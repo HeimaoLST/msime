@@ -144,6 +144,11 @@ public final class LocalAsrPolicySmoke {
             transcript.setAccessible(true);
             check("synthetic transcript".equals(transcript.invoke(null, "synthetic transcript")),
                 "local ASR accepts bounded transcript text");
+            check("".equals(transcript.invoke(null, 42)),
+                "本地语音识别拒绝非字符串转写结果");
+            check("😀".repeat(LocalAsrPolicy.MAX_TRANSCRIPT).equals(transcript.invoke(null,
+                "😀".repeat(LocalAsrPolicy.MAX_TRANSCRIPT))),
+                "本地语音识别按 Unicode 码点接受边界长度");
             check("".equals(transcript.invoke(null, "bad\u0000text")),
                 "local ASR rejects transcript controls before editor insertion");
             check("".equals(transcript.invoke(null, "\ud800")),
