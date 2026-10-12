@@ -10,7 +10,7 @@ import type { ImeSetupClient } from "../core/host-contracts";
 import type { Preferences } from "../index";
 import { touchKeyboardSchemeTitle } from "../settings/touch-keyboard-scheme-helpers";
 import { SetupStatusCard } from "./setup-status-card";
-import { logo } from "../settings/app-resources";
+import { logo, settingsIcons } from "../settings/app-resources";
 import {
   RootSettingsList,
   RootSettingsRowView,
