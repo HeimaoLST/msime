@@ -915,7 +915,7 @@ fn deduplicate_by_value(rows: &mut Vec<DictRow>) {
     if rows.len() < 2 {
         return;
     }
-    // 长词续接每次最多收集 3 * 12 行；这个规模用已保留行线性扫描比建立哈希表更省分配。
+    // 长词续接每次最多收集 `LONGER_PHRASE_EXTRA_SYLLABLES * LONGER_PHRASE_LIMIT` 行（现在是 3 * 3 = 9），远在 36 行以内；这个规模用已保留行线性扫描比建立哈希表更省分配。
     if rows.len() <= 36 {
         let mut write = 0;
         for read in 0..rows.len() {

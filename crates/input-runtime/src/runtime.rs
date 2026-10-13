@@ -1168,7 +1168,7 @@ impl<E: InputEngine> Runtime<E> {
         true
     }
 
-    /// Presentation-only resize; a live composition keeps its numeric key map.
+    /// Resizes the page while idle. Besides the presentation, the Engine's first-page threshold for longer phrases follows, so a host menu that changes the page size does not leave the Engine judging against the old one until the next rebuild.
     pub fn set_page_size(&mut self, page_size: u8) -> Result<(), RuntimeError> {
         if !(1..=MAX_CANDIDATE_PAGE_SIZE).contains(&page_size) {
             return Err(RuntimeError::InvalidPageSize);
@@ -1181,6 +1181,7 @@ impl<E: InputEngine> Runtime<E> {
         }
         self.advance()?;
         self.page_size = page_size.into();
+        self.engine.set_first_page_rows(self.page_size);
         Ok(())
     }
 

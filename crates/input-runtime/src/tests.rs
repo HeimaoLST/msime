@@ -41,6 +41,8 @@ struct Fixture {
     reading: String,
     /// What the Engine reports it takes as characters rather than punctuation.
     spelling_symbols: String,
+    /// 每页候选数，每次 `Runtime::set_page_size` 推过来一项。
+    first_page_rows: Vec<usize>,
 }
 
 #[cfg(unix)]
@@ -893,6 +895,9 @@ impl InputEngine for Fixture {
     fn reset_context(&mut self) {
         self.context_resets += 1;
     }
+    fn set_first_page_rows(&mut self, rows: usize) {
+        self.first_page_rows.push(rows);
+    }
     fn reset_cache(&mut self) -> Result<(), RuntimeError> {
         self.cache_resets += 1;
         Ok(())
@@ -1321,6 +1326,7 @@ fn runtime() -> Runtime<Fixture> {
             positions: Vec::new(),
             reading: String::new(),
             spelling_symbols: String::new(),
+            first_page_rows: Vec::new(),
         },
         5,
     )
@@ -1375,6 +1381,7 @@ fn several_candidates_from_one_provider_take_their_seat_as_a_group() {
                 positions: Vec::new(),
                 reading: String::new(),
                 spelling_symbols: String::new(),
+                first_page_rows: Vec::new(),
             },
             9,
         )
@@ -1539,6 +1546,7 @@ fn promoted_english_candidate_keeps_the_first_seat_with_cloud_and_ai() {
                 positions: Vec::new(),
                 reading: String::new(),
                 spelling_symbols: String::new(),
+                first_page_rows: Vec::new(),
             },
             9,
         )
@@ -1754,6 +1762,7 @@ fn a_chosen_phrase_piece_waits_for_the_rest_of_the_phrase() {
                 positions: Vec::new(),
                 reading: String::new(),
                 spelling_symbols: String::new(),
+                first_page_rows: Vec::new(),
             },
             5,
         )
@@ -1856,6 +1865,7 @@ fn a_phrase_piece_survives_the_reading_being_deleted() {
             positions: Vec::new(),
             reading: String::new(),
             spelling_symbols: String::new(),
+            first_page_rows: Vec::new(),
         },
         5,
     )
@@ -2275,6 +2285,7 @@ fn candidate_codes_follow_candidates_in_page_and_complete_snapshots() {
             positions: Vec::new(),
             reading: String::new(),
             spelling_symbols: String::new(),
+            first_page_rows: Vec::new(),
         },
         2,
     )
@@ -4510,6 +4521,16 @@ fn page_size_accepts_one_to_ten() {
     ));
 }
 
+#[test]
+fn a_page_size_change_reaches_the_engine_first_page_threshold() {
+    // 宿主菜单改每页条数（`msime_client_set_candidate_page_size`）不重建引擎，所以补全词的首页门槛要由这里推过去；没变时不推。
+    let mut runtime = Runtime::new(Fixture::default(), 6).unwrap();
+    runtime.set_page_size(9).unwrap();
+    runtime.set_page_size(9).unwrap();
+    runtime.set_page_size(3).unwrap();
+    assert_eq!(runtime.engine.first_page_rows, [9, 3]);
+}
+
 /// A digit the Engine already answered with a commit is not also a page selection: selecting would replace the commit, and the text it carried - a Korean syllable - would be lost.
 #[test]
 fn a_digit_that_already_committed_is_not_also_a_selection() {
@@ -5358,6 +5379,7 @@ fn withholding_runtime(offered: usize, withheld: usize, page_size: u8) -> Runtim
             positions: Vec::new(),
             reading: String::new(),
             spelling_symbols: String::new(),
+            first_page_rows: Vec::new(),
         },
         page_size,
     )

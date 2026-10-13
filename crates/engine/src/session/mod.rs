@@ -398,6 +398,12 @@ impl Session {
         self.nine_key.set_personal_context_enabled(enabled);
     }
 
+    /// 宿主在会话活着时改了每页候选数（Linux 的每页候选数菜单、`msime_client_set_candidate_page_size`）：26 键和九键的补全词门槛跟着变，不用重建会话。
+    pub fn set_first_page_rows(&mut self, rows: usize) {
+        self.input.engine.set_first_page_rows(rows);
+        self.nine_key.set_first_page_rows(rows);
+    }
+
     /// The committed text the neural sentence models condition on, updated without rebuilding the session. Only the last 64 characters matter.
     pub fn set_rescoring_context(&mut self, context: &str) {
         self.input.set_rescoring_context(context);

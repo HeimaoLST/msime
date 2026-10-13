@@ -13,6 +13,8 @@ Status: implemented
 
 ## Decision
 
+其中「够一页就整组不并入」后来改成接在全长组末尾，宿主运行时改页大小也会即时跟随，见 [精确同音词够一页时补全词接在后面](2026-10-13-longer-phrases-follow-a-full-page.md)。
+
 全长组里有补全词时，精确同音词（`canonical_pinyin` 等于键入切分的行）自己够填一页就不再并入补全词，不足一页时并入但最多 `LONGER_PHRASE_LIMIT` 条：
 
 1. 页门槛取宿主的每页候选数，不写死：`SessionOptions::first_page_rows` → `QueryRequest::first_page_rows` → `QuanpinDictionary::set_first_page_rows`。host-api 用 `host_page_size(page_size_override.unwrap_or(candidate_page_size))` 填它（与交给 `Runtime` 的页大小同源），网页引擎用自己的 `page_size`；缺省 `DEFAULT_FIRST_PAGE_ROWS = 6`，只留给不设它的调用方（goldens、mcp-server、backend-engine）。判据只看行数，不看权重：够填一页就说明用户要的词大概率就在本表里。
@@ -38,7 +40,7 @@ Status: implemented
 
 ## Verification
 
-- `crates/engine/src/quanpin/dictionary/tests.rs` 新增三个合成夹具测试：`exact_rows_filling_a_page_drop_the_longer_phrases`（6 条精确同音词 + 一个更重的补全词，补全词不入，前六位是精确行）；`longer_phrases_are_capped_when_the_exact_table_is_short`（精确两条 + 五条补全词，补全词只留 3 条，前五位是 法办 发版 发版号 发版支持 发版要求）；`a_larger_first_page_rows_keeps_the_longer_phrases`（6 条精确词，`set_first_page_rows(8)` 后补全词照旧并入）。前两个在改动前失败。
+- `crates/engine/src/quanpin/dictionary/tests.rs` 新增三个合成夹具测试：`exact_rows_filling_a_page_put_the_longer_phrases_after_them`（原名 `exact_rows_filling_a_page_drop_the_longer_phrases`；6 条精确同音词 + 一个更重的补全词，前六位是精确行，补全词现在接在第七位）；`longer_phrases_are_capped_when_the_exact_table_is_short`（精确两条 + 五条补全词，补全词只留 3 条，前五位是 法办 发版 发版号 发版支持 发版要求）；`a_larger_first_page_rows_keeps_the_longer_phrases`（6 条精确词，`set_first_page_rows(8)` 后补全词照旧并入）。前两个在改动前失败。
 - `crates/engine/src/session/tests.rs` 新增 `first_page_rows_reaches_the_dictionary_through_the_session_options`：同一夹具在默认 6 下不出补全词、`first_page_rows = 8` 时出；删掉 `session/input.rs` 里那行接线它会变红，钉住 `SessionOptions` → 请求 → 引擎这段通路。
 - `cargo test -p msime-engine --lib quanpin::dictionary::tests`：54 passed；`cargo test -p msime-engine --test golden`：31 passed（脚本场景仍与参考实现逐位一致）。
 - `cargo check -p msime-engine --lib --tests`、`-p msime-host-api --lib --tests`、`-p msime-input-runtime --lib`、`-p msime-engine-wasm` 全部通过。

@@ -7554,7 +7554,7 @@ fn a_cloud_answer_does_not_move_the_ai_seat() {
 
 #[test]
 fn first_page_rows_reaches_the_dictionary_through_the_session_options() {
-    // 首页行数从会话选项一路走到词库：默认 6 下 6 条精确同音词就不再并入补全词，设成 8 后照旧并入。
+    // 首页行数从会话选项一路走到词库：默认 6 下 6 条精确同音词占满首页，补全词接在它们后面；设成 8 后补全词按权重和同音词混排。
     // 词库级测试直接调 `set_first_page_rows`，这条钉住的是 `SessionOptions` → 请求 → 引擎这段接线。
     let fixture = Fixture::new(
         "CREATE TABLE tbl_2_q(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
@@ -7567,19 +7567,22 @@ fn first_page_rows_reaches_the_dictionary_through_the_session_options() {
          CREATE TABLE tbl_5_q(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
          INSERT INTO tbl_5_q VALUES('qi''shi''ye''dan''wei','qsydw','企事业单位',600);",
     );
+    let at = |words: &[String]| words.iter().position(|word| word == "企事业单位");
     let mut narrow = fixture.session();
     type_text(&mut narrow, "qishi");
+    let skipping = words(&narrow);
+    let behind = skipping.iter().position(|word| word == "骑士");
     assert!(
-        !words(&narrow).iter().any(|word| word == "企事业单位"),
-        "每页 6 行时不该并入补全词: {:?}",
-        words(&narrow)
+        at(&skipping).is_some() && at(&skipping) > behind,
+        "每页 6 行时补全词应排在全部同音词后面: {skipping:?}"
     );
 
     let mut wide = fixture.session_with(|options| options.first_page_rows = 8);
     type_text(&mut wide, "qishi");
-    assert!(
-        words(&wide).iter().any(|word| word == "企事业单位"),
-        "每页 8 行时补全词应照旧并入: {:?}",
-        words(&wide)
+    let mixed = words(&wide);
+    assert_eq!(
+        at(&mixed),
+        Some(1),
+        "每页 8 行时补全词按权重排在首位同音词之后: {mixed:?}"
     );
 }

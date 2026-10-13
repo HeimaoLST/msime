@@ -525,8 +525,8 @@ fn longer_phrases_join_the_full_key_group_by_weight() {
 }
 
 #[test]
-fn exact_rows_filling_a_page_drop_the_longer_phrases() {
-    // 精确同音词自己够填一页时整组补全词都不并入：补全词只为「同长度表只剩冷僻同音词」的输入存在。
+fn exact_rows_filling_a_page_put_the_longer_phrases_after_them() {
+    // 精确同音词自己够填一页时补全词不和它们按权重混排，接在这一组后面：首页全是同音词，补全词翻页还找得到（zhong'guo 的 中国人民）。
     let fixture = Fixture::new();
     fixture
         .insert("qi'shi", "其实", 500)
@@ -538,15 +538,25 @@ fn exact_rows_filling_a_page_drop_the_longer_phrases() {
         .insert("qi'shi'ye'dan'wei", "企事业单位", 600);
     let mut dictionary = QuanpinDictionary::new(&fixture.paths);
     let listed = query(&mut dictionary, "qishi", "qi'shi", NONE);
-    assert!(
-        !contains(&listed, "企事业单位"),
-        "精确同音词够一页时不该并入补全词: {:?}",
-        words(&listed)
-    );
     assert_eq!(
         words(&listed[..DEFAULT_FIRST_PAGE_ROWS]),
         ["其实", "歧视", "岂是", "气势", "启示", "骑士"]
     );
+    assert_eq!(
+        position(&listed, "企事业单位"),
+        DEFAULT_FIRST_PAGE_ROWS,
+        "补全词应紧接在同音词后面，而不是被丢掉: {:?}",
+        words(&listed)
+    );
+}
+
+#[test]
+fn a_zero_first_page_rows_counts_as_one() {
+    // 九键把会话选项里的原始值直接交给词库，所以「0 当 1」在词库里做，与 26 键的 `FirstPageRows::new` 一致。
+    let fixture = Fixture::new();
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    dictionary.set_first_page_rows(0);
+    assert_eq!(dictionary.first_page_rows, 1);
 }
 
 #[test]

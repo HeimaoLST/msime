@@ -543,13 +543,13 @@ impl QuanpinDictionary {
         self.series_cache.clear();
     }
 
-    /// 首页行数只决定全长组要不要并入补全词；改了就清掉按旧答案组装的候选列表（照 `set_sentence_alternatives`）。
+    /// 首页行数只决定补全词和全长组的同音词混排还是接在后面；0 当作 1（同 `FirstPageRows::new`），九键和 26 键都经过这里，所以只在这里归一。改了只清按旧门槛组装好的候选列表 `series_cache`；`cache` 存的是每个切分的查询结果，补全词是查完之后才并入的，与门槛无关。
     pub fn set_first_page_rows(&mut self, rows: usize) {
+        let rows = rows.max(1);
         if self.first_page_rows == rows {
             return;
         }
         self.first_page_rows = rows;
-        self.cache.clear();
         self.series_cache.clear();
     }
 
@@ -782,14 +782,14 @@ impl QuanpinDictionary {
             if count == segments.len() {
                 // 同长度表里常常只剩冷僻同音词：ping'guo 只有 苹果 1143881、评过 1180、平果 169、平锅 1，而 苹果电脑 21495、苹果公司 19725 在 tbl_4_p，同长度查询看不到，第二位就落到冷僻同音词上。所以更长的补全词按权重并入这一组，权重出自同一语料，跨表可比。`pinyin` 仍是键入的切分（上屏只消耗已键入的音节），`canonical_pinyin` 保留完整读音供持久化。
                 // 但首位只留给读音和键入完全一致的同长度行里最重的那一行：补全词上屏会多出用户没打的字，权重再高也不能抢首选（#7345：dacuozi 的首选曾是 打错字了，doumeiren 的首选曾是 都没人管理）。补全词只和其余同长度行竞争第二位起的位置，苹果电脑 仍排在 平锅 前面。同长度查询没有精确键时会退到前缀区间（zhi'liang'jian 只查到 zhi'liang'jiang 的 质量奖），那一行的读音并不是键入的读音，不钉首位，和补全词一起按权重排；同长度查询一行都没有时同样按权重排，整句块随后由 `whole_sentence_insert_position` 插到首位。
-                // 精确同音词自己够填一页时整组补全词都不并入：补全词存在的理由是「同长度表只剩冷僻同音词」（ping'guo 的第二位只剩 平锅），本地表能填满首页就说明用户要的词就在里面，再并进来只会把同音词挤到后面（qi'shi 的首屏曾是 其实 骑士 其实是 企事业单位）。一页几行取宿主的每页候选数（`first_page_rows`）。
+                // 精确同音词自己够填一页时补全词不和它们按权重竞争，而是接在这一组末尾：补全词和同音词混排的理由是「同长度表只剩冷僻同音词」（ping'guo 的第二位只剩 平锅），本地表能填满首页就说明用户要的词多半就在里面，混进来只会把同音词挤到后面（qi'shi 的首屏曾是 其实 骑士 其实是 企事业单位）。接在末尾而不是丢掉，是因为同音词多的输入照样有人要补全词：zhong'guo 的 中国人民、shi'de 的 是的话，丢掉就翻页也找不到了。一页几行取宿主的每页候选数（`first_page_rows`）。
                 let exact_rows = rows
                     .iter()
                     .filter(|item| item.canonical_pinyin == partial_segmentation)
                     .count();
-                if exact_rows < self.first_page_rows {
-                    let longer = self.longer_phrase_candidates(&partial_segmentation, partial);
-                    if !longer.is_empty() {
+                let longer = self.longer_phrase_candidates(&partial_segmentation, partial);
+                if !longer.is_empty() {
+                    if exact_rows < self.first_page_rows {
                         rows.sort_by_key(|item| std::cmp::Reverse(item.weight));
                         let lead = usize::from(
                             rows.first()
@@ -797,6 +797,9 @@ impl QuanpinDictionary {
                         );
                         rows.extend(longer);
                         rows[lead..].sort_by_key(|item| std::cmp::Reverse(item.weight));
+                    } else {
+                        // `longer_phrase_candidates` 已按权重排好。
+                        rows.extend(longer);
                     }
                 }
             }

@@ -430,6 +430,11 @@ impl Session {
         }
     }
 
+    /// 宿主的每页候选数变了时，补全词的首页门槛跟着变，不用重建。
+    pub fn set_first_page_rows(&mut self, rows: usize) {
+        self.inner.set_first_page_rows(rows);
+    }
+
     /// Live update of the neural rescoring context without a rebuild.
     pub fn set_rescoring_context(&mut self, context: &str) {
         self.inner.set_rescoring_context(context);
