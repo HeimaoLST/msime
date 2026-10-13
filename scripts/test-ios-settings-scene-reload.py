@@ -67,6 +67,11 @@ class SettingsSceneReloadContract(unittest.TestCase):
         source = path.read_text()
         self.assertIn(".reloadOnAppearAndActive({ reloadLibrary(); reloadThemes() })", source)
 
+    def test_input_settings_uses_shared_reload_modifier(self):
+        path = ROOT / "platforms/ios/App/Sources/app/OnboardingView.swift"
+        source = path.read_text()
+        self.assertIn(".reloadOnAppearAndActive({ reloadPreferences(); reloadHelpcodePacks() })", source)
+
 
 if __name__ == "__main__":
     unittest.main()
