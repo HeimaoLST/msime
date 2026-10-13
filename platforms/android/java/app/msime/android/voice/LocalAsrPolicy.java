@@ -41,9 +41,8 @@ public final class LocalAsrPolicy {
      * <p>Only a directory the shared installer produced can be used here; a Whisper model file, which desktop hosts also accept as `asr_model_path`, has no recognizer on Android. That is reported when the dictation starts ({@link #installed}), not by falling back to the platform recogniser: a user who chose on-device recognition did not agree to the audio going to whatever service the device ships.
      */
     public static boolean usable(String provider, String modelPath) {
-        if (!PROVIDER.equals(provider) || modelPath == null) return false;
-        if (modelPath.isEmpty() || TextPolicy.utf8Length(modelPath) > MAX_PATH_LENGTH) return false;
-        if (TextPolicy.hasControl(modelPath) || !TextPolicy.validUnicode(modelPath)) return false;
+        if (!PROVIDER.equals(provider)
+                || !TextPolicy.boundedNonEmpty(modelPath, MAX_PATH_LENGTH)) return false;
         return modelPath.startsWith("/");
     }
 
@@ -113,23 +112,27 @@ public final class LocalAsrPolicy {
         return "pinyin".equals(hotwordMode);
     }
 
-    /** The native correction response carries text; reject non-string bridge values. */
-    static String strictText(Object value) {
-        return JsonPolicy.strictString(value);
+    /**
+     * 本机识别被拒时给用户看的统一说明。
+     *
+     * @return 用户主动取消时为 null，其余失败返回可直接展示的文案
+     */
+    public static String failureMessage(LocalAsrRecognizer.Failure failure, boolean runtimeMissing) {
+        return switch (failure) {
+            case PERMISSION -> "语音识别需要麦克风权限";
+            case UNAVAILABLE -> "麦克风被其他应用占用";
+            case MODEL -> "本地语音模型未安装或已损坏，请在设置中重新下载";
+            case RUNTIME -> runtimeMissing
+                ? "本地语音识别组件尚未下载，请在设置中下载后再试"
+                : "本地语音识别组件无法加载";
+            case EMPTY -> "没有听到内容";
+            case CANCELLED -> null;
+        };
     }
 
     /** Native ASR text must be plain, well-formed Unicode before it reaches the editor. */
     static String transcript(Object value) {
-        String text = strictText(value);
-        if (text == null || TextPolicy.codePointLength(text) > MAX_TRANSCRIPT
-                || TextPolicy.hasControlExceptWhitespace(text)
-                || !TextPolicy.validUnicode(text)) return "";
-        return text;
-    }
-
-    /** Native bridge response flags must remain JSON booleans; reject coercible strings. */
-    static Boolean strictBoolean(Object value) {
-        return JsonPolicy.strictBoolean(value);
+        return AiProviderResponse.boundedText(value, MAX_TRANSCRIPT);
     }
 
     /**

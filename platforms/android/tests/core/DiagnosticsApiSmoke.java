@@ -1,20 +1,26 @@
 import app.msime.android.CloudApi;
 import app.msime.android.DiagnosticsApi;
+import app.msime.android.DiagnosticEventKind;
+import app.msime.android.JsonPolicy;
 import java.util.ArrayList;
 import java.util.List;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 public final class DiagnosticsApiSmoke {
     public static void main(String[] arguments) throws Exception {
         // 事件只能按 P19 枚举构造：不在枚举里的种类、负时间都被丢弃。
-        check(DiagnosticsApi.EventKind.values().length == 10, "P19 lists ten event kinds");
+        check(DiagnosticEventKind.values().length == 10, "P19 lists ten event kinds");
         check(DiagnosticsApi.Event.of(1, "key_down", 3) != null, "key_down is accepted");
         check(DiagnosticsApi.Event.of(1, "text", 3) == null, "an unknown kind is dropped");
         check(DiagnosticsApi.Event.of(1, "KEY_DOWN", 3) == null, "kinds are matched exactly");
         check(DiagnosticsApi.Event.of(-1, "commit", 0) == null, "a negative time is dropped");
         check(DiagnosticsApi.Event.of(5, "commit", -7).durationMs() == -1, "a negative duration means none");
-        check(DiagnosticsApi.strictInteger(7L) == 7L, "diagnostic integer");
-        check(DiagnosticsApi.strictInteger(1.5d) == null, "fractional diagnostic integer is rejected");
-        check(DiagnosticsApi.strictInteger("7") == null, "numeric strings are rejected");
+        check(JsonPolicy.strictLong(7L) == 7L, "diagnostic integer");
+        check(JsonPolicy.strictLong(1.5d) == null, "fractional diagnostic integer is rejected");
+        check(JsonPolicy.strictLong("7") == null, "numeric strings are rejected");
 
         check(DiagnosticsApi.Retention.fromWire("one_hour") == DiagnosticsApi.Retention.ONE_HOUR, "one_hour");
         check(DiagnosticsApi.Retention.fromWire("seven_days") == DiagnosticsApi.Retention.SEVEN_DAYS, "seven_days");
@@ -50,16 +56,10 @@ public final class DiagnosticsApiSmoke {
         String clipped = DiagnosticsApi.CrashLog.of("", longMessage, "").message();
         check(clipped.length() == 682, "2 KiB of three-byte characters is 682 of them, got " + clipped.length());
         check(DiagnosticsApi.CrashLog.of(null, null, null).stack().isEmpty(), "missing fields become empty");
-        try {
-            java.lang.reflect.Method strictString = DiagnosticsApi.class.getDeclaredMethod("strictString", Object.class);
-            strictString.setAccessible(true);
-            check("synthetic".equals(strictString.invoke(null, "synthetic")),
-                "diagnostics identifiers accept strings");
-            check(strictString.invoke(null, 7) == null,
-                "diagnostics identifiers reject numbers instead of coercing them");
-        } catch (ReflectiveOperationException error) {
-            throw new AssertionError("diagnostics response string policy missing", error);
-        }
+        check("synthetic".equals(JsonPolicy.strictString("synthetic")),
+            "diagnostics identifiers accept strings");
+        check(JsonPolicy.strictString(7) == null,
+            "diagnostics identifiers reject numbers instead of coercing them");
 
         check("https://api.msime.app/mcp/s/abc".equals(DiagnosticsApi.mcpUrl("abc")), "remote address");
 
@@ -72,6 +72,46 @@ public final class DiagnosticsApiSmoke {
         new DiagnosticsApi(api).delete();
         check(seen.size() == 1 && "DELETE /v1/users/me/diagnostics Bearer anon".equals(seen.get(0)),
             "delete with the anonymous session: " + seen);
+
+        Path root = Files.createTempDirectory("msime-diagnostics-");
+        try {
+            Path source = root.resolve("source.zip");
+            try (ZipOutputStream output = new ZipOutputStream(Files.newOutputStream(source))) {
+                output.putNextEntry(new ZipEntry("ignored.txt"));
+                output.write('x');
+                output.closeEntry();
+            }
+            Path linked = root.resolve("diagnostics.zip");
+            Files.createLink(linked, source);
+            try {
+                DiagnosticsApi.readBundle(linked.toFile(), new DiagnosticsApi.Include(false, false, false, false));
+                throw new AssertionError("hard-linked diagnostics input must be refused");
+            } catch (java.io.IOException ioError) {
+                // Private diagnostic archives must have one directory entry.
+            }
+
+            Path tooManyEntries = root.resolve("too-many-entries.zip");
+            try (ZipOutputStream output = new ZipOutputStream(Files.newOutputStream(tooManyEntries))) {
+                for (int index = 0; index < 129; index++) {
+                    output.putNextEntry(new ZipEntry("ignored-" + index + ".txt"));
+                    output.closeEntry();
+                }
+            }
+            try {
+                DiagnosticsApi.readBundle(tooManyEntries.toFile(),
+                    new DiagnosticsApi.Include(false, false, false, false));
+                throw new AssertionError("diagnostics archives must bound entry count");
+            } catch (java.io.IOException bounded) {
+                // A malformed or adversarial archive must stop before unbounded traversal.
+            }
+        } finally {
+            try (java.util.stream.Stream<Path> paths = Files.walk(root)) {
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach(path -> {
+                    try { Files.deleteIfExists(path); }
+                    catch (Exception error) { throw new IllegalStateException(error); }
+                });
+            }
+        }
 
         System.out.println("DiagnosticsApiSmoke passed");
     }

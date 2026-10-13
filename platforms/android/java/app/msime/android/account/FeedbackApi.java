@@ -53,16 +53,9 @@ public final class FeedbackApi {
         this.api = api;
     }
 
-    /** 描述的字符数（按 Unicode 码点计，和服务端一致）。 */
-    public static int length(String text) {
-        return TextPolicy.codePointLength(text);
-    }
-
     /** 描述去掉首尾空白后非空、不超过 500 个字符、不含换行和制表以外的控制字符时可以提交。 */
     public static boolean validText(String text) {
-        if (text == null || TextPolicy.trimmed(text).isEmpty()) return false;
-        if (length(text) > MAX_TEXT) return false;
-        return !TextPolicy.hasControlExceptWhitespace(text) && TextPolicy.validUnicode(text);
+        return TextPolicy.validBoundedText(text, MAX_TEXT);
     }
 
     /** 只保留白名单键；值去掉控制字符、截到 256 字节以内（不截断在一个字符中间），空值丢掉。 */
@@ -72,22 +65,18 @@ public final class FeedbackApi {
         for (String key : DIAGNOSTIC_KEYS) {
             String value = raw.get(key);
             if (value == null) continue;
-            String trimmed = clip(TextPolicy.trimmed(TextPolicy.replaceControls(value, ' ')), MAX_DIAGNOSTIC_VALUE_BYTES);
+            String trimmed = TextPolicy.clipUtf8(
+                TextPolicy.trimmed(TextPolicy.replaceControls(value, ' ')), MAX_DIAGNOSTIC_VALUE_BYTES);
             if (!trimmed.isEmpty()) clean.put(key, trimmed);
         }
         return clean;
-    }
-
-    /** 按 UTF-8 字节截断，不切开代理对。 */
-    static String clip(String value, int maxBytes) {
-        return TextPolicy.clipUtf8(value, maxBytes);
     }
 
     /** 截图是 PNG 或 JPEG（看文件头，与声明的类型一致）、非空、不超过 1 MiB 时为真。 */
     public static boolean validScreenshot(Screenshot shot) {
         if (shot == null || shot.bytes() == null) return false;
         byte[] data = shot.bytes();
-        if (data.length == 0 || data.length > MAX_SCREENSHOT_BYTES) return false;
+        if (!HttpBodyPolicy.isNonEmptyWithinLimit(data, MAX_SCREENSHOT_BYTES)) return false;
         if ("image/png".equals(shot.contentType())) {
             return data.length >= 8 && (data[0] & 0xff) == 0x89 && data[1] == 'P' && data[2] == 'N' && data[3] == 'G';
         }
@@ -116,7 +105,7 @@ public final class FeedbackApi {
                 .put("type", type.id())
                 .put("text", TextPolicy.trimmed(text))
                 .put("platform", "android")
-                .put("app_version", clip(appVersion == null ? "" : appVersion, 64))
+                .put("app_version", TextPolicy.clipUtf8(appVersion == null ? "" : appVersion, 64))
                 .put("edition", edition == null ? "" : edition);
             if (diagnostics != null) {
                 Map<String, String> clean = filterDiagnostics(diagnostics);
@@ -136,11 +125,6 @@ public final class FeedbackApi {
         }
         JSONObject response = api.multipart(PATH, parts, CloudApi.Auth.ACCOUNT_OR_ANONYMOUS);
         return JsonPolicy.strictStringOrEmpty(response.opt("id"));
-    }
-
-    /** Compatibility entry point retained for the host smoke contract. */
-    static String strictString(Object value) {
-        return JsonPolicy.strictString(value);
     }
 
 }

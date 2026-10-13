@@ -114,6 +114,25 @@ final class DictionarySnapshotQueueTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: externalState), Data(#"{"version":1,"localVersion":null,"request":null}"#.utf8))
   }
 
+  func testOversizedStateIsInvalidAndCannotBeClaimed() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let queue = DictionarySnapshotQueue(directory: root)
+    let directory = root.appendingPathComponent("DictionarySnapshots", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let state = directory.appendingPathComponent("state.json")
+    let oversized = Data(repeating: 0x20, count: 65537)
+    try oversized.write(to: state)
+
+    XCTAssertThrowsError(try queue.read()) { error in
+      guard case DictionarySnapshotQueue.Failure.invalid = error else {
+        return XCTFail("超限状态应映射为 invalid")
+      }
+    }
+    try queue.cancelIfPresent(accountID: "synthetic-account")
+    XCTAssertEqual(try Data(contentsOf: state), oversized)
+  }
+
   private let first = "local-v1:legacy:" + String(repeating: "a", count: 64)
   private let second = "local-v1:legacy:" + String(repeating: "b", count: 64)
   private func fixture(_ action: (DictionarySnapshotQueue, URL, String, URL) throws -> Void) throws {
@@ -172,6 +191,65 @@ final class DictionarySnapshotQueueTests: XCTestCase {
       XCTAssertThrowsError(try queue.complete(id: id, using: lease, currentVersion: first, alreadyApplied: false) {
         XCTFail("cancelled snapshot applied"); return self.second
       })
+      XCTAssertEqual(try queue.read().request?.status, .cancelled)
+    }
+  }
+  func testCancellationWaitsForShortStateLockHandoff() throws {
+    try fixture { queue, file, hash, root in
+      _ = try enqueue(queue, file, hash)
+      let lock = root.appendingPathComponent("DictionarySnapshots/state.lock")
+      let descriptor = open(lock.path, O_RDWR | O_NOFOLLOW)
+      guard descriptor >= 0 else { throw CocoaError(.fileNoSuchFile) }
+      defer { flock(descriptor, LOCK_UN); close(descriptor) }
+      XCTAssertEqual(flock(descriptor, LOCK_EX | LOCK_NB), 0)
+      let release = DispatchWorkItem {
+        usleep(150_000)
+        flock(descriptor, LOCK_UN)
+      }
+      DispatchQueue.global().async(execute: release)
+      defer { release.wait() }
+
+      try queue.cancel(accountID: "synthetic-account")
+      XCTAssertEqual(try queue.read().request?.status, .cancelled)
+    }
+  }
+  func testCancelIfPresentTreatsInvalidStateAsNothingToCancel() throws {
+    try fixture { queue, _, _, root in
+      let state = root.appendingPathComponent("DictionarySnapshots/state.json")
+      for content in ["{not json", #"{"version":2,"localVersion":null,"request":null}"#] {
+        let data = Data(content.utf8)
+        try data.write(to: state)
+
+        try queue.cancelIfPresent(accountID: "synthetic-account")
+
+        XCTAssertEqual(try Data(contentsOf: state), data, "无效状态文件不应被改写")
+        // 放行是安全的：键盘同样读不了这份状态，领取不到其中任何请求。
+        let lease = try queue.acquireWorkerLease()
+        XCTAssertThrowsError(try queue.claim(using: lease))
+      }
+    }
+  }
+  func testCancelWithoutMatchingRequestDoesNotRewriteState() throws {
+    try fixture { queue, file, hash, root in
+      _ = try enqueue(queue, file, hash)
+      let directory = root.appendingPathComponent("DictionarySnapshots", isDirectory: true)
+      let state = directory.appendingPathComponent("state.json")
+      let before = try Data(contentsOf: state)
+      // 目录只读时原子写入会失败，用来模拟磁盘已满。
+      try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
+      defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path) }
+
+      try queue.cancelIfPresent(accountID: "different-account")
+      XCTAssertEqual(try Data(contentsOf: state), before)
+      XCTAssertEqual(try queue.read().request?.status, .queued)
+      XCTAssertThrowsError(try queue.cancelIfPresent(accountID: "synthetic-account"),
+                           "真有请求要取消时写入失败仍须报错")
+
+      try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+      try queue.cancelIfPresent(accountID: "synthetic-account")
+      XCTAssertEqual(try queue.read().request?.status, .cancelled)
+      try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
+      try queue.cancelIfPresent(accountID: "synthetic-account")
       XCTAssertEqual(try queue.read().request?.status, .cancelled)
     }
   }

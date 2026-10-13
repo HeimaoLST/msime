@@ -12,18 +12,20 @@ Status: implemented
 
 `platforms/linux/data/msime-linux-settings.in` 在 exec `msime-linux-desktop` 之前，与 `WEBKIT_DISABLE_COMPOSITING_MODE` 并排导出 `WEBKIT_DISABLE_DMABUF_RENDERER=${WEBKIT_DISABLE_DMABUF_RENDERER:-1}`：不论驱动和会话类型，默认都禁用；调用方显式设成 `0` 时原样保留，用于排查上游问题。
 
+「不论驱动」这一点已被 [Linux 设置窗口的 WebKit 渲染规避只在 NVIDIA 专有驱动下默认启用](2026-10-11-linux-webkit-workaround-nvidia-only.md) 收窄（#6847）：启动器现在只在加载了 NVIDIA 专有驱动内核模块时默认导出这两个变量，其他机器上都不设。本篇其余的判断（禁用的是 DMA-BUF 渲染器、放在启动器里而不是 Rust 宿主里）仍然成立。
+
 终端、桌面菜单、IBus/Fcitx5 菜单（`MSIME_EDITION_SETTINGS_PROGRAM`）、Omarchy 钩子与菜单都经这个启动器拉起窗口，改一处就覆盖全部入口。直接运行 `msime-linux-desktop` 不经过启动器，它不是面向用户的入口，这次不处理。
 
-`settings_launcher_contract.py` 核对两个变量在各入口的默认值都是 `1`，空值也会回到默认值，`0` 和 `1` 原样传下去，`GDK_BACKEND` 不受影响。
+`settings_launcher_contract.py` 核对装了 NVIDIA 驱动时两个变量在各入口的默认值都是 `1`、没装时都不设，空值也会回到默认值，`0` 和 `1` 原样传下去，`GDK_BACKEND` 不受影响。
 
 ## Alternatives considered
 
-- 只在检测到 NVIDIA 加 Wayland 时导出（issue 建议用 `/sys/module/nvidia` 加 `XDG_SESSION_TYPE=wayland` 判断）：这样能让其他显卡保留 GPU 渲染。没采用的原因：设置窗口是静态表单页面，用不着 GPU 渲染，退回共享内存的开销感觉不到；上游这个 bug 也不只出现在 NVIDIA 上；而检测分支要随驱动和会话的组合变化，CI 里又没有对应的机器能跑。现有的合成开关也是无条件默认，两个变量保持同一种规则。
+- 只在检测到 NVIDIA 加 Wayland 时导出（issue 建议用 `/sys/module/nvidia` 加 `XDG_SESSION_TYPE=wayland` 判断）：这样能让其他显卡保留 GPU 渲染。没采用的原因：设置窗口是静态表单页面，用不着 GPU 渲染，退回共享内存的开销感觉不到；上游这个 bug 也不只出现在 NVIDIA 上；而检测分支要随驱动和会话的组合变化，CI 里又没有对应的机器能跑。现有的合成开关也是无条件默认，两个变量保持同一种规则。后来 #6847 表明非合成路径在 niri 上持续闪烁，这个方案已被采用，见 [Linux 设置窗口的 WebKit 渲染规避只在 NVIDIA 专有驱动下默认启用](2026-10-11-linux-webkit-workaround-nvidia-only.md)。
 - 在 Rust 宿主的 `main` 里、GTK 初始化之前用 `std::env::set_var` 设置：这样直接运行 `msime-linux-desktop` 也能覆盖到。没采用的原因：合成开关已经放在启动器里，环境默认值分在两处会让排查时查不清最终值是哪里定的；而且启动器就是唯一面向用户的入口。
 
 ## Consequences
 
-所有 Linux 用户的设置窗口都改用共享内存把画面交给 GTK，不再走 DMA-BUF。对设置页这种静态页面，用户感觉不到差别；代价是将来如果在这个窗口里放重绘密集的内容，就需要重新评估。
+装了 NVIDIA 专有驱动的 Linux 用户的设置窗口改用共享内存把画面交给 GTK，不再走 DMA-BUF（起初是所有 Linux 用户，#6847 后收窄）。对设置页这种静态页面，用户感觉不到差别；代价是将来如果在这个窗口里放重绘密集的内容，就需要重新评估。带模糊的阴影就是这样的内容：内容区每滚一步都在 CPU 上整块重绘，分组的模糊阴影让每一步慢到 50ms 以上，见 [Linux 设置页去掉分组与皮肤卡片的模糊阴影](2026-10-09-linux-settings-scroll-blur-shadow.md)。
 
 ## Verification
 

@@ -9,6 +9,9 @@ import {
   type CandidateFontPresetId,
 } from "../candidate/candidate-font-presets";
 import {
+  candidateCardPadding,
+  candidateCardPaddingPatch,
+  candidateCardPaddingSlider,
   candidateCornerRadius,
   candidateCornerRadiusPatch,
   candidateCornerRadiusSlider,
@@ -31,6 +34,7 @@ export type CandidateWindowStyleSectionPreferences = Pick<
   | "candidate_scale_percent"
   | "candidate_opacity_percent"
   | "candidate_corner_radius"
+  | "candidate_padding"
 >;
 
 export interface CandidateFontPresetRowProps {
@@ -90,27 +94,44 @@ export function CandidateScaleRow({ preferences, onChange }: CandidateScaleRowPr
 }
 
 export interface CandidateWindowStyleSectionProps {
-  preferences: Pick<Preferences, "candidate_opacity_percent" | "candidate_corner_radius">;
+  preferences: Pick<
+    Preferences,
+    "candidate_opacity_percent" | "candidate_corner_radius" | "candidate_padding"
+  >;
+  /** 宿主平台，决定「跟随皮肤」时滑块停在哪个圆角和内边距上。 */
+  platform?: HostPlatform;
   showOpacity: boolean;
   showCornerRadius: boolean;
+  /** 宿主声明了 `candidate_padding` 时显示「内边距」行（目前只有 macOS）。 */
+  showPadding?: boolean;
   onChange: (patch: Partial<Preferences>) => void;
   /** 排在窗口自身样式之后的行，例如链接到颜色和明暗设置处的那一行。 */
   children?: ReactNode;
 }
 
-/** What the slider shows while the card follows the skin and the host: the radius the preview draws then. */
-const followedCornerRadius = 6;
+/** 卡片跟随皮肤和宿主时滑块显示的圆角，即那时预览画的卡片圆角：macOS 是原生候选窗的 10pt（`skin-card-preview` 里 macOS 默认值块的 `--msime-host-card-radius`），其他平台的预览还没有自己的默认值块，仍是 6。 */
+function followedCornerRadius(platform: HostPlatform | undefined): number {
+  return platform === "macos" ? 10 : 6;
+}
 
-/** 「候选窗口」页的「窗口样式」组：窗口的不透明度和圆角。颜色和明暗只在「主题」页编辑，本页在这一组末尾链接过去。 */
+/** 卡片跟随皮肤和宿主时滑块显示的内边距：macOS 原生候选窗的 6pt（`skin-card-preview` 里 macOS 默认值块的 `--msime-host-pad`）。只有 macOS 声明这一行，其他平台的值只是为了滑块有个落点。 */
+function followedCardPadding(platform: HostPlatform | undefined): number {
+  return platform === "macos" ? 6 : 2;
+}
+
+/** 「候选窗口」页的「窗口样式」组：窗口的不透明度、圆角和内边距。颜色和明暗只在「主题」页编辑，本页在这一组末尾链接过去。 */
 export function CandidateWindowStyleSection({
   preferences,
+  platform,
   showOpacity,
   showCornerRadius,
+  showPadding = false,
   onChange,
   children,
 }: CandidateWindowStyleSectionProps) {
   const opacity = candidateOpacityPercent(preferences.candidate_opacity_percent);
   const radius = candidateCornerRadius(preferences.candidate_corner_radius);
+  const padding = candidateCardPadding(preferences.candidate_padding);
   return (
     <GroupList title="窗口样式">
       {showOpacity && (
@@ -136,7 +157,7 @@ export function CandidateWindowStyleSection({
             <span className={settings.sliderControl}>
               <Slider
                 {...candidateCornerRadiusSlider}
-                value={radius ?? followedCornerRadius}
+                value={radius ?? followedCornerRadius(platform)}
                 valueText={radius === null ? "跟随皮肤" : `${radius}pt`}
                 onChange={(value) => onChange(candidateCornerRadiusPatch(value))}
               />
@@ -147,6 +168,35 @@ export function CandidateWindowStyleSection({
               }}
               ariaPressed={radius === null}
               className={`candidate-color-reset${radius === null ? " is-active" : ""}`}
+              label="跟随皮肤"
+            />
+          </span>
+        </Row>
+      )}
+      {showPadding && (
+        <Row
+          title="内边距"
+          description={
+            padding === null
+              ? "跟随皮肤；调小后候选离窗口边缘更近，窗口更紧凑"
+              : `${padding}pt，覆盖皮肤自带的内边距`
+          }
+        >
+          <span className="candidate-color-control">
+            <span className={settings.sliderControl}>
+              <Slider
+                {...candidateCardPaddingSlider}
+                value={padding ?? followedCardPadding(platform)}
+                valueText={padding === null ? "跟随皮肤" : `${padding}pt`}
+                onChange={(value) => onChange(candidateCardPaddingPatch(value))}
+              />
+            </span>
+            <ActionButton
+              action={() => {
+                if (padding !== null) onChange(candidateCardPaddingPatch(null));
+              }}
+              ariaPressed={padding === null}
+              className={`candidate-color-reset${padding === null ? " is-active" : ""}`}
               label="跟随皮肤"
             />
           </span>

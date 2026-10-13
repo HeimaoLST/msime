@@ -3,11 +3,12 @@ import Darwin
 import CoreFoundation
 
 enum TypingSource: String, CaseIterable {
-  case quanpin, nineKey, shuangpin, ziranma, microsoft, shoudao, wubi, japanese, korean, cantonese, zhuyin, vietnamese, tibetan, stroke, handwriting, english, local, ai, reply, voice, unknown
+  case quanpin, nineKey, fourteenKey, shuangpin, ziranma, microsoft, shoudao, wubi, japanese, korean, cantonese, zhuyin, vietnamese, tibetan, stroke, handwriting, english, local, ai, reply, voice, unknown
   var title: String {
     switch self {
     case .quanpin: "全拼 26 键"
     case .nineKey: "全拼 9 键"
+    case .fourteenKey: "全拼 14 键"
     case .shuangpin: "小鹤双拼"
     case .ziranma: "自然码双拼"
     case .microsoft: "微软双拼"
@@ -331,9 +332,11 @@ enum TypingKeyID {
     let numpadDigits: [String] = (0...9).map { "Numpad\($0)" }
     let numpad: [String] = ["NumpadDecimal", "NumpadEnter", "NumpadAdd", "NumpadSubtract", "NumpadMultiply", "NumpadDivide", "NumLock"]
     let nineKey: [String] = (0...9).map { "Nine\($0)" }
+    // 全拼 14 键的各键，按键面上的字母命名，与 client-core 的 `KEY_IDS` 逐字一致。
+    let fourteenKey: [String] = ["QW", "ER", "TY", "UI", "OP", "AS", "DF", "GH", "JK", "L", "ZX", "CV", "BN", "M"].map { "Fourteen\($0)" }
     let soft: [String] = ["SoftPunctuation", "SoftSymbol", "SoftLayer", "SoftLanguage", "SoftGlobe", "SoftEmoji", "SoftVoice"]
     var keys: [String] = letters
-    for part in [digits, editing, functionKeys, numpadDigits, numpad, nineKey, soft] {
+    for part in [digits, editing, functionKeys, numpadDigits, numpad, nineKey, soft, fourteenKey] {
       keys += part
     }
     return keys
@@ -360,6 +363,12 @@ enum TypingKeyID {
   /// 九键格里的一格，按格上印的数字编号。1 号格是 @#，点开符号面板；0 是最下一排的那个键。
   static func nineKey(_ digit: Int) -> String? {
     (0...9).contains(digit) ? "Nine\(digit)" : nil
+  }
+
+  /// 全拼 14 键的一个键，按键面上的字母命名（`FourteenQW`）；不记到 `KeyQ` 这些 26 键字母上，否则会混进 26 键的热力图。键面不是 14 键的某一组时为 nil。
+  static func fourteenKey(_ face: String) -> String? {
+    let id = "Fourteen\(face)"
+    return known.contains(id) ? id : nil
   }
 
   /// A cell of the Japanese kana grid by its index in `JapaneseNineKeyView.keys`: あ through ら sit where 1 to 9 sit on a phone keypad, わ where 0 sits, and the punctuation cell beside it is side punctuation.
@@ -414,6 +423,7 @@ enum TypingKeyID {
     if id.hasPrefix("Key") { return String(id.dropFirst(3)) }
     if id.hasPrefix("Digit") { return String(id.dropFirst(5)) }
     if id.hasPrefix("Nine") { return "九键 \(id.dropFirst(4))" }
+    if id.hasPrefix("Fourteen") { return "14 键 \(id.dropFirst(8))" }
     return id
   }
 }
@@ -815,13 +825,14 @@ enum TypingSummaryText {
     ]
   }
 
-  /// 输入方式：26 键、9 键、语音和手写，只列有输入的部分。除九键外的所有键盘方案都在 26 个字母键上输入；AI 润色、回复和未归类的输入不算输入方式，不计入。
+  /// 输入方式：26 键、14 键、9 键、语音和手写，只列有输入的部分。除九键和 14 键外的所有键盘方案都在 26 个字母键上输入；AI 润色、回复和未归类的输入不算输入方式，不计入。与共享界面的 `summaryMethods` 一致。
   static func methods(_ sources: [String: Int]) -> [Share] {
-    let excluded = Set([TypingSource.nineKey, .voice, .handwriting, .unknown, .ai, .reply].map(\.rawValue))
+    let excluded = Set([TypingSource.nineKey, .fourteenKey, .voice, .handwriting, .unknown, .ai, .reply].map(\.rawValue))
     let full = sources.filter { !excluded.contains($0.key) }.values.reduce(0) { $0 + max(0, $1) }
     func value(_ source: TypingSource) -> Int { max(0, sources[source.rawValue] ?? 0) }
     return [
       Share(title: "26 键", count: full),
+      Share(title: "14 键", count: value(.fourteenKey)),
       Share(title: "9 键", count: value(.nineKey)),
       Share(title: "语音", count: value(.voice)),
       Share(title: "手写", count: value(.handwriting)),
@@ -996,6 +1007,28 @@ struct TypingStatisticsStore {
     return .neverWritten
   }
 
+  /// 原生统计页「统计没有数据」那张卡的正文，nil 表示不需要这张卡。`recordingOff` 只在确实读到了统计文档且其中记录关闭时为真：此时键盘本来就不写，「记录已关闭」那张卡已经说明了原因，这里再让人去开完全访问，会把人引到错误的地方。
+  ///
+  /// 文件存在不能说明键盘写过：在 app 里开启记录时，`client-core` 的 `set_enabled` 会无条件写出 `typing-statistics.json`，而键盘没有完全访问权限时不记录任何东西，数字会一直是零。app 读不到键盘是否有完全访问（iOS 没有公开 API，键盘没有完全访问时也写不了 App Group，留下的标记在权限收回后会过期），所以计数为零时始终先提醒这一项，再说其他可能。
+  static func emptyStatisticsAdvice(_ availability: Availability, recordingOff: Bool, total: Int) -> String? {
+    if recordingOff { return nil }
+    switch availability {
+    case .containerUnavailable:
+      return "无法访问共享存储，键盘与本 app 之间没有可用的数据通道。重装水杉输入法可以重建它。"
+    case .neverWritten:
+      return "键盘从未写入过统计。请在系统设置 → 通用 → 键盘 → 键盘 → 水杉输入法中开启“允许完全访问”，"
+        + "然后用水杉键盘输入几个字再回来刷新。未开启时仍可正常打字，只是不记录统计。"
+    case .ready(let lastWritten):
+      guard total == 0 else { return nil }
+      let fullAccess = "请先确认已在系统设置 → 通用 → 键盘 → 键盘 → 水杉输入法中为水杉键盘开启“允许完全访问”，未开启时键盘不记录统计。"
+      guard let lastWritten else {
+        return "统计文件存在但还没有计数。" + fullAccess + "已开启的话，用水杉键盘输入几个字再刷新。"
+      }
+      return "统计文件最后写入于 \(lastWritten.formatted(.dateTime.month().day().hour().minute()))，但计数为零。"
+        + fullAccess + "已开启的话，若此前清空过统计，这是正常的；否则请附上这条信息反馈。"
+    }
+  }
+
   /// Count one commit. `date` places it on a day and an hour; the active time between commits is measured by the shared store against its own clock.
   func record(_ text: String, source: TypingSource = .unknown, at date: Date = Date(), calendar: Calendar = .current) throws {
     guard text.contains(where: { !$0.isWhitespace }) else { return }
@@ -1078,12 +1111,7 @@ struct TypingStatisticsStore {
 
   /// Native JSON must return a non-negative integral count that cannot exceed the submitted batch.
   static func strictRecordedCount(_ value: Any?, maximum: Int) -> Int? {
-    guard let number = value as? NSNumber,
-          CFGetTypeID(number) != CFBooleanGetTypeID(),
-          let integer = Int(number.stringValue),
-          integer >= 0,
-          integer <= maximum,
-          NSNumber(value: integer).compare(number) == .orderedSame else { return nil }
+    guard let integer = SharedNumber.nonnegativeInt(value), integer <= maximum else { return nil }
     return integer
   }
 

@@ -18,6 +18,13 @@ public final class KeyboardLayout {
     public static final int STROKE_LAYOUT = 6;
     /** 注音 9 键：声调列、{@link ZhuyinNineKeyLayout} 的 1-9/0 音键网格和 ⌫ 列；音键发送数字，声调键发送 z x c v b。 */
     public static final int ZHUYIN_NINE_KEY_LAYOUT = 7;
+    /** 全拼 14 键：{@link FourteenKeyLayout} 的三行两字母键，点按经 `gridKey` 送这一组的首字母；123 层、底行和 26 键相同。 */
+    public static final int FOURTEEN_KEY_LAYOUT = 8;
+
+    /** 画着的是引擎组码网格的键面（拼音九键或 14 键）：读音行显示 `nine_key_reading`，组字不写进输入框，展开候选是三栏面板。 */
+    public static boolean drawsKeyGrid(int layout) {
+        return layout == QUANPIN_NINE_KEY_LAYOUT || layout == FOURTEEN_KEY_LAYOUT;
+    }
 
     private static final List<List<String>> LETTER_ROWS = List.of(
         List.of("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"),
@@ -30,11 +37,36 @@ public final class KeyboardLayout {
         List.of("(", ")", "[", "]", "<", ">", "\\", "-", "_", "=")
     );
 
+    /** 数字行（#6022）：本地设置「数字行」打开时画在字母上方的 1–0。 */
+    public static final List<String> NUMBER_ROW = List.of("1", "2", "3", "4", "5", "6", "7", "8", "9", "0");
+    /** 窗口可用高度（`Configuration.screenHeightDp`）低于它时不画数字行：横屏手机的窗口只有 330–430 dp，默认高度的键盘（约 300 dp）再加一行 63 dp 就把工具栏或底行挤出窗口、应用也没有可见区域了。竖屏手机、平板横屏和折叠屏内屏都在 480 dp 以上。 */
+    public static final int NUMBER_ROW_MIN_WINDOW_HEIGHT_DP = 480;
+
     private KeyboardLayout() {}
+
+    /**
+     * 这一刻要不要在字母上方画数字行（#6022）：设置打开、在字母层、画的是标准 26 键一族或韩文两套式，并且窗口够高。九键、笔画、手写、日文假名网格和注音（大千的数字本身是注音键，注音 9 键是网格）都不画；123 / #+= 层也不画，它第一行本来就是数字；窗口低于 {@link #NUMBER_ROW_MIN_WINDOW_HEIGHT_DP}（横屏手机）时也不画，存着的设置不变，转回竖屏自动回来。
+     *
+     * @param enabled 本地设置 `platform.android.number_row`
+     * @param windowHeightDp 键盘所在窗口的可用高度（`Configuration.screenHeightDp`）；未知（0 或负数）时不按高度拦
+     */
+    public static boolean drawsNumberRow(boolean enabled, Layer layer, int touchLayout, int windowHeightDp) {
+        return enabled && layer == Layer.LETTERS
+            && (touchLayout == STANDARD_TOUCH_LAYOUT || touchLayout == KOREAN_LAYOUT)
+            && (windowHeightDp <= 0 || windowHeightDp >= NUMBER_ROW_MIN_WINDOW_HEIGHT_DP);
+    }
 
     /** Resolves the host surface from the Engine view without conflating Japanese nine-key. */
     public static int resolveTouchLayout(boolean handwriting, boolean nineKey, int scheme,
                                          String touchLayout) {
+        return resolveTouchLayout(handwriting, nineKey, false, scheme, touchLayout);
+    }
+
+    /**
+     * 同 {@link #resolveTouchLayout(boolean, boolean, int, String)}，`fourteenKey` 是引擎此刻开着 14 键网格（`View.key_grid` 为 `fourteen_key`）且没有本地模式：本地模式要逐个确定的字母，14 键的组码打不出来，所以回落 26 键。14 键只在全拼下开，排在九键之前判断。
+     */
+    public static int resolveTouchLayout(boolean handwriting, boolean nineKey, boolean fourteenKey,
+                                         int scheme, String touchLayout) {
         // Korean has only the 26-key Dubeolsik keyboard, whatever layout the document carries.
         if (scheme == KoreanInputPolicy.KOREAN_SCHEME) return KOREAN_LAYOUT;
         // Zhuyin draws the nine-key bopomofo grid when the document stores the nine-key layout, the Dachen rows otherwise; it has no handwriting surface. The stored layout decides, as for Japanese, rather than the view's nine_key flag.
@@ -44,6 +76,7 @@ public final class KeyboardLayout {
         // 笔画方案画自己的笔画键盘：偏好是 26 键还是 9 键都一样，只有手写让给手写面板。
         if (scheme == InputSchemeTraits.STROKE) return STROKE_LAYOUT;
         if (scheme == 3 && "nine_key".equals(touchLayout)) return JAPANESE_NINE_KEY_LAYOUT;
+        if (fourteenKey) return FOURTEEN_KEY_LAYOUT;
         if (nineKey) return QUANPIN_NINE_KEY_LAYOUT;
         return STANDARD_TOUCH_LAYOUT;
     }

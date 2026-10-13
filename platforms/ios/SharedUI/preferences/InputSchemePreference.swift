@@ -2,10 +2,11 @@ import Foundation
 
 enum ChineseInputScheme: String, CaseIterable {
   // 「高情商回复」已改为工具栏入口，不再是方案。旧版存下的 `thoughtfulReply`（App Group）或 `thoughtful_reply`（共享文档）在这里认不出来，与其他未知值一样走 `InputSchemePreference` 的回退：已选的落到全拼 26 键或第一个可用方案，启用列表里直接忽略。
-  case quanpin, nineKey, shuangpin, ziranma, microsoft, shoudao, wubi, japaneseNineKey, japanese, korean, handwriting, cantonese, zhuyin, vietnamese, tibetan, stroke
+  // 全拼 14 键排在最后：方案按 client-core 的 `TouchKeyboardScheme::ALL` 只往后追加，启用列表也按这个顺序写回文档。
+  case quanpin, nineKey, shuangpin, ziranma, microsoft, shoudao, wubi, japaneseNineKey, japanese, korean, handwriting, cantonese, zhuyin, vietnamese, tibetan, stroke, fourteenKey
 
-  /// 全新安装默认不打开、要用户自己启用的方案，与设置宿主一致（MobilePlatformPlugin 里的 `optInSchemes`）。
-  static let optInSchemes: [ChineseInputScheme] = [.cantonese, .zhuyin, .vietnamese, .tibetan, .stroke]
+  /// 全新安装默认不打开、要用户自己启用的方案，与设置宿主一致（MobilePlatformPlugin 里的 `optInSchemes`）。全拼 14 键也不默认打开，与 client-core 的 `DEFAULT_ENABLED` 一致。
+  static let optInSchemes: [ChineseInputScheme] = [.cantonese, .zhuyin, .vietnamese, .tibetan, .stroke, .fourteenKey]
 
   var isJapanese: Bool { self == .japanese || self == .japaneseNineKey }
 
@@ -48,13 +49,13 @@ enum ChineseInputScheme: String, CaseIterable {
   /// Whether the scheme reads a dictionary that ships apart from the resource set, and so is offered only where it is installed.
   var needsLanguageDictionary: Bool { isCantonese || isZhuyin || isStroke }
 
-  /// Whether a held backspace and a quick space-bar flick edit the spelling a syllable at a time. Only a lettered pinyin spelling has syllables to step over: a nine-key digit run is still ambiguous, and a wubi code is not made of syllables, so those keep a hold that clears the composition.
+  /// 长按退格和空格键快速轻扫是否按音节编辑拼写。只有用字母写的拼音才有音节可跳：九键的一串数字仍有歧义，五笔码不由音节组成，所以它们长按时整段清除组字。全拼 14 键的组字是组码，同样有歧义，与九键一样整段清除。
   var editsBySyllable: Bool { self == .quanpin || shuangpinProfile != nil }
 
   /// 这个入口背后的输入方案，即版本表和共享偏好 `scheme` 里的方案名。手写的识别由平台识别器完成，不属于任何一个方案，这里的 `quanpin` 只用来归类；它写进偏好的方案见 `MetasequoiaInputSessionBridge.schemeMapping`。
   var engineScheme: String {
     switch self {
-    case .quanpin, .nineKey, .handwriting: "quanpin"
+    case .quanpin, .nineKey, .fourteenKey, .handwriting: "quanpin"
     case .shuangpin, .ziranma, .microsoft, .shoudao: "shuangpin"
     case .wubi: "wubi"
     case .japanese, .japaneseNineKey: "japanese"
@@ -107,17 +108,28 @@ enum ChineseInputScheme: String, CaseIterable {
     case .vietnamese: "vietnamese"
     case .tibetan: "tibetan"
     case .stroke: "stroke"
+    case .fourteenKey: "fourteen_key"
     }
   }
   /// 这个方案在云端设置文档里的 `input.schema`，云端带不了的方案为 nil。云端只认 quanpin、shuangpin、wubi、japanese 和 korean，任何设备收到其他值都会拒绝整份文档（`IOSPreferencePlan`），所以粤拼、注音、越南语、藏文和笔画不写这个字段，保留账号里的方案，与 Tauri 的 `local_account_preferences` 一致。
   var cloudSchema: String? {
     switch self {
-    case .quanpin, .nineKey, .handwriting: "quanpin"
+    // 全拼的 26 键、9 键、14 键和手写都是全拼，用哪种键盘由 `cloudKeyboardLayout` 说明。
+    case .quanpin, .nineKey, .fourteenKey, .handwriting: "quanpin"
     case .shuangpin, .ziranma, .microsoft, .shoudao: "shuangpin"
     case .wubi: "wubi"
     case .japanese, .japaneseNineKey: "japanese"
     case .korean: "korean"
     case .cantonese, .zhuyin, .vietnamese, .tibetan, .stroke: nil
+    }
+  }
+  /// 这个方案在云端的 `platform.ios.keyboard_layout`，与 Android 的 `platform.android.keyboard_layout` 同一套词。只随 `input.schema` 一起上传；旧版本不认识它，所以同时照旧上传 `platform.ios.nine_key`，那台设备上 14 键和手写落成全拼 26 键。
+  var cloudKeyboardLayout: String {
+    switch self {
+    case .nineKey, .japaneseNineKey: "nine_key"
+    case .fourteenKey: "fourteen_key"
+    case .handwriting: "handwriting"
+    default: "twenty_six_key"
     }
   }
   static func scheme(sharedIdentifier value: String) -> ChineseInputScheme? {
@@ -141,6 +153,7 @@ enum ChineseInputScheme: String, CaseIterable {
     case .vietnamese: "越南语 26 键"
     case .tibetan: "藏文 26 键"
     case .stroke: "笔画"
+    case .fourteenKey: "全拼 14 键"
     }
   }
 }
@@ -152,7 +165,7 @@ enum WubiProfilePreference {
   static let profiles = ["wubi86", "wubi98"]
   static let documentKey = "wubi_profile"
   static let profileKey = "wubi.profile"
-  private static var defaults: UserDefaults { UserDefaults(suiteName: InputSchemePreference.appGroupIdentifier) ?? .standard }
+  private static var defaults: UserDefaults { InputSchemePreference.appGroupDefaults }
 
   static var profile: String {
     get { known(defaults.string(forKey: profileKey)) }
@@ -216,14 +229,26 @@ enum InputSchemePreference {
 
   /// The enabled schemes this process can run: an enabled Cantonese, Zhuyin or Stroke whose dictionary is not installed is left out, because the Engine would answer it with another scheme. The enabled list itself keeps it, so the choice holds once the dictionary arrives. A process that carries no Engine (the App) cannot tell and leaves every enabled scheme in, so its settings never rewrite a selection the keyboard can run.
   static var offeredSchemes: [ChineseInputScheme] {
-    offeredSchemes(enabled: enabledSchemes, installed: installedLanguageSchemes)
+    offeredSchemes(enabled: enabledSchemes, installed: installedLanguageSchemes,
+                   japaneseAvailable: !hasBundledEngine || bundledJapanese || downloadedPackIDs.contains("japanese"))
   }
 
-  /// `enabled` without the Cantonese, Zhuyin and Stroke schemes missing from `installed`; nil `installed` means unknown and filters nothing.
-  static func offeredSchemes(enabled: [ChineseInputScheme], installed: Set<ChineseInputScheme>?) -> [ChineseInputScheme] {
+  /// 缺失词库的已启用方案暂不显示，启用列表保留；主应用没有 Engine 时 installed 为 nil。
+  static func offeredSchemes(enabled: [ChineseInputScheme], installed: Set<ChineseInputScheme>?, japaneseAvailable: Bool = true) -> [ChineseInputScheme] {
     guard let installed else { return enabled }
-    let offered = enabled.filter { !$0.needsLanguageDictionary || installed.contains($0) }
+    let offered = enabled.filter { (!$0.needsLanguageDictionary || installed.contains($0)) && (!$0.isJapanese || japaneseAvailable) }
     return offered.isEmpty ? [.editionFallback] : offered
+  }
+
+  /// 键盘「输入方式」面板里列出的方案：`schemes` 里的双拼只留一种，其余方案原样、按原顺序保留。
+  ///
+  /// 留下的那一种依次取：`selected` 本身是双拼且在 `schemes` 里时就是它；否则是共享文档 `shuangpin_profile`（`profile`，缺省或不认识时按小鹤，与 client-core 的缺省相同）对应的那一种；它不在 `schemes` 里时取 `schemes` 里第一种双拼。大多数人只用一种双拼，四种都列出来会把手写挤到第二页（#6450）；换双拼方案在 App 的「双拼」子菜单里。与 Android、鸿蒙的 `KeyboardScheme.pickerSchemes` 一致。
+  static func pickerSchemes(_ schemes: [ChineseInputScheme], selected: ChineseInputScheme?, shuangpinProfile profile: String?) -> [ChineseInputScheme] {
+    let shuangpin = schemes.filter { $0.shuangpinProfile != nil }
+    let configured = ["ziranma", "microsoft", "shoudao"].contains(profile ?? "") ? profile : "xiaohe"
+    let kept = selected.flatMap { $0.shuangpinProfile != nil && schemes.contains($0) ? $0 : nil }
+      ?? shuangpin.first { $0.shuangpinProfile == configured } ?? shuangpin.first
+    return schemes.filter { $0.shuangpinProfile == nil || $0 == kept }
   }
 
   /// The language dictionary directory host-api reads: `language-dictionaries/` beside the bundle's EngineResources, or nil for a bundle without EngineResources. Only the keyboard extension and its test host carry them; the App bundle runs no Engine.
@@ -241,8 +266,21 @@ enum InputSchemePreference {
     return Set(files.filter { FileManager.default.fileExists(atPath: directory.appendingPathComponent($0.1).path) }.map(\.0))
   }
 
-  /// Read once: the bundle does not change while the process runs, and `scheme` is read on every keystroke.
-  static let installedLanguageSchemes = installedLanguageSchemes(in: languageDictionaryDirectory(in: .main))
+  private static let hasBundledEngine = languageDictionaryDirectory(in: .main) != nil
+  private static let bundledJapanese = IOSResourcePacks.bundled("japanese")
+  private static let bundledLanguageSchemes = installedLanguageSchemes(in: languageDictionaryDirectory(in: .main))
+  private static var downloadedPackIDs = Set((try? IOSResourcePacks.list())?.filter(\.installed).map(\.id) ?? [])
+
+  /// 取得键盘焦点或宿主下载完成后刷新，按键处理只读缓存。
+  static func refreshResourceAvailability() {
+    downloadedPackIDs = Set((try? IOSResourcePacks.list())?.filter(\.installed).map(\.id) ?? [])
+  }
+
+  static var installedLanguageSchemes: Set<ChineseInputScheme>? {
+    guard var installed = bundledLanguageSchemes else { return nil }
+    if downloadedPackIDs.contains("language-dictionaries") { installed.formUnion([.cantonese, .zhuyin, .stroke]) }
+    return installed
+  }
 
   private static let schemeKey = "chineseInputScheme"
   static var scheme: ChineseInputScheme {
@@ -357,4 +395,9 @@ enum InputSchemePreference {
   }
 
   static let appGroupIdentifier = MSIMEAppEdition.appGroupIdentifier
+
+  /// The shared App Group defaults used by preferences mirrored between the app and keyboard.
+  static var appGroupDefaults: UserDefaults {
+    UserDefaults(suiteName: appGroupIdentifier) ?? .standard
+  }
 }

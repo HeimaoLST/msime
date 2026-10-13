@@ -10,7 +10,11 @@ import {
 } from "./translation-credential-test-config";
 import type { TranslationProviderSettingsSectionProps } from "./translation-provider-settings-section";
 import { type TranslationProvider } from "./translation-service-selector-section";
-import { tencentCredentialIssue, translationEndpointIssue } from "./translation-validation";
+import {
+  customTranslationKeyIssue,
+  tencentCredentialIssue,
+  translationEndpointIssue,
+} from "./translation-validation";
 import { tencentSecretConfigured } from "./credential-utils";
 
 type CustomTranslationPreferences = NonNullable<Preferences["custom_translation"]>;
@@ -153,7 +157,8 @@ export function createTranslationProviderSettings({
         customTranslationCredentialTestConfig(customTranslation),
         customTranslationCredentialTestDisabled(
           candidateTranslations,
-          translationEndpointIssue(customTranslation.endpoint),
+          translationEndpointIssue(customTranslation.endpoint) ||
+            customTranslationKeyIssue(customTranslation.endpoint, customTranslation.api_key),
         ),
       ),
     },

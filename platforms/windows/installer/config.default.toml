@@ -66,8 +66,8 @@ region = "ap-guangzhou"
 target_language = "en"
 
 #
-# 自定义 DeepLX 兼容翻译服务。endpoint 必须填写完整的 POST 接口地址。
-# api_key 留空时不发送 Authorization 请求头。
+# 自定义翻译服务：自建的 DeepLX 兼容服务，或 DeepL 官方 API（endpoint 填 https://api-free.deepl.com/v2/translate 或 https://api.deepl.com/v2/translate，api_key 填 DeepL 的 Auth Key，候选词会发送到 DeepL）。endpoint 必须填写完整的 POST 接口地址。
+# api_key 留空时不发送 Authorization 请求头；DeepL 官方地址必须填写 api_key。
 #
 [custom_translation]
 enabled = false
@@ -208,13 +208,13 @@ fuzzy_uan_uang = false
 [helpcode]
 # 双拼辅助码
 shuangpin_helpcode = true
-# 双拼辅助码方案，可选："lantian", "ziranma", "shouyou2_0", "shouyouplus", "xiaohe", "jiajia"
+# 双拼辅助码方案，可选："lantian", "ziranma", "shouyou2_0", "shouyouplus", "xiaohe", "jiajia", "wubi86"
 shuangpin_helpcode_schema = "lantian"
 # 是否在候选窗口中显示双拼辅助码
 show_sp_helpcode_in_candidate_window = true
 # 全拼辅助码
 quanpin_helpcode = true
-# 全拼辅助码方案，可选："lantian", "ziranma", "shouyou2_0", "shouyouplus", "xiaohe", "jiajia"
+# 全拼辅助码方案，可选："lantian", "ziranma", "shouyou2_0", "shouyouplus", "xiaohe", "jiajia", "wubi86"
 quanpin_helpcode_schema = "ziranma"
 # 是否在候选窗口中显示全拼辅助码
 show_qp_helpcode_in_candidate_window = false
@@ -224,7 +224,7 @@ show_qp_helpcode_in_candidate_window = false
 # 全拼
 #
 [quanpin]
-# 全拼自动纠错按类型独立启用。
+# 自动纠错按类型独立启用。名字在 quanpin 下是历史原因：双拼也读这两项，按当前方案作用。
 autocorrect_transposition = true
 autocorrect_neighbor = true
 

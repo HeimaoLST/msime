@@ -214,7 +214,7 @@ describe("the HarmonyOS phone 表达 page", () => {
       "关闭",
       "腾讯云机器翻译",
       "小牛翻译（NiuTrans）",
-      "自定义 DeepLX 兼容服务",
+      "自定义（DeepLX 或 DeepL API）",
     ]) {
       expect(within(sheet).getByRole("button", { name: provider })).toBeTruthy();
     }

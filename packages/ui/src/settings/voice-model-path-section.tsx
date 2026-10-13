@@ -1,4 +1,5 @@
 import { Row } from "../core/platform-controls";
+import { ControlledInput } from "../core/controlled-input";
 import { ActionButton } from "./action-button";
 
 export interface VoiceModelPathSectionProps {
@@ -12,11 +13,11 @@ export function VoiceModelPathSection({ path, pickPath, onChange }: VoiceModelPa
   const description = "已安装模型所在文件夹的绝对路径（包含 msime-model.json）";
   const editor = (
     <span className="flex items-center gap-2 [&>input]:min-w-0 [&>input]:flex-1">
-      <input
+      <ControlledInput
         aria-label="本地模型目录"
         value={path}
         placeholder="/path/to/voice-models/<model>"
-        onChange={(event) => onChange(event.target.value)}
+        onChange={onChange}
       />
       {pickPath && (
         <ActionButton

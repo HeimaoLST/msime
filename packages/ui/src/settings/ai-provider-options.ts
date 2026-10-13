@@ -1,3 +1,16 @@
+import {
+  deepseekChatEndpoint,
+  deepseekDocumentationUrl,
+  dashScopeChatEndpoint,
+  everyApiModelsUrl,
+  groqChatEndpoint,
+  groqDocumentationUrl,
+  openAiChatEndpoint,
+  openAiModelsDocumentationUrl,
+  siliconFlowChatEndpoint,
+  siliconFlowTextDocumentationUrl,
+} from "../core/provider-resources";
+
 /**
  * `models` are the models the provider is known to accept and `documentation`
  * explains the endpoint and how to obtain an API key. These values are
@@ -17,15 +30,15 @@ export const AI_PROVIDER_OPTIONS: readonly {
     endpoint: "https://api.everyapi.ai/v1/chat/completions",
     model: "deepseek-v4-flash",
     models: ["deepseek-v4-flash", "deepseek-v4-pro", "claude-sonnet-5", "glm-5.3-flash"],
-    documentation: "https://everyapi.ai/models",
+    documentation: everyApiModelsUrl,
   },
   {
     id: "openai",
     title: "OpenAI",
-    endpoint: "https://api.openai.com/v1/chat/completions",
+    endpoint: openAiChatEndpoint,
     model: "gpt-4.1-mini",
     models: ["gpt-4.1-mini"],
-    documentation: "https://developers.openai.com/api/docs/models/gpt-4.1-mini",
+    documentation: openAiModelsDocumentationUrl,
   },
   {
     id: "anthropic",
@@ -46,15 +59,15 @@ export const AI_PROVIDER_OPTIONS: readonly {
   {
     id: "deepseek",
     title: "DeepSeek",
-    endpoint: "https://api.deepseek.com/chat/completions",
+    endpoint: deepseekChatEndpoint,
     model: "deepseek-v4-flash",
     models: ["deepseek-v4-flash", "deepseek-v4-pro"],
-    documentation: "https://api-docs.deepseek.com/",
+    documentation: deepseekDocumentationUrl,
   },
   {
     id: "qwen",
     title: "通义千问 · 阿里云百炼",
-    endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+    endpoint: dashScopeChatEndpoint,
     model: "qwen-plus",
     models: ["qwen-plus"],
     documentation: "https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope",
@@ -78,18 +91,18 @@ export const AI_PROVIDER_OPTIONS: readonly {
   {
     id: "siliconflow",
     title: "硅基流动",
-    endpoint: "https://api.siliconflow.cn/v1/chat/completions",
+    endpoint: siliconFlowChatEndpoint,
     model: "Qwen/Qwen3.6-27B",
     models: ["Qwen/Qwen3.6-27B"],
-    documentation: "https://docs.siliconflow.cn/docs/userguide/capabilities/text-generation",
+    documentation: siliconFlowTextDocumentationUrl,
   },
   {
     id: "groq",
     title: "Groq",
-    endpoint: "https://api.groq.com/openai/v1/chat/completions",
+    endpoint: groqChatEndpoint,
     model: "llama-3.3-70b-versatile",
     models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
-    documentation: "https://console.groq.com/docs/quickstart",
+    documentation: groqDocumentationUrl,
   },
   {
     id: "openrouter",

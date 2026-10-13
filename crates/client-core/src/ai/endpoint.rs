@@ -31,16 +31,8 @@ pub fn validate(endpoint: &str) -> Result<Url, AiEndpointError> {
         return Err(AiEndpointError::Invalid);
     }
     let url = Url::parse(endpoint).map_err(|_| AiEndpointError::Invalid)?;
-    // `https:///v1` 会被解析成主机 `v1`；要求 `://` 后面紧跟主机，免得路径被当成主机。
-    let explicit_authority = endpoint
-        .split_once("://")
-        .is_some_and(|(_, rest)| rest.as_bytes().first().is_some_and(|byte| *byte != b'/'));
     if !matches!(url.scheme(), "https" | "http")
-        || !explicit_authority
-        || url.host_str().is_none_or(str::is_empty)
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
+        || !crate::endpoint::valid_endpoint_shape(endpoint, &url, url.scheme())
     {
         return Err(AiEndpointError::Invalid);
     }
@@ -81,6 +73,35 @@ pub fn credential_origin(endpoint: &str) -> Option<String> {
     let host = url.host_str()?.to_ascii_lowercase();
     let port = url.port_or_known_default()?;
     Some(format!("{}://{host}:{port}", url.scheme()))
+}
+
+/// 地址不能用时设置页写在接口地址下面的说明，地址可用时为空字符串。与设置页 `ai-endpoint-policy.ts` 的 `aiEndpointHint` 逐字一致。
+pub fn hint(endpoint: &str) -> &'static str {
+    match validate(endpoint) {
+        Ok(_) => "",
+        Err(AiEndpointError::CleartextPublicHost) => "http:// 只能用于本机或局域网地址（如 localhost、127.0.0.1、192.168.x.x、10.x.x.x、*.local）；公网服务请使用 https://，以免 API Token 明文经过互联网。",
+        Err(AiEndpointError::Invalid) => "请填写完整的接口地址：https://，或本机、局域网的 http://，且不能包含用户名、密码或 # 片段。",
+    }
+}
+
+/// 对话接口旁边的模型列表地址，不管版本前缀是什么（`/v1`、`/v1beta/openai`、`/api/paas/v4`）：去掉结尾的 `/chat/completions` 或 `/audio/transcriptions`，再接上 `/models`。`clear_query` 决定接口地址里的查询参数要不要带到列表请求上。
+pub fn models_url(mut url: Url, clear_query: bool) -> Url {
+    let mut path = url.path().trim_end_matches('/').to_owned();
+    for suffix in ["/chat/completions", "/audio/transcriptions"] {
+        if let Some(prefix) = path.strip_suffix(suffix) {
+            path = prefix.to_owned();
+            break;
+        }
+    }
+    if !path.ends_with('/') {
+        path.push('/');
+    }
+    path.push_str("models");
+    url.set_path(&path);
+    if clear_query {
+        url.set_query(None);
+    }
+    url
 }
 
 /// 发往 AI 接口的 HTTP 客户端的公共设置，`url` 必须已经通过 [`validate`]。不跟随重定向，免得 Token 被转发到别的主机；https 地址只走 https；http 地址（只会是本机或局域网）直连、不经过系统或环境变量里配置的代理，否则代理会收到明文的 Token，而代理本身可能在公网上。
@@ -162,6 +183,56 @@ mod tests {
                 "{}",
                 case.endpoint
             );
+        }
+    }
+
+    #[test]
+    fn hint_matches_the_settings_page_copy() {
+        assert_eq!(hint("https://api.example.test/v1/chat/completions"), "");
+        assert!(hint("http://api.example.test/v1").starts_with("http:// 只能用于本机或局域网地址"));
+        assert!(hint("").starts_with("请填写完整的接口地址"));
+        assert!(hint("https://example.test/v1#x").starts_with("请填写完整的接口地址"));
+    }
+
+    #[test]
+    fn models_url_replaces_known_suffixes_and_keeps_the_prefix() {
+        let parse = |value: &str| Url::parse(value).unwrap();
+        let endpoint = parse("https://fixture.invalid/v1/chat/completions?tenant=synthetic");
+        assert_eq!(
+            models_url(endpoint.clone(), true).as_str(),
+            "https://fixture.invalid/v1/models"
+        );
+        assert_eq!(
+            models_url(endpoint, false).as_str(),
+            "https://fixture.invalid/v1/models?tenant=synthetic"
+        );
+        for (endpoint, models) in [
+            (
+                "https://api.example.test/openai/v1/chat/completions?tenant=fixture",
+                "https://api.example.test/openai/v1/models",
+            ),
+            (
+                "https://api.example.test/chat/completions",
+                "https://api.example.test/models",
+            ),
+            (
+                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                "https://generativelanguage.googleapis.com/v1beta/openai/models",
+            ),
+            (
+                "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+                "https://open.bigmodel.cn/api/paas/v4/models",
+            ),
+            (
+                "https://host.example.test/v1/chat/completions/",
+                "https://host.example.test/v1/models",
+            ),
+            (
+                "https://host.example.test/v1/audio/transcriptions",
+                "https://host.example.test/v1/models",
+            ),
+        ] {
+            assert_eq!(models_url(parse(endpoint), true).as_str(), models);
         }
     }
 

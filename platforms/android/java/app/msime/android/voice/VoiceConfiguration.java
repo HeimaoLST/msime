@@ -17,6 +17,8 @@ import org.json.JSONObject;
  */
 public final class VoiceConfiguration {
     private final String providerName;
+    /** 共享层给出的请求格式（`multipart`、`chat_audio` 等）；上传按它拼请求体。 */
+    private final String requestFormat;
     private final String endpoint;
     private final String model;
     private final String token;
@@ -27,13 +29,21 @@ public final class VoiceConfiguration {
     private VoiceConfiguration(String providerName, String endpoint, String model, String token,
                                VoiceRecognitionActivity.Streaming streaming,
                                VoiceRecognitionActivity.Polish polish) {
-        this(providerName, endpoint, model, token, streaming, polish, null);
+        this(providerName, null, endpoint, model, token, streaming, polish, null);
     }
 
     private VoiceConfiguration(String providerName, String endpoint, String model, String token,
                                VoiceRecognitionActivity.Streaming streaming,
                                VoiceRecognitionActivity.Polish polish, String localModel) {
+        this(providerName, null, endpoint, model, token, streaming, polish, localModel);
+    }
+
+    private VoiceConfiguration(String providerName, String requestFormat, String endpoint,
+                               String model, String token,
+                               VoiceRecognitionActivity.Streaming streaming,
+                               VoiceRecognitionActivity.Polish polish, String localModel) {
         this.providerName = providerName;
+        this.requestFormat = requestFormat;
         this.endpoint = endpoint;
         this.model = model;
         this.token = token;
@@ -54,6 +64,11 @@ public final class VoiceConfiguration {
 
     public String providerName() {
         return providerName;
+    }
+
+    /** 上传的请求格式；不是整句上传时为 null。 */
+    public String requestFormat() {
+        return requestFormat;
     }
 
     public String endpoint() {
@@ -108,12 +123,13 @@ public final class VoiceConfiguration {
             JSONObject polishValue = value.optJSONObject("polish");
             VoiceRecognitionActivity.Polish polish = polish(polishValue, requestId);
             if (provider == null) return new VoiceConfiguration(null, null, null, null, null, polish);
-            String name = text(provider.opt("provider"));
-            String endpoint = text(provider.opt("endpoint"));
-            String model = text(provider.opt("model"));
-            String token = text(provider.opt("token"));
+            String name = JsonPolicy.strictStringOrEmpty(provider.opt("provider"));
+            String requestFormat = JsonPolicy.strictStringOrEmpty(provider.opt("requestFormat"));
+            String endpoint = JsonPolicy.strictStringOrEmpty(provider.opt("endpoint"));
+            String model = JsonPolicy.strictStringOrEmpty(provider.opt("model"));
+            String token = JsonPolicy.strictStringOrEmpty(provider.opt("token"));
             String[] headers = headers(provider.optJSONArray("headers"));
-            String modelPath = text(provider.opt("modelPath"));
+            String modelPath = JsonPolicy.strictStringOrEmpty(provider.opt("modelPath"));
             if ("local".equals(name)) {
                 return fromProvider(name, modelPath, polish);
             }
@@ -126,11 +142,12 @@ public final class VoiceConfiguration {
                         JsonPolicy.strictTrue(provider.opt("enableItn")),
                         JsonPolicy.strictTrue(provider.opt("enablePunctuation")),
                         JsonPolicy.strictTrue(provider.opt("enableDdc")),
-                        text(provider.opt("boostingTableId"))),
+                        JsonPolicy.strictStringOrEmpty(provider.opt("boostingTableId"))),
                     polish);
             }
-            if (HttpAsrPolicy.usable(name, endpoint, model, token)) {
-                return new VoiceConfiguration(name, endpoint, model, token, null, polish);
+            if (HttpAsrPolicy.usable(requestFormat, endpoint, model, token)) {
+                return new VoiceConfiguration(name, requestFormat, endpoint, model, token, null,
+                    polish, null);
             }
             return new VoiceConfiguration(null, null, null, null, null, polish);
         } catch (JSONException error) {
@@ -145,29 +162,16 @@ public final class VoiceConfiguration {
         return new VoiceConfiguration(name, null, null, null, null, polish, modelPath);
     }
 
-    /** Shared voice configuration flags must remain JSON booleans; reject coercible strings. */
-    static Boolean strictBoolean(Object value) {
-        return JsonPolicy.strictBoolean(value);
-    }
-
-    /** Shared voice response text fields must remain JSON strings; malformed values become empty. */
-    static String strictString(Object value) {
-        return JsonPolicy.strictString(value);
-    }
-
-    private static String text(Object value) {
-        String parsed = strictString(value);
-        return parsed == null ? "" : parsed;
-    }
-
     private static VoiceRecognitionActivity.Polish polish(JSONObject value, String requestId) {
         if (value == null) return null;
-        String prompt = NativeClient.polishPrompt(text(value.opt("promptId")),
-            text(value.opt("promptCustom1")), text(value.opt("promptCustom2")),
-            text(value.opt("promptCustom3")));
-        String endpoint = text(value.opt("endpoint"));
-        String model = text(value.opt("model"));
-        String token = text(value.opt("token"));
+        String prompt = NativeClient.polishPrompt(
+            JsonPolicy.strictStringOrEmpty(value.opt("promptId")),
+            JsonPolicy.strictStringOrEmpty(value.opt("promptCustom1")),
+            JsonPolicy.strictStringOrEmpty(value.opt("promptCustom2")),
+            JsonPolicy.strictStringOrEmpty(value.opt("promptCustom3")));
+        String endpoint = JsonPolicy.strictStringOrEmpty(value.opt("endpoint"));
+        String model = JsonPolicy.strictStringOrEmpty(value.opt("model"));
+        String token = JsonPolicy.strictStringOrEmpty(value.opt("token"));
         if (!VoicePolishPolicy.usable(endpoint, model, token, prompt)) return null;
         return new VoiceRecognitionActivity.Polish(endpoint, model, token, prompt);
     }
@@ -179,8 +183,8 @@ public final class VoiceConfiguration {
         for (int index = 0; index < value.length(); index++) {
             JSONObject header = value.optJSONObject(index);
             if (header == null) return new String[0];
-            flat[index * 2] = text(header.opt("name"));
-            flat[index * 2 + 1] = text(header.opt("value"));
+            flat[index * 2] = JsonPolicy.strictStringOrEmpty(header.opt("name"));
+            flat[index * 2 + 1] = JsonPolicy.strictStringOrEmpty(header.opt("value"));
         }
         return flat;
     }

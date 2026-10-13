@@ -8,9 +8,14 @@
  * what stops the next page from being able to do that.
  */
 
-export const page = "flex flex-col gap-3.5";
+import { fieldLabel } from "../core/form-style";
+import { standardPage } from "../core/page-style";
+import { minWidthZero, subtleMeta } from "../core/row-style";
+import { searchRow as sharedSearchRow } from "../core/search-style";
 
-export const searchRow = "flex gap-2";
+export const page = standardPage;
+
+export const searchRow = sharedSearchRow;
 export const searchInput =
   "min-w-0 flex-1 rounded-[9px] border border-control-border bg-[var(--dropdown-bg)] px-3 py-[9px] font-[inherit] text-body focus:border-accent";
 export const searchSubmit =
@@ -27,7 +32,7 @@ export const searchSubmit =
 export const heading =
   "flex items-start justify-between gap-4 px-0.5 py-1 max-tight:flex-col max-tight:items-stretch max-tight:gap-2";
 /** The heading's left column has to be allowed to shrink or the actions get pushed off the edge. */
-export const headingBody = "min-w-0";
+export const headingBody = minWidthZero;
 export const headingTitle = "m-0 text-xl [color:var(--p-text)]";
 export const headingNote = "mt-[5px] mb-0 [font-size:var(--p-sub-fs)] [color:var(--p-sub)]";
 /** Stacked on a roomy window, laid out in a row once the heading has to share a phone's width. */
@@ -80,7 +85,7 @@ export const detailStage = "overflow-hidden rounded-xl bg-[var(--skin-preview-st
 export const detailTitle = "flex items-start justify-between gap-3";
 export const detailBadge =
   "shrink-0 grow-0 basis-auto rounded-full bg-accent-soft px-2 py-1 text-[11px] text-accent";
-export const description = "m-0 leading-[1.7] whitespace-pre-wrap break-anywhere text-secondary";
+export const description = "m-0 leading-[1.7] whitespace-pre-wrap wrap-anywhere text-secondary";
 export const metrics = "m-0 text-xs leading-relaxed text-muted";
 /** A block that is separated from the one above it by a rule rather than by space alone. */
 export const divided = "border-t border-[var(--divider-color)] pt-3.5";
@@ -100,13 +105,13 @@ export const dialogHeading = "flex items-center justify-between gap-3";
 export const dialogTitle = "m-0 text-lg text-body";
 export const dialogClose =
   "size-8 rounded-lg border-0 bg-transparent text-2xl leading-none text-muted not-disabled:hover:bg-[var(--button-secondary-bg)] not-disabled:hover:text-body";
-export const field = "flex flex-col gap-[7px] text-xs text-secondary";
+export const field = fieldLabel;
 export const fieldControl =
   "box-border w-full rounded-lg border border-control-border bg-[var(--dropdown-bg)] px-2.5 py-2 font-[inherit] text-body";
 export const textArea = `${fieldControl} resize-y leading-normal`;
 export const agreement = "flex flex-row items-start gap-2 text-xs leading-normal text-secondary";
 export const agreementBox = "mt-0.5 size-4 shrink-0 grow-0 accent-[var(--accent-color)]";
-export const warning = "m-0 text-xs leading-relaxed text-muted";
+export const warning = metrics;
 export const dialogActions =
   "flex justify-end gap-2 border-t border-[var(--divider-color)] pt-1 [&>button]:m-0";
 
@@ -129,7 +134,7 @@ export const entryForm =
 export const entryList =
   "flex max-h-[200px] flex-col gap-1.5 overflow-y-auto [&>div]:flex [&>div]:items-center [&>div]:justify-between [&>div]:gap-2 [&>div]:rounded-lg [&>div]:bg-subtle [&>div]:px-2.5 [&>div]:py-1.5 [&>div]:text-xs [&>div>button]:m-0";
 export const promptPreview =
-  "m-0 max-h-[220px] overflow-auto rounded-[10px] bg-subtle p-3 text-xs leading-relaxed whitespace-pre-wrap break-anywhere text-secondary";
+  "m-0 max-h-[220px] overflow-auto rounded-[10px] bg-subtle p-3 text-xs leading-relaxed whitespace-pre-wrap wrap-anywhere text-secondary";
 export const entryPreview =
   "max-h-[220px] overflow-y-auto rounded-[10px] bg-subtle p-2.5 text-xs [&>div]:flex [&>div]:justify-between [&>div]:gap-2 [&>div]:py-1";
 
@@ -201,7 +206,7 @@ export const harmonyRowTile =
 export const harmonyRowText =
   "m-0 flex min-w-0 flex-1 cursor-pointer flex-col gap-0.5 border-0 bg-transparent p-0 text-left font-[inherit] [color:inherit]";
 export const harmonyRowName = "truncate text-[15px] font-semibold [color:var(--p-text)]";
-export const harmonyRowMeta = "text-[12px] [color:var(--p-sub)]";
+export const harmonyRowMeta = subtleMeta;
 export const harmonyRowDescription = "truncate text-[12px] [color:var(--p-sub)]";
 /** 行的「添加 / 已添加」胶囊；颜色来自 `harmonyPillTonal` 或 `harmonyPillDone`。 */
 export const harmonyRowPill =

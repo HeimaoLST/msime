@@ -52,10 +52,10 @@ class IOSProjectConfigTests(unittest.TestCase):
         self.assertIn('request.setValue("multipart/form-data; boundary=', swift)
         self.assertIn("willPerformHTTPRedirection", swift)
         self.assertIn("private static let maximumResponseBytes = 1024 * 1024", swift)
-        self.assertIn(
-            '["openai", "siliconflow", "groq", "everyapi", "mistral"].contains(args.provider)', swift
-        )
-        self.assertIn('args.provider == "doubao"', swift)
+        # 插件按共享层给出的请求格式挑请求构造，不再按 provider 名字判断（#6017）。
+        self.assertIn('["multipart", "chat_audio"].contains(args.requestFormat)', swift)
+        self.assertIn('args.requestFormat == "doubao_websocket", args.provider == "doubao"', swift)
+        self.assertIn('"input_audio": ["data": "data:audio/wav;base64,"', swift)
         self.assertIn('components.scheme?.lowercased() == "wss"', swift)
         self.assertIn('@_silgen_name("msime_client_doubao_start_frame")', doubao)
         self.assertIn('@_silgen_name("msime_client_doubao_audio_frame")', doubao)
@@ -365,6 +365,8 @@ class IOSProjectConfigTests(unittest.TestCase):
         rust_entry = (TAURI_ROOT / "src/lib.rs").read_text()
         account = (TAURI_ROOT / "src/platform/ios/ios_account.rs").read_text()
         clipboard = (TAURI_ROOT / "src/platform/cloud_clipboard.rs").read_text()
+        # The dispatch moved into host-api so the native Windows settings window shares it through the C ABI; the Tauri module only forwards the session and action to it.
+        dispatch = (TAURI_ROOT / "../../../crates/host-api/src/cloud_clipboard.rs").read_text()
         desktop_entry = (TAURI_ROOT.parent / "src/main.tsx").read_text()
 
         self.assertIn(
@@ -373,10 +375,14 @@ class IOSProjectConfigTests(unittest.TestCase):
         )
         self.assertIn("pub(crate) fn session(&self) -> &Arc<Session>", account)
         self.assertIn("pub(crate) async fn cloud_clipboard_request<", clipboard)
-        self.assertIn("session.clipboard(&search)", clipboard)
-        self.assertIn(".set_clipboard_enabled(enabled)", clipboard)
-        self.assertIn("session.add_clipboard(&text)", clipboard)
-        self.assertIn(".delete_clipboard(Some(&id))", clipboard)
+        self.assertIn("msime_host_api::cloud_clipboard::account_request(&session, &action)", clipboard)
+        self.assertIn("pub fn account_request<", dispatch)
+        self.assertIn("session.clipboard(search)", dispatch)
+        self.assertIn(".set_clipboard_enabled(enabled)", dispatch)
+        self.assertIn("session.add_clipboard(text)", dispatch)
+        self.assertIn(".delete_clipboard(Some(id))", dispatch)
+        # 端到端加密的设备管理也走同一个分派。
+        self.assertIn("session.approve_clipboard_device(", dispatch)
         self.assertIn('run_mobile_plugin("copyText", CopyTextRequest { text })', plugin_rust)
         self.assertIn("@objc public func copyText", swift)
         self.assertIn("UIPasteboard.general.string = args.text", swift)
@@ -393,6 +399,7 @@ class IOSProjectConfigTests(unittest.TestCase):
         rust_entry = (TAURI_ROOT / "src/lib.rs").read_text()
         account = (TAURI_ROOT / "src/platform/ios/ios_account.rs").read_text()
         shared_account = (TAURI_ROOT / "src/platform/mobile/mobile_account_helpers.rs").read_text()
+        shared_dispatch = (TAURI_ROOT / "src/platform/cloud_dictionary.rs").read_text()
         desktop_entry = (TAURI_ROOT.parent / "src/main.tsx").read_text()
         bridge = (TAURI_ROOT / "../../../platforms/ios/App/Sources/dictionary/TauriDictionarySnapshotBridge.swift").read_text()
 
@@ -408,7 +415,8 @@ class IOSProjectConfigTests(unittest.TestCase):
             ".import_dictionary(",
             ".export_dictionary(",
         ]:
-            self.assertIn(method, shared_account)
+            self.assertIn(method, shared_dispatch)
+        self.assertIn("crate::platform::cloud_dictionary::account_request(state.session(), request)", shared_account)
         self.assertIn(
             'openCloudDictionary: async () => navigateMobilePanel("cloud-dictionary")',
             desktop_entry,
@@ -446,6 +454,7 @@ class IOSProjectConfigTests(unittest.TestCase):
         rust_entry = (TAURI_ROOT / "src/lib.rs").read_text()
         account = (TAURI_ROOT / "src/platform/ios/ios_account.rs").read_text()
         community = (TAURI_ROOT / "src/platform/mobile/mobile_community.rs").read_text()
+        resources = (TAURI_ROOT / "src/platform/community_resources.rs").read_text()
         desktop_entry = (TAURI_ROOT.parent / "src/main.tsx").read_text()
         mobile_services = (TAURI_ROOT.parent / "src/core/mobile-host-services.ts").read_text()
 
@@ -454,22 +463,30 @@ class IOSProjectConfigTests(unittest.TestCase):
             "mobile_community::community_skin_list",
             "mobile_community::community_skin_download",
             "mobile_community::ai_skin_generate",
-            "mobile_community::community_resource_list",
-            "mobile_community::community_resource_apply",
+            "community_resources::community_resource_list",
+            "community_resources::community_resource_apply",
+            "mobile_community::community_resource_store_reply",
         ]:
             self.assertIn(symbol, rust_entry)
         self.assertIn("MobileCommunityState::new(client, &session)", account)
         self.assertIn("app.manage(community);", account)
+        self.assertIn("CommunityResourceState::new(&session)", account)
+        self.assertIn("app.manage(resources);", account)
         for symbol in [
             "BackendCommunitySkinService",
-            "BackendCommunityResourceService",
             "BackendAiSkinService",
             "pub async fn community_skin_list",
             "pub async fn ai_skin_generate",
-            "pub async fn community_resource_list",
+            "pub async fn community_resource_store_reply",
             "CommunityResourceLibraryStore",
         ]:
             self.assertIn(symbol, community)
+        for symbol in [
+            "BackendCommunityResourceService",
+            "pub async fn community_resource_list",
+            "pub async fn community_resource_apply",
+        ]:
+            self.assertIn(symbol, resources)
         self.assertIn("createMobileHostServices", desktop_entry)
         self.assertIn("communitySkins:", mobile_services)
         self.assertIn("communityResources:", mobile_services)

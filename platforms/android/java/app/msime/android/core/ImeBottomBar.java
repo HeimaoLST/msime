@@ -1,5 +1,8 @@
 package app.msime.android;
 
+import app.msime.android.LayoutPolicy;
+
+
 import android.app.Dialog;
 import android.content.res.Configuration;
 import android.graphics.Color;
@@ -44,7 +47,7 @@ final class ImeBottomBar {
 
     /** 建好底栏并叠到外框底部；每次 onCreateInputView 新建控件后调用一次。 */
     void build(MSIMEInputService.PanelSurface surface) {
-        bar = KeyboardGeometry.row(s);
+        bar = LayoutPolicy.row(s);
         ViewPolicy.setCenteredVertically(bar);
         bar.setContentDescription("键盘底栏");
         // 系统的输入法选择框，与 Android 自己画在导航栏里的切换按钮一致；只装了一个别的输入法时也能用，组字不结束，理由见 bindInputMethodPicker。
@@ -58,10 +61,10 @@ final class ImeBottomBar {
         bar.addView(switchButton, buttonParams());
         track = new TextView(s);
         ViewPolicy.setCentered(track);
-        KeyboardGeometry.setKeyTextSize(track, 12);
+        KeyboardTypographyPolicy.setKeyTextSize(track, 12);
         track.setContentDescription("左右滑动移动光标");
         bindCursorTrack(track);
-        bar.addView(track, KeyboardGeometry.weightedMatchParentParams(1));
+        bar.addView(track, LayoutPolicy.weightedMatchParentParams(1));
         clipboardButton = new KeyboardShortcutButton(s, KeyboardShortcutIconPolicy.Icon.CLIPBOARD);
         ViewPolicy.setAllCapsFalse(clipboardButton);
         clipboardButton.setText("剪贴板");
@@ -80,7 +83,7 @@ final class ImeBottomBar {
     }
 
     private LinearLayout.LayoutParams buttonParams() {
-        LinearLayout.LayoutParams params = KeyboardGeometry.linearParamsPx(s.pixels(56),
+        LinearLayout.LayoutParams params = LayoutPolicy.linearParamsPx(s.pixels(56),
             LinearLayout.LayoutParams.MATCH_PARENT);
         params.setMarginStart(s.pixels(8));
         params.setMarginEnd(s.pixels(8));
@@ -153,8 +156,8 @@ final class ImeBottomBar {
         Window window = dialog == null ? null : dialog.getWindow();
         if (window != null) {
             WindowInsets screen = window.getWindowManager().getCurrentWindowMetrics().getWindowInsets();
-            navigation = Math.max(navigation, screen.getInsets(WindowInsets.Type.navigationBars()).bottom);
-            gesture = Math.max(gesture, screen.getInsets(WindowInsets.Type.mandatorySystemGestures()).bottom);
+            navigation = BoundsPolicy.atLeast(navigation, screen.getInsets(WindowInsets.Type.navigationBars()).bottom);
+            gesture = BoundsPolicy.atLeast(gesture, screen.getInsets(WindowInsets.Type.mandatorySystemGestures()).bottom);
             // 只有视图的 inset 时同样分不出三键导航，窗口还没建好就先不画。
             navigationKnown = true;
         }
@@ -170,12 +173,21 @@ final class ImeBottomBar {
     /** 底栏此刻画不画（{@link KeyboardBottomBarPolicy#shown}）。 */
     boolean shown() {
         if (bar == null) return false;
-        Configuration configuration = s.getResources().getConfiguration();
-        boolean phoneLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-            && !KeyboardFormFactorPolicy.expanded(configuration.smallestScreenWidthDp);
         return KeyboardBottomBarPolicy.shown(s.localSettings.bool(AndroidLocalSettings.BOTTOM_BAR),
-            systemDrawsImeButtons(), navigationKnown, s.floatingDrawn(), s.hardwareKeysCollapsed(), phoneLandscape,
-            KeyboardGeometry.fromPixels(s, navigationBottom));
+            systemDrawsImeButtons(), navigationKnown, s.floatingDrawn(), s.hardwareKeysCollapsed(), phoneLandscape(),
+            DimensionPolicy.fromPixels(s, navigationBottom));
+    }
+
+    /** 「底部留白」此刻垫不垫（{@link KeyboardBottomBarPolicy#paddingShown}）；`barShown` 是这一次 {@link #shown} 的结果。 */
+    private boolean paddingShown(boolean barShown) {
+        return KeyboardBottomBarPolicy.paddingShown(s.localSettings.bool(AndroidLocalSettings.BOTTOM_PADDING),
+            barShown, s.floatingDrawn(), s.hardwareKeysCollapsed(), phoneLandscape());
+    }
+
+    private boolean phoneLandscape() {
+        Configuration configuration = s.getResources().getConfiguration();
+        return configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+            && !KeyboardFormFactorPolicy.expanded(configuration.smallestScreenWidthDp);
     }
 
     /**
@@ -187,22 +199,22 @@ final class ImeBottomBar {
         if (window == null || !(window.peekDecorView() instanceof ViewGroup decor)) return false;
         for (int index = 0; index < decor.getChildCount(); index++) {
             View child = decor.getChildAt(index);
-            if (child.getVisibility() == View.VISIBLE
+            if (ViewPolicy.isVisible(child)
                     && "NavigationBarFrame".equals(child.getClass().getSimpleName())) return true;
         }
         return false;
     }
 
     /**
-     * 按当前状态给键盘列套底部内边距并摆放底栏：浮动时四边都不留；停靠时留出系统栏，底栏画着时底部再加上底栏和它下面让出的手势区。insets 变化和每次 render 都调用，状态没变时不触发重新布局。
+     * 按当前状态给键盘列套底部内边距并摆放底栏：浮动（以及候选栏跟随光标）时四边都不留；停靠时留出系统栏，底栏画着时底部再加上底栏和它下面让出的手势区，底栏不画而「底部留白」开着时再加一段同高的空白。insets 变化和每次 render 都调用，状态没变时不触发重新布局。
      *
      * @param keyboard 键盘的竖向一列
      */
     void apply(LinearLayout keyboard) {
         if (keyboard == null) return;
-        if (s.floatingDrawn()) {
+        if (s.overlayDrawn()) {
             if (bar != null) ViewPolicy.hide(bar);
-            setPadding(keyboard, 0, 0, 0, 0);
+            ViewPolicy.setPaddingIfChanged(keyboard, 0, 0, 0, 0);
             return;
         }
         boolean shown = shown();
@@ -214,15 +226,12 @@ final class ImeBottomBar {
                 bar.setLayoutParams(params);
             }
             bottom = margin + s.pixels(KeyboardBottomBarPolicy.BAR_HEIGHT_DP);
+        } else if (paddingShown(false)) {
+            // 底部留白：键盘列的底部内边距里多出一段空白，覆盖面板同样按这段内边距让出底边。
+            bottom += s.pixels(KeyboardBottomBarPolicy.BAR_HEIGHT_DP);
         }
-        if (bar != null && (bar.getVisibility() == View.VISIBLE) != shown) ViewPolicy.setVisible(bar, shown);
-        setPadding(keyboard, insets.left, insets.top, insets.right, bottom);
-    }
-
-    private static void setPadding(View view, int left, int top, int right, int bottom) {
-        if (view.getPaddingLeft() == left && view.getPaddingTop() == top
-                && view.getPaddingRight() == right && view.getPaddingBottom() == bottom) return;
-        ViewPolicy.setPadding(view, left, top, right, bottom);
+        if (bar != null) ViewPolicy.setVisibleIfChanged(bar, shown);
+        ViewPolicy.setPaddingIfChanged(keyboard, insets.left, insets.top, insets.right, bottom);
     }
 
     /** 每次 render 末尾按皮肤给两个按钮上色；剪贴板面板开着时剪贴板按钮画成选中。 */
@@ -233,7 +242,7 @@ final class ImeBottomBar {
             button.setIconColors(iconColor, activeIconColor);
         }
         ViewPolicy.setSelected(clipboardButton,
-            s.clipboardScroll != null && s.clipboardScroll.getVisibility() == View.VISIBLE);
+            ViewPolicy.isVisible(s.clipboardScroll));
         ViewPolicy.setTextColor(track, Color.argb(160, Color.red(iconColor), Color.green(iconColor),
             Color.blue(iconColor)));
     }

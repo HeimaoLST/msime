@@ -5,26 +5,7 @@
 use crate::*;
 use msime_client_core::is_bounded_text;
 
-#[cfg(test)]
-mod tests {
-    use super::online_candidate_response;
-    use serde_json::json;
-
-    #[test]
-    fn online_candidate_response_carries_only_the_batch() {
-        let value =
-            online_candidate_response(vec![("first".to_owned(), 0), ("second".to_owned(), 1)]);
-
-        assert_eq!(
-            value,
-            json!({"candidates": [
-                {"text": "first", "source": 0},
-                {"text": "second", "source": 1},
-            ]})
-        );
-    }
-}
-
+#[cfg(any(unix, test))]
 fn online_candidate_response(candidates: Vec<(String, u8)>) -> Value {
     let mut rows = Vec::with_capacity(candidates.len());
     for (text, source) in candidates {
@@ -88,8 +69,14 @@ pub unsafe extern "C" fn msime_client_ai_request_for_query(
             // limit disagrees with its config, and the query document's copy
             // can lag the pending preferences this call is meant to follow.
             let mut config = preferences.ai_assistant.clone();
-            if let Some(token) = &session.ai_credential {
-                config.tokens.insert(config.provider.clone(), token.clone());
+            if let Some(credential) = &session.ai_credential {
+                if credential.endpoint == config.endpoint {
+                    if let Some(origin) =
+                        msime_client_core::ai::endpoint::credential_origin(&config.endpoint)
+                    {
+                        config.tokens.insert(origin, credential.token.clone());
+                    }
+                }
             }
             let request = AiSuggestionRequest {
                 segmented_pinyin: query.pinyin_segments,
@@ -103,9 +90,9 @@ pub unsafe extern "C" fn msime_client_ai_request_for_query(
     })
 }
 
-/// Hand the session an AI provider credential kept outside the preferences. It is used for the active provider in place of any token the preferences carry, lives only as long as the session, and is never persisted or reported back. An empty token clears it.
+/// 把偏好之外的 AI 凭据交给会话，只覆盖当前端点，不持久化也不回传。凭据变化时清理旧 AI 候选并拒绝旧查询；空凭据表示撤销。
 /// # Safety
-/// `token` references `token_length` readable UTF-8 bytes; null is accepted only with a zero length. No buffers are retained.
+/// `token` 指向 `token_length` 个可读的 UTF-8 字节；仅长度为零时允许空指针，调用后不保留缓冲区。
 #[no_mangle]
 pub unsafe extern "C" fn msime_client_set_ai_credential(
     handle: u64,
@@ -128,7 +115,31 @@ pub unsafe extern "C" fn msime_client_set_ai_credential(
             Some(text.to_owned())
         };
         with_session(handle, |session| {
-            session.ai_credential = token;
+            let next_credential = token.map(|token| {
+                let preferences = session
+                    .requested
+                    .as_ref()
+                    .map(|snapshot| &snapshot.preferences)
+                    .unwrap_or(&session.applied);
+                SessionAiCredential {
+                    endpoint: preferences.ai_assistant.endpoint.clone(),
+                    token,
+                }
+            });
+            let pending = session.lifecycle_begin(lifecycle::Call::SideChannel);
+            if next_credential != session.ai_credential && !session.runtime.is_idle() {
+                // 凭据改变时，旧 AI 行与旧在线查询一起失效；同一凭据的重复同步不碰当前组字。
+                let cleared = session
+                    .runtime
+                    .clear_online_candidates(1)
+                    .map_err(|e| e.to_string());
+                session.lifecycle_on_error(pending, cleared)?;
+            }
+            session.ai_credential = next_credential;
+            // 只有会话密钥的宿主（iOS）到这时才知道 AI 请求发不发得出去。AI 座位可能在组字中途出现或消失，按旁路调用推导。
+            let refreshed = session.refresh_ai_seat();
+            session.lifecycle_on_error(pending, refreshed)?;
+            session.lifecycle_settle(pending);
             Ok(Value::Bool(true))
         })
     })
@@ -232,6 +243,15 @@ pub extern "C" fn msime_client_translation_query(handle: u64) -> *mut c_char {
                         msime_client_core::preferences::TranslationTargetLanguage::En
                     )
                 });
+            // 整句候选的逐词拆解（随包的英文词释义表）：和 macOS currentGlossRequest 一样，候选翻译或离线英文释义打开、目标语言里有英文就请求，不要求离线英文释义开着。
+            let gloss_breakdown = (preferences.candidate_translations
+                || preferences.candidate_english_gloss)
+                && target_languages.iter().any(|language| {
+                    matches!(
+                        language,
+                        msime_client_core::preferences::TranslationTargetLanguage::En
+                    )
+                });
             let persist_english_translation = preferences.candidate_translations
                 && matches!(
                     preferences.translation_target_language,
@@ -313,12 +333,14 @@ pub extern "C" fn msime_client_translation_query(handle: u64) -> *mut c_char {
             // machine.
             //
             // Emoji and kaomoji sources never qualify, whatever their text: many kaomoji carry Han characters ("(*Φ皿Φ*)") and would otherwise queue behind real words on the serial on-device model and spend account quota, as Windows' BuildTranslationQuery already refuses.
+            //
+            // 日文混输行（来源 13）同样不请求：私、開始 这样的汉字是日文，当中文请求释义会在日文下面写出中文意思，还花掉额度。
             let mut candidates = Vec::with_capacity(candidates_view.candidates.len());
             candidates.extend(candidates_view.candidates.iter().map(|candidate| {
                 json!({
                     "text": candidate.text,
                     "online_gloss":
-                        !msime_client_core::translation::is_emoji_or_kaomoji_source(
+                        !msime_client_core::translation::source_gets_no_gloss(
                             candidate.source,
                         ) && msime_client_core::translation::is_cloud_translatable_chinese(
                             &candidate.text,
@@ -342,10 +364,12 @@ pub extern "C" fn msime_client_translation_query(handle: u64) -> *mut c_char {
                 "tencent_tmt": services.tencent_tmt,
                 "niutrans": services.niutrans,
                 "english_gloss": english_gloss,
-                // The packaged resource path is only needed for offline
-                // lookup. The user path is also needed by a background host
-                // worker to persist successful English-target translations.
-                "resources": (english_gloss || !offline_gloss_languages.is_empty())
+                // 资源目录在要查离线释义（英文或其他语言）时带上，打开读音或要拆解整句候选时也带上：读音表 pronunciations/en-phonetic.db 和拆解用的词释义表都装在资源目录旁边，在线翻译出来的英文释义也要靠读音表标音标。
+                // 用户目录在要查英文释义时带上，要把成功的英文翻译存下来时也带上：宿主的后台工作线程把它们写进用户目录。
+                "resources": (english_gloss
+                    || gloss_breakdown
+                    || !offline_gloss_languages.is_empty()
+                    || preferences.candidate_pronunciation)
                     .then(|| session.options.resources.clone()),
                 "user_data": (english_gloss || persist_english_translation)
                     .then(|| session.options.user_data.clone()),
@@ -357,6 +381,10 @@ pub extern "C" fn msime_client_translation_query(handle: u64) -> *mut c_char {
             // Likewise present only when on: the host then pronounces the gloss lines it draws, English through msime_client_pronunciation_request.
             if preferences.candidate_pronunciation {
                 query["candidate_pronunciation"] = json!(true);
+            }
+            // 同样只在要拆解时出现：宿主据此对整句候选调 msime_client_gloss_breakdown_request，拆解表装在 resources 旁边。
+            if gloss_breakdown {
+                query["gloss_breakdown"] = json!(true);
             }
             // Only when a dictionary comes from the downloaded pack: the host passes it back to msime_client_candidate_gloss_request, which looks there after the resources.
             if from_pack {
@@ -501,6 +529,28 @@ pub unsafe extern "C" fn msime_client_cloud_clipboard_provider_request(
             .ok_or_else(|| "cloud clipboard provider unavailable".to_owned())
     })
 }
+
+/// 云剪贴板端到端加密的 sans-IO 驱动：开始一个操作或交回上一步请求的响应，得到下一步要发的请求、结果或错误。格式见 `docs/cloud-clipboard-e2e.md` 的「客户端驱动」。不访问会话，也不打开任何连接；请求最大 2 MiB（交回的列表正文最多 50 条、每条约 16 KiB 密文）。
+///
+/// # Safety
+/// `request` must point to a readable UTF-8 JSON buffer of `request_length` bytes. The buffer is
+/// read only for the duration of this call and is never retained.
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_cloud_clipboard_e2e(
+    request: *const u8,
+    request_length: usize,
+) -> *mut c_char {
+    response(|| {
+        if request.is_null() || request_length > CLOUD_CLIPBOARD_E2E_REQUEST_LIMIT {
+            return Err("invalid cloud clipboard e2e buffer".into());
+        }
+        msime_client_core::cloud::clipboard_e2e::drive_json(unsafe {
+            std::slice::from_raw_parts(request, request_length)
+        })
+    })
+}
+
+const CLOUD_CLIPBOARD_E2E_REQUEST_LIMIT: usize = 2 * 1024 * 1024;
 
 /// Query a user-owned Unix-socket translation provider.
 ///
@@ -777,4 +827,24 @@ pub unsafe extern "C" fn msime_client_emoji_catalog_request(
             "items": rendered_items
         }))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::online_candidate_response;
+    use serde_json::json;
+
+    #[test]
+    fn online_candidate_response_carries_only_the_batch() {
+        let value =
+            online_candidate_response(vec![("first".to_owned(), 0), ("second".to_owned(), 1)]);
+
+        assert_eq!(
+            value,
+            json!({"candidates": [
+                {"text": "first", "source": 0},
+                {"text": "second", "source": 1},
+            ]})
+        );
+    }
 }

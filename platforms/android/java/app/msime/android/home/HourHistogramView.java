@@ -1,5 +1,8 @@
 package app.msime.android.home;
 
+import app.msime.android.DimensionPolicy;
+
+import app.msime.android.ThemeColorPolicy;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
@@ -64,22 +67,22 @@ public final class HourHistogramView extends View {
     }
 
     @Override protected void onMeasure(int widthSpec, int heightSpec) {
-        int height = Ui.dp(getContext(), BAR_MAX + LABEL_GAP + LABEL_SIZE + 4);
+        int height = DimensionPolicy.pixels(getContext(), BAR_MAX + LABEL_GAP + LABEL_SIZE + 4);
         setMeasuredDimension(MeasureSpec.getSize(widthSpec), resolveSize(height, heightSpec));
     }
 
     @Override protected void onDraw(Canvas canvas) {
         Context context = getContext();
         int count = TypingStatisticsSummary.HOURS_PER_DAY;
-        float gap = Ui.dp(context, BAR_GAP);
+        float gap = DimensionPolicy.pixels(context, BAR_GAP);
         float width = (getWidth() - gap * (count - 1)) / count;
-        float max = Ui.dp(context, BAR_MAX);
-        float min = Ui.dp(context, BAR_MIN);
-        float radius = Ui.dp(context, 2);
+        float max = DimensionPolicy.pixels(context, BAR_MAX);
+        float min = DimensionPolicy.pixels(context, BAR_MIN);
+        float radius = DimensionPolicy.pixels(context, 2);
         long highest = 1;
         for (long value : hours) highest = BoundsPolicy.atLeast(highest, value);
-        int accent = Ui.accent(context);
-        int rest = Ui.color(context, R.attr.msStatBar);
+        int accent = ThemeColorPolicy.accent(context);
+        int rest = ThemeColorPolicy.color(context, R.attr.msStatBar);
         for (int hour = 0; hour < count; hour++) {
             long value = hour < hours.size() ? hours.get(hour) : 0;
             float height = BoundsPolicy.atLeast(min, max * value / (float) highest);
@@ -88,8 +91,8 @@ public final class HourHistogramView extends View {
             bar.setColor(highlighted(hour) ? accent : rest);
             canvas.drawRoundRect(box, radius, radius, bar);
         }
-        label.setColor(Ui.subText(context));
-        float baseline = max + Ui.dp(context, LABEL_GAP) + label.getTextSize();
+        label.setColor(ThemeColorPolicy.subText(context));
+        float baseline = max + DimensionPolicy.pixels(context, LABEL_GAP) + label.getTextSize();
         for (int tick : TICKS) {
             String text = tick == 0 ? "0 时" : String.valueOf(tick);
             float x = tick * (width + gap);

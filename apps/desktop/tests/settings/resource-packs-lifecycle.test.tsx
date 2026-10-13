@@ -39,6 +39,19 @@ function service() {
   return { client, download, listeners };
 }
 
+test("stops a progress subscription that resolves after the page unmounts", async () => {
+  const packs = service();
+  const subscription = deferred<() => void>();
+  const stop = vi.fn();
+  packs.client.onProgress.mockImplementationOnce(() => subscription.promise);
+
+  const view = renderHook(() => useResourcePacks(packs.client));
+  view.unmount();
+  await act(async () => subscription.resolve(stop));
+
+  expect(stop).toHaveBeenCalledOnce();
+});
+
 test("旧 client 的下载结束不能释放新 client 的下载登记", async () => {
   const old = service(),
     next = service();
@@ -72,6 +85,23 @@ test("同一 client 复用后不能采纳上一代迟到的列表", async () => 
   expect(result.current.statuses).toEqual(missing);
   await act(async () => list.resolve([{ ...missing[0], state: "installed" }]));
   expect(result.current.statuses).toEqual(missing);
+});
+
+test("启动时迟到的列表不能覆盖安装完成事件刷新的状态", async () => {
+  const packs = service();
+  const oldList = deferred<ResourcePackStatus[]>();
+  const installed = [{ ...missing[0], state: "installed" as const }];
+  packs.client.list.mockImplementationOnce(() => oldList.promise).mockResolvedValueOnce(installed);
+  const { result } = renderHook(() => useResourcePacks(packs.client));
+  await act(async () => {});
+
+  act(() => packs.listeners[0]({ id: "handwriting", stage: "done", downloaded: 100, total: 100 }));
+  await act(async () => {});
+  expect(packs.client.list).toHaveBeenCalledTimes(2);
+  expect(result.current.statuses).toEqual(installed);
+
+  await act(async () => oldList.resolve(missing));
+  expect(result.current.statuses).toEqual(installed);
 });
 
 test("同一 client 复用后不能采纳上一代迟到的进度和下载失败", async () => {

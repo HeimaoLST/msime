@@ -6,12 +6,10 @@ import UIKit
 /// 手机从分组卡片沿一条导航栈逐层进入。在 iPad 上那个列表会横跨整个屏幕，每进一页都会把它替换掉，所以设计稿把它拆开：左边是 320pt 的侧栏，放搜索框、状态卡和与手机相同的分组，选中的页面放在旁边一列，宽度不超过 720pt。侧栏行不显示取值也不显示箭头，图标使用文字颜色。
 struct TabletSettingsView: View {
   enum Destination: Hashable {
-    case tryout
     case page(SettingsPage)
 
     var identifier: String {
       switch self {
-      case .tryout: return "tabletSettings.tryout"
       case .page(let page): return "tabletSettings.\(page.rawValue)"
       }
     }
@@ -37,7 +35,7 @@ struct TabletSettingsView: View {
         detail(selection ?? .page(.input))
           .frame(maxWidth: 720)
           .frame(maxWidth: .infinity)
-          .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+          .designCanvasBackground()
           // 设计稿给详情页一个靠前对齐的大标题，而不是居中的内联标题栏。
           .toolbarTitleDisplayMode(.large)
       }.id(selection)
@@ -69,7 +67,7 @@ struct TabletSettingsView: View {
           .listRowBackground(Color.clear)
           .listRowSeparator(.hidden)
         if query.isEmpty {
-          KeyboardStatusCard(scheme: scheme, tryout: .action { navigation.tabletSettingsSelection = .tryout })
+          KeyboardStatusCard(scheme: scheme, tryout: navigation.openChat)
             .listRowInsets(EdgeInsets(top: 20, leading: 0, bottom: 0, trailing: 0))
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
@@ -83,7 +81,7 @@ struct TabletSettingsView: View {
     }
     .listStyle(.insetGrouped)
     .scrollContentBackground(.hidden)
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .listSectionSpacing(20)
     .environment(\.defaultMinListRowHeight, 44)
     .scrollDismissesKeyboard(.interactively)
@@ -111,7 +109,6 @@ struct TabletSettingsView: View {
 
   @ViewBuilder private func detail(_ destination: Destination) -> some View {
     switch destination {
-    case .tryout: KeyboardTryoutView(focusOnAppear: true)
     case .page(let page): page.destination
     }
   }

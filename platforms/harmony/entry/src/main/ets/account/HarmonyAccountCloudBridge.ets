@@ -12,6 +12,7 @@ import {
 import { KeyboardSession } from '../keyboard/KeyboardSession';
 import { KeyboardFeedbackBridge } from '../keyboard/KeyboardFeedbackBridge';
 import { HarmonyAiSkins } from './HarmonyAiSkins';
+import { HarmonyGoogleSignIn } from './HarmonyGoogleSignIn';
 import {
   AccountPreferences,
   AccountPreferenceSchema,
@@ -23,13 +24,15 @@ import {
   localAccountPreferences,
   mergeAccountPreferences,
   preferenceSchemaFromDocument,
+  snapshotWithPreferences,
   validLocalPreferenceDocument,
 } from './AccountPreferencePlan';
 import {
-  ACCOUNT_ORIGIN, AnonymousSessionStore, FileSessionStore, HarmonyAccountTransport, responseContentLength,
-  responseContentType
+  ACCOUNT_ORIGIN, AnonymousSessionStore, FileSessionStore, HarmonyAccountTransport,
+  HarmonyCloudClipboardE2e, cancelSnapshotQueueForAccount, responseContentLength, responseContentType
 } from './HarmonyAccountTransport';
 import { installNoRedirectGuard, noRedirectOptions } from '../network/HarmonyHttpSecurity';
+import { AccountAvatarPolicy } from './AccountAvatarPolicy';
 
 interface SnapshotAction {
   operation: string;
@@ -45,6 +48,34 @@ interface AccountOperation {
 
 interface AccountOperationReply {
   ok?: boolean;
+}
+
+/** `status` 回复里当前用户的头像地址，`avatar` 操作只读这一项。 */
+interface AvatarStatusUser {
+  avatar_url?: string | null;
+}
+
+interface AvatarStatusValue {
+  user?: AvatarStatusUser | null;
+}
+
+interface AvatarStatusReply {
+  ok?: boolean;
+  value?: AvatarStatusValue;
+}
+
+/** `avatar` 的回复：头像的 `data:` 地址，没有头像或取不到时为 null，页面随之显示名字的首字。 */
+interface AvatarValue {
+  data_url: string | null;
+}
+
+interface AvatarReply {
+  ok: boolean;
+  value: AvatarValue;
+}
+
+interface AvatarHeaders {
+  Accept: string;
 }
 
 /** One settings-sync request from the page: read the schema or document, upload, or apply. */
@@ -312,6 +343,7 @@ export class HarmonyAccountCloudBridge {
   private restoreAccountId: string = '';
   private restoreMetadata: SnapshotMetadata | undefined = undefined;
   private restoreExpectedRevision: number = -1;
+  private readonly google: HarmonyGoogleSignIn;
 
   constructor(context: common.UIAbilityContext) {
     this.context = context;
@@ -322,9 +354,11 @@ export class HarmonyAccountCloudBridge {
       // The store reports an unavailable session if the sandbox cannot be prepared.
     }
     this.transport = new HarmonyTransport();
-    // 匿名会话就是 EntryAbility 在同一目录下注册的那个；无人登录时反馈回退到它，与 Android 一致。
+    // 匿名会话就是 EntryAbility 在同一目录下注册的那个；无人登录时反馈回退到它，与 Android 一致。云剪贴板的密钥串与会话同目录，键盘用的是同一份。
     this.bridge = new AccountCloudBridge(this.transport, new FileSessionStore(directory),
-      new AnonymousSessionStore(directory));
+      new AnonymousSessionStore(directory), new HarmonyCloudClipboardE2e(directory));
+    // 流程里的 request_code 和 google_login 回到 request()，与页面发来的账号操作走同一条路。
+    this.google = new HarmonyGoogleSignIn(context, (action: string): Promise<string> => this.request(action));
   }
 
   async request(action: string): Promise<string> {
@@ -337,8 +371,18 @@ export class HarmonyAccountCloudBridge {
     } catch {
       // The account bridge reports malformed action documents.
     }
-    if (operation === 'logout' || operation === 'delete_account'
-      || operation === 'login' || operation === 'clear_expired') {
+    if (operation === 'google_sign_in') {
+      return this.google.signIn();
+    }
+    if (operation === 'google_cancel') {
+      this.google.cancel();
+      return '{"ok":true,"value":{}}';
+    }
+    if (operation === 'avatar') {
+      return this.avatar();
+    }
+    if (operation === 'logout' || operation === 'delete_account' || operation === 'login'
+      || operation === 'google_login' || operation === 'clear_expired') {
       this.transport.cancelDownloads();
       this.clearSnapshotPreview();
       this.clearRestorePreview();
@@ -361,6 +405,52 @@ export class HarmonyAccountCloudBridge {
       // The account bridge already owns malformed request and response reporting.
     }
     return result;
+  }
+
+  /**
+   * 当前用户的头像，作为 `data:` 地址交给页面：页面的内容安全策略只放行 `data:` 图片，桌面由 Tauri 的 `account_avatar` 做同一件事。
+   *
+   * 地址取自会话里的用户，只下载 `AccountAvatarPolicy.allowed` 认可的 HTTPS 地址，不跟随重定向，响应大小、状态和文件头都要符合 `AccountAvatarPolicy.accept`。没有头像、地址不认、网络失败或内容不对都回答 null，页面显示名字的首字，不报错。
+   */
+  private async avatar(): Promise<string> {
+    let url: string = '';
+    try {
+      const status: AvatarStatusReply = JSON.parse(await this.bridge.handle('{"operation":"status"}')) as AvatarStatusReply;
+      const value: string | null | undefined = status.value?.user?.avatar_url;
+      url = typeof value === 'string' ? value : '';
+    } catch {
+      url = '';
+    }
+    if (!AccountAvatarPolicy.allowed(url)) return this.avatarReply(null);
+    const request: http.HttpRequest = http.createHttp();
+    installNoRedirectGuard(request);
+    const headers: AvatarHeaders = { Accept: AccountAvatarPolicy.ACCEPT };
+    try {
+      const response: http.HttpResponse = await request.request(url, noRedirectOptions({
+        method: http.RequestMethod.GET,
+        header: headers,
+        expectDataType: http.HttpDataType.ARRAY_BUFFER,
+        usingCache: false,
+        maxLimit: AccountAvatarPolicy.MAX_BYTES,
+        connectTimeout: 15000,
+        readTimeout: 15000
+      }));
+      if (!(response.result instanceof ArrayBuffer)) return this.avatarReply(null);
+      const bytes: Uint8Array = new Uint8Array(response.result);
+      const type: string | null = AccountAvatarPolicy.accept(response.responseCode, bytes);
+      if (type === null) return this.avatarReply(null);
+      const encoded: string = new util.Base64Helper().encodeToStringSync(bytes);
+      return this.avatarReply(`data:${type};base64,${encoded}`);
+    } catch {
+      return this.avatarReply(null);
+    } finally {
+      request.destroy();
+    }
+  }
+
+  private avatarReply(dataUrl: string | null): string {
+    const reply: AvatarReply = { ok: true, value: { data_url: dataUrl } };
+    return JSON.stringify(reply);
   }
 
   /** Download and validate privately before asking the user where the finished export should go. */
@@ -414,17 +504,7 @@ export class HarmonyAccountCloudBridge {
   }
 
   private cancelQueueForAccount(accountId: string): boolean {
-    try {
-      const action: SnapshotQueueCancelAction = {
-        operation: 'cancel', directory: `${this.context.filesDir}/state/dictionary-snapshots`,
-        account_id: accountId
-      };
-      const reply: SnapshotQueueReply =
-        JSON.parse(client.snapshotQueue(JSON.stringify(action))) as SnapshotQueueReply;
-      return strictAccountOk(reply.ok);
-    } catch {
-      return false;
-    }
+    return cancelSnapshotQueueForAccount(`${this.context.filesDir}/state`, accountId);
   }
 
   /**
@@ -616,7 +696,7 @@ export class HarmonyAccountCloudBridge {
       this.feedbackValues(stateRoot));
     const revision: number = local['revision'] as number;
     const saved: string = client.savePreferences(stateRoot, revision,
-      JSON.stringify(applied.preferences));
+      snapshotWithPreferences(local, applied.preferences));
     try {
       const reply: Record<string, Object> = JSON.parse(saved) as Record<string, Object>;
       if (reply['ok'] !== true) return this.failure('account_storage');

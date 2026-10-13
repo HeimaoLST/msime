@@ -29,16 +29,25 @@ extern BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier);
 - (msime::mac::ResolvedSkin)resolvedSkinForDark:(BOOL)dark;
 /// The floating toolbar's palette for one mode: the resolved candidate palette (surface, text, hover, border, selected), with the applied package's toolbar stylesheet over it.
 - (msime::mac::SkinTokens)toolbarSkinForDark:(BOOL)dark;
-@property(nonatomic, readonly) NSImage *decorationImage;
-/// The drawn package's background image, read with the decoration when the theme is resolved; the candidate window draws it only in a mode whose resolved skin has a backgroundPath.
-@property(nonatomic, readonly) NSImage *backgroundImage;
+/// 这种明暗画的那个皮肤包的装饰图，主题解析时读好；这种明暗没有画包或包没有装饰时为 nil。浅色、深色槽位可以是两个包，所以按明暗各取各的。
+- (NSImage *)decorationImageForDark:(BOOL)dark;
+/// 这种明暗画的那个皮肤包的背景图，与装饰图一起读好；候选窗只在这种明暗的解析结果带 backgroundPath 时画它。
+- (NSImage *)backgroundImageForDark:(BOOL)dark;
+/// 主题固定的明暗：浅色、深色两次解析给出同一个固定明暗时才有值（见 msime::mac::FixedThemeMode），候选窗、悬浮工具栏和菜单据此钉住明暗。
+- (std::optional<bool>)fixedThemeMode;
 @property(nonatomic, readonly) NSURL *skinsRoot;
 @property(nonatomic) BOOL vertical;
 @property(nonatomic) BOOL candidateFollowCursor;
 /// Show the short non-activating Chinese/English mode badge near the caret.
 @property(nonatomic) BOOL inputModeHUD;
+/// 在菜单栏放一个状态项常驻显示当前输入模式（共享偏好 `input_mode_status_item`），没有共享值也没有本机值时不显示。
+@property(nonatomic) BOOL inputModeStatusItem;
 /// 候选窗和悬浮工具栏左端是否画水杉 logo（共享偏好 `show_app_logo`）。没有共享值也没有本机值时按新装处理，不画。
 @property(nonatomic) BOOL showsAppLogo;
+/// 候选窗首行是否画「1 / 3」和 ‹ › 翻页按钮（共享偏好 `show_candidate_page_number`）。没有共享值也没有本机值时画，与共享偏好的默认一致。它不改变键盘和滚轮翻页，但滚轮翻页（`navigation.mouse_wheel`）默认关，关掉它后鼠标只能靠滚轮翻页。
+@property(nonatomic) BOOL showsCandidatePageNumber;
+/// 「展开候选」（共享偏好 `expand_candidates`）：横排候选窗按 ↓ 展开成多行候选网格。没有共享值也没有本机值时关闭。
+@property(nonatomic) BOOL expandCandidates;
 @property(nonatomic, copy) NSString *inputScheme;
 /// The Chinese scheme to go back to when leaving japanese or korean: the current scheme while it is Chinese, otherwise the one left for japanese or korean here or the shared `last_chinese_scheme`, 全拼 when neither is known.
 @property(nonatomic, readonly) NSString *lastChineseScheme;
@@ -61,10 +70,11 @@ extern BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier);
 - (NSFont *)candidateFontOfSize:(CGFloat)size englishFirst:(BOOL)englishFirst;
 @property(nonatomic) NSUInteger preeditFontSize;
 @property(nonatomic) BOOL showsCandidatePreedit;
-/// The candidate window's own style: `candidate_scale_percent` (50-200, 100 by default), which multiplies the candidate fonts and every length of the window; `candidate_opacity_percent` (50-100, 100 by default), which fades only the card surface, its border and a package background; and `candidate_corner_radius` (0-32 points), nil to keep the theme's or the package's card radius. A value outside its range is refused and leaves the setting as it was.
+/// The candidate window's own style: `candidate_scale_percent` (50-200, 100 by default), which multiplies the candidate fonts and every length of the window; `candidate_opacity_percent` (50-100, 100 by default), which fades only the card surface, its border and a package background; `candidate_corner_radius` (0-32 points), nil to keep the theme's or the package's card radius; and `candidate_padding` (0-16 points between the card's edge and its candidates), nil to keep the theme's or the package's `pad`. A value outside its range is refused and leaves the setting as it was.
 @property(nonatomic) NSInteger candidateScalePercent;
 @property(nonatomic) NSInteger candidateOpacityPercent;
 @property(nonatomic, copy) NSNumber *candidateCornerRadius;
+@property(nonatomic, copy) NSNumber *candidatePadding;
 - (msime::mac::CandidateWindowStyle)candidateWindowStyle;
 /// -resolvedSkinForDark: with -candidateWindowStyle laid over it, which is what the candidate window draws. The floating toolbar and the colour wells read the skin as resolved.
 - (msime::mac::ResolvedSkin)candidateWindowSkinForDark:(BOOL)dark;
@@ -87,13 +97,17 @@ extern BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier);
 @property(nonatomic, copy) NSString *globalTheme;
 /// `custom_theme.base`: system or a built-in theme id, the palette the custom theme starts from.
 @property(nonatomic, readonly, copy) NSString *customThemeBase;
-/// `custom_theme.candidate_skin`: the external package the custom theme draws, or nil for none.
+/// 浅色槽位 `custom_theme.candidate_skin`：浅色模式画的外部皮肤包，深色槽位空着时深色模式也取它；nil 表示没有。
 @property(nonatomic, readonly, copy) NSString *customCandidateSkin;
-/// Applies an external package: the custom theme, drawing that package, over the base its manifest names.
+/// 深色槽位 `custom_theme.candidate_skin_dark`：深色模式画的外部皮肤包，nil 表示没有。
+@property(nonatomic, readonly, copy) NSString *customCandidateSkinDark;
+/// 应用外部皮肤包：选中自定义主题，按清单 base 的明暗把包放进它的槽位（msime::mac::ApplyCandidateSkin，与设置页的 `applyCandidateSkin` 同一规则），base 写成包的 base。
 - (void)selectExternalSkin:(NSString *)skinId base:(NSString *)base;
-/// 自定义主题不使用外部皮肤: drops the package and keeps the rest of the custom theme.
+/// 取消使用一款外部皮肤：只清放着它的槽位，另一个槽位和自定义主题的其他部分不动。
+- (void)removeCustomCandidateSkin:(NSString *)skinId;
+/// 自定义主题不使用外部皮肤：两个槽位一起清，自定义主题的其他部分不动。
 - (void)clearCustomCandidateSkin;
-/// The custom theme as stored here (base, package and the seven pickers), as the host resolver takes it.
+/// 这里存的自定义主题（底色、两个皮肤槽位和七个取色器），即宿主解析器要的形状。
 - (msime::mac::CustomTheme)customTheme;
 @property(nonatomic) NSUInteger pageSize;
 // Native routing preferences; English passes keys through without preparing Engine.
@@ -106,6 +120,8 @@ extern BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier);
 @property(nonatomic) BOOL inputModeShortcut;
 @property(nonatomic) BOOL shiftTapShortcut;
 @property(nonatomic) BOOL controlTapShortcut;
+/// 单按 Caps Lock 切换中英文（共享偏好 `keybindings.switch_language_caps_lock`），缺省为关。
+@property(nonatomic) BOOL capsLockTapShortcut;
 @property(nonatomic) BOOL controlOptionSpaceShortcut;
 @property(nonatomic) BOOL characterSetShortcut;
 @property(nonatomic) BOOL fullWidthShortcut;
@@ -156,7 +172,10 @@ extern BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier);
 @property(nonatomic) BOOL shuangpinHelpcodeEnabled;
 - (void)applySharedAssistancePreferences:(NSDictionary *)preferences;
 - (NSDictionary *)helpcodeOptionsForScheme:(NSString *)scheme;
+/// 共享偏好里这个方案（quanpin 或 shuangpin）选中的辅助码表插件 id（`plugins.helpcode_pack_<方案>`），没选时为 nil。选了插件时 Engine 用插件的码表替代辅助码方案，所以方案下拉框显示的是插件；在这里选一个方案就不再使用该插件，与共享设置页的「辅助码方案」一致。
+- (NSString *)helpcodePackForScheme:(NSString *)scheme;
 @property(nonatomic) BOOL shuangpinKeymap;
+/// 四码唯一候选自动上屏：值随共享偏好 `wubi_auto_commit_unique` 进 Engine，本键只是本机的存储位置；从没设置过时是开。
 @property(nonatomic) BOOL wubiAutoCommitUnique;
 /// Dictation, which is read straight out of NSUserDefaults by the input method and by the voice module rather than through the shared document. The recogniser and the text it produces are the voice form's; these are the preferences around it — whether dictation runs at all, which language it transcribes, whether it plays a cue, whether it mutes what else is playing, and whether the partial transcript appears inline while it listens.
 @property(nonatomic) BOOL voiceInputEnabled;
@@ -199,6 +218,8 @@ extern BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier);
 - (void)applySharedInputPreferences:(NSDictionary *)preferences;
 /// 是否已经从共享偏好文档载入过一次输入选项。在此之前方案等字段读的是 NSUserDefaults 里本输入法自己上次写下的值，而设置页、`msime config set` 和云端同步只写文档，那个值可能早已过时（#4288）。
 @property(nonatomic, readonly) BOOL sharedInputPreferencesApplied;
+/// 本机有共享文档还没有、但收得下的应用例外（升级前存在 NSUserDefaults 里的规则）。最近一次 -applySharedInputPreferences: 之后为真时，输入法应当保存一次，把它们经 -sharedPreferencesByMerging: 发布进文档，共享设置页才显示得出输入法实际在用的规则。
+@property(nonatomic, readonly) BOOL applicationInputModeRulesAwaitPublication;
 - (void)applySharedCandidatePreferences:(NSDictionary *)preferences;
 /// The native candidate panel appearance override. A nil value means AppKit follows the system.
 @property(nonatomic, readonly) NSAppearance *candidateAppearanceOverride;

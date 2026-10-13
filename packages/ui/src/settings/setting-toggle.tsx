@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { ControlledCheckbox } from "../core/controlled-checkbox";
 import { SettingField } from "./setting-field";
 
 export interface SettingToggleProps {
@@ -30,13 +31,12 @@ export function SettingToggle({
       description={description}
       className={`section-header${rowClassName ? ` ${rowClassName}` : ""}`}
     >
-      <input
+      <ControlledCheckbox
         className="toggle"
-        type="checkbox"
         aria-label={ariaLabel}
         checked={checked}
         disabled={disabled}
-        onChange={(event) => onChange(event.target.checked)}
+        onChange={onChange}
       />
     </SettingField>
   );

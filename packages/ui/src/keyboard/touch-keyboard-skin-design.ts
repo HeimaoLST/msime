@@ -1,7 +1,7 @@
 // Fixed source: MSIME-Apple@11c950a63ec57656cd78b3f75aa621c293bfe453,
 // platforms/ios/SharedUI/CustomKeyboardSkin.swift and KeyboardSkinCollection.swift.
 import { boundedGraphemes } from "../core/text";
-import { clamp as clampNumber } from "../core/number";
+import { clamp as clampNumber, clampFinite } from "../core/number";
 
 export function skinColorNumber(value: string): number {
   return Number.parseInt(value.slice(1), 16);
@@ -341,16 +341,93 @@ export const touchKeyboardSkinTemplates: { title: string; design: TouchKeyboardS
   },
 ];
 
-export const touchKeyboardBackgroundPresets: { start: number; end?: number; title: string }[] = [
-  { start: 0xffffff, title: "纯白" },
-  { start: 0xdfe2eb, title: "雾灰" },
-  { start: 0x171717, title: "曜黑" },
-  { start: 0xffd5db, title: "樱粉" },
-  { start: 0xaee3f3, title: "晴空" },
-  { start: 0xc6e9a7, title: "嫩绿" },
-  { start: 0x160a3f, end: 0xa747df, title: "紫夜渐变" },
-  { start: 0xc5f5ff, end: 0xfad8f6, title: "极光渐变" },
-  { start: 0x185c47, end: 0x80bfa8, title: "森林渐变" },
+/**
+ * 编辑器「背景」里的预设。每个预设带一整套配色，而不只是背景：按键文字色同时画在按键上和背景上（工具栏图标、候选栏文字都直接压在背景上），只换背景时，深色背景配默认的白键深字，工具栏就看不见了，默认的绿色强调色在紫色、粉色背景上也很突兀。每一套都满足 `hasReadableSkinText`，按键文字色在背景（渐变的两端）上的对比度也不低于 3:1。
+ */
+export const touchKeyboardBackgroundPresets: {
+  title: string;
+  start: number;
+  end?: number;
+  keyBackground: number;
+  keyForeground: number;
+  accent: number;
+  actionBackground: number;
+}[] = [
+  {
+    title: "纯白",
+    start: 0xffffff,
+    keyBackground: 0xf1f3f5,
+    keyForeground: 0x1f2329,
+    accent: 0x185c47,
+    actionBackground: 0x185c47,
+  },
+  {
+    title: "雾灰",
+    start: 0xdfe2eb,
+    keyBackground: 0xffffff,
+    keyForeground: 0x1f2329,
+    accent: 0x2f4a7a,
+    actionBackground: 0x2f4a7a,
+  },
+  {
+    title: "曜黑",
+    start: 0x171717,
+    keyBackground: 0x2e2e30,
+    keyForeground: 0xf2f2f2,
+    accent: 0x8fd5a6,
+    actionBackground: 0x2c7a4b,
+  },
+  {
+    title: "樱粉",
+    start: 0xffd5db,
+    keyBackground: 0xffffff,
+    keyForeground: 0x3d1f27,
+    accent: 0xa3304f,
+    actionBackground: 0xa3304f,
+  },
+  {
+    title: "晴空",
+    start: 0xaee3f3,
+    keyBackground: 0xffffff,
+    keyForeground: 0x14324a,
+    accent: 0x1d5f8a,
+    actionBackground: 0x1d5f8a,
+  },
+  {
+    title: "嫩绿",
+    start: 0xc6e9a7,
+    keyBackground: 0xffffff,
+    keyForeground: 0x1f3317,
+    accent: 0x3a6619,
+    actionBackground: 0x3a6619,
+  },
+  {
+    title: "紫夜渐变",
+    start: 0x160a3f,
+    end: 0xa747df,
+    keyBackground: 0x2e1f63,
+    keyForeground: 0xffffff,
+    accent: 0xffffff,
+    actionBackground: 0x8b5cf6,
+  },
+  {
+    title: "极光渐变",
+    start: 0xc5f5ff,
+    end: 0xfad8f6,
+    keyBackground: 0xffffff,
+    keyForeground: 0x2a2f45,
+    accent: 0x5b3fb0,
+    actionBackground: 0x5b3fb0,
+  },
+  {
+    title: "森林渐变",
+    start: 0x0f3d2f,
+    end: 0x35806a,
+    keyBackground: 0x0f4a38,
+    keyForeground: 0xffffff,
+    accent: 0xffffff,
+    actionBackground: 0x9be3c0,
+  },
 ];
 
 export function skinColor(value: number): string {
@@ -388,8 +465,6 @@ export function normalizeTouchKeyboardSkinDesign(
   value: TouchKeyboardSkinDesign,
 ): TouchKeyboardSkinDesign {
   const color = (entry: number) => Math.round(entry) & 0xffffff;
-  const clamp = (entry: number, min: number, max: number, fallback: number) =>
-    Number.isFinite(entry) ? clampNumber(entry, min, max) : fallback;
   return {
     ...value,
     background: color(value.background),
@@ -397,18 +472,22 @@ export function normalizeTouchKeyboardSkinDesign(
     keyForeground: color(value.keyForeground),
     accent: color(value.accent),
     actionBackground: color(value.actionBackground),
-    cornerRadius: clamp(value.cornerRadius, 0, 20, 8),
-    borderWidth: clamp(value.borderWidth, 0, 2, 0),
-    shadow: clamp(value.shadow, 0, 0.4, 0),
+    cornerRadius: clampFinite(value.cornerRadius, 0, 20, 8),
+    borderWidth: clampFinite(value.borderWidth, 0, 2, 0),
+    shadow: clampFinite(value.shadow, 0, 0.4, 0),
     pattern: value.pattern >= 0 && value.pattern <= 3 ? value.pattern : 0,
-    keyOpacity: value.keyOpacity === undefined ? undefined : clamp(value.keyOpacity, 0.25, 1, 1),
+    keyOpacity:
+      value.keyOpacity === undefined ? undefined : clampFinite(value.keyOpacity, 0.25, 1, 1),
     gradientEnd: value.gradientEnd === undefined ? undefined : color(value.gradientEnd),
     patternOpacity:
-      value.patternOpacity === undefined ? undefined : clamp(value.patternOpacity, 0, 0.5, 0.15),
+      value.patternOpacity === undefined
+        ? undefined
+        : clampFinite(value.patternOpacity, 0, 0.5, 0.15),
     customBorderColor:
       value.customBorderColor === undefined ? undefined : color(value.customBorderColor),
-    photoShade: value.photoShade === undefined ? undefined : clamp(value.photoShade, 0, 0.8, 0.25),
+    photoShade:
+      value.photoShade === undefined ? undefined : clampFinite(value.photoShade, 0, 0.8, 0.25),
     photoPosition:
-      value.photoPosition === undefined ? undefined : clamp(value.photoPosition, 0, 1, 0.5),
+      value.photoPosition === undefined ? undefined : clampFinite(value.photoPosition, 0, 1, 0.5),
   };
 }

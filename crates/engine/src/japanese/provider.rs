@@ -4,9 +4,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::decoder::JapaneseDictionary;
+#[cfg(test)]
 use super::matrix::search_converted;
+use super::matrix::{best_path, search_converted_into, BestPath, JapaneseConversion};
 use super::romaji::{
-    convert_romaji, hiragana_to_katakana, is_single_kana_conversion, kana_for_romaji_prefix,
+    convert_romaji_into, count_morae, hiragana_to_katakana_into, is_single_kana_conversion,
+    kana_for_romaji_prefix_view, RomajiConversion,
 };
 use crate::cache::FifoCache;
 use crate::types::{CandidateSource, QueryRequest, SchemeType, WordItem};
@@ -22,9 +25,12 @@ const SENTENCE_BASE: i64 = 900_000;
 const PENDING_PREFIX_LEMMAS: usize = 24;
 const READING_PREFIX_LEMMAS: usize = 16;
 const SENTENCE_LIMIT: usize = 12;
+/// 完整读音接在列表末尾的同音词条上限，只防异常模型；Mozc 词库最大的读音组（こうじ）是 286 条。
+const EXACT_READING_LEMMAS: usize = 512;
 /// Two kana: a one-kana reading is already answered by the kana rows and the sentence search.
 const MIN_PREFIX_READING_BYTES: usize = 6;
 
+#[cfg(test)]
 fn join_reading(prefix: &str, suffix: &str) -> String {
     let mut reading = String::with_capacity(prefix.len() + suffix.len());
     reading.push_str(prefix);
@@ -32,11 +38,25 @@ fn join_reading(prefix: &str, suffix: &str) -> String {
     reading
 }
 
+/// 整段读音的精确词条和长度，见 [`JapaneseProvider::whole_reading_lemma`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WholeReadingLemma {
+    /// 整段读音正好是某个词条的读音。
+    pub exact: bool,
+    /// 读音的拍数（`count_morae`：拗音、ふぁ一类的小写假名不单算）。
+    pub morae: usize,
+}
+
 pub struct JapaneseProvider {
     model: PathBuf,
     /// `None` until the first query, then the shared model or `Some(None)` when it is missing or invalid; a failed load is not retried by this provider, as in the reference.
     dictionary: Option<Option<Arc<JapaneseDictionary>>>,
     dynamic: FifoCache<String, Vec<WordItem>>,
+    conversion: RomajiConversion,
+    katakana: String,
+    sentences: Vec<JapaneseConversion>,
+    /// 同音词排名缓冲，跨查询复用。
+    exact_ranking: Vec<(i32, u32)>,
 }
 
 /// 按插入顺序保留唯一词面；`used` 之后是上次查询留下的可复用行。
@@ -82,13 +102,9 @@ impl Rows<'_> {
         self.used += 1;
     }
 
-    fn push_kana(&mut self, hiragana: &str) {
+    fn push_kana(&mut self, hiragana: &str, katakana: &str) {
         self.push(hiragana, KANA_WEIGHT, CandidateSource::Generated);
-        self.push(
-            &hiragana_to_katakana(hiragana),
-            KATAKANA_WEIGHT,
-            CandidateSource::Generated,
-        );
+        self.push(katakana, KATAKANA_WEIGHT, CandidateSource::Generated);
     }
 
     /// 把已在列表里的 `word` 挪到不晚于 `slot` 的位置，其余行保持相对顺序。
@@ -111,12 +127,16 @@ impl Rows<'_> {
 }
 
 impl JapaneseProvider {
-    /// Shares the model at `model` on the first query, so sessions that never type Japanese never read the 66 MB file; a missing model leaves only the kana rows.
+    /// 构造时不读模型：完整版的每个会话都会构造这个 provider，不管用户加没加日文键盘。模型在方案切到日文时由 [`JapaneseProvider::warm_up_in_background`] 在后台读，最晚在第一个查询时读，所以从不打日文的会话不会碰这个 66 MB 的文件；模型缺失时只出假名行。
     pub fn new(model: &Path) -> Self {
         Self {
             model: model.to_path_buf(),
             dictionary: None,
             dynamic: FifoCache::new(DYNAMIC_CACHE_CAPACITY),
+            conversion: RomajiConversion::default(),
+            katakana: String::new(),
+            sentences: Vec::new(),
+            exact_ranking: Vec::new(),
         }
     }
 
@@ -144,58 +164,90 @@ impl JapaneseProvider {
             rows.finish_into(destination);
             return;
         }
-        let conversion = convert_romaji(&request.raw_input);
-        let kana_first = is_single_kana_conversion(&conversion);
+        convert_romaji_into(&request.raw_input, &mut self.conversion);
+        let dictionary = self.dictionary();
+        let conversion = &self.conversion;
+        hiragana_to_katakana_into(&conversion.hiragana, &mut self.katakana);
+        let kana_first = is_single_kana_conversion(conversion);
         if kana_first {
-            rows.push_kana(&conversion.hiragana);
+            rows.push_kana(&conversion.hiragana, &self.katakana);
         }
 
-        if let Some(dictionary) = self.dictionary() {
-            // With letters still pending, the lemmas the letters can go on to spell lead: the sentence search can convert only the finished kana. With the reading complete, the lemmas whose reading only starts with it (predictions) go after the conversions of the reading itself: listed first, the cheapest longer readings fill the page and push the word the reading spells off it (にじ listed 二重, 二条 and 二次創作 ahead of 虹).
-            let mut predictions = Vec::new();
+        if let Some(dictionary) = &dictionary {
+            // 待定字母的前缀词条先展示；完整读音先展示转换，再追加预测，避免较长联想挤走当前词。
+            let complete_prediction = conversion.pending.is_empty()
+                && conversion.hiragana.len() >= MIN_PREFIX_READING_BYTES;
             if !conversion.hiragana.is_empty() && !conversion.pending.is_empty() {
-                // `kana_for_romaji_prefix` already limits the kana to spellings that start with the pending letters. Re-deriving romaji from each lemma's reading to check the prefix again would drop correct lemmas: a reading has several valid spellings and `hiragana_to_romaji` picks one, so しし reads `shishi` and fails `sis`.
-                let pending_kana = kana_for_romaji_prefix(&conversion.pending);
+                // 前缀视图已限制为待定字母能拼出的假名。一个读音有多种合法拼法，不能再用反查首选拼法过滤：しし反查为 `shishi`，会被 `sis` 错误排除。
+                let pending_kana = kana_for_romaji_prefix_view(&conversion.pending);
                 rows.reserve(
                     pending_kana
                         .len()
                         .saturating_mul(PENDING_PREFIX_LEMMAS)
                         .saturating_add(SENTENCE_LIMIT + 1),
                 );
-                for kana in pending_kana {
-                    let prefix = join_reading(&conversion.hiragana, kana);
-                    for lemma in dictionary.prefix_lemmas(&prefix, PENDING_PREFIX_LEMMAS) {
-                        rows.push(
-                            &lemma.surface,
-                            PREFIX_LEMMA_BASE - i64::from(lemma.word_cost),
-                            CandidateSource::Database,
+                if let Some(first) = pending_kana.first() {
+                    let suffix_capacity = if pending_kana.len() == 1 {
+                        first.len()
+                    } else {
+                        pending_kana
+                            .iter()
+                            .map(|kana| kana.len())
+                            .max()
+                            .unwrap_or(0)
+                    };
+                    let mut prefix =
+                        String::with_capacity(conversion.hiragana.len() + suffix_capacity);
+                    prefix.push_str(&conversion.hiragana);
+                    for kana in pending_kana {
+                        // 公共读音始终保留，截断边界是完整 UTF-8 文本的末尾。
+                        prefix.truncate(conversion.hiragana.len());
+                        prefix.push_str(kana);
+                        dictionary.for_each_prefix_lemma_view(
+                            &prefix,
+                            PENDING_PREFIX_LEMMAS,
+                            |lemma| {
+                                rows.push(
+                                    lemma.surface,
+                                    PREFIX_LEMMA_BASE - i64::from(lemma.word_cost),
+                                    CandidateSource::Database,
+                                );
+                            },
                         );
                     }
                 }
-            } else if conversion.pending.is_empty()
-                && conversion.hiragana.len() >= MIN_PREFIX_READING_BYTES
-            {
-                predictions = dictionary.prefix_lemmas(&conversion.hiragana, READING_PREFIX_LEMMAS);
             }
-            rows.reserve(predictions.len() + SENTENCE_LIMIT + 1);
-            for sentence in search_converted(&dictionary, &conversion, SENTENCE_LIMIT) {
+            rows.reserve(
+                usize::from(complete_prediction)
+                    .saturating_mul(READING_PREFIX_LEMMAS)
+                    .saturating_add(SENTENCE_LIMIT + 1),
+            );
+            search_converted_into(dictionary, conversion, SENTENCE_LIMIT, &mut self.sentences);
+            // 消费后释放句子文本，仅保留固定结果限额所需的向量容量。
+            for sentence in self.sentences.drain(..) {
                 rows.push(
                     &sentence.text,
                     SENTENCE_BASE - sentence.cost,
                     CandidateSource::Database,
                 );
             }
-            for lemma in predictions {
-                rows.push(
-                    &lemma.surface,
-                    PREFIX_LEMMA_BASE - i64::from(lemma.word_cost),
-                    CandidateSource::Database,
+            if complete_prediction {
+                dictionary.for_each_prefix_lemma_view(
+                    &conversion.hiragana,
+                    READING_PREFIX_LEMMAS,
+                    |lemma| {
+                        rows.push(
+                            lemma.surface,
+                            PREFIX_LEMMA_BASE - i64::from(lemma.word_cost),
+                            CandidateSource::Database,
+                        );
+                    },
                 );
             }
         }
 
         if !conversion.hiragana.is_empty() && !kana_first {
-            rows.push_kana(&conversion.hiragana);
+            rows.push_kana(&conversion.hiragana, &self.katakana);
             // 读音完整时，平假名本身最晚排在第二位。词库里没有这个假名词条时，它原本跟在全部汉字和联想后面：`tyou`/`chou` 的ちょう排在第 23 个，用户以为打不出来；有词条的きょう、にほん本来就在第二位。
             if conversion.pending.is_empty() {
                 rows.promote(&conversion.hiragana, KANA_SLOT);
@@ -227,6 +279,24 @@ impl JapaneseProvider {
                 rows.used += 1;
                 rows.items[insertion..rows.used].rotate_right(1);
                 insertion += 1;
+            }
+        }
+
+        // 读音完整时，把这个读音的全部同音词按成本接在最后（#7353）。句子和预测各有限额，しょう在 Mozc 词库里的六十多个词面原本只有十几个能进列表，生僻词翻多少页都翻不到；接在片假名和云候选之后，前面各行与原来一样，已列出的词由去重跳过。必须排在云候选插入之后：云候选只跳过前面已有的词，若同音词先接上，与同音词同名的云答案会被当成重复丢掉，既失去第二位（单个假名时第三位），也丢了云来源。
+        if let Some(dictionary) = &dictionary {
+            if conversion.pending.is_empty() {
+                dictionary.for_each_exact_lemma_view_reusing(
+                    &conversion.hiragana,
+                    EXACT_READING_LEMMAS,
+                    &mut self.exact_ranking,
+                    |lemma| {
+                        rows.push(
+                            lemma.surface,
+                            PREFIX_LEMMA_BASE - i64::from(lemma.word_cost),
+                            CandidateSource::Database,
+                        );
+                    },
+                );
             }
         }
         rows.finish_into(destination);
@@ -262,6 +332,48 @@ impl JapaneseProvider {
         self.dynamic.clear();
     }
 
+    /// 方案切到日文时调用：本 provider 还没拿到模型，就在后台线程把它读进进程级缓存，第一个假名不必在按键线程上等它。
+    pub fn warm_up_in_background(&self) {
+        if self.dictionary.is_none() {
+            JapaneseDictionary::warm_up_in_background(&self.model);
+        }
+    }
+
+    /// 整段罗马字读音有没有完全相同读音的词条，以及读音有几拍（日文混输「精确」信号的原料，规则见 `ImeSession::mixed_japanese_conversion`）。`request` 是日文请求，同 [`JapaneseProvider::query_into`]；读音还有待定字母、不到两个假名，或者模型缺失时答 `None`：只能给假名行的时候不算日文。
+    pub(crate) fn whole_reading_lemma(
+        &mut self,
+        request: &QueryRequest,
+    ) -> Option<WholeReadingLemma> {
+        let dictionary = self.whole_reading_dictionary(request)?;
+        let mut exact = false;
+        dictionary.for_each_exact_lemma_view(&self.conversion.hiragana, 1, |_| exact = true);
+        Some(WholeReadingLemma {
+            exact,
+            morae: count_morae(&self.conversion.hiragana),
+        })
+    }
+
+    /// 整段罗马字读音的最佳整句和它用了几个未知假名（日文混输的转换文字和「认得」信号），与 `query_into` 第一行的整句是同一条路径。答 `None` 的条件同 [`JapaneseProvider::whole_reading_lemma`]。
+    pub(crate) fn whole_reading_best_path(&mut self, request: &QueryRequest) -> Option<BestPath> {
+        let dictionary = self.whole_reading_dictionary(request)?;
+        best_path(&dictionary, &self.conversion.hiragana)
+    }
+
+    /// 把整段读音转换进 `self.conversion`，读音完整、至少两个假名、模型读得到时交回模型。
+    fn whole_reading_dictionary(
+        &mut self,
+        request: &QueryRequest,
+    ) -> Option<Arc<JapaneseDictionary>> {
+        if !request.valid || request.scheme != SchemeType::JapaneseRomaji {
+            return None;
+        }
+        convert_romaji_into(&request.raw_input, &mut self.conversion);
+        if !self.conversion.complete || self.conversion.hiragana.chars().nth(1).is_none() {
+            return None;
+        }
+        self.dictionary()
+    }
+
     fn dictionary(&mut self) -> Option<Arc<JapaneseDictionary>> {
         self.dictionary
             .get_or_insert_with(|| JapaneseDictionary::shared(&self.model))
@@ -271,6 +383,12 @@ impl JapaneseProvider {
 
 #[cfg(test)]
 mod tests {
+    #[path = "pending_tests.rs"]
+    mod pending_tests;
+
+    #[path = "mixed_tests.rs"]
+    mod mixed_tests;
+
     use super::super::decoder::test_model;
     use super::*;
 
@@ -330,13 +448,130 @@ mod tests {
             provider.query_into(&request, &mut destination);
         });
 
-        let (_, conversion_allocations) = crate::ime::personal_rerank::allocations::count(|| {
-            let conversion = convert_romaji(&request.raw_input);
-            hiragana_to_katakana(&conversion.hiragana)
-        });
-        assert_eq!(allocations, conversion_allocations);
+        eprintln!("日文单假名 provider 热查询分配：{allocations}");
+        assert_eq!(allocations, 0, "已有候选行与转换缓冲应复用");
         assert_eq!(words(&destination), ["か", "カ"]);
         assert_eq!(destination[0].word.as_ptr(), word_pointer);
+    }
+
+    #[test]
+    fn model_backed_provider_does_not_copy_temporary_lemma_strings() {
+        let (_root, mut provider) =
+            provider_with(Some(test_model::bytes(&[("か", "蚊", 0, 0, 500)], 1, &[0])));
+        let request = request("ka");
+        let mut destination = provider.query(&request);
+        provider.query_into(&request, &mut destination);
+        let expected = destination.clone();
+        let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            provider.query_into(&request, &mut destination);
+        });
+        assert_eq!(destination, expected);
+        assert_eq!(words(&destination), ["か", "カ", "蚊"]);
+        eprintln!("日文有词库单假名 provider 热查询分配：{allocations}");
+        assert!(
+            allocations <= 10,
+            "词条应借用，句子结果向量应复用：{allocations}"
+        );
+    }
+
+    #[test]
+    fn pending_model_query_reuses_fixed_kana_prefixes() {
+        let (_root, mut provider) = provider_with(Some(test_model::bytes(
+            &[("かか", "仮仮", 0, 0, 500), ("かき", "仮木", 0, 0, 600)],
+            1,
+            &[0],
+        )));
+        let request = request("kak");
+        let mut destination = provider.query(&request);
+        provider.query_into(&request, &mut destination);
+        let expected = destination.clone();
+        let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            provider.query_into(&request, &mut destination);
+        });
+        assert_eq!(destination, expected);
+        assert!(words(&destination).contains(&"仮仮"));
+        eprintln!("日文待定前缀 provider 热查询分配：{allocations}");
+        assert!(
+            allocations <= 15,
+            "拼接读音键与句子结果容器应复用，前缀与继续补全词条应直接消费：{allocations}"
+        );
+    }
+
+    #[test]
+    fn complete_model_query_streams_predictions() {
+        let (_root, mut provider) = provider_with(Some(test_model::bytes(
+            &[
+                ("かな", "仮名", 0, 0, 500),
+                ("かなこ", "加奈子", 0, 0, 600),
+                ("かなで", "奏で", 0, 0, 700),
+            ],
+            1,
+            &[0],
+        )));
+        let request = request("kana");
+        let mut destination = provider.query(&request);
+        provider.query_into(&request, &mut destination);
+        let expected = destination.clone();
+        let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            provider.query_into(&request, &mut destination);
+        });
+        assert_eq!(destination, expected);
+        assert_eq!(
+            words(&destination),
+            ["仮名", "かな", "加奈子", "奏で", "カナ"]
+        );
+        eprintln!("日文完整预测流式查询分配：{allocations}");
+        assert_eq!(
+            allocations, 10,
+            "预测和矩阵精确词条应流式消费，句子结果向量应复用"
+        );
+    }
+
+    fn assert_provider_reuses_conversion_strings(raw: &str) {
+        let (_root, mut provider) = provider_with(None);
+        let request = request(raw);
+        let mut destination = provider.query(&request);
+        let expected = destination.clone();
+        let pointer = destination.as_ptr();
+        for row in &mut destination {
+            row.source = CandidateSource::CloudSuggestion;
+            row.fixed_position = 7;
+            row.fuzzy = true;
+            row.corrected_from.push_str("synthetic");
+            row.sentence_association = true;
+            row.sentence_words.push("synthetic".to_owned());
+        }
+        for _ in 0..3 {
+            let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+                provider.query_into(&request, &mut destination);
+            });
+            assert_eq!(destination, expected);
+            assert_eq!(destination.as_ptr(), pointer);
+            eprintln!(
+                "日文 provider 合成输入长度 {} 热查询分配：{allocations}",
+                raw.len()
+            );
+            assert_eq!(allocations, 0, "热查询不应重建转换字符串");
+        }
+    }
+
+    #[test]
+    fn complete_provider_queries_reuse_conversion_strings() {
+        for raw in ["nihongo", "Sinnyou", "n'a", "xtsu", "ko-hi-"] {
+            assert_provider_reuses_conversion_strings(raw);
+        }
+    }
+
+    #[test]
+    fn long_provider_queries_reuse_conversion_strings() {
+        assert_provider_reuses_conversion_strings(&"ka".repeat(32));
+    }
+
+    #[test]
+    fn pending_provider_queries_reuse_conversion_strings() {
+        for raw in ["NiHoNg", "kak", "k", "ka漢字", ""] {
+            assert_provider_reuses_conversion_strings(raw);
+        }
     }
 
     #[test]
@@ -349,6 +584,27 @@ mod tests {
         });
         assert_eq!(allocations, 0);
         assert_eq!(words(&destination), ["ー", "-"]);
+    }
+
+    #[test]
+    fn model_load_stays_lazy_and_missing_model_is_not_retried() {
+        let (_root, mut provider) = provider_with(None);
+        let mut invalid = request("ka");
+        invalid.valid = false;
+        assert!(provider.query(&invalid).is_empty());
+        let mut wrong_scheme = request("ka");
+        wrong_scheme.scheme = SchemeType::Quanpin;
+        assert!(provider.query(&wrong_scheme).is_empty());
+        assert_eq!(words(&provider.query(&request("-"))), ["ー", "-"]);
+        assert!(provider.dictionary.is_none());
+        assert_eq!(words(&provider.query(&request("ka"))), ["か", "カ"]);
+        assert!(matches!(provider.dictionary, Some(None)));
+        std::fs::write(&provider.model, test_model::smoke()).expect("write synthetic model");
+        assert_eq!(
+            words(&provider.query(&request("kanji"))),
+            ["かんじ", "カンジ"]
+        );
+        assert!(matches!(provider.dictionary, Some(None)));
     }
 
     #[test]
@@ -480,6 +736,105 @@ mod tests {
         );
     }
 
+    /// `count` 个合成同音词共用 `reading`，成本随序号递增：`合成00` 最便宜。
+    fn homophones(reading: &'static str, count: usize) -> Vec<(&'static str, String, i32)> {
+        (0..count)
+            .map(|index| (reading, format!("合成{index:02}"), 100 + index as i32 * 10))
+            .collect()
+    }
+
+    fn homophone_model(
+        all: &[(&'static str, String, i32)],
+        extra: &[test_model::Entry<'_>],
+    ) -> Vec<u8> {
+        let mut entries: Vec<test_model::Entry<'_>> = all
+            .iter()
+            .map(|(reading, surface, cost)| (*reading, surface.as_str(), 0, 0, *cost))
+            .collect();
+        entries.extend_from_slice(extra);
+        test_model::bytes(&entries, 1, &[0])
+    }
+
+    fn synthetic(range: std::ops::Range<usize>) -> Vec<String> {
+        range.map(|index| format!("合成{index:02}")).collect()
+    }
+
+    /// #7353：完整读音的同音词比句子和预测的限额多时，原本只有最便宜的十几个能进列表。其余的按成本接在片假名行之后，一个不漏，前面的行一行不变。
+    #[test]
+    fn a_complete_reading_lists_every_homophone_after_the_first_pages() {
+        let all = homophones("しょう", 40);
+        let model = homophone_model(&all, &[("しょうがっこう", "合成学校", 0, 0, 50)]);
+        let (_root, mut provider) = provider_with(Some(model));
+        let rows = provider.query(&request("syou"));
+        // 原有部分：12 个句子（平假名提到第二位），16 个最便宜的预测里新出现的四个，片假名。
+        let mut expected = synthetic(0..1);
+        expected.push("しょう".to_owned());
+        expected.extend(synthetic(1..12));
+        expected.push("合成学校".to_owned());
+        expected.extend(synthetic(12..15));
+        expected.push("ショウ".to_owned());
+        // 新接上的：其余同音词，按成本。
+        expected.extend(synthetic(15..40));
+        assert_eq!(words(&rows), expected);
+        let first_appended = &rows[expected.len() - 25];
+        assert_eq!(
+            (first_appended.weight, first_appended.source),
+            (PREFIX_LEMMA_BASE - 250, CandidateSource::Database)
+        );
+
+        // 还挂着半截字母时不接：那时列的是待定字母能拼出的词。
+        let pending = provider.query(&request("syouk"));
+        assert!(
+            !words(&pending).contains(&"合成39"),
+            "{:?}",
+            words(&pending)
+        );
+    }
+
+    /// 单个假名也是完整读音：假名行之后先是句子，再是其余同音词。
+    #[test]
+    fn a_single_kana_lists_every_homophone_after_its_sentences() {
+        let all = homophones("か", 30);
+        let (_root, mut provider) = provider_with(Some(homophone_model(&all, &[])));
+        let mut expected = vec!["か".to_owned(), "カ".to_owned()];
+        expected.extend(synthetic(0..30));
+        assert_eq!(words(&provider.query(&request("ka"))), expected);
+    }
+
+    /// 云答案是排在末尾的同音词时，仍占它的位置并保留云来源；同音词尾部不再重复列出它。
+    #[test]
+    fn a_cloud_homophone_keeps_its_seat_ahead_of_the_homophone_tail() {
+        let all = homophones("か", 30);
+        let (_root, mut provider) = provider_with(Some(homophone_model(&all, &[])));
+        assert!(provider.cache_dynamic_candidate("ka", "合成20", CandidateSource::CloudSuggestion));
+        let single_kana = provider.query(&request("ka"));
+        let mut expected = vec!["か".to_owned(), "カ".to_owned(), "合成20".to_owned()];
+        expected.extend(synthetic(0..20));
+        expected.extend(synthetic(21..30));
+        assert_eq!(words(&single_kana), expected);
+        assert_eq!(single_kana[2].source, CandidateSource::CloudSuggestion);
+
+        // 完整读音不是单个假名：云答案在第二位。
+        let all = homophones("しょう", 40);
+        let (_root, mut provider) = provider_with(Some(homophone_model(&all, &[])));
+        assert!(provider.cache_dynamic_candidate(
+            "syou",
+            "合成30",
+            CandidateSource::CloudSuggestion
+        ));
+        let reading = provider.query(&request("syou"));
+        assert_eq!(words(&reading)[..3], ["合成00", "合成30", "しょう"]);
+        assert_eq!(reading[1].source, CandidateSource::CloudSuggestion);
+        assert_eq!(
+            words(&reading)
+                .iter()
+                .filter(|word| **word == "合成30")
+                .count(),
+            1
+        );
+        assert_eq!(reading.len(), 42);
+    }
+
     #[test]
     fn single_kana_leads_and_without_a_model_only_kana_remain() {
         let (_root, mut provider) = provider_with(None);
@@ -568,5 +923,12 @@ mod tests {
         assert_eq!(words(&kanj)[0], "感じ");
         let sentence = provider.query(&request("watashihagakuseidesu"));
         assert!(sentence.len() > 2, "{:?}", words(&sentence));
+        // #7353：しょう在 Mozc 词库里有六十多个不同词面，生僻的鐘、梢原本排不进列表。
+        let syou = provider.query(&request("syou"));
+        for rare in ["鐘", "梢", "簫"] {
+            assert!(words(&syou).contains(&rare), "{rare}: {:?}", words(&syou));
+        }
+        assert!(syou.len() > 60, "{}", syou.len());
+        assert_eq!(words(&syou)[1], "しょう");
     }
 }

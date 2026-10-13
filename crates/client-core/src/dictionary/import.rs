@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Rows accepted from one file. Beyond this the remainder is reported as
+/// Rows examined from one file. Beyond this the remainder is reported as
 /// truncated rather than silently dropped or rejected wholesale, because each
 /// import holds the dictionary maintenance lock.
 pub const MAX_ENTRIES: usize = 1000;
@@ -181,17 +181,13 @@ impl ImportReport {
     pub fn record_rejected(&mut self, lines: &[usize]) {
         self.failed += lines.len();
         for line in lines {
-            if self.first_failures.len() >= REPORTED_FAILURES {
-                break;
-            }
             self.first_failures.push(ImportFailure {
                 line: *line,
                 issue: ImportIssue::Rejected,
             });
+            self.first_failures.sort_by_key(|failure| failure.line);
+            self.first_failures.truncate(REPORTED_FAILURES);
         }
-        // Parse failures are reported in line order; keep the combined list in
-        // line order too, so "first appeared at line N" stays true.
-        self.first_failures.sort_by_key(|failure| failure.line);
     }
 }
 
@@ -257,11 +253,8 @@ pub fn parse_rows(kind: ImportKind, format: ImportFormat, text: &str) -> ImportR
         swapped: false,
     };
     let mut in_yaml_header = false;
+    let mut examined = 0;
     for (index, line) in text.lines().enumerate() {
-        if report.entries.len() >= MAX_ENTRIES {
-            report.truncated = true;
-            break;
-        }
         let line = line.trim_end_matches('\r');
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -280,6 +273,11 @@ pub fn parse_rows(kind: ImportKind, format: ImportFormat, text: &str) -> ImportR
                 continue;
             }
         }
+        if examined >= MAX_ENTRIES {
+            report.truncated = true;
+            break;
+        }
+        examined += 1;
         match parse_row(kind, format, line) {
             Ok(mut entry) => {
                 entry.line = index + 1;
@@ -603,6 +601,20 @@ mod tests {
     }
 
     #[test]
+    fn invalid_rows_count_toward_the_examined_row_limit() {
+        let mut text = String::from("首词\tni'hao\n");
+        for _ in 1..MAX_ENTRIES {
+            text.push_str("invalid row\n");
+        }
+        text.push_str("末词\tni'hao\n");
+
+        let report = parse_ok(ImportKind::Pinyin, "standard", &text);
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.failed, MAX_ENTRIES - 1);
+        assert!(report.truncated);
+    }
+
+    #[test]
     fn a_page_holds_only_rows_of_the_requested_kind() {
         // The defect: a user with more than a page of pinyin words who selects
         // 五笔 saw an empty page 1, because the client filtered a page it had
@@ -748,6 +760,25 @@ mod tests {
             .first_failures
             .iter()
             .all(|failure| failure.issue == ImportIssue::Rejected));
+    }
+
+    #[test]
+    fn earlier_engine_rejection_displaces_a_later_parse_failure() {
+        let mut text = String::from("你好\tni'hao\n");
+        for _ in 0..REPORTED_FAILURES {
+            text.push_str("没有制表符\n");
+        }
+        let mut report = parse_ok(ImportKind::Pinyin, "standard", &text);
+        report.record_rejected(&[1]);
+
+        assert_eq!(report.failed, REPORTED_FAILURES + 1);
+        assert_eq!(report.first_failures.len(), REPORTED_FAILURES);
+        assert_eq!(report.first_failures[0].line, 1);
+        assert_eq!(report.first_failures[0].issue, ImportIssue::Rejected);
+        assert_eq!(
+            report.first_failures.last().unwrap().line,
+            REPORTED_FAILURES
+        );
     }
 
     #[test]

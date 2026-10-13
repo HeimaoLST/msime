@@ -1,5 +1,10 @@
 package app.msime.android.home;
 
+import app.msime.android.DimensionPolicy;
+
+import app.msime.android.ThemeColorPolicy;
+import app.msime.android.BoundsPolicy;
+import app.msime.android.DrawablePolicy;
 import app.msime.android.KeyboardGeometry;
 import android.content.Context;
 import android.graphics.drawable.ClipDrawable;
@@ -31,11 +36,11 @@ public final class MsSlider extends SeekBar {
 
     public MsSlider(Context context, @Nullable AttributeSet attrs) {
         super(context, attrs);
-        int track = Ui.dp(context, Ui.SLIDER_TRACK);
+        int track = DimensionPolicy.pixels(context, Ui.SLIDER_TRACK);
         float radius = track / 2f;
 
-        GradientDrawable rest = Ui.rounded(Ui.accentSoft(context), radius);
-        GradientDrawable done = Ui.rounded(Ui.accent(context), radius);
+        GradientDrawable rest = DrawablePolicy.rounded(ThemeColorPolicy.accentSoft(context), radius);
+        GradientDrawable done = DrawablePolicy.rounded(ThemeColorPolicy.accent(context), radius);
         Drawable progress = new ClipDrawable(done, Gravity.START, ClipDrawable.HORIZONTAL);
         LayerDrawable layers = new LayerDrawable(new Drawable[] {rest, progress});
         layers.setId(0, android.R.id.background);
@@ -47,16 +52,16 @@ public final class MsSlider extends SeekBar {
         }
         setProgressDrawable(layers);
 
-        GradientDrawable thumb = Ui.rounded(Ui.accent(context), Ui.dp(context, 2));
-        thumb.setSize(Ui.dp(context, Ui.SLIDER_THUMB_WIDTH), Ui.dp(context, Ui.SLIDER_THUMB_HEIGHT));
+        GradientDrawable thumb = DrawablePolicy.rounded(ThemeColorPolicy.accent(context), DimensionPolicy.pixels(context, 2),
+            DimensionPolicy.pixels(context, Ui.SLIDER_THUMB_WIDTH), DimensionPolicy.pixels(context, Ui.SLIDER_THUMB_HEIGHT));
         setThumb(thumb);
-        setThumbOffset(Ui.dp(context, Ui.SLIDER_THUMB_WIDTH) / 2);
+        setThumbOffset(DimensionPolicy.pixels(context, Ui.SLIDER_THUMB_WIDTH) / 2);
         setSplitTrack(false);
         ViewPolicy.clearBackground(this);
         // 左右留出半个滑块，滑块在两端时不会被裁掉。
-        int inset = Ui.dp(context, Ui.SLIDER_THUMB_WIDTH);
-        Ui.setHorizontalPaddingPx(this, inset);
-        Ui.setMinimumHeightDp(this, context, Ui.SLIDER_TOUCH_HEIGHT);
+        int inset = DimensionPolicy.pixels(context, Ui.SLIDER_THUMB_WIDTH);
+        ViewPolicy.setHorizontalPadding(this, inset);
+        ViewPolicy.setMinimumHeightDp(context, this, Ui.SLIDER_TOUCH_HEIGHT);
 
         setOnSeekBarChangeListener(new OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
@@ -92,7 +97,7 @@ public final class MsSlider extends SeekBar {
     /** 设置当前值，不在区间里时夹到端点，不在步长上时取最近的一格。 */
     public void setValue(int value) {
         int slot = Math.round((value - min) / (float) step);
-        setProgress(KeyboardGeometry.bounded(slot, 0, getMax()));
+        setProgress(BoundsPolicy.bounded(slot, 0, getMax()));
     }
 
     /** 拖动过程中每一格都回调，用来实时刷新数值标签。 */

@@ -179,19 +179,16 @@
    "op": "type",
    "arg": "zi",
    "result": {
-    "handled": false,
-    "unhandled_at": [
-     0
-    ]
+    "handled": true
    },
    "snapshot": {
     "scheme": "wubi",
     "local_mode": "none",
-    "preedit": "i",
-    "raw_segmentation": "i",
-    "normalized_segmentation": "i",
-    "editing_text": "i",
-    "caret": 1,
+    "preedit": "zi",
+    "raw_segmentation": "zi",
+    "normalized_segmentation": "zi",
+    "editing_text": "zi",
+    "caret": 2,
     "dedicated_english": false,
     "shuangpin_profile": "xiaohe",
     "candidate_count": 0,

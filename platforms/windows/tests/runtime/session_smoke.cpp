@@ -1,4 +1,5 @@
 #include "FocusRouter.h"
+#include "../../../common/HostApiString.h"
 #include "FocusedSession.h"
 #include "InputQueue.h"
 #include "KeyEvent.h"
@@ -16,6 +17,7 @@
 #include <memory>
 #include <cstdio>
 #include <stdexcept>
+#include <string_view>
 #ifdef _WIN32
 #include <windows.h>
 static_assert(VK_BACK == 0x08 && VK_RETURN == 0x0D && VK_SPACE == 0x20);
@@ -66,10 +68,15 @@ void local_mode_tests(const std::string &options) {
       {'J', "super_jianpin", "nh"},
       {'Y', "temporary_english", "he"},
       {'R', "temporary_japanese", "ka"},
+      {'C', "chaizi", "huohuohuo"},
   };
+  // 拆字反查在桌面默认关，这里显式打开；其余模式缺键时本来就是开。
+  auto enabled = Json::parse(options);
+  enabled["preferences"]["local_modes"]["chaizi"] = true;
+  const auto enabled_options = enabled.dump();
   uint64_t request = 1;
   for (const auto &mode : cases) {
-    ServerSession session(77, options);
+    ServerSession session(77, enabled_options);
     uint64_t epoch = 1;
     session.activate(epoch);
     auto key = [&](uint32_t keycode, uint32_t text, uint32_t modifiers) {
@@ -115,6 +122,20 @@ void local_mode_trigger_tests(const std::string &options) {
   session.activate(epoch);
   require(session.view().at("spelling_symbols") == "",
           "Switched-off modes listed trigger symbols");
+  // 拆字反查在桌面默认关：偏好里没有这个键时 Shift+C 不进模式，大写 C 交还应用。
+  {
+    FanyImeNamedpipeData packet{};
+    packet.event_type = FanyImePipeEventType::KeyEvent;
+    packet.client_id = 43;
+    packet.request_id = 1;
+    packet.keycode = 'C';
+    packet.wch = static_cast<FanyImeWireChar>('C');
+    packet.modifiers_down = 1;
+    session.key(packet, epoch);
+    require(session.view().at("local_mode") == "none" &&
+                session.view().at("editing_text") == "",
+            "Shift+C opened the chaizi mode while its switch was absent");
+  }
   auto preferences = Json::parse(options).at("preferences");
   preferences["local_modes"] = {
       {"unicode", true},       {"date_time", true},
@@ -122,7 +143,7 @@ void local_mode_trigger_tests(const std::string &options) {
       {"kaomoji", true},       {"super_jianpin", true},
       {"temporary_english", true}, {"temporary_japanese", true},
       {"expression", true},    {"command", true},
-      {"mention", true}};
+      {"mention", true},       {"chaizi", true}};
   preferences["chinese_punctuation"] = true;
   session.update_preferences(
       epoch, Json{{"format_version", 1}, {"revision", 1}, {"preferences", preferences}}
@@ -184,6 +205,33 @@ void local_mode_trigger_tests(const std::string &options) {
               !transition_counts_as_typing(command.source.transition),
           "Space did not commit the command row");
 
+  // 拆字反查：Shift+C 进入，部件拼音是字母。跟在部件后面的 ' 由 Engine 列进 spelling_symbols，EditPolicy 因此把它当字符交给 Engine 当分隔符；只有入口字母 C 时不列。空格上屏首行，计入打字统计。
+  press('C', 'C', 1);
+  require(session.view().at("local_mode") == "chaizi" &&
+              session.view().at("editing_text") == "C" &&
+              session.view().at("spelling_symbols") == "",
+          "Shift+C did not open the chaizi mode");
+  for (const char *part : {"huo", "'", "huo", "'", "huo"}) {
+    for (const unsigned char character : std::string(part)) {
+      if (character == '\'')
+        press(0xDE, '\'');
+      else
+        press(static_cast<uint32_t>(character - 'a' + 'A'), character);
+    }
+  }
+  const auto chaizi = session.view();
+  require(chaizi.at("editing_text") == "Chuo'huo'huo" &&
+              chaizi.at("local_mode") == "chaizi" &&
+              !chaizi.at("candidates").empty() &&
+              chaizi.at("candidates").at(0).at("text") == "焱" &&
+              chaizi.at("candidates").at(0).at("annotation") == "yàn",
+          "The chaizi mode did not take the apostrophe as a separator or did not find 焱");
+  const auto picked = press(0x20, ' ');
+  require(picked.committed_text == std::optional<std::string>("焱") &&
+              transition_counts_as_typing(picked.source.transition) &&
+              session.view().at("local_mode") == "none",
+          "Space did not commit the chaizi row");
+
   // "@" is Shift+2: the mode's key, not the second candidate. Backspace leaves it again.
   press('2', '@', 1);
   require(session.view().at("local_mode") == "mention" &&
@@ -241,16 +289,25 @@ int main(int argc, char **argv) {
                     {"cache", directory("cache")},
                     {"dictionaries", directory("dictionaries")},
                     {"preferences", preferences}};
+    // `--local-modes` 只跑不需要词库的本地模式路由用例（V、/、@、拆字）。整套冒烟在模拟的 Wine 下跑不完，这样仍能真跑这一段。
+#ifdef _WIN32
+    const bool local_modes_only = argc == 2 && std::wstring_view(argv[1]) == L"--local-modes";
+#else
+    const bool local_modes_only = argc == 2 && std::string_view(argv[1]) == "--local-modes";
+#endif
+    if (local_modes_only) {
+      local_mode_trigger_tests(options.dump());
+      std::cout << "Windows Server boundary: local-mode routing passed\n";
+      return 0;
+    }
     if (argc == 2) {
       const auto resources = std::filesystem::path(argv[1]);
       require(resources.is_absolute(), "Expected absolute resource directory");
       auto input = Json{{"resources", resources.u8string()},
                         {"state_root", (root / "prepared").u8string()}}
                        .dump();
-      std::unique_ptr<char, decltype(&msime_client_string_free)> prepared(
-          msime_client_prepare_host(
-              reinterpret_cast<const uint8_t *>(input.data()), input.size()),
-          msime_client_string_free);
+      auto prepared = msime::host_api::own_string(msime_client_prepare_host(
+          reinterpret_cast<const uint8_t *>(input.data()), input.size()));
       auto document = Json::parse(prepared.get());
       if (!document.at("ok").get<bool>()) {
         // The reply carries why. Asserting only on `ok` throws that away and
@@ -271,6 +328,86 @@ int main(int argc, char **argv) {
         FanyImeProtocol::Negotiate(hello, FanyImeProtocol::RequiredCapabilities)
             .accepted,
         "Shared protocol negotiation failed");
+    {
+      // Ctrl+Shift+J：只在开关打开、中文状态、不在 Engine 英文模式时交给 persist，不改组字，回复不带帧（TIP 不读它）。
+      using namespace msime::windows;
+      FocusGate gate;
+      FocusedSession focused(gate, 42, options.dump());
+      PipeTicket ticket{42, {1, 2, 3}};
+      auto first = *gate.begin(ticket, 77);
+      require(focused.prepare(first.pending), "Focus preparation failed");
+      require(gate.acknowledge(first.pending, [] { return true; }),
+              "Synthetic queue-test fence failed");
+      FanyImeNamedpipeData packet{};
+      packet.event_type = FanyImePipeEventType::KeyEvent;
+      packet.client_id = 42;
+      packet.request_id = 2;
+      packet.keycode = 'J';
+      packet.wch = 'j';
+      packet.modifiers_down = 0b11;
+      require(FanyImeProtocol::IsJapaneseToggleShortcut(packet.keycode,
+                                                        packet.modifiers_down),
+              "Ctrl+Shift+J fixture is not the shortcut");
+      size_t japanese_persists = 0;
+      auto persist_japanese = [&] {
+        ++japanese_persists;
+        return true;
+      };
+      // Engine 自己的英文模式里 TIP 仍报告中文，Server 这一侧同样不切换。英文模式只在没有组字时打得开，所以先测它。
+      require(focused.set_dedicated_english(first.pending, true).has_value(),
+              "Dedicated English fixture failed");
+      auto dedicated = focused.toggle_japanese(first.pending, packet, true,
+                                               persist_japanese);
+      require(dedicated && !dedicated->encoded && japanese_persists == 0 &&
+                  focused.confirm(first.pending, packet.request_id),
+              "Dedicated English persisted a Japanese toggle");
+      require(focused.set_dedicated_english(first.pending, false).has_value(),
+              "Leaving dedicated English failed");
+      ++packet.request_id;
+      packet.keycode = 'N';
+      packet.wch = 'n';
+      packet.modifiers_down = 0;
+      require(focused.key(first.pending, packet, ReplyPath::Composition) &&
+                  focused.confirm(first.pending, packet.request_id) &&
+                  focused.view().at("editing_text") == "n",
+              "Japanese-toggle fixture did not compose");
+      const auto composing = focused.view().at("editing_text");
+      ++packet.request_id;
+      packet.keycode = 'J';
+      packet.wch = 'j';
+      packet.modifiers_down = 0b11;
+      auto disabled = focused.toggle_japanese(first.pending, packet, false,
+                                              persist_japanese);
+      require(disabled && !disabled->encoded && japanese_persists == 0 &&
+                  focused.confirm(first.pending, packet.request_id),
+              "Disabled Japanese toggle persisted a scheme");
+      ++packet.request_id;
+      auto enabled = focused.toggle_japanese(first.pending, packet, true,
+                                             persist_japanese);
+      require(enabled && !enabled->encoded && japanese_persists == 1 &&
+                  focused.confirm(first.pending, packet.request_id) &&
+                  focused.view().at("editing_text") == composing,
+              "Japanese toggle changed the composition");
+      ++packet.request_id;
+      auto rejected_toggle = focused.toggle_japanese(
+          first.pending, packet, true, [&] {
+            ++japanese_persists;
+            return false;
+          });
+      require(rejected_toggle && !rejected_toggle->encoded &&
+                  japanese_persists == 2 &&
+                  focused.confirm(first.pending, packet.request_id) &&
+                  focused.view().at("editing_text") == composing,
+              "A busy Japanese toggle changed the composition");
+      ++packet.request_id;
+      require(focused.set_input_enabled(first.pending, false),
+              "English-mode fixture failed");
+      auto english = focused.toggle_japanese(first.pending, packet, true,
+                                             persist_japanese);
+      require(english && !english->encoded && japanese_persists == 2 &&
+                  focused.confirm(first.pending, packet.request_id),
+              "English mode persisted a Japanese toggle");
+    }
     {
       using namespace msime::windows;
       FocusGate gate;

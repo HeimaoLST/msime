@@ -1,5 +1,6 @@
 package app.msime.android;
 
+
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -37,12 +38,9 @@ public final class HandwritingCanvas extends View {
     public HandwritingCanvas(Context context, AttributeSet attributes) {
         super(context, attributes);
         setContentDescription("手写区域；用手指书写，停笔后选择候选文字");
-        stroke.setStyle(Paint.Style.STROKE);
-        stroke.setStrokeCap(Paint.Cap.ROUND);
-        stroke.setStrokeJoin(Paint.Join.ROUND);
-        stroke.setStrokeWidth(KeyboardGeometry.floatPixels(context, 3));
+        HandwritingStrokeRenderer.configure(stroke, DimensionPolicy.floatPixels(context, 3));
         guide.setStyle(Paint.Style.STROKE);
-        guide.setStrokeWidth(KeyboardGeometry.floatPixels(context, 1));
+        guide.setStrokeWidth(DimensionPolicy.floatPixels(context, 1));
         applySkin(KeyboardSkin.system(false));
     }
 
@@ -103,7 +101,7 @@ public final class HandwritingCanvas extends View {
         super.onDraw(canvas);
         RectF card = cardRect.isEmpty() ? drawCard : cardRect;
         if (card == drawCard) drawCard.set(0, 0, getWidth(), getHeight());
-        float radius = KeyboardGeometry.floatPixels(getContext(), 10);
+        float radius = DimensionPolicy.floatPixels(getContext(), 10);
         canvas.drawRoundRect(card, radius, radius, background);
         guideLines[0] = card.centerX();
         guideLines[1] = card.top;
@@ -114,20 +112,7 @@ public final class HandwritingCanvas extends View {
         guideLines[6] = card.right;
         guideLines[7] = card.centerY();
         canvas.drawLines(guideLines, guide);
-        for (java.util.List<HandwritingInk.Point> points : ink.strokesForDrawing()) {
-            if (points.isEmpty()) continue;
-            if (points.size() == 1) {
-                HandwritingInk.Point point = points.get(0);
-                canvas.drawPoint(point.x(), point.y(), stroke);
-                continue;
-            }
-            strokePath.reset();
-            strokePath.moveTo(points.get(0).x(), points.get(0).y());
-            for (int index = 1; index < points.size(); index++) {
-                strokePath.lineTo(points.get(index).x(), points.get(index).y());
-            }
-            canvas.drawPath(strokePath, stroke);
-        }
+        HandwritingStrokeRenderer.draw(canvas, stroke, strokePath, ink.strokesForDrawing());
     }
 
     @Override public boolean onTouchEvent(MotionEvent event) {

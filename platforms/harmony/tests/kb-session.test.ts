@@ -30,18 +30,23 @@ function check(condition: boolean, message: string): void {
 
 console.log("KeyboardSession settings links and common phrases");
 
-group("the function panel's 词库, 反馈 and 关于 open their settings pages", () => {
-  check(
-    SettingsPageLink.PAGES.length === 3 &&
-      SettingsPageLink.accepts("dictionary") &&
-      SettingsPageLink.accepts("feedback") &&
-      SettingsPageLink.accepts("about"),
-    "exactly the three packages/ui page ids",
-  );
-  check(!SettingsPageLink.accepts("account"), "another real page is not linked");
-  check(!SettingsPageLink.accepts(""), "nor is an empty id");
-  check(!SettingsPageLink.accepts("About"), "and ids are matched exactly");
-});
+// 皮肤选择器的「更多皮肤」打开「皮肤」页：键盘读不到设置应用下载的社区皮肤，那一页能用全部皮肤。
+group(
+  "the function panel's 词库, 反馈, 关于 and the skin picker's 更多皮肤 open their settings pages",
+  () => {
+    check(
+      SettingsPageLink.PAGES.length === 4 &&
+        SettingsPageLink.accepts("dictionary") &&
+        SettingsPageLink.accepts("feedback") &&
+        SettingsPageLink.accepts("about") &&
+        SettingsPageLink.accepts("skin"),
+      "exactly the four packages/ui page ids",
+    );
+    check(!SettingsPageLink.accepts("account"), "another real page is not linked");
+    check(!SettingsPageLink.accepts(""), "nor is an empty id");
+    check(!SettingsPageLink.accepts("About"), "and ids are matched exactly");
+  },
+);
 
 group("a Want's page parameter is honoured only for a linked page", () => {
   check(SettingsPageLink.fromParameter("feedback") === "feedback", "a linked id passes through");

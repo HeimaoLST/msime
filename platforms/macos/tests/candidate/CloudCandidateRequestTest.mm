@@ -111,6 +111,23 @@ static void TestTranslationTransport() {
         [request start];
         assert(rejected && ![request valueForKey:@"session"]);
     }
+    // DeepL 官方 API 的描述器：`DeepL-Auth-Key` 鉴权、text 为数组；最长密钥带前缀是 4111 字节，再长一个字节就拒绝。
+    NSMutableDictionary *deepl = [descriptor mutableCopy];
+    deepl[@"url"] = @"https://api-free.deepl.com/v2/translate";
+    deepl[@"body"] = @{@"text":@[@"测试"], @"source_lang":@"ZH", @"target_lang":@"EN-US"};
+    NSString *longestKey = [@"" stringByPaddingToLength:4096 withString:@"k" startingAtIndex:0];
+    deepl[@"headers"] = @{@"Content-Type":@"application/json", @"Authorization":[@"DeepL-Auth-Key " stringByAppendingString:longestKey]};
+    MSIMECloudCandidateRequest *official = [[MSIMECloudCandidateRequest alloc] initWithTranslationDescriptor:deepl
+        configuration:NSURLSessionConfiguration.ephemeralSessionConfiguration completion:^(NSData *body) { (void)body; }];
+    NSURLRequest *officialRequest = [official valueForKey:@"translationRequest"];
+    assert(officialRequest && [[officialRequest valueForHTTPHeaderField:@"Authorization"] hasPrefix:@"DeepL-Auth-Key "]);
+    assert([[NSJSONSerialization JSONObjectWithData:officialRequest.HTTPBody options:0 error:nil] isEqual:deepl[@"body"]]);
+    deepl[@"headers"] = @{@"Content-Type":@"application/json", @"Authorization":[@"DeepL-Auth-Key k" stringByAppendingString:longestKey]};
+    __block BOOL oversized = NO;
+    MSIMECloudCandidateRequest *tooLong = [[MSIMECloudCandidateRequest alloc] initWithTranslationDescriptor:deepl
+        configuration:NSURLSessionConfiguration.ephemeralSessionConfiguration completion:^(NSData *body) { assert(!body); oversized = YES; }];
+    [tooLong start];
+    assert(oversized && ![tooLong valueForKey:@"session"]);
     NSMutableDictionary *loopback = [descriptor mutableCopy];
     loopback[@"url"] = @"http://127.0.0.1:8765/translate";
     MSIMECloudCandidateRequest *local = [[MSIMECloudCandidateRequest alloc]

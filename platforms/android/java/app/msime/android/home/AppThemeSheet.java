@@ -1,16 +1,17 @@
 package app.msime.android.home;
 
+import app.msime.android.LayoutPolicy;
+
+import app.msime.android.DimensionPolicy;
+
+import app.msime.android.ThemeColorPolicy;
 import android.content.Context;
-import android.view.View;
-import android.view.ViewGroup;
 import android.widget.LinearLayout;
-import android.widget.TextView;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
 import app.msime.android.AndroidLocalSettings;
 import app.msime.android.SyncSignals;
 import app.msime.android.SyncSwitch;
-import app.msime.android.ViewPolicy;
 import com.google.android.material.bottomsheet.BottomSheetDialog;
 import java.util.List;
 import org.json.JSONObject;
@@ -48,18 +49,10 @@ final class AppThemeSheet {
     static void show(Fragment host, @Nullable JSONObject preferences, Runnable refresh) {
         Context context = host.requireContext();
         BottomSheetDialog dialog = new BottomSheetDialog(context);
-        LinearLayout root = Ui.column(context);
-        root.addView(Ui.sheetDragHandle(context));
+        LinearLayout root = LayoutPolicy.column(context);
+        root.addView(LayoutPolicy.sheetDragHandle(context));
 
-        LinearLayout header = Ui.column(context);
-        ViewPolicy.setCenteredHorizontally(header);
-        Ui.setSheetHeaderPadding(header, context);
-        TextView heading = Ui.sheetHeading(context, "应用主题");
-        header.addView(heading);
-        TextView note = Ui.sheetSubtitle(context, "四季会随季节自动更换配色");
-        LinearLayout.LayoutParams noteParams = Ui.wrap();
-        noteParams.topMargin = Ui.dp(context, 2);
-        header.addView(note, noteParams);
+        LinearLayout header = SheetHeaderView.create(context, "应用主题", "四季会随季节自动更换配色");
 
         // 颜色模式：键盘和本应用的浅色 / 深色，与应用主题的季节无关。
         String mode = preferences == null ? AppMode.SYSTEM : AppMode.of(preferences);
@@ -72,24 +65,24 @@ final class AppThemeSheet {
             dialog.dismiss();
             save(host, "theme", MODES[index][0], refresh);
         });
-        LinearLayout.LayoutParams modeParams = Ui.wrap();
-        modeParams.topMargin = Ui.dp(context, 12);
+        LinearLayout.LayoutParams modeParams = LayoutPolicy.wrapParams();
+        modeParams.topMargin = DimensionPolicy.pixels(context, 12);
         header.addView(modes, modeParams);
         root.addView(header);
 
         String current = theme(context);
         for (int index = 0; index < THEMES.length; index++) {
-            if (index > 0) root.addView(Ui.divider(context, true));
+            if (index > 0) root.addView(LayoutPolicy.divider(context, ThemeColorPolicy.hairline(context), true));
             String id = THEMES[index][0];
             root.addView(SheetOptionView.create(context, THEMES[index][1], id.equals(current), false,
-                Ui.accent(context), id.equals(current), () -> {
+                ThemeColorPolicy.accent(context), id.equals(current), () -> {
                 dialog.dismiss();
                 if (!id.equals(current)) saveAppTheme(host, id, refresh);
             }));
         }
 
-        root.addView(Ui.sheetSeparator(context));
-        root.addView(SheetOptionView.create(context, "取消", false, false, Ui.accent(context), false,
+        root.addView(LayoutPolicy.colorBand(context, ThemeColorPolicy.page(context), 8));
+        root.addView(SheetOptionView.create(context, "取消", false, false, ThemeColorPolicy.accent(context), false,
             dialog::cancel));
         dialog.setContentView(root);
         dialog.show();

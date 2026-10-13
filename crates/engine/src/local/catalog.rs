@@ -104,7 +104,7 @@ pub fn read_emoji_catalog_slice(
     bound.map_err(|_| EngineError::failed(diagnostics::EMOJI_CATALOG_QUERY_REJECTED))?;
 
     let mut result = EmojiCatalogSlice {
-        items: Vec::with_capacity(limit),
+        items: Vec::new(),
         next_offset: offset,
         complete: false,
     };
@@ -132,6 +132,9 @@ pub fn read_emoji_catalog_slice(
             continue;
         }
         if let Some(text) = text {
+            if result.items.capacity() == 0 {
+                result.items.reserve_exact(limit);
+            }
             result.items.push(EmojiCatalogItem {
                 text,
                 annotation: annotation.unwrap_or_default(),
@@ -371,6 +374,10 @@ mod tests {
         let search =
             read_emoji_catalog_slice(&resources, "xiao", "", "", 0, 10, "", false).unwrap();
         assert_eq!(texts(&search), ["😀", "😄"]);
+        let empty =
+            read_emoji_catalog_slice(&resources, "不存在", "", "", 0, 10, "", false).unwrap();
+        assert!(empty.items.is_empty());
+        assert_eq!(empty.items.capacity(), 0);
         // Deduplicated pages keep rows with an empty group.
         let dedup =
             read_emoji_catalog_slice(&resources, "weixiao", "", "", 0, 10, "", true).unwrap();

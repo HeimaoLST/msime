@@ -13,6 +13,18 @@ pub const LATTICE_SOURCE: u8 = 8;
 /// `CandidateSource::QuickPhrase`, `Emoji` and `Kaomoji`: entries a keyword finds in a catalog, listed in the catalog's order. They are not readings of the key, so the reranker neither compares them nor promotes them: typing `kiss` in kaomoji mode had the model seat the catalog's 646th entry, `French Kiss!(*￣(￣　*)`, above its first.
 const CATALOG_SOURCES: [u8; 3] = [5, 6, 7];
 
+/// `CandidateSource::AiSuggestion` 和它的占位行 `AiPending`：在线座位规则（`normalize_online_slots`）总把它们放回 AI 座位，模型提它们也没用；更要紧的是，若让 AI 候选参与比较，它一到就可能抢走本来要提到首位的本地候选，回答到达时本地候选的次序就变了（#6888）。
+const AI_SEAT_SOURCES: [u8; 2] = [3, 12];
+
+/// `CandidateSource::EnglishDictionary`。混输英文只在拼音拆不开、英文完全匹配（或用户固定在第一位）时才由引擎放到首位，那是引擎有意的安排；句子模型读的是中文，不能因为英文行不算词典命中就把中文行转到它前面。这道检查不分方案和模式：只有英文行的列表（比如专用英文模式、临时英文）首行也是英文，同样不重排，这是有意的：模型读的是中文，比较英文行没有意义。
+const ENGLISH_SOURCE: u8 = 4;
+
+/// `CandidateSource::MixedJapanese`：日文混输行。它领先时是引擎判定拼音给不出整段的词，和领先的英文一样不重排；它在别的位置时也不让模型拿它比较、把它提到首位，句子模型读的是中文。
+const MIXED_JAPANESE_SOURCE: u8 = 13;
+
+/// 候选列表通常不超过一页；短列表的文本引用放在栈上，较大列表继续走堆缓冲。
+const SMALL_RERANK_TEXTS: usize = 128;
+
 /// The traits of the scheme behind `scheme`, which the Engine reports as its `SchemeType` ordinal. Only the placeholder snapshot of a failed refresh carries an ordinal no scheme has; each caller decides what that placeholder means, the way the ordinal comparisons this replaces did.
 fn scheme_type(scheme: u8) -> Option<SchemeType> {
     SchemeType::from_u8(scheme)
@@ -23,28 +35,38 @@ pub fn reorders_candidates(scheme: u8) -> bool {
     scheme_type(scheme).is_none_or(SchemeType::holds_phrase_progress)
 }
 
-/// Apply a permutation in place. `order` maps each new seat to its old seat.
+/// 方案的纠错行能不能被重排器提到首位。双拼的纠错整句按产品取舍一律不抢首选（#6034，引擎把它排在整句块之后），所以重排时它既不参与比较，也不让整张表失去词典命中的豁免；全拼的纠错行本来就允许领先（`typo_lead_margin`），照旧。
+fn corrections_may_lead(scheme: u8) -> bool {
+    scheme_type(scheme) != Some(SchemeType::Shuangpin)
+}
+
+/// 原地应用排列，`order` 将每个新座位映射到旧座位。
 ///
-/// The order is built as a permutation of the candidate seats, so each cycle can be rotated with
-/// swaps. Keeping the operation in place matters here because the same order is applied to eight
-/// parallel arrays, several of which contain candidate strings.
+/// 按循环交换候选所有权，不复制元素。记录已访问座位，让每条循环只遍历一次；
+/// 短列表用栈缓冲，大列表才申请辅助缓冲，恒等排列直接返回。
 pub fn apply_order<T>(items: &mut [T], order: &[usize]) {
     debug_assert_eq!(items.len(), order.len());
+    if order.iter().enumerate().all(|(seat, row)| seat == *row) {
+        return;
+    }
+    let mut stack_visited = [false; 128];
+    let mut heap_visited;
+    let visited = if items.len() <= stack_visited.len() {
+        &mut stack_visited[..items.len()]
+    } else {
+        heap_visited = vec![false; items.len()];
+        &mut heap_visited[..]
+    };
     for start in 0..items.len() {
-        // Process each cycle only from its smallest member, without allocating a visited bitmap.
-        let mut current = order[start];
-        let mut smallest = start;
-        while current != start {
-            smallest = smallest.min(current);
-            current = order[current];
-        }
-        if smallest != start {
+        if visited[start] {
             continue;
         }
-        current = start;
+        visited[start] = true;
+        let mut current = start;
         while order[current] != start {
             let next = order[current];
             items.swap(current, next);
+            visited[next] = true;
             current = next;
         }
     }
@@ -177,13 +199,13 @@ impl<'a> OrderRowSource<'a> for ParallelOrderRows<'a> {
 
 /// rerank() 的决策部分：返回应当移到首位的行下标；None 表示不动。
 ///
-/// `scheme` 是 `SchemeType` 序号；不允许重排的方案（韩文汉字表）返回 None，五笔且 `!answered_by_pinyin_fallback` 时返回 None，行数 < 2 时返回 None。`Reranker::best_where` 是 `&mut self`，因此这里取 `&mut`。
+/// `scheme` 是 `SchemeType` 序号；不允许重排的方案（韩文汉字表）返回 None，五笔且 `!answered_by_pinyin_fallback` 时返回 None，行数 < 2 时返回 None，首行是英文时返回 None。`Reranker::best_where` 是 `&mut self`，因此这里取 `&mut`。
 pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
     reranker: &mut Reranker,
     context: &str,
     scheme: u8,
     answered_by_pinyin_fallback: bool,
-    rows: &R,
+    rows: &'a R,
 ) -> Option<usize> {
     // A Korean Hanja list is a table in frequency order for one syllable, not Chinese text the language model can read.
     if !reorders_candidates(scheme) {
@@ -196,8 +218,10 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
     if rows.len() < 2 {
         return None;
     }
-    let mut texts = Vec::with_capacity(rows.len());
-    texts.extend((0..rows.len()).map(|index| rows.get(index).text));
+    // 引擎让英文或日文混输行领先的列表原样保留，见 `ENGLISH_SOURCE`、`MIXED_JAPANESE_SOURCE`。
+    if matches!(rows.get(0).source, ENGLISH_SOURCE | MIXED_JAPANESE_SOURCE) {
+        return None;
+    }
     // A dictionary hit earns the model's deference because it carries corpus frequency for the
     // key the user typed. That premise fails the moment the engine offers a correction of that
     // key: the frequency then belongs to the letters that arrived rather than to the word they
@@ -206,8 +230,17 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
     //
     // With correction off, or with nothing corrected, this is exactly the previous behaviour,
     // which is what the 2052-case dictionary measurement was taken on.
-    let corrected_key = (0..rows.len()).any(|index| rows.get(index).corrected);
-    let answers_key = |row: OrderRow<'a>| row.answers_key && !CATALOG_SOURCES.contains(&row.source);
+    //
+    // 不许领先的纠错行（双拼）只是附带的一个改正：它不算回答了按键，模型不拿它比较，也不因为它的存在撤掉词典命中的豁免，排序和没有纠错时完全一样。
+    let corrections_lead = corrections_may_lead(scheme);
+    let corrected_key = corrections_lead && (0..rows.len()).any(|index| rows.get(index).corrected);
+    let answers_key = |row: OrderRow<'a>| {
+        row.answers_key
+            && !CATALOG_SOURCES.contains(&row.source)
+            && !AI_SEAT_SOURCES.contains(&row.source)
+            && row.source != MIXED_JAPANESE_SOURCE
+            && (corrections_lead || !row.corrected)
+    };
     // Only candidates that answer the key are scored, so they are the ones the window has to leave room for.
     let longest = (0..rows.len())
         .map(|index| rows.get(index))
@@ -216,11 +249,30 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
         .max()
         .unwrap_or(0);
     let context = rerank_context(context, reranker.model().context_length(), longest);
-    reranker.best_where(context, &texts, |index| CandidateFacts {
-        answers_key: answers_key(rows.get(index)),
-        trusted_dictionary_hit: DICTIONARY_SOURCES.contains(&rows.get(index).source)
-            && !corrected_key,
+    with_row_texts(rows, |texts| {
+        reranker.best_where(context, texts, |index| CandidateFacts {
+            answers_key: answers_key(rows.get(index)),
+            trusted_dictionary_hit: DICTIONARY_SOURCES.contains(&rows.get(index).source)
+                && !corrected_key,
+        })
     })
+}
+
+fn with_row_texts<'a, R, T>(rows: &'a R, operation: impl FnOnce(&[&'a str]) -> T) -> T
+where
+    R: OrderRowSource<'a> + ?Sized,
+{
+    if rows.len() <= SMALL_RERANK_TEXTS {
+        let mut texts = [""; SMALL_RERANK_TEXTS];
+        for (index, text) in texts.iter_mut().enumerate().take(rows.len()) {
+            *text = rows.get(index).text;
+        }
+        operation(&texts[..rows.len()])
+    } else {
+        let mut texts = Vec::with_capacity(rows.len());
+        texts.extend((0..rows.len()).map(|index| rows.get(index).text));
+        operation(&texts)
+    }
 }
 
 /// demote_runner_up_readings() 的决策部分：返回 order（新座位 -> 旧座位）；恒等排列时返回 None。
@@ -409,6 +461,100 @@ mod tests {
         assert_eq!(values, vec!["two", "four", "one", "zero", "three"]);
     }
 
+    #[test]
+    fn in_place_order_preserves_ownership_and_storage_boundaries() {
+        struct Value(usize);
+        for count in [0, 1, 127, 128, 129, 256, 8192] {
+            let mut order: Vec<usize> = (0..count).collect();
+            if count > 1 {
+                order[1..].rotate_left(1);
+            }
+            let mut values: Vec<Value> = (0..count).map(Value).collect();
+            let pointer = values.as_ptr();
+            let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+                apply_order(&mut values, &order);
+            });
+            assert_eq!(values.as_ptr(), pointer);
+            assert!(allocations <= usize::from(count > 128));
+            assert_eq!(
+                values.iter().map(|value| value.0).collect::<Vec<_>>(),
+                order
+            );
+        }
+        let mut values: Vec<usize> = (0..8192).collect();
+        let order = values.clone();
+        let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            apply_order(&mut values, &order);
+        });
+        assert_eq!(values, order);
+        assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn in_place_order_matches_every_small_permutation() {
+        fn visit(order: &mut [usize], start: usize) {
+            if start == order.len() {
+                let mut values: Vec<usize> = (0..order.len()).collect();
+                apply_order(&mut values, order);
+                assert_eq!(values, order);
+                return;
+            }
+            for next in start..order.len() {
+                order.swap(start, next);
+                visit(order, start + 1);
+                order.swap(start, next);
+            }
+        }
+        for count in 0..=7 {
+            visit(&mut (0..count).collect::<Vec<_>>(), 0);
+        }
+    }
+
+    #[test]
+    #[ignore = "长循环的配对计时，需在空闲主机上显式运行"]
+    fn long_candidate_permutations_have_linear_scaling() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        fn elapsed(count: usize) -> u128 {
+            let order: Vec<usize> = std::iter::once(0)
+                .chain(2..count)
+                .chain(std::iter::once(1))
+                .collect();
+            let mut values: Vec<usize> = (0..count).collect();
+            apply_order(&mut values, &order);
+            assert_eq!(values, order);
+            let begin = Instant::now();
+            for _ in 0..32768 / count {
+                apply_order(black_box(&mut values), black_box(&order));
+            }
+            black_box(values);
+            begin.elapsed().as_nanos()
+        }
+        // 两种长度处理相同总行数；交替先后顺序取中位数，预算留出主机噪声。
+        let mut small = Vec::new();
+        let mut large = Vec::new();
+        for round in 0..5 {
+            if round % 2 == 0 {
+                small.push(elapsed(128));
+                large.push(elapsed(8192));
+            } else {
+                large.push(elapsed(8192));
+                small.push(elapsed(128));
+            }
+        }
+        small.sort_unstable();
+        large.sort_unstable();
+        eprintln!(
+            "permutation_equal_rows_small_ns={} large_ns={}",
+            small[2], large[2]
+        );
+        assert!(
+            large[2] <= small[2] * 16,
+            "同等总行数的长排列成本过高: {large:?} / {small:?}"
+        );
+    }
+
     /// Only `CandidateSource::Generated` names alternative readings of one key. Every other source
     /// is plural by design — English words, emoji, kaomoji, quick phrases, AI suggestions — and an
     /// earlier version of this rule kept one of each and dropped the rest.
@@ -418,6 +564,16 @@ mod tests {
         let (order, allocations) =
             crate::ime::personal_rerank::allocations::count(|| runner_up_order(0, &rows));
         assert_eq!(order, None);
+        assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn short_rerank_texts_need_no_temporary_heap_state() {
+        let rows = [row("你好", LATTICE_SOURCE), row("倪好", LATTICE_SOURCE)];
+        let (summary, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            with_row_texts(&rows, |texts| (texts.len(), texts[0], texts[1]))
+        });
+        assert_eq!(summary, (2, "你好", "倪好"));
         assert_eq!(allocations, 0);
     }
 
@@ -458,6 +614,15 @@ mod tests {
         }
         // 刷新失败时的占位快照不对应任何方案，照旧允许重排。
         assert!(reorders_candidates(255));
+    }
+
+    #[test]
+    fn only_shuangpin_corrections_stay_behind() {
+        let shuangpin = SchemeType::Shuangpin as u8;
+        assert!(!corrections_may_lead(shuangpin));
+        for ordinal in (0..=u8::MAX).filter(|&ordinal| ordinal != shuangpin) {
+            assert!(corrections_may_lead(ordinal), "{ordinal}");
+        }
     }
 
     #[test]

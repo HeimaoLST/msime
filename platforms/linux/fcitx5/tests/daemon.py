@@ -13,6 +13,9 @@ import dbus
 import dbus.mainloop.glib
 from gi.repository import GLib
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+from host_api import ResponseDecoder
+
 
 def wait(predicate):
     deadline = time.monotonic() + 15
@@ -23,6 +26,31 @@ def wait(predicate):
             return
         time.sleep(0.02)
     raise AssertionError("Expected frontend state was not observed")
+
+
+def daemon_environment(root, addon):
+    """把真实 daemon 的目录、插件与状态限制在合成夹具内。"""
+    config = root / "config" / "fcitx5"
+    config.mkdir(parents=True)
+    (config / "profile").write_text(
+        "[Groups/0]\nName=Default\nDefault Layout=us\nDefaultIM=msime\n"
+        "[Groups/0/Items/0]\nName=keyboard-us\nLayout=\n"
+        "[Groups/0/Items/1]\nName=msime\nLayout=\n[GroupOrder]\n0=Default\n")
+    runtime = root / "run"
+    runtime.mkdir(mode=0o700)
+    data = root / "data" / "fcitx5"
+    (data / "addon").mkdir(parents=True)
+    (data / "inputmethod").mkdir()
+    source = Path(__file__).resolve().parents[1]
+    (data / "addon" / "msime.conf").write_bytes((source / "msime.conf").read_bytes())
+    (data / "inputmethod" / "msime.conf").write_bytes((source / "msime-inputmethod.conf").read_bytes())
+    system_lib = subprocess.check_output(
+        ["pkg-config", "--variable=libdir", "Fcitx5Core"], text=True).strip()
+    return dict(os.environ, XDG_CONFIG_HOME=str(root / "config"),
+               XDG_DATA_HOME=str(root / "data"), XDG_STATE_HOME=str(root / "xdg-state"),
+               XDG_RUNTIME_DIR=str(runtime),
+               MSIME_FCITX5_OPTIONS=str(root / "options.json"),
+               FCITX_ADDON_DIRS=f"{addon.parent}:{system_lib}/fcitx5")
 
 
 def main():
@@ -38,40 +66,44 @@ def main():
         host = ctypes.CDLL(str(library))
         host.msime_client_prepare_host.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
         host.msime_client_prepare_host.restype = ctypes.c_void_p
-        host.msime_client_string_free.argtypes = [ctypes.c_void_p]
+        responses = ResponseDecoder(host)
         request = json.dumps({"resources": str(resources), "state_root": str(root / "state")}).encode()
         raw = host.msime_client_prepare_host(request, len(request))
-        assert raw, "Host preparation returned no result"
-        try:
-            result = json.loads(ctypes.string_at(raw))
-        finally:
-            host.msime_client_string_free(raw)
+        result = responses.decode(raw)
         assert result["ok"], "Host preparation failed"
         options = result["value"]
+        for name in ("msime_client_load_preferences", "msime_client_save_preferences"):
+            getattr(host, name).restype = ctypes.c_void_p
+        host.msime_client_load_preferences.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
+        host.msime_client_save_preferences.argtypes = [
+            ctypes.c_char_p, ctypes.c_size_t, ctypes.c_uint64, ctypes.c_char_p, ctypes.c_size_t]
+
+        def call(raw):
+            assert raw, "Host API returned no result"
+            try:
+                reply = json.loads(ctypes.string_at(raw))
+            finally:
+                host.msime_client_string_free(raw)
+            assert reply["ok"], "Host API request failed"
+            return reply["value"]
+
+        def publish():
+            # 设置页的做法：先写偏好存储，再把同一份偏好抄进 runtime options。插件新建会话时以存储为准，只改文件的偏好不会生效。
+            store = options["preferences_directory"].encode()
+            snapshot = call(host.msime_client_load_preferences(store, len(store)))
+            revision = snapshot["revision"]
+            snapshot["preferences"] = options["preferences"]
+            document = json.dumps(snapshot).encode()
+            call(host.msime_client_save_preferences(store, len(store), revision, document, len(document)))
+            (root / "options.json").write_text(json.dumps(options))
+
         options["preferences"].update(learning=False, cloud_candidates=False)
         if "--wayland-punctuation" in sys.argv[4:]:
             options["preferences"]["usage_reporting"] = False
-        (root / "options.json").write_text(json.dumps(options))
-        config = root / "config" / "fcitx5"
-        config.mkdir(parents=True)
-        (config / "profile").write_text(
-            "[Groups/0]\nName=Default\nDefault Layout=us\nDefaultIM=msime\n"
-            "[Groups/0/Items/0]\nName=keyboard-us\nLayout=\n"
-            "[Groups/0/Items/1]\nName=msime\nLayout=\n[GroupOrder]\n0=Default\n")
+        publish()
+        env = daemon_environment(root, addon)
         runtime = root / "run"
-        runtime.mkdir(mode=0o700)
-        data = root / "data" / "fcitx5"
-        (data / "addon").mkdir(parents=True)
-        (data / "inputmethod").mkdir()
         source = Path(__file__).resolve().parents[1]
-        (data / "addon" / "msime.conf").write_bytes((source / "msime.conf").read_bytes())
-        (data / "inputmethod" / "msime.conf").write_bytes((source / "msime-inputmethod.conf").read_bytes())
-        system_lib = subprocess.check_output(
-            ["pkg-config", "--variable=libdir", "Fcitx5Core"], text=True).strip()
-        env = dict(os.environ, XDG_CONFIG_HOME=str(root / "config"),
-                   XDG_DATA_HOME=str(root / "data"), XDG_RUNTIME_DIR=str(runtime),
-                   MSIME_FCITX5_OPTIONS=str(root / "options.json"),
-                   FCITX_ADDON_DIRS=f"{addon.parent}:{system_lib}/fcitx5")
         if "--page-number" in sys.argv[4:]:
             env["FCITX_X11_USE_CLIENT_SIDE_UI"] = "1"
         if "--wayland-punctuation" in sys.argv[4:]:
@@ -128,7 +160,7 @@ def main():
                             options["preferences"].pop("show_candidate_page_number", None)
                         else:
                             options["preferences"]["show_candidate_page_number"] = show_page
-                        (root / "options.json").write_text(json.dumps(options))
+                        publish()
                         control.ReloadAddonConfig("msime")
                         panels.clear()
                         for character in "nihao":

@@ -23,9 +23,9 @@ public final class CandidateTranslationPolicy {
     /** Primary always falls back to English; a malformed or duplicate secondary is ignored. */
     public static List<String> targets(String primary, String secondary) {
         ArrayList<String> result = new ArrayList<>(MAX_TARGETS);
-        String first = normalize(primary);
+        String first = TextPolicy.lowercaseTrimmed(primary);
         result.add(SUPPORTED.contains(first) ? first : "en");
-        String second = normalize(secondary);
+        String second = TextPolicy.lowercaseTrimmed(secondary);
         if (SUPPORTED.contains(second) && !result.contains(second)) result.add(second);
         return List.copyOf(result);
     }
@@ -36,40 +36,124 @@ public final class CandidateTranslationPolicy {
         return String.join("\n", glosses);
     }
 
-    /** Return the bounded, user-visible gloss rows that a long press may insert. */
+    /** 长按候选最多给出的可上屏义项数，与鸿蒙 {@code TranslationSensePolicy.MAX_SENSES} 相同。 */
+    public static final int MAX_INSERTION_SENSES = 9;
+
+    /**
+     * 长按候选可以上屏的义项：先按换行切成每种目标语言一行，再把每行按 {@code ;} 或全角 {@code ；} 切成义项，去掉首尾空白、空项和重复项，按目标语言顺序、行内义项顺序排列。
+     *
+     * <p>分号规则对应 {@code shared/input/GlossSenses.h} 的 {@code gloss_senses}（macOS、Linux、Windows 共用）。换行处有意与它不同：{@code gloss_senses} 把换行当义项内的折行，本宿主的换行是 {@link #joinGlosses} 写进去的语言分隔，所以先按换行切行。账号译文同样会被切开，一句本身含分号的译文会成为几项，桌面和鸿蒙也是这样。
+     */
     public static List<String> insertionGlosses(String translation) {
         if (translation == null || translation.isEmpty()) return List.of();
-        ArrayList<String> result = new ArrayList<>(MAX_TARGETS);
-        for (String value : translation.split("\\R", -1)) {
-            String gloss = TextPolicy.trimmed(value);
-            if (gloss.isEmpty() || result.contains(gloss)
-                    || TextPolicy.utf8Length(gloss) > 4096
-                    || TextPolicy.hasControl(gloss) || !TextPolicy.validUnicode(gloss)) continue;
-            result.add(gloss);
-            if (result.size() == MAX_TARGETS) break;
+        ArrayList<String> result = new ArrayList<>(MAX_INSERTION_SENSES);
+        String[] rows = translation.split("\\R", -1);
+        for (int row = 0; row < rows.length && result.size() < MAX_INSERTION_SENSES; row++) {
+            for (String value : rows[row].split("[;；]", -1)) {
+                if (result.size() >= MAX_INSERTION_SENSES) break;
+                String gloss = TextPolicy.trimmed(value);
+                if (!insertableGloss(gloss, result)) continue;
+                // 只有后面的语言行确实有新的可上屏义项，才为它留一个菜单位置。
+                if (result.size() == MAX_INSERTION_SENSES - 1
+                        && hasLaterInsertionSense(rows, row, result)) break;
+                result.add(gloss);
+            }
         }
         return List.copyOf(result);
     }
 
-    /**
-     * Whether candidate words may be sent to the MSIME account endpoint (api.msime.app).
-     *
-     * <p>Only an explicit `translation_account` choice selects it, and a user's own NiuTrans or custom service always wins over it, so nothing is sent when the user never chose. This mirrors the `translation_account` rule in the shared core (`msime_client_translation_query` in `crates/host-api/src/ffi/providers.rs`) except for the Tencent clause: this host has no Tencent client and neither Android settings surface can enter Tencent credentials. The shared settings page also writes Tencent's `enabled` to false when the account is chosen; the native feature switch writes only `translation_account`. Plain booleans because the JVM smokes cannot load org.json.
-     */
-    public static boolean accountSelected(boolean candidateTranslations,
-            boolean translationAccount, boolean niutransEnabled, boolean customEnabled) {
-        return candidateTranslations && translationAccount && !niutransEnabled && !customEnabled;
+    private static boolean hasLaterInsertionSense(String[] rows, int row, List<String> selected) {
+        for (int next = row + 1; next < rows.length; next++) {
+            for (String value : rows[next].split("[;；]", -1)) {
+                if (insertableGloss(TextPolicy.trimmed(value), selected)) return true;
+            }
+        }
+        return false;
     }
 
-    /** 偏好变化后当前候选行中的译文必须先清空，再等待新配置的回答。 */
+    private static boolean insertableGloss(String gloss, List<String> selected) {
+        return TextPolicy.boundedNonBlank(gloss, 4096) && !selected.contains(gloss);
+    }
+
+    /**
+     * 候选词这一次发给哪个在线服务，逐条照共享层 `crates/host-api/src/ffi/providers.rs` 的 `selected_translation_services`：
+     *
+     * <ul>
+     * <li>候选翻译关闭时什么都不发。共享层在这种情况下只排除水杉账号，用户自己的服务由宿主按这个开关拦下（Linux 的 provider 也是这样）。</li>
+     * <li>水杉账号（api.msime.app）只在用户明确选了它、并且小牛和自定义都没启用、腾讯也不是「启用且两项凭据都可用」时才用，从不作为回落。</li>
+     * <li>其余按 小牛 > 自定义 > 腾讯 选。选中的服务不可用时结果是 {@link CandidateTranslationRoute#NONE}，不改用别的服务：小牛要两项凭据都可用；自定义只要求接口地址去掉首尾空白后不为空，API Key 可以为空（DeepLX 允许不带密钥），DeepL 地址缺密钥这类情况由共享描述器在请求时拒绝；腾讯的 `enabled` 默认就是开着的，所以只有两项凭据都可用才算选中。</li>
+     * </ul>
+     *
+     * <p>参数都是基本类型，因为 JVM 冒烟加载不了 org.json。凭据去掉首尾的空格、制表符和换行，与共享层的 `trim_matches` 相同。
+     */
+    public static CandidateTranslationRoute route(boolean candidateTranslations, boolean translationAccount,
+            boolean niutransEnabled, String niutransAppId, String niutransApiKey,
+            boolean customEnabled, String customEndpoint, String customApiKey,
+            boolean tencentEnabled, String tencentSecretId, String tencentSecretKey, String tencentRegion) {
+        if (!candidateTranslations) return CandidateTranslationRoute.NONE;
+        String secretId = credentialTrimmed(tencentSecretId);
+        String secretKey = credentialTrimmed(tencentSecretKey);
+        boolean tencentUsable = tencentEnabled && usableCredential(secretId) && usableCredential(secretKey);
+        if (translationAccount && !niutransEnabled && !customEnabled && !tencentUsable)
+            return CandidateTranslationRoute.ACCOUNT;
+        if (niutransEnabled) {
+            String appId = credentialTrimmed(niutransAppId);
+            String apiKey = credentialTrimmed(niutransApiKey);
+            return usableCredential(appId) && usableCredential(apiKey)
+                ? CandidateTranslationRoute.niutrans(appId, apiKey) : CandidateTranslationRoute.NONE;
+        }
+        if (customEnabled) {
+            String endpoint = credentialTrimmed(customEndpoint);
+            return endpoint.isEmpty() ? CandidateTranslationRoute.NONE
+                : CandidateTranslationRoute.custom(endpoint, credentialTrimmed(customApiKey));
+        }
+        if (tencentUsable)
+            return CandidateTranslationRoute.tencent(secretId, secretKey, credentialTrimmed(tencentRegion));
+        return CandidateTranslationRoute.NONE;
+    }
+
+    /** 与共享层的 source_gets_no_gloss 保持一致：表情、颜文字和混入全拼/双拼的日文不送用户翻译服务。 */
+    public static boolean userTranslationSourceAllowed(int source) {
+        return source != 6 && source != 7 && source != 13;
+    }
+
+    /** 与共享层 `translation::usable_credential` 相同：去掉首尾空白后不为空，不是 `<...>` 这样的占位符，也不以 `FAKESECRET_` 开头。 */
+    public static boolean usableCredential(String value) {
+        String trimmed = credentialTrimmed(value);
+        return !trimmed.isEmpty() && !(trimmed.startsWith("<") && trimmed.endsWith(">"))
+            && !trimmed.startsWith("FAKESECRET_");
+    }
+
+    /** 去掉首尾的空格、制表符、回车和换行，与共享层的 `trim_matches([' ', '\t', '\r', '\n'])` 相同。 */
+    static String credentialTrimmed(String value) {
+        if (value == null) return "";
+        int start = 0;
+        int end = value.length();
+        while (start < end && trimmable(value.charAt(start))) start++;
+        while (end > start && trimmable(value.charAt(end - 1))) end--;
+        return value.substring(start, end);
+    }
+
+    private static boolean trimmable(char value) {
+        return value == ' ' || value == '\t' || value == '\r' || value == '\n';
+    }
+
+    /** A delayed account translation may be applied only while the same binding snapshot is current. */
+    public static boolean acceptsBinding(String requested, String current) {
+        return requested != null && !requested.isEmpty() && requested.equals(current);
+    }
+
+    /** 偏好变化后当前候选行中的译文必须先清空，再等待新配置的回答。换了翻译服务或凭据（路由变了）也算。 */
     public static boolean displayInvalidated(boolean previousEnglishGloss,
             boolean nextEnglishGloss, boolean previousTranslations,
             boolean nextTranslations, boolean previousAccount, boolean nextAccount,
-            List<String> previousTargets, List<String> nextTargets) {
+            List<String> previousTargets, List<String> nextTargets,
+            CandidateTranslationRoute previousRoute, CandidateTranslationRoute nextRoute) {
         return previousEnglishGloss != nextEnglishGloss
             || previousTranslations != nextTranslations
             || previousAccount != nextAccount
-            || !java.util.Objects.equals(previousTargets, nextTargets);
+            || !java.util.Objects.equals(previousTargets, nextTargets)
+            || !java.util.Objects.equals(previousRoute, nextRoute);
     }
 
     /** Count rows that can actually be filled by the enabled offline/online paths. The offline switch covers English and every target in {@code offlineTargets}. */
@@ -78,7 +162,7 @@ public final class CandidateTranslationPolicy {
         if (targets == null || targets.isEmpty()) return 0;
         int lines = 0;
         for (String target : targets) {
-            String code = normalize(target);
+            String code = TextPolicy.lowercaseTrimmed(target);
             if (online || (offline && ("en".equals(code)
                     || (offlineTargets != null && offlineTargets.contains(code))))) lines++;
         }
@@ -101,7 +185,7 @@ public final class CandidateTranslationPolicy {
             ? null : new File(stateRoot, "resource-packs/offline-glosses");
         ArrayList<String> result = new ArrayList<>(MAX_TARGETS);
         for (String target : targets) {
-            String code = normalize(target);
+            String code = TextPolicy.lowercaseTrimmed(target);
             if (!OFFLINE_GLOSS_LANGUAGES.contains(code)) continue;
             String name = "zh-" + code + ".db";
             if (Files.isRegularFile(new File(parent, "offline-glosses/" + name).toPath(), LinkOption.NOFOLLOW_LINKS)
@@ -111,7 +195,7 @@ public final class CandidateTranslationPolicy {
         return List.copyOf(result);
     }
 
-    /** One candidate's rows in target order: the offline gloss for a target first, the account translation where there is none. */
+    /** 一个候选按目标语言顺序排列的各行：某个目标有离线释义就用离线释义，没有时才用在线译文（水杉账号或用户自己的服务）。鸿蒙相反，在线优先、离线补缺。 */
     public static String mergeGlosses(List<String> targets, Map<String, String> offline,
             Map<String, String> online) {
         if (targets == null) return "";
@@ -146,9 +230,5 @@ public final class CandidateTranslationPolicy {
     public static int reservedGlossRows(int glossLines, boolean hanjaRows) {
         int lines = BoundsPolicy.nonNegative(glossLines);
         return hanjaRows ? BoundsPolicy.bounded(lines, 1, Integer.MAX_VALUE) : lines;
-    }
-
-    private static String normalize(String value) {
-        return TextPolicy.lowercase(TextPolicy.trimmed(value));
     }
 }

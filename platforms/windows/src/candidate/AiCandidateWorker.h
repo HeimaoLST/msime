@@ -26,6 +26,7 @@ public:
     FocusLease lease;
     // The query this answers, so a stale reply can be recognised.
     std::string query;
+    // 空表示这次发问没有拿到可用的回答（失败、被拒或模型没给词），owner 据此把 AI 座位上的占位行换成「—」。
     std::vector<std::string> candidates;
   };
   using Completed = std::function<void(Result)>;
@@ -36,7 +37,7 @@ public:
   // it is queueing, debouncing and cancellation, none of which needs a network
   // or a paid provider to exercise.
   using Fetcher = std::function<std::vector<std::string>(
-      const std::string &, const std::function<bool()> &)>;
+      const std::string &, const std::string &, const std::function<bool()> &)>;
 
   explicit AiCandidateWorker(Completed completed);
   AiCandidateWorker(Completed completed, Fetcher fetcher);
@@ -45,7 +46,7 @@ public:
   AiCandidateWorker &operator=(const AiCandidateWorker &) = delete;
 
   // Keeps only the newest request; never waits for a response.
-  bool submit(const FocusLease &lease, std::string query);
+  bool submit(const FocusLease &lease, std::string query, std::string descriptor);
   void request_stop();
   void stop();
   bool failed() const { return failed_.load(std::memory_order_acquire); }
@@ -54,11 +55,13 @@ private:
   struct Request {
     FocusLease lease;
     std::string query;
+    std::string descriptor;
     uint64_t serial = 0;
   };
   void run();
   bool cancelled(uint64_t serial) const noexcept;
   static std::vector<std::string> fetch(const std::string &query,
+                                        const std::string &descriptor,
                                         const std::function<bool()> &cancelled);
 
   Completed completed_;

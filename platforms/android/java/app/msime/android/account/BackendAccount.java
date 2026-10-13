@@ -11,9 +11,11 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.FutureTask;
 import javax.net.ssl.HttpsURLConnection;
+import org.json.JSONException;
 import org.json.JSONObject;
 import app.msime.android.clipboard.CloudClipboardTextPolicy;
 
@@ -29,14 +31,10 @@ import app.msime.android.clipboard.CloudClipboardTextPolicy;
  * stops a token minted for some other app, or captured from an earlier sign-in, being replayed here.
  */
 public final class BackendAccount {
-    /** Maximum number of models accepted in the chat catalogue. */
-    public static final int MAX_CHAT_MODELS = 33;
     /** Fixed hexadecimal length of account challenge and clipboard identifiers. */
     public static final int HEX_ID_LENGTH = 64;
-    private static final String ORIGIN = "https://api.msime.app";
     private static final String SESSION_STORE = "msime_account_session_v2";
-    private static final String DEFAULT_USER_AGENT = "MSIME/Android";
-    /** Matches client-core's account JSON response ceiling; a full cloud clipboard page can exceed 64 KiB. */
+    /** Matches client-core's account JSON response ceiling. 云剪贴板的整页密文走 {@link #httpExchange}，上限是 {@link CloudClipboardE2e#MAX_RESPONSE_BYTES}。 */
     private static final int MAX_RESPONSE_BYTES = 1024 * 1024;
     /** 一条 AI 回复的 UTF-8 字节上限，流式与非流式相同。 */
     public static final int MAX_CHAT_REPLY_BYTES = 16 * 1024;
@@ -49,14 +47,25 @@ public final class BackendAccount {
     private static FutureTask<String> refreshFlight;
     private static long sessionGeneration;
 
-    /** One challenge, waiting for the provider's token. */
-    public record Challenge(String id, String nonce) {}
+    /** 一次等待提供商凭据的挑战；link 挑战还记住发起它的账号会话。 */
+    public record Challenge(String id, String nonce, String purpose, String sessionId) {
+        public Challenge(String id, String nonce) { this(id, nonce, "login", ""); }
+    }
     /** 一次邮箱验证码挑战：服务端的 id、用途（login / link）与有效秒数。 */
-    public record EmailChallenge(String id, String purpose, long expiresIn) {}
-    public record ChatModel(String id) {}
+    public record EmailChallenge(String id, String purpose, long expiresIn, String sessionId) {
+        public EmailChallenge(String id, String purpose, long expiresIn) {
+            this(id, purpose, expiresIn, "");
+        }
+    }
     public record ChatMessage(String role, String content) {}
     public record ClipboardItem(String id, String text, String updatedAt) {}
-    public record ClipboardPage(boolean enabled, List<ClipboardItem> items) {}
+    /**
+     * 键盘读到的云剪贴板：已解密的条目，以及本机的加密状态 `status`（`ready`、`pending` 或 `disabled`，见 {@link CloudClipboardApi}）和本机核对码 `code`。待批准时 `items` 为空。
+     */
+    public record ClipboardPage(boolean enabled, List<ClipboardItem> items, String status, String code) {
+        /** 本机还在等已有设备批准：读不到，也不能上传。 */
+        public boolean pending() { return CloudClipboardApi.STATUS_PENDING.equals(status); }
+    }
 
     interface SessionStore {
         String load() throws Exception;
@@ -72,18 +81,32 @@ public final class BackendAccount {
                 throws Exception {
             return request(method, path, body, token);
         }
+
+        /** 发一个请求，不论状态码都把状态和正文交回，连不上时抛出；只给云剪贴板的端到端驱动用（{@link CloudClipboardE2e}）。 */
+        default CloudClipboardE2e.Reply exchange(String method, String path, String body, String token) throws Exception {
+            throw new UnsupportedOperationException("raw exchange");
+        }
+    }
+
+    interface StreamRequester {
+        String stream(JSONObject body, String token, ChatCall call, ChatStreamListener listener) throws Exception;
     }
 
     /** 走 HTTPS 的默认实现；只有登录请求会传入详细 User-Agent。 */
     private static final class HttpRequester implements Requester {
         @Override public JSONObject request(String method, String path, JSONObject body, String token)
                 throws Exception {
-            return httpRequest(method, path, body, token, DEFAULT_USER_AGENT);
+            return httpRequest(method, path, body, token, CloudApi.USER_AGENT);
         }
 
         @Override public JSONObject request(String method, String path, JSONObject body, String token,
                 String userAgent) throws Exception {
             return httpRequest(method, path, body, token, userAgent);
+        }
+
+        @Override public CloudClipboardE2e.Reply exchange(String method, String path, String body, String token)
+                throws Exception {
+            return httpExchange(method, path, body, token);
         }
     }
 
@@ -94,21 +117,38 @@ public final class BackendAccount {
         default String accessToken(String rejectedToken) throws Exception {
             return accessToken();
         }
+
+        default SessionCredential session(String rejectedToken) throws Exception {
+            throw new IllegalStateException("account session identity unavailable");
+        }
     }
+
+    record SessionCredential(String token, String sessionId) {}
+    private static final SessionCredential NO_SESSION = new SessionCredential("", "");
 
     static final class RequestException extends IllegalStateException {
         private static final long serialVersionUID = 1L;
         final int status;
+        /** 错误码；只有云剪贴板驱动报的错带它（例如 `clipboard_device_pending`，这时 `status` 为 0），其余为空字符串。 */
+        final String code;
 
         RequestException(int status) {
-            super("HTTP " + status);
+            this(status, "");
+        }
+
+        RequestException(int status, String code) {
+            super(code == null || code.isEmpty() ? "HTTP " + status : code);
             this.status = status;
+            this.code = code == null ? "" : code;
         }
     }
 
     private final SessionStore sessions;
     private final Requester requester;
     private final TokenSource ownerProcess;
+    private final StreamRequester streamer;
+    /** 云剪贴板的本机密钥串，退出登录时与会话一起删除；测试构造的账号没有。 */
+    private final CloudClipboardE2e.Keystore clipboardKeystore;
 
     /**
      * The account as this process may use it.
@@ -118,13 +158,13 @@ public final class BackendAccount {
     public BackendAccount(Context context) {
         this(new AndroidAccountSessionStorage(context, SESSION_STORE), new HttpRequester(),
             AccountSessionRoutingPolicy.ownsSession(Application.getProcessName(), context.getPackageName())
-                ? null : sessionOwner(context));
+                ? null : sessionOwner(context), BackendAccount::streamChat, CloudClipboardKeystore.deferred(context));
     }
 
     /** The account read and refreshed in this process, whatever process it is; only {@link AccountSessionProvider} uses this, in the main process. */
     static BackendAccount owningSession(Context context) {
         return new BackendAccount(new AndroidAccountSessionStorage(context, SESSION_STORE),
-            new HttpRequester(), null);
+            new HttpRequester(), null, BackendAccount::streamChat, CloudClipboardKeystore.deferred(context));
     }
 
     BackendAccount(SessionStore sessions, Requester requester) {
@@ -132,9 +172,20 @@ public final class BackendAccount {
     }
 
     BackendAccount(SessionStore sessions, Requester requester, TokenSource owner) {
+        this(sessions, requester, owner, BackendAccount::streamChat);
+    }
+
+    BackendAccount(SessionStore sessions, Requester requester, TokenSource owner, StreamRequester streamer) {
+        this(sessions, requester, owner, streamer, null);
+    }
+
+    BackendAccount(SessionStore sessions, Requester requester, TokenSource owner, StreamRequester streamer,
+            CloudClipboardE2e.Keystore clipboardKeystore) {
         this.sessions = sessions;
         this.requester = requester;
         this.ownerProcess = owner;
+        this.streamer = streamer;
+        this.clipboardKeystore = clipboardKeystore;
     }
 
     private static TokenSource sessionOwner(Context context) {
@@ -146,12 +197,21 @@ public final class BackendAccount {
             }
 
             @Override public String accessToken(String rejectedToken) throws Exception {
+                return session(rejectedToken).token();
+            }
+
+            @Override public SessionCredential session(String rejectedToken) throws Exception {
                 Bundle reply = application.getContentResolver().call(
                     uri, AccountSessionRoutingPolicy.METHOD_ACCESS_TOKEN, rejectedToken, null);
                 if (reply == null) throw new IllegalStateException("account session unavailable");
-                return AccountSessionRoutingPolicy.tokenFromReply(
+                String token = AccountSessionRoutingPolicy.tokenFromReply(
                     reply.getString(AccountSessionRoutingPolicy.KEY_STATE),
                     reply.getString(AccountSessionRoutingPolicy.KEY_ACCESS_TOKEN));
+                if (token.isEmpty()) return NO_SESSION;
+                String sessionId = reply.getString(AccountSessionRoutingPolicy.KEY_SESSION_ID);
+                if (sessionId == null || sessionId.isEmpty())
+                    throw new IllegalStateException("account session unavailable");
+                return new SessionCredential(token, sessionId);
             }
         };
     }
@@ -168,41 +228,52 @@ public final class BackendAccount {
 
     public boolean supports(String provider) {
         try {
-            return providerEnabled(providers().opt(provider));
+            return JsonPolicy.strictTrue(providers().opt(provider));
         } catch (Exception | LinkageError error) {
             return false;
         }
     }
 
-    /** Provider availability is a typed server flag; reject org.json scalar coercion. */
-    static boolean providerEnabled(Object value) {
-        return JsonPolicy.strictTrue(value);
+    /** 开始登录或关联并取得提供商 SDK 必须原样回传的 nonce。 */
+    public Challenge challenge(String provider, String target) throws Exception {
+        return challenge(provider, target, "login");
     }
 
-    /** Start a sign-in and get the nonce the provider's SDK has to echo. */
-    public Challenge challenge(String provider, String target) throws Exception {
-        JSONObject body = new JSONObject().put("provider", provider).put("purpose", "login");
+    /** 只允许在发起 link 挑战的同一账号会话中完成关联。 */
+    public Challenge challenge(String provider, String target, String purpose) throws Exception {
+        SessionCredential session = linkSession(purpose);
+        ensureBoundSession(session);
+        JSONObject body = new JSONObject().put("provider", provider).put("purpose", purpose);
         if (target != null && !target.isEmpty()) body.put("target", target);
-        JSONObject response = request("POST", "/v1/auth/challenges", body, null);
+        JSONObject response = request("POST", "/v1/auth/challenges", body,
+            session.token().isEmpty() ? null : session.token());
+        ensureBoundSession(session);
         String id = optionalStringField(response.opt("challenge_id"), "");
         String nonce = optionalStringField(response.opt("nonce"), "");
         if (id.length() != HEX_ID_LENGTH || nonce.isEmpty()) {
             throw new IllegalStateException("challenge unavailable");
         }
-        return new Challenge(id, nonce);
+        return new Challenge(id, nonce, purpose, session.sessionId());
     }
 
     /** Finish it with the provider's ID token, and keep the session this device is now signed in on. */
     public void login(Challenge challenge, String idToken) throws Exception {
-        login(challenge, idToken, DEFAULT_USER_AGENT);
+        login(challenge, idToken, CloudApi.USER_AGENT);
     }
 
     /** 同上，登录请求带 {@link #loginUserAgent} 生成的详细 User-Agent；后端只在登录时记下它，用来在「我的设备」里显示这台设备。 */
     public void login(Challenge challenge, String idToken, String userAgent) throws Exception {
         if (ownerProcess != null) throw new IllegalStateException("account session owner");
-        keepSession(request("POST", "/v1/auth/login",
-            new JSONObject().put("challenge_id", challenge.id()).put("credential", idToken), null,
-            userAgent(userAgent)));
+        if (challenge == null || !("login".equals(challenge.purpose()) || "link".equals(challenge.purpose())))
+            throw new IllegalArgumentException("invalid challenge");
+        SessionCredential session = linkSession(challenge.purpose());
+        requireSession(session, "link".equals(challenge.purpose()) ? challenge.sessionId() : null);
+        JSONObject response = request("POST", "/v1/auth/login",
+            new JSONObject().put("challenge_id", challenge.id()).put("credential", idToken),
+            session.token().isEmpty() ? null : session.token(),
+            userAgent(userAgent));
+        ensureBoundSession(session);
+        keepSession(response);
     }
 
     /**
@@ -215,13 +286,16 @@ public final class BackendAccount {
     public EmailChallenge requestEmailCode(String email, String purpose) throws Exception {
         String target = TextPolicy.trimmed(email);
         if (!validEmail(target)) throw new IllegalArgumentException("invalid email");
-        String token = linkToken(purpose);
+        SessionCredential session = linkSession(purpose);
+        ensureBoundSession(session);
         JSONObject response = request("POST", "/v1/auth/challenges", new JSONObject()
-            .put("provider", "email").put("target", target).put("purpose", purpose), token);
+            .put("provider", "email").put("target", target).put("purpose", purpose),
+            session.token().isEmpty() ? null : session.token());
+        ensureBoundSession(session);
         String id = optionalStringField(response.opt("challenge_id"), "");
         long expires = AccountTokenPolicy.strictLong(response.opt("expires_in"), 0);
         if (id.length() != HEX_ID_LENGTH || expires <= 0) throw new IllegalStateException("challenge unavailable");
-        return new EmailChallenge(id, purpose, expires);
+        return new EmailChallenge(id, purpose, expires, session.sessionId());
     }
 
     /** 提交邮件里的验证码完成登录（或绑定），保存得到的会话。 */
@@ -229,10 +303,14 @@ public final class BackendAccount {
         if (ownerProcess != null) throw new IllegalStateException("account session owner");
         String credential = TextPolicy.trimmed(code);
         if (challenge == null || !validEmailCode(credential)) throw new IllegalArgumentException("invalid code");
-        String token = linkToken(challenge.purpose());
-        keepSession(request("POST", "/v1/auth/login",
-            new JSONObject().put("challenge_id", challenge.id()).put("credential", credential), token,
-            userAgent(userAgent)));
+        SessionCredential session = linkSession(challenge.purpose());
+        requireSession(session, "link".equals(challenge.purpose()) ? challenge.sessionId() : null);
+        JSONObject response = request("POST", "/v1/auth/login",
+            new JSONObject().put("challenge_id", challenge.id()).put("credential", credential),
+            session.token().isEmpty() ? null : session.token(),
+            userAgent(userAgent));
+        ensureBoundSession(session);
+        keepSession(response);
     }
 
     /**
@@ -242,23 +320,33 @@ public final class BackendAccount {
      */
     public void loginWithAppleGrant(String grant, String verifier, boolean link, String userAgent)
             throws Exception {
+        loginWithAppleGrant(grant, verifier, link, userAgent, null);
+    }
+
+    /** 用发起 Apple link 流程时的会话兑换授权码，账号切换后拒绝写入新会话。 */
+    public void loginWithAppleGrant(String grant, String verifier, boolean link, String userAgent,
+            String expectedSessionId) throws Exception {
         if (ownerProcess != null) throw new IllegalStateException("account session owner");
         if (grant == null || grant.isEmpty() || grant.length() > AppleWebSignIn.MAX_GRANT_LENGTH
                 || verifier == null || verifier.isEmpty()) {
             throw new IllegalArgumentException("invalid grant");
         }
-        String token = link ? linkToken("link") : null;
-        keepSession(request("POST", "/v1/auth/apple/web/login",
-            new JSONObject().put("grant", grant).put("code_verifier", verifier), token, userAgent(userAgent)));
+        SessionCredential session = link ? linkSession("link") : NO_SESSION;
+        requireSession(session, link ? expectedSessionId : null);
+        JSONObject response = request("POST", "/v1/auth/apple/web/login",
+            new JSONObject().put("grant", grant).put("code_verifier", verifier),
+            session.token().isEmpty() ? null : session.token(), userAgent(userAgent));
+        ensureBoundSession(session);
+        keepSession(response);
     }
 
-    /** 当前登录会话的令牌，供需要「最近登录」的请求（`purpose=link`）使用；`login` 用途不带令牌。 */
-    private String linkToken(String purpose) throws Exception {
-        if ("login".equals(purpose)) return null;
+    /** 读取 link 的当前会话；login 不读取账号令牌。 */
+    private SessionCredential linkSession(String purpose) throws Exception {
+        if ("login".equals(purpose)) return NO_SESSION;
         if (!"link".equals(purpose)) throw new IllegalArgumentException("invalid purpose");
-        String token = currentAccessToken();
-        if (token.isEmpty()) throw new IllegalStateException("HTTP 401");
-        return token;
+        SessionCredential session = currentSession();
+        if (session.token().isEmpty()) throw new IllegalStateException("HTTP 401");
+        return session;
     }
 
     /** 粗查邮箱形状：去掉首尾空白后 3–254 个字符、恰好一个 @、两边都不为空、没有空白和控制字符。真正的校验在服务端。 */
@@ -277,7 +365,7 @@ public final class BackendAccount {
     public static boolean validEmailCode(String code) {
         if (code == null || code.length() != 6) return false;
         for (int index = 0; index < code.length(); index++) {
-            if (code.charAt(index) < '0' || code.charAt(index) > '9') return false;
+            if (!TextPolicy.isAsciiDigit(code.charAt(index))) return false;
         }
         return true;
     }
@@ -288,12 +376,7 @@ public final class BackendAccount {
      * <p>只给登录请求用：后端只在登录时把它记进会话，刷新和其他请求都发 `MSIME/Android`。
      */
     public static String loginUserAgent(Context context, String editionId) {
-        String version;
-        try {
-            version = context.getPackageManager().getPackageInfo(context.getPackageName(), 0).versionName;
-        } catch (android.content.pm.PackageManager.NameNotFoundException absent) {
-            version = "";
-        }
+        String version = AppVersionPolicy.versionName(context, "");
         return loginUserAgent(version, android.os.Build.MODEL, android.os.Build.VERSION.RELEASE, editionId);
     }
 
@@ -321,7 +404,7 @@ public final class BackendAccount {
     }
 
     private static String userAgent(String value) {
-        return value == null || value.isEmpty() ? DEFAULT_USER_AGENT : value;
+        return value == null || value.isEmpty() ? CloudApi.USER_AGENT : value;
     }
 
     /** 校验并保存一次登录得到的会话。 */
@@ -333,6 +416,7 @@ public final class BackendAccount {
             throw new IllegalStateException("login refused");
         }
         String saved = new JSONObject().put("tokens", tokens)
+            .put("session_id", UUID.randomUUID().toString())
             .put("expires_at_unix_ms", expiration(expires)).toString();
         synchronized (SESSION_LOCK) {
             sessionGeneration++;
@@ -364,30 +448,48 @@ public final class BackendAccount {
             String token = ownerProcess.accessToken(rejectedToken);
             return AccountTokenPolicy.validToken(token) ? token : "";
         }
+        return currentSession(rejectedToken).token();
+    }
+
+    SessionCredential currentSession() throws Exception { return currentSession(null); }
+
+    SessionCredential currentSession(String rejectedToken) throws Exception {
+        if (ownerProcess != null) {
+            SessionCredential answer = ownerProcess.session(rejectedToken);
+            return AccountTokenPolicy.validToken(answer.token()) ? answer : NO_SESSION;
+        }
         FutureTask<String> flight;
         boolean owner = false;
+        String sessionId;
         synchronized (SESSION_LOCK) {
             String saved = sessions.load();
-            if (saved == null) return "";
+            if (saved == null) return NO_SESSION;
             JSONObject session = new JSONObject(saved);
             JSONObject tokens = session.getJSONObject("tokens");
             if (!AccountTokenPolicy.validSession(optionalStringField(tokens.opt("token_type"), ""),
                     optionalStringField(tokens.opt("access_token"), ""), optionalStringField(tokens.opt("refresh_token"), ""),
-                    AccountTokenPolicy.strictSeconds(tokens.opt("expires_in")))) return "";
+                    AccountTokenPolicy.strictSeconds(tokens.opt("expires_in")))) return NO_SESSION;
             long now = System.currentTimeMillis();
             long expiry = AccountTokenPolicy.strictLong(session.opt("expires_at_unix_ms"), 0);
-            if (expiry > now + MAX_SESSION_MILLISECONDS) return "";
+            if (expiry > now + MAX_SESSION_MILLISECONDS) return NO_SESSION;
+            sessionId = session.optString("session_id", "");
+            if (sessionId.isEmpty()) {
+                sessionId = UUID.randomUUID().toString();
+                session.put("session_id", sessionId);
+                sessions.save(session.toString());
+            }
             if (expiry > now + 30_000L
                     && !java.util.Objects.equals(rejectedToken,
                         optionalStringField(tokens.opt("access_token"), ""))) {
-                return optionalStringField(tokens.opt("access_token"), "");
+                return new SessionCredential(optionalStringField(tokens.opt("access_token"), ""), sessionId);
             }
             if (refreshFlight != null) {
                 flight = refreshFlight;
             } else {
                 long generation = sessionGeneration;
                 String refresh = optionalStringField(tokens.opt("refresh_token"), "");
-                flight = new FutureTask<>(() -> refresh(refresh, generation));
+                String refreshingSessionId = sessionId;
+                flight = new FutureTask<>(() -> refresh(refresh, generation, refreshingSessionId));
                 refreshFlight = flight;
                 owner = true;
             }
@@ -402,7 +504,17 @@ public final class BackendAccount {
             }
         }
         try {
-            return flight.get();
+            String token = flight.get();
+            if (token.isEmpty()) return NO_SESSION;
+            synchronized (SESSION_LOCK) {
+                String saved = sessions.load();
+                if (saved == null) throw new CancellationException("account session changed");
+                JSONObject session = new JSONObject(saved);
+                if (!sessionId.equals(session.optString("session_id", ""))
+                        || !token.equals(session.getJSONObject("tokens").optString("access_token", "")))
+                    throw new CancellationException("account session changed");
+            }
+            return new SessionCredential(token, sessionId);
         } catch (java.util.concurrent.ExecutionException error) {
             Throwable cause = error.getCause();
             if (cause instanceof Exception exception) throw exception;
@@ -419,79 +531,43 @@ public final class BackendAccount {
 
     public boolean signedIn() { return !accessToken().isEmpty(); }
 
-    /** Loads the bounded model catalogue used by the keyboard tryout chat. */
-    public List<ChatModel> chatModels() throws Exception {
-        String token = accessToken();
-        if (token.isEmpty()) throw new IllegalStateException("HTTP 401");
-        JSONObject response = authorizedRequest("GET", "/v1/models", null, token);
-        org.json.JSONArray data = response.optJSONArray("data");
-        if (data == null || data.length() == 0 || data.length() > 64)
-            throw new IllegalStateException("invalid model catalogue");
-        List<ChatModel> models = new ArrayList<>(data.length());
-        for (int index = 0; index < data.length(); index++) {
-            JSONObject item = data.optJSONObject(index);
-            String id = item == null ? "" : TextPolicy.trimmed(optionalStringField(item.opt("id"), ""));
-            if (id.isEmpty() || id.length() > 256) throw new IllegalStateException("invalid model catalogue");
-            models.add(new ChatModel(id));
+    /** Stable local login identity for UI actions that must not outlive an account switch. */
+    public String sessionId() {
+        try {
+            return currentSession().sessionId();
+        } catch (Exception | LinkageError error) {
+            return "";
         }
-        String defaultModel = optionalStringField(response.opt("default_model"), "");
-        if (!validChatModels(models, defaultModel))
-            throw new IllegalStateException("invalid model catalogue");
-        return List.copyOf(models);
     }
 
-    static boolean validChatModels(List<ChatModel> models, String defaultModel) {
-        if (models == null || models.isEmpty() || models.size() > MAX_CHAT_MODELS || defaultModel == null
-                || defaultModel.isEmpty() || TextPolicy.utf8Length(defaultModel) > 200
-                || TextPolicy.hasControl(defaultModel) || !TextPolicy.validUnicode(defaultModel))
-            return false;
-        java.util.HashSet<String> ids = new java.util.HashSet<>(models.size());
-        boolean hasDefault = false;
-        for (ChatModel model : models) {
-            if (model == null || model.id() == null || model.id().isEmpty()
-                    || TextPolicy.utf8Length(model.id()) > 200 || TextPolicy.hasControl(model.id())
-                    || !TextPolicy.validUnicode(model.id())
-                    || !ids.add(model.id())) return false;
-            if (defaultModel.equals(model.id())) hasDefault = true;
-        }
-        return hasDefault;
-    }
-
-    static boolean validChatRequest(List<ChatMessage> messages, String model) {
-        if (model == null || model.isEmpty() || TextPolicy.utf8Length(model) > 200
-                || TextPolicy.hasControl(model) || !TextPolicy.validUnicode(model)
-                || messages == null || messages.isEmpty() || messages.size() > 16) return false;
+    static boolean validChatRequest(List<ChatMessage> messages) {
+        if (messages == null || messages.isEmpty() || messages.size() > 16) return false;
         int bytes = 0;
         for (ChatMessage message : messages) {
             if (message == null || !("user".equals(message.role()) || "assistant".equals(message.role())
-                    || "system".equals(message.role())) || message.content() == null
-                    || TextPolicy.trimmed(message.content()).isEmpty()
-                    || TextPolicy.utf8Length(message.content()) > 16 * 1024
-                    || TextPolicy.hasControlExceptWhitespace(message.content())
-                    || !TextPolicy.validUnicode(message.content())) return false;
+                    || "system".equals(message.role()))
+                    || !TextPolicy.boundedNonBlankAllowingWhitespaceControls(message.content(), 16 * 1024)) return false;
             bytes += TextPolicy.utf8Length(message.content());
         }
         return bytes <= 64 * 1024;
     }
 
     static boolean validChatResponse(String role, String content) {
-        return "assistant".equals(role) && content != null && !TextPolicy.trimmed(content).isEmpty()
-            && TextPolicy.utf8Length(content) <= 16 * 1024
-            && !TextPolicy.hasControlExceptWhitespace(content)
-            && TextPolicy.validUnicode(content);
+        return "assistant".equals(role)
+            && TextPolicy.boundedNonBlankAllowingWhitespaceControls(content, 16 * 1024);
     }
 
     static boolean validChatReplyText(String content) {
-        return content != null && !TextPolicy.trimmed(content).isEmpty()
+        return TextPolicy.hasText(content)
             && TextPolicy.utf8Length(content) <= MAX_CHAT_REPLY_BYTES
             && TextPolicy.validUnicode(content);
     }
 
     /** Sends one bounded non-streaming chat request; callers must run it off the UI thread. */
-    public String chat(List<ChatMessage> messages, String model) throws Exception {
-        String token = accessToken();
-        JSONObject body = chatBody(messages, model, token).put("stream", false);
-        return chatContent(authorizedRequest("POST", "/v1/chat/completions", body, token));
+    public String chat(List<ChatMessage> messages) throws Exception {
+        SessionCredential session = currentSession();
+        JSONObject body = chatBody(messages, session.token()).put("stream", false);
+        return chatContent(authorizedRequest("POST", "/v1/chat/completions", body, session));
     }
 
     /**
@@ -499,26 +575,54 @@ public final class BackendAccount {
      *
      * <p>请求与 {@link #chat} 相同，只多了 `"stream": true`；服务端回 OpenAI 兼容的 SSE（`data: <chat.completion.chunk>`，以 `data: [DONE]` 结束）。不认识 stream 的旧后端回 HTTP 400，这时退回 {@link #chat}，把整段回复一次交给 listener。{@code call} 可以从任何线程取消，取消会断开连接，阻塞中的读取立刻失败。
      */
-    public String chatStream(List<ChatMessage> messages, String model, ChatCall call, ChatStreamListener listener)
+    public String chatStream(List<ChatMessage> messages, ChatCall call, ChatStreamListener listener)
             throws Exception {
-        String token = accessToken();
-        JSONObject body = chatBody(messages, model, token).put("stream", true);
+        return chatStream(messages, call, listener, null);
+    }
+
+    /** 只在页面传入的会话仍是当前会话时发送聊天流。 */
+    public String chatStream(List<ChatMessage> messages, ChatCall call, ChatStreamListener listener,
+            String expectedSessionId) throws Exception {
+        SessionCredential session = currentSession();
+        requireSession(session, expectedSessionId);
+        JSONObject body = chatBody(messages, session.token()).put("stream", true);
+        ChatStreamListener guarded = delta -> {
+            try {
+                ensureCurrentSession(session);
+            } catch (Exception unavailable) {
+                throw new CancellationException("account session changed");
+            }
+            if (call.cancelled()) throw new CancellationException("chat cancelled");
+            listener.onDelta(delta);
+        };
         try {
             try {
-                return streamChat(body, token, call, listener);
+                ensureCurrentSession(session);
+                String reply = streamer.stream(body, session.token(), call, guarded);
+                ensureCurrentSession(session);
+                return reply;
             } catch (RequestException error) {
                 if (error.status != 401) throw error;
-                String fresh = currentAccessToken(token);
-                if (fresh.isEmpty() || fresh.equals(token)) throw error;
-                return streamChat(body, fresh, call, listener);
+                ensureCurrentSession(session);
+                SessionCredential fresh = currentSession(session.token());
+                if (!session.sessionId().equals(fresh.sessionId()))
+                    throw new CancellationException("account session changed");
+                if (fresh.token().isEmpty() || fresh.token().equals(session.token())) throw error;
+                ensureCurrentSession(session);
+                String reply = streamer.stream(body, fresh.token(), call, guarded);
+                ensureCurrentSession(session);
+                return reply;
             }
         } catch (RequestException error) {
             if (error.status != 400) throw error;
             // 旧后端不认识 stream：退回非流式请求，整段回复一次交出去。
+            ensureCurrentSession(session);
             if (call.cancelled()) throw new CancellationException("chat cancelled");
-            String reply = chat(messages, model);
+            String reply = chatContent(authorizedRequest("POST", "/v1/chat/completions",
+                body.put("stream", false), session));
+            ensureCurrentSession(session);
             if (call.cancelled()) throw new CancellationException("chat cancelled");
-            listener.onDelta(reply);
+            guarded.onDelta(reply);
             return reply;
         }
     }
@@ -545,7 +649,7 @@ public final class BackendAccount {
                 open = connection;
                 connection = null;
             }
-            if (open != null) new Thread(open::disconnect, "msime-chat-cancel").start();
+            if (open != null) ThreadPolicy.startNamedThread("msime-chat-cancel", open::disconnect);
         }
 
         public synchronized boolean cancelled() { return cancelled; }
@@ -562,9 +666,13 @@ public final class BackendAccount {
         }
     }
 
-    /** 校验对话请求并组装请求体（不含 stream 字段），{@link #chat} 和 {@link #chatStream} 共用同一套上限。 */
-    private static JSONObject chatBody(List<ChatMessage> messages, String model, String token) throws Exception {
-        if (token.isEmpty() || !validChatRequest(messages, model))
+    /**
+     * 校验对话请求并组装请求体（不含 stream 字段），{@link #chat} 和 {@link #chatStream} 共用同一套上限。
+     *
+     * <p>请求体不带 `model`：用哪个模型由服务端决定，省略时后端用它配置的默认模型，用户在客户端选不了，客户端也不去 `/v1/models` 替用户挑一个。
+     */
+    private static JSONObject chatBody(List<ChatMessage> messages, String token) throws Exception {
+        if (token.isEmpty() || !validChatRequest(messages))
             throw new IllegalStateException("invalid chat request");
         org.json.JSONArray payloadMessages = new org.json.JSONArray();
         for (int index = 0; index < messages.size(); index++) {
@@ -575,7 +683,7 @@ public final class BackendAccount {
             payloadMessages.put(new JSONObject().put("role", message.role())
                 .put("content", message.content()));
         }
-        return new JSONObject().put("messages", payloadMessages).put("model", model).put("max_tokens", 2048);
+        return new JSONObject().put("messages", payloadMessages).put("max_tokens", 2048);
     }
 
     /** 非流式回复里的 choices[0].message.content：按 {@link #validChatResponse} 校验。 */
@@ -666,15 +774,16 @@ public final class BackendAccount {
     private static String streamChat(JSONObject body, String token, ChatCall call, ChatStreamListener listener)
             throws Exception {
         byte[] payload = TextPolicy.utf8Bytes(body.toString());
-        HttpsURLConnection connection = (HttpsURLConnection) new URL(ORIGIN + "/v1/chat/completions").openConnection();
+        HttpsURLConnection connection = (HttpsURLConnection) new URL(CloudApi.ORIGIN + "/v1/chat/completions").openConnection();
         try {
             if (!call.attach(connection)) throw new CancellationException("chat cancelled");
-            connection.setInstanceFollowRedirects(false);
+            HttpConnectionPolicy.rejectRedirects(connection);
             connection.setRequestMethod("POST");
-            connection.setConnectTimeout(30_000);
-            connection.setReadTimeout(30_000);
+            HttpConnectionPolicy.setTimeouts(connection, 30_000, 30_000);
             connection.setRequestProperty("Accept", "text/event-stream");
-            connection.setRequestProperty("User-Agent", DEFAULT_USER_AGENT);
+            // SSE 必须逐事件到达；不请求 gzip，避免 Android 或中间代理等到压缩缓冲区满了才把增量交给读取端。
+            connection.setRequestProperty("Accept-Encoding", "identity");
+            connection.setRequestProperty("User-Agent", CloudApi.USER_AGENT);
             connection.setRequestProperty("Authorization", "Bearer " + token);
             connection.setDoOutput(true);
             connection.setFixedLengthStreamingMode(payload.length);
@@ -688,7 +797,7 @@ public final class BackendAccount {
             if (call.cancelled()) throw new CancellationException("chat cancelled");
             int status = connection.getResponseCode();
             if (call.cancelled()) throw new CancellationException("chat cancelled");
-            if (status / 100 != 2) throw new RequestException(status);
+            if (!HttpConnectionPolicy.isSuccessful(status)) throw new RequestException(status);
             String type = connection.getContentType();
             try (InputStream input = connection.getInputStream()) {
                 if (type == null || !TextPolicy.lowercase(type).startsWith("text/event-stream")) {
@@ -738,14 +847,32 @@ public final class BackendAccount {
         }
     }
 
-    public ClipboardPage clipboard(String search) throws Exception {
-        String token = accessToken();
-        if (token.isEmpty() || !validClipboardSearch(search))
+    /**
+     * Read only from the session that opened the keyboard panel.
+     *
+     * <p>经共享驱动读出并在本机解密（{@link CloudClipboardE2e}）；`search` 也在本机过滤。本机还在等批准时返回 `pending`、条目为空，不算失败。驱动报的错以 {@link RequestException} 抛出，`code` 保持驱动给的错误码。
+     */
+    public ClipboardPage clipboard(String search, String expectedSessionId, CloudClipboardE2e.Local local)
+            throws Exception {
+        SessionCredential session = currentSession();
+        requireSession(session, expectedSessionId);
+        if (session.token().isEmpty() || !validClipboardSearch(search))
             throw new IllegalStateException("invalid clipboard request");
-        String encoded = java.net.URLEncoder.encode(search, StandardCharsets.UTF_8.name()).replace("+", "%20");
-        JSONObject response = authorizedRequest("GET", "/v1/users/me/clipboard?q=" + encoded, null, token);
+        return clipboardPage(runClipboard(local, CloudClipboardE2e.Operation.list(search), session));
+    }
+
+    /** 驱动 `list` 的结果（经自建中继时形状相同，见 {@link CloudClipboardRelay}）读成键盘要的那一页；形状不对时抛出。 */
+    static ClipboardPage clipboardPage(String json) throws JSONException {
+        JSONObject response = new JSONObject(json);
         org.json.JSONArray values = response.optJSONArray("items");
-        if (values == null || values.length() > 50) throw new IllegalStateException("invalid clipboard response");
+        JSONObject e2e = response.optJSONObject("e2e");
+        if (values == null || values.length() > 50 || e2e == null)
+            throw new IllegalStateException("invalid clipboard response");
+        String status = optionalStringField(e2e.opt("status"), "");
+        String code = optionalStringField(e2e.opt("code"), "");
+        if (!(CloudClipboardApi.STATUS_READY.equals(status) || CloudClipboardApi.STATUS_PENDING.equals(status)
+                || CloudClipboardApi.STATUS_DISABLED.equals(status)) || !CloudClipboardApi.validCode(code))
+            throw new IllegalStateException("invalid clipboard response");
         List<ClipboardItem> items = new ArrayList<>(values.length());
         for (int index = 0; index < values.length(); index++) {
             JSONObject item = values.optJSONObject(index);
@@ -757,7 +884,8 @@ public final class BackendAccount {
                 throw new IllegalStateException("invalid clipboard response");
             items.add(new ClipboardItem(id, text, updated));
         }
-        return new ClipboardPage(requiredBooleanField(response.opt("enabled")), List.copyOf(items));
+        return new ClipboardPage(requiredBooleanField(response.opt("enabled")), ListPolicy.copyOrEmpty(items),
+            status, code);
     }
 
     /** Whether a clipboard search fits client-core's 1024-byte text contract. */
@@ -781,18 +909,25 @@ public final class BackendAccount {
     }
 
     public void setClipboardEnabled(boolean enabled) throws Exception {
-        String token = accessToken();
-        if (token.isEmpty()) throw new IllegalStateException("HTTP 401");
-        authorizedRequest("PUT", "/v1/users/me/clipboard/settings", new JSONObject().put("enabled", enabled), token);
+        SessionCredential session = currentSession();
+        if (session.token().isEmpty()) throw new IllegalStateException("HTTP 401");
+        authorizedRequest("PUT", "/v1/users/me/clipboard/settings", new JSONObject().put("enabled", enabled), session);
     }
 
-    public ClipboardItem addClipboard(String text) throws Exception {
-        String token = accessToken();
-        if (token.isEmpty() || !CloudClipboardTextPolicy.valid(text))
+    /** Prevent a queued keyboard upload from switching to a newly signed-in account. 在本机加密后上传；本机还在等批准时驱动报 `clipboard_device_pending`，不上传。 */
+    ClipboardItem addClipboard(String text, String expectedSessionId, CloudClipboardE2e.Local local) throws Exception {
+        SessionCredential session = currentSession();
+        requireSession(session, expectedSessionId);
+        if (session.token().isEmpty() || !CloudClipboardTextPolicy.valid(text))
             throw new IllegalStateException("invalid clipboard request");
-        JSONObject item = authorizedRequest("POST", "/v1/users/me/clipboard", new JSONObject().put("text", text), token);
+        return clipboardItem(runClipboard(local, CloudClipboardE2e.Operation.add(text), session));
+    }
+
+    /** 驱动 `add` 的结果（经自建中继时形状相同）：新上传的那一条；形状不对时抛出。 */
+    static ClipboardItem clipboardItem(String json) throws JSONException {
+        JSONObject item = new JSONObject(json);
         String id = optionalStringField(item.opt("id"), "");
-        String returnedText = optionalStringField(item.opt("text"), text);
+        String returnedText = optionalStringField(item.opt("text"), "");
         String updated = optionalStringField(item.opt("updated_at"), "");
         ClipboardItem result = new ClipboardItem(id, returnedText, updated);
         if (!validClipboardItem(result))
@@ -800,23 +935,60 @@ public final class BackendAccount {
         return result;
     }
 
+    /**
+     * 经驱动跑一个云剪贴板操作：请求一律用开始时的这个会话发出（401 时与 {@link #authorizedRequest} 一样换一枚令牌重试一次），密钥串只在这个会话仍是当前会话时写入。
+     */
+    private String runClipboard(CloudClipboardE2e.Local local, CloudClipboardE2e.Operation operation,
+            SessionCredential session) throws Exception {
+        try {
+            return CloudClipboardE2e.run(local, operation,
+                (method, path, body) -> clipboardExchange(method, path, body, session),
+                () -> ensureCurrentSession(session));
+        } catch (CloudClipboardE2e.Failure failure) {
+            throw new RequestException(failure.status, failure.code);
+        }
+    }
+
+    private CloudClipboardE2e.Reply clipboardExchange(String method, String path, String body, SessionCredential session)
+            throws Exception {
+        ensureCurrentSession(session);
+        CloudClipboardE2e.Reply reply = requester.exchange(method, path, body, session.token());
+        ensureCurrentSession(session);
+        if (reply.status() != 401) return reply;
+        SessionCredential fresh = currentSession(session.token());
+        if (!session.sessionId().equals(fresh.sessionId()))
+            throw new CancellationException("account session changed");
+        if (fresh.token().isEmpty() || fresh.token().equals(session.token())) return reply;
+        reply = requester.exchange(method, path, body, fresh.token());
+        ensureCurrentSession(session);
+        return reply;
+    }
+
+    private static void requireSession(SessionCredential session, String expectedSessionId) {
+        if (expectedSessionId != null && (expectedSessionId.isEmpty()
+                || !expectedSessionId.equals(session.sessionId())))
+            throw new CancellationException("account session changed");
+    }
+
     static boolean validClipboardItem(ClipboardItem item) {
-        return item != null && item.id() != null && item.id().matches("[0-9a-f]{" + HEX_ID_LENGTH + "}")
-            && CloudClipboardTextPolicy.valid(item.text()) && item.updatedAt() != null
-            && !item.updatedAt().isEmpty() && TextPolicy.utf8Length(item.updatedAt()) <= 128
-            && !TextPolicy.hasControl(item.updatedAt())
-            && TextPolicy.validUnicode(item.updatedAt());
+        return item != null && TextPolicy.isLowerHex(item.id(), HEX_ID_LENGTH)
+            && CloudClipboardTextPolicy.valid(item.text())
+            && TextPolicy.boundedNonEmpty(item.updatedAt(), 128);
     }
 
     public void deleteClipboard(String id) throws Exception {
-        String token = accessToken();
-        if (token.isEmpty() || (id != null && !id.matches("[0-9a-f]{" + HEX_ID_LENGTH + "}")))
+        SessionCredential session = currentSession();
+        if (session.token().isEmpty() || (id != null && !TextPolicy.isLowerHex(id, HEX_ID_LENGTH)))
             throw new IllegalStateException("invalid clipboard request");
         authorizedRequest("DELETE", id == null ? "/v1/users/me/clipboard" : "/v1/users/me/clipboard/" + id,
-            null, token);
+            null, session);
     }
 
-    /** Forget the session on this device. The account itself is untouched. */
+    /**
+     * Forget the session on this device. The account itself is untouched.
+     *
+     * <p>云剪贴板的本机密钥串随会话一起删除，下一个登录的账号不会拿到上一个账号的剪贴板密钥。先清会话、出了会话锁再删密钥串：正在写密钥串的一方是在密钥串的锁里核对会话的（{@link #runClipboard}），会话一清它就不会再写，而这里删除时不拿会话锁，两把锁不会互相等。
+     */
     public void signOut() {
         if (ownerProcess != null) return;
         try {
@@ -824,6 +996,7 @@ public final class BackendAccount {
                 sessionGeneration++;
                 sessions.clear();
             }
+            if (clipboardKeystore != null) clipboardKeystore.delete();
         } catch (Exception | LinkageError error) {
             // 清除失败时会话仍可能有效，必须把失败交给界面，不能按退出成功处理。
             throw new IllegalStateException("account sign-out unavailable");
@@ -841,31 +1014,63 @@ public final class BackendAccount {
     }
 
     /** Retry one request after the server rejects an otherwise unexpired access token. */
-    private JSONObject authorizedRequest(String method, String path, JSONObject body, String token)
+    private JSONObject authorizedRequest(String method, String path, JSONObject body, SessionCredential session)
             throws Exception {
+        ensureCurrentSession(session);
         try {
-            return request(method, path, body, token);
+            JSONObject response = request(method, path, body, session.token());
+            ensureCurrentSession(session);
+            return response;
         } catch (RequestException error) {
             if (error.status != 401) throw error;
-            String fresh = currentAccessToken(token);
-            if (fresh.isEmpty() || fresh.equals(token)) throw error;
-            return request(method, path, body, fresh);
+            ensureCurrentSession(session);
+            SessionCredential fresh = currentSession(session.token());
+            if (!session.sessionId().equals(fresh.sessionId()))
+                throw new CancellationException("account session changed");
+            if (fresh.token().isEmpty() || fresh.token().equals(session.token())) throw error;
+            JSONObject response = request(method, path, body, fresh.token());
+            ensureCurrentSession(session);
+            return response;
         }
     }
 
-    private String refresh(String refreshToken, long generation) throws Exception {
+    private void ensureBoundSession(SessionCredential expected) throws Exception {
+        if (!expected.sessionId().isEmpty()) ensureCurrentSession(expected);
+    }
+
+    private void ensureCurrentSession(SessionCredential expected) throws Exception {
+        if (expected.sessionId().isEmpty()) throw new CancellationException("account session changed");
+        if (ownerProcess != null) {
+            if (!expected.sessionId().equals(ownerProcess.session(null).sessionId()))
+                throw new CancellationException("account session changed");
+            return;
+        }
+        synchronized (SESSION_LOCK) {
+            String saved = sessions.load();
+            if (saved == null || !expected.sessionId().equals(new JSONObject(saved).optString("session_id", "")))
+                throw new CancellationException("account session changed");
+        }
+    }
+
+    private String refresh(String refreshToken, long generation, String sessionId) throws Exception {
         JSONObject tokens;
         try {
             tokens = request("POST", "/v1/auth/refresh",
                 new JSONObject().put("refresh_token", refreshToken), null);
         } catch (RequestException error) {
             if (error.status == 401 || error.status == 403) {
+                boolean revoked = false;
                 synchronized (SESSION_LOCK) {
-                    if (sessionGeneration == generation) {
+                    String current = sessions.load();
+                    if (sessionGeneration == generation && current != null
+                            && sessionId.equals(new JSONObject(current).optString("session_id", ""))) {
                         sessionGeneration++;
                         sessions.clear();
+                        revoked = true;
                     }
                 }
+                // 服务端吊销了会话，等同于退出登录：云剪贴板的密钥串一起删掉，理由与锁的顺序同 signOut。
+                if (revoked && clipboardKeystore != null) clipboardKeystore.delete();
                 return "";
             }
             throw error;
@@ -877,9 +1082,13 @@ public final class BackendAccount {
             throw new IllegalStateException("refresh refused");
         }
         String saved = new JSONObject().put("tokens", tokens)
+            .put("session_id", sessionId)
             .put("expires_at_unix_ms", expiration(expires)).toString();
         synchronized (SESSION_LOCK) {
             if (sessionGeneration != generation) return "";
+            String current = sessions.load();
+            if (current == null || !sessionId.equals(new JSONObject(current).optString("session_id", "")))
+                return "";
             sessions.save(saved);
         }
         return access;
@@ -894,28 +1103,39 @@ public final class BackendAccount {
         byte[] payload = body == null ? null : body.toString().getBytes(StandardCharsets.UTF_8);
         HttpsURLConnection connection = null;
         try {
-            connection = (HttpsURLConnection) new URL(ORIGIN + path).openConnection();
-            connection.setInstanceFollowRedirects(false);
-            connection.setRequestMethod(method);
-            connection.setConnectTimeout(30_000);
-            connection.setReadTimeout(30_000);
-            connection.setRequestProperty("Accept", "application/json");
-            connection.setRequestProperty("User-Agent", userAgent);
-            if (token != null) connection.setRequestProperty("Authorization", "Bearer " + token);
-            if (payload != null) {
-                connection.setDoOutput(true);
-                connection.setFixedLengthStreamingMode(payload.length);
-                connection.setRequestProperty("Content-Type", "application/json");
-                try (OutputStream output = connection.getOutputStream()) { output.write(payload); }
-            }
+            connection = (HttpsURLConnection) new URL(CloudApi.ORIGIN + path).openConnection();
+            AccountHttpRequest.writeJson(connection, method, token, userAgent, payload);
             int status = connection.getResponseCode();
             // 状态码带进消息里：503 是这个登录方式没配，401 是凭据不对，两件事不该长同一个样子。
-            if (status / 100 != 2) throw new RequestException(status);
+            if (!HttpConnectionPolicy.isSuccessful(status)) throw new RequestException(status);
             try (InputStream input = connection.getInputStream()) {
                 byte[] response = readBounded(input);
                 if (response.length == 0) return new JSONObject();
                 return new JSONObject(TextPolicy.utf8(response));
             }
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    /** 云剪贴板驱动的一次往返：非 2xx 也读出错误正文交回，正文上限是驱动能接收的 {@link CloudClipboardE2e#MAX_RESPONSE_BYTES}。 */
+    private static CloudClipboardE2e.Reply httpExchange(String method, String path, String body, String token)
+            throws Exception {
+        byte[] payload = body == null ? null : TextPolicy.utf8Bytes(body);
+        HttpsURLConnection connection = null;
+        try {
+            connection = (HttpsURLConnection) new URL(CloudApi.ORIGIN + path).openConnection();
+            AccountHttpRequest.writeJson(connection, method, token, CloudApi.USER_AGENT, payload);
+            int status = connection.getResponseCode();
+            InputStream stream = HttpConnectionPolicy.isSuccessful(status) ? connection.getInputStream() : connection.getErrorStream();
+            byte[] response = new byte[0];
+            if (stream != null) {
+                try (InputStream input = stream) {
+                    response = HttpBodyPolicy.readBounded(input, CloudClipboardE2e.MAX_RESPONSE_BYTES);
+                }
+                if (response == null) throw new IllegalStateException("response too large");
+            }
+            return new CloudClipboardE2e.Reply(status, TextPolicy.utf8(response));
         } finally {
             if (connection != null) connection.disconnect();
         }

@@ -6,6 +6,8 @@
  * all share one column so the text does not run the full width of a desktop window.
  */
 
+import { flexSpacer, spaciousStack, tightStack } from "../core/page-style";
+
 const column = "mx-auto w-[min(560px,100%)]";
 
 export const page =
@@ -15,7 +17,7 @@ export const skip = "ml-auto border-0 bg-transparent px-0 py-[5px] text-[13px] t
 export const progress = "mt-0 mb-[3px] text-xs tabular-nums text-accent";
 
 export const body = `${column} flex-1 pt-7 pb-5 max-tight:pt-[22px]`;
-export const section = "flex flex-col gap-[18px]";
+export const section = spaciousStack;
 export const sectionTitle = "m-0 text-[27px] font-bold tracking-[-0.02em] max-tight:text-2xl";
 export const lead = "mt-[-8px] mb-1 text-[15px] leading-relaxed text-secondary";
 
@@ -74,7 +76,7 @@ export const sheet = (desktop: boolean) =>
   }`;
 
 /** 把 2-in-1 按钮栏里的按钮推到「跳过」右侧。 */
-export const deskSpacer = "flex-1";
+export const deskSpacer = flexSpacer;
 
 // ---- Android: a linear progress bar over the page and a pair of buttons under it ----
 
@@ -170,7 +172,7 @@ export const hSystemActions = "mt-3 flex flex-wrap gap-[9px] [&>button]:m-0";
 export const hNote = "mt-3 mb-0 text-xs leading-[1.7] text-[var(--p-sub)]";
 
 // 第 2 步：每个方案一张卡片，右侧是单选按钮。
-export const hSchemes = "flex flex-col gap-2.5";
+export const hSchemes = tightStack;
 /** 方案卡片；选中的那张带 2px 内嵌强调色圆环（dc.html `o.ring`）。 */
 export const hScheme = (desktop: boolean, selected: boolean) =>
   `${hCard(desktop)} m-0 flex w-full items-center gap-3 border-0 px-4 py-3.5 text-left text-[var(--p-text)] ${
@@ -199,7 +201,7 @@ export const hGlossRow = (desktop: boolean) =>
   `${hCard(desktop)} mt-3 flex items-center justify-between gap-4 px-3.5 py-3 text-base`;
 
 // 第 4 步：登录带来的好处。
-export const hPerks = "m-0 flex list-none flex-col gap-2.5 p-0";
+export const hPerks = perks;
 export const hPerk = (desktop: boolean) =>
   `${hCard(desktop)} flex items-center gap-3 px-3.5 py-3 text-[15px]`;
 export const hPerkTile =
@@ -232,30 +234,39 @@ export const hDeskBack = (dark: boolean) =>
 export const hDeskNext =
   "min-w-18 rounded-[18px] bg-[var(--accent-color)] px-[18px] font-medium text-[var(--p-on-accent)]";
 
-// ---- HarmonyOS 启动页（dc.html L2692-2698）：圆盘落在带强调色调的底色上，标志旋转入场并描画出来，底部一条进度条逐渐填满 ----
+// ---- HarmonyOS 首次启动的开屏（dc.html L2692-2698）：圆盘在启动窗底色上，底部一条进度条逐渐填满。第一帧和系统启动窗一样，见 styles.css 的 `splash-veil` ----
 
-/** 底色：强调色混入近黑色，所以随平台和季节强调色变化。 */
-export const hSplashShell =
-  "flex min-h-full w-full bg-[color-mix(in_srgb,var(--accent-color)_20%,#0A0B0A)]";
+/** 底色是系统启动窗的颜色（`start_window_background`）：深色是近黑，浅色是 #F1F3F5，跟随文档的深浅色，不随季节变。启动窗只能用一种颜色，开屏接着它往下播；季节色由光晕、圆盘、标志和进度条带出来。 */
+export const hSplashShell = "flex min-h-full w-full bg-[#0A0B0A] light-theme:bg-[#F1F3F5]";
 export const hSplash =
-  "relative flex min-h-full w-full cursor-pointer flex-col items-center justify-center gap-[18px] overflow-hidden border-0 bg-[color-mix(in_srgb,var(--accent-color)_20%,#0A0B0A)] p-0 text-white";
+  "relative flex min-h-full w-full cursor-pointer flex-col items-center justify-center overflow-hidden border-0 bg-[#0A0B0A] p-0 text-white light-theme:bg-[#F1F3F5] light-theme:text-[#191C1E]";
 export const hSplashGlow =
   "absolute size-80 rounded-full bg-[radial-gradient(circle,color-mix(in_srgb,var(--accent-color)_34%,transparent)_0%,transparent_65%)] animate-splash-glow motion-reduce:animate-none";
-/** 180px 圆盘、它的涟漪圆环和标志共用一个盒子，作为整体落下。 */
-export const hSplashDiscBox =
-  "relative size-[180px] flex-none animate-splash-circ-in motion-reduce:animate-none";
-/** 圆盘后的白色光晕，放大到 1.2 倍并淡出，共两次（dc.html `msRipple`）；动画前后都保持不可见。 */
+/** 180px 圆盘、它的涟漪圆环和标志共用一个盒子。它绝对定位、不设偏移，所以落在页面正中，与宿主盖在网页上的启动画面重合；文字不参与居中。 */
+export const hSplashDiscBox = "absolute size-[180px]";
+/** 圆盘后的光晕，放大到 1.2 倍并淡出，共两次（dc.html `msRipple`）；动画前后都保持不可见。深色底上是白色，浅色底上白色看不见，换成淡强调色。 */
 export const hSplashRipple =
-  "absolute inset-0 rounded-full bg-white/70 opacity-0 animate-splash-ripple motion-reduce:hidden";
+  "absolute inset-0 rounded-full bg-white/70 opacity-0 animate-splash-ripple motion-reduce:hidden light-theme:bg-[color-mix(in_srgb,var(--accent-color)_30%,transparent)]";
 export const hSplashDisc =
-  "absolute inset-0 rounded-full bg-[color-mix(in_srgb,var(--accent-color)_12%,#FFFFFF)] shadow-[0_12px_40px_rgba(0,0,0,0.35)]";
-export const hSplashLogo =
-  "absolute top-10 left-10 size-[100px] animate-splash-logo-in motion-reduce:animate-none";
+  "absolute inset-0 rounded-full bg-[color-mix(in_srgb,var(--accent-color)_12%,#FFFFFF)] shadow-[0_12px_40px_rgba(0,0,0,0.35)] light-theme:shadow-[0_8px_28px_rgba(0,0,0,0.10)]";
+/**
+ * 圆盘和标志方块上各盖一层启动窗的颜色（`start_window_icon.png`、`Settings.ets` 的 `launchCoverView`），开屏开始后淡出，露出下面的当季颜色。
+ */
+export const hSplashDiscVeil =
+  "absolute inset-0 rounded-full bg-[#EDF0F0] animate-splash-veil motion-reduce:hidden light-theme:bg-[#FFFFFF]";
+export const hSplashLogo = "absolute top-10 left-10 size-[100px]";
 export const hSplashFrame = "fill-[color-mix(in_srgb,var(--accent-color)_82%,#000)]";
+export const hSplashFrameVeil = "fill-[#2E3A40] animate-splash-veil motion-reduce:hidden";
+/** 英文名在深色底上是半透明白，浅色底上换成半透明黑；其余与其他平台的开屏相同。 */
+export const hSplashTagline = `${splashTagline} light-theme:text-black/55`;
+/** 名字和英文名排在圆盘正下方，与圆盘相隔 18px。 */
+export const hSplashCaption =
+  "absolute inset-x-0 top-[calc(50%+108px)] flex flex-col items-center gap-[18px]";
+/** 笔画一开始就画好：系统启动窗和盖板上的标志已经带着它，开屏再从零描一遍就是先擦掉再画。 */
 export const hSplashStroke =
-  "fill-none stroke-white [stroke-dasharray:1] [stroke-linecap:round] [stroke-linejoin:round] [stroke-width:9] animate-splash-logo-draw motion-reduce:animate-none";
+  "fill-none stroke-white [stroke-linecap:round] [stroke-linejoin:round] [stroke-width:9]";
 /** 加载条：距两侧和底部 48 的 3px 轨道，在启动页停留的时间内逐渐填满（dc.html `msLoad`）。 */
 export const hSplashTrack =
-  "absolute right-12 bottom-12 left-12 h-[3px] overflow-hidden rounded-[2px] bg-white/8";
+  "absolute right-12 bottom-12 left-12 h-[3px] overflow-hidden rounded-[2px] bg-white/8 light-theme:bg-black/8";
 export const hSplashFill =
   "block h-full w-full origin-left bg-[color-mix(in_srgb,var(--accent-color)_70%,#FFFFFF)] animate-splash-load motion-reduce:animate-none";

@@ -1,12 +1,27 @@
 // @msime/web-engine 的类型。帧的字段与 crates/engine-wasm/src/bindings.rs 的 frame_to_js 一一对应。
 
 /** xiaohe、ziranma、shoudao、microsoft 是小鹤、自然码、手到和微软双拼，和全拼共用拼音库；微软双拼的 `;` 是韵母 ing。japanese 是日语罗马字：下载 wasm 和日语模型（约 5 MB），组字区显示假名，候选是整句转换、词和平假名、片假名，`-` 是长音 ー，标点是 、。「」。korean 是韩文两套式（두벌식）：只下载 wasm，音节在组字区拼好后自动上屏，没有候选。 */
-export type MsimeScheme = "quanpin" | "xiaohe" | "ziranma" | "shoudao" | "microsoft" | "wubi86" | "japanese" | "korean";
+export type MsimeScheme =
+  | "quanpin"
+  | "xiaohe"
+  | "ziranma"
+  | "shoudao"
+  | "microsoft"
+  | "wubi86"
+  | "japanese"
+  | "korean";
 
 export declare const SCHEMES: readonly MsimeScheme[];
 
-/** 辅助码方案：lantian 蓝天小雨点、ziranma 自然码、shouyou2_0 首右 2.0、shouyouplus 首右 plus、xiaohe 小鹤形码、jiajia 加加。任何一种都能配全拼和任何一种双拼。 */
-export type MsimeHelpcode = "lantian" | "ziranma" | "shouyou2_0" | "shouyouplus" | "xiaohe" | "jiajia";
+/** 辅助码方案：lantian 蓝天小雨点、ziranma 自然码、shouyou2_0 首右 2.0、shouyouplus 首右 plus、xiaohe 小鹤形码、jiajia 加加、wubi86 五笔 86（86 五笔全码的前两码）。任何一种都能配全拼和任何一种双拼。 */
+export type MsimeHelpcode =
+  | "lantian"
+  | "ziranma"
+  | "shouyou2_0"
+  | "shouyouplus"
+  | "xiaohe"
+  | "jiajia"
+  | "wubi86";
 
 /** SDK 带的辅助码方案，顺序同引擎的 `assets::HELPCODES`。 */
 export declare const HELPCODES: readonly MsimeHelpcode[];
@@ -78,7 +93,14 @@ export interface MsimeAssets {
 }
 
 export type MsimeLoadPhase = "fetch" | "compile" | "import" | "session";
-export type MsimeErrorCode = "unsupported" | "network" | "csp" | "memory" | "panic" | "engine" | "disposed";
+export type MsimeErrorCode =
+  | "unsupported"
+  | "network"
+  | "csp"
+  | "memory"
+  | "panic"
+  | "engine"
+  | "disposed";
 
 export declare class MsimeError extends Error {
   readonly code: MsimeErrorCode;
@@ -153,11 +175,17 @@ export declare const KeyKind: Readonly<{
 }>;
 export declare function packKey(kind: number, ascii?: number): number;
 /** keydown 对应的打包按键，引擎不该看到这个键时为 null。composing 传最近一帧的 composing；typed 可以覆盖 e.key。 */
-export declare function keyFromEvent(e: KeyboardEvent, options?: { composing?: boolean; typed?: string | null }): number | null;
+export declare function keyFromEvent(
+  e: KeyboardEvent,
+  options?: { composing?: boolean; typed?: string | null },
+): number | null;
 /** 系统输入法正在处理这个键。 */
 export declare function osImeIntercepting(e: KeyboardEvent): boolean;
 /** 单按 Shift 的检测器；up 返回 true 时发送 packKey(KeyKind.ShiftTap)。 */
-export declare function createShiftTap(): { down(e: KeyboardEvent): void; up(e: KeyboardEvent): boolean };
+export declare function createShiftTap(): {
+  down(e: KeyboardEvent): void;
+  up(e: KeyboardEvent): boolean;
+};
 
 /** 内置皮肤 ID：`system`（网页上画桌面端设置页预览的平台默认配色，跟随明暗）、五个全局主题，以及 msime-windows 的五个内置外观。 */
 export type MsimeSkinId =
@@ -181,6 +209,23 @@ export declare const DEFAULT_SKIN: "shuishan";
 export type MsimeSkinLayout = "horizontal" | "vertical";
 export type MsimeSkinMode = "light" | "dark";
 
+export type MsimeSkinAnimationPreset =
+  | "none"
+  | "fade"
+  | "fade_scale"
+  | "slide_up"
+  | "spring"
+  | "glow";
+
+/** schema_version 2 的安全动画预设；不会执行皮肤提供的 CSS 或脚本。 */
+export interface MsimeSkinAnimation {
+  enter?: MsimeSkinAnimationPreset;
+  exit?: MsimeSkinAnimationPreset;
+  selection?: MsimeSkinAnimationPreset;
+  durationMs?: number;
+  staggerMs?: number;
+}
+
 /** 皮肤包在一种明暗下的候选框配色，同桌面 `skin.toml` 的 `[candidate.light]` / `[candidate.dark]`。颜色写成 `#RGB`、`#RRGGBB`、`#RRGGBBAA`、`rgb()`、`rgba()` 或 `transparent`，读不懂的当没写。 */
 export interface MsimeSkinPalette {
   accent?: string;
@@ -203,6 +248,8 @@ export interface MsimeSkinPalette {
 /** 皮肤对象，形状同桌面设置页的 `SkinSummary` JSON（只取候选框用得到的字段）。尺寸单位 dip 在网页上就是 CSS px；图片写成 http(s)、blob、`data:image/*` 或相对地址（按页面地址解析），其他地址丢弃。 */
 export interface MsimeSkin {
   id?: string;
+  /** 外部清单的 schema_version；写 2 时未提供 animation 也采用漂亮的安全默认动画。 */
+  schemaVersion?: 1 | 2;
   /** 画在哪个主题之上：全局主题、`system` 或 msime-windows 的内置外观（`fluent`、`wechat` 等），默认 `system`。base 为全局主题时，皮肤固定画在那个主题的明暗下。 */
   base?: string;
   /** 皮肤支持的布局，不写时全都支持。不支持当前布局或明暗时只画 base（`ResolvedSkin.drawn` 为 false）。 */
@@ -227,6 +274,7 @@ export interface MsimeSkin {
   /** 候选框背景图；opacity 默认 1，夹到 0 到 1。 */
   background?: { image?: string; fit?: "cover" | "contain" | "stretch"; opacity?: number } | null;
   candidate?: { dark?: MsimeSkinPalette; light?: MsimeSkinPalette };
+  animation?: MsimeSkinAnimation | null;
 }
 
 /** resolveSkin 的结果，整个被冻结。颜色都是大写的 `#RRGGBB` 或 `#RRGGBBAA`。 */
@@ -257,17 +305,36 @@ export interface ResolvedSkin {
     /** 圆角（px），皮肤没给时为 null。 */
     cornerRadius: number | null;
     minWidth: number | null;
-    decoration: Readonly<{ url: string; top: number; width: number; align: "left" | "center" | "right" }> | null;
-    background: Readonly<{ url: string; fit: "cover" | "contain" | "stretch"; opacity: number }> | null;
+    decoration: Readonly<{
+      url: string;
+      top: number;
+      width: number;
+      align: "left" | "center" | "right";
+    }> | null;
+    background: Readonly<{
+      url: string;
+      fit: "cover" | "contain" | "stretch";
+      opacity: number;
+    }> | null;
   }>;
   /** 候选栏用的 CSS 自定义属性（`--cand-bg`、`--cand-text`、`--cand-selected`、`--msime-skin-radius` 等），值都已校验，可以直接 `style.setProperty`。 */
   readonly variables: Readonly<Record<string, string>>;
+  readonly animation: Readonly<{
+    enter: MsimeSkinAnimationPreset;
+    exit: MsimeSkinAnimationPreset;
+    selection: MsimeSkinAnimationPreset;
+    durationMs: number;
+    staggerMs: number;
+  }>;
   /** 皮肤对象不支持当前布局或明暗、只画了 base 时为 false。 */
   readonly drawn: boolean;
 }
 
 /** 把内置皮肤 ID 或皮肤对象解析成颜色、几何和 CSS 自定义属性：桌面端 `theme::resolve` 的结果，再补齐它留空的槽位（`system` 留空的用平台默认配色，Windows 外观补上高亮候选的文字色）。自己画候选栏的页面用它取水杉的配色。未知 ID、base 或 layout 抛 TypeError。 */
-export declare function resolveSkin(skin?: MsimeSkinId | MsimeSkin, options?: { dark?: boolean; layout?: MsimeSkinLayout }): ResolvedSkin;
+export declare function resolveSkin(
+  skin?: MsimeSkinId | MsimeSkin,
+  options?: { dark?: boolean; layout?: MsimeSkinLayout },
+): ResolvedSkin;
 
 /** 候选栏的宿主元素标签名。 */
 export declare const CANDIDATE_BAR_TAG: "msime-candidates";
@@ -318,7 +385,10 @@ export interface CandidateBar {
   /** 宿主元素 `<msime-candidates>`，候选栏画在它的 Shadow DOM 里。 */
   readonly element: HTMLElement;
   /** 画一帧；frame.composing 为 false 时隐藏。anchorRect 是光标或文本框的视口矩形，候选栏画在它下方，放不下时画在上方，并保持在视口内。 */
-  render(frame: MsimeFrame, anchorRect: Pick<DOMRectReadOnly, "left" | "top" | "bottom" | "right">): void;
+  render(
+    frame: MsimeFrame,
+    anchorRect: Pick<DOMRectReadOnly, "left" | "top" | "bottom" | "right">,
+  ): void;
   hide(): void;
   /** 换皮肤；未知 ID 抛 TypeError，原来的皮肤不变。 */
   setSkin(skin: MsimeSkinId | MsimeSkin | undefined): void;
@@ -346,4 +416,8 @@ export interface AttachInputOptions {
   onFrame?: (frame: MsimeFrame) => void;
 }
 /** 把引擎接到一个 textarea 或 input 上：组字时拦截按键交给引擎，空闲时的回车、退格、方向键和 Esc 仍由浏览器处理。返回解除绑定的函数；解除绑定时正在组的字被放弃，还没回来的帧不再写进文本框，也不再回调 onFrame。 */
-export declare function attachInput(el: HTMLTextAreaElement | HTMLInputElement, engine: MsimeEngine, options?: AttachInputOptions): () => void;
+export declare function attachInput(
+  el: HTMLTextAreaElement | HTMLInputElement,
+  engine: MsimeEngine,
+  options?: AttachInputOptions,
+): () => void;

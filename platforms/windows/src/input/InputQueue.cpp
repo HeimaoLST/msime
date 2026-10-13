@@ -1,14 +1,16 @@
 #include "InputQueue.h"
 #include "TerminalDeactivationPolicy.h"
+#include "CandidateWheel.h"
 
 namespace msime::windows {
 std::optional<PendingReply>
 InputState::select_candidate(const FocusLease &lease, uint64_t expected_session,
-                             uint64_t generation, size_t index) {
+                             uint64_t generation, size_t index,
+                             uint64_t translation_page) {
   check_thread();
   auto *owner = session(lease.transport);
   return owner ? owner->select_candidate(lease, expected_session, generation,
-                                         index)
+                                         index, translation_page)
                : std::nullopt;
 }
 std::optional<PendingReply> InputState::toggle_character_set(
@@ -19,6 +21,16 @@ std::optional<PendingReply> InputState::toggle_character_set(
   if (!owner)
     return std::nullopt;
   return owner->toggle_character_set(lease, packet, enabled, persist);
+}
+std::optional<PendingReply>
+InputState::toggle_japanese(const FocusLease &lease,
+                            const FanyImeNamedpipeData &packet, bool enabled,
+                            const std::function<bool()> &persist) {
+  check_thread();
+  auto *owner = session(lease.transport);
+  if (!owner)
+    return std::nullopt;
+  return owner->toggle_japanese(lease, packet, enabled, persist);
 }
 std::optional<nlohmann::json>
 InputState::candidate_action(const FocusLease &lease, uint64_t session,
@@ -57,6 +69,10 @@ InputState::InputState(FocusGate &gate, size_t clients, std::string options)
       document.value("preferences", nlohmann::json::object())
           .value("keybindings", nlohmann::json::object())
           .value("toggle_character_set_ctrl_shift_f", true);
+  japanese_toggle_shortcut_enabled_ =
+      document.value("preferences", nlohmann::json::object())
+          .value("keybindings", nlohmann::json::object())
+          .value("toggle_japanese_ctrl_shift_j", false);
 }
 InputState::~InputState() { shutdown(); }
 void InputState::shutdown() noexcept {
@@ -109,6 +125,9 @@ size_t InputState::resume_dictionaries() {
       continue;
     try {
       client.session = std::make_unique<FocusedSession>(gate_, id, options_);
+      // 新会话的属性从未知开始，TIP 只在属性变了或换了连接时才重报，所以把记下的交给它。
+      if (client.field_traits)
+        client.session->set_field_traits(*client.field_traits);
       ++rebuilt;
     } catch (...) {
       // A client whose session cannot be rebuilt is left without one. It
@@ -133,6 +152,29 @@ bool InputState::deactivate_terminal(uint64_t client, uint64_t token) {
     return false;
   return found->second.session->cancel_focus_token(token);
 }
+bool InputState::passthrough_key(uint64_t client, uint64_t token, uint32_t key_class) {
+  check_thread();
+  if (!client || !token || quiesced_)
+    return false;
+  const auto found = clients_.find(client);
+  if (found == clients_.end() || !found->second.session)
+    return false;
+  return found->second.session->passthrough_key(token, key_class);
+}
+bool InputState::set_field_traits(const PipeTicket &ticket,
+                                  const FanyImeNamedpipeData &packet) {
+  check_thread();
+  if (!valid_main_frame(packet, ticket.client) ||
+      packet.event_type != FanyImePipeEventType::FieldTraits)
+    throw std::invalid_argument("Invalid field traits notification");
+  const auto found = clients_.find(ticket.client);
+  if (found == clients_.end() || !same_ticket(found->second.ticket, ticket))
+    return false;
+  found->second.field_traits = packet.keycode;
+  if (found->second.session)
+    found->second.session->set_field_traits(packet.keycode);
+  return true;
+}
 void InputState::cleanup(const FocusRoute &route) {
   if (route.cleanup)
     if (auto *owner = session(route.cleanup->transport))
@@ -150,8 +192,10 @@ FocusRoute InputState::connected(const PipeTicket &ticket) {
   else {
     try {
       clients_.emplace(ticket.client,
-                       Client{ticket, std::make_unique<FocusedSession>(
-                                          gate_, ticket.client, options_)});
+                       Client{ticket,
+                              std::make_unique<FocusedSession>(
+                                  gate_, ticket.client, options_),
+                              std::nullopt});
     } catch (...) {
       router_.disconnected(ticket);
       throw;
@@ -292,6 +336,12 @@ InputState::dedicated_english(const FocusLease &lease, bool exit) {
   auto *owner = session(lease.transport);
   return owner ? owner->dedicated_english(lease, exit) : std::nullopt;
 }
+std::optional<nlohmann::json>
+InputState::set_dedicated_english(const FocusLease &lease, bool enabled) {
+  check_thread();
+  auto *owner = session(lease.transport);
+  return owner ? owner->set_dedicated_english(lease, enabled) : std::nullopt;
+}
 bool InputState::cancel_composition(const FocusLease &lease) {
   check_thread();
   auto *owner = session(lease.transport);
@@ -326,11 +376,24 @@ InputState::apply_ai_candidates(const FocusLease &lease,
   return owner ? owner->apply_ai_candidates(lease, query, candidates)
                : std::nullopt;
 }
+std::optional<nlohmann::json>
+InputState::resolve_ai_candidates(const FocusLease &lease,
+                                  const std::string &query) {
+  check_thread();
+  auto *owner = session(lease.transport);
+  return owner ? owner->resolve_ai_candidates(lease, query) : std::nullopt;
+}
 std::optional<std::string>
 InputState::translation_query(const FocusLease &lease) {
   check_thread();
   auto *owner = session(lease.transport);
   return owner ? owner->translation_query(lease) : std::nullopt;
+}
+std::optional<std::string>
+InputState::ai_request(const FocusLease &lease, const std::string &query) {
+  check_thread();
+  auto *owner = session(lease.transport);
+  return owner ? owner->ai_request(lease, query) : std::nullopt;
 }
 std::optional<std::pair<FocusLease, std::string>>
 InputState::current_translation_request() {
@@ -360,9 +423,10 @@ InputState::update_preferences(const FocusLease &lease,
 }
 std::optional<nlohmann::json>
 InputState::page_candidate(const FocusLease &lease, uint64_t session,
-                           uint64_t generation, bool previous, unsigned steps) {
+                           uint64_t generation, bool previous, unsigned steps,
+                           bool from_wheel) {
   check_thread();
-  if (!navigation_.mouse_wheel)
+  if (!candidate_page_allowed(from_wheel, navigation_.mouse_wheel))
     return std::nullopt;
   auto *owner = this->session(lease.transport);
   return owner ? owner->page_candidate(lease, session, generation, previous,
@@ -383,11 +447,15 @@ void InputState::publish_preferences(const PreferenceSnapshot &snapshot) {
   const bool character_set_shortcut =
       document.value("keybindings", nlohmann::json::object())
           .value("toggle_character_set_ctrl_shift_f", true);
+  const bool japanese_toggle_shortcut =
+      document.value("keybindings", nlohmann::json::object())
+          .value("toggle_japanese_ctrl_shift_j", false);
   preferences_ = snapshot;
   navigation_ = navigation;
   word_character_ = word;
   tsf_preedit_style_ = style;
   character_set_shortcut_enabled_ = character_set_shortcut;
+  japanese_toggle_shortcut_enabled_ = japanese_toggle_shortcut;
   for (auto &[id, client] : clients_) {
     (void)id;
     if (client.session)

@@ -20,7 +20,7 @@ public final class EnglishCapitalizationPolicy {
         if (context.length() == 0) return true;
         int codePoint = Character.codePointBefore(context, context.length());
         if (codePoint == '\'' || codePoint == '\u2019') return false;
-        return !Character.isLetterOrDigit(codePoint);
+        return !TextPolicy.isLetterOrDigit(codePoint);
     }
 
     private static boolean shouldShiftSentences(CharSequence context) {
@@ -32,7 +32,7 @@ public final class EnglishCapitalizationPolicy {
             int codePoint = Character.codePointBefore(context, offset);
             offset -= Character.charCount(codePoint);
             if (codePoint == '\n' || codePoint == '\r') return true;
-            if (Character.isWhitespace(codePoint) || Character.isSpaceChar(codePoint)) {
+            if (TextPolicy.isSpace(codePoint)) {
                 whitespaceAfter = true;
                 continue;
             }

@@ -8,19 +8,20 @@ use crate::*;
 #[no_mangle]
 pub extern "C" fn msime_client_set_candidate_page_size(handle: u64, size: u8) -> *mut c_char {
     response(|| {
-        if !(1..=9).contains(&size) {
-            return Err("candidate page size must be between 1 and 9".into());
+        if !(1..=msime_client_core::preferences::MAX_CANDIDATE_PAGE_SIZE).contains(&size) {
+            return Err("candidate page size must be between 1 and 10".into());
         }
+        let applied = host_page_size(size);
         with_session(handle, |session| {
             if session.runtime.is_idle() {
                 session
                     .runtime
-                    .set_page_size(size)
+                    .set_page_size(applied)
                     .map_err(|e| e.to_string())?;
             }
             session.page_size_override = Some(size);
             let view = session.runtime.view();
-            Ok(json!({"deferred": view.page_size != usize::from(size), "view": view}))
+            Ok(json!({"deferred": view.page_size != usize::from(applied), "view": view}))
         })
     })
 }
@@ -33,11 +34,15 @@ pub extern "C" fn msime_client_set_chinese_punctuation(handle: u64, enabled: boo
             let lock = session
                 .punctuation_lock_override
                 .unwrap_or_else(|| punctuation_lock_code(session.applied.punctuation_lock));
-            session
+            // 没有组字时会刷新视图，暂存着词段时也算：按旁路调用推导。
+            let pending = session.lifecycle_begin(lifecycle::Call::SideChannel);
+            let switched = session
                 .runtime
                 .set_chinese_punctuation_enabled(engine_chinese_punctuation(enabled, lock))
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string());
+            session.lifecycle_on_error(pending, switched)?;
             session.punctuation_override = Some(enabled);
+            session.lifecycle_settle(pending);
             serialized_runtime_view(session)
         })
     })
@@ -61,16 +66,21 @@ pub extern "C" fn msime_client_set_paired_punctuation(handle: u64, enabled: bool
 pub extern "C" fn msime_client_set_punctuation_lock(handle: u64, lock: u8) -> *mut c_char {
     response(|| {
         with_session(handle, |session| {
-            session
+            // 同 `msime_client_set_chinese_punctuation`：按旁路调用推导。
+            let pending = session.lifecycle_begin(lifecycle::Call::SideChannel);
+            let locked = session
                 .runtime
                 .set_punctuation_lock(lock)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string());
+            session.lifecycle_on_error(pending, locked)?;
             session.punctuation_lock_override = Some(lock);
             let engine_enabled = session.live_engine_chinese_punctuation();
-            session
+            let switched = session
                 .runtime
                 .set_chinese_punctuation_enabled(engine_enabled)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string());
+            session.lifecycle_on_error(pending, switched)?;
+            session.lifecycle_settle(pending);
             serialized_runtime_view(session)
         })
     })
@@ -80,12 +90,27 @@ pub extern "C" fn msime_client_set_punctuation_lock(handle: u64, lock: u8) -> *m
 pub extern "C" fn msime_client_set_english_mode(handle: u64, enabled: bool) -> *mut c_char {
     response(|| {
         with_session(handle, |session| {
-            session
+            // 切换专用英文会丢掉正在打的组字（IBus 的 Ctrl+Shift+E 不先上屏就调这里）：按旁路调用推导，组字的 end 和候选的 hidden 才不会丢。
+            let pending = session.lifecycle_begin(lifecycle::Call::SideChannel);
+            let switched = session
                 .runtime
                 .set_dedicated_english(enabled)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string());
+            session.lifecycle_on_error(pending, switched)?;
             session.english_mode = enabled;
+            session.lifecycle_settle(pending);
             serialized_runtime_view(session)
+        })
+    })
+}
+
+/// 宿主报告大写锁定状态。偏好 `caps_lock_ascii_punctuation` 打开时，大写锁定期间没有组字的标点按英文标点输出（见 `HostSession::caps_lock_punctuation`）。不是持久化的偏好，换会话后由宿主重新报告。
+#[no_mangle]
+pub extern "C" fn msime_client_set_caps_lock(handle: u64, enabled: bool) -> *mut c_char {
+    response(|| {
+        with_session(handle, |session| {
+            session.caps_lock = enabled;
+            Ok(Value::Bool(enabled))
         })
     })
 }
@@ -101,7 +126,7 @@ pub extern "C" fn msime_client_set_private_session(handle: u64, enabled: bool) -
     })
 }
 
-/// 在组字空闲后开启引擎负责的九键数字处理：全拼九宫格，或注音九键。
+/// 在组字空闲后开启引擎负责的九键数字处理：全拼九宫格，或注音九键。`msime_client_set_key_grid` 的九键开关，关掉时连 14 键也关掉。
 #[no_mangle]
 pub extern "C" fn msime_client_set_nine_key_mode(handle: u64, enabled: bool) -> *mut c_char {
     response(|| {
@@ -110,7 +135,29 @@ pub extern "C" fn msime_client_set_nine_key_mode(handle: u64, enabled: bool) -> 
                 .runtime
                 .set_nine_key_enabled(enabled)
                 .map_err(|e| e.to_string())?;
-            session.nine_key_override = Some(enabled);
+            session.key_grid_override = Some(enabled.then_some(KeyGrid::NineKey));
+            serialized_runtime_view(session)
+        })
+    })
+}
+
+/// 在组字空闲后换引擎的组码网格：0 关，1 九键，2 全拼 14 键，3 九键双拼（表按已应用的偏好 `nine_key_shuangpin_profile` 取，自定义表不能用时按默认的内置方案）。其他取值报错，会话不变。
+#[no_mangle]
+pub extern "C" fn msime_client_set_key_grid(handle: u64, grid: u8) -> *mut c_char {
+    response(|| {
+        with_session(handle, |session| {
+            let grid = match grid {
+                0 => None,
+                1 => Some(KeyGrid::NineKey),
+                2 => Some(KeyGrid::FourteenKey),
+                3 => Some(crate::nine_key_shuangpin_grid(&session.applied).0),
+                _ => return Err("unknown key grid".into()),
+            };
+            session
+                .runtime
+                .set_key_grid(grid)
+                .map_err(|e| e.to_string())?;
+            session.key_grid_override = Some(grid);
             serialized_runtime_view(session)
         })
     })
@@ -141,6 +188,12 @@ pub extern "C" fn msime_client_character(handle: u64, ascii: u8, shift: bool) ->
     )
 }
 
+/// 14 键的一键：`letter` 是这一组里的任一小写字母（宿主约定送首字母）。不在 14 键下、或不是 `a`–`z` 时 handled=false，会话不变。
+#[no_mangle]
+pub extern "C" fn msime_client_grid_key(handle: u64, letter: u8) -> *mut c_char {
+    dispatch(handle, Action::GridKey(letter))
+}
+
 #[no_mangle]
 pub extern "C" fn msime_client_command(handle: u64, command: u32) -> *mut c_char {
     let action = match command {
@@ -161,6 +214,24 @@ pub extern "C" fn msime_client_command(handle: u64, command: u32) -> *mut c_char
         14 => Action::SegmentMoveRight,
         15 => Action::Command(Command::CommitRawWithoutLearning),
         16 => Action::Command(Command::ConvertHanja),
+        17 => Action::Command(Command::ConversionLeft),
+        18 => Action::Command(Command::ConversionRight),
+        // 宿主已经自己写入了文本：对会话同 Cancel，生命周期里结束原因记 HostCommit。
+        lifecycle::COMMAND_CANCEL_AFTER_HOST_COMMIT => {
+            return dispatch_call(
+                handle,
+                Action::Command(Command::Cancel),
+                Some(lifecycle::InputClass::HostCommit),
+            )
+        }
+        // 焦点即将离开，宿主替用户结束组字：对会话同 Finish，上屏来源记 FocusLoss，不出声不画。
+        lifecycle::COMMAND_FINISH_ON_FOCUS_LOSS => {
+            return dispatch_call(
+                handle,
+                Action::Finish,
+                Some(lifecycle::InputClass::FocusLoss),
+            )
+        }
         100 => Action::NextPage,
         101 => Action::PreviousPage,
         102 => Action::NextCandidate,
@@ -205,27 +276,7 @@ pub extern "C" fn msime_client_punctuation_with_context(
         let session = sessions
             .get(&handle)
             .ok_or_else(|| "unknown session or wrong thread".to_owned())?;
-        let lock = match session.punctuation_lock_override {
-            Some(1) => msime_client_core::preferences::PunctuationLock::Chinese,
-            Some(2) => msime_client_core::preferences::PunctuationLock::English,
-            Some(_) => msime_client_core::preferences::PunctuationLock::Follow,
-            None => session.applied.punctuation_lock,
-        };
-        let route = punctuation_route(PunctuationContext {
-            character: ascii,
-            preceding,
-            host_context_available: session
-                .runtime
-                .punctuation_host_context_available(session.english_mode),
-            has_composition: !session.runtime.is_idle(),
-            chinese_punctuation: session
-                .punctuation_override
-                .unwrap_or(session.applied.chinese_punctuation),
-            smart_punctuation: session.applied.smart_punctuation,
-            direct_digit: session.applied.smart_punctuation_direct_digit,
-            direct_letter: session.applied.smart_punctuation_direct_letter,
-            lock,
-        });
+        let route = punctuation_route(session.punctuation_context(ascii, preceding));
         Ok(match route {
             PunctuationRoute::Engine => Action::Punctuation(ascii),
             PunctuationRoute::Ascii => Action::PunctuationAscii(ascii),
@@ -472,9 +523,11 @@ pub extern "C" fn msime_client_punctuation_ascii(handle: u64, ascii: u8) -> *mut
 pub extern "C" fn msime_client_rerank_settled(handle: u64) -> *mut c_char {
     response(|| {
         with_session(handle, |session| {
+            let pending = session.lifecycle_begin(lifecycle::Call::SideChannel);
             let moved = session.runtime.rerank_settled();
             if moved {
                 let view = session.runtime.view();
+                session.lifecycle_view(pending, &view);
                 Ok(serde_json::json!({"moved": true, "view": view}))
             } else {
                 Ok(serde_json::json!({"moved": false}))

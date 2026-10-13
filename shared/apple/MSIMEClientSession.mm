@@ -77,6 +77,10 @@ static NSDictionary *decode(char *response, NSError **error) {
     NSNumber *_pairedPunctuationOverride;
     NSNumber *_punctuationLockOverride;
     NSNumber *_characterWidthOverride;
+    BOOL _capsLock;
+    // 生命周期核心的选择加入和最后报告的字段属性。它们只活在会话里、不落盘，快照替换会话后在 restoreLiveModes: 里恢复。
+    uint32_t _lifecycleFlags;
+    uint32_t _fieldTraits;
 }
 - (NSDictionary *)voiceProviderRequest:(NSDictionary *)query socket:(NSString *)socket error:(NSError **)error {
     if (![NSJSONSerialization isValidJSONObject:query] || ![socket isKindOfClass:NSString.class] || !socket.length) { setError(error, @"语音服务请求格式错误"); return nil; }
@@ -128,6 +132,11 @@ static NSDictionary *decode(char *response, NSError **error) {
     if (restored && _punctuationLockOverride) restored = decode(msime_client_set_punctuation_lock(_handle, _punctuationLockOverride.unsignedCharValue), error) != nil;
     if (restored && _characterWidthOverride) restored = decode(msime_client_set_character_width(_handle, _characterWidthOverride.boolValue), error) != nil;
     if (restored && _dedicatedEnglishEnabled) restored = decode(msime_client_set_english_mode(_handle, true), error) != nil;
+    if (restored && _capsLock) restored = decodeValue(msime_client_set_caps_lock(_handle, true), error) != nil;
+    if (restored && _lifecycleFlags) {
+        _lifecycleFlags = msime_client_set_lifecycle(_handle, _lifecycleFlags);
+        if (_fieldTraits) _fieldTraits = msime_client_set_field_traits(_handle, _fieldTraits);
+    }
     if (restored) return YES;
     // Do not expose a replacement session silently running in the wrong mode.
     msime_client_string_free(msime_client_destroy(_handle));
@@ -176,6 +185,16 @@ static NSDictionary *decode(char *response, NSError **error) {
     }
     return decode(msime_client_apply_online_candidates(_handle, (const uint8_t *)queryData.bytes, queryData.length,
         (const uint8_t *)candidateData.bytes, candidateData.length, (uint8_t)source), error);
+}
+- (NSDictionary *)resolveOnlineCandidatesForSource:(NSUInteger)source
+                                            query:(NSDictionary *)query error:(NSError **)error {
+    if (source > 1 || ![query isKindOfClass:NSDictionary.class] || ![NSJSONSerialization isValidJSONObject:query]) {
+        setError(error, @"在线候选格式错误"); return nil;
+    }
+    NSData *queryData = [NSJSONSerialization dataWithJSONObject:query options:0 error:error];
+    if (!queryData || queryData.length > 16384) { setError(error, @"在线候选请求过大"); return nil; }
+    return decode(msime_client_resolve_online_candidates(_handle, (const uint8_t *)queryData.bytes, queryData.length,
+        (uint8_t)source), error);
 }
 + (NSDictionary *)customTranslationHTTPRequest:(NSDictionary *)request error:(NSError **)error {
     if (![NSJSONSerialization isValidJSONObject:request]) { setError(error, @"自定义翻译请求格式错误"); return nil; }
@@ -236,7 +255,7 @@ static NSDictionary *decode(char *response, NSError **error) {
     return [value isKindOfClass:NSDictionary.class] ? value : nil;
 }
 + (NSArray *)parseTencentTranslationResponse:(NSData *)body expectedCount:(NSUInteger)count error:(NSError **)error {
-    if (![body isKindOfClass:NSData.class] || body.length > 1048576 || count < 1 || count > 9) {
+    if (![body isKindOfClass:NSData.class] || body.length > 1048576 || count < 1 || count > 10) {
         setError(error, @"腾讯翻译响应格式错误或过大"); return nil;
     }
     if (!body.length) return nil;
@@ -613,6 +632,12 @@ static NSDictionary *decode(char *response, NSError **error) {
     if (view) _punctuationLockOverride = @(value);
     return view;
 }
+- (BOOL)setCapsLockEnabled:(BOOL)enabled error:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return NO;
+    if (!decodeValue(msime_client_set_caps_lock(_handle, enabled), error)) return NO;
+    _capsLock = enabled;
+    return YES;
+}
 - (nullable NSDictionary *)setCharacterWidthFull:(BOOL)fullwidth error:(NSError **)error {
     if (![self checkThreadAndHandle:error]) return nil;
     NSDictionary *view = decode(msime_client_set_character_width(_handle, fullwidth), error);
@@ -655,6 +680,14 @@ static NSDictionary *decode(char *response, NSError **error) {
     if (![self checkThreadAndHandle:error]) return nil;
     return decode(msime_client_view(_handle), error);
 }
+- (nullable NSDictionary *)allCandidatesWithError:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return nil;
+    return decode(msime_client_all_candidates(_handle), error);
+}
+- (nullable NSDictionary *)selectAnyCandidateGeneration:(uint64_t)generation index:(NSUInteger)index error:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return nil;
+    return decode(msime_client_select_any_candidate(_handle, generation, index), error);
+}
 - (nullable NSDictionary *)setDedicatedEnglishEnabled:(BOOL)enabled error:(NSError **)error {
     if (![self checkThreadAndHandle:error]) return nil;
     NSDictionary *view = decode(msime_client_set_english_mode(_handle, enabled), error);
@@ -689,6 +722,26 @@ static NSDictionary *decode(char *response, NSError **error) {
 }
 - (uint32_t)typingEffect:(uint32_t)event {
     return _handle ? msime_client_typing_effect(_handle, event) : 0;
+}
+// 同上，按键路径上不做主线程检查：库对已关闭的句柄和别的线程本来就返回 0 或 false。
+- (uint32_t)setLifecycle:(uint32_t)flags {
+    if (!_handle) return 0;
+    _lifecycleFlags = msime_client_set_lifecycle(_handle, flags);
+    return _lifecycleFlags;
+}
+- (uint32_t)lifecycleFlags { return _lifecycleFlags; }
+- (uint32_t)lifecycleKey:(uint32_t)key {
+    return _handle ? msime_client_key(_handle, key) : 0;
+}
+- (uint32_t)setFieldTraits:(uint32_t)traits {
+    if (!_handle) return 0;
+    const uint32_t applied = msime_client_set_field_traits(_handle, traits);
+    // 没选择加入时库返回 0，也就没有可恢复的属性。
+    _fieldTraits = applied;
+    return applied;
+}
+- (BOOL)setLifecycleActive:(BOOL)active {
+    return _handle && msime_client_set_active(_handle, active);
 }
 - (nullable NSDictionary *)typingEffectSettingsWithError:(NSError **)error {
     if (![self checkThreadAndHandle:error]) return nil;

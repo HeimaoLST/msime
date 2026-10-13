@@ -1,3 +1,4 @@
+import app.msime.android.NumberPolicy;
 import app.msime.android.TypingStatisticsSummary;
 import app.msime.android.TypingStatisticsSummary.Achievement;
 import app.msime.android.TypingStatisticsSummary.PeakWindow;
@@ -12,7 +13,7 @@ import java.util.Map;
  */
 public final class TypingStatisticsSummarySmoke {
     public static void main(String[] args) {
-        check("12,846".equals(TypingStatisticsSummary.grouped(12_846)), "thousands separator");
+        check("12,846".equals(NumberPolicy.grouped(12_846)), "thousands separator");
         check("比上周多 18%".equals(TypingStatisticsSummary.weekDelta(12_846, 10_886)), "week up");
         check("比上周少 50%".equals(TypingStatisticsSummary.weekDelta(50, 100)), "week down");
         check("和上周持平".equals(TypingStatisticsSummary.weekDelta(100, 100)), "week flat");
@@ -88,6 +89,12 @@ public final class TypingStatisticsSummarySmoke {
             "nineKey", 19L, "voice", 9L, "handwriting", 4L, "ai", 30L, "unknown", 5L));
         check(methods.size() == 4 && methods.get(0).count() == 68 && methods.get(1).count() == 19,
             "methods leave out AI and unknown");
+        // 14 键单独一档，排在 26 键和 9 键之间，不再并进 26 键（与共享 UI 的 summaryMethods 一致）。
+        List<Share> withFourteen = TypingStatisticsSummary.methods(Map.of("quanpin", 60L, "fourteenKey", 12L,
+            "nineKey", 19L));
+        check(withFourteen.size() == 3 && withFourteen.get(0).count() == 60
+            && "14 键".equals(withFourteen.get(1).title()) && withFourteen.get(1).count() == 12
+            && "9 键".equals(withFourteen.get(2).title()), "the fourteen-key keyboard is its own method");
 
         TypingStatisticsSummary summary = new TypingStatisticsSummary(null, null, null,
             List.of(first, million, streak));

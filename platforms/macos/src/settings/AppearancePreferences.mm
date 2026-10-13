@@ -47,7 +47,10 @@ NSString *const MSIMEAppearanceInputModeOnlyKey = @"MSIMEClientAppearanceInputMo
 static NSString *const LayoutKey = @"MSIMEClientCandidatePanelStyle";
 static NSString *const CandidateFollowCursorKey = @"MSIMEClientCandidateFollowCursor";
 static NSString *const InputModeHUDKey = @"MSIMEClientInputModeHUD";
+static NSString *const InputModeStatusItemKey = @"MSIMEClientInputModeStatusItem";
 static NSString *const AppLogoKey = @"MSIMEClientAppLogo";
+static NSString *const CandidatePageNumberKey = @"MSIMEClientCandidatePageNumber";
+static NSString *const ExpandCandidatesKey = @"MSIMEClientExpandCandidates";
 static NSString *const SchemeKey = @"MSIMEClientInputScheme";
 static NSString *const LastSyncedSchemeKey = @"MSIMEClientLastSyncedInputScheme";
 static NSString *const ShuangpinProfileKey = @"MSIMEClientShuangpinProfile";
@@ -55,11 +58,16 @@ static NSString *const ShuangpinPreeditKey = @"MSIMEClientShuangpinPreeditUsesRa
 /// 五笔码表版本：`wubi86` 或 `wubi98`，写进共享偏好文档的 `wubi_profile`。
 static NSString *const WubiProfileKey = @"MSIMEClientWubiProfile";
 static NSString *const LocalModesKey = @"MSIMEClientLocalModes";
+/// 「Shift+字母进入快捷模式」总开关和各模式开关存在同一张表里（共享文档的 `local_modes.shift_letter_entry`），缺省同样是开；设置窗口把它单独放在模式网格上方。
+static NSString *const ShiftLetterEntryMode = @"shift_letter_entry";
+/// 拆字反查（C 模式）在桌面宿主默认关：共享文档的 `local_modes.chaizi` 只在用户动过开关后才出现，host-api 在桌面构建里把缺键读作关，这里也要读作关，否则勾选和实际不一致。
+static NSString *const ChaiziMode = @"chaizi";
 static NSArray<NSArray<NSString *> *> *LocalModeControls() {
-    return @[@[@"quick_phrase", @"快捷短语（K 模式）"], @[@"date_time", @"日期与时间（T 模式）"],
+    return @[@[ShiftLetterEntryMode, @"Shift+字母进入快捷模式"], @[@"quick_phrase", @"快捷短语（K 模式）"], @[@"date_time", @"日期与时间（T 模式）"],
              @[@"unicode", @"Unicode 录入（U 模式）"], @[@"emoji", @"Emoji（E 模式）"],
              @[@"kaomoji", @"颜文字（M 模式）"], @[@"super_jianpin", @"超级简拼（J 模式）"],
-             @[@"temporary_english", @"临时英文（Y 模式）"], @[@"temporary_japanese", @"临时日语（R 模式）"]];
+             @[@"temporary_english", @"临时英文（Y 模式）"], @[@"temporary_japanese", @"临时日语（R 模式）"],
+             @[ChaiziMode, @"拆字反查（C 模式）"]];
 }
 static BOOL KnownLocalMode(NSString *mode) {
     for (NSArray *entry in LocalModeControls()) if ([entry[0] isEqual:mode]) return YES;
@@ -150,6 +158,8 @@ static NSString *const PreeditFontKey = @"MSIMEClientCandidatePreeditFontSize";
 static NSString *const CandidateScaleKey = @"MSIMEClientCandidateScalePercent";
 static NSString *const CandidateOpacityKey = @"MSIMEClientCandidateOpacityPercent";
 static NSString *const CandidateCornerRadiusKey = @"MSIMEClientCandidateCornerRadius";
+/// candidate_padding, stored like the radius: points, or an empty string once the user has asked to follow the skin again.
+static NSString *const CandidatePaddingKey = @"MSIMEClientCandidatePadding";
 /// A whole number in [minimum, maximum], as the shared document's integer fields are: a boolean or a fraction is not one.
 static BOOL ValidCandidateStyleInteger(id value, NSInteger minimum, NSInteger maximum) {
     return [value isKindOfClass:NSNumber.class] && CFGetTypeID((__bridge CFTypeRef)value) != CFBooleanGetTypeID() &&
@@ -159,6 +169,7 @@ static BOOL ValidCandidateStyleInteger(id value, NSInteger minimum, NSInteger ma
 static BOOL ValidCandidateScale(id value) { return ValidCandidateStyleInteger(value, 50, 200); }
 static BOOL ValidCandidateOpacity(id value) { return ValidCandidateStyleInteger(value, 50, 100); }
 static BOOL ValidCandidateCornerRadius(id value) { return ValidCandidateStyleInteger(value, 0, 32); }
+static BOOL ValidCandidatePadding(id value) { return ValidCandidateStyleInteger(value, 0, 16); }
 /// The 候选字体 presets in the order the popup lists them: a title, then the families the preset writes. The first family is the one this host puts in 候选字体; all of them go to the front of the fallback list, because the document is shared and the Windows and Linux names are what those hosts will find there. 默认 is the shared default pair (crates/client-core) rather than a preset of its own.
 static NSArray<NSArray<NSString *> *> *CandidateFontPresets() {
     return @[
@@ -184,7 +195,9 @@ static NSString *const PageSizeKey = @"MSIMEClientCandidatePageSize";
 static NSString *const GlobalThemeKey = @"MSIMEClientGlobalTheme";
 static NSString *const CustomThemeBaseKey = @"MSIMEClientCustomThemeBase";
 static NSString *const CustomCandidateSkinKey = @"MSIMEClientCustomCandidateSkin";
-/// `custom_theme.candidate_skin`: a package folder name, never a global theme id.
+/// 深色槽位 `custom_theme.candidate_skin_dark`，与浅色槽位同样校验，空串表示没有。
+static NSString *const CustomCandidateSkinDarkKey = @"MSIMEClientCustomCandidateSkinDark";
+/// `custom_theme.candidate_skin` 与 `candidate_skin_dark` 的值：皮肤包文件夹名，不会是全局主题 id。
 static BOOL ValidCustomCandidateSkin(id value) {
     return [value isKindOfClass:NSString.class] && [value length] > 0 && [value length] <= 64 &&
            msime::mac::IsSafeSkinId([value UTF8String]) && !msime::mac::IsGlobalThemeId([value UTF8String]);
@@ -196,10 +209,71 @@ static NSString *const ImeModeScopeKey = @"MSIMEClientImeModeScope";
 ///
 /// Deliberately not the same store as the remembered mode: a rule is a decision the user wrote down and a memory is an observation of what they last did, so a rule is saved and a memory is not, and -resetRememberedInputModes throws the observations away on every input-source switch without touching the decisions. Reading them apart is also the only way the lookup below can put the rule first.
 ///
-/// macOS-local for now, and so absent from both -sharedPreferencesByMerging: and -cloudSettingsSnapshot. Publishing it would make it a field of crates/client-core's Preferences, which is a shape Windows, Linux, iOS and HarmonyOS have to agree on before any one host starts writing it.
+/// 规则表现在是共享偏好文档的 `app_input_mode_rules`（crates/client-core 的 `Preferences::app_input_mode_rules`，macOS 按 bundle id、Windows 按进程基名），共享设置页和 Windows 也读写它。这个 NSUserDefaults 键只剩三种用途：升级前写下的规则在文档还没有这个键时照样生效，并由输入法载入文档后立即发起的一次保存（applicationInputModeRulesAwaitPublication）发布进文档；本窗口改规则时先记在这里，等同一次合并把它写进文档；偏好库收不下的旧规则（标识不合法，或超出 32 条）留在这里，只在本机生效。文档一旦带着这个键载入，它就是权威来源，已经进了文档的规则随即从这个键里删掉，键空了就整个删除。不在 -cloudSettingsSnapshot 里：bundle id 只对本机有意义。
 static NSString *const AppInputModeRulesKey = @"MSIMEClientAppInputModeRules";
 static BOOL ValidInputModeRule(id value) {
     return [value isKindOfClass:NSString.class] && [@[@"chinese", @"english"] containsObject:value];
+}
+/// 一张规则表里合法的条目：标识是非空字符串，模式是 chinese 或 english；别的都丢掉。
+static NSDictionary<NSString *, NSString *> *ValidInputModeRules(id stored) {
+    if (![stored isKindOfClass:NSDictionary.class]) return @{};
+    NSMutableDictionary<NSString *, NSString *> *rules = [NSMutableDictionary dictionary];
+    for (id identifier in stored)
+        if ([identifier isKindOfClass:NSString.class] && [identifier length] > 0 && ValidInputModeRule(stored[identifier]))
+            rules[identifier] = [stored[identifier] copy];
+    return rules;
+}
+/// 与 crates/client-core 的 MAX_APP_INPUT_MODE_RULES 一致。共享文档里的规则表超过它时偏好库拒绝整份保存。
+static const NSUInteger MaxPublishedInputModeRules = 32;
+/// 标识能否写进共享文档，与 crates/client-core 的 valid_app_input_mode_rules 逐条一致：非空、UTF-8 不超过 64 字节、两侧没有空白、不含控制字符（U+0000–U+001F、U+007F–U+009F）和 \ /。偏好库对不合法的表拒绝整份保存，所以发布前必须先过这一关，否则一条升级前留下的怪标识就会让本输入法此后的每一次保存都失败。
+static BOOL PublishableInputModeRuleIdentifier(NSString *identifier) {
+    if (![identifier isKindOfClass:NSString.class] || identifier.length == 0) return NO;
+    const NSUInteger bytes = [identifier lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    if (bytes == 0 || bytes > 64) return NO;
+    if (![[identifier stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] isEqualToString:identifier]) return NO;
+    NSMutableCharacterSet *forbidden = [NSMutableCharacterSet characterSetWithRange:NSMakeRange(0x00, 0x20)];
+    [forbidden addCharactersInRange:NSMakeRange(0x7F, 0x21)];
+    [forbidden addCharactersInString:@"\\/"];
+    return [identifier rangeOfCharacterFromSet:forbidden].location == NSNotFound;
+}
+/// 两个标识是否是同一个：只把 ASCII 字母当作不分大小写，和偏好库去重用的 to_ascii_lowercase 相同（ASCII 字母在 UTF-8 和 UTF-16 里都是单个码元，逐码元比较结果一致）。不分配内存，-englishMode 每次查规则都会走到这里。
+static BOOL InputModeRuleIdentifiersEqual(NSString *left, NSString *right) {
+    const NSUInteger length = left.length;
+    if (right.length != length) return NO;
+    for (NSUInteger index = 0; index < length; ++index) {
+        unichar a = [left characterAtIndex:index], b = [right characterAtIndex:index];
+        if (a >= 'A' && a <= 'Z') a = (unichar)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (unichar)(b - 'A' + 'a');
+        if (a != b) return NO;
+    }
+    return YES;
+}
+/// 表里代表这个标识的那条规则的键：先找完全相同的，再按 ASCII 不分大小写找，和偏好库的去重规则相同；没有时为 nil。共享设置页按用户键入的文字写标识，大小写未必和应用的 bundle id 一致，所以按应用查规则必须走这里，不能直接下标取。
+static NSString *InputModeRuleKeyForIdentifier(NSDictionary<NSString *, NSString *> *rules, NSString *identifier) {
+    if (identifier == nil) return nil;
+    if (rules[identifier] != nil) return identifier;
+    for (NSString *existing in rules)
+        if (InputModeRuleIdentifiersEqual(existing, identifier)) return existing;
+    return nil;
+}
+/// 表里是否已有这个标识，按 ASCII 不分大小写比较，和偏好库的去重规则相同。
+static BOOL InputModeRulesContainIdentifier(NSDictionary<NSString *, NSString *> *rules, NSString *identifier) {
+    return InputModeRuleKeyForIdentifier(rules, identifier) != nil;
+}
+/// 按应用查它的规则，标识的认法同 InputModeRuleKeyForIdentifier。
+static NSString *InputModeRuleForIdentifier(NSDictionary<NSString *, NSString *> *rules, NSString *identifier) {
+    NSString *key = InputModeRuleKeyForIdentifier(rules, identifier);
+    return key == nil ? nil : rules[key];
+}
+/// 能写进共享文档的那部分规则：丢掉不合法的标识和只差大小写的重复项，最多 32 条。按标识排序后取，结果与字典的遍历顺序无关。
+static NSDictionary<NSString *, NSString *> *PublishableInputModeRules(NSDictionary<NSString *, NSString *> *rules) {
+    NSMutableDictionary<NSString *, NSString *> *published = [NSMutableDictionary dictionary];
+    for (NSString *identifier in [rules.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        if (published.count >= MaxPublishedInputModeRules) break;
+        if (!PublishableInputModeRuleIdentifier(identifier) || InputModeRulesContainIdentifier(published, identifier)) continue;
+        published[identifier] = rules[identifier];
+    }
+    return published;
 }
 static NSString *const TraditionalKey = @"MSIMEClientTraditionalOutput";
 static NSString *const FullWidthKey = @"MSIMEClientFullWidthInput";
@@ -251,7 +325,7 @@ static NSString *const CandidateEnglishGlossKey = @"MSIMEClientCandidateEnglishG
 static NSString *const TranspositionKey = @"MSIMEClientAutocorrectTransposition";
 static NSString *const NeighborKey = @"MSIMEClientAutocorrectNeighbor";
 static NSString *const HelpcodeOptionsKey = @"MSIMEClientHelpcodeOptions";
-static NSArray<NSString *> *HelpcodeSchemas() { return @[@"lantian", @"ziranma", @"shouyou2_0", @"shouyouplus", @"xiaohe", @"jiajia"]; }
+static NSArray<NSString *> *HelpcodeSchemas() { return @[@"lantian", @"ziranma", @"shouyou2_0", @"shouyouplus", @"xiaohe", @"jiajia", @"wubi86"]; }
 static BOOL ValidHelpcodeOption(NSString *key, id value) {
     return [key isEqual:@"schema"] ? [HelpcodeSchemas() containsObject:value] :
         ([key isEqual:@"show_in_candidate_window"] && LocalModeBoolean(value));
@@ -260,10 +334,13 @@ static NSString *const QuanpinHelpcodeKey = @"MSIMEClientQuanpinHelpcodeEnabled"
 static NSString *const ShuangpinHelpcodeKey = @"MSIMEClientShuangpinHelpcodeEnabled";
 static NSString *const KeymapKey = @"MSIMEClientShuangpinKeymap";
 static NSString *const WubiKey = @"MSIMEClientWubiAutoCommitUnique";
+// 这个开关接进共享偏好之前 macOS 从不兑现它：defaults 里留下的任何 NO（旧缺省、升级前套用云快照写回的）都是历史缺省而不是用户选择。这个标记记下用户在新语义下第一次在原生面板里做出的选择，在那之前 WubiKey 的存量值一律当未设置，缺省为开。
+static NSString *const WubiAutoCommitUniqueAdoptedKey = @"MSIMEClientWubiAutoCommitUniqueAdopted";
 static NSString *const WubiMixedPinyinKey = @"MSIMEClientWubiMixedPinyin";
 static NSString *const InputModeShortcutKey = @"MSIMEClientInputModeShortcut";
 static NSString *const ShiftTapShortcutKey = @"MSIMEClientShiftTapShortcut";
 static NSString *const ControlTapShortcutKey = @"MSIMEClientControlTapShortcut";
+static NSString *const CapsLockTapShortcutKey = @"MSIMEClientCapsLockTapShortcut";
 static NSString *const ControlOptionSpaceShortcutKey = @"MSIMEClientControlOptionSpaceShortcut";
 static NSString *const CharacterSetShortcutKey = @"MSIMEClientCharacterSetShortcut";
 static NSString *const FullWidthShortcutKey = @"MSIMEClientFullWidthShortcut";
@@ -311,12 +388,18 @@ static NSDictionary<NSString *, NSString *> *SharedOverrideProperties() {
         LayoutKey : @"sharedVertical",
         CandidateFollowCursorKey : @"sharedCandidateFollowCursor",
         InputModeHUDKey : @"sharedInputModeHUD",
+        InputModeStatusItemKey : @"sharedInputModeStatusItem",
+        AppInputModeRulesKey : @"sharedAppInputModeRules",
         AppLogoKey : @"sharedShowsAppLogo",
+        CandidatePageNumberKey : @"sharedShowsCandidatePageNumber",
+        ExpandCandidatesKey : @"sharedExpandCandidates",
         SchemeKey : @"sharedInputScheme",
         ShuangpinProfileKey : @"sharedShuangpinProfile",
         ShuangpinPreeditKey : @"sharedShuangpinPreeditUsesRaw",
+        KeymapKey : @"sharedShuangpinKeymap",
         WubiProfileKey : @"sharedWubiProfile",
         WubiMixedPinyinKey : @"sharedWubiMixedPinyin",
+        WubiKey : @"sharedWubiAutoCommitUnique",
         LocalModesKey : @"sharedLocalModes",
         FontKey : @"sharedFontSize",
         FontFamilyKey : @"sharedFontFamily",
@@ -332,6 +415,7 @@ static NSDictionary<NSString *, NSString *> *SharedOverrideProperties() {
         GlobalThemeKey : @"sharedGlobalTheme",
         CustomThemeBaseKey : @"sharedCustomThemeBase",
         CustomCandidateSkinKey : @"sharedCustomCandidateSkin",
+        CustomCandidateSkinDarkKey : @"sharedCustomCandidateSkinDark",
         CandidateThemeKey : @"sharedCandidateTheme",
         ToolbarThemeKey : @"sharedToolbarTheme",
         FallbackFontsKey : @"sharedFallbackFonts",
@@ -339,6 +423,7 @@ static NSDictionary<NSString *, NSString *> *SharedOverrideProperties() {
         CandidateScaleKey : @"sharedCandidateScale",
         CandidateOpacityKey : @"sharedCandidateOpacity",
         CandidateCornerRadiusKey : @"sharedCandidateCornerRadius",
+        CandidatePaddingKey : @"sharedCandidatePadding",
         CandidatePreeditKey : @"sharedCandidatePreedit",
         NavigationKey : @"sharedNavigation",
         WordCharacterKey : @"sharedWordCharacter",
@@ -371,6 +456,7 @@ static NSDictionary<NSString *, NSString *> *SharedOverrideProperties() {
         InputModeShortcutKey : @"sharedInputModeShortcut",
         ShiftTapShortcutKey : @"sharedShiftTapShortcut",
         ControlTapShortcutKey : @"sharedControlTapShortcut",
+        CapsLockTapShortcutKey : @"sharedCapsLockTapShortcut",
         ControlOptionSpaceShortcutKey : @"sharedControlOptionSpaceShortcut",
         CharacterSetShortcutKey : @"sharedCharacterSetShortcut",
         FullWidthShortcutKey : @"sharedFullWidthShortcut",
@@ -446,10 +532,14 @@ static NSDictionary<NSString *, MSIMESettingProbe> *SettingProbes() {
             CandidateScaleKey : ^id(MSIMEAppearancePreferences *p) { return @(p.candidateScalePercent); },
             CandidateOpacityKey : ^id(MSIMEAppearancePreferences *p) { return @(p.candidateOpacityPercent); },
             CandidateCornerRadiusKey : ^id(MSIMEAppearancePreferences *p) { return p.candidateCornerRadius ?: NSNull.null; },
+            CandidatePaddingKey : ^id(MSIMEAppearancePreferences *p) { return p.candidatePadding ?: NSNull.null; },
             CandidatePreeditKey : ^id(MSIMEAppearancePreferences *p) { return @(p.showsCandidatePreedit); },
             CandidateFollowCursorKey : ^id(MSIMEAppearancePreferences *p) { return @(p.candidateFollowCursor); },
             InputModeHUDKey : ^id(MSIMEAppearancePreferences *p) { return @(p.inputModeHUD); },
+            InputModeStatusItemKey : ^id(MSIMEAppearancePreferences *p) { return @(p.inputModeStatusItem); },
             AppLogoKey : ^id(MSIMEAppearancePreferences *p) { return @(p.showsAppLogo); },
+            CandidatePageNumberKey : ^id(MSIMEAppearancePreferences *p) { return @(p.showsCandidatePageNumber); },
+            ExpandCandidatesKey : ^id(MSIMEAppearancePreferences *p) { return @(p.expandCandidates); },
             FontFamilyKey : ^id(MSIMEAppearancePreferences *p) { return p.fontFamily ?: NSNull.null; },
             CandidateEnglishFontKey : ^id(MSIMEAppearancePreferences *p) { return p.candidateEnglishFont ?: NSNull.null; },
             FallbackFontsKey : ^id(MSIMEAppearancePreferences *p) { return p.fallbackFonts ?: NSNull.null; },
@@ -460,6 +550,7 @@ static NSDictionary<NSString *, MSIMESettingProbe> *SettingProbes() {
             GlobalThemeKey : ^id(MSIMEAppearancePreferences *p) { return p.globalTheme; },
             CustomThemeBaseKey : ^id(MSIMEAppearancePreferences *p) { return p.customThemeBase; },
             CustomCandidateSkinKey : ^id(MSIMEAppearancePreferences *p) { return p.customCandidateSkin ?: NSNull.null; },
+            CustomCandidateSkinDarkKey : ^id(MSIMEAppearancePreferences *p) { return p.customCandidateSkinDark ?: NSNull.null; },
             CandidateLearningKey : ^id(MSIMEAppearancePreferences *p) { return @(p.candidateLearningEnabled); },
             FrequencyModeKey : ^id(MSIMEAppearancePreferences *p) { return p.frequencyAdjustmentMode ?: NSNull.null; },
             FrequencyTriggerCountKey : ^id(MSIMEAppearancePreferences *p) { return @(p.frequencyTriggerCount); },
@@ -470,6 +561,7 @@ static NSDictionary<NSString *, MSIMESettingProbe> *SettingProbes() {
             InputModeShortcutKey : ^id(MSIMEAppearancePreferences *p) { return @(p.inputModeShortcut); },
             ShiftTapShortcutKey : ^id(MSIMEAppearancePreferences *p) { return @(p.shiftTapShortcut); },
             ControlTapShortcutKey : ^id(MSIMEAppearancePreferences *p) { return @(p.controlTapShortcut); },
+            CapsLockTapShortcutKey : ^id(MSIMEAppearancePreferences *p) { return @(p.capsLockTapShortcut); },
             ControlOptionSpaceShortcutKey : ^id(MSIMEAppearancePreferences *p) { return @(p.controlOptionSpaceShortcut); },
             CharacterSetShortcutKey : ^id(MSIMEAppearancePreferences *p) { return @(p.characterSetShortcut); },
             FullWidthShortcutKey : ^id(MSIMEAppearancePreferences *p) { return @(p.fullWidthShortcut); },
@@ -878,6 +970,12 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     MSIMEUpdateController *_updateController;
     NSString *_sharedDefaultImeMode;
     NSString *_sharedImeModeScope;
+    // 共享文档里的应用例外（加上还没发布、文档收得下的旧规则，和本窗口对它的改动）；文档没有这个键时为 nil，查找退回 NSUserDefaults 里升级前的规则。本窗口改规则时只改它和 _localOnlyAppInputModeRules 里那一条，两边不合并，见 -setInputMode:forApplication:。
+    NSDictionary<NSString *, NSString *> *_sharedAppInputModeRules;
+    // 文档收不下的旧规则：标识不合法（超过 64 字节、带 / 或 \ 等），或文档已满 32 条。它们留在 NSUserDefaults 里，只在本机查找时生效，不发布。
+    NSDictionary<NSString *, NSString *> *_localOnlyAppInputModeRules;
+    // 有文档还没有、但收得下的规则，需要保存一次才能发布；见 applicationInputModeRulesAwaitPublication。
+    BOOL _applicationInputModeRulesAwaitPublication;
     NSString *_activeModeApplication;
     BOOL _activeModeGlobal;
     NSMutableDictionary<NSString *, NSNumber *> *_applicationInputModes;
@@ -914,14 +1012,20 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSNumber *_sharedInputModeShortcut;
     NSNumber *_sharedShiftTapShortcut;
     NSNumber *_sharedControlTapShortcut;
+    NSNumber *_sharedCapsLockTapShortcut;
     NSSwitch *_shiftTapShortcutToggle;
     NSSwitch *_controlTapShortcutToggle;
+    NSSwitch *_capsLockTapShortcutToggle;
     NSNumber *_sharedControlOptionSpaceShortcut;
     NSSwitch *_controlOptionSpaceShortcutToggle;
     NSNumber *_sharedCharacterSetShortcut;
     NSNumber *_sharedFullWidthShortcut;
     NSSwitch *_characterSetShortcutToggle;
     NSMutableDictionary *_sharedHelpcodeOptions;
+    // 共享文档里每个方案选中的辅助码表插件 id，空串是没有选；文档没读过时没有这一项。
+    NSMutableDictionary<NSString *, NSString *> *_sharedHelpcodePacks;
+    // 在这个窗口里选了方案、因而不再使用插件，而共享文档还没写进去的方案，值是清掉的那个插件 id：保存时把空串写出去，在文档写好之前读到的正是这个旧 id 时不采用，免得下拉框又跳回插件。读到空串或别的 id（共享设置页另选了插件）就以文档为准并撤销这一项，否则保存失败后这一项一直留着，会把另一处新选的插件挡在下拉框外，还在下次保存时把它写成空串。
+    NSMutableDictionary<NSString *, NSString *> *_clearedHelpcodePacks;
     NSMutableDictionary<NSString *, NSPopUpButton *> *_helpcodeSchemaButtons;
     NSMutableDictionary<NSString *, NSSwitch *> *_helpcodeDisplayToggles;
     NSNumber *_sharedChinesePunctuation;
@@ -952,13 +1056,19 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSNumber *_sharedVertical;
     NSNumber *_sharedCandidateFollowCursor;
     NSNumber *_sharedInputModeHUD;
+    NSNumber *_sharedInputModeStatusItem;
     NSNumber *_sharedShowsAppLogo;
+    NSNumber *_sharedShowsCandidatePageNumber;
+    NSNumber *_sharedExpandCandidates;
     NSNumber *_sharedFontSize;
     NSString *_sharedFontFamily;
     id _sharedCandidateEnglishFont;
     NSArray<NSString *> *_sharedFallbackFonts;
     NSSwitch *_inputModeHUDToggle;
+    NSSwitch *_inputModeStatusItemToggle;
     NSSwitch *_appLogoToggle;
+    NSSwitch *_candidatePageNumberToggle;
+    NSSwitch *_expandCandidatesToggle;
     id _sharedTextColor;
     id _sharedNumberColor;
     id _sharedAccentColor;
@@ -969,6 +1079,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     id _sharedGlobalTheme;
     id _sharedCustomThemeBase;
     id _sharedCustomCandidateSkin;
+    id _sharedCustomCandidateSkinDark;
     NSTextField *_textColorField;
     NSColorWell *_textColorWell;
     /// The wells and 跟随皮肤 buttons of CandidateColorControls(), by the property each one sets, so
@@ -981,6 +1092,8 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSNumber *_sharedCandidateOpacity;
     /// A radius in points, or NSNull for a document that follows the skin.
     id _sharedCandidateCornerRadius;
+    /// Padding in points, or NSNull for a document that follows the skin.
+    id _sharedCandidatePadding;
     NSSlider *_candidateScaleSlider;
     NSTextField *_candidateScaleLabel;
     NSSlider *_candidateOpacitySlider;
@@ -988,6 +1101,9 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSSlider *_candidateCornerRadiusSlider;
     NSTextField *_candidateCornerRadiusLabel;
     NSButton *_candidateCornerRadiusReset;
+    NSSlider *_candidatePaddingSlider;
+    NSTextField *_candidatePaddingLabel;
+    NSButton *_candidatePaddingReset;
     NSPopUpButton *_candidateFontPresetButton;
     NSString *_sharedCandidatePreedit;
     NSNumber *_sharedPageSize;
@@ -1006,9 +1122,12 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSString *_lastChineseScheme;
     NSString *_sharedShuangpinProfile;
     NSNumber *_sharedShuangpinPreeditUsesRaw;
+    // 共享偏好 `shuangpin_keymap_hint`。文档里没有这一项时为 nil，getter 退回本机 defaults 里升级前的选择；文档带着这一项载入过之后那个旧键已经删除，退回的就是关。
+    NSNumber *_sharedShuangpinKeymap;
     NSString *_sharedWubiProfile;
     NSTextField *_wubiProfileLabel;
     NSNumber *_sharedWubiMixedPinyin;
+    NSNumber *_sharedWubiAutoCommitUnique;
     NSString *_sharedInlinePreeditStyle;
     NSMutableDictionary *_sharedLocalModes;
     NSMutableArray<NSButton *> *_localModeButtons;
@@ -1023,8 +1142,11 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSPopUpButton *_pageShortcutButton;
     NSPopUpButton *_pageSizeButton;
     NSURL *_skinsRoot;
-    NSImage *_decorationImage;
-    NSImage *_backgroundImage;
+    /// 两种明暗各画各自槽位的皮肤包，装饰图和背景图因此也按明暗各存一份；两种明暗画同一个包时共用同一张图。
+    NSImage *_lightDecorationImage;
+    NSImage *_darkDecorationImage;
+    NSImage *_lightBackgroundImage;
+    NSImage *_darkBackgroundImage;
     msime::mac::ResolvedSkin _lightSkin;
     msime::mac::ResolvedSkin _darkSkin;
     msime::mac::SkinTokens _lightToolbarSkin;
@@ -1033,6 +1155,8 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSString *_resolvedThemeKey;
     std::vector<msime::mac::SkinListEntry> _skins;
     MSIMECandidatePreviewView *_preview;
+    NSSegmentedControl *_candidateSettingsTabs;
+    NSArray<NSArray<NSView *> *> *_candidateSettingsTabContents;
     NSTextField *_previewSampleField;
     MSIMEToolbarPreviewView *_toolbarPreview;
     NSButton *_themeButton;
@@ -1169,6 +1293,10 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSMutableDictionary *merged = [snapshot mutableCopy];
     if ([_defaults objectForKey:DefaultImeModeKey] != nil) merged[@"default_ime_mode"] = self.defaultImeMode;
     if ([_defaults objectForKey:ImeModeScopeKey] != nil) merged[@"ime_mode_scope"] = self.imeModeScope;
+    // 整张表一起写，MSIMEMergePreferenceSnapshot 对这个键整体替换而不是逐项合并，移除的规则才会从文档里消失。表为空时写空对象，偏好库保存时把它省掉。载入过文档时取文档那张表（加上本窗口的改动和收得下、等待发布的旧规则），文档没有这个键时取本地键里的整张表；只写偏好库收得下的部分（PublishableInputModeRules），否则整份保存都会被拒。
+    // 还没载入过文档时一律不写，即使本地键存在：迁移之后本地键只剩文档收不下、只在本机生效的旧规则，和本窗口写下、等待下一次载入确认已进文档的规则，并不是完整的规则表，写进去会把文档里的整张表换成这一小部分甚至清空。升级前还没发布的旧规则也不会因此丢掉：载入文档后 applicationInputModeRulesAwaitPublication 为真，输入法随即保存一次把它们发布出去。
+    if (_sharedInputPreferencesApplied)
+        merged[@"app_input_mode_rules"] = PublishableInputModeRules(_sharedAppInputModeRules ?: [self applicationInputModeRules]);
     // Apple exposes one switch for both a solitary Shift tap and Shift+Space.
     // Keep the legacy native keys independent when no shared snapshot exists,
     // but publish one shared value for both routes.
@@ -1178,7 +1306,8 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
         keys[@"switch_language_shift"] = @(([_defaults objectForKey:ShiftTapShortcutKey] != nil) ? self.shiftTapShortcut : self.inputModeShortcut);
         merged[@"keybindings"] = keys;
     }
-    for (NSArray *entry in @[@[ControlTapShortcutKey, @"switch_language_ctrl", @(self.controlTapShortcut)]]) {
+    for (NSArray *entry in @[@[ControlTapShortcutKey, @"switch_language_ctrl", @(self.controlTapShortcut)],
+                             @[CapsLockTapShortcutKey, @"switch_language_caps_lock", @(self.capsLockTapShortcut)]]) {
         if ([_defaults objectForKey:entry[0]] == nil) continue;
         id existing = merged[@"keybindings"];
         NSMutableDictionary *keys = [existing isKindOfClass:NSDictionary.class] ? [existing mutableCopy] : [NSMutableDictionary dictionary];
@@ -1215,14 +1344,21 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     merged[@"candidate_layout"] = self.vertical ? @"vertical" : @"horizontal";
     merged[@"candidate_follow_cursor"] = @(self.candidateFollowCursor);
     merged[@"input_mode_hud"] = @(self.inputModeHUD);
+    merged[@"input_mode_status_item"] = @(self.inputModeStatusItem);
     merged[@"show_app_logo"] = @(self.showsAppLogo);
+    merged[@"show_candidate_page_number"] = @(self.showsCandidatePageNumber);
+    merged[@"expand_candidates"] = @(self.expandCandidates);
     merged[@"scheme"] = self.inputScheme;
     // 切到日文、韩文、越南文或藏文时要留一条回去的路。`last_chinese_scheme` 是其他宿主在方案变化时都会写的字段——Fcitx5、IBus、iOS 和 HarmonyOS 都写——共享设置页也靠它把用户送回五笔而不是全拼。这个窗口自己也会设置方案，包括这四个，所以不写的话这个字段会停在别的界面写下的值，回去的路就指错了方案。在这四个方案之一生效期间，只要知道是从哪个方案进来的，也照样写进去，因为输入菜单的 中 也是这样离开它们的。
     if (![@[@"japanese", @"korean", @"vietnamese", @"tibetan"] containsObject:self.inputScheme] || _lastChineseScheme) merged[@"last_chinese_scheme"] = self.lastChineseScheme;
     merged[@"shuangpin_profile"] = self.shuangpinProfile;
     merged[@"shuangpin_preedit_uses_raw"] = @(self.shuangpinPreeditUsesRaw);
+    // 双拼键位提示以前只存在 defaults 里。载入过文档之后总是写当前值，这样「恢复默认值」清掉文档缓存和 defaults 后写回的是关，而不是让文档里的旧值在下次载入时又回来；还没载入过文档时只在本机留下过选择才写，把升级前的选择带进共享偏好，否则不写，免得没读到的文档值被这里的缺省覆盖。
+    if (_sharedInputPreferencesApplied || _sharedShuangpinKeymap || [_defaults objectForKey:KeymapKey] != nil)
+        merged[@"shuangpin_keymap_hint"] = @(self.shuangpinKeymap);
     merged[@"wubi_profile"] = self.wubiProfile;
     merged[@"wubi_mixed_pinyin"] = @(self.wubiMixedPinyinEnabled);
+    merged[@"wubi_auto_commit_unique"] = @(self.wubiAutoCommitUnique);
     NSMutableDictionary *qh = [merged[@"quanpin_helpcode"] mutableCopy] ?: [NSMutableDictionary dictionary];
     qh[@"enabled"] = @(self.quanpinHelpcodeEnabled);
     merged[@"quanpin_helpcode"] = qh;
@@ -1236,6 +1372,12 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
         NSDictionary *effective = [self helpcodeOptionsForScheme:scheme];
         for (NSString *key in @[@"schema", @"show_in_candidate_window"])
             if (ValidHelpcodeOption(key, stored[key])) target[key] = effective[key];
+    }
+    // 只写在这个窗口里清掉的插件，其余的插件选择原样留给文档：这个窗口不选插件，写回读到的值只会在共享设置页刚选了插件时把它改回去。
+    if (_clearedHelpcodePacks.count) {
+        NSMutableDictionary *plugins = [merged[@"plugins"] isKindOfClass:NSDictionary.class] ? [merged[@"plugins"] mutableCopy] : [NSMutableDictionary dictionary];
+        for (NSString *scheme in _clearedHelpcodePacks) plugins[[@"helpcode_pack_" stringByAppendingString:scheme]] = @"";
+        merged[@"plugins"] = plugins;
     }
     merged[@"candidate_page_size"] = @(self.pageSize);
     if ([_defaults dictionaryForKey:WordCharacterKey]) merged[@"word_character"] = [self wordCharacterOptions];
@@ -1257,6 +1399,8 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     if (_sharedCustomThemeBase || [_defaults objectForKey:CustomThemeBaseKey]) customTheme[@"base"] = self.customThemeBase;
     if (_sharedCustomCandidateSkin || [_defaults objectForKey:CustomCandidateSkinKey])
         customTheme[@"candidate_skin"] = self.customCandidateSkin ?: (id)NSNull.null;
+    if (_sharedCustomCandidateSkinDark || [_defaults objectForKey:CustomCandidateSkinDarkKey])
+        customTheme[@"candidate_skin_dark"] = self.customCandidateSkinDark ?: (id)NSNull.null;
     NSMutableDictionary *pickerColors = [existingCustom[@"candidate_colors"] isKindOfClass:NSDictionary.class]
                                             ? [existingCustom[@"candidate_colors"] mutableCopy]
                                             : [NSMutableDictionary dictionary];
@@ -1279,6 +1423,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     merged[@"candidate_scale_percent"] = @(self.candidateScalePercent);
     merged[@"candidate_opacity_percent"] = @(self.candidateOpacityPercent);
     merged[@"candidate_corner_radius"] = self.candidateCornerRadius ?: (id)NSNull.null;
+    merged[@"candidate_padding"] = self.candidatePadding ?: (id)NSNull.null;
     if (_sharedCandidatePreedit || [_defaults objectForKey:CandidatePreeditKey]) merged[@"candidate_preedit_style"] = self.showsCandidatePreedit ? @"pinyin" : @"empty";
     merged[@"chinese_punctuation"] = @(self.chinesePunctuation);
     merged[@"smart_punctuation"] = @(self.smartPunctuation);
@@ -1349,7 +1494,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
 - (BOOL)localModeEnabled:(NSString *)mode {
     if (!KnownLocalMode(mode)) return NO;
     NSNumber *value = _sharedLocalModes[mode] ?: [_defaults dictionaryForKey:LocalModesKey][mode];
-    return LocalModeBoolean(value) ? value.boolValue : YES;
+    return LocalModeBoolean(value) ? value.boolValue : ![mode isEqual:ChaiziMode];
 }
 - (void)setLocalMode:(NSString *)mode enabled:(BOOL)enabled {
     if (!KnownLocalMode(mode)) return;
@@ -1368,14 +1513,23 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
         if (LocalModeBoolean(value))
             _sharedLocalModes[entry[0]] = value;
     }
-    for (NSButton *button in _localModeButtons)
+    [self refreshLocalModeButtons];
+}
+// 总开关关掉时各模式的勾选保留原值，只是暂时不起作用，所以置灰而不改值。
+- (void)refreshLocalModeButtons {
+    const BOOL shiftLetterEntry = [self localModeEnabled:ShiftLetterEntryMode];
+    for (NSButton *button in _localModeButtons) {
         button.state = [self localModeEnabled:button.identifier] ? NSControlStateValueOn : NSControlStateValueOff;
+        button.enabled = shiftLetterEntry || [button.identifier isEqual:ShiftLetterEntryMode];
+    }
 }
 - (void)localModeChanged:(NSButton *)sender {
     [self setLocalMode:sender.identifier enabled:sender.state == NSControlStateValueOn];
+    [self refreshLocalModeButtons];
 }
-- (NSImage *)decorationImage { return _decorationImage; }
-- (NSImage *)backgroundImage { return _backgroundImage; }
+- (NSImage *)decorationImageForDark:(BOOL)dark { return dark ? _darkDecorationImage : _lightDecorationImage; }
+- (NSImage *)backgroundImageForDark:(BOOL)dark { return dark ? _darkBackgroundImage : _lightBackgroundImage; }
+- (std::optional<bool>)fixedThemeMode { return msime::mac::FixedThemeMode(_lightSkin, _darkSkin); }
 - (msime::mac::ResolvedSkin)resolvedSkinForDark:(BOOL)dark { return dark ? _darkSkin : _lightSkin; }
 - (msime::mac::SkinTokens)toolbarSkinForDark:(BOOL)dark { return dark ? _darkToolbarSkin : _lightToolbarSkin; }
 - (void)reloadSkins {
@@ -1400,6 +1554,10 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     _sharedVertical = nil;
     _sharedInputScheme = nil;
     _sharedShuangpinPreeditUsesRaw = nil;
+    // 双拼键位提示同样在云快照里（platform.macos.shuangpin_keymap，写进 defaults），套用后丢掉文档缓存，由 getter 读新值，下一次保存再写回文档。
+    _sharedShuangpinKeymap = nil;
+    // 四码唯一自动上屏在云快照里，所以套用之后要丢掉共享文档缓存，让新的值经 getter 生效。
+    _sharedWubiAutoCommitUnique = nil;
     _sharedChinesePunctuation = nil;
     _sharedSmartPunctuation = nil;
     _sharedSmartPunctuationRepeatToChinese = nil;
@@ -1415,6 +1573,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     _sharedGlobalTheme = nil;
     _sharedCustomThemeBase = nil;
     _sharedCustomCandidateSkin = nil;
+    _sharedCustomCandidateSkinDark = nil;
     [self dropRuntimeOverridesUnlessPunctuation:punctuationBefore width:widthBefore];
     [self reloadSkins]; // Resolve the imported skin and publish one complete update.
     return YES;
@@ -1431,6 +1590,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     snapshot[@"platform.macos.global_theme"] = self.globalTheme;
     snapshot[@"platform.macos.custom_theme_base"] = self.customThemeBase;
     snapshot[@"platform.macos.custom_candidate_skin"] = self.customCandidateSkin ?: @"";
+    snapshot[@"platform.macos.custom_candidate_skin_dark"] = self.customCandidateSkinDark ?: @"";
     // The stored preset is kept in step by -syncStoredPageShortcut, but a navigation dictionary an account pushed down never reaches storage at all, and this method's job is to export what the host is actually using; see -storedPageShortcutForCurrentBindings for what a state the three-value contract cannot name exports as.
     snapshot[@"platform.macos.candidate_page_shortcut"] = @([self storedPageShortcutForCurrentBindings]);
     NSArray *schemes = @[@"quanpin", @"shuangpin", @"wubi"];
@@ -1443,6 +1603,10 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     for (NSString *mode in MSIMECloudLocalModeKeys()) allLocalModes = allLocalModes && [self localModeEnabled:mode];
     snapshot[@"platform.macos.local_input_modes"] = @(allLocalModes);
     snapshot[@"platform.macos.shuangpin_preedit_uses_raw"] = @(self.shuangpinPreeditUsesRaw);
+    // 双拼键位提示的权威值在共享文档里（共享设置页只写文档），导出取宿主真正在用的值，而不是 defaults 里可能过时的旧值。
+    snapshot[@"platform.macos.shuangpin_keymap"] = @(self.shuangpinKeymap);
+    // 这个键只写共享文档、不再写 defaults，所以导出要取宿主真正在用的值，而不是 defaults 里的旧值。
+    snapshot[@"platform.macos.wubi_auto_commit_unique"] = @(self.wubiAutoCommitUnique);
     snapshot[@"platform.macos.chinese_punctuation"] = @(self.chinesePunctuation);
     snapshot[@"platform.macos.traditional_chinese_output"] = @(self.traditionalOutput);
     snapshot[@"platform.macos.candidate_learning"] = @(self.candidateLearningEnabled);
@@ -1455,6 +1619,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     msime::mac::CustomTheme custom;
     custom.base = self.customThemeBase.UTF8String;
     custom.candidateSkin = self.customCandidateSkin.UTF8String ?: "";
+    custom.candidateSkinDark = self.customCandidateSkinDark.UTF8String ?: "";
     custom.candidateColors.text = self.candidateTextColor.UTF8String ?: "";
     custom.candidateColors.number = self.candidateNumberColor.UTF8String ?: "";
     custom.candidateColors.accent = self.candidateAccentColor.UTF8String ?: "";
@@ -1467,7 +1632,8 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
 /// Everything the resolved theme depends on besides the package files themselves, which -reloadSkins rereads.
 - (NSString *)themeResolutionKey {
     return [@[
-        self.globalTheme, self.customThemeBase, self.customCandidateSkin ?: @"", self.candidateTextColor ?: @"",
+        self.globalTheme, self.customThemeBase, self.customCandidateSkin ?: @"", self.customCandidateSkinDark ?: @"",
+        self.candidateTextColor ?: @"",
         self.candidateNumberColor ?: @"", self.candidateAccentColor ?: @"", self.candidateSelectedColor ?: @"",
         self.candidateHoverColor ?: @"", self.candidateSurfaceColor ?: @"", self.candidateBorderColor ?: @"",
         self.vertical ? @"vertical" : @"horizontal", _skinsRoot.path ?: @""
@@ -1485,16 +1651,17 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     _lightToolbarSkin = msime::mac::ToolbarSkinTokens(_lightSkin, root);
     _darkToolbarSkin = msime::mac::ToolbarSkinTokens(_darkSkin, root);
     _resolvedThemeKey = [self themeResolutionKey];
-    _decorationImage = nil;
-    if (_lightSkin.decorationTopDip > 0 && !_lightSkin.decorationPath.empty()) {
-        _decorationImage = [[NSImage alloc] initWithContentsOfFile:@(_lightSkin.decorationPath.c_str())];
-    }
-    if (!_decorationImage && _darkSkin.decorationTopDip > 0 && !_darkSkin.decorationPath.empty()) {
-        _decorationImage = [[NSImage alloc] initWithContentsOfFile:@(_darkSkin.decorationPath.c_str())];
-    }
-    // Both modes draw the same package, so one image serves whichever of them draws a background.
-    const std::string &backgroundPath = !_lightSkin.backgroundPath.empty() ? _lightSkin.backgroundPath : _darkSkin.backgroundPath;
-    _backgroundImage = backgroundPath.empty() ? nil : [[NSImage alloc] initWithContentsOfFile:@(backgroundPath.c_str())];
+    // 每种明暗只读它自己画的那个包的图：浅色、深色槽位可以是两个包，一张图给两种明暗用会把一个包的装饰画到另一个包的配色上。
+    auto load = [](const std::string &path) -> NSImage * {
+        return path.empty() ? nil : [[NSImage alloc] initWithContentsOfFile:@(path.c_str())];
+    };
+    const auto decorationPath = [](const msime::mac::ResolvedSkin &skin) {
+        return skin.decorationTopDip > 0 ? skin.decorationPath : std::string();
+    };
+    _lightDecorationImage = load(decorationPath(_lightSkin));
+    _darkDecorationImage = decorationPath(_darkSkin) == decorationPath(_lightSkin) ? _lightDecorationImage : load(decorationPath(_darkSkin));
+    _lightBackgroundImage = load(_lightSkin.backgroundPath);
+    _darkBackgroundImage = _darkSkin.backgroundPath == _lightSkin.backgroundPath ? _lightBackgroundImage : load(_darkSkin.backgroundPath);
 }
 - (BOOL)vertical { return _sharedVertical ? _sharedVertical.boolValue : [_defaults integerForKey:LayoutKey] == 1; }
 - (BOOL)candidateFollowCursor {
@@ -1515,6 +1682,15 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     [_defaults setBool:value forKey:InputModeHUDKey];
     [self preferencesChanged];
 }
+- (BOOL)inputModeStatusItem {
+    if (_sharedInputModeStatusItem) return _sharedInputModeStatusItem.boolValue;
+    return [_defaults boolForKey:InputModeStatusItemKey];
+}
+- (void)setInputModeStatusItem:(BOOL)value {
+    _sharedInputModeStatusItem = nil;
+    [_defaults setBool:value forKey:InputModeStatusItemKey];
+    [self preferencesChanged];
+}
 - (BOOL)showsAppLogo {
     if (_sharedShowsAppLogo) return _sharedShowsAppLogo.boolValue;
     return [_defaults boolForKey:AppLogoKey];
@@ -1522,6 +1698,24 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
 - (void)setShowsAppLogo:(BOOL)value {
     _sharedShowsAppLogo = nil;
     [_defaults setBool:value forKey:AppLogoKey];
+    [self preferencesChanged];
+}
+- (BOOL)showsCandidatePageNumber {
+    if (_sharedShowsCandidatePageNumber) return _sharedShowsCandidatePageNumber.boolValue;
+    return [_defaults objectForKey:CandidatePageNumberKey] == nil ? YES : [_defaults boolForKey:CandidatePageNumberKey];
+}
+- (void)setShowsCandidatePageNumber:(BOOL)value {
+    _sharedShowsCandidatePageNumber = nil;
+    [_defaults setBool:value forKey:CandidatePageNumberKey];
+    [self preferencesChanged];
+}
+- (BOOL)expandCandidates {
+    if (_sharedExpandCandidates) return _sharedExpandCandidates.boolValue;
+    return [_defaults boolForKey:ExpandCandidatesKey];
+}
+- (void)setExpandCandidates:(BOOL)value {
+    _sharedExpandCandidates = nil;
+    [_defaults setBool:value forKey:ExpandCandidatesKey];
     [self preferencesChanged];
 }
 - (BOOL)candidateLearningEnabled {
@@ -1673,7 +1867,24 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
             if (ValidHelpcodeOption(key, shared[key])) values[key] = shared[key];
         _sharedHelpcodeOptions[scheme] = values;
     }
+    // The Rust store never writes an empty pack (crates/client-core/src/preferences.rs skips an empty helpcode_pack_<scheme> and a default plugins object), so a document without plugins, or whose plugins lacks the key, is the empty pack: that is how a saved clear comes back.
+    id plugins = [preferences[@"plugins"] isKindOfClass:NSDictionary.class] ? preferences[@"plugins"] : @{};
+    if (!_sharedHelpcodePacks) _sharedHelpcodePacks = [NSMutableDictionary dictionary];
+    for (NSString *scheme in @[@"quanpin", @"shuangpin"]) {
+        id raw = plugins[[@"helpcode_pack_" stringByAppendingString:scheme]];
+        NSString *pack = [raw isKindOfClass:NSString.class] ? raw : @"";
+        if (_clearedHelpcodePacks[scheme]) {
+            // 这里清掉的插件还没写进文档。
+            if ([pack isEqualToString:_clearedHelpcodePacks[scheme]]) continue;
+            [_clearedHelpcodePacks removeObjectForKey:scheme];
+        }
+        _sharedHelpcodePacks[scheme] = [pack copy];
+    }
     [self refreshControls];
+}
+- (NSString *)helpcodePackForScheme:(NSString *)scheme {
+    NSString *pack = _sharedHelpcodePacks[scheme];
+    return pack.length ? pack : nil;
 }
 - (NSDictionary *)helpcodeOptionsForScheme:(NSString *)scheme {
     BOOL shuangpin = [scheme isEqualToString:@"shuangpin"];
@@ -1700,7 +1911,17 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     [self preferencesChanged];
 }
 - (void)helpcodeSchemaChanged:(NSPopUpButton *)sender {
-    [self setHelpcodeOption:@"schema" value:sender.selectedItem.representedObject scheme:sender.identifier];
+    NSString *scheme = sender.identifier;
+    id schema = sender.selectedItem.representedObject;
+    // 选的是代表插件的那一项：插件本来就在用，没有要改的。
+    if (!ValidHelpcodeOption(@"schema", schema)) return;
+    // 选内置方案时不再使用辅助码表插件，与共享设置页一致；清掉要在保存之前，这次保存才会把它写出去。
+    if (NSString *pack = [self helpcodePackForScheme:scheme]) {
+        if (!_clearedHelpcodePacks) _clearedHelpcodePacks = [NSMutableDictionary dictionary];
+        _clearedHelpcodePacks[scheme] = pack;
+        _sharedHelpcodePacks[scheme] = @"";
+    }
+    [self setHelpcodeOption:@"schema" value:schema scheme:scheme];
 }
 - (void)helpcodeDisplayChanged:(NSSwitch *)sender {
     [self setHelpcodeOption:@"show_in_candidate_window" value:@(sender.state == NSControlStateValueOn) scheme:sender.identifier];
@@ -1715,8 +1936,8 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
 }
 - (NSString *)lastSyncedInputScheme { return [_defaults stringForKey:LastSyncedSchemeKey]; }
 - (void)setLastSyncedInputScheme:(NSString *)value { [_defaults setObject:value forKey:LastSyncedSchemeKey]; }
-- (NSString *)shuangpinProfile { NSString *value = _sharedShuangpinProfile ?: [_defaults stringForKey:ShuangpinProfileKey]; return [@[@"xiaohe", @"ziranma", @"shoudao", @"microsoft"] containsObject:value] ? value : @"xiaohe"; }
-- (void)setShuangpinProfile:(NSString *)value { if (![@[@"xiaohe", @"ziranma", @"shoudao", @"microsoft"] containsObject:value]) value = @"xiaohe"; _sharedShuangpinProfile = nil; [_defaults setObject:value forKey:ShuangpinProfileKey]; [self preferencesChanged]; }
+- (NSString *)shuangpinProfile { NSString *value = _sharedShuangpinProfile ?: [_defaults stringForKey:ShuangpinProfileKey]; return [@[@"xiaohe", @"ziranma", @"shoudao", @"microsoft", @"custom"] containsObject:value] ? value : @"xiaohe"; }
+- (void)setShuangpinProfile:(NSString *)value { if (![@[@"xiaohe", @"ziranma", @"shoudao", @"microsoft", @"custom"] containsObject:value]) value = @"xiaohe"; _sharedShuangpinProfile = nil; [_defaults setObject:value forKey:ShuangpinProfileKey]; [self preferencesChanged]; }
 - (NSString *)wubiProfile { NSString *value = _sharedWubiProfile ?: [_defaults stringForKey:WubiProfileKey]; return [@[@"wubi86", @"wubi98"] containsObject:value] ? value : @"wubi86"; }
 - (void)setWubiProfile:(NSString *)value { if (![@[@"wubi86", @"wubi98"] containsObject:value]) value = @"wubi86"; _sharedWubiProfile = nil; [_defaults setObject:value forKey:WubiProfileKey]; [self preferencesChanged]; }
 - (BOOL)shuangpinPreeditUsesRaw { if (_sharedShuangpinPreeditUsesRaw) return _sharedShuangpinPreeditUsesRaw.boolValue; return [_defaults objectForKey:ShuangpinPreeditKey] == nil ? YES : [_defaults boolForKey:ShuangpinPreeditKey]; }
@@ -1744,6 +1965,36 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     id defaultMode = preferences[@"default_ime_mode"], scope = preferences[@"ime_mode_scope"];
     if ([@[@"chinese", @"english"] containsObject:defaultMode]) _sharedDefaultImeMode = defaultMode;
     if ([@[@"app", @"global"] containsObject:scope]) _sharedImeModeScope = scope;
+    // 文档没有规则时不写这个键，所以缺这个键就是没有规则；只有升级前的规则还没发布时才退回 NSUserDefaults，并要求保存一次把它们发布出去，共享设置页才看得到输入法实际在用的规则。文档带着这个键载入时，逐条看本地旧键：已经在文档里的（含只差大小写的同一个 bundle id，以文档为准）从旧键里删掉，免得以后文档删掉它时又冒出来；文档还没有、收得下的并进来等下一次保存发布（它们可能是还没发布就有别处先写了规则表）；收不下的（标识不合法，或文档已满 32 条）留在旧键里只在本机生效，不悄悄丢掉。旧键空了就整个删除。
+    id applicationRules = preferences[@"app_input_mode_rules"];
+    NSDictionary<NSString *, NSString *> *legacy = ValidInputModeRules([_defaults dictionaryForKey:AppInputModeRulesKey]);
+    if ([applicationRules isKindOfClass:NSDictionary.class]) {
+        NSDictionary<NSString *, NSString *> *published = ValidInputModeRules(applicationRules);
+        NSMutableDictionary<NSString *, NSString *> *rules = [published mutableCopy];
+        NSMutableDictionary<NSString *, NSString *> *remaining = [NSMutableDictionary dictionary];
+        NSMutableDictionary<NSString *, NSString *> *localOnly = [NSMutableDictionary dictionary];
+        BOOL unpublished = NO;
+        for (NSString *identifier in [legacy.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+            if (InputModeRulesContainIdentifier(published, identifier)) continue;
+            remaining[identifier] = legacy[identifier];
+            if (PublishableInputModeRuleIdentifier(identifier) && rules.count < MaxPublishedInputModeRules &&
+                !InputModeRulesContainIdentifier(rules, identifier)) {
+                rules[identifier] = legacy[identifier];
+                unpublished = YES;
+            } else {
+                localOnly[identifier] = legacy[identifier];
+            }
+        }
+        _sharedAppInputModeRules = rules;
+        _localOnlyAppInputModeRules = localOnly.count > 0 ? localOnly : nil;
+        _applicationInputModeRulesAwaitPublication = unpublished;
+        if (remaining.count == 0) [_defaults removeObjectForKey:AppInputModeRulesKey];
+        else if (![remaining isEqualToDictionary:legacy]) [_defaults setObject:remaining forKey:AppInputModeRulesKey];
+    } else {
+        _sharedAppInputModeRules = nil;
+        _localOnlyAppInputModeRules = nil;
+        _applicationInputModeRulesAwaitPublication = PublishableInputModeRules(legacy).count > 0;
+    }
     id keys = preferences[@"keybindings"];
     if ([keys isKindOfClass:NSDictionary.class]) {
         id shift = keys[@"switch_language_shift"];
@@ -1753,6 +2004,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
             _sharedShiftTapShortcut = shift;
         }
         if (LocalModeBoolean(keys[@"switch_language_ctrl"])) _sharedControlTapShortcut = keys[@"switch_language_ctrl"];
+        if (LocalModeBoolean(keys[@"switch_language_caps_lock"])) _sharedCapsLockTapShortcut = keys[@"switch_language_caps_lock"];
         id inputMode = keys[@"switch_language_ctrl_alt_space"];
         if (LocalModeBoolean(inputMode)) _sharedControlOptionSpaceShortcut = inputMode;
         id enabled = keys[@"toggle_character_set_ctrl_shift_f"];
@@ -1797,13 +2049,24 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     id profile = preferences[@"shuangpin_profile"];
     id raw = preferences[@"shuangpin_preedit_uses_raw"];
     id wubiMixedPinyin = preferences[@"wubi_mixed_pinyin"];
+    id wubiAutoCommitUnique = preferences[@"wubi_auto_commit_unique"];
     id wubiProfile = preferences[@"wubi_profile"];
     if (MSIMEEditionOffersScheme(scheme)) _sharedInputScheme = [scheme copy];
     id lastChinese = preferences[@"last_chinese_scheme"];
     if ([@[@"quanpin", @"shuangpin", @"wubi", @"cantonese", @"zhuyin", @"stroke"] containsObject:lastChinese] && MSIMEEditionOffersScheme(lastChinese)) _lastChineseScheme = [lastChinese copy];
-    if ([@[@"xiaohe", @"ziranma", @"shoudao", @"microsoft"] containsObject:profile]) _sharedShuangpinProfile = [profile copy];
+    // 自定义表由共享偏好管理；原生设置暂不编辑它，但保存其它选项时必须保留这个方案名。
+    if ([@[@"xiaohe", @"ziranma", @"shoudao", @"microsoft", @"custom"] containsObject:profile]) _sharedShuangpinProfile = [profile copy];
     if (LocalModeBoolean(raw)) _sharedShuangpinPreeditUsesRaw = raw;
+    // 文档没有这一项时回到 nil，getter 读 defaults：从没在共享设置里选过，就沿用本机升级前的选择。文档一旦带着这一项载入，那个选择已经发布过（或者文档里有更新的选择），文档从此是唯一来源：删掉本机旧键，之后文档再缺这一项（共享设置页恢复默认设置、导入不带这一项的设置文件）就是关，旧选择不会复活。与 AppInputModeRulesKey 迁移完成后删除旧键是同一个做法。
+    id keymap = preferences[@"shuangpin_keymap_hint"];
+    _sharedShuangpinKeymap = LocalModeBoolean(keymap) ? keymap : nil;
+    if (_sharedShuangpinKeymap) [_defaults removeObjectForKey:KeymapKey];
     if (LocalModeBoolean(wubiMixedPinyin)) _sharedWubiMixedPinyin = wubiMixedPinyin;
+    if (LocalModeBoolean(wubiAutoCommitUnique)) {
+        _sharedWubiAutoCommitUnique = wubiAutoCommitUnique;
+        // 文档里的 false 只可能来自新语义下的选择：升级时把旧的原生 NO 合并进文档之前 getter 已经读作开，而共享设置页（macOS 上的主要入口）只写文档、不写原生标记。这里也认作本机已经采纳新语义，免得下一次套用云快照时把用户关掉的开关又当历史缺省恢复成开。
+        if (![wubiAutoCommitUnique boolValue]) [_defaults setBool:YES forKey:WubiAutoCommitUniqueAdoptedKey];
+    }
     if ([@[@"wubi86", @"wubi98"] containsObject:wubiProfile]) _sharedWubiProfile = [wubiProfile copy];
     id inlinePreedit = preferences[@"tsf_preedit_style"];
     if ([@[@"raw", @"pinyin", @"empty"] containsObject:inlinePreedit]) _sharedInlinePreeditStyle = [inlinePreedit copy];
@@ -1837,32 +2100,71 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     // Scope changes take effect on activation, never in the middle of typing.
     _activeModeGlobal = [self.imeModeScope isEqual:@"global"];
 }
-/// The rules the user has written down, with anything the stored dictionary has picked up that is not one dropped.
+/// 用户写下的规则：文档里有就用文档的（再加上文档收不下、只在本机生效的旧规则），否则用本窗口或升级前的版本记在本地的，不是规则的条目丢掉。
 - (NSDictionary<NSString *, NSString *> *)applicationInputModeRules {
-    NSDictionary *stored = [_defaults dictionaryForKey:AppInputModeRulesKey];
-    if (![stored isKindOfClass:NSDictionary.class]) return @{};
-    NSMutableDictionary<NSString *, NSString *> *rules = [NSMutableDictionary dictionary];
-    for (id identifier in stored)
-        if ([identifier isKindOfClass:NSString.class] && [identifier length] > 0 && ValidInputModeRule(stored[identifier]))
-            rules[identifier] = [stored[identifier] copy];
-    return rules;
+    if (_sharedAppInputModeRules) {
+        if (_localOnlyAppInputModeRules.count == 0) return _sharedAppInputModeRules;
+        NSMutableDictionary<NSString *, NSString *> *rules = [_sharedAppInputModeRules mutableCopy];
+        for (NSString *identifier in _localOnlyAppInputModeRules)
+            if (!rules[identifier]) rules[identifier] = _localOnlyAppInputModeRules[identifier];
+        return rules;
+    }
+    return ValidInputModeRules([_defaults dictionaryForKey:AppInputModeRulesKey]);
 }
+- (BOOL)applicationInputModeRulesAwaitPublication { return _applicationInputModeRulesAwaitPublication; }
 /// Writes one rule, or removes it when the mode is nil. The key goes rather than being left holding an empty dictionary, so that 恢复默认值 has nothing to offer once the last rule is gone.
 - (void)setInputMode:(NSString *)mode forApplication:(NSString *)identifier {
     if (![identifier isKindOfClass:NSString.class] || identifier.length == 0) return;
     if (mode != nil && !ValidInputModeRule(mode)) return;
-    NSMutableDictionary<NSString *, NSString *> *rules = [[self applicationInputModeRules] mutableCopy];
-    if (mode == nil) [rules removeObjectForKey:identifier]; else rules[identifier] = mode;
     // Writing a rule is the user saying what this application should be in, so it takes effect now rather than waiting for them to leave and come back.
-    [_inputModeRuleOverrides removeObject:identifier];
-    if (rules.count > 0) [_defaults setObject:rules forKey:AppInputModeRulesKey];
+    for (NSString *overridden in [_inputModeRuleOverrides allObjects])
+        if (InputModeRuleIdentifiersEqual(overridden, identifier)) [_inputModeRuleOverrides removeObject:overridden];
+    if (_sharedAppInputModeRules == nil) {
+        // 文档还没有规则表（或还没载入过文档）：本地键就是整张表，改动直接记在这里，载入文档后的那次保存或 preferencesChanged 触发的保存把它发布出去。
+        NSMutableDictionary<NSString *, NSString *> *rules = [[self applicationInputModeRules] mutableCopy];
+        NSString *key = InputModeRuleKeyForIdentifier(rules, identifier) ?: identifier;
+        if (mode == nil) [rules removeObjectForKey:key]; else rules[key] = mode;
+        if (rules.count > 0) [_defaults setObject:rules forKey:AppInputModeRulesKey];
+        else [_defaults removeObjectForKey:AppInputModeRulesKey];
+        [self preferencesChanged];
+        return;
+    }
+    // 文档有规则表时，文档里的规则和只在本机生效的旧规则分开改：改哪条就只动它所在的那一边。以前把两边合成一张表记进本地键、丢掉文档那张，合并时再按标识排序取前 32 条，就会把一条已经在文档里的规则挤出去，换上一条只在本机生效的旧规则。
+    NSMutableDictionary<NSString *, NSString *> *shared = [_sharedAppInputModeRules mutableCopy];
+    NSMutableDictionary<NSString *, NSString *> *localOnly = [_localOnlyAppInputModeRules mutableCopy] ?: [NSMutableDictionary dictionary];
+    // 本地键同时记下这次改动：保存没成功、或者在下一次载入前进程就退出时，下一次载入会把文档还没有的规则并进来再发布；文档已经有的照旧以文档为准从本地键里删掉。
+    NSMutableDictionary<NSString *, NSString *> *stored = [ValidInputModeRules([_defaults dictionaryForKey:AppInputModeRulesKey]) mutableCopy];
+    NSString *sharedKey = InputModeRuleKeyForIdentifier(shared, identifier);
+    NSString *localKey = InputModeRuleKeyForIdentifier(localOnly, identifier);
+    NSString *storedKey = InputModeRuleKeyForIdentifier(stored, identifier);
+    if (mode == nil) {
+        if (sharedKey) [shared removeObjectForKey:sharedKey];
+        if (localKey) [localOnly removeObjectForKey:localKey];
+        if (storedKey) [stored removeObjectForKey:storedKey];
+    } else if (sharedKey || localKey) {
+        // 升级前的表里可能有两条只差大小写的规则，一条并进了文档那边、另一条留在本机那边，查找时各自精确命中；两边都改，用户改的这一行才真的生效。
+        if (sharedKey) shared[sharedKey] = mode;
+        if (localKey) localOnly[localKey] = mode;
+        stored[storedKey ?: (sharedKey ?: localKey)] = mode;
+    } else if (PublishableInputModeRuleIdentifier(identifier) && shared.count < MaxPublishedInputModeRules) {
+        shared[identifier] = mode;
+        stored[identifier] = mode;
+    } else {
+        // 偏好库收不下的新规则（「添加应用…」已经当场拒绝，这里只防别的调用方）只在本机生效，不挤占文档里的位置。
+        localOnly[identifier] = mode;
+        stored[identifier] = mode;
+    }
+    _sharedAppInputModeRules = shared;
+    _localOnlyAppInputModeRules = localOnly.count > 0 ? localOnly : nil;
+    if (stored.count > 0) [_defaults setObject:stored forKey:AppInputModeRulesKey];
     else [_defaults removeObjectForKey:AppInputModeRulesKey];
     [self preferencesChanged];
 }
 - (BOOL)englishMode {
     if (!_activeModeApplication) return [_defaults boolForKey:EnglishKey];
     // Rule, then memory, then the default. A rule is what the user decided this application should start in and it is saved, so it goes on answering after -resetRememberedInputModes has thrown away what they happened to do last time; it also holds under 全局 scope, which is what makes it an exception rather than a second way of saying the same thing. What it does not outrank is the user reaching for Shift+空格 inside the application: that writes an override which stands until they leave and come back.
-    NSString *rule = [self applicationInputModeRules][_activeModeApplication];
+    // 规则按 ASCII 不分大小写查，和偏好库的去重、Windows 的查找一致：共享设置页写下的标识大小写未必和应用的 bundle id 相同。
+    NSString *rule = InputModeRuleForIdentifier([self applicationInputModeRules], _activeModeApplication);
     if (rule != nil && ![_inputModeRuleOverrides containsObject:_activeModeApplication]) return [rule isEqual:@"english"];
     NSNumber *mode = _activeModeGlobal ? _globalInputMode : _applicationInputModes[_activeModeApplication];
     return mode ? mode.boolValue : [self.defaultImeMode isEqual:@"english"];
@@ -1922,8 +2224,14 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
 // Off unless asked for, matching the Windows baseline and the shared default.
 - (BOOL)smartPunctuationSpaceConvert { return _sharedSmartPunctuationSpaceConvert ? _sharedSmartPunctuationSpaceConvert.boolValue : [_defaults boolForKey:SmartPunctuationSpaceConvertKey]; }
 - (void)setSmartPunctuationSpaceConvert:(BOOL)value { _sharedSmartPunctuationSpaceConvert = nil; [_defaults setBool:value forKey:SmartPunctuationSpaceConvertKey]; [self preferencesChanged]; }
-- (BOOL)shuangpinKeymap { return [_defaults boolForKey:KeymapKey]; }
-- (BOOL)wubiAutoCommitUnique { return [_defaults boolForKey:WubiKey]; }
+// 共享文档的值优先；文档还没有这一项时读升级前留在 defaults 里的选择。
+- (BOOL)shuangpinKeymap { return _sharedShuangpinKeymap ? _sharedShuangpinKeymap.boolValue : [_defaults boolForKey:KeymapKey]; }
+// 从没设置过时是开：这个开关接进共享偏好之前，第四键上屏是唯一可能的实际行为，缺省必须是 YES 才不会在升级后改掉手感。共享文档的值最优先；原生 defaults 只有在本机留下过新语义下的选择之后才作数，否则里面存的 NO 是历史缺省，当作未设置。
+- (BOOL)wubiAutoCommitUnique {
+    if (_sharedWubiAutoCommitUnique) return _sharedWubiAutoCommitUnique.boolValue;
+    if (![_defaults boolForKey:WubiAutoCommitUniqueAdoptedKey]) return YES;
+    return [_defaults objectForKey:WubiKey] == nil ? YES : [_defaults boolForKey:WubiKey];
+}
 - (BOOL)floatingToolbarEnabled { return _sharedToolbarEnabled ? _sharedToolbarEnabled.boolValue : ([_defaults objectForKey:FloatingToolbarKey] == nil ? YES : [_defaults boolForKey:FloatingToolbarKey]); }
 - (void)setFloatingToolbarEnabled:(BOOL)value { _sharedToolbarEnabled = nil; [_defaults setBool:value forKey:FloatingToolbarKey]; [self preferencesChanged]; }
 - (void)applySharedToolbarVisibility:(BOOL)enabled { _sharedToolbarEnabled = @(enabled); [self refreshControls]; }
@@ -2008,8 +2316,15 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     if (ValidToolbarFontSize(font)) _sharedToolbarOptions[@"font_size"] = font;
     [self refreshControls];
 }
-- (void)setWubiAutoCommitUnique:(BOOL)value { [_defaults setBool:value forKey:WubiKey]; [self preferencesChanged]; }
+- (void)setWubiAutoCommitUnique:(BOOL)value {
+    _sharedWubiAutoCommitUnique = nil;
+    [_defaults setBool:value forKey:WubiKey];
+    // 用户在这里做出的选择是新语义下的第一个真实取值；此后再来的 defaults 值（包括云快照写回的）照常作数。
+    [_defaults setBool:YES forKey:WubiAutoCommitUniqueAdoptedKey];
+    [self preferencesChanged];
+}
 - (void)setShuangpinKeymap:(BOOL)value {
+    _sharedShuangpinKeymap = nil;
     [_defaults setBool:value forKey:KeymapKey];
     [self preferencesChanged];
 }
@@ -2087,7 +2402,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
 /// Records that the user switched mode by hand in an application that has a rule, so -englishMode stops answering with the rule until they arrive at the application again. Does nothing where there is no rule to outrank.
 - (void)overrideActiveInputModeRule {
     if (!_activeModeApplication) return;
-    if ([self applicationInputModeRules][_activeModeApplication] == nil) return;
+    if (InputModeRuleForIdentifier([self applicationInputModeRules], _activeModeApplication) == nil) return;
     if (!_inputModeRuleOverrides) _inputModeRuleOverrides = [NSMutableSet set];
     [_inputModeRuleOverrides addObject:_activeModeApplication];
 }
@@ -2107,6 +2422,15 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
 }
 - (BOOL)controlTapShortcut {
     return _sharedControlTapShortcut ? _sharedControlTapShortcut.boolValue : [_defaults boolForKey:ControlTapShortcutKey];
+}
+// 缺省为关，和共享偏好 `keybindings.switch_language_caps_lock` 一致。
+- (BOOL)capsLockTapShortcut {
+    return _sharedCapsLockTapShortcut ? _sharedCapsLockTapShortcut.boolValue : [_defaults boolForKey:CapsLockTapShortcutKey];
+}
+- (void)setCapsLockTapShortcut:(BOOL)value {
+    _sharedCapsLockTapShortcut = nil;
+    [_defaults setBool:value forKey:CapsLockTapShortcutKey];
+    [self preferencesChanged];
 }
 - (void)setControlTapShortcut:(BOOL)value {
     _sharedControlTapShortcut = nil;
@@ -2244,8 +2568,10 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     _sharedGlobalTheme = nil;
     _sharedCustomThemeBase = nil;
     _sharedCustomCandidateSkin = nil;
+    _sharedCustomCandidateSkinDark = nil;
     [_defaults setObject:current forKey:CustomThemeBaseKey];
     [_defaults setObject:@"" forKey:CustomCandidateSkinKey];
+    [_defaults setObject:@"" forKey:CustomCandidateSkinDarkKey];
     [_defaults setObject:@"custom" forKey:GlobalThemeKey];
 }
 - (NSString *)globalTheme {
@@ -2266,20 +2592,46 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     id value = _sharedCustomCandidateSkin ?: [_defaults objectForKey:CustomCandidateSkinKey];
     return ValidCustomCandidateSkin(value) ? value : nil;
 }
+- (NSString *)customCandidateSkinDark {
+    id value = _sharedCustomCandidateSkinDark ?: [_defaults objectForKey:CustomCandidateSkinDarkKey];
+    return ValidCustomCandidateSkin(value) ? value : nil;
+}
+/// 把两个槽位写回本机偏好。共享文档推下来的两个槽位已经折进 `custom`，所以丢掉这两个共享值，让 getter 读到刚写下的值。
+- (void)storeCustomCandidateSkins:(const msime::mac::CustomTheme &)custom {
+    _sharedCustomCandidateSkin = nil;
+    _sharedCustomCandidateSkinDark = nil;
+    [_defaults setObject:@(custom.candidateSkin.c_str()) forKey:CustomCandidateSkinKey];
+    [_defaults setObject:@(custom.candidateSkinDark.c_str()) forKey:CustomCandidateSkinDarkKey];
+}
 - (void)selectExternalSkin:(NSString *)skinId base:(NSString *)base {
     if (!ValidCustomCandidateSkin(skinId)) return;
+    // The package's manifest base replaces the custom theme's own; the loader has already refused anything but system or a built-in theme.
+    const std::string packageBase = msime::mac::IsThemeBaseId(base.UTF8String ?: "") ? base.UTF8String : "system";
+    const std::filesystem::path root = _skinsRoot.fileSystemRepresentation ?: "";
+    // 原来那款皮肤属于哪个槽位要读它的清单；包已经不在目录里时是 unknown，应用浅色皮肤时直接覆盖它，不挪进深色槽位。
+    const auto slotOf = [&root](const std::string &id) {
+        const auto package = msime::mac::LoadSkinPackage(root, id);
+        return package ? msime::mac::SkinSlotOfBase(package->base) : msime::mac::SkinSlot::unknown;
+    };
+    const msime::mac::CustomTheme custom = msime::mac::ApplyCandidateSkin([self customTheme], skinId.UTF8String, packageBase, slotOf);
     _sharedGlobalTheme = nil;
     _sharedCustomThemeBase = nil;
-    _sharedCustomCandidateSkin = nil;
-    // The package's manifest base replaces the custom theme's own; the loader has already refused anything but system or a built-in theme.
-    [_defaults setObject:msime::mac::IsThemeBaseId(base.UTF8String ?: "") ? base : @"system" forKey:CustomThemeBaseKey];
-    [_defaults setObject:skinId forKey:CustomCandidateSkinKey];
+    [_defaults setObject:@(custom.base.c_str()) forKey:CustomThemeBaseKey];
+    [self storeCustomCandidateSkins:custom];
     [_defaults setObject:@"custom" forKey:GlobalThemeKey];
     [self preferencesChanged];
 }
+- (void)removeCustomCandidateSkin:(NSString *)skinId {
+    if (!ValidCustomCandidateSkin(skinId)) return;
+    const msime::mac::CustomTheme custom = msime::mac::RemoveCandidateSkin([self customTheme], skinId.UTF8String);
+    _sharedCustomThemeBase = nil;
+    [_defaults setObject:@(custom.base.c_str()) forKey:CustomThemeBaseKey];
+    [self storeCustomCandidateSkins:custom];
+    [self preferencesChanged];
+}
 - (void)clearCustomCandidateSkin {
-    _sharedCustomCandidateSkin = nil;
-    [_defaults setObject:@"" forKey:CustomCandidateSkinKey];
+    // 不使用外部皮肤：两个槽位一起清，只清浅色槽位会让深色模式还画着深色槽位里的包。
+    [self storeCustomCandidateSkins:msime::mac::CustomTheme()];
     [self preferencesChanged];
 }
 /// The six colours of CandidateColorControls(), which read and write exactly as 候选文字颜色 above
@@ -2451,11 +2803,22 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     [_defaults setObject:value ? @(value.integerValue) : @"" forKey:CandidateCornerRadiusKey];
     [self preferencesChanged];
 }
+- (NSNumber *)candidatePadding {
+    id value = _sharedCandidatePadding ?: [_defaults objectForKey:CandidatePaddingKey];
+    return ValidCandidatePadding(value) ? @([value integerValue]) : nil;
+}
+- (void)setCandidatePadding:(NSNumber *)value {
+    if (value && !ValidCandidatePadding(value)) { [self refreshControls]; return; }
+    _sharedCandidatePadding = nil;
+    [_defaults setObject:value ? @(value.integerValue) : @"" forKey:CandidatePaddingKey];
+    [self preferencesChanged];
+}
 - (msime::mac::CandidateWindowStyle)candidateWindowStyle {
     msime::mac::CandidateWindowStyle style;
     style.scale = self.candidateScalePercent / 100.0;
     style.opacity = self.candidateOpacityPercent / 100.0;
     if (NSNumber *radius = self.candidateCornerRadius) style.cornerRadius = radius.doubleValue;
+    if (NSNumber *padding = self.candidatePadding) style.padding = padding.doubleValue;
     return style;
 }
 - (msime::mac::ResolvedSkin)candidateWindowSkinForDark:(BOOL)dark {
@@ -2602,8 +2965,14 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     if (LocalModeBoolean(followCursor)) _sharedCandidateFollowCursor = followCursor;
     id inputModeHUD = preferences[@"input_mode_hud"];
     if (LocalModeBoolean(inputModeHUD)) _sharedInputModeHUD = inputModeHUD;
+    id inputModeStatusItem = preferences[@"input_mode_status_item"];
+    if (LocalModeBoolean(inputModeStatusItem)) _sharedInputModeStatusItem = inputModeStatusItem;
     id appLogo = preferences[@"show_app_logo"];
     if (LocalModeBoolean(appLogo)) _sharedShowsAppLogo = appLogo;
+    id pageNumber = preferences[@"show_candidate_page_number"];
+    if (LocalModeBoolean(pageNumber)) _sharedShowsCandidatePageNumber = pageNumber;
+    id expandCandidates = preferences[@"expand_candidates"];
+    if (LocalModeBoolean(expandCandidates)) _sharedExpandCandidates = expandCandidates;
     id font = preferences[@"candidate_font_size"];
     // The global theme and the custom theme. Every part of custom_theme is omitted when unset, and omission also clears a previously loaded value, without persisting a local override.
     id globalTheme = preferences[@"global_theme"];
@@ -2615,6 +2984,9 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     id candidateSkin = customTheme[@"candidate_skin"];
     if (!candidateSkin || candidateSkin == NSNull.null) _sharedCustomCandidateSkin = NSNull.null;
     else if (ValidCustomCandidateSkin(candidateSkin)) _sharedCustomCandidateSkin = [candidateSkin copy];
+    id candidateSkinDark = customTheme[@"candidate_skin_dark"];
+    if (!candidateSkinDark || candidateSkinDark == NSNull.null) _sharedCustomCandidateSkinDark = NSNull.null;
+    else if (ValidCustomCandidateSkin(candidateSkinDark)) _sharedCustomCandidateSkinDark = [candidateSkinDark copy];
     NSDictionary *pickerColors = [customTheme[@"candidate_colors"] isKindOfClass:NSDictionary.class] ? customTheme[@"candidate_colors"] : @{};
     _sharedTextColor = SharedCandidateColor(pickerColors, @"text", _sharedTextColor);
     _sharedNumberColor = SharedCandidateColor(pickerColors, @"number", _sharedNumberColor);
@@ -2648,10 +3020,13 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     id cornerRadius = preferences[@"candidate_corner_radius"];
     if (ValidCandidateCornerRadius(cornerRadius)) _sharedCandidateCornerRadius = cornerRadius;
     else if (!cornerRadius || cornerRadius == NSNull.null) _sharedCandidateCornerRadius = NSNull.null;
+    id padding = preferences[@"candidate_padding"];
+    if (ValidCandidatePadding(padding)) _sharedCandidatePadding = padding;
+    else if (!padding || padding == NSNull.null) _sharedCandidatePadding = NSNull.null;
     id page = preferences[@"candidate_page_size"];
     // Match the shared integer ranges; booleans and fractions are not sizes.
     if (ValidCandidateStyleInteger(font, 12, 32)) _sharedFontSize = font;
-    if (ValidCandidateStyleInteger(page, 1, 9))
+    if (ValidCandidateStyleInteger(page, (NSInteger)msime::mac::kMinimumCandidatePageSize, (NSInteger)msime::mac::kMaximumCandidatePageSize))
         _sharedPageSize = @(msime::mac::NormalizeCandidatePageSize([page unsignedIntegerValue]));
     id theme = preferences[@"theme"];
     if ([ThemeModes() containsObject:theme]) _sharedTheme = [theme copy];
@@ -2667,8 +3042,8 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
 }
 
 - (NSAppearance *)candidateAppearanceOverride {
-    // A theme with a mode of its own (水杉, 浅色, 纸, 夜 and 墨, or the custom theme over one of them) is drawn in that mode whatever the light/dark choice says: its palette is the one for that mode.
-    if (_lightSkin.fixedDark) return [NSAppearance appearanceNamed:*_lightSkin.fixedDark ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
+    // 固定明暗的主题（水杉、浅色、纸、夜、墨，或叠在其中之一上、没有设皮肤的自定义主题）不管明暗选择都画在自己的明暗下：它的配色就是那一种明暗的。两个槽位按明暗各画一款皮肤时两次解析的明暗不同，见 FixedThemeMode。
+    if (const auto fixed = [self fixedThemeMode]) return [NSAppearance appearanceNamed:*fixed ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
     return self.systemBaseCandidateAppearanceOverride;
 }
 - (NSAppearance *)systemBaseCandidateAppearanceOverride {
@@ -2679,7 +3054,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     return nil;
 }
 - (BOOL)candidateAppearanceOverrideConfigured {
-    return _lightSkin.fixedDark.has_value() || _sharedTheme != nil || _sharedCandidateTheme != nil || [_defaults objectForKey:ThemeKey] != nil ||
+    return [self fixedThemeMode].has_value() || _sharedTheme != nil || _sharedCandidateTheme != nil || [_defaults objectForKey:ThemeKey] != nil ||
            [_defaults objectForKey:CandidateThemeKey] != nil;
 }
 - (void)setPageShortcut:(NSInteger)value {
@@ -2735,7 +3110,18 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
         button.state = [self navigationEnabled:button.identifier] ? NSControlStateValueOn : NSControlStateValueOff;
     for (NSString *scheme in _helpcodeSchemaButtons) {
         NSDictionary *values = [self helpcodeOptionsForScheme:scheme];
-        [_helpcodeSchemaButtons[scheme] selectItemAtIndex:[HelpcodeSchemas() indexOfObject:values[@"schema"]]];
+        NSPopUpButton *schemas = _helpcodeSchemaButtons[scheme];
+        // 选了辅助码表插件时，下拉框末尾多一项代表它并选中：Engine 用的是插件的码表，上面的方案此时不起作用。
+        while (schemas.numberOfItems > (NSInteger)HelpcodeSchemas().count) [schemas removeItemAtIndex:schemas.numberOfItems - 1];
+        NSString *pack = [self helpcodePackForScheme:scheme];
+        if (pack) {
+            [schemas addItemWithTitle:[pack stringByAppendingString:@"（插件）"]];
+            [schemas selectItem:schemas.lastItem];
+            schemas.toolTip = [NSString stringWithFormat:@"辅助码表插件「%@」替代了辅助码方案；选一个方案就不再使用该插件。", pack];
+        } else {
+            [schemas selectItemAtIndex:[HelpcodeSchemas() indexOfObject:values[@"schema"]]];
+            schemas.toolTip = nil;
+        }
         _helpcodeDisplayToggles[scheme].state = [values[@"show_in_candidate_window"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
     }
     _fullWidthToggle.state = self.fullWidthInput ? NSControlStateValueOn : NSControlStateValueOff;
@@ -2796,11 +3182,11 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     _candidateEnglishGlossToggle.state = self.candidateEnglishGloss ? NSControlStateValueOn : NSControlStateValueOff;
     _quanpinHelpcodeToggle.state = self.quanpinHelpcodeEnabled ? NSControlStateValueOn : NSControlStateValueOff;
     _shuangpinHelpcodeToggle.state = self.shuangpinHelpcodeEnabled ? NSControlStateValueOn : NSControlStateValueOff;
-    for (NSButton *button in _localModeButtons)
-        button.state = [self localModeEnabled:button.identifier] ? NSControlStateValueOn : NSControlStateValueOff;
+    [self refreshLocalModeButtons];
     _inputModeShortcutToggle.state = self.inputModeShortcut ? NSControlStateValueOn : NSControlStateValueOff;
     _shiftTapShortcutToggle.state = self.shiftTapShortcut ? NSControlStateValueOn : NSControlStateValueOff;
     _controlTapShortcutToggle.state = self.controlTapShortcut ? NSControlStateValueOn : NSControlStateValueOff;
+    _capsLockTapShortcutToggle.state = self.capsLockTapShortcut ? NSControlStateValueOn : NSControlStateValueOff;
     _controlOptionSpaceShortcutToggle.state = self.controlOptionSpaceShortcut ? NSControlStateValueOn : NSControlStateValueOff;
     _characterSetShortcutToggle.state = self.characterSetShortcut ? NSControlStateValueOn : NSControlStateValueOff;
     [_layoutButton selectItemAtIndex:self.vertical ? 1 : 0];
@@ -2833,7 +3219,10 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     _textColorField.stringValue = self.candidateTextColor ?: @"";
     _textColorWell.color = CandidateColor(self.candidateTextColor, [self candidateSkinColorForProperty:@"candidateTextColor"]);
     _inputModeHUDToggle.state = self.inputModeHUD ? NSControlStateValueOn : NSControlStateValueOff;
+    _inputModeStatusItemToggle.state = self.inputModeStatusItem ? NSControlStateValueOn : NSControlStateValueOff;
     _appLogoToggle.state = self.showsAppLogo ? NSControlStateValueOn : NSControlStateValueOff;
+    _candidatePageNumberToggle.state = self.showsCandidatePageNumber ? NSControlStateValueOn : NSControlStateValueOff;
+    _expandCandidatesToggle.state = self.expandCandidates ? NSControlStateValueOn : NSControlStateValueOff;
     [_themeModeButton selectItemAtIndex:(NSInteger)[ThemeModes() indexOfObject:self.themeMode]];
     [_candidateThemeButton selectItemAtIndex:(NSInteger)[SurfaceThemes() indexOfObject:self.candidateTheme]];
     // A well always shows a colour, so one that is not overridden shows the colour the candidate
@@ -2858,6 +3247,15 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     _candidateCornerRadiusSlider.integerValue = cornerRadius.integerValue;
     _candidateCornerRadiusLabel.stringValue = [NSString stringWithFormat:@"%ld pt", (long)cornerRadius.integerValue];
     _candidateCornerRadiusReset.enabled = self.candidateCornerRadius != nil;
+    // The padding the same way: following the skin, the slider shows the skin's own pad.
+    NSNumber *padding = self.candidatePadding;
+    if (_candidatePaddingSlider != nil && padding == nil) {
+        NSAppearanceName match = [NSApp.effectiveAppearance bestMatchFromAppearancesWithNames:@[ NSAppearanceNameAqua, NSAppearanceNameDarkAqua ]];
+        padding = @(lround([self resolvedSkinForDark:[match isEqual:NSAppearanceNameDarkAqua]].tokens.pad));
+    }
+    _candidatePaddingSlider.integerValue = padding.integerValue;
+    _candidatePaddingLabel.stringValue = [NSString stringWithFormat:@"%ld pt", (long)padding.integerValue];
+    _candidatePaddingReset.enabled = self.candidatePadding != nil;
     [_candidateFontPresetButton selectItemAtIndex:self.candidateFontPreset];
     [_candidatePreeditButton selectItemAtIndex:self.showsCandidatePreedit ? 0 : 1];
     // -1 deselects, which is what the menu has to show for a state none of its three items describes: an NSPopUpButton showing 「Page Up / Page Down」 over an unticked Page Up / Page Down box is the menu naming a binding the user does not have. The line under it says where the setting actually is, so the empty menu is not the whole answer.
@@ -2893,7 +3291,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
         // configuring the scheme that is actually in use.
         @[ @(scheme == 1), @[_shuangpinSchemeButton] ],
         @[ @(scheme == 2), @[_wubiSchemeButton] ],
-        // Fuzzy rules and the two quanpin corrections reach the candidates of quanpin, shuangpin and wubi only: Japanese, Korean, Cantonese, Zhuyin and Vietnamese answer false to the Engine's `supports_fuzzy` and `supports_autocorrect`, and Korean's only candidates are the Hanja of the composing syllable, which no spelling rule reaches. refresh_candidates (crates/engine/src/ime/mod.rs) puts all three into the query request whatever the scheme is, and only the quanpin and shuangpin engines read them back out (crates/engine/src/quanpin/engine.rs, crates/engine/src/shuangpin/engine.rs); the Japanese provider never looks. 五笔 keeps them even though its own table ignores them too, because the same method builds a second, quanpin request carrying the same three values when 编码打不出时用拼音候选 is on and the table cannot answer the code — so under 五笔 they decide what that fallback offers.
+        // 模糊音和两项全拼纠错只作用于全拼、双拼和五笔的候选：日语、韩语、粤拼、注音和越南文对 Engine 的 `supports_fuzzy`、`supports_autocorrect` 回答 false，韩语的候选只有当前音节的汉字，任何拼写规则都够不着。refresh_candidates（crates/engine/src/ime/mod.rs）不论方案都把这三项放进查询请求，只有全拼和双拼引擎会读出来（crates/engine/src/quanpin/engine.rs、crates/engine/src/shuangpin/engine.rs），日语 provider 从不看。五笔自己的码表同样不理它们，仍然保留，是因为「五笔拼音混输」打开时同一个方法会对同一串字母再建一个带着这三项的全拼请求，不论五笔码表答不答得上，把全拼候选接在五笔候选之后，所以在五笔下它们决定混输列出哪些拼音候选。
         @[ @(scheme <= 2), @[_fuzzyPinyinToggle, _transpositionToggle, _neighborToggle] ],
         @[ @(self.fuzzyPinyinEnabled && scheme <= 2), _fuzzyPinyinRuleButtons.allValues ],
         // Both places the space conversion is read — InputController.mm, where a space after a
@@ -3119,14 +3517,17 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     _toolbarThemeButton.target = self;
     _toolbarThemeButton.action = @selector(toolbarThemeChanged:);
     _inputModeHUDToggle = MSIMESettingSwitch(self, @selector(inputModeHUDChanged:), @"切换中英文时显示提示");
+    _inputModeStatusItemToggle = MSIMESettingSwitch(self, @selector(inputModeStatusItemChanged:), @"菜单栏显示中/英状态");
     _appLogoToggle = MSIMESettingSwitch(self, @selector(appLogoChanged:), @"显示水杉 logo");
+    _candidatePageNumberToggle = MSIMESettingSwitch(self, @selector(candidatePageNumberChanged:), @"显示页码和翻页按钮");
+    _expandCandidatesToggle = MSIMESettingSwitch(self, @selector(expandCandidatesChanged:), @"展开候选");
     _preeditFontButton = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     for (NSUInteger size = 12; size <= 32; ++size)
         [_preeditFontButton addItemWithTitle:[NSString stringWithFormat:@"%lu pt", (unsigned long)size]];
     _preeditFontButton.accessibilityLabel = @"候选窗拼音字号";
     _preeditFontButton.target = self;
     _preeditFontButton.action = @selector(preeditFontChanged:);
-    // The three style settings are a size, a fade and a curve the user judges by looking at the preview above, so they are sliders that stop on the steps the shared settings page offers, each with the value it stands at printed beside it.
+    // The style settings are a size, a fade, a curve and a margin the user judges by looking at the preview above, so they are sliders that stop on the steps the shared settings page offers, each with the value it stands at printed beside it.
     NSSlider *(^styleSlider)(double, double, double, NSString *) = ^NSSlider *(double minimum, double maximum, double step, NSString *label) {
         NSSlider *slider = [NSSlider sliderWithValue:minimum minValue:minimum maxValue:maximum target:self action:@selector(candidateStyleSliderChanged:)];
         slider.numberOfTickMarks = (NSInteger)lround((maximum - minimum) / step) + 1;
@@ -3157,6 +3558,13 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     _candidateCornerRadiusReset.accessibilityLabel = @"圆角大小跟随皮肤";
     NSStackView *cornerRadiusControls = [NSStackView stackViewWithViews:@[ _candidateCornerRadiusSlider, _candidateCornerRadiusLabel, _candidateCornerRadiusReset ]];
     cornerRadiusControls.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    // 2pt 起：候选窗边缘至少留 2pt（InputController 的 inset），更小的值画出来一样。
+    _candidatePaddingSlider = styleSlider(2.0, 16.0, 1.0, @"内边距");
+    _candidatePaddingLabel = styleValueLabel();
+    _candidatePaddingReset = [NSButton buttonWithTitle:@"跟随皮肤" target:self action:@selector(resetCandidatePadding:)];
+    _candidatePaddingReset.accessibilityLabel = @"内边距跟随皮肤";
+    NSStackView *paddingControls = [NSStackView stackViewWithViews:@[ _candidatePaddingSlider, _candidatePaddingLabel, _candidatePaddingReset ]];
+    paddingControls.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     _candidateFontPresetButton = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     NSArray<NSArray<NSString *> *> *fontPresets = CandidateFontPresets();
     for (NSUInteger index = 0; index < fontPresets.count; ++index) {
@@ -3244,6 +3652,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     [appRuleScroll.widthAnchor constraintEqualToAnchor:appRuleControls.widthAnchor].active = YES;
     _shiftTapShortcutToggle = MSIMESettingSwitch(self, @selector(shiftTapShortcutChanged:), @"单按 Shift 切换中英文");
     _controlTapShortcutToggle = MSIMESettingSwitch(self, @selector(controlTapShortcutChanged:), @"单按 Control 切换中英文");
+    _capsLockTapShortcutToggle = MSIMESettingSwitch(self, @selector(capsLockTapShortcutChanged:), @"单按 Caps Lock 切换中英文");
     _controlOptionSpaceShortcutToggle = MSIMESettingSwitch(self, @selector(controlOptionSpaceShortcutChanged:), @"Control + Option + 空格切换中英文");
     _characterSetShortcutToggle = MSIMESettingSwitch(self, @selector(characterSetShortcutChanged:), @"Control + Shift + F 切换简繁");
     _fullWidthToggle = MSIMESettingSwitch(self, @selector(fullWidthChanged:), @"全角输入（Option + Shift + H）");
@@ -3269,7 +3678,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     _traditionalOutputToggle = MSIMESettingSwitch(self, @selector(traditionalOutputChanged:), @"简繁输入");
     _keymapToggle = MSIMESettingSwitch(self, @selector(keymapChanged:), @"输入时显示双拼键位提示");
     _wubiToggle = MSIMESettingSwitch(self, @selector(wubiChanged:), @"五笔四码唯一候选自动上屏");
-    _wubiMixedPinyinToggle = MSIMESettingSwitch(self, @selector(wubiMixedPinyinChanged:), @"编码打不出时用拼音候选");
+    _wubiMixedPinyinToggle = MSIMESettingSwitch(self, @selector(wubiMixedPinyinChanged:), @"五笔拼音混输");
     _punctuationToggle = MSIMESettingSwitch(self, @selector(punctuationChanged:), @"中文标点");
     _smartPunctuationToggle = MSIMESettingSwitch(self, @selector(smartPunctuationChanged:), @"智能标点");
     _smartPunctuationRepeatToggle = MSIMESettingSwitch(self, @selector(smartPunctuationRepeatChanged:), @"重复标点转中文");
@@ -3420,7 +3829,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     for (NSString *scheme in @[@"quanpin", @"shuangpin"]) {
         NSString *name = [scheme isEqual:@"quanpin"] ? @"全拼" : @"双拼";
         NSPopUpButton *schemas = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-        [schemas addItemsWithTitles:@[@"蓝天小雨点", @"自然码", @"首右2.0", @"首右plus", @"小鹤", @"加加"]];
+        [schemas addItemsWithTitles:@[@"蓝天小雨点", @"自然码", @"首右2.0", @"首右plus", @"小鹤", @"加加", @"五笔 86"]];
         for (NSUInteger index = 0; index < HelpcodeSchemas().count; ++index)
             [schemas itemAtIndex:index].representedObject = HelpcodeSchemas()[index];
         schemas.identifier = scheme;
@@ -3463,10 +3872,10 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     _wubiCard = MSIMECardWithViews(@[
         [self settingRow:@"编码方案" control:_wubiProfileLabel aka:@[@"86 五笔", @"98 五笔", @"五笔版本"]],
         [self settingRow:@"四码唯一候选自动上屏" control:_wubiToggle],
-        [self settingRow:@"编码打不出时用拼音候选"
-                  detail:@"五笔词库无法回答当前编码时，用同一串字母查询全拼；词库能回答时不影响。"
+        [self settingRow:@"五笔拼音混输"
+                  detail:@"五笔候选之后接着列出同一串字母的全拼候选，五笔编码打不出时直接出拼音候选。"
                  control:_wubiMixedPinyinToggle
-                     aka:@[@"五笔拼音混输"]],
+                     aka:@[@"五笔混拼", @"编码打不出时用拼音候选"]],
     ], 0.0);
     _wubiCard.accessibilityLabel = @"五笔选项卡片";
 
@@ -3551,14 +3960,21 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     // 实用功能 was a page holding this one card, and its summary was the only place in the window
     // that said how the eight modes are entered. The page is gone and the sentence is not: it is the
     // first thing in the card, where the grid it describes is.
+    NSButton *shiftLetterEntryButton = nil;
+    NSMutableArray<NSButton *> *modeButtons = [NSMutableArray array];
     for (NSArray<NSString *> *entry in LocalModeControls()) {
         NSButton *button = [NSButton checkboxWithTitle:entry[1] target:self action:@selector(localModeChanged:)];
         button.identifier = entry[0];
         [_localModeButtons addObject:button];
+        if ([entry[0] isEqual:ShiftLetterEntryMode]) shiftLetterEntryButton = button;
+        else [modeButtons addObject:button];
     }
+    [self refreshLocalModeButtons];
     NSBox *localModesCard = MSIMECardWithViews(@[
-        MSIMEDetailLabel(@"未组词时按 Shift 加一个字母，临时切到另一种输入方式。"),
-        [self settingCheckboxes:_localModeButtons columns:2],
+        MSIMEDetailLabel(@"未组词时按 Shift 加一个字母，临时切到另一种输入方式。关掉总开关后 Shift+字母照常打出大写字母，下面各模式的开关保留。"),
+        shiftLetterEntryButton,
+        MSIMECardSeparator(),
+        [self settingCheckboxes:modeButtons columns:2],
     ], 8.0);
     localModesCard.accessibilityLabel = @"快捷模式卡片";
 
@@ -3601,38 +4017,33 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSBox *candidateWindowCard = MSIMECardWithViews(@[
         [self settingRow:@"候选排列" control:_layoutButton aka:@[@"横排", @"竖排"]],
         [self settingRow:@"每页候选" control:_pageSizeButton aka:@[@"候选个数"]],
-        [self settingRow:@"候选字号" control:_fontButton aka:@[@"字体大小"]],
-        [self settingRow:@"整体大小"
-                  detail:@"候选文字与窗口的边距、行高和圆角一同缩放。"
-                 control:scaleControls
-                     aka:@[@"缩放", @"候选窗大小"]],
-        [self settingRow:@"不透明度"
-                  detail:@"只淡化候选框底色、边框与皮肤背景图，文字和焦点高亮保持不透明。"
-                 control:opacityControls
-                     aka:@[@"透明度"]],
-        [self settingRow:@"圆角大小"
-                  detail:@"跟随皮肤时显示皮肤自带的圆角；拖动后以此值覆盖皮肤的圆角。"
-                 control:cornerRadiusControls
-                     aka:@[@"圆角"]],
-        [self settingRow:@"候选窗拼音字号" control:_preeditFontButton],
-        [self settingRow:@"候选窗预编辑" control:_candidatePreeditButton],
         [self settingRow:@"候选窗口跟随光标" control:_candidateFollowCursorToggle],
-        // The badge is this host's own feature and every other platform already offers a switch for
-        // it; macOS drew it, read the preference on every mode change, and had nowhere to turn it off.
+        // 模式提示由本机宿主绘制，可独立关闭。
         [self settingRow:@"切换中英文时显示提示"
                   detail:@"切换后在光标下方短暂显示「中」或「英」。"
                  control:_inputModeHUDToggle
                      aka:@[@"HUD", @"角标"]],
+        // 系统的输入法图标只在「英」也加成输入源时才跟着变，这个状态项由输入法进程自己放，不依赖它（#7066）。
+        [self settingRow:@"菜单栏显示中/英状态"
+                  detail:@"在菜单栏常驻显示当前模式：中文时是所用方案，英文时是「英」。不需要把「英」加成输入源。"
+                 control:_inputModeStatusItemToggle
+                     aka:@[@"状态栏", @"菜单栏图标"]],
         [self settingRow:@"显示水杉 logo"
                   detail:@"在候选窗和悬浮工具栏左端显示水杉图标。"
                  control:_appLogoToggle
                      aka:@[@"图标", @"logo"]],
+        [self settingRow:@"显示页码和翻页按钮"
+                  detail:@"关闭后候选窗不再显示「1 / 3」和 ‹ ›，仍可用键盘翻页；鼠标滚轮翻页默认关闭，需要时在「按键 › 候选翻页与选字」里打开。"
+                 control:_candidatePageNumberToggle
+                     aka:@[@"页码", @"翻页箭头", @"紧凑"]],
+        // 横排候选窗按 ↓ 展开成多行候选网格（#7307），竖排候选窗不受影响。
+        [self settingRow:@"展开候选"
+                  detail:@"横排候选窗按 ↓ 或点展开按钮，把后面几页候选排成多行一起显示；竖排候选窗不受影响。"
+                 control:_expandCandidatesToggle
+                     aka:@[@"多行候选", @"候选网格", @"候选词卷轴"]],
     ], 0.0);
     candidateWindowCard.accessibilityLabel = @"候选窗口卡片";
-    // The three clusters — a field beside a colour well, a field beside a button, a popup beside
-    // three buttons — are wider than one popup, and the row now lets them be: the control column is
-    // placed against the trailing edge rather than pinned to a width, so the card keeps one control
-    // edge without the second fixed width these rows used to ask for.
+    // 字体选择和字号、整体缩放归入同一个标签。
     NSBox *fontCard = MSIMECardWithViews(@[
         [self settingRow:@"字体预设"
                   detail:@"写入候选字体；本机未安装时使用同类字体，最后使用系统字体。"
@@ -3644,11 +4055,15 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
         [self settingRow:@"候选窗英文字体"
                   detail:@"优先用于拉丁字符；未安装时使用候选字体，留空表示不设置独立英文字体。"
                  control:_englishFontFamilyControl],
+        [self settingRow:@"候选字号" control:_fontButton aka:@[@"字体大小"]],
+        [self settingRow:@"整体大小"
+                  detail:@"候选文字与窗口的边距、行高和圆角一同缩放。"
+                 control:scaleControls
+                     aka:@[@"缩放", @"候选窗大小"]],
+        [self settingRow:@"候选窗拼音字号" control:_preeditFontButton],
     ], 0.0);
     fontCard.accessibilityLabel = @"候选字体卡片";
-    // 候选文字颜色 leaves the font card for this one, which is the only row that moves: it is a colour,
-    // the other six are colours, and a card holding one of the seven while a card under it holds the
-    // rest is a worse place to look for any of them than either card alone.
+    // 颜色与窗口几何设置共用窗口样式标签，各自保留恢复入口。
     NSMutableArray<NSView *> *colorRows = [NSMutableArray arrayWithObjects:
         [self settingRow:@"颜色模式"
                   detail:@"候选窗口、悬浮工具栏、屏幕键盘与输入法菜单的默认明暗；设置窗口始终跟随系统。"
@@ -3659,24 +4074,46 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     [colorRows addObjectsFromArray:candidateColorRows];
     NSBox *colorCard = MSIMECardWithViews(colorRows, 0.0);
     colorCard.accessibilityLabel = @"候选配色卡片";
-    NSScrollView *candidateWindowPage = [self page:MSIMESettingsPageCandidateWindow
-                                             title:@"候选窗口"
-                                           summary:@"候选窗口的排列、字体与配色。"
-                                           content:@[
-        // The preview writes nothing: 预览深色, the showcase checkbox and the sample text are ways of looking at the settings below, not settings, so this section has nothing to restore and nothing here outlives the window.
-        [self sectionHeader:@"效果预览" keys:@[]], _preview, previewControls,
-        [self sectionHeader:@"候选窗口"
-                       keys:@[LayoutKey, PageSizeKey, FontKey, CandidateScaleKey, CandidateOpacityKey,
-                              CandidateCornerRadiusKey, PreeditFontKey, CandidatePreeditKey,
-                              CandidateFollowCursorKey, InputModeHUDKey, AppLogoKey]],
-        candidateWindowCard,
-        [self sectionHeader:@"候选字体" keys:@[FontFamilyKey, CandidateEnglishFontKey, FallbackFontsKey]],
-        fontCard,
-        [self sectionHeader:@"配色"
-                       keys:@[ThemeKey, CandidateThemeKey, TextColorKey, NumberColorKey, AccentColorKey,
-                              SelectedColorKey, HoverColorKey, SurfaceColorKey, BorderColorKey]],
-        colorCard,
-    ]];
+    NSBox *windowStyleCard = MSIMECardWithViews(@[
+        [self settingRow:@"不透明度"
+                  detail:@"只淡化候选框底色、边框与皮肤背景图，文字和焦点高亮保持不透明。"
+                 control:opacityControls
+                     aka:@[@"透明度"]],
+        [self settingRow:@"圆角大小"
+                  detail:@"跟随皮肤时显示皮肤自带的圆角；拖动后以此值覆盖皮肤的圆角。"
+                 control:cornerRadiusControls
+                     aka:@[@"圆角"]],
+        [self settingRow:@"内边距"
+                  detail:@"候选与窗口边缘之间的距离。跟随皮肤时显示皮肤自带的值；调小后窗口更紧凑。"
+                 control:paddingControls
+                     aka:@[@"边距", @"间距", @"紧凑"]],
+    ], 0.0);
+    windowStyleCard.accessibilityLabel = @"候选窗口样式卡片";
+    NSBox *preeditCard = MSIMECardWithViews(@[
+        [self settingRow:@"候选窗预编辑" control:_candidatePreeditButton],
+    ], 0.0);
+    preeditCard.accessibilityLabel = @"候选预编辑卡片";
+    _candidateSettingsTabs = [NSSegmentedControl segmentedControlWithLabels:@[@"布局", @"字体大小", @"窗口样式", @"预编辑"]
+        trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(candidateSettingsTabChanged:)];
+    _candidateSettingsTabs.accessibilityLabel = @"候选窗口设置标签";
+    _candidateSettingsTabs.selectedSegment = 0;
+    _candidateSettingsTabContents = @[
+        @[[self sectionHeader:@"布局" keys:@[LayoutKey, PageSizeKey, CandidateFollowCursorKey,
+            InputModeHUDKey, InputModeStatusItemKey, AppLogoKey, CandidatePageNumberKey, ExpandCandidatesKey]], candidateWindowCard],
+        @[[self sectionHeader:@"字体大小" keys:@[FontFamilyKey, CandidateEnglishFontKey, FallbackFontsKey,
+            FontKey, PreeditFontKey, CandidateScaleKey]], fontCard],
+        @[[self sectionHeader:@"窗口样式" keys:@[CandidateOpacityKey, CandidateCornerRadiusKey, CandidatePaddingKey]], windowStyleCard,
+          [self sectionHeader:@"配色" keys:@[ThemeKey, CandidateThemeKey, TextColorKey, NumberColorKey,
+            AccentColorKey, SelectedColorKey, HoverColorKey, SurfaceColorKey, BorderColorKey]], colorCard],
+        @[[self sectionHeader:@"预编辑" keys:@[CandidatePreeditKey]], preeditCard],
+    ];
+    // 预览控件共用同一份实例，切换标签不改偏好或丢失示例文字、明暗与展示状态。
+    NSMutableArray<NSView *> *candidateContent = [NSMutableArray arrayWithObjects:_candidateSettingsTabs,
+        [self sectionHeader:@"效果预览" keys:@[]], _preview, previewControls, nil];
+    for (NSArray<NSView *> *content in _candidateSettingsTabContents) [candidateContent addObjectsFromArray:content];
+    NSScrollView *candidateWindowPage = [self page:MSIMESettingsPageCandidateWindow title:@"候选窗口"
+        summary:@"候选窗口的排列、字体、窗口样式与预编辑。" content:candidateContent];
+    [self candidateSettingsTabChanged:_candidateSettingsTabs];
 
     // ---- 皮肤 -------------------------------------------------------------------------------
     // The page is the skin browser itself. It already existed — cards with a live candidate preview
@@ -3862,6 +4299,10 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
         [self settingRow:@"Shift + 空格切换中英文" control:_inputModeShortcutToggle aka:@[@"中英文切换"]],
         [self settingRow:@"单按 Shift 切换中英文" control:_shiftTapShortcutToggle aka:@[@"中英文切换"]],
         [self settingRow:@"单按 Control 切换中英文" control:_controlTapShortcutToggle aka:@[@"中英文切换"]],
+        [self settingRow:@"单按 Caps Lock 切换中英文"
+                  detail:@"轻点（300 毫秒内松开）切换中英文，不打开大写锁定；按住更久照常打开大写锁定。若打开了系统的「使用大写锁定键切换 ABC」，请先把它关掉。"
+                 control:_capsLockTapShortcutToggle
+                     aka:@[@"中英文切换", @"大写锁定"]],
         [self settingRow:@"Control + Option + 空格切换中英文" control:_controlOptionSpaceShortcutToggle aka:@[@"中英文切换"]],
         [self settingRow:@"Control + Shift + F 切换简繁" control:_characterSetShortcutToggle aka:@[@"繁体"]],
         [self settingRow:@"Option + Shift + H 切换全半角"
@@ -3893,7 +4334,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
                                 summary:@"切换中英文、翻页选字与开始语音输入使用的按键。"
                                 content:@[
         [self sectionHeader:@"输入状态切换"
-                       keys:@[InputModeShortcutKey, ShiftTapShortcutKey, ControlTapShortcutKey,
+                       keys:@[InputModeShortcutKey, ShiftTapShortcutKey, ControlTapShortcutKey, CapsLockTapShortcutKey,
                               ControlOptionSpaceShortcutKey, CharacterSetShortcutKey, FullWidthShortcutKey,
                               VoiceHotkeyCtrlF9Key, VoiceHotkeyRightAltKey, VoiceHotkeyCtrlCommandKey,
                               VoiceHotkeyCtrlOptionKey, VoiceHotkeyHoldSpaceKey]],
@@ -4368,14 +4809,29 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
         if (view == container) return YES;
     return NO;
 }
-/// Whether the user can currently get to the row an entry points at. 输入方案 shows the 全拼, 双拼 and 五笔 option cards one at a time, so under 五笔 the three 辅助码 rows are on the page but not reachable, and offering them would scroll to nothing. Asked at the moment the query runs rather than recorded when the index was built, which is what stops the index going stale: there is nothing to rebuild when the selected scheme changes.
+// 标签内的设置始终可由搜索到达；方案自身隐藏的选项仍不进入结果。
 - (BOOL)searchEntryReachable:(MSIMESettingsSearchEntry *)entry {
     if (entry.pageIndex < 0 || (NSUInteger)entry.pageIndex >= _preferencePages.count) return NO;
     NSView *page = _preferencePages[(NSUInteger)entry.pageIndex];
-    // The pages themselves are all hidden but the one in front, so the walk stops at the page.
-    for (NSView *view = entry.row; view != nil && view != page; view = view.superview)
-        if (view.hidden) return NO;
+    for (NSView *view = entry.row; view != nil && view != page; view = view.superview) {
+        BOOL tabRoot = NO;
+        for (NSArray<NSView *> *content in _candidateSettingsTabContents)
+            if ([content containsObject:view]) { tabRoot = YES; break; }
+        if (view.hidden && !tabRoot) return NO;
+    }
     return YES;
+}
+- (NSInteger)candidateSettingsTabForRow:(NSView *)row {
+    for (NSUInteger index = 0; index < _candidateSettingsTabContents.count; ++index)
+        for (NSView *root in _candidateSettingsTabContents[index])
+            if ([self view:root containsRow:row]) return (NSInteger)index;
+    return NSNotFound;
+}
+- (void)candidateSettingsTabChanged:(NSSegmentedControl *)sender {
+    for (NSUInteger index = 0; index < _candidateSettingsTabContents.count; ++index)
+        for (NSView *view in _candidateSettingsTabContents[index]) view.hidden = (NSInteger)index != sender.selectedSegment;
+    [_preview.enclosingScrollView.documentView layoutSubtreeIfNeeded];
+    [_preview.enclosingScrollView.documentView scrollPoint:NSZeroPoint];
 }
 /// A query replaces the navigation with its matches rather than dropping a menu over the sidebar:
 /// a menu takes key focus, so the next keystroke would go to the menu instead of the field.
@@ -4473,6 +4929,11 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     if (sender.tag < 0 || (NSUInteger)sender.tag >= _searchResults.count) return;
     MSIMESettingsSearchEntry *entry = _searchResults[(NSUInteger)sender.tag];
     [self showPreferencesPageAtIndex:entry.pageIndex navigationIndex:entry.pageIndex];
+    NSInteger tab = [self candidateSettingsTabForRow:entry.row];
+    if (tab != NSNotFound) {
+        _candidateSettingsTabs.selectedSegment = tab;
+        [self candidateSettingsTabChanged:_candidateSettingsTabs];
+    }
     // The search is over once it has been answered. Leaving the query in the field left the sidebar showing results for a search the user had already finished, with the page they had just landed on nowhere on screen and its row in the navigation hidden behind them.
     [self clearSettingsSearch:nil];
     NSView *row = entry.row;
@@ -4519,6 +4980,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
 - (void)wubiProfileChanged:(NSPopUpButton *)sender { self.wubiProfile = sender.indexOfSelectedItem == 1 ? @"wubi98" : @"wubi86"; }
 - (void)preeditChanged:(NSPopUpButton *)sender { self.shuangpinPreeditUsesRaw = sender.indexOfSelectedItem == 1; }
 - (void)inputModeShortcutChanged:(NSSwitch *)sender { self.inputModeShortcut = sender.state == NSControlStateValueOn; }
+- (void)capsLockTapShortcutChanged:(NSSwitch *)sender { self.capsLockTapShortcut = sender.state == NSControlStateValueOn; }
 - (void)defaultImeModeChanged:(NSPopUpButton *)sender { self.defaultImeMode = sender.indexOfSelectedItem == 1 ? @"english" : @"chinese"; }
 - (void)imeModeScopeChanged:(NSPopUpButton *)sender { self.imeModeScope = sender.indexOfSelectedItem == 1 ? @"global" : @"app"; }
 - (void)shiftTapShortcutChanged:(NSSwitch *)sender { self.shiftTapShortcut = sender.state == NSControlStateValueOn; }
@@ -5182,23 +5644,29 @@ static NSString *CandidateColorHex(NSColor *color) {
     if (sender.identifier) [self setValue:nil forKey:sender.identifier];
 }
 - (void)inputModeHUDChanged:(NSSwitch *)sender { self.inputModeHUD = sender.state == NSControlStateValueOn; }
+- (void)inputModeStatusItemChanged:(NSSwitch *)sender { self.inputModeStatusItem = sender.state == NSControlStateValueOn; }
 - (void)appLogoChanged:(NSSwitch *)sender { self.showsAppLogo = sender.state == NSControlStateValueOn; }
+- (void)candidatePageNumberChanged:(NSSwitch *)sender { self.showsCandidatePageNumber = sender.state == NSControlStateValueOn; }
+- (void)expandCandidatesChanged:(NSSwitch *)sender { self.expandCandidates = sender.state == NSControlStateValueOn; }
 - (void)themeModeChanged:(NSPopUpButton *)sender { self.themeMode = ThemeModes()[sender.indexOfSelectedItem]; }
 - (void)candidateThemeChanged:(NSPopUpButton *)sender { self.candidateTheme = SurfaceThemes()[sender.indexOfSelectedItem]; }
 - (void)preeditFontChanged:(NSPopUpButton *)sender { self.preeditFontSize = sender.indexOfSelectedItem + 12; }
 - (void)candidateStyleSliderChanged:(NSSlider *)sender {
     const NSInteger value = sender.integerValue;
-    NSString *unit = sender == _candidateCornerRadiusSlider ? @" pt" : @"%";
+    NSString *unit = sender == _candidateCornerRadiusSlider || sender == _candidatePaddingSlider ? @" pt" : @"%";
     NSTextField *label = sender == _candidateScaleSlider ? _candidateScaleLabel
-                       : sender == _candidateOpacitySlider ? _candidateOpacityLabel : _candidateCornerRadiusLabel;
+                       : sender == _candidateOpacitySlider ? _candidateOpacityLabel
+                       : sender == _candidatePaddingSlider ? _candidatePaddingLabel : _candidateCornerRadiusLabel;
     label.stringValue = [NSString stringWithFormat:@"%ld%@", (long)value, unit];
     // While the knob is dragged only the figure follows it. The value is written when the knob is let go, or at once from the keyboard, so one drag redraws the candidate window and saves the shared document once rather than at every step it passes.
     if (NSApp.currentEvent.type == NSEventTypeLeftMouseDragged) return;
     if (sender == _candidateScaleSlider) { if (value != self.candidateScalePercent) self.candidateScalePercent = value; }
     else if (sender == _candidateOpacitySlider) { if (value != self.candidateOpacityPercent) self.candidateOpacityPercent = value; }
     else if (sender == _candidateCornerRadiusSlider && ![self.candidateCornerRadius isEqual:@(value)]) self.candidateCornerRadius = @(value);
+    else if (sender == _candidatePaddingSlider && ![self.candidatePadding isEqual:@(value)]) self.candidatePadding = @(value);
 }
 - (void)resetCandidateCornerRadius:(id)sender { (void)sender; self.candidateCornerRadius = nil; }
+- (void)resetCandidatePadding:(id)sender { (void)sender; self.candidatePadding = nil; }
 - (void)candidateFontPresetChanged:(NSPopUpButton *)sender { self.candidateFontPreset = sender.indexOfSelectedItem; }
 - (void)candidatePreeditChanged:(NSPopUpButton *)sender { self.showsCandidatePreedit = sender.indexOfSelectedItem == 0; }
 
@@ -5287,8 +5755,22 @@ static NSString *CandidateColorHex(NSColor *color) {
         _appRuleStatusLabel.textColor = NSColor.systemRedColor;
         return;
     }
+    // 规则表在共享文档里，偏好库收不下的规则（标识不合法、只差大小写的重复、超过 32 条）会让整份保存失败，所以在这里就拒绝并说明原因，和共享设置页的提示相同。
+    NSDictionary<NSString *, NSString *> *existingRules = [self applicationInputModeRules];
+    if (existingRules[identifier] == nil) {
+        NSString *refusal = nil;
+        if (!PublishableInputModeRuleIdentifier(identifier)) refusal = @"这个应用的 Bundle ID 无法加入应用例外。";
+        else if (InputModeRulesContainIdentifier(existingRules, identifier)) refusal = @"这个应用已经有例外了，在列表里改它的模式即可。";
+        // 上限只数占文档位置的规则：只在本机生效的旧规则（标识不合法、第 33 条以后）不进文档，不该挡住新规则，和偏好库的 MAX_APP_INPUT_MODE_RULES 只数文档里的规则一致。
+        else if (PublishableInputModeRules(_sharedAppInputModeRules ?: existingRules).count >= MaxPublishedInputModeRules) refusal = @"最多 32 个应用例外，请先移除不再需要的。";
+        if (refusal) {
+            _appRuleStatusLabel.stringValue = refusal;
+            _appRuleStatusLabel.textColor = NSColor.systemRedColor;
+            return;
+        }
+    }
     // A rule for an application that already has one is that application's rule, so the selection moves to it rather than a second row appearing.
-    if ([self applicationInputModeRules][identifier] == nil) [self setInputMode:@"chinese" forApplication:identifier];
+    if (existingRules[identifier] == nil) [self setInputMode:@"chinese" forApplication:identifier];
     [self refreshControls];
     const NSUInteger index = [_appRuleIdentifiers indexOfObject:identifier];
     if (index != NSNotFound) {

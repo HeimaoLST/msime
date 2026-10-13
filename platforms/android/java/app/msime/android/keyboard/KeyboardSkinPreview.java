@@ -1,5 +1,6 @@
 package app.msime.android;
 
+
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -101,20 +102,20 @@ public final class KeyboardSkinPreview extends View {
     public KeyboardSkinPreview(Context context, KeyboardSkin skin) {
         super(context);
         this.skin = skin;
-        previewDrawState = new PreviewDrawState(skin, KeyboardGeometry.density(context));
+        previewDrawState = new PreviewDrawState(skin, DimensionPolicy.density(context));
         setWillNotDraw(false);
     }
 
     public void setSkin(KeyboardSkin value) {
         skin = value;
-        previewDrawState = new PreviewDrawState(value, KeyboardGeometry.density(getContext()));
+        previewDrawState = new PreviewDrawState(value, DimensionPolicy.density(getContext()));
         invalidate();
     }
 
     @Override protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
         previewBounds.set(0, 0, getWidth(), getHeight());
-        drawPreview(canvas, previewBounds, skin, KeyboardGeometry.density(getContext()),
+        drawPreview(canvas, previewBounds, skin, DimensionPolicy.density(getContext()),
             previewText, previewKey, previewDrawState);
     }
 
@@ -139,14 +140,14 @@ public final class KeyboardSkinPreview extends View {
         background.draw(canvas);
         String[][] rows = PREVIEW_ROWS;
         float gap = BoundsPolicy.bounded(
-            KeyboardGeometry.shorterSide(bounds.width(), bounds.height()) * .035f,
+            DimensionPolicy.shorterSide(bounds.width(), bounds.height()) * .035f,
             1f, Float.MAX_VALUE);
         float rowHeight = (bounds.height() - gap * 3) / rows.length;
         Paint text = reusableText == null ? new Paint(Paint.ANTI_ALIAS_FLAG) : reusableText;
         text.setTextAlign(Paint.Align.CENTER);
-        text.setTypeface(skin.monospaced() ? Typeface.MONOSPACE : Typeface.DEFAULT);
-        text.setTextSize(KeyboardGeometry.bounded(rowHeight * .42f, 7f,
-            KeyboardGeometry.floatPixels(14f, density)));
+        ViewPolicy.setTypeface(text, skin.monospaced() ? Typeface.MONOSPACE : Typeface.DEFAULT);
+        ViewPolicy.setTextSize(text, BoundsPolicy.bounded(rowHeight * .42f, 7f,
+            DimensionPolicy.floatPixels(14f, density)));
         int keyFill = Color.parseColor(skin.keyBackground());
         int actionFill = Color.parseColor(skin.actionBackground());
         int keyText = Color.parseColor(skin.keyForeground());
@@ -201,8 +202,8 @@ public final class KeyboardSkinPreview extends View {
         state.background.draw(canvas);
         double opacity = skin.designed() ? skin.keyOpacity() : 1d;
         drawMiniKeyboard(canvas, bounds,
-            withOpacity(Color.parseColor(skin.keyBackground()), opacity),
-            withOpacity(Color.parseColor(skin.functionBackground()), opacity),
+            ColorPolicy.withAlpha(Color.parseColor(skin.keyBackground()), opacity),
+            ColorPolicy.withAlpha(Color.parseColor(skin.functionBackground()), opacity),
             Color.parseColor(skin.returnBackground()), Color.parseColor(skin.returnForeground()),
             Color.parseColor(skin.keyForeground()), Color.parseColor(skin.secondary()),
             Color.parseColor(skin.accent()), state);
@@ -247,11 +248,6 @@ public final class KeyboardSkinPreview extends View {
         canvas.clipPath(clip);
     }
 
-    private static int withOpacity(int colour, double opacity) {
-        float factor = (float) KeyboardGeometry.bounded(opacity, 0, 1);
-        return ColorPolicy.withAlpha(colour, factor);
-    }
-
     /** MiniKb 字母键右上角的提示字，与设计的 HINT 表一一对应。 */
     private static final String LETTER_HINTS = "qwertyuiopasdfghjklzxcvbnm";
     private static final String[] HINTS = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "0",
@@ -260,10 +256,10 @@ public final class KeyboardSkinPreview extends View {
         {"q", "w", "e", "r", "t", "y", "u", "i", "o", "p"},
         {"a", "s", "d", "f", "g", "h", "j", "k", "l"},
         {"⇧", "z", "x", "c", "v", "b", "n", "m", "⌫"},
-        {"123", "中", "，", "", "。", "↵"},
+        {"123", "，", "", "。", "中", "↵"},
     };
     private static final float[][] MINI_WEIGHTS = {
-        null, null, {1.4f, 1, 1, 1, 1, 1, 1, 1, 1.4f}, {1.25f, 1.05f, 1, 4, 1, 1.9f},
+        null, null, {1.4f, 1, 1, 1, 1, 1, 1, 1, 1.4f}, {1.25f, 1, 4, 1, 1.05f, 1.9f},
     };
 
     /**
@@ -337,7 +333,7 @@ public final class KeyboardSkinPreview extends View {
                 if (!face.isEmpty()) {
                     text.setTextAlign(Paint.Align.CENTER);
                     text.setColor(enter ? returnInk : ink);
-                    text.setTextSize(letter || punctuation ? 22f : 15f);
+                    ViewPolicy.setTextSize(text, letter || punctuation ? 22f : 15f);
                     text.setFakeBoldText(special);
                     Paint.FontMetrics metrics = text.getFontMetrics();
                     canvas.drawText(face, rect.centerX(), rect.centerY() - (metrics.ascent + metrics.descent) / 2f, text);
@@ -345,7 +341,7 @@ public final class KeyboardSkinPreview extends View {
                 if (letter) {
                     text.setTextAlign(Paint.Align.RIGHT);
                     text.setColor(sub);
-                    text.setTextSize(10f);
+                    ViewPolicy.setTextSize(text, 10f);
                     text.setFakeBoldText(false);
                     canvas.drawText(HINTS[LETTER_HINTS.indexOf(face)], rect.right - 5f, rect.top + 13f, text);
                 }
@@ -356,7 +352,7 @@ public final class KeyboardSkinPreview extends View {
         // 底部指示条：134×5，键字色 85%，居中在键区下方的余量里。
         float keysBottom = top - 11f;
         float barTop = keysBottom + (MINI_HEIGHT - keysBottom) / 2f - 2.5f;
-        paint.setColor(withOpacity(ink, .85));
+        paint.setColor(ColorPolicy.withAlpha(ink, .85));
         rect.set(MINI_WIDTH / 2f - 67f, barTop, MINI_WIDTH / 2f + 67f, barTop + 5f);
         canvas.drawRoundRect(rect, 3f, 3f, paint);
         canvas.restoreToCount(saved);

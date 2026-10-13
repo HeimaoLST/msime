@@ -32,10 +32,10 @@ dump() {
   "$adb" -s "$serial" shell uiautomator dump /data/local/tmp/msime-test-window.xml >/dev/null \
     && "$adb" -s "$serial" pull /data/local/tmp/msime-test-window.xml "$xml" >/dev/null 2>&1
 }
+# 点 $xml 这份 dump 里的目标，不另取 dump；目标不在里面时返回 1，由调用方决定是否重试。
 tap() {
-  dump
   bounds=$(xmllint --xpath "string(($1)[1]/@bounds)" "$xml")
-  [[ "$bounds" =~ ^\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]$ ]] || { echo "Missing tap target: $1" >&2; exit 1; }
+  [[ "$bounds" =~ ^\[([0-9]+),([0-9]+)\]\[([0-9]+),([0-9]+)\]$ ]] || return 1
   "$adb" -s "$serial" shell input tap "$(( (BASH_REMATCH[1] + BASH_REMATCH[3]) / 2 ))" "$(( (BASH_REMATCH[2] + BASH_REMATCH[4]) / 2 ))"
 }
 # The host prepares the shipped dictionary itself on first run; there is no button to press for it any more. The 设置 tab shows the state only while preparing or after a failure, so the tab having rendered with no preparation notice is what readiness looks like.
@@ -50,7 +50,8 @@ for attempt in $(seq 1 60); do
   if [[ $(xmllint --xpath 'boolean(//node[contains(@text,"词库准备失败")])' "$xml") == true ]]; then echo "Device bootstrap failed" >&2; exit 1; fi
   if [[ $(xmllint --xpath 'boolean(//node[contains(@resource-id,":id/onboarding_skip")])' "$xml") == true ]]; then
     settled=0
-    tap '//node[contains(@resource-id,":id/onboarding_skip")]'
+    # 用这一拍刚读到的 dump 去点：tap 原先会另取一份 dump，引导页在两次 dump 之间可能正在打开或关闭，另取的那份偶尔是空的（null root），找不到按钮就让整个冒烟在第一条用例之前退出（API 28 上出现过）。这一拍点不到就当作还没就绪，下一拍再看。
+    tap '//node[contains(@resource-id,":id/onboarding_skip")]' || true
     sleep 1
     continue
   fi
@@ -65,11 +66,28 @@ for attempt in $(seq 1 60); do
   sleep 1
 done
 [[ "$ready" == true ]] || { echo "Device bootstrap timed out" >&2; exit 1; }
+sdk=$("$adb" -s "$serial" shell getprop ro.build.version.sdk | tr -d '\r')
+[[ "$sdk" =~ ^[0-9]+$ ]] || { echo "Android API level was unavailable" >&2; exit 1; }
+# API 31 起可附着到已运行的产品进程。普通 instrument 若以产品包为目标，会连同 :ime 服务一起强停；
+# 连续跑设备套件时，系统偶尔来不及重新绑定输入法。以测试 APK 为目标的用例继续正常启动 instrumentation。
+run_instrumentation() {
+  local component=$1 class=${1#*/} target
+  target=$(xmllint --xpath "string(//instrumentation[@*[local-name()='name']='$class']/@*[local-name()='targetPackage'])" \
+    platforms/android/tests/device/AndroidManifest.xml)
+  [[ "$target" == app.msime.android || "$target" == app.msime.android.test ]] \
+    || { echo "Unknown instrumentation target: $component" >&2; return 1; }
+  if (( sdk >= 31 )) && [[ "$target" == app.msime.android ]]; then
+    "$adb" -s "$serial" shell am start -W -n app.msime.android/app.msime.android.home.HomeActivity >/dev/null
+    "$adb" -s "$serial" shell am instrument --no-restart -w "$component"
+  else
+    "$adb" -s "$serial" shell am instrument -w "$component"
+  fi
+}
 # 输入法 id 必须写成 `ime list` 给出的短写：系统按字符串原样查找，长写 app.msime.android/app.msime.android.MSIMEInputService 在 `ime enable` 时报 Unknown input method。设备测试里的 `ime` 命令都用同一个短写。
 "$adb" -s "$serial" shell ime enable app.msime.android/.MSIMEInputService
 "$adb" -s "$serial" shell ime set app.msime.android/.MSIMEInputService
 "$adb" -s "$serial" shell am force-stop app.msime.android.test
-result=$("$adb" -s "$serial" shell am instrument -w app.msime.android.test/app.msime.android.test.DeviceSmoke)
+result=$(run_instrumentation app.msime.android.test/app.msime.android.test.DeviceSmoke)
 printf '%s\n' "$result"
 [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "System input acceptance failed" >&2; exit 1; }
 if [[ "$core" == true ]]; then echo "Dedicated Android AVD: install, resource setup and core typing acceptance passed"; exit 0; fi
@@ -79,14 +97,27 @@ for entry in \
     "CandidatePanelDeviceSmoke|Candidate panel acceptance failed" \
     "MoreToolsDeviceSmoke|More tools acceptance failed" \
     "EmojiPickerDeviceSmoke|Emoji picker acceptance failed" \
+    "PairedPunctuationDeviceSmoke|Paired punctuation acceptance failed" \
+    "LetterHintPunctuationDeviceSmoke|Letter hint punctuation acceptance failed" \
     "PreferencesDeviceSmoke|Preferences acceptance failed" \
+    "ThemeModeDeviceSmoke|Theme mode acceptance failed" \
     "KeyboardHeightDeviceSmoke|Keyboard height acceptance failed" \
     "FuzzyPinyinDeviceSmoke|Fuzzy pinyin acceptance failed" \
     "CandidateGlossDeviceSmoke|Candidate gloss acceptance failed" \
     "NineKeyEnglishDeviceSmoke|Nine-key English acceptance failed" \
     "NineKeyPanelDeviceSmoke|Nine-key panel acceptance failed" \
+    "FourteenKeyDeviceSmoke|Fourteen-key acceptance failed" \
+    "NineKeyShuangpinDeviceSmoke|Nine-key shuangpin acceptance failed" \
     "ChineseHelpcodeDeviceSmoke|Chinese helpcode acceptance failed" \
-    "MicrosoftShuangpinDeviceSmoke|Microsoft double-pinyin acceptance failed"
+    "ChineseHelpcodeOffDeviceSmoke|Chinese helpcode-off Shift letter acceptance failed" \
+    "MicrosoftShuangpinDeviceSmoke|Microsoft double-pinyin acceptance failed" \
+    "EmailSuffixDeviceSmoke|Email suffix acceptance failed" \
+    "NumberRowDeviceSmoke|Number row acceptance failed" \
+    "ClipboardImageDeviceSmoke|Clipboard image acceptance failed" \
+    "CaretCandidatesDeviceSmoke|Caret candidates acceptance failed" \
+    "HardwareTranslationDeviceSmoke|Hardware Ctrl+Enter translation acceptance failed" \
+    "AiPlaceholderDeviceSmoke|AI placeholder acceptance failed" \
+    "WubiLookupDeviceSmoke|Wubi lookup acceptance failed"
 do
   suite=${entry%%|*}
   if [[ " ${MSIME_DEVICE_SMOKE_SKIP:-} " == *" $suite "* ]]; then
@@ -94,12 +125,17 @@ do
     skipped_suites+=("$suite")
     continue
   fi
-  result=$("$adb" -s "$serial" shell am instrument -w "app.msime.android.test/app.msime.android.test.$suite")
+  if [[ "$suite" == WubiLookupDeviceSmoke ]]; then
+    # 它直接改偏好文件，再让设置进程读新配置；必须重新启动产品主进程。
+    result=$("$adb" -s "$serial" shell am instrument -w "app.msime.android.test/app.msime.android.test.$suite")
+  else
+    result=$(run_instrumentation "app.msime.android.test/app.msime.android.test.$suite")
+  fi
   printf '%s\n' "$result"
   [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "${entry#*|}" >&2; exit 1; }
 done
 if [[ "$settings" == true ]]; then
-  for suite in SettingsDeviceSmoke SettingsLifecycleSmoke AccountStorageDeviceSmoke; do
+  for suite in SettingsDeviceSmoke SettingsLifecycleSmoke AccountStorageDeviceSmoke CloudClipboardKeystoreDeviceSmoke CloudClipboardDriverDeviceSmoke CloudClipboardRelayDeviceSmoke; do
     result=$("$adb" -s "$serial" shell am instrument -w "app.msime.android.test/app.msime.android.test.$suite")
     printf '%s\n' "$result"
     [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Shared settings acceptance failed" >&2; exit 1; }

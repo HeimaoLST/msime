@@ -2,7 +2,7 @@ import Foundation
 import CoreFoundation
 
 enum KeyboardLayoutPreference {
-  static var defaults: UserDefaults { UserDefaults(suiteName: InputSchemePreference.appGroupIdentifier) ?? .standard }
+  static var defaults: UserDefaults { InputSchemePreference.appGroupDefaults }
   static let keySpacingKey = "keyboard.spacing.keys"
   static let rowSpacingKey = "keyboard.spacing.rows"
   static let voiceShortcutKey = "keyboard.shortcut.voice"
@@ -15,11 +15,11 @@ enum KeyboardLayoutPreference {
   static let oneHandedKey = "keyboard.oneHanded"
   static var keySpacing: Double {
     get { spacing(key: keySpacingKey, fallback: 6, range: 3...6) }
-    set { defaults.set(min(6, max(3, newValue)), forKey: keySpacingKey) }
+    set { defaults.set(SharedNumber.clamped(newValue, to: 3...6), forKey: keySpacingKey) }
   }
   static var rowSpacing: Double {
     get { spacing(key: rowSpacingKey, fallback: 7, range: 4...10) }
-    set { defaults.set(min(10, max(4, newValue)), forKey: rowSpacingKey) }
+    set { defaults.set(SharedNumber.clamped(newValue, to: 4...10), forKey: rowSpacingKey) }
   }
   /// Keyboard height adjustment relative to the platform's current default, in points.
   ///
@@ -27,7 +27,7 @@ enum KeyboardLayoutPreference {
   /// same setting remains useful when the candidate surface changes height.
   static var heightAdjustment: Double {
     get { spacing(key: heightAdjustmentKey, fallback: 0, range: -12...48) }
-    set { defaults.set(min(48, max(-12, newValue)), forKey: heightAdjustmentKey) }
+    set { defaults.set(SharedNumber.clamped(newValue, to: -12...48), forKey: heightAdjustmentKey) }
   }
   /// Whether Tab opens the full candidate panel while composing on the full-size iPad keyboard: the shared `navigation.tab` (Windows `paging_tab`, on by default). Read by the keyboard and edited by the App's iPad section.
   static func tabShowsMoreCandidates(_ preferences: [String: Any]?) -> Bool {
@@ -74,46 +74,27 @@ enum KeyboardLayoutPreference {
     if let voice = preferences["touch_voice_shortcut"] as? Bool { voiceShortcutEnabled = voice }
   }
 
-  /// 「数字键盘顺序」：九键数字层 1 2 3 在上（电话）还是 7 8 9 在上（计算器）。共享文档里是 `touch_number_keypad_order`，键盘从 App Group 镜像读。
-  enum NumberKeypadOrder: String, CaseIterable {
-    case phone, calculator
+  /// 「双拼键位提示」：双拼方案的 26 键在字母键底部画这个键代表的声母和韵母。共享文档里是 `touch_shuangpin_key_hints`，缺省为开；键盘从 App Group 镜像读。
+  static let shuangpinKeyHintsDocumentKey = "touch_shuangpin_key_hints"
+  static let shuangpinKeyHintsKey = "keyboard.shuangpin.keyHints"
 
-    static let documentKey = "touch_number_keypad_order"
-
-    var title: String {
-      switch self {
-      case .phone: "电话（123 在上）"
-      case .calculator: "计算器（789 在上）"
-      }
-    }
-
-    /// 文档里缺这一项或是认不得的值时按电话顺序。
-    static func shared(in preferences: [String: Any]?) -> NumberKeypadOrder {
-      (preferences?[documentKey] as? String).flatMap(NumberKeypadOrder.init(rawValue:)) ?? .phone
-    }
-
-    /// 3×3 网格里第 `row` 行第 `column` 列（都从 0 起）的数字键显示并输入的数字。电话顺序第一行是 1 2 3；计算器顺序上下颠倒，第一行是 7 8 9，列不变。
-    func digit(row: Int, column: Int) -> Int {
-      switch self {
-      case .phone: row * 3 + column + 1
-      case .calculator: (2 - row) * 3 + column + 1
-      }
-    }
+  /// 文档里缺这一项或不是布尔值时按开，与 client-core 的默认值一致。
+  static func sharedShuangpinKeyHints(in preferences: [String: Any]?) -> Bool {
+    preferences?[shuangpinKeyHintsDocumentKey] as? Bool ?? true
   }
 
-  static let numberKeypadOrderKey = "keyboard.numberKeypad.order"
-  static var numberKeypadOrder: NumberKeypadOrder {
-    get { defaults.string(forKey: numberKeypadOrderKey).flatMap(NumberKeypadOrder.init(rawValue:)) ?? .phone }
-    set { defaults.set(newValue.rawValue, forKey: numberKeypadOrderKey) }
+  static var shuangpinKeyHints: Bool {
+    get { defaults.object(forKey: shuangpinKeyHintsKey) as? Bool ?? true }
+    set { defaults.set(newValue, forKey: shuangpinKeyHintsKey) }
   }
 
-  /// 把数字键盘顺序写进共享文档，只改这一项；文档接受了才更新 App Group 镜像。
+  /// 把双拼键位提示开关写进共享文档，只改这一项；文档接受了才更新 App Group 镜像。
   @discardableResult
-  static func saveNumberKeypadOrder(_ order: NumberKeypadOrder, stateRoot: URL? = nil) -> Bool {
+  static func saveShuangpinKeyHints(_ enabled: Bool, stateRoot: URL? = nil) -> Bool {
     guard MetasequoiaInputSessionBridge.updateSharedPreferences(stateRoot: stateRoot, { document in
-      document[NumberKeypadOrder.documentKey] = order.rawValue
+      document[shuangpinKeyHintsDocumentKey] = enabled
     }) else { return false }
-    numberKeypadOrder = order
+    shuangpinKeyHints = enabled
     return true
   }
 
@@ -170,31 +151,23 @@ enum KeyboardLayoutPreference {
 
   /// Values from the canonical document are integer tenths/points. Reject booleans and fractions before clamping so malformed synced data cannot silently become a valid geometry setting.
   static func sharedKeySpacing(_ value: Any?) -> Double? {
-    guard let integer = strictInteger(value) else { return nil }
-    return min(6, max(3, Double(integer) / 10))
+    guard let integer = SharedNumber.strictInt(value) else { return nil }
+    return SharedNumber.clamped(Double(integer) / 10, to: 3...6)
   }
 
   static func sharedRowSpacing(_ value: Any?) -> Double? {
-    guard let integer = strictInteger(value) else { return nil }
-    return min(10, max(4, Double(integer) / 10))
+    guard let integer = SharedNumber.strictInt(value) else { return nil }
+    return SharedNumber.clamped(Double(integer) / 10, to: 4...10)
   }
 
   static func sharedHeightAdjustment(_ value: Any?) -> Double? {
-    guard let integer = strictInteger(value) else { return nil }
-    return Double(min(48, max(-12, integer)))
+    guard let integer = SharedNumber.strictInt(value) else { return nil }
+    return Double(SharedNumber.clamped(integer, to: -12...48))
   }
 
   private static func spacing(key: String, fallback: Double, range: ClosedRange<Double>) -> Double {
     guard let value = defaults.object(forKey: key) as? NSNumber, value.doubleValue.isFinite else { return fallback }
-    return min(range.upperBound, max(range.lowerBound, value.doubleValue))
-  }
-
-  private static func strictInteger(_ value: Any?) -> Int? {
-    guard let number = value as? NSNumber,
-          CFGetTypeID(number) != CFBooleanGetTypeID(),
-          let integer = Int(number.stringValue),
-          NSNumber(value: integer).compare(number) == .orderedSame else { return nil }
-    return integer
+    return SharedNumber.clamped(value.doubleValue, to: range)
   }
 }
 
@@ -252,10 +225,12 @@ enum KeyboardHeightPercent {
   /// `touch_keyboard_height_adjustment` 经过校验的取值范围，单位为点。
   static let adjustmentRange: ClosedRange<CGFloat> = -12...48
 
-  /// 设计稿中竖屏的按键高度（`dc.html` 的 `keyH`）：手机按键 42pt，iPad 按键 54pt。键盘高度由它累加而来（`KeyboardFormFactor.keyboardHeight`），所以 100% 画出的正好是这样的按键。
-  static func portraitKeyHeight(tablet: Bool) -> CGFloat { tablet ? 54 : 42 }
+  /// 竖屏的按键高度：手机按键 52pt，九键的宽键帽保留足够的纵向空间；iPad 按键 54pt（`dc.html` 的 `keyH`）。键盘高度由它累加而来（`KeyboardFormFactor.keyboardHeight`），所以 100% 画出的正好是这样的按键。
+  ///
+  /// 手机原是设计稿的 42pt：九键每个键约 105pt 宽，42pt 高看上去是扁的，上面的顶栏又按读音行加候选行留着 56pt，整块键盘头重脚轻。
+  static func portraitKeyHeight(tablet: Bool) -> CGFloat { tablet ? 54 : 52 }
 
-  /// 默认高度下的按键区：`rows` 行高为 `keyHeight` 的按键，加上行与行之间的间距。手机竖屏、默认行距 7pt 时为 189pt。
+  /// 默认高度下的按键区：`rows` 行高为 `keyHeight` 的按键，加上行与行之间的间距。手机竖屏、默认行距 7pt 时为 229pt。
   static func keyBlockHeight(keyHeight: CGFloat, rows: Int, rowSpacing: CGFloat) -> CGFloat {
     max(1, CGFloat(rows) * keyHeight + CGFloat(max(rows - 1, 0)) * rowSpacing)
   }
@@ -287,7 +262,7 @@ struct KeyboardGeometry: Equatable {
   var showsFullKeyboardSymbols: Bool { false }
 
   static func clamped(_ value: Double, _ lower: Double, _ upper: Double) -> Double {
-    min(upper, max(lower, value))
+    SharedNumber.clamped(value, to: lower...upper)
   }
 
   static func formattedHeightAdjustment(_ value: Double) -> String {

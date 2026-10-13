@@ -1,6 +1,7 @@
 import UIAbility from '@ohos.app.ability.UIAbility';
 import Want from '@ohos.app.ability.Want';
 import AbilityConstant from '@ohos.app.ability.AbilityConstant';
+import ConfigurationConstant from '@ohos.app.ability.ConfigurationConstant';
 import window from '@ohos.window';
 import { KeyboardLog } from '../keyboard/KeyboardLog';
 import { BusinessErrorPolicy } from '../keyboard/BusinessErrorPolicy';
@@ -20,6 +21,8 @@ import client from 'libmsimeclient.so';
 export default class EntryAbility extends UIAbility {
   /** Set by the settings page, which owns the bridge that can read and deliver the document. */
   static onActivated: (() => void) | undefined = undefined;
+  /** 设置窗口退到后台时调用，设置页借它把改动立即发布给键盘。 */
+  static onDeactivated: (() => void) | undefined = undefined;
   /** 键盘请求过、设置页面还没取走的页面；设置页面加载完成后会取走它。 */
   static pendingPage: string | null = null;
   /** 由设置页面在打开期间设置，让之后请求的页面能送达已经显示着的设置页面。 */
@@ -77,6 +80,8 @@ export default class EntryAbility extends UIAbility {
       stage.on('windowStageEvent', (event: window.WindowStageEventType): void => {
         if (event === window.WindowStageEventType.ACTIVE) {
           EntryAbility.onActivated?.();
+        } else if (event === window.WindowStageEventType.HIDDEN) {
+          EntryAbility.onDeactivated?.();
         }
       });
     } catch (error) {
@@ -90,5 +95,32 @@ export default class EntryAbility extends UIAbility {
         KeyboardLog.error(`settings page would not load: ${BusinessErrorPolicy.describe(error)}`);
       }
     });
+    // 系统栏先取启动窗的颜色（`start_window_background`，浅色和深色各一份，跟随系统外观）：页面要等桥接就绪才能调用 setSystemBars，在那之前状态栏是系统默认色，会在启动画面上下露出一条别的颜色。页面挂载后会换成它自己的颜色。
+    const launchColour: string = this.launchColour();
+    const launchContent: string =
+      this.context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK ? '#FFFFFF' : '#000000';
+    const launchBars: window.SystemBarProperties = {
+      statusBarColor: launchColour,
+      statusBarContentColor: launchContent,
+      navigationBarColor: launchColour,
+      navigationBarContentColor: launchContent
+    };
+    stage.getMainWindow().then((main: window.Window): Promise<void> => {
+      // 窗口底色也一样：底部手势条那一块露出的是它，见 Settings 的 setSystemBars。
+      try {
+        main.setWindowBackgroundColor(launchColour);
+      } catch (error) {
+        KeyboardLog.error(`launch window background not applied: ${describeError(error)}`);
+      }
+      return main.setWindowSystemBarProperties(launchBars);
+    }).catch((error: Object): void => {
+      KeyboardLog.error(`launch system bar colours not applied: ${describeError(error)}`);
+    });
+  }
+
+  /** 启动窗的底色，`#AARRGGBB`。从资源读而不是写死：浅色和深色由资源目录各给一份，系统按当前外观取。 */
+  private launchColour(): string {
+    const argb: number = this.context.resourceManager.getColorSync($r('app.color.start_window_background').id);
+    return `#${(argb >>> 0).toString(16).padStart(8, '0')}`;
   }
 }

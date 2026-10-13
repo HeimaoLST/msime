@@ -1,9 +1,9 @@
 package app.msime.android.home;
 
-import android.os.Bundle;
 import android.widget.LinearLayout;
 import androidx.annotation.Nullable;
 import app.msime.android.CloudApi;
+import app.msime.android.DeviceNamePolicy;
 import app.msime.android.DeviceDataApi;
 import java.util.List;
 
@@ -12,37 +12,55 @@ import java.util.List;
  *
  * <p>设备名、平台和版本由服务端从登录时的 User-Agent 解析，解析不出时显示「未知设备」。移除当前这台就是退出登录：服务端撤销会话后再清掉本机会话与同步状态（{@link SignIn#signOut}），然后回到「我的」。
  */
-public final class DevicesPage extends DetailPage {
-    @Nullable private LinearLayout column;
+public final class DevicesPage extends ReloadingDetailPage {
+    private record Loaded(String sessionId, List<DeviceDataApi.Session> sessions) {}
+    @Nullable private String loadedSessionId;
+    private long generation;
 
-    @Override protected void buildContent(LinearLayout column, Bundle args) {
-        this.column = column;
-        column.removeAllViews();
-        GroupCard.add(column, null).note("正在读取…");
+    @Override protected void onContentDestroyed() {
+        generation++;
+        loadedSessionId = null;
     }
 
-    @Override protected void onBecameVisible() { reload(); }
+    @Override protected void onContentReady() {
+        showLoading();
+    }
 
-    private void reload() {
+    @Override protected boolean shouldReloadOnContentReady() { return false; }
+
+    private void showLoading() {
+        LinearLayout target = contentColumn();
+        if (target == null) return;
+        target.removeAllViews();
+        GroupCard.add(target, null).note("正在读取…");
+    }
+
+    @Override protected void reload() {
+        long request = ++generation;
+        loadedSessionId = null;
+        showLoading();
         HostTask.runNetwork(this, context -> {
             try {
-                return (Object) new DeviceDataApi(context).sessions();
+                String sessionId = new DeviceDataApi(context).currentAccountSessionId();
+                return (Object) new Loaded(sessionId, new DeviceDataApi(context, sessionId).sessions());
             } catch (CloudApi.Failure failure) {
                 return failure;
             }
         }, result -> {
-            if (column == null) return;
-            column.removeAllViews();
+            LinearLayout current = contentColumn();
+            if (current == null || request != generation) return;
+            current.removeAllViews();
             if (result instanceof CloudApi.Failure failure) {
-                GroupCard.add(column, null).note(failure.signedOut() ? "登录后可以在这里查看和移除登录过的设备。"
+                GroupCard.add(current, null).note(failure.signedOut() ? "登录后可以在这里查看和移除登录过的设备。"
                     : failure.network() ? "连不上服务器，请检查网络后再试。" : "设备列表暂时读不到，请稍后再试。");
                 return;
             }
-            if (!(result instanceof List<?> sessions)) {
-                GroupCard.add(column, null).note("设备列表暂时读不到，请稍后再试。");
+            if (!(result instanceof Loaded loaded)) {
+                GroupCard.add(current, null).note("设备列表暂时读不到，请稍后再试。");
                 return;
             }
-            render(column, sessions);
+            loadedSessionId = loaded.sessionId();
+            render(current, loaded.sessions());
         });
     }
 
@@ -51,7 +69,7 @@ public final class DevicesPage extends DetailPage {
         long now = System.currentTimeMillis();
         for (Object item : sessions) {
             if (!(item instanceof DeviceDataApi.Session session)) continue;
-            String name = session.name().isEmpty() ? "未知设备" : session.name();
+            String name = DeviceNamePolicy.display(session.name());
             StringBuilder detail = new StringBuilder(platformName(session.platform()));
             if (!session.appVersion().isEmpty()) detail.append(' ').append(session.appVersion());
             String active = DeviceDataApi.relativeTime(now, session.lastActive());
@@ -70,15 +88,20 @@ public final class DevicesPage extends DetailPage {
     }
 
     private void remove(DeviceDataApi.Session session) {
+        String sessionId = loadedSessionId;
+        if (sessionId == null) return;
+        long request = ++generation;
+        loadedSessionId = null;
         HostTask.runNetwork(this, context -> {
             try {
-                new DeviceDataApi(context).revokeSession(session.id());
-                if (session.current()) SignIn.signOut(context);
+                new DeviceDataApi(context, sessionId).revokeSession(session.id());
+                if (session.current()) return SignIn.signOut(context, sessionId) ? "" : "登录已改变，请重新打开设备列表";
                 return "";
             } catch (CloudApi.Failure failure) {
                 return failure.network() ? "连不上服务器，请检查网络后再试" : "没有移除，请稍后再试";
             }
         }, failure -> {
+            if (request != generation) return;
             if (failure == null) {
                 MsToast.show(requireContext(), "没有移除，请稍后再试");
             } else if (!failure.isEmpty()) {

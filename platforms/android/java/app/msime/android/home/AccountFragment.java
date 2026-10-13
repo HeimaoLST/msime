@@ -1,5 +1,11 @@
 package app.msime.android.home;
 
+import app.msime.android.LayoutPolicy;
+
+import app.msime.android.DimensionPolicy;
+
+import app.msime.android.DrawablePolicy;
+import app.msime.android.ThemeColorPolicy;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
@@ -15,8 +21,11 @@ import androidx.annotation.DrawableRes;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import app.msime.android.AppIconStyle;
+import app.msime.android.AppVersionPolicy;
 import app.msime.android.BackendAccount;
 import app.msime.android.CloudApi;
+import app.msime.android.CloudClipboardNativeDriver;
+import app.msime.android.CloudClipboardRelay;
 import app.msime.android.DeviceDataApi;
 import app.msime.android.R;
 import app.msime.android.SyncSignals;
@@ -40,10 +49,18 @@ public final class AccountFragment extends HomeTabFragment {
 
     /** 联网读到的：资料（读不到为 null）、头像、设备数与云剪贴板条数（读不到为 -1）、是否绑定了真实账号。 */
     private record Remote(@Nullable DeviceDataApi.Profile profile, @Nullable Bitmap avatar, int devices,
-            int clipboard, boolean realAccount) {}
+            int clipboard, boolean realAccount, String sessionId) {}
 
     @Nullable private Local local;
     @Nullable private Remote remote;
+    private long generation;
+
+    @Override public void onDestroyView() {
+        generation++;
+        local = null;
+        remote = null;
+        super.onDestroyView();
+    }
 
     @Override public View onCreateView(@NonNull LayoutInflater inflater, @Nullable ViewGroup parent,
                                        @Nullable Bundle state) {
@@ -52,7 +69,7 @@ public final class AccountFragment extends HomeTabFragment {
 
     @Override public void onViewCreated(@NonNull View view, @Nullable Bundle state) {
         View card = view.findViewById(R.id.account_card);
-        ViewPolicy.setBackground(card, Ui.rippleOn(requireContext(), Ui.card(requireContext()), Ui.dp(requireContext(), 20)));
+        ViewPolicy.setBackground(card, ViewPolicy.ripple(requireContext(), ThemeColorPolicy.card(requireContext()), DimensionPolicy.pixels(requireContext(), 20)));
         ViewPolicy.bindClick(card, this::openProfile);
         render();
     }
@@ -61,30 +78,32 @@ public final class AccountFragment extends HomeTabFragment {
     @Override protected void onBecameVisible() { reload(); }
 
     private void reload() {
-        HostTask.run(this, context -> new Local(snapshotPreferences(context), new BackendAccount(context).signedIn(),
+        long request = ++generation;
+        HostTask.run(this, context -> new Local(KeyboardSheets.preferences(context), new BackendAccount(context).signedIn(),
             SyncSwitch.enabled(context), SyncSwitch.validLoginKind(SyncSwitch.loginKind(context)),
             SyncSwitch.lastSyncedAt(context), CloudSync.statusLine(context)), state -> {
-                if (state == null) return;
+                if (state == null || request != generation || getView() == null) return;
                 local = state;
-                if (!state.signedIn()) remote = null;
+                remote = null;
                 render();
-                if (state.signedIn()) reloadRemote();
+                if (state.signedIn()) reloadRemote(request);
             });
     }
 
-    @Nullable private static JSONObject snapshotPreferences(Context context) {
-        JSONObject snapshot = HostStore.loadPreferences(context);
-        return snapshot == null ? null : snapshot.optJSONObject("preferences");
-    }
-
-    private void reloadRemote() {
+    private void reloadRemote(long request) {
         HostTask.runNetwork(this, context -> {
-            DeviceDataApi api = new DeviceDataApi(context);
+            String sessionId;
+            try {
+                sessionId = new DeviceDataApi(context).currentAccountSessionId();
+            } catch (CloudApi.Failure unavailable) {
+                return new Remote(null, null, -1, -1, false, "");
+            }
+            DeviceDataApi api = new DeviceDataApi(context, sessionId);
             DeviceDataApi.Profile profile;
             try {
                 profile = api.profile();
                 // 登录时没读到用户 id 的话，这里补上同步要用的账号绑定。
-                ProfilePage.bindIfNeeded(context, profile);
+                ProfilePage.bindIfNeeded(context, profile, sessionId);
             } catch (CloudApi.Failure failure) {
                 profile = null;
             }
@@ -96,16 +115,26 @@ public final class AccountFragment extends HomeTabFragment {
             }
             int clipboard;
             try {
-                BackendAccount.ClipboardPage page = new BackendAccount(context).clipboard("");
-                clipboard = page.enabled() ? page.items().size() : -1;
+                if (CloudClipboardRelay.selected(CloudClipboardRelay.preferencesDirectory(context))) {
+                    // 云剪贴板改走了自建中继：这里是账号页，不为了一个条数去连中继，更不能去问水杉账号（那会把这台设备登记到账号的云剪贴板上）。
+                    clipboard = -1;
+                } else {
+                    BackendAccount.ClipboardPage page = new BackendAccount(context).clipboard("", sessionId,
+                        CloudClipboardNativeDriver.local(context));
+                    // 这台设备还在等允许时读不到条目，不写「0 条」。
+                    clipboard = page.enabled() && !page.pending() ? page.items().size() : -1;
+                }
             } catch (Exception unavailable) {
                 clipboard = -1;
             }
             Bitmap avatar = profile == null ? null : ProfilePage.avatar(profile.avatarUrl());
             return new Remote(profile, avatar, devices, clipboard,
-                SyncSwitch.validLoginKind(SyncSwitch.loginKind(context)));
+                SyncSwitch.validLoginKind(SyncSwitch.loginKind(context)), sessionId);
         }, state -> {
-            if (state == null) return;
+            if (state == null || request != generation || getView() == null) return;
+            if (state.sessionId().isEmpty() || state.profile() == null
+                    || !state.sessionId().equals(new BackendAccount(requireContext()).sessionId())
+                    || !state.profile().id().equals(SyncSwitch.accountId(requireContext()))) return;
             remote = state;
             Local current = local;
             if (current != null && state.realAccount() != current.realAccount()) {
@@ -194,7 +223,7 @@ public final class AccountFragment extends HomeTabFragment {
             online == null || online.clipboard() < 0 ? null : online.clipboard() + " 条",
             () -> SettingsNavigator.open(context, PageId.CLOUD_CLIPBOARD, null));
         // 社区作品的管理界面只在 Tauri 合包里有（P21），保留原来的跳转。
-        if (Ui.tauriAvailable()) {
+        if (ManagementUi.available()) {
             row(group, R.drawable.ic_ms_groups, "社区作品", "发布、收藏皮肤、词库和回复", null, this::openCommunityAccount);
         }
     }
@@ -213,10 +242,7 @@ public final class AccountFragment extends HomeTabFragment {
     }
 
     private void openCommunityAccount() {
-        Intent intent = new Intent();
-        intent.setClassName(requireContext(), "app.msime.android.MainActivity");
-        intent.putExtra("msime_settings_page", "account");
-        startActivity(intent);
+        startActivity(ManagementUi.settingsPage(requireContext(), "account"));
     }
 
     // ---- 同步 ----
@@ -233,8 +259,8 @@ public final class AccountFragment extends HomeTabFragment {
         MsSwitch toggle = new MsSwitch(context);
         toggle.setChecked(real && state.syncEnabled());
         ViewPolicy.setInteractive(toggle, false);
-        Ui.hideFromAccessibility(toggle);
-            LinearLayout.LayoutParams switchParams = Ui.rowGapParams(context);
+        ViewPolicy.hideFromAccessibility(toggle);
+            LinearLayout.LayoutParams switchParams = LayoutPolicy.rowGapParams(context, Ui.ROW_GAP);
         sync.addView(toggle, switchParams);
         sync.setAccessibilityDelegate(new View.AccessibilityDelegate() {
             @Override public void onInitializeAccessibilityNodeInfo(View host, AccessibilityNodeInfo info) {
@@ -245,7 +271,7 @@ public final class AccountFragment extends HomeTabFragment {
             }
         });
         if (real) {
-            ViewPolicy.setBackground(sync, Ui.ripple(context));
+            ViewPolicy.setBackground(sync, ViewPolicy.ripple(context));
             ViewPolicy.setInteractive(sync, true);
             ViewPolicy.bindClick(sync, () -> setSync(!toggle.isChecked()));
         } else {
@@ -311,13 +337,7 @@ public final class AccountFragment extends HomeTabFragment {
 
     /** 已安装的版本名；包管理器不肯说时是一道横线。 */
     private String version() {
-        try {
-            String name = requireContext().getPackageManager()
-                .getPackageInfo(requireContext().getPackageName(), 0).versionName;
-            return name == null ? "—" : name;
-        } catch (android.content.pm.PackageManager.NameNotFoundException error) {
-            return "—";
-        }
+        return AppVersionPolicy.versionName(requireContext(), "—");
     }
 
     private void showIcons() {

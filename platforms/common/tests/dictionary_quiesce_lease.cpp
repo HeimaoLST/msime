@@ -12,6 +12,7 @@
 int main() {
   using msime::dictionary_lease::dictionary_quiesce_lease_live;
   using msime::dictionary_lease::dictionary_quiesced;
+  using msime::dictionary_lease::lower_dictionary_quiesce_lease;
   using msime::dictionary_lease::raise_dictionary_quiesce_lease;
 
   assert(dictionary_quiesce_lease_live("1010000", 1000000));
@@ -65,9 +66,36 @@ int main() {
   assert(::mkfifo((root / ".msime-dictionary-quiesce").c_str(), 0600) == 0);
   assert(!dictionary_quiesced(root.string(), 1000000));
   std::filesystem::remove(root / ".msime-dictionary-quiesce");
+  // 租约正文必须是私有 inode，不能把外部文件的硬链接当成租约或删除它。
+  char hardlink_outside_pattern[] = "/tmp/msime-quiesce-hardlink-XXXXXX";
+  const std::filesystem::path hardlink_outside = mkdtemp(hardlink_outside_pattern);
+  const auto hardlink_target = hardlink_outside / "target";
+  const auto hardlink_lease = root / ".msime-dictionary-quiesce";
+  std::ofstream(hardlink_target) << "1030000\n";
+  std::filesystem::create_hard_link(hardlink_target, hardlink_lease);
+  assert(!dictionary_quiesced(root.string(), 1000000));
+  lower_dictionary_quiesce_lease(root.string(), "1030000\n");
+  assert(std::filesystem::exists(hardlink_lease));
+  assert(std::filesystem::exists(hardlink_target));
+  std::filesystem::remove(hardlink_lease);
+  std::filesystem::remove_all(hardlink_outside);
+  char hardlink_lock_root_pattern[] = "/tmp/msime-quiesce-hardlink-lock-root-XXXXXX";
+  const std::filesystem::path hardlink_lock_root = mkdtemp(hardlink_lock_root_pattern);
+  char hardlink_lock_outside_pattern[] = "/tmp/msime-quiesce-hardlink-lock-XXXXXX";
+  const std::filesystem::path hardlink_lock_outside = mkdtemp(hardlink_lock_outside_pattern);
+  const auto hardlink_lock_target = hardlink_lock_outside / "target";
+  const auto hardlink_lock = hardlink_lock_root / ".msime-dictionary-quiesce.lock";
+  std::ofstream(hardlink_lock_target) << "lock";
+  std::filesystem::create_hard_link(hardlink_lock_target, hardlink_lock);
+  std::string hardlink_lock_written;
+  assert(!raise_dictionary_quiesce_lease(hardlink_lock_root.string(), hardlink_lock_written, 1000000));
+  assert(std::filesystem::exists(hardlink_lock));
+  assert(std::filesystem::exists(hardlink_lock_target));
+  assert(!std::filesystem::exists(hardlink_lock_root / ".msime-dictionary-quiesce"));
+  std::filesystem::remove(hardlink_lock);
+  std::filesystem::remove_all(hardlink_lock_outside);
+  std::filesystem::remove_all(hardlink_lock_root);
   // A host raising the lease itself leaves exactly the lease behind, live for the bound, with its owner line after the expiry, and lowering it clears it.
-  using msime::dictionary_lease::lower_dictionary_quiesce_lease;
-  using msime::dictionary_lease::raise_dictionary_quiesce_lease;
   std::string written;
   assert(raise_dictionary_quiesce_lease(root.string(), written, 1000000));
   assert(written.rfind("1030000\n", 0) == 0 && written.size() > 8 && written.back() == '\n');

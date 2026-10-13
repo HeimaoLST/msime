@@ -1,19 +1,14 @@
 import type { CSSProperties } from "react";
 import { clamp } from "../core/number";
-import { keyboardThemeLook } from "./screen-keyboard-preview";
+import type { ResolvedKeyboardSkinLook } from "./keyboard-skin-look";
 import { keyboardRgba } from "./keyboard-colors";
-import { skinColor, type TouchKeyboardSkinDesign } from "./touch-keyboard-skin-design";
-import type { GlobalTheme } from "../theme/global-theme";
+import { skinColor } from "./touch-keyboard-skin-design";
 
-export function keyboardBackgroundStyle(
-  theme: "dark" | "light",
-  skin: GlobalTheme,
-  customDesign: TouchKeyboardSkinDesign | undefined,
-  palette: { background: string; accent: string },
-): CSSProperties {
-  const custom = skin === "custom" && customDesign ? customDesign : undefined;
-  const option = keyboardThemeLook(skin, theme);
-  const pattern = custom?.pattern ?? option.pattern;
+export function keyboardBackgroundStyle({
+  custom,
+  palette,
+  pattern,
+}: ResolvedKeyboardSkinLook): CSSProperties {
   const patternOpacity = custom?.patternOpacity ?? 0.15;
   const images: string[] = [];
   const sizes: string[] = [];

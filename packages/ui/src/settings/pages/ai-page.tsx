@@ -1,8 +1,9 @@
 import { AiSettingsContent } from "../ai-settings-content";
 import { useSettingsForm } from "../settings-form-context";
 import { SubPageEntries } from "./sub-page-entries";
+import { AiReplyTemplates } from "../ai-reply-templates";
 
-/** The AI 辅助 page of the settings form, a page of the 工具 group; AI 对话 opens from its last group. */
+/** 设置表单的「AI 辅助」页，属于「工具」分组。桌面上最后一组打开「AI 对话」；触屏宿主的「AI 对话」是底部的「对话」标签页，这里不再放第二个入口，而是列出社区的回复模板（高情商回复用），完整的回复模板图库也在这一页上打开。 */
 export function AiSettingsPage() {
   const {
     client,
@@ -11,6 +12,7 @@ export function AiSettingsPage() {
     iosPlatform,
     windowsPlatform,
     macosPlatform,
+    mobilePlatform,
     busy,
     page,
     aiModels,
@@ -74,10 +76,15 @@ export function AiSettingsPage() {
       runProviderCredential={runProviderCredential}
       credentialTestControl={credentialTestControl}
       trailing={
-        <SubPageEntries
-          title="AI 对话"
-          pages={[{ id: "chat", description: "与 AI 对话，结果可以直接用于输入" }]}
-        />
+        <>
+          <AiReplyTemplates />
+          {!mobilePlatform && (
+            <SubPageEntries
+              title="AI 对话"
+              pages={[{ id: "chat", description: "与 AI 对话，结果可以直接用于输入" }]}
+            />
+          )}
+        </>
       }
     />
   );

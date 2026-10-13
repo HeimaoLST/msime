@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { testHost } from "../support/host";
-import { settingsFormReady } from "../support/settings-form";
+import { selectSettingsTab, settingsFormReady } from "../support/settings-form";
 import { afterEach, expect, test, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { SettingsPage, type ResolvedAppTheme, type Snapshot } from "@msime/ui";
@@ -106,6 +106,7 @@ test("Harmony capability chrome stays split between phone and 2-in-1", async () 
   expect(screen.getByRole("group", { name: "面板快捷键" })).toBeTruthy();
   expect(screen.getByRole("switch", { name: "数字键选词" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "标点与翻译" }));
+  selectSettingsTab("候选翻译");
   expect(screen.getByRole("combobox", { name: "候选词翻译第二种语言" })).toBeTruthy();
 
   cleanup();
@@ -141,6 +142,7 @@ test("Harmony capability chrome stays split between phone and 2-in-1", async () 
   expect(within(phoneSettings).queryByRole("button", { name: "外接键盘快捷键" })).toBeNull();
   // 手机把候选翻译放在 输入 页的 翻译 分组里。
   fireEvent.click(within(phoneSettings).getByRole("button", { name: "输入" }));
+  selectSettingsTab("候选翻译");
   expect(screen.getByRole("combobox", { name: "候选词翻译第二种语言" })).toBeTruthy();
 });
 
@@ -173,7 +175,7 @@ test("Harmony appearance names only the surfaces the form factor actually has", 
   // The phone hides the physical-keyboard shortcut page everywhere, the sidebar included: a sidebar entry here was a button `selectPage` refused, and asserting the page's text passed only because the hidden fieldset stays in the DOM.
   expect(screen.queryByRole("button", { name: "快捷键" })).toBeNull();
 
-  // The per-surface theme overrides are in the 高级 group of 主题.
+  // 手机皮肤页只有网格，不提供各界面的明暗覆盖。
   cleanup();
   renderSettings(
     "harmony",
@@ -186,7 +188,7 @@ test("Harmony appearance names only the surfaces the form factor actually has", 
     "skin",
   );
   await settingsFormReady();
-  expect(screen.getByRole("combobox", { name: "候选栏主题" })).toBeTruthy();
+  expect(screen.queryByRole("combobox", { name: "候选栏主题" })).toBeNull();
   expect(screen.queryByRole("combobox", { name: "候选窗口主题" })).toBeNull();
   expect(screen.queryByRole("combobox", { name: "悬浮工具栏主题" })).toBeNull();
 
@@ -201,6 +203,7 @@ test("Harmony appearance names only the surfaces the form factor actually has", 
   expect(screen.getByRole("button", { name: "悬浮工具栏" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "候选窗口" }));
   expect(screen.getByRole("region", { name: "候选窗口预览" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("tab", { name: "预编辑" }));
   expect(screen.getByRole("combobox", { name: "候选窗口预编辑" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "主题" }));
   expect(screen.getByRole("combobox", { name: "候选窗口主题" })).toBeTruthy();
@@ -256,6 +259,31 @@ test("the desktop home card keeps the full keyboard", async () => {
   );
   expect(keys).toContain("Caps Lock");
   expect(keys).toContain("Tab");
+});
+
+// 触屏宿主的键盘就是三排字母加一排功能键：设置页在根部声明宿主的键盘布局，没写 `layout` 的预览（键盘页、皮肤编辑器、社区皮肤详情等）都按它画，不会在手机上画出 Win、Alt、Caps Lock。
+test.each([
+  ["harmony", { mobile_settings: true }],
+  ["android", {}],
+])("a %s keyboard page previews the touch keyboard", async (platform, host) => {
+  renderSettings(platform, host, "screen-keyboard");
+  await settingsFormReady();
+  const keys = Array.from(document.querySelectorAll("[data-keyboard-key]")).map((key) =>
+    key.getAttribute("data-keyboard-key"),
+  );
+  expect(keys.length).toBeGreaterThan(0);
+  expect(keys).not.toContain("Caps Lock");
+  expect(keys).not.toContain("Win");
+  expect(keys).not.toContain("Tab");
+});
+
+test("a desktop keyboard page keeps the full keyboard", async () => {
+  renderSettings("windows", {}, "screen-keyboard");
+  await settingsFormReady();
+  const keys = Array.from(document.querySelectorAll("[data-keyboard-key]")).map((key) =>
+    key.getAttribute("data-keyboard-key"),
+  );
+  expect(keys).toContain("Caps Lock");
 });
 
 test("the phone home surface hides its duplicate page heading", async () => {
@@ -343,8 +371,9 @@ test("a touch host calls the keyboard pages by their touch names", async () => {
   await settingsFormReady();
   expect(screen.getByRole("heading", { level: 1, name: "键盘" })).toBeTruthy();
   const sidebar = screen.getByRole("navigation", { name: "设置分类" });
-  expect(within(sidebar).getByRole("button", { name: "外接键盘快捷键" })).toBeTruthy();
   expect(within(sidebar).queryByRole("button", { name: "屏幕键盘" })).toBeNull();
+  // 手机上不提供实体键盘快捷键页，即使宿主路由了快捷键。
+  expect(within(sidebar).queryByRole("button", { name: "外接键盘快捷键" })).toBeNull();
   expect(within(sidebar).queryByRole("button", { name: "快捷键" })).toBeNull();
 
   cleanup();
@@ -353,10 +382,19 @@ test("a touch host calls the keyboard pages by their touch names", async () => {
   expect(screen.getByRole("heading", { level: 1, name: "屏幕键盘" })).toBeTruthy();
 });
 
-// Each of the four tabs exists only where its page does, and each page is gated on the client capability behind it.
+// 每个标签页只在对应页面存在时出现，每个页面又取决于它背后的客户端能力。社区客户端在，但触屏宿主已没有「社区」标签页。
+const typingStatistics = {
+  load: vi.fn().mockResolvedValue({
+    availability: "neverWritten",
+    statistics: { enabled: false, total: 0, days: {}, detail: {} },
+  }),
+  setEnabled: vi.fn(),
+  reset: vi.fn(),
+};
+
 const allTabs = {
   account: {},
-  typingStatistics: {},
+  typingStatistics,
   communitySkins: { list: vi.fn().mockResolvedValue({ skins: [], has_more: false }) },
 };
 
@@ -380,7 +418,7 @@ test("a wide iOS host splits the 设置 tab and gives the other tabs the whole w
     const sidebar = screen.getByRole("navigation", { name: "设置分类" });
     expect(within(sidebar).getByRole("heading", { level: 2, name: "设置" })).toBeTruthy();
     expect(within(sidebar).getByRole("searchbox", { name: "搜索设置" })).toBeTruthy();
-    // The tab bar already carries these, so the split does not list them a second time.
+    // 标签栏上已经有这些，分栏不再列第二遍；触屏宿主没有「社区」页，侧栏里也没有它。
     for (const name of ["社区", "打字统计", "我的"]) {
       expect(within(sidebar).queryByRole("button", { name })).toBeNull();
     }
@@ -390,7 +428,7 @@ test("a wide iOS host splits the 设置 tab and gives the other tabs the whole w
 
     fireEvent.click(
       within(screen.getByRole("navigation", { name: "主要功能" })).getByRole("button", {
-        name: "社区",
+        name: "统计",
       }),
     );
     expect(sidebar.className).toContain("ipad:hidden");
@@ -406,7 +444,8 @@ test("a phone page collapses its large title into a compact bar once scrolled", 
   await settingsFormReady();
   const main = document.getElementById("settings-content")!;
   const title = screen.getByRole("heading", { level: 1 }).textContent!;
-  const bar = [...main.querySelectorAll('[aria-hidden="true"]')].find(
+  // 栏里的标题是装饰（`h1` 仍是页面的名字），推入页上它还带一个返回按钮，所以按吸顶的 class 找栏，不按 aria-hidden。
+  const bar = [...main.querySelectorAll("div")].find(
     (node) => node.textContent === title && node.className.includes("max-phone:sticky"),
   );
   if (!bar) throw new Error("no compact title bar");
@@ -421,12 +460,12 @@ test("a phone page collapses its large title into a compact bar once scrolled", 
 
   fireEvent.click(
     within(screen.getByRole("navigation", { name: "主要功能" })).getByRole("button", {
-      name: "社区",
+      name: "统计",
     }),
   );
   expect(
-    [...document.getElementById("settings-content")!.querySelectorAll('[aria-hidden="true"]')].some(
-      (node) => node.className.includes("max-phone:sticky"),
+    [...document.getElementById("settings-content")!.querySelectorAll("div")].some((node) =>
+      node.className.includes("max-phone:sticky"),
     ),
   ).toBe(false);
 });
@@ -465,14 +504,15 @@ test("a phone is not offered the desktop's modifier-chord voice shortcuts", asyn
 });
 
 // A HarmonyOS phone routes an attached keyboard's voice chords (VoiceHotkeyPolicy has no desktop check), so it declares `voice_hotkeys` and its owner can reach the switches that decide what Right Alt and Ctrl+F9 do there.
-test("a phone that routes an attached keyboard's voice chords offers their switches", async () => {
+// 宿主处理外接键盘的语音组合键，手机也不列这些开关：Ctrl+F9、长按右 Alt 要连实体键盘才用得上，在手机的语音页上只是一堆用不到的开关。2in1 照旧列出。
+test("a phone does not list the attached keyboard's voice chords", async () => {
   renderSettings("harmony", { mobile_settings: true, panel_windows: false, voice_hotkeys: true });
   await settingsFormReady();
   fireEvent.click(
     within(screen.getByRole("region", { name: "首页" })).getByRole("button", { name: "语音输入" }),
   );
-  expect(screen.getByText("语音快捷键")).toBeTruthy();
-  expect(screen.getByText(/连接实体键盘后/)).toBeTruthy();
+  expect(screen.queryByText("语音快捷键")).toBeNull();
+  expect(screen.queryByText(/连接实体键盘后/)).toBeNull();
   expect(screen.queryByText("语音输入弹出条主题")).toBeNull();
 });
 
@@ -582,15 +622,6 @@ function appThemeClient() {
   return { client, change };
 }
 
-const typingStatistics = {
-  load: vi.fn().mockResolvedValue({
-    availability: "neverWritten",
-    statistics: { enabled: false, total: 0, days: {}, detail: {} },
-  }),
-  setEnabled: vi.fn(),
-  reset: vi.fn(),
-};
-
 const shell = () => document.querySelector<HTMLElement>("[data-settings-shell]")!;
 
 // 设计稿给每个 HarmonyOS 手机页面都加标题，标签页根页面也不例外；其他触屏宿主的 统计 和 我的 不加标题，它们的内容已经表明了自己是什么页面。
@@ -609,6 +640,31 @@ test("a HarmonyOS phone titles the 设置, 统计 and 我的 roots", async () =>
   renderSettings("android", {}, "typing-statistics", { typingStatistics });
   const untitled = await screen.findByRole("heading", { level: 1, name: "统计" });
   expect(untitled.parentElement?.className).toContain("max-phone:sr-only");
+});
+
+// 「对话」是标签页的根页面：鸿蒙手机照设计稿给它加大标题，但不滑入、不带返回按钮；其他触屏宿主也不再有回到「AI 辅助」的返回链接。
+test("the 对话 tab is a titled tab root with no way back to AI 辅助", async () => {
+  const chat = {
+    models: vi.fn().mockResolvedValue({ data: [], defaultModel: "" }),
+    complete: vi.fn(),
+  };
+  renderSettings("harmony", {}, undefined, { chat });
+  await settingsFormReady();
+  const bar = screen.getByRole("navigation", { name: "主要功能" });
+  fireEvent.click(within(bar).getByRole("button", { name: "对话" }));
+  const title = await screen.findByRole("heading", { level: 1, name: "AI 对话" });
+  expect(title.parentElement?.className).not.toContain("max-phone:sr-only");
+  expect(screen.queryByRole("button", { name: "返回" })).toBeNull();
+  cleanup();
+
+  renderSettings("android", {}, "chat", { chat });
+  await screen.findByRole("region", { name: "AI 对话" });
+  expect(screen.queryByRole("button", { name: "返回AI 辅助" })).toBeNull();
+  expect(
+    within(screen.getByRole("navigation", { name: "主要功能" }))
+      .getByRole("button", { name: "对话" })
+      .getAttribute("aria-current"),
+  ).toBe("page");
 });
 
 // 设计稿把手机页面叫作 皮肤、表达、开发者选项 和 反馈，桌面侧栏则叫 主题、标点与翻译、维护与诊断 和 帮助与反馈。
@@ -842,4 +898,16 @@ test("the 2-in-1 warns on 输入 and 关于 while the input method is not set up
   renderSettings("harmony", {}, "input", { home: { setup, openSystemKeyboardSettings } });
   await settingsFormReady();
   expect(screen.queryByText("水杉输入法尚未在「系统 → 输入法」中添加")).toBeNull();
+});
+
+// 共享沙箱还没有 data-group-id 时，宿主照实报 `harmony_shared_sandbox: false`，但设置页不对用户显示这件事：这是开发和签名上的状态，用户对它无能为力。
+test("a HarmonyOS host without the shared sandbox shows no warning about it", async () => {
+  renderSettings("harmony", {
+    mobile_settings: true,
+    panel_windows: false,
+    harmony_shared_sandbox: false,
+  });
+  await settingsFormReady();
+  expect(screen.queryByText(/共享沙箱/)).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
 });

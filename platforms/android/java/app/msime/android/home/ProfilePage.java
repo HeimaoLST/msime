@@ -1,12 +1,19 @@
 package app.msime.android.home;
 
+import app.msime.android.TextPolicy;
+
+import app.msime.android.LayoutPolicy;
+
+import app.msime.android.DimensionPolicy;
+
+import app.msime.android.ImageViewPolicy;
+import app.msime.android.ThemeColorPolicy;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
-import android.os.Bundle;
 import android.text.InputFilter;
 import android.view.Gravity;
 import android.view.View;
@@ -20,9 +27,13 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
 import androidx.core.content.FileProvider;
 import app.msime.android.BitmapPolicy;
+import app.msime.android.BackendAccount;
 import app.msime.android.CloudApi;
 import app.msime.android.DeviceDataApi;
+import app.msime.android.DrawablePolicy;
+import app.msime.android.FilePolicy;
 import app.msime.android.HttpBodyPolicy;
+import app.msime.android.HttpConnectionPolicy;
 import app.msime.android.ListPolicy;
 import app.msime.android.SyncSwitch;
 import app.msime.android.ViewPolicy;
@@ -47,7 +58,7 @@ import javax.net.ssl.HttpsURLConnection;
  *
  * <p>数据全部来自 {@link DeviceDataApi}。注销账号和删除云端数据要求最近登录：收到 {@link DeviceDataApi.RecentLoginRequired} 时弹登录面板，用户重新登录同一个账号后自动重试一次；登录成了别的账号时不重试，免得删错。关联登录方式走登录面板的 `link` 用途，回来后按关联列表的变化说出关联了哪一种。
  */
-public final class ProfilePage extends DetailPage {
+public final class ProfilePage extends ReloadingDetailPage {
     private static final String[][] PROVIDERS = {{"apple", "Apple"}, {"google", "Google"}, {"email", "邮箱"}};
     private static final String EXPORTS = "exports";
     /** 头像解码后的长边上限（像素）：最大的头像画 88dp，xxxhdpi 下约 352 像素，留一点余量。 */
@@ -57,24 +68,38 @@ public final class ProfilePage extends DetailPage {
 
     private final ActivityResultLauncher<String> picker =
         registerForActivityResult(new ActivityResultContracts.GetContent(), this::onPicked);
-    @Nullable private LinearLayout column;
     @Nullable private Loaded loaded;
+    @Nullable private String avatarPickerSessionId;
     private boolean busy;
+    private long generation;
 
     /** 一次读取的结果：资料（未登录或读不到时为 null）、读不到的原因、云端数据汇总（读不到时为 null）、后端开放的登录方式、头像。 */
     private record Loaded(@Nullable DeviceDataApi.Profile profile, @Nullable CloudApi.Failure failure,
-            @Nullable DeviceDataApi.DataSummary data, CloudApi.Providers providers, @Nullable Bitmap avatar) {}
+            @Nullable DeviceDataApi.DataSummary data, CloudApi.Providers providers, @Nullable Bitmap avatar,
+            String sessionId) {}
 
-    @Override protected void buildContent(LinearLayout column, Bundle args) {
-        this.column = column;
+    @Override protected void onContentDestroyed() {
+        generation++;
+        loaded = null;
+        avatarPickerSessionId = null;
+        // Work results are fenced to the old view and will be dropped after recreation. Do not
+        // leave the rebuilt page permanently disabled while an abandoned operation finishes.
+        busy = false;
+    }
+
+    @Override protected void onContentReady() {
+        loaded = null;
         render();
     }
 
-    @Override protected void onBecameVisible() { reload(null); }
+    @Override protected boolean shouldReloadOnContentReady() { return false; }
+
+    @Override protected void reload() { reload(null); }
 
     private void reload(@Nullable Consumer<Loaded> then) {
+        long request = ++generation;
         HostTask.runNetwork(this, ProfilePage::load, result -> {
-            if (result == null) return;
+            if (result == null || request != generation || contentColumn() == null) return;
             loaded = result;
             render();
             if (then != null) then.accept(result);
@@ -83,32 +108,42 @@ public final class ProfilePage extends DetailPage {
 
     private static Loaded load(Context context) {
         CloudApi.Providers providers = SignIn.providers(context);
-        DeviceDataApi api = new DeviceDataApi(context);
+        String sessionId;
+        try {
+            sessionId = new DeviceDataApi(context).currentAccountSessionId();
+        } catch (CloudApi.Failure failure) {
+            return new Loaded(null, failure, null, providers, null, "");
+        }
+        DeviceDataApi api = new DeviceDataApi(context, sessionId);
         DeviceDataApi.Profile profile;
         try {
             profile = api.profile();
         } catch (CloudApi.Failure failure) {
-            return new Loaded(null, failure, null, providers, null);
+            return new Loaded(null, failure, null, providers, null, "");
         }
-        bindIfNeeded(context, profile);
+        bindIfNeeded(context, profile, sessionId);
         DeviceDataApi.DataSummary data;
         try {
             data = api.dataSummary();
         } catch (CloudApi.Failure unavailable) {
             data = null;
         }
-        return new Loaded(profile, null, data, providers, avatar(profile.avatarUrl()));
+        return new Loaded(profile, null, data, providers, avatar(profile.avatarUrl()), sessionId);
     }
 
     /** 同步状态记着的账号与服务端说的不一致（登录时没读到用户 id，或换了账号）时重新绑定；绑定换账号时会关闭同步并清空游标。 */
-    static void bindIfNeeded(Context context, DeviceDataApi.Profile profile) {
-        String kind = SyncSwitch.validLoginKind(SyncSwitch.loginKind(context)) ? SyncSwitch.loginKind(context)
-            : profile.loginKind();
-        if (kind.isEmpty()) return;
-        String previousAccount = SyncSwitch.accountId(context);
-        if (profile.id().equals(previousAccount) && kind.equals(SyncSwitch.loginKind(context))) return;
+    static void bindIfNeeded(Context context, DeviceDataApi.Profile profile, String expectedSessionId) {
         synchronized (SyncSwitch.bindingLock()) {
-            SignIn.cancelPendingSnapshot(context, previousAccount);
+            if (expectedSessionId == null || expectedSessionId.isEmpty()
+                    || !expectedSessionId.equals(new BackendAccount(context).sessionId())) return;
+            String currentKind = SyncSwitch.loginKind(context);
+            String kind = SyncSwitch.validLoginKind(currentKind) ? currentKind : profile.loginKind();
+            if (kind.isEmpty()) return;
+            String previousAccount = SyncSwitch.accountId(context);
+            if (profile.id().equals(previousAccount) && kind.equals(currentKind)) return;
+            if (!previousAccount.equals(profile.id())) {
+                SignIn.cancelPendingSnapshot(context, previousAccount);
+            }
             SyncSwitch.bindAccount(context, profile.id(), kind);
         }
     }
@@ -119,9 +154,8 @@ public final class ProfilePage extends DetailPage {
         try {
             HttpsURLConnection connection = (HttpsURLConnection) new URL(url).openConnection();
             try {
-                connection.setInstanceFollowRedirects(false);
-                connection.setConnectTimeout(10_000);
-                connection.setReadTimeout(15_000);
+                HttpConnectionPolicy.rejectRedirects(connection);
+                HttpConnectionPolicy.setTimeouts(connection, 10_000, 15_000);
                 connection.setRequestProperty("User-Agent", CloudApi.USER_AGENT);
                 if (connection.getResponseCode() / 100 != 2) return null;
                 try (InputStream input = connection.getInputStream()) {
@@ -150,49 +184,48 @@ public final class ProfilePage extends DetailPage {
     /** 圆形头像：有图片时画图片，否则是强调色底上的昵称首字。 */
     static FrameLayout avatarView(Context context, int sizeDp, String name, @Nullable Bitmap image) {
         FrameLayout frame = new FrameLayout(context);
-        GradientDrawable circle = Ui.circle(Ui.accent(context));
+        GradientDrawable circle = DrawablePolicy.circle(ThemeColorPolicy.accent(context));
         if (image != null) {
             ImageView picture = new ImageView(context);
             picture.setImageBitmap(image);
             picture.setScaleType(ImageView.ScaleType.CENTER_CROP);
             ViewPolicy.setBackground(picture, circle);
             picture.setClipToOutline(true);
-            Ui.hideFromAccessibility(picture);
-            frame.addView(picture, Ui.squareFrameParams(context, sizeDp));
+            ViewPolicy.hideFromAccessibility(picture);
+            frame.addView(picture, LayoutPolicy.squareFrameParams(context, sizeDp));
         } else {
-            TextView letter = Ui.styledLabel(context, Ui.trimmedInitial(name, "?"), Math.round(sizeDp * 0.4f), 600,
-                Ui.onAccent(context));
-            ViewPolicy.setCentered(letter);
+            TextView letter = ViewPolicy.centeredLabel(context, TextPolicy.trimmedInitial(name, "?"),
+                Math.round(sizeDp * 0.4f), 600, ThemeColorPolicy.onAccent(context));
             ViewPolicy.setBackground(letter, circle);
-            Ui.hideFromAccessibility(letter);
-            frame.addView(letter, Ui.squareFrameParams(context, sizeDp));
+            ViewPolicy.hideFromAccessibility(letter);
+            frame.addView(letter, LayoutPolicy.squareFrameParams(context, sizeDp));
         }
         return frame;
     }
 
     private void render() {
-        LinearLayout column = this.column;
-        if (column == null) return;
-        column.removeAllViews();
+        LinearLayout target = contentColumn();
+        if (target == null) return;
+        target.removeAllViews();
         Loaded state = loaded;
         if (state == null) {
-            GroupCard.add(column, null).note("正在读取…");
+            GroupCard.add(target, null).note("正在读取…");
             return;
         }
         if (state.profile() == null) {
-            renderUnavailable(column, state.failure());
+            renderUnavailable(target, state.failure());
             return;
         }
         DeviceDataApi.Profile profile = state.profile();
         Context context = requireContext();
-        column.addView(header(context, profile, state.avatar()));
+        target.addView(header(context, profile, state.avatar()));
 
-        GroupCard account = GroupCard.add(column, "账号").withDividers(16);
+        GroupCard account = GroupCard.add(target, "账号").withDividers(16);
         account.nav("昵称", null, profile.displayName(), this::rename);
         account.nav("水杉 ID", null, profile.id(), () -> copy("水杉 ID", profile.id()));
         if (!profile.email().isEmpty()) account.value("邮箱", null, profile.email());
 
-        GroupCard methods = GroupCard.add(column, "登录方式").withDividers(16);
+        GroupCard methods = GroupCard.add(target, "登录方式").withDividers(16);
         for (String[] provider : PROVIDERS) {
             boolean linked = profile.linked(provider[0]);
             if (!linked && !offered(state.providers(), provider[0])) continue;
@@ -200,14 +233,14 @@ public final class ProfilePage extends DetailPage {
         }
         methods.footer("关联后可以用任意一种方式登录同一个账号");
 
-        GroupCard data = GroupCard.add(column, "数据").withDividers(16);
+        GroupCard data = GroupCard.add(target, "数据").withDividers(16);
         data.nav("云端数据", null, state.data() == null ? null : DeviceDataApi.formatBytes(state.data().bytes()),
             this::confirmDeleteData);
         data.nav("导出我的数据", null, null, this::export);
 
-        GroupCard signOut = GroupCard.add(column, null);
+        GroupCard signOut = GroupCard.add(target, null);
         signOut.addView(dangerButton(context, "退出登录", this::confirmSignOut));
-        GroupCard delete = GroupCard.add(column, null);
+        GroupCard delete = GroupCard.add(target, null);
         delete.addView(dangerButton(context, "注销账号", this::confirmDeleteAccount));
         delete.footer("注销后云端的词库、皮肤、设置和社区作品会立即永久删除，无法恢复");
     }
@@ -225,57 +258,57 @@ public final class ProfilePage extends DetailPage {
     }
 
     private View header(Context context, DeviceDataApi.Profile profile, @Nullable Bitmap image) {
-        LinearLayout header = Ui.column(context);
+        LinearLayout header = LayoutPolicy.column(context);
         ViewPolicy.setCenteredHorizontally(header);
-        Ui.setPaddingDp(header, context, 0, 8, 0, 4);
+        ViewPolicy.setPaddingDp(context, header, 0, 8, 0, 4);
 
         FrameLayout avatar = new FrameLayout(context);
         avatar.addView(avatarView(context, 88, profile.displayName(), image));
-        ImageView camera = Ui.decorativeIcon(context, app.msime.android.R.drawable.ms_w5_me_camera,
-            Ui.text(context));
-        GradientDrawable badge = Ui.circle(Ui.card(context));
+        ImageView camera = ImageViewPolicy.decorative(context, app.msime.android.R.drawable.ms_w5_me_camera,
+            ThemeColorPolicy.text(context));
+        GradientDrawable badge = DrawablePolicy.circle(ThemeColorPolicy.card(context));
         ViewPolicy.setBackground(camera, badge);
-        int pad = Ui.dp(context, 6);
-        Ui.setSymmetricPaddingPx(camera, pad);
-        Ui.hideFromAccessibility(camera);
-        FrameLayout.LayoutParams cameraParams = Ui.squareFrameParams(context, 28);
+        int pad = DimensionPolicy.pixels(context, 6);
+        ViewPolicy.setSymmetricPadding(camera, pad);
+        ViewPolicy.hideFromAccessibility(camera);
+        FrameLayout.LayoutParams cameraParams = LayoutPolicy.squareFrameParams(context, 28);
         cameraParams.gravity = Gravity.BOTTOM | Gravity.END;
         avatar.addView(camera, cameraParams);
         ViewPolicy.setInteractive(avatar, true);
         avatar.setContentDescription("更换头像");
         ViewPolicy.bindClick(avatar, this::chooseAvatar);
-        header.addView(avatar, Ui.squareParams(context, 92));
+        header.addView(avatar, LayoutPolicy.squareParams(context, 92));
 
-        TextView name = Ui.styledLabel(context, profile.displayName(), 22, 700, Ui.text(context));
-        LinearLayout.LayoutParams nameParams = Ui.wrap();
-        nameParams.topMargin = Ui.dp(context, 10);
+        TextView name = ViewPolicy.styledLabel(context, profile.displayName(), 22, 700, ThemeColorPolicy.text(context));
+        LinearLayout.LayoutParams nameParams = LayoutPolicy.wrapParams();
+        nameParams.topMargin = DimensionPolicy.pixels(context, 10);
         header.addView(name, nameParams);
 
         if (!profile.email().isEmpty()) {
-            TextView email = Ui.styledLabel(context, profile.email(), Ui.TEXT_ROW_SUBTITLE, 400,
-                Ui.subText(context));
-            LinearLayout.LayoutParams emailParams = Ui.wrap();
-            emailParams.topMargin = Ui.dp(context, 2);
+            TextView email = ViewPolicy.styledLabel(context, profile.email(), Ui.TEXT_ROW_SUBTITLE, 400,
+                ThemeColorPolicy.subText(context));
+            LinearLayout.LayoutParams emailParams = LayoutPolicy.wrapParams();
+            emailParams.topMargin = DimensionPolicy.pixels(context, 2);
             header.addView(email, emailParams);
         }
 
         String kind = SyncSwitch.validLoginKind(SyncSwitch.loginKind(context)) ? SyncSwitch.loginKind(context)
             : profile.loginKind();
         if (!kind.isEmpty()) {
-            TextView chip = Ui.styledLabel(context, "通过 " + providerName(kind) + " 登录", 12, 500,
-                Ui.accent(context));
-            ViewPolicy.setBackground(chip, Ui.pill(Ui.accentSoft(context)));
-            Ui.setSymmetricPaddingDp(chip, context, 10, 3);
-            LinearLayout.LayoutParams chipParams = Ui.wrap();
-            chipParams.topMargin = Ui.dp(context, 8);
+            TextView chip = ViewPolicy.styledLabel(context, "通过 " + providerName(kind) + " 登录", 12, 500,
+                ThemeColorPolicy.accent(context));
+            ViewPolicy.setBackground(chip, DrawablePolicy.pill(ThemeColorPolicy.accentSoft(context)));
+            ViewPolicy.setSymmetricPaddingDp(context, chip, 10, 3);
+            LinearLayout.LayoutParams chipParams = LayoutPolicy.wrapParams();
+            chipParams.topMargin = DimensionPolicy.pixels(context, 8);
             header.addView(chip, chipParams);
         }
         return header;
     }
 
     private static View dangerButton(Context context, CharSequence label, Runnable action) {
-        TextView button = Ui.textButton(context, label, Ui.TEXT_ROW_TITLE, 500, Ui.danger(context),
-            Ui.ripple(context), Ui.ACTION_BUTTON_MIN_HEIGHT, action);
+        TextView button = ViewPolicy.textButton(context, label, Ui.TEXT_ROW_TITLE, 500, ThemeColorPolicy.danger(context),
+            ViewPolicy.ripple(context), Ui.ACTION_BUTTON_MIN_HEIGHT, action);
         return button;
     }
 
@@ -297,13 +330,14 @@ public final class ProfilePage extends DetailPage {
 
     private void rename() {
         Loaded state = loaded;
-        if (state == null || state.profile() == null) return;
+        if (state == null || state.profile() == null || state.sessionId().isEmpty()) return;
+        String expectedSessionId = state.sessionId();
         InputDialog dialog = new InputDialog(requireContext(), "昵称", "最多 64 个字，留空恢复默认昵称");
         dialog.addField("昵称", state.profile().displayName(), 0)
             .setFilters(new InputFilter[] {new InputFilter.LengthFilter(DeviceDataApi.MAX_DISPLAY_NAME * 2)});
         dialog.setValidator(values -> DeviceDataApi.validDisplayName(values.get(0)));
         dialog.setPrimary("保存", values -> run(context -> {
-            new DeviceDataApi(context).rename(values.get(0));
+            new DeviceDataApi(context, expectedSessionId).rename(values.get(0));
             return "";
         }, "昵称已更新"));
         dialog.show();
@@ -345,11 +379,17 @@ public final class ProfilePage extends DetailPage {
 
     private void chooseAvatar() {
         if (busy) return;
+        Loaded state = loaded;
+        if (state == null || state.profile() == null || state.sessionId().isEmpty()) return;
+        avatarPickerSessionId = state.sessionId();
         picker.launch("image/*");
     }
 
     private void onPicked(@Nullable Uri uri) {
+        String expectedSessionId = avatarPickerSessionId;
+        avatarPickerSessionId = null;
         if (uri == null || getView() == null) return;
+        if (expectedSessionId == null || expectedSessionId.isEmpty()) return;
         run(context -> {
             byte[] image;
             try (InputStream input = context.getContentResolver().openInputStream(uri)) {
@@ -363,26 +403,30 @@ public final class ProfilePage extends DetailPage {
             BitmapFactory.Options size = BitmapPolicy.decodeBounds(image);
             if (size == null) return "读不到这张图片";
             if (BitmapPolicy.longestEdge(size.outWidth, size.outHeight) > MAX_AVATAR_UPLOAD_EDGE) return "图片尺寸太大，请换一张小一些的";
-            new DeviceDataApi(context).uploadAvatar(image);
+            new DeviceDataApi(context, expectedSessionId).uploadAvatar(image);
             return "";
         }, "头像已更新");
     }
 
     private void export() {
+        Loaded state = loaded;
+        if (state == null || state.profile() == null || state.sessionId().isEmpty()) return;
+        String expectedSessionId = state.sessionId();
+        long request = generation;
         String name = DeviceDataApi.exportFileName(LocalDate.now(ZoneId.systemDefault()));
         execute(context -> {
             File directory = new File(context.getCacheDir(), EXPORTS);
             if (!directory.isDirectory() && !directory.mkdirs()) return "没有导出，存储空间不可用";
             // 导出包里是个人数据，只留最新这一份给分享用：先删掉以前导出的，不让它们一直堆在缓存目录里。
             File[] previous = directory.listFiles();
-            if (previous != null) for (File stale : previous) deleteQuietly(stale);
+            if (previous != null) for (File stale : previous) FilePolicy.deleteQuietly(stale);
             File file = new File(directory, name);
             java.nio.file.Path temporary = null;
             try {
                 temporary = Files.createTempFile(directory.toPath(), name + ".", ".part");
                 try (OutputStream output = Files.newOutputStream(temporary, StandardOpenOption.WRITE,
                         StandardOpenOption.TRUNCATE_EXISTING, LinkOption.NOFOLLOW_LINKS)) {
-                    new DeviceDataApi(context).exportData(output);
+                    new DeviceDataApi(context, expectedSessionId).exportData(output);
                 }
                 try {
                     Files.move(temporary, file.toPath(), StandardCopyOption.ATOMIC_MOVE,
@@ -391,14 +435,14 @@ public final class ProfilePage extends DetailPage {
                     Files.move(temporary, file.toPath(), StandardCopyOption.REPLACE_EXISTING);
                 }
             } catch (IOException unwritable) {
-                deleteQuietly(file);
+                FilePolicy.deleteQuietly(file);
                 return "没有导出，存储空间不可用";
             } catch (CloudApi.Failure failure) {
-                deleteQuietly(file);
-                if (failure.status == 429) return "今天的导出次数已用完，明天再试";
+                FilePolicy.deleteQuietly(file);
+                if (failure.rateLimited()) return "今天的导出次数已用完，明天再试";
                 throw failure;
             } finally {
-                if (temporary != null) deleteQuietly(temporary.toFile());
+                if (temporary != null) FilePolicy.deleteQuietly(temporary.toFile());
             }
             return "";
         }, outcome -> {
@@ -408,6 +452,11 @@ public final class ProfilePage extends DetailPage {
             }
             Context context = requireContext();
             File file = new File(new File(context.getCacheDir(), EXPORTS), name);
+            if (request != generation || !sameLoadedSession(expectedSessionId)) {
+                FilePolicy.deleteQuietly(file);
+                MsToast.show(context, "登录已改变，请重新打开页面");
+                return;
+            }
             Uri uri = FileProvider.getUriForFile(context, context.getPackageName() + ".files", file);
             Intent send = new Intent(Intent.ACTION_SEND).setType("application/zip").putExtra(Intent.EXTRA_STREAM, uri)
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
@@ -415,39 +464,42 @@ public final class ProfilePage extends DetailPage {
         }, null);
     }
 
-    private static void deleteQuietly(File file) {
-        if (file.exists() && !file.delete()) file.deleteOnExit();
-    }
-
     private void confirmDeleteData() {
         Loaded state = loaded;
+        if (state == null || state.profile() == null || state.sessionId().isEmpty()) return;
+        String expectedSessionId = state.sessionId();
         String size = state == null || state.data() == null ? "" : "（约 " + DeviceDataApi.formatBytes(state.data().bytes()) + "）";
         new OptionSheet(requireContext(), "删除云端数据" + size,
             "删除云端的设置、词库、常用语和云剪贴板，账号和社区作品保留，本机数据不受影响")
-            .destructive("删除云端数据", () -> recentLogin(context -> {
-                new DeviceDataApi(context).deleteData(DeviceDataApi.DELETABLE_SECTIONS);
+            .destructive("删除云端数据", () -> recentLogin(sessionId -> context -> {
+                new DeviceDataApi(context, sessionId).deleteData(DeviceDataApi.DELETABLE_SECTIONS);
                 return "";
-            }, "云端数据已删除", false))
+            }, expectedSessionId, "云端数据已删除", false))
             .show();
     }
 
     private void confirmSignOut() {
+        Loaded state = loaded;
+        if (state == null || state.profile() == null || state.sessionId().isEmpty()) return;
+        String expectedSessionId = state.sessionId();
         new OptionSheet(requireContext(), "退出登录", "本机的词库和设置会保留，云同步随之关闭")
             .destructive("退出登录", () -> run(context -> {
-                SignIn.signOut(context);
-                return "";
+                return SignIn.signOut(context, expectedSessionId) ? "" : "登录已改变，请重新打开页面";
             }, "已退出登录", true))
             .show();
     }
 
     private void confirmDeleteAccount() {
+        Loaded state = loaded;
+        if (state == null || state.profile() == null || state.sessionId().isEmpty()) return;
+        String expectedSessionId = state.sessionId();
         new OptionSheet(requireContext(), "注销账号", "云端的词库、皮肤、设置和社区作品会立即永久删除")
             .destructive("继续注销", () -> new OptionSheet(requireContext(), "确定注销？", "这一步无法撤销")
-                .destructive("永久注销账号", () -> recentLogin(context -> {
-                    new DeviceDataApi(context).deleteAccount();
-                    SignIn.signOut(context);
+                .destructive("永久注销账号", () -> recentLogin(sessionId -> context -> {
+                    new DeviceDataApi(context, sessionId).deleteAccount();
+                    if (!SignIn.signOut(context, sessionId)) return "登录已改变，请重新打开页面";
                     return "";
-                }, "账号已注销", true))
+                }, expectedSessionId, "账号已注销", true))
                 .show())
             .show();
     }
@@ -473,12 +525,15 @@ public final class ProfilePage extends DetailPage {
     /**
      * 要求最近登录的动作：服务端说要重新登录时弹登录面板，重新登录的还是同一个账号才重试一次。
      */
-    private void recentLogin(Work work, String success, boolean leave) {
-        execute(work, outcome -> {
+    private void recentLogin(Function<String, Work> workFactory, String expectedSessionId,
+            String success, boolean leave) {
+        Loaded initial = loaded;
+        if (initial == null || initial.profile() == null || !expectedSessionId.equals(initial.sessionId())) return;
+        String before = initial.profile().id();
+        execute(workFactory.apply(expectedSessionId), outcome -> {
             if (outcome.isEmpty()) finish(success, leave);
             else MsToast.show(requireContext(), outcome);
         }, () -> {
-            String before = loaded == null || loaded.profile() == null ? "" : loaded.profile().id();
             MsToast.show(requireContext(), "为了安全，请重新登录一次");
             SignIn.start(requireActivity(), failure -> {
                 if (!isAdded()) return;
@@ -487,14 +542,20 @@ public final class ProfilePage extends DetailPage {
                     return;
                 }
                 reload(result -> {
-                    if (result.profile() == null || before.isEmpty() || !before.equals(result.profile().id())) {
+                    if (result.profile() == null || result.sessionId().isEmpty()
+                            || before.isEmpty() || !before.equals(result.profile().id())) {
                         MsToast.show(requireContext(), "登录的不是原来的账号，操作已取消");
                         return;
                     }
-                    run(work, success, leave);
+                    run(workFactory.apply(result.sessionId()), success, leave);
                 });
             });
         });
+    }
+
+    private boolean sameLoadedSession(String expectedSessionId) {
+        Loaded state = loaded;
+        return state != null && expectedSessionId.equals(state.sessionId());
     }
 
     private void execute(Work work, Consumer<String> done, @Nullable Runnable relogin) {
@@ -535,10 +596,11 @@ public final class ProfilePage extends DetailPage {
 
     static String explain(CloudApi.Failure failure) {
         if (failure.network()) return "连不上服务器，请检查网络后再试";
+        if ("session_changed".equals(failure.code)) return "登录已改变，请重新打开页面";
         if (failure.signedOut()) return "登录已失效，请重新登录";
-        if (failure.status == 429) return "操作太频繁，请稍后再试";
-        if (failure.status == 413) return "图片超过 1 MB，请换一张小一些的";
-        if (failure.status == 415 || "invalid_avatar".equals(failure.code)) return "头像只支持 PNG 或 JPEG 图片";
+        if (failure.rateLimited()) return "操作太频繁，请稍后再试";
+        if (failure.payloadTooLarge()) return "图片超过 1 MB，请换一张小一些的";
+        if (failure.unsupportedMediaType() || "invalid_avatar".equals(failure.code)) return "头像只支持 PNG 或 JPEG 图片";
         if (failure.unavailable() || failure.status == 503) return "这项功能暂未开放";
         return "没有完成，请稍后再试";
     }

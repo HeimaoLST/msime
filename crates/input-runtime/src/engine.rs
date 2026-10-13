@@ -4,7 +4,7 @@ use super::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
-    #[error("candidate page size must be between 1 and 9")]
+    #[error("candidate page size must be between 1 and 10")]
     InvalidPageSize,
     #[error("candidate belongs to an expired view or another session")]
     StaleCandidate,
@@ -27,6 +27,8 @@ pub trait InputEngine {
     fn reset_context(&mut self) {}
     /// The committed text the Engine's neural sentence models condition on, pushed by the runtime whenever the text it keeps changes. Engines without such models ignore it.
     fn set_rescoring_context(&mut self, _context: &str) {}
+    /// 首页放得下几行，宿主改每页候选数时跟着分页一起下发；没有按切分查词库的引擎忽略它。
+    fn set_first_page_rows(&mut self, _rows: usize) {}
     /// Moves the caret prefix decoding answers for; `None` returns to the end of the composition. Engines without
     /// prefix decoding ignore it and report nothing pending below.
     fn set_caret(&mut self, _caret: Option<usize>) {}
@@ -80,6 +82,19 @@ pub trait InputEngine {
     }
     fn set_nine_key_enabled(&mut self, _enabled: bool) -> Result<(), RuntimeError> {
         Err(RuntimeError::Engine("Nine-key mode is unsupported".into()))
+    }
+    /// 触屏的组码网格（九键、14 键），`None` 不用网格；没有九宫格的引擎不支持。
+    fn set_key_grid(&mut self, _grid: Option<KeyGrid>) -> Result<(), RuntimeError> {
+        Err(RuntimeError::Engine("Key grids are unsupported".into()))
+    }
+    /// 14 键的一键，`letter` 是这一组里的任一字母；没有网格的引擎不处理。
+    fn grid_key(&mut self, _letter: u8) -> Result<EngineResult, RuntimeError> {
+        Ok(EngineResult {
+            handled: false,
+            has_commit: false,
+            commit: String::new(),
+            diagnostic: String::new(),
+        })
     }
     /// Replace the `/` mode's command table. Engines without the mode ignore it.
     fn set_command_table(&mut self, _table: &[CommandTableEntry]) -> Result<(), RuntimeError> {
@@ -180,6 +195,10 @@ pub trait InputEngine {
         Ok(result)
     }
     fn select(&mut self, index: usize) -> Result<EngineResult, RuntimeError>;
+    /// 整句改字的左移，进入改字时从引擎的第 `index` 个候选开始。没有整句改字的引擎当作普通的改字命令。
+    fn conversion_left_from(&mut self, _index: usize) -> Result<EngineResult, RuntimeError> {
+        self.command(Command::ConversionLeft)
+    }
     fn pin_candidate(&mut self, _index: usize) -> Result<EngineResult, RuntimeError> {
         Err(RuntimeError::Engine(
             "Candidate pinning is unsupported".into(),
@@ -226,6 +245,9 @@ impl InputEngine for Session {
     }
     fn set_rescoring_context(&mut self, context: &str) {
         Session::set_rescoring_context(self, context);
+    }
+    fn set_first_page_rows(&mut self, rows: usize) {
+        Session::set_first_page_rows(self, rows);
     }
     fn set_caret(&mut self, caret: Option<usize>) {
         Session::set_caret(self, caret);
@@ -278,6 +300,12 @@ impl InputEngine for Session {
     fn set_nine_key_enabled(&mut self, enabled: bool) -> Result<(), RuntimeError> {
         Session::set_nine_key_enabled(self, enabled)
             .map_err(|e| RuntimeError::Engine(e.to_string()))
+    }
+    fn set_key_grid(&mut self, grid: Option<KeyGrid>) -> Result<(), RuntimeError> {
+        Session::set_key_grid(self, grid).map_err(|e| RuntimeError::Engine(e.to_string()))
+    }
+    fn grid_key(&mut self, letter: u8) -> Result<EngineResult, RuntimeError> {
+        Session::grid_key(self, letter).map_err(|e| RuntimeError::Engine(e.to_string()))
     }
     fn set_command_table(&mut self, table: &[CommandTableEntry]) -> Result<(), RuntimeError> {
         Session::set_command_table(self, table).map_err(|e| RuntimeError::Engine(e.to_string()))
@@ -332,6 +360,10 @@ impl InputEngine for Session {
     }
     fn select(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
         Session::select(self, index).map_err(|error| RuntimeError::Engine(error.to_string()))
+    }
+    fn conversion_left_from(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
+        Session::conversion_left_from(self, index)
+            .map_err(|error| RuntimeError::Engine(error.to_string()))
     }
     fn pin_candidate(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
         Session::pin_candidate(self, index).map_err(|e| RuntimeError::Engine(e.to_string()))

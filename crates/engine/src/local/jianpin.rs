@@ -116,7 +116,7 @@ fn read(
     let matched_code = initials.join("'");
     let mut statement = connection.prepare_cached(&sql)?;
     let mut rows = statement.query(rusqlite::params![jianpin, super::sql_limit(scan_limit)])?;
-    let mut candidates = Vec::with_capacity(limit);
+    let mut candidates = Vec::new();
     while let Some(row) = rows.next()? {
         let Some(value) = row.get::<_, Option<String>>(1)? else {
             continue;
@@ -124,6 +124,9 @@ fn read(
         let canonical = row.get::<_, Option<String>>(0)?.unwrap_or_default();
         if filter_initials && !key_matches_initials(&canonical, initials) {
             continue;
+        }
+        if candidates.capacity() == 0 {
+            candidates.reserve_exact(limit);
         }
         candidates.push(WordItem::new(
             matched_code.clone(),
@@ -255,6 +258,7 @@ mod tests {
         }
         assert_eq!(quanpin.candidates[0].canonical_pinyin, "ni'hao");
         assert_eq!(quanpin.candidates[0].weight, 300);
+        assert_eq!(quanpin.candidates.capacity(), 50);
 
         let uppercase = query_jianpin("NH", SchemeType::Quanpin, &path, 1, &XIAOHE);
         assert_eq!(words(&uppercase), ["你好"]);
@@ -384,6 +388,11 @@ mod tests {
             result.diagnostic.as_deref(),
             Some(diagnostics::SUPER_JIANPIN_QUERY_FAILED)
         );
+
+        let result = query_jianpin("nx", SchemeType::Quanpin, &path, 50, &XIAOHE);
+        assert!(result.diagnostic.is_none());
+        assert!(result.candidates.is_empty());
+        assert_eq!(result.candidates.capacity(), 0);
     }
 
     #[test]

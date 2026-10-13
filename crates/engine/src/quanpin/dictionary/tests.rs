@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 use super::*;
 use crate::quanpin::fixture::Fixture;
-use crate::types::fuzzy_rule;
+use crate::types::{fuzzy_rule, FirstPageRows, DEFAULT_FIRST_PAGE_ROWS};
 
 const NONE: u32 = 0;
 const TRANSPOSITION: u32 = autocorrect_type::TRANSPOSITION;
@@ -57,6 +57,20 @@ fn primary_segmentation_is_checked_without_owning_a_key_copy() {
         "ni'hao",
         "ni'he".to_owned()
     ));
+}
+
+#[test]
+fn explicit_segmentation_without_alternatives_does_not_allocate_a_result_buffer() {
+    let resolution = SeriesResolution {
+        segmentation: "ni'hao".to_owned(),
+        ..SeriesResolution::default()
+    };
+    let segments = vec!["ni".to_owned(), "hao".to_owned()];
+    let (alternatives, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+        alternative_segmentations("ni'hao", &segments, &resolution, NONE)
+    });
+    assert!(alternatives.is_empty());
+    assert_eq!(allocations, 0, "无替代切分却分配了结果缓冲: {allocations}");
 }
 
 #[test]
@@ -117,6 +131,32 @@ fn path_cache_key_borrows_the_segmentation_when_present() {
 }
 
 #[test]
+fn segment_row_cache_hit_borrows_the_segmentation_key() {
+    let fixture = Fixture::new();
+    fixture.insert("ni'hao", "你好", 10);
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    let segments = vec!["ni".to_owned(), "hao".to_owned()];
+    let _ = dictionary.query_database(&segments, "ni'hao");
+    let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+        let _ = dictionary.query_database(&segments, "ni'hao");
+    });
+    assert_eq!(allocations, 5, "热缓存分段查询仍重建了表键: {allocations}");
+}
+
+#[test]
+fn automatic_segmentation_reuses_the_joined_code_for_word_items() {
+    let fixture = Fixture::new();
+    fixture.insert("ni'hao", "你好", 10);
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    let segments = vec!["ni".to_owned(), "hao".to_owned()];
+    let _ = dictionary.query_database(&segments, "");
+    let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+        let _ = dictionary.query_database(&segments, "");
+    });
+    assert_eq!(allocations, 6, "自动分段查询重复拼接了读音: {allocations}");
+}
+
+#[test]
 fn truncating_a_joined_prefix_drops_only_the_last_segment() {
     let mut segmentation = "ni'hao'ma".to_owned();
     truncate_last_segment(&mut segmentation);
@@ -135,6 +175,80 @@ fn fuzzy_cache_key_hash_checks_rules_and_segmentation() {
     assert!(fuzzy_cache_key_matches(&cached, 0x7ff, "ni'hao"));
     assert!(!fuzzy_cache_key_matches(&cached, 0x3ff, "ni'hao"));
     assert!(!fuzzy_cache_key_matches(&cached, 0x7ff, "niha"));
+}
+
+#[test]
+fn fuzzy_row_cache_hit_checks_the_full_key_without_allocating() {
+    let mut cache = FifoCache::new(2);
+    let typed = "zan'hao";
+    cache.insert(
+        fuzzy_row_cache_hash(fuzzy_rule::Z_ZH, 32, typed),
+        CachedFuzzyRows {
+            rules: fuzzy_rule::Z_ZH,
+            limit: 32,
+            typed: typed.to_owned(),
+            rows: Vec::new(),
+        },
+    );
+    let fixture = Fixture::new();
+    let database = PinyinDatabase::open(&fixture.database());
+    let paths = vec![vec!["zhan".to_owned(), "hao".to_owned()]];
+
+    assert!(fuzzy_row_cache_key_matches(
+        cache
+            .get_ref(&fuzzy_row_cache_hash(fuzzy_rule::Z_ZH, 32, typed))
+            .unwrap(),
+        fuzzy_rule::Z_ZH,
+        32,
+        typed,
+    ));
+    assert!(!fuzzy_row_cache_key_matches(
+        cache
+            .get_ref(&fuzzy_row_cache_hash(fuzzy_rule::Z_ZH, 32, typed))
+            .unwrap(),
+        fuzzy_rule::Z_ZH,
+        64,
+        typed,
+    ));
+
+    let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+        assert!(
+            cached_fuzzy_rows(&database, &mut cache, &paths, fuzzy_rule::Z_ZH, 32, typed,)
+                .is_empty()
+        );
+    });
+    assert_eq!(allocations, 0, "模糊行缓存热命中仍重建了查询键");
+}
+
+#[test]
+fn fuzzy_row_cache_hash_collision_requeries_instead_of_returning_wrong_rows() {
+    let fixture = Fixture::new();
+    fixture.insert("zhan'hao", "战好", 10);
+    let database = PinyinDatabase::open(&fixture.database());
+    let typed = "zan'hao";
+    let paths = vec![vec!["zhan".to_owned(), "hao".to_owned()]];
+    let mut cache = FifoCache::new(2);
+    cache.insert(
+        fuzzy_row_cache_hash(fuzzy_rule::Z_ZH, 32, typed),
+        CachedFuzzyRows {
+            rules: fuzzy_rule::Z_ZH,
+            limit: 32,
+            typed: "zan'he".to_owned(),
+            rows: vec![DictRow {
+                key: "wrong".to_owned(),
+                value: "错误哨兵".to_owned(),
+                weight: 999,
+            }],
+        },
+    );
+
+    let rows = cached_fuzzy_rows(&database, &mut cache, &paths, fuzzy_rule::Z_ZH, 32, typed);
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.value.as_str())
+            .collect::<Vec<_>>(),
+        ["战好"]
+    );
 }
 
 fn contains(items: &[WordItem], word: &str) -> bool {
@@ -411,6 +525,101 @@ fn longer_phrases_join_the_full_key_group_by_weight() {
 }
 
 #[test]
+fn exact_rows_filling_a_page_push_the_longer_phrases_behind_it() {
+    // 精确同音词自己够填首页时，补全词不占首页座位，但也不从候选里消失：往后翻还翻得到它们。
+    // zhongguo、shide 的精确表本来就够一页，直接丢掉等于让「中国人民」「是的话」再也翻不到。
+    let fixture = Fixture::new();
+    fixture
+        .insert("qi'shi", "其实", 500)
+        .insert("qi'shi", "歧视", 400)
+        .insert("qi'shi", "岂是", 300)
+        .insert("qi'shi", "气势", 200)
+        .insert("qi'shi", "启示", 100)
+        .insert("qi'shi", "骑士", 90)
+        .insert("qi'shi'ye'dan'wei", "企事业单位", 600);
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    let listed = query(&mut dictionary, "qishi", "qi'shi", NONE);
+    assert_eq!(
+        words(&listed[..DEFAULT_FIRST_PAGE_ROWS]),
+        ["其实", "歧视", "岂是", "气势", "启示", "骑士"],
+        "精确同音词够填首页时补全词挤进了首页: {:?}",
+        words(&listed)
+    );
+    assert!(
+        position(&listed, "企事业单位") >= DEFAULT_FIRST_PAGE_ROWS,
+        "补全词没有接在整组末尾: {:?}",
+        words(&listed)
+    );
+}
+
+#[test]
+fn a_larger_first_page_rows_keeps_the_longer_phrases() {
+    // 首页行数来自宿主的每页候选数：设成 8 时 6 条精确同音词不够一页，补全词照旧并入。
+    let fixture = Fixture::new();
+    fixture
+        .insert("qi'shi", "其实", 500)
+        .insert("qi'shi", "歧视", 400)
+        .insert("qi'shi", "岂是", 300)
+        .insert("qi'shi", "气势", 200)
+        .insert("qi'shi", "启示", 100)
+        .insert("qi'shi", "骑士", 90)
+        .insert("qi'shi'ye'dan'wei", "企事业单位", 600);
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    dictionary.set_first_page_rows(FirstPageRows::new(8));
+    let listed = query(&mut dictionary, "qishi", "qi'shi", NONE);
+    assert!(
+        contains(&listed, "企事业单位"),
+        "首页行数大于精确同音词数时补全词应照旧并入: {:?}",
+        words(&listed)
+    );
+}
+
+#[test]
+fn longer_phrases_are_capped_when_the_exact_table_is_short() {
+    // 精确同音词不足一页时补全词进场，但最多 LONGER_PHRASE_LIMIT 条。
+    let fixture = Fixture::new();
+    fixture
+        .insert("fa'ban", "法办", 4000)
+        .insert("fa'ban", "发版", 3000)
+        .insert("fa'ban'hao", "发版号", 300)
+        .insert("fa'ban'zhi'chi", "发版支持", 250)
+        .insert("fa'ban'yao'qiu", "发版要求", 200)
+        .insert("fa'ban'xia", "法半夏", 100)
+        .insert("fa'ban'xia'pi'pa", "法半夏枇杷", 50);
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    let listed = query(&mut dictionary, "faban", "fa'ban", NONE);
+    let continuations = listed
+        .iter()
+        .filter(|item| item.canonical_pinyin.starts_with("fa'ban'"))
+        .count();
+    assert_eq!(
+        continuations,
+        LONGER_PHRASE_LIMIT,
+        "补全词条数应被 LONGER_PHRASE_LIMIT 截住: {:?}",
+        words(&listed)
+    );
+    assert_eq!(
+        words(&listed[..5]),
+        ["法办", "发版", "发版号", "发版支持", "发版要求"]
+    );
+}
+
+#[test]
+fn longer_phrase_cache_hit_does_not_rebuild_the_full_key() {
+    let fixture = phrase_fixture();
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    let segments = vec!["ni".to_owned(), "hao".to_owned()];
+    let _ = dictionary.longer_phrase_candidates("ni'hao", &segments);
+    let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+        let _ = dictionary.longer_phrase_candidates("ni'hao", &segments);
+    });
+    assert_eq!(
+        allocations, 8,
+        "热缓存长词补全仍重建了切分键: {allocations}"
+    );
+}
+
+#[test]
 fn sentence_rows_follow_the_exact_hits_and_precede_longer_phrases() {
     // quanpin.md §11.1: ping'guo lists 苹果, the sentence block, then 苹果电脑 苹果公司 评过 平果 平锅.
     let fixture = Fixture::new();
@@ -438,6 +647,94 @@ fn sentence_rows_follow_the_exact_hits_and_precede_longer_phrases() {
     assert_eq!(
         words(&listed[longer..longer + 5]),
         ["苹果电脑", "苹果公司", "评过", "平果", "平锅"]
+    );
+}
+
+#[test]
+fn heavier_longer_phrase_does_not_take_the_first_seat_from_the_exact_reading() {
+    // #7345：打错字了 比 打错字 重，但选它会多上屏一个用户没打的 了，首位必须是读音完全一致的词。
+    let fixture = Fixture::new();
+    fixture
+        .insert("da'cuo'zi", "打错字", 565)
+        .insert("da'cuo'zi", "大错字", 1)
+        .insert("da'cuo'zi'le", "打错字了", 1010);
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    let listed = query(&mut dictionary, "dacuozi", "da'cuo'zi", NONE);
+    assert_eq!(listed[0].word, "打错字");
+    assert!(
+        position(&listed, "打错字了") < position(&listed, "大错字"),
+        "补全词仍应排在冷僻同音词之前"
+    );
+}
+
+#[test]
+fn light_exact_reading_still_leads_heavier_continuations() {
+    // #7345：都没人 只有 3，后面的 都没人买 都没人管 都没人管理 都在 100 以上。
+    let fixture = Fixture::new();
+    fixture
+        .insert("dou'mei'ren", "都没人", 3)
+        .insert("dou'mei'ren'mai", "都没人买", 129)
+        .insert("dou'mei'ren'guan", "都没人管", 100)
+        .insert("dou'mei'ren'guan'li", "都没人管理", 100);
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    let listed = query(&mut dictionary, "doumeiren", "dou'mei'ren", NONE);
+    assert_eq!(
+        words(&listed[..4]),
+        ["都没人", "都没人买", "都没人管", "都没人管理"]
+    );
+}
+
+#[test]
+fn sentence_rows_follow_a_light_exact_hit_and_precede_heavier_longer_phrases() {
+    let fixture = Fixture::new();
+    fixture
+        .insert("da'cuo'zi", "打错字", 565)
+        .insert("da'cuo'zi'le", "打错字了", 1010)
+        .insert("da", "大", 1000)
+        .insert("cuo", "错", 1000)
+        .insert("zi", "子", 1000);
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    dictionary.set_sentence_alternatives(true);
+    let listed = query(&mut dictionary, "dacuozi", "da'cuo'zi", NONE);
+    assert_eq!(listed[0].word, "打错字");
+    let longer = position(&listed, "打错字了");
+    assert!(longer > 1, "整句块应夹在完整读音词和补全词之间");
+    assert!(listed[1..longer]
+        .iter()
+        .all(|item| item.source == CandidateSource::Generated && item.sentence_association));
+}
+
+#[test]
+fn sentence_leads_longer_phrases_when_no_exact_reading_exists() {
+    let fixture = Fixture::new();
+    fixture
+        .insert("da'cuo'zi'le", "打错字了", 1010)
+        .insert("da", "大", 1000)
+        .insert("cuo", "错", 1000)
+        .insert("zi", "子", 1000);
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    let listed = query(&mut dictionary, "dacuozi", "da'cuo'zi", NONE);
+    assert!(
+        listed[0].source == CandidateSource::Generated && listed[0].sentence_association,
+        "没有完整读音词时整句应排在补全词之前: {:?}",
+        words(&listed)
+    );
+    assert!(position(&listed, "打错字了") > 0);
+}
+
+#[test]
+fn prefix_only_row_does_not_pin_the_first_seat_over_a_heavier_continuation() {
+    // 没有 zhi'liang'jian 这一行时，同长度查询退到前缀区间，返回的 质量奖 读音是 jiang 而不是键入的 jian，不能被钉在首位压过更重的 质量检验。
+    let fixture = Fixture::new();
+    fixture
+        .insert("zhi'liang'jiang", "质量奖", 10)
+        .insert("zhi'liang'jian'yan", "质量检验", 500);
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    let listed = query(&mut dictionary, "zhiliangjian", "zhi'liang'jian", NONE);
+    assert!(
+        position(&listed, "质量检验") < position(&listed, "质量奖"),
+        "前缀读音的同长度行应和补全词一起按权重排: {:?}",
+        words(&listed)
     );
 }
 
@@ -642,7 +939,7 @@ fn online_rows_land_in_the_series_slot_the_query_used() {
         &ai,
         CandidateSource::AiSuggestion
     ));
-    // A second cloud answer replaces the first and keeps the AI block at index 2.
+    // 第二次云回答替换掉第一次，AI 座位仍在下标 2；第二条 AI 候选排在最后（#6888）。
     assert!(dictionary.insert_online_words(
         "nihao",
         "ni'hao",
@@ -651,7 +948,8 @@ fn online_rows_land_in_the_series_slot_the_query_used() {
         CandidateSource::CloudSuggestion
     ));
     let listed = query(&mut dictionary, "nihao", "ni'hao", NONE);
-    assert_eq!(words(&listed[..4]), ["你好", "妮好", "智能甲", "智能乙"]);
+    assert_eq!(words(&listed[..3]), ["你好", "妮好", "智能甲"]);
+    assert_eq!(listed.last().unwrap().word, "智能乙");
     assert!(!contains(&listed, "倪好"));
 
     let two = vec!["一".to_string(), "二".to_string()];
@@ -1095,6 +1393,24 @@ fn fuzzy_candidates_do_not_allocate_the_full_path_budget_up_front() {
 
     assert_eq!(candidates.len(), 1);
     assert!(candidates.capacity() < FUZZY_PATH_BUDGET * FUZZY_ROW_LIMIT);
+}
+
+#[test]
+fn fuzzy_candidate_rows_reuse_the_first_typed_reading_string() {
+    let fixture = fuzzy_fixture();
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    let options = FuzzyPinyinOptions {
+        rules: fuzzy_rule::ALL,
+    };
+    let _ = dictionary.fuzzy_candidates("zong'guo", options);
+    dictionary.fuzzy_cache.clear();
+    let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+        let _ = dictionary.fuzzy_candidates("zong'guo", options);
+    });
+    assert_eq!(
+        allocations, 35,
+        "模糊候选重复复制了首个读音或查询键: {allocations}"
+    );
 }
 
 #[test]

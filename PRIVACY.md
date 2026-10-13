@@ -44,7 +44,9 @@ https://inputtools.google.com/request?text=ni%20hao&itc=zh-t-i0-pinyin&num=1&ie=
 
 ### 候选翻译（默认不联网）
 
-`candidate_translations` 默认 `true`，支持腾讯机器翻译（`https://tmt.tencentcloudapi.com`）、小牛翻译（`https://api.niutrans.com/v2/text/translate`）和自定义端点。三者都要求你在设置里填入自己的 API 凭据，默认全为空字符串——**没有凭据就不会发出请求**，开关为真也一样。发送内容是待翻译的候选词。代码在 `crates/client-core/src/credential/translation.rs`。
+`candidate_translations` 默认 `true`，支持腾讯机器翻译（`https://tmt.tencentcloudapi.com`）、小牛翻译（`https://api.niutrans.com/v2/text/translate`）和自定义端点。三者都要求你在设置里填入自己的 API 凭据，默认全为空字符串——**没有凭据就不会发出请求**，开关为真也一样。发送内容是待翻译的候选词。代码在 `crates/client-core/src/credential/translation.rs`。自定义端点的主机名恰好是 `api.deepl.com` 或 `api-free.deepl.com`（https、默认端口）时，按 DeepL v2 格式带上你填的密钥发给 DeepL：密钥以 `:fx` 结尾的发往 `https://api-free.deepl.com/v2/translate`，其余发往 `https://api.deepl.com/v2/translate`，与你填的是两个 DeepL 主机中的哪一个无关；这种地址没有密钥时不发。其他自定义端点原样使用你填的地址。请求由 `crates/client-core/src/translation.rs` 的 `custom_translation_request` 构造，Linux provider（`platforms/linux/scripts/msime-linux-online-provider`）照写的一份由 `shared/contracts/custom-translation/cases.json` 的共享用例约束。
+
+Android 也支持这三种服务（含按主机名识别的 DeepL），在「设置 → 输入 → 翻译 → 翻译服务」里选择和填写凭据。选了它们之后，键盘把当前一页的中文候选词直接发给你配置的第三方服务翻译，不经过水杉服务器，候选词按该服务自己的数据政策处理：每页最多 10 个词，每个不超过 40 字，跳过表情和颜文字候选；腾讯每批最多 9 个词，小牛和自定义每个词单独请求一次；设置了第二目标语言时，每种语言各请求一次。离线释义查得到的语言仍然先用离线释义，但请求不因此省掉。自定义端点在 Android 上只接受 https，或指向本机（`localhost`、`127.0.0.1`、`[::1]`）的 http，局域网 http 不接受。同一设置下已经回答过的词（包括回答「没有译文」的）不会重复请求；失败时同一个词 30 秒内不再请求，整个服务连不上时 30 秒内不再发任何请求。凭据只保存在本机的设置文件里，不随设置同步上传，也不写进日志。代码在 `platforms/android/java/app/msime/android/candidate/UserTranslationClient.java` 和 `TranslationHttpTransport.java`。
 
 macOS、iOS、Android 和 Linux 另提供「水杉账号」（`translation_account`）：选择它后，会把当前页的中文候选词（包括本地已有释义的）连同目标语言代码 POST 到 `https://api.msime.app/v1/translate`。请求带账号令牌：macOS 与 Android 在你已登录时用登录的账号，否则（以及 iOS 上始终）用安装后首次启动时注册的本机匿名账号（见[账号与同步](#账号与同步需要登录)）。所有平台新装和「恢复默认设置」都不选它，只有你显式选择才发送；已有配置文件里存着选择的，升级沿用，缺这个字段的按未选择处理。不想发送，在设置的翻译服务里改选别的服务或「不使用在线翻译」，或关掉候选翻译。你自己的服务优先：候选翻译关闭、小牛或自定义服务已启用、或腾讯已启用且两项凭据都可用时，都不走水杉账号。共享层把这个判定算成翻译查询里的 `translation_account` 字段（`crates/host-api/src/ffi/providers.rs`），各宿主只在它为真时发请求。Windows、HarmonyOS 没有这条路径。没有选择任何服务时不发出候选翻译请求。
 
@@ -52,7 +54,7 @@ macOS 26 及以上在没有选择任何服务时（候选翻译开启，小牛�
 
 ### 语音输入（默认凭据为空）
 
-`voice_input.enabled` 默认 `true`，但这只表示功能可用，录音要你主动触发。默认识别服务是豆包（`wss://openspeech.bytedance.com/...`），**`asr_token` 默认为空字符串**，不填就无法使用。可选的识别服务还有 SiliconFlow、OpenAI、Groq、EveryAPI、Mistral Voxtral，以及两种不出设备的选项：
+`voice_input.enabled` 默认 `true`，但这只表示功能可用，录音要你主动触发。默认识别服务是豆包（`wss://openspeech.bytedance.com/...`），**`asr_token` 默认为空字符串**，不填就无法使用。可选的识别服务还有 SiliconFlow、OpenAI、Groq、EveryAPI、Mistral Voxtral、阿里云百炼（`bailian`，默认 `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions`，模型 `qwen3-asr-flash`，录音以 Base64 放进 Chat Completions 请求），以及两种不出设备的选项：
 
 - `local`：设备上的识别模型，`asr_model_path` 是一个绝对路径，指向设置页下载的 sherpa-onnx 模型目录（包含 `msime-model.json`）。不需要 Token，也没有端点。
 - `system`：调用操作系统自带的识别（macOS / iOS / HarmonyOS），数据流向由操作系统决定。macOS 与 iOS 26 起使用 SpeechAnalyzer（设备端）；更早的系统在识别器支持时设置 `requiresOnDeviceRecognition`，不支持时由系统决定是否上传。
@@ -61,7 +63,7 @@ macOS 26 及以上在没有选择任何服务时（候选翻译开启，小牛�
 
 **本地模型**全程在设备上运行：录音、识别结果和热词都不离开设备，识别期间不发出任何网络请求。macOS 与 Linux 的输入法进程不自己加载模型，而是拉起本机的 `msime-voice-local` 辅助进程，经标准输入输出交换音频和文本（协议见 `shared/voice/README.md`），不经过网络套接字；Windows 在本机的 `msime-client-server` 进程内识别，Android、iOS 与 HarmonyOS 在应用进程内识别。热词取自你的个人词库（只取用户自己添加的拼音词条），在本机交给识别器，或在识别后于本机做近音替换（`crates/client-core/src/voice/hotwords.rs`）。
 
-唯一的联网发生在**下载模型**时，且只在你在设置页点「下载」后发生（Android 的 full 与拼音版在打开「离线识别」而本机还没有语音运行库时会下载它，见[资源与更新下载](#资源与更新下载)）：
+唯一的联网发生在**下载模型**时，且只在你在设置页点「下载」后发生。用「从文件导入」安装时完全不联网：选中的本地文件只在本机按长度和 SHA-256 校验后解压进模型目录；设置页里每个文件的下载链接用系统浏览器打开，输入法本身不发请求（Android 的 full 与拼音版在打开「离线识别」而本机还没有语音运行库时会下载它，见[资源与更新下载](#资源与更新下载)）：
 
 | | |
 | --- | --- |
@@ -95,20 +97,27 @@ macOS 26 及以上在没有选择任何服务时（候选翻译开启，小牛�
 
 Windows 与 HarmonyOS 除了你主动提交的[社区举报](#社区举报与审核)之外，不用这个账号发送任何内容。候选翻译在你选择了「水杉账号」时才发送，见[候选翻译](#候选翻译默认不联网)；Android 浏览社区皮肤与词库目录时，也会带上匿名账号的令牌（`platforms/android/java/app/msime/android/community/CommunityCatalog.java`），取不到照常列出目录。凭据的存放：iOS 用 Keychain（`crates/tauri-mobile-platform/ios/Sources/MobilePlatformPlugin.swift`），Android 用 Keystore 加密后落盘；macOS、Windows 与 Linux 桌面端存在当前用户私有的 `account-session.json` 里（`crates/client-core/src/account/file_storage.rs`），只有本人可读写，不加密。
 
-### 云剪贴板（需要登录）
+### 云剪贴板（需要登录或自建中继）
 
-用来在手机和电脑之间传文字：一台设备上把文字放进云剪贴板，另一台设备上从云剪贴板里点选。条目存在 `https://api.msime.app` 你的账号下，最多 50 条，单条不超过 4000 个 UTF-16 单元。
+用来在手机和电脑之间传文字：一台设备上把文字放进云剪贴板，另一台设备上从云剪贴板里点选。条目存在 `https://api.msime.app` 你的账号下（改走自建中继时存在你自己的中继上，见下文），最多 50 条，单条不超过 4000 个 UTF-16 单元。
 
-- **只上传你明确选择的文字**：在云剪贴板面板里输入或粘贴后点上传，或者在本地剪贴板历史的某一条上点「发到云剪贴板」。复制时不会自动上传到云端。（Android 在你开启本机剪贴板历史后会自动把复制的文字记在本机，见下文「默认值」，这些记录同样不会上传。）
+- **端到端加密**：文字在你的设备上加密后才上传，只在你的设备上解密，服务端只保存密文，读不到内容，也不能替你搜索（搜索在设备上进行）。不需要设置口令：每台设备第一次使用时自己生成一对密钥，私钥只留在这台设备上；账号的剪贴板密钥由第一台开启云剪贴板的设备生成，服务端只保存分别用每台设备的公钥封装过的副本。协议公开在 [`docs/cloud-clipboard-e2e.md`](docs/cloud-clipboard-e2e.md)，实现在 `crates/client-core/src/cloud/clipboard_e2e.rs`。
+- **新设备要由已有设备批准**：在新设备上登录后，要在一台已经能用云剪贴板的设备上点「允许」，它才拿得到密钥；两台设备上会显示同一组 16 位核对码，核对一致再允许。服务端因此没办法悄悄加一台设备来读你的剪贴板。移除设备或「重置云剪贴板」会换一把新密钥并清空云端条目，其余设备都要重新批准。所有设备都丢了时，在新设备上重置即可，旧条目无法找回。
+- **服务端仍然看得到的**：条目数量、写入时间、是否置顶、写入设备的名称、两条内容是否相同（用于去重），以及每台设备的名称、公钥和登记时间。
+- **本机密钥放在哪里**：与账号凭据放在一起——iOS 钥匙串、Android 用 Keystore 加密后落盘、HarmonyOS 应用私有目录、macOS/Windows/Linux 当前用户私有的 `cloud-clipboard-keystore` 文件；退出登录时与凭据一起删除。同一台设备上的输入法和设置应用共用这一份，所以在服务端只算一台设备。
+
+- **改走自建中继**：Linux 设置页「剪贴板」和 Android「我的 → 云剪贴板」页的「云剪贴板同步方式」可以选「自建中继」，填中继地址和管理员发的令牌（偏好字段 `cloud_clipboard_relay`）。选了以后，云剪贴板的请求只发往你填的地址、带中继令牌，不再经过 `api.msime.app`，也不需要登录水杉账号；加密和设备批准都和上面一样，上面说的元数据留在你的中继上（中继不记录写入设备的名称）。地址只接受 `https://`（`http://` 只用于本机回环地址），证书必须是公网可信的。令牌和语音、翻译服务的凭据一样明文存在本机的设置文件里，不随设置文件导出、不随账号同步，诊断快照里换成 `<redacted>`。本机密钥另存为当前用户私有的 `cloud-clipboard-relay-keystore`（桌面端与账号会话同一目录；Android 在应用私有的 `no_backup/cloud-clipboard-relay/` 下，和账号那份一样用 AndroidKeyStore 里不能导出的密钥加密，不进云备份，也不随设备间迁移带走），退出水杉账号不删除它，换了中继地址或令牌后不再使用旧的那份。Android 上配置了中继时，设置页和键盘的「云端」都只连中继，账号页不再为显示条数去问水杉账号；还不能经中继收发的页面（Android、iOS 的 Tauri 设置页和云剪贴板面板）直接拒绝，不改走水杉账号。协议和参考实现见 [`docs/cloud-clipboard-relay.md`](docs/cloud-clipboard-relay.md)，客户端在 `crates/client-core/src/clipboard_relay.rs`。
+
+- **只上传你明确选择的文字**：在云剪贴板面板里输入或粘贴后点上传，或者在本地剪贴板历史的某一条上点「发到云剪贴板」。复制时不会自动上传到云端。（Android 在你开启本机剪贴板历史后会自动把复制的文字记在本机，见下文「默认值」，这些记录同样不会上传；你在键盘里把某一条「添加到常用语」后，它就成了一条常用语，开着常用语同步时会随常用语一起同步。）
 - **只在打开面板时读取**：设置页、键盘里的「云端」栏和 macOS 输入法菜单里的「云剪贴板…」在打开和点刷新时各拉取一次列表，没有轮询或推送。
 - **密码框里不出现**：Android、iOS、HarmonyOS 键盘和 Linux Fcitx5 在密码类输入框里不显示云端条目，也不发请求；macOS 在安全输入期间不打开云剪贴板面板。
-- **关闭即删除**：把云剪贴板关掉会删除云端全部条目，共享设置页在关闭前会先请你确认。
+- **关闭即删除**：把云剪贴板关掉会删除云端全部条目、剪贴板密钥的封装和设备登记，共享设置页在关闭前会先请你确认。
 - **键盘怎么拿到账号**：键盘和设置应用是不同的进程，账号令牌不会被复制成明文文件。Android 键盘向主进程里一个不导出的 ContentProvider 取令牌，只有主进程会刷新令牌；iOS 的会话存放在 App 与键盘扩展共有的 App Group 钥匙串访问组里，键盘需要「允许完全访问」才会联网；HarmonyOS 键盘读取设置应用在应用私有目录里保存的同一份会话；macOS 的输入法与设置应用读写同一个 `~/Library/Application Support/app.msime.macos/account-session.json`。iOS、HarmonyOS 与 macOS 刷新令牌时持有跨进程文件锁，防止两个进程用同一个刷新令牌而让会话被服务端吊销。
 - **从电脑上屏**：Windows 与 Linux 的设置窗口里，云剪贴板面板只有在这次打开时记下了另一个应用的输入窗口才能直接上屏，否则只能复制；它不会沿用以前记下的窗口。
 
 ### 资源与更新下载
 
-首次准备词库时从 GitHub Releases 拉取固定版本的资源，地址、长度和 SHA-256 全部写死在 `resources/desktop-dictionary.lock.json` 里，逐一校验，全部成功才发布到内容标识目录。下载的是公开发布物，不上传任何东西。检查更新只在点击「检查更新」时进行，向 `https://api.github.com/repos/metasequoiaime/msime/releases` 发起 GET 请求并在本地按平台标签前缀筛选（识别不出宿主平台时改为读取 `https://msime.app/update.json`）；请求除 IP 地址和防缓存时间戳外不携带标识，适用 GitHub 隐私条款。
+首次准备词库时从 GitHub Releases 拉取固定版本的资源，地址、长度和 SHA-256 全部写死在 `resources/desktop-dictionary.lock.json` 里，逐一校验，全部成功才发布到内容标识目录。下载的是公开发布物，不上传任何东西。检查更新只在点击「检查更新」时进行，由应用本身（不经网页）向 `https://api.github.com/repos/metasequoiaime/msime/releases` 发起 GET 请求，在本地按平台标签前缀、版本和架构筛选；请求除 IP 地址和固定的 User-Agent `msime-client` 外不携带标识，适用 GitHub 隐私条款。
 
 桌面和 Android 发布包不内置的几个资源包由设置应用在首次用到时下载，之后从本机读取。哪些平台下载哪些：
 
@@ -183,6 +192,7 @@ Android 的手写识别使用 ML Kit，**首次使用需要联网下载识别模
 - **输入历史与学习数据**由输入引擎（`crates/engine`）管理，写在宿主提供的用户目录里，不上传。
 - **剪贴板历史默认关闭**（`clipboard_history` 默认 `false`）。开启后写入状态目录下的 `clipboard_history.json`，仅本地；关闭时会清空该文件。Android 上开启后，水杉作为当前输入法时会在你每次复制文字后自动记下一条（隐私模式、密码类输入框和系统标记为敏感的内容除外），不再需要手动点「保存当前」。
 - **@ 名单**：用户在设置页「插件」里手动添加的名字和地点写在状态目录下的 `plugins/mentions.json`，仅本地，不读取通讯录或位置。它不在 `preferences.json` 里，所以宿主拷贝偏好和账号同步都不会带上它。「@ 名字与地点」模式默认关闭（`local_modes.mention` 默认 `false`）；从这个模式以及 V、/ 模式上屏的文字不进学习数据，也不计入打字统计。
+- **导入的辅助码表**：Android 在「输入 › 辅助码方案」里导入的 `.txt` 码表只在本机校验后复制到状态目录下的 `plugins/helpcode/`，不联网、不上传；应用只读你在系统文件选择器里选中的那一个文件，不申请存储权限。
 - **设置**保存在应用数据目录的 `preferences.json`，可用绝对路径环境变量 `MSIME_CLIENT_STATE_DIR` 指向隔离目录。
 
 ## 没有的东西
@@ -223,4 +233,4 @@ sed -n '/fn build_google_url/,/^}/p' crates/client-core/src/cloud/candidates.rs
 grep -n 'enabled_by_default' crates/client-core/src/preferences.rs
 ```
 
-发现本文档与代码不符，请按[贡献指南](CONTRIBUTING.md)提 issue；若涉及数据泄露或凭据问题，走[安全策略](SECURITY.md)的私下报告入口，不要开公开 issue。
+发现本文档与代码不符，请按[贡献指南](.github/CONTRIBUTING.md)提 issue；若涉及数据泄露或凭据问题，走[安全策略](.github/SECURITY.md)的私下报告入口，不要开公开 issue。

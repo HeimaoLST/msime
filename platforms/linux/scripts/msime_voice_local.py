@@ -15,6 +15,8 @@ import threading
 import time
 from pathlib import Path
 
+from host_api import ResponseDecoder
+
 
 MANIFEST = "msime-model.json"
 MAX_MANIFEST = 1024 * 1024
@@ -112,6 +114,7 @@ class HotwordCorrector:
         self.library = library
         self.lock = threading.Lock()
         self.handle = None
+        self.responses = None
         self.failed = False
 
     def load(self):
@@ -121,9 +124,9 @@ class HotwordCorrector:
                     handle = ctypes.CDLL(str(self.library))
                     handle.msime_client_voice_hotword_correct.argtypes = (ctypes.c_char_p, ctypes.c_size_t)
                     handle.msime_client_voice_hotword_correct.restype = ctypes.c_void_p
-                    handle.msime_client_string_free.argtypes = (ctypes.c_void_p,)
-                    handle.msime_client_string_free.restype = None
+                    responses = ResponseDecoder(handle)
                     self.handle = handle
+                    self.responses = responses
                 except (OSError, AttributeError, TypeError):
                     self.failed = True
             return self.handle
@@ -140,10 +143,7 @@ class HotwordCorrector:
         result = handle.msime_client_voice_hotword_correct(request, len(request))
         if not result:
             return text
-        try:
-            document = json.loads(ctypes.string_at(result).decode("utf-8"))
-        finally:
-            handle.msime_client_string_free(result)
+        document = self.responses.decode(result)
         value = document.get("value") if isinstance(document, dict) and document.get("ok") else None
         corrected = value.get("text") if isinstance(value, dict) else None
         return corrected if isinstance(corrected, str) and corrected else text

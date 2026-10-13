@@ -1,5 +1,8 @@
 package app.msime.android.home;
 
+import app.msime.android.ThemeColorPolicy;
+import app.msime.android.DimensionPolicy;
+
 import android.content.Context;
 import android.graphics.drawable.GradientDrawable;
 import android.view.LayoutInflater;
@@ -13,6 +16,7 @@ import app.msime.android.CommunityCatalog;
 import app.msime.android.CommunityRequest;
 import app.msime.android.BoundsPolicy;
 import app.msime.android.DrawablePolicy;
+import app.msime.android.KeyboardGeometry;
 import app.msime.android.KeyboardSkin;
 import app.msime.android.R;
 import app.msime.android.TextPolicy;
@@ -115,7 +119,13 @@ public final class CommunityAdapter extends RecyclerView.Adapter<CommunityAdapte
 
     /** Set the pill state of every entry named in `values` (keys from {@link #key}); entries not named keep theirs. */
     public void setActions(Map<String, Action> values) {
-        actions.putAll(values);
+        // The initial disk read can finish after the user has already started an install. Keep
+        // BUSY visible until that operation reports its own terminal state, or the same item can
+        // be tapped again while the first write is still in flight.
+        for (Map.Entry<String, Action> entry : values.entrySet()) {
+            if (actions.get(entry.getKey()) == Action.BUSY) continue;
+            actions.put(entry.getKey(), entry.getValue());
+        }
         notifyDataSetChanged();
     }
 
@@ -222,8 +232,7 @@ public final class CommunityAdapter extends RecyclerView.Adapter<CommunityAdapte
         ViewPolicy.setBackground(holder.itemView, group(holder.itemView, first, last));
         String subtitle = subtitle(item);
         if (holder.author != null) {
-            holder.author.setText(subtitle);
-            Ui.setVisibilityForText(holder.author, subtitle);
+            ViewPolicy.setTextAndVisibility(holder.author, subtitle);
         }
         boolean reply = item.kind() == CommunityRequest.Kind.REPLY;
         if (holder.description != null) {
@@ -259,14 +268,14 @@ public final class CommunityAdapter extends RecyclerView.Adapter<CommunityAdapte
         // 「已添加」是终态：没有底色、正文色、不响应；皮肤拿到之后的「使用」仍是可点的 tonal 按钮。
         boolean enabled = action == Action.AVAILABLE || (skin && action == Action.DONE);
         boolean filled = action != Action.DONE || skin;
-        ViewPolicy.setBackground(pill, filled ? Ui.pillRipple(context, Ui.accentSoft(context)) : null);
-        ViewPolicy.setTextColor(pill, filled ? Ui.accent(context) : Ui.text(context));
+        ViewPolicy.setBackground(pill, filled ? ViewPolicy.pillRipple(context, ThemeColorPolicy.accentSoft(context)) : null);
+        ViewPolicy.setTextColor(pill, filled ? ThemeColorPolicy.accent(context) : ThemeColorPolicy.text(context));
         ViewPolicy.setEnabled(pill, enabled);
         ViewPolicy.setInteractive(pill, enabled);
         ViewPolicy.setActiveAlpha(pill, action != Action.BUSY, 0.6f);
         if (enabled) ViewPolicy.bindClick(pill, () -> onAction.accept(item));
         else ViewPolicy.bindOptionalClick(pill, null);
-        pill.setAccessibilityDelegate(KeyboardSheets.buttonDelegate(label + "，" + item.name()));
+        pill.setAccessibilityDelegate(HomeButtonPolicy.buttonDelegate(label + "，" + item.name()));
     }
 
     /** What the pill says for this entry in this state; empty for an entry without one. */
@@ -296,15 +305,15 @@ public final class CommunityAdapter extends RecyclerView.Adapter<CommunityAdapte
 
     /** The glyph in the badge: the first character of the name, as the design's 网/码/医 boxes. */
     static String glyph(CommunityCatalog.Item item) {
-        return Ui.trimmedInitial(item.name(), "?");
+        return TextPolicy.trimmedInitial(item.name(), "?");
     }
 
     /** The slice of the grouped card behind one row: rounded where the group starts and ends. */
     private static GradientDrawable group(View row, boolean first, boolean last) {
-        float radius = Ui.dpFloat(row.getContext(), GROUP_RADIUS_DP);
+        float radius = DimensionPolicy.floatPixels(row.getContext(), GROUP_RADIUS_DP);
         float top = first ? radius : 0f;
         float bottom = last ? radius : 0f;
-        return DrawablePolicy.rounded(Ui.card(row.getContext()),
+        return DrawablePolicy.rounded(ThemeColorPolicy.card(row.getContext()),
             new float[] {top, top, top, top, bottom, bottom, bottom, bottom});
     }
 

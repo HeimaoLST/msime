@@ -12,6 +12,8 @@ struct TranslationProviderSettingsView: View {
   @State private var customKey = ""
   @State private var status: String?
   @State private var testing = false
+  @State private var operation: Task<Void, Never>?
+  @State private var testGeneration = OperationGeneration()
   /// What the shared document holds, so reading it in does not write it back; nil until it has been read.
   @State private var savedProvider: TranslationProvider?
   @State private var savedFields: [String] = []
@@ -66,11 +68,11 @@ struct TranslationProviderSettingsView: View {
         Section {
           TextField("https://example.com/translate", text: $customEndpoint).credentialField()
             .keyboardType(.URL)
-          SecureField("API Key（可选）", text: $customKey).credentialField()
+          SecureField("API Key（DeepL 必填）", text: $customKey).credentialField()
         } header: {
           SettingsGroupHeader(title: "自定义接口")
         } footer: {
-          Text("兼容 DeepLX 的 POST 接口。iOS 只允许 HTTPS 地址，HTTP 地址保存后不会被调用。")
+          Text("兼容 DeepLX 的 POST 接口，或 DeepL 官方 API 地址（https://api-free.deepl.com/v2/translate 或 https://api.deepl.com/v2/translate）配 DeepL 的 Auth Key；使用 DeepL 时候选词会发送到 DeepL，按 DeepL 的数据政策处理。iOS 只允许 HTTPS 地址，HTTP 地址保存后不会被调用。")
         }
         .designRow()
       }
@@ -98,6 +100,10 @@ struct TranslationProviderSettingsView: View {
     .onChange(of: fields) { _, next in
       guard savedProvider != nil, next != savedFields || autosave.hasPending else { return }
       autosave.schedule { try save() }
+    }
+    .onDisappear {
+      ViewRequestTask.cancel(generation: $testGeneration, task: $operation)
+      testing = false
     }
     .flushesAutosave(autosave)
   }
@@ -154,9 +160,12 @@ struct TranslationProviderSettingsView: View {
     guard route != .none, route != .account else { status = "凭据不完整。"; return }
     testing = true
     status = nil
-    Task {
+    let id = testGeneration.begin()
+    operation = Task {
       let result = await TranslationProviderClient().translate(words: ["你好"], target: "EN", route: route)
+      guard testGeneration.isCurrent(id) else { return }
       testing = false
+      operation = nil
       if let gloss = result.first ?? nil {
         status = "测试成功：你好 → \(gloss)"
       } else {

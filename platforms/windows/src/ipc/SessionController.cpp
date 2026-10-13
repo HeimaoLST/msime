@@ -3,10 +3,23 @@
 #include "CandidateRenderSync.h"
 #include "ReplyCodec.h"
 #include "UiSelectionDelivery.h"
+#include <thread>
 
 namespace msime::windows {
 namespace {
 thread_local const SessionController *active_controller = nullptr;
+// 外部工作线程等事务锁，直到 deadline：锁被按键、候选点击或 250 毫秒一次的英文模式读取占着时不把请求丢掉。每 5 毫秒重试一次；Server 停止时立即放弃。
+std::unique_lock<std::mutex> wait_transaction(std::mutex &transactions,
+                                              const std::atomic<bool> &stopping,
+                                              std::chrono::steady_clock::time_point deadline) {
+  std::unique_lock transaction(transactions, std::try_to_lock);
+  while (!transaction.owns_lock() && !stopping.load() &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    (void)transaction.try_lock();
+  }
+  return transaction;
+}
 }
 SessionController::SessionController(
     MainTransport &transport, RegistrationInbox &inbox, size_t clients,
@@ -48,8 +61,14 @@ SessionController::SessionController(
                 nlohmann::json candidates = nlohmann::json::array();
                 for (auto &text : result.candidates)
                   candidates.push_back(std::move(text));
-                auto view = state.apply_ai_candidates(
-                    result.lease, result.query, candidates.dump());
+                auto view = result.candidates.empty()
+                                ? std::optional<nlohmann::json>{}
+                                : state.apply_ai_candidates(
+                                      result.lease, result.query,
+                                      candidates.dump());
+                // 回答为空、失败或被拒：AI 座位上的占位行换成「—」，后面的候选不挪位（#6888）。
+                if (!view)
+                  view = state.resolve_ai_candidates(result.lease, result.query);
                 if (view) {
                   candidates_.online(result.lease, *view);
                   // AI insertion changes the visible candidate generation just
@@ -70,10 +89,17 @@ SessionController::SessionController(
               [this, result = std::move(result)](InputState &state) mutable {
                 if (stopping_ || !transport_.current(result.lease.transport))
                   return;
-                auto view = state.apply_translations(
-                    result.lease, result.generation, result.translations);
+                // 只带读音和拆解、没有释义的结果（TranslationWorker 交的是空列表）不交给会话：空列表会把会话里已有的释义清掉。
+                std::optional<nlohmann::json> view;
+                if (result.translations != "[]")
+                  view = state.apply_translations(
+                      result.lease, result.generation, result.translations);
+                // 读音和逐词拆解只用于显示，不进会话，随释义一起交给候选窗；没有新释义可交时单独交。
                 if (view)
-                  candidates_.translations(result.lease, *view);
+                  candidates_.translations(result.lease, *view,
+                                           std::move(result.readings));
+                else if (!result.readings.empty())
+                  candidates_.readings(result.lease, std::move(result.readings));
               });
         } catch (...) {
           // Optional provider delivery must never stop the input queue.
@@ -110,10 +136,18 @@ SessionController::SessionController(
              settled_since_ = std::chrono::steady_clock::now();
              if (reply.online_query) {
                (void)cloud_.submit(lease, *reply.online_query);
-               // The same query carries the resolved AI config and the
-               // ai_eligible flag; the AI worker decides for itself whether it
-               // applies, so an ineligible query costs nothing here.
-               (void)ai_.submit(lease, *reply.online_query);
+               // Rebuild the descriptor on the input queue after delivery: a
+               // preference update may have landed after this reply was composed.
+               const auto query = *reply.online_query;
+               const auto refresh = input_.submit([this, lease, query](InputState &state) {
+                 if (stopping_)
+                   return;
+                 const auto descriptor = state.ai_request(lease, query);
+                 (void)ai_.submit(lease, query,
+                                  descriptor.value_or(std::string{}));
+               });
+               if (!refresh)
+                 (void)ai_.submit(lease, query, std::string{});
              }
            },
            [this](const FocusLease &lease, const PendingReply &reply) {
@@ -149,6 +183,8 @@ SessionController::SessionController(
             // both positive and negative results before asking for the new
             // query, even when the candidate page remains eligible.
             translations_.clear_cache();
+            // 读音开关、释义开关或目标语言变了：旧的读音和拆解作废，等这次重新翻译带回新的。
+            candidates_.clear_readings();
             if (auto request = state.current_translation_request())
               (void)translations_.submit(request->first,
                                           std::move(request->second));
@@ -159,7 +195,8 @@ SessionController::SessionController(
 SessionController::~SessionController() { stop(); }
 SelectionRequestResult
 SessionController::request_selection(const FocusLease &lease, uint64_t session,
-                                     uint64_t generation, size_t index) {
+                                     uint64_t generation, size_t index,
+                                     uint64_t translation_page) {
   if (input_.on_worker_thread() || active_controller == this)
     throw std::logic_error("Selection cannot reenter controller callbacks");
   std::unique_lock transaction(*transactions_, std::try_to_lock);
@@ -175,7 +212,9 @@ SessionController::request_selection(const FocusLease &lease, uint64_t session,
   try {
     const auto shown = candidate_view();
     if (!shown || !shown->visible || shown->session != session ||
-        shown->generation != generation || shown->lease.epoch != lease.epoch ||
+        shown->generation != generation ||
+        shown->translation_page != translation_page ||
+        shown->lease.epoch != lease.epoch ||
         shown->lease.token != lease.token ||
         !same_ticket(shown->lease.transport, lease.transport))
       return SelectionRequestResult::Rejected;
@@ -188,6 +227,7 @@ SessionController::request_selection(const FocusLease &lease, uint64_t session,
     const auto painted = candidate_view();
     if (!painted || painted->session != session ||
         painted->generation != generation ||
+        painted->translation_page != translation_page ||
         painted->render_serial < shown->render_serial)
       return SelectionRequestResult::Rejected;
     bool found = false;
@@ -200,7 +240,8 @@ SessionController::request_selection(const FocusLease &lease, uint64_t session,
     std::optional<PendingReply> pending;
     auto prepared = input_.submit([&](InputState &state) {
       if (!stopping_ && transport_.current(lease.transport))
-        pending = state.select_candidate(lease, session, generation, index);
+        pending = state.select_candidate(lease, session, generation, index,
+                                         translation_page);
     });
     if (!prepared || prepared->get() != InputTaskStatus::Completed)
       return fail();
@@ -248,11 +289,12 @@ SessionController::request_selection(const FocusLease &lease, uint64_t session,
 }
 CandidateActionRequestResult SessionController::request_candidate_action(
     const FocusLease &lease, uint64_t session, uint64_t generation,
-    size_t index, CandidateAction action, uint8_t position) {
+    size_t index, uint64_t translation_page, CandidateAction action,
+    uint8_t position) {
   if (input_.on_worker_thread() || active_controller == this)
     throw std::logic_error(
         "Candidate action cannot reenter controller callbacks");
-  if (action == CandidateAction::Select ||
+  if (action == CandidateAction::Select || translation_page != 0 ||
       (action == CandidateAction::FixPosition &&
        (position < 1 || position > 5)) ||
       (action != CandidateAction::FixPosition && position != 0))
@@ -270,7 +312,9 @@ CandidateActionRequestResult SessionController::request_candidate_action(
   try {
     const auto shown = candidate_view();
     if (!shown || !shown->visible || shown->session != session ||
-        shown->generation != generation || shown->lease.epoch != lease.epoch ||
+        shown->generation != generation ||
+        shown->translation_page != translation_page ||
+        shown->lease.epoch != lease.epoch ||
         shown->lease.token != lease.token ||
         !same_ticket(shown->lease.transport, lease.transport))
       return CandidateActionRequestResult::Rejected;
@@ -285,6 +329,7 @@ CandidateActionRequestResult SessionController::request_candidate_action(
     const auto painted = candidate_view();
     if (!painted || !painted->visible || painted->session != session ||
         painted->generation != generation ||
+        painted->translation_page != translation_page ||
         painted->lease.epoch != lease.epoch ||
         painted->lease.token != lease.token ||
         !same_ticket(painted->lease.transport, lease.transport))
@@ -318,8 +363,9 @@ CandidatePageRequestResult
 SessionController::request_page(const CandidatePage &page) {
   if (input_.on_worker_thread() || active_controller == this)
     throw std::logic_error("Candidate paging cannot reenter controller callbacks");
+  // 释义页上翻页不起作用（FocusedSession::page_candidate），从释义页那一帧发起的翻页直接拒绝。
   if (!page.lease.epoch || !page.session || !page.generation ||
-      page.steps == 0 || page.steps > 9 || stopping_)
+      page.steps == 0 || page.steps > 9 || page.translation_page != 0 || stopping_)
     return CandidatePageRequestResult::Rejected;
   std::unique_lock transaction(*transactions_, std::try_to_lock);
   if (!transaction.owns_lock())
@@ -335,6 +381,7 @@ SessionController::request_page(const CandidatePage &page) {
     const auto shown = candidate_view();
     if (!shown || !shown->visible || shown->session != page.session ||
         shown->generation != page.generation ||
+        shown->translation_page != page.translation_page ||
         shown->lease.epoch != page.lease.epoch ||
         shown->lease.token != page.lease.token ||
         !same_ticket(shown->lease.transport, page.lease.transport))
@@ -350,6 +397,7 @@ SessionController::request_page(const CandidatePage &page) {
     const auto painted = candidate_view();
     if (!painted || !painted->visible || painted->session != page.session ||
         painted->generation != page.generation ||
+        painted->translation_page != page.translation_page ||
         painted->lease.epoch != page.lease.epoch ||
         painted->lease.token != page.lease.token ||
         !same_ticket(painted->lease.transport, page.lease.transport))
@@ -359,7 +407,7 @@ SessionController::request_page(const CandidatePage &page) {
       if (!stopping_ && transport_.current(page.lease.transport))
         transition = state.page_candidate(page.lease, page.session,
                                           page.generation, page.previous,
-                                          page.steps);
+                                          page.steps, page.from_wheel);
       if (transition) {
         candidates_.action(page.lease, *transition);
         // Paging advances the Engine generation and replaces the visible
@@ -495,6 +543,25 @@ bool SessionController::exit_dedicated_english(const FocusLease &lease) {
   if (!submitted || submitted->wait_for(std::chrono::seconds(2)) != std::future_status::ready)
     return false;
   return submitted->get() == InputTaskStatus::Completed && exited;
+}
+bool SessionController::set_dedicated_english(const FocusLease &lease,
+                                              bool enabled) {
+  if (input_.on_worker_thread() || active_controller == this || stopping_.load())
+    throw std::logic_error("Dedicated-English switch cannot reenter controller callbacks");
+  // 这是用户在托盘里点的开关，只发一次、没有重试，所以锁忙时等着而不是放弃；等锁和等输入队列共用 2 秒。
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  const auto transaction = wait_transaction(*transactions_, stopping_, deadline);
+  if (!transaction.owns_lock() || stopping_.load()) return false;
+  // 等待可能超时，任务之后仍会在输入队列上运行，所以结果和租约放在任务自己持有的存储里，不引用这个栈帧。
+  auto applied = std::make_shared<bool>(false);
+  auto submitted = input_.submit([this, lease, enabled, applied](InputState &state) {
+    if (stopping_ || !transport_.current(lease.transport)) return;
+    if (auto view = state.set_dedicated_english(lease, enabled))
+      *applied = view->at("dedicated_english").get<bool>() == enabled;
+  });
+  if (!submitted || submitted->wait_until(deadline) != std::future_status::ready)
+    return false;
+  return submitted->get() == InputTaskStatus::Completed && *applied;
 }
 bool SessionController::focus_current(const FocusLease &lease) {
   if (input_.on_worker_thread() || active_controller == this)
@@ -636,6 +703,14 @@ bool SessionController::deactivate_terminal(uint64_t client, uint64_t token) {
       std::future_status::ready)
     return false;
   return submitted->get() == InputTaskStatus::Completed && result->load();
+}
+void SessionController::passthrough_key(uint64_t client, uint64_t token, uint32_t key_class) {
+  if (!client || !token || stopping_.load())
+    return;
+  // 返回的 future 来自 promise，丢掉它不会阻塞。
+  (void)input_.submit([client, token, key_class](InputState &state) {
+    (void)state.passthrough_key(client, token, key_class);
+  });
 }
 ModeRequestResult SessionController::request_mode(const FocusLease &lease,
                                                   WorkerMode mode) {

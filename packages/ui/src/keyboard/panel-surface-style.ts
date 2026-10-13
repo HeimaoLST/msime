@@ -7,9 +7,11 @@
  * stylesheet's habit of writing every declaration twice.
  */
 
-const panelText = "text-[#f5f5f7] group-data-[panel-theme=light]:text-[#202124]";
-const panelMuted = "text-[#aeb0b7] group-data-[panel-theme=light]:text-[#656a73]";
-const panelSurface = "bg-[#202027] group-data-[panel-theme=light]:bg-[#f7f8fa]";
+import { minWidthZero } from "../core/row-style";
+
+export const panelText = "text-[#f5f5f7] group-data-[panel-theme=light]:text-[#202124]";
+export const panelMuted = "text-[#aeb0b7] group-data-[panel-theme=light]:text-[#656a73]";
+export const panelSurface = "bg-[#202027] group-data-[panel-theme=light]:bg-[#f7f8fa]";
 const panelEdge = "border-[#45454f] group-data-[panel-theme=light]:border-[#c8ccd5]";
 const panelField = `rounded-[7px] border bg-[#2b2b33] ${panelEdge} ${panelText} group-data-[panel-theme=light]:bg-white`;
 
@@ -36,7 +38,7 @@ export const handwritingPanel = `group ${panelSurface} ${panelText}`;
 /** Canvas beside the recognition column, stacked once the window is too narrow to hold both. */
 export const handwritingBody =
   "grid grid-cols-[minmax(300px,0.43fr)_minmax(360px,0.57fr)] gap-7 p-6 max-phone:grid-cols-1 max-phone:p-3.5";
-export const inkSection = "min-w-0";
+export const inkSection = minWidthZero;
 /*
  * Crosshair while a stroke is in progress, hand otherwise, as the shipped panel does: with no cursor
  * at all the square gives no hint that it can be written on.
@@ -58,8 +60,7 @@ export const recognitionSection =
 export const candidateGrid =
   "grid grid-cols-4 gap-2 [&>button]:aspect-square [&>button]:rounded-md [&>button]:text-3xl [&>button]:border [&>button]:bg-[#292a31] [&>button]:border-[#45454f] [&>button]:group-data-[panel-theme=light]:border-[#c8ccd5] [&>button]:text-[#f5f5f7] [&>button]:group-data-[panel-theme=light]:text-[#202124] [&>button]:hover:border-[#5fbf84] [&>button]:hover:bg-[#3b3240] [&>button]:group-data-[panel-theme=light]:bg-white [&>button]:group-data-[panel-theme=light]:hover:bg-[#edf0f5]";
 export const candidate = "flex min-w-0 flex-col gap-1";
-export const candidateSubmit =
-  "w-full min-w-0 p-1.5 leading-tight break-anywhere whitespace-normal";
+export const candidateSubmit = "w-full min-w-0 p-1.5 leading-tight wrap-anywhere whitespace-normal";
 /** The copy affordance beside a candidate is a label, not a glyph, so it does not want a square. */
 export const candidateCopy = "aspect-auto! px-2 py-1 text-[13px]!";
 
@@ -83,9 +84,9 @@ export const mockCandidates =
 export const keyboardPanel =
   "flex h-screen min-h-0 flex-col rounded-lg bg-[var(--kb-background)] font-[var(--kb-font-family)] text-[var(--kb-text)]";
 export const keyboardHeader =
-  "h-7 flex-[0_0_28px] border-b-0 bg-[var(--kb-background)] pt-0 pr-1.5 pb-0 pl-2.5 text-xs text-[var(--kb-heading)] [&>button]:h-6 [&>button]:flex-[0_0_28px] [&>button]:rounded [&>button]:text-[var(--kb-text)] [&>button:hover]:bg-[var(--kb-hover)] [&>button:hover]:text-[var(--kb-text)]";
+  "flex min-h-9 shrink-0 items-center gap-2 bg-[var(--kb-background)] px-2.5 py-1.5 text-xs text-[var(--kb-heading)] select-none [&>button]:h-7 [&>button]:shrink-0 [&>button]:rounded [&>button]:border-0 [&>button]:bg-transparent [&>button]:px-2 [&>button]:text-xs [&>button]:leading-none [&>button]:whitespace-nowrap [&>button]:text-[var(--kb-text)] [&>button:hover]:bg-[var(--kb-hover)] [&>button:last-child]:w-7 [&>button:last-child]:p-0 [&>button:last-child]:text-xl";
 export const keyboardNotice =
-  "min-w-0 overflow-hidden text-xs text-ellipsis whitespace-nowrap text-[var(--kb-heading)]";
+  "min-w-0 flex-1 text-xs leading-5 break-words whitespace-normal text-[var(--kb-heading)]";
 export const keyboardBody = "min-h-0 flex-1 px-[7px] pt-0 pb-[7px]";
 export const keyboardLayout = "flex h-full flex-col gap-[var(--keyboard-row-gap,4px)]";
 export const keyboardRow = "flex min-h-0 flex-1 gap-[var(--keyboard-key-gap,4px)]";

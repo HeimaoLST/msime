@@ -9,10 +9,25 @@ public final class ShuangpinKeyHintPolicy {
     private static final int MAX_HINT_LENGTH = 128;
     private static final String OK_TRUE = "\"ok\"\\s*:\\s*true";
 
+    /** 共享偏好里控制提示的开关，缺省为开；关掉后双拼也不画提示，其余条件与它无关。 */
+    public static final String PREFERENCE_KEY = "touch_shuangpin_key_hints";
+
     private ShuangpinKeyHintPolicy() { }
 
-    public static boolean visible(boolean dedicatedEnglish, int scheme, String localMode) {
-        return !dedicatedEnglish && scheme == 1 && "none".equals(localMode);
+    /** 有 view 时记下的双拼方案：方案是双拼（scheme 1）时是它的 `shuangpin_profile`，其他方案为空。本地模式和英文只决定此刻画不画，不改记下的方案，免得临时进一次本地模式就把它冲掉。 */
+    public static String rememberedProfile(int scheme, String profile) {
+        return scheme == 1 && profile != null ? profile : "";
+    }
+
+    /**
+     * 没有 view 时按哪个双拼方案画提示。换应用、换页面时 onStartInput 先停掉会话、清空 view，会话要在后台建一两秒；光标移动取消组字后 view 也会暂时清空。会话正在建或仍然在（{@code sessionExpected}）时用上次记下的方案，第一帧就带着提示和下边距，会话到达时不再整排跳一下。不打算建会话的输入框（密码、数字）和建会话失败后不画。
+     */
+    public static String profileWithoutView(boolean sessionExpected, String remembered) {
+        return sessionExpected && remembered != null ? remembered : "";
+    }
+
+    public static boolean visible(boolean dedicatedEnglish, int scheme, String localMode, boolean enabled) {
+        return enabled && !dedicatedEnglish && scheme == 1 && "none".equals(localMode);
     }
 
     /** Decode the shared host envelope; malformed or failed responses intentionally yield no map. */
@@ -50,12 +65,12 @@ public final class ShuangpinKeyHintPolicy {
     }
 
     private static int skipSpaces(String value, int cursor, int limit) {
-        while (cursor < limit && Character.isWhitespace(value.charAt(cursor))) cursor++;
+        while (cursor < limit && TextPolicy.isWhitespace(value.charAt(cursor))) cursor++;
         return cursor;
     }
 
     private static int skipSpaceAndCommas(String value, int cursor, int limit) {
-        while (cursor < limit && (Character.isWhitespace(value.charAt(cursor))
+            while (cursor < limit && (TextPolicy.isWhitespace(value.charAt(cursor))
                 || value.charAt(cursor) == ',')) cursor++;
         return cursor;
     }
@@ -72,8 +87,8 @@ public final class ShuangpinKeyHintPolicy {
     }
 
     public static String hint(Map<String, String> hints, String key,
-            boolean dedicatedEnglish, int scheme, String localMode) {
-        if (!visible(dedicatedEnglish, scheme, localMode) || key == null || hints == null)
+            boolean dedicatedEnglish, int scheme, String localMode, boolean enabled) {
+        if (!visible(dedicatedEnglish, scheme, localMode, enabled) || key == null || hints == null)
             return "";
         return hints.getOrDefault(TextPolicy.uppercase(key), "");
     }

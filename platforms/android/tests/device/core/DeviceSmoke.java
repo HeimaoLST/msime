@@ -9,17 +9,57 @@ import android.content.Intent;
 import android.graphics.Rect;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
+import android.util.AtomicFile;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.InputDevice;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.function.Predicate;
 
 /** Device-only synthetic acceptance; reads both editor and IME accessibility windows. */
 public class DeviceSmoke extends Instrumentation {
     protected UiAutomation automation;
     protected String stage = "launch";
+
+    /** 执行设备测试命令并排空输出，避免未读取的管道阻塞命令。 */
+    protected final void shellDiscard(String command) throws Exception {
+        try (var input = new ParcelFileDescriptor.AutoCloseInputStream(
+                automation.executeShellCommand(command))) {
+            byte[] buffer = new byte[1024];
+            while (input.read(buffer) != -1) { }
+        }
+    }
+
+    /** 重新注册并启用被测输入法，等待系统完成切换。 */
+    protected final void restartIme() throws Exception {
+        shellDiscard("ime disable app.msime.android/.MSIMEInputService");
+        shellDiscard("ime enable app.msime.android/.MSIMEInputService");
+        shellDiscard("ime set app.msime.android/.MSIMEInputService");
+        SystemClock.sleep(1000);
+    }
+
+    /** 用原子写入发布测试偏好；失败时保留原文件。 */
+    protected final void publish(File file, byte[] contents) throws Exception {
+        AtomicFile target = new AtomicFile(file);
+        FileOutputStream output = target.startWrite();
+        try {
+            output.write(contents);
+            target.finishWrite(output);
+        } catch (Exception error) {
+            target.failWrite(output);
+            throw error;
+        }
+    }
+
+    /** `uinput` 接上的键盘的标准输入，往里写注入命令就是在那块键盘上按键；没有接时为空。 */
+    protected FileOutputStream uinputInput;
+
     @Override public void onCreate(Bundle arguments) { super.onCreate(arguments); start(); }
     @Override public void onStart() {
         Bundle result = new Bundle();
@@ -275,6 +315,15 @@ public class DeviceSmoke extends Instrumentation {
         }
         for (int index = 0; index < node.getChildCount(); index++) collectImeTexts(node.getChild(index), texts);
     }
+    /**
+     * 丢掉 UiAutomation 缓存里的节点，下一次查询从输入法进程重新取。
+     *
+     * <p>「更多」面板每次切换开关都整页重建磁贴（`ImeFunctionPanel.renderMoreTools` 先 removeAllViews 再挂新磁贴）。重建发出的内容变化事件和查询时预取的子树交错到达时，缓存里可能留下已经拆掉的旧磁贴；之后界面静止、不再有事件来冲掉它，只等空闲再查，拿到的还是同一个过期节点，performAction 连续三次返回 false。2026-10-09 CI 的 API 35 上，「按键音」第二次点击（`more tools sound update`）在 PR 和 develop 上反复失败，失败时整个 MoreTools 套件不到五秒就结束，三次重试几乎是立刻用完的。tap 最后一次失败时报告节点是否还在（`node live` / `node gone`），用来确认这个判断。`clearCache` 从安卓 14（API 34）起才有，更早的系统维持原来的重试。
+     */
+    protected void dropStaleNodes() {
+        if (Build.VERSION.SDK_INT >= 34) automation.clearCache();
+    }
+
     protected void tap(Predicate<AccessibilityNodeInfo> match) throws java.util.concurrent.TimeoutException {
         AccessibilityNodeInfo target = awaitAny(match);
         automation.waitForIdle(500, 5000);
@@ -283,10 +332,20 @@ public class DeviceSmoke extends Instrumentation {
         // Accessibility click still invokes the real product control and InputConnection path.
         if (equalsText("app.msime.android", target.getPackageName())
                 && target.isClickable()) {
-            if (!target.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-                throw new AssertionError("Synthetic control action failed");
-            SystemClock.sleep(150);
-            return;
+            // 查到节点和点下去之间，面板可能已经重新绑定（开关刷新状态、翻页动画收尾），performAction 对过期节点返回 false，点击并没有发生。所以等界面空闲后重新查一次再点，连续三次都不成才算失败：真不接受点击的控件照样失败，不会被重试掩盖，也不会把开关点两次。
+            for (int attempt = 1; ; attempt++) {
+                if (target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    SystemClock.sleep(150);
+                    return;
+                }
+                if (attempt == 3) {
+                    throw new AssertionError("Synthetic control action failed ("
+                        + (target.refresh() ? "node live" : "node gone") + ")");
+                }
+                dropStaleNodes();
+                automation.waitForIdle(500, 5000);
+                target = awaitAny(match);
+            }
         }
         if (!target.isVisibleToUser()) target = await(match);
         Rect bounds = new Rect();
@@ -303,6 +362,135 @@ public class DeviceSmoke extends Instrumentation {
         } finally { down.recycle(); up.recycle(); }
         SystemClock.sleep(150);
     }
+    // ---- 实体键盘 ----
+    // 宿主只把来自非虚拟、字母型键盘设备的按下当成实体键盘打字（`HardwareKeyboardModePolicy.physicalTyping`），`adb shell input` 的虚拟设备不算，而专用 AVD 自带的 `qwerty2` 在 `hw.keyboard=no` 时不是字母型。所以安卓 12（API 31）起用系统的 `uinput` 命令接上一块 USB 键盘：它是真的 evdev 设备，系统像对待蓝牙、USB 键盘一样报告「接着实体键盘」，测试结束关掉 `uinput` 就是拔掉。更早的系统只能用 `hw.keyboard=yes` 的 AVD 自带键盘，没有就失败并说明原因。
+
+    /** 一块非虚拟、字母型的键盘：`uinput` 接上的那块，或 `hw.keyboard=yes` 的 AVD 自带的那块。设备接上后要过一会儿才出现在列表里。 */
+    protected static int physicalKeyboard() {
+        long deadline = SystemClock.uptimeMillis() + 10000;
+        do {
+            for (int id : InputDevice.getDeviceIds()) {
+                InputDevice device = InputDevice.getDevice(id);
+                if (device != null && !device.isVirtual()
+                        && device.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC) return id;
+            }
+            SystemClock.sleep(200);
+        } while (SystemClock.uptimeMillis() < deadline);
+        throw new AssertionError("No physical alphabetic keyboard: API " + Build.VERSION.SDK_INT
+            + " before 31 needs an AVD with hw.keyboard=yes");
+    }
+
+    /**
+     * 用 `uinput` 接上一块 USB 键盘，返回命令的标准输出、标准输入和标准错误；标准输入一直开着，键盘就一直接着。键盘总有 26 个字母键和空格，`extraKeyCodes` 是套件另外要按的键（Android 键码），一并登记。
+     */
+    protected ParcelFileDescriptor[] plugKeyboard(int... extraKeyCodes) throws Exception {
+        ParcelFileDescriptor[] streams = automation.executeShellCommandRwe("uinput -");
+        StringBuilder keys = new StringBuilder();
+        // Linux 键码：KEY_Q..KEY_P 是 16..25，KEY_A..KEY_L 是 30..38，KEY_Z..KEY_M 是 44..50，空格 57。
+        for (int[] range : new int[][] {{16, 25}, {30, 38}, {44, 50}, {57, 57}}) {
+            for (int code = range[0]; code <= range[1]; code++) keys.append(keys.length() == 0 ? "" : ",").append(code);
+        }
+        for (int keyCode : extraKeyCodes) keys.append(',').append(linuxKey(keyCode));
+        String register = "{\"id\":1,\"command\":\"register\",\"name\":\"MSIME test keyboard\",\"vid\":6353,"
+            + "\"pid\":26514,\"bus\":\"usb\",\"configuration\":[{\"type\":\"UI_SET_EVBIT\",\"data\":[1]},"
+            + "{\"type\":\"UI_SET_KEYBIT\",\"data\":[" + keys + "]}]}\n";
+        uinputInput = new FileOutputStream(streams[1].getFileDescriptor());
+        uinputInput.write(register.getBytes(StandardCharsets.UTF_8));
+        uinputInput.flush();
+        return streams;
+    }
+
+    /** 关掉 `uinput` 的标准输入：命令退出，键盘拔掉。 */
+    protected void unplugKeyboard(ParcelFileDescriptor[] streams) throws Exception {
+        uinputInput = null;
+        for (ParcelFileDescriptor stream : streams) stream.close();
+    }
+
+    /** Android 键码对应的 Linux 键码：字母、数字行、空格、回车、Esc 和左 Ctrl。 */
+    protected static int linuxKey(int keyCode) {
+        if (keyCode >= KeyEvent.KEYCODE_1 && keyCode <= KeyEvent.KEYCODE_9) return keyCode - KeyEvent.KEYCODE_1 + 2;
+        return switch (keyCode) {
+            case KeyEvent.KEYCODE_0 -> 11;
+            case KeyEvent.KEYCODE_Q -> 16;
+            case KeyEvent.KEYCODE_W -> 17;
+            case KeyEvent.KEYCODE_E -> 18;
+            case KeyEvent.KEYCODE_R -> 19;
+            case KeyEvent.KEYCODE_T -> 20;
+            case KeyEvent.KEYCODE_Y -> 21;
+            case KeyEvent.KEYCODE_U -> 22;
+            case KeyEvent.KEYCODE_I -> 23;
+            case KeyEvent.KEYCODE_O -> 24;
+            case KeyEvent.KEYCODE_P -> 25;
+            case KeyEvent.KEYCODE_A -> 30;
+            case KeyEvent.KEYCODE_S -> 31;
+            case KeyEvent.KEYCODE_D -> 32;
+            case KeyEvent.KEYCODE_F -> 33;
+            case KeyEvent.KEYCODE_G -> 34;
+            case KeyEvent.KEYCODE_H -> 35;
+            case KeyEvent.KEYCODE_J -> 36;
+            case KeyEvent.KEYCODE_K -> 37;
+            case KeyEvent.KEYCODE_L -> 38;
+            case KeyEvent.KEYCODE_Z -> 44;
+            case KeyEvent.KEYCODE_X -> 45;
+            case KeyEvent.KEYCODE_C -> 46;
+            case KeyEvent.KEYCODE_V -> 47;
+            case KeyEvent.KEYCODE_B -> 48;
+            case KeyEvent.KEYCODE_N -> 49;
+            case KeyEvent.KEYCODE_M -> 50;
+            case KeyEvent.KEYCODE_SPACE -> 57;
+            case KeyEvent.KEYCODE_ENTER -> 28;
+            case KeyEvent.KEYCODE_ESCAPE -> 1;
+            case KeyEvent.KEYCODE_CTRL_LEFT -> 29;
+            default -> throw new AssertionError("No Linux key code for " + KeyEvent.keyCodeToString(keyCode));
+        };
+    }
+
+    /** 逐个按下、松开这些键：接了 `uinput` 键盘时从那块键盘的 evdev 打进去，走真实的输入读取链路；否则以 AVD 自带键盘的设备号注入。 */
+    protected void type(int device, int... keyCodes) throws Exception {
+        for (int keyCode : keyCodes) {
+            if (uinputInput != null) {
+                int code = linuxKey(keyCode);
+                inject("1," + code + ",1,0,0,0,1," + code + ",0,0,0,0");
+                continue;
+            }
+            long now = SystemClock.uptimeMillis();
+            injectKey(device, now, KeyEvent.ACTION_DOWN, keyCode, 0);
+            injectKey(device, now + 30, KeyEvent.ACTION_UP, keyCode, 0);
+            SystemClock.sleep(80);
+        }
+    }
+
+    /** 按着左 Ctrl 按一下 `keyCode`：Ctrl 按下、键按下、键松开、Ctrl 松开，和真人按组合键的顺序一样。 */
+    protected void ctrlChord(int device, int keyCode) throws Exception {
+        if (uinputInput != null) {
+            int ctrl = linuxKey(KeyEvent.KEYCODE_CTRL_LEFT);
+            int code = linuxKey(keyCode);
+            inject("1," + ctrl + ",1,0,0,0,1," + code + ",1,0,0,0,1," + code + ",0,0,0,0,1," + ctrl + ",0,0,0,0");
+            return;
+        }
+        int meta = KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON;
+        long now = SystemClock.uptimeMillis();
+        injectKey(device, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_CTRL_LEFT, meta);
+        injectKey(device, now + 20, KeyEvent.ACTION_DOWN, keyCode, meta);
+        injectKey(device, now + 50, KeyEvent.ACTION_UP, keyCode, meta);
+        injectKey(device, now + 70, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_CTRL_LEFT, 0);
+        SystemClock.sleep(80);
+    }
+
+    /** 往 `uinput` 键盘写一串 evdev 事件（类型、键码、值三个一组，EV_KEY 后面跟 EV_SYN），写完等系统读走。 */
+    private void inject(String events) throws Exception {
+        String command = "{\"id\":1,\"command\":\"inject\",\"events\":[" + events + "]}\n";
+        uinputInput.write(command.getBytes(StandardCharsets.UTF_8));
+        uinputInput.flush();
+        SystemClock.sleep(120);
+    }
+
+    private void injectKey(int device, long time, int action, int keyCode, int metaState) {
+        KeyEvent event = new KeyEvent(time, time, action, keyCode, 0, metaState, device, 0, 0,
+            InputDevice.SOURCE_KEYBOARD);
+        if (!automation.injectInputEvent(event, true)) throw new AssertionError("Key injection failed");
+    }
+
     /**
      * Page the function panel until the tile described `description` is on screen.
      *

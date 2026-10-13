@@ -7,8 +7,8 @@ use crate::paths::RuntimePaths;
 use crate::types::{
     CandidateSource, CommandTableEntry, EnglishInputOptions, FrequencyAdjustmentOptions,
     FuzzyPinyinOptions, LocalInputMode, LocalModeOptions, MentionEntry, MixedExpressiveOptions,
-    QuickPhraseEntry, SchemeSet, SchemeType, SentenceAssociationOptions, ShuangpinProfileKind,
-    WordItem, WubiInputOptions,
+    QuickPhraseEntry, SchemeSet, SchemeType, SentenceAssociationOptions, ShuangpinCustomTable,
+    ShuangpinProfileKind, WordItem, WubiInputOptions, DEFAULT_FIRST_PAGE_ROWS,
 };
 use crate::vietnamese::{InputMethod as VietnameseInputMethod, ToneStyle as VietnameseToneStyle};
 
@@ -20,6 +20,8 @@ pub struct SessionOptions {
     /// 会话允许运行的方案，缺省全部。`scheme` 和之后的 `switch_scheme` 都必须在其中；只为其中的方案构造 provider（见 [`SchemeSet`]）。
     pub enabled_schemes: SchemeSet,
     pub shuangpin_profile: ShuangpinProfileKind,
+    /// `shuangpin_profile` 为 `Custom` 时的键位表。没有它或它不合法时，会话里有双拼就建不起来（`INVALID_CUSTOM_SHUANGPIN_PROFILE`），没有双拼就按小鹤；内置方案不读它。
+    pub shuangpin_custom_profile: Option<ShuangpinCustomTable>,
     /// Shuangpin preedit shows the typed keys rather than the decoded quanpin.
     pub shuangpin_preedit_uses_raw: bool,
     /// How the Vietnamese scheme spells marks: Telex letters or VNI digits.
@@ -47,6 +49,8 @@ pub struct SessionOptions {
     pub learning: bool,
     /// Hand back every whole-sentence reading instead of only the best. A host that sets this must reorder and crop them itself.
     pub sentence_alternatives: bool,
+    /// 宿主的每页候选数（`candidate_page_size`）：全长组的精确同音词够这么多行就不再并入更长的补全词。0 到请求里会归一成 1。
+    pub first_page_rows: usize,
     /// 只出单字：中文方案的候选去掉含汉字的词和整句、只留单个汉字（见 [`SchemeType::filters_to_single_characters`]），选一个字后剩下的拼写接着组字。
     pub single_character_only: bool,
     pub fuzzy_pinyin: FuzzyPinyinOptions,
@@ -54,6 +58,8 @@ pub struct SessionOptions {
     pub local_modes: LocalModeOptions,
     pub english: EnglishInputOptions,
     pub expressive: MixedExpressiveOptions,
+    /// 日文混输（实验选项，默认关）：全拼、双拼组字时，整段输入像日文罗马字就混进一行日文转换（来源 `MixedJapanese`），见 `ImeSession::mixed_japanese_conversion`。需要会话带日文（`enabled_schemes` 含 `JapaneseRomaji`）和日文模型；开着时建会话就在后台预热模型。
+    pub japanese_mixing: bool,
     pub wubi: WubiInputOptions,
     /// Learn word sequences and pick pairs; also needs `learning`.
     pub personal_context: bool,
@@ -66,6 +72,8 @@ pub struct SessionOptions {
     pub mention_entries: Vec<MentionEntry>,
     /// K 模式在数据库行之后追加的宿主短语；`Session::set_quick_phrase_table` 可以实时替换。
     pub quick_phrase_table: Vec<QuickPhraseEntry>,
+    /// 宿主会把候选转成繁体输出：拆字（`C`）行按转换后的字形去重，免得一屏出现两个相同的繁体字。
+    pub chaizi_traditional_output: bool,
 }
 
 impl SessionOptions {
@@ -76,6 +84,7 @@ impl SessionOptions {
             scheme: SchemeType::Quanpin,
             enabled_schemes: SchemeSet::ALL,
             shuangpin_profile: ShuangpinProfileKind::Xiaohe,
+            shuangpin_custom_profile: None,
             shuangpin_preedit_uses_raw: true,
             vietnamese_input_method: VietnameseInputMethod::Telex,
             vietnamese_tone_style: VietnameseToneStyle::Modern,
@@ -92,12 +101,14 @@ impl SessionOptions {
             punctuation_lock: 0,
             learning: true,
             sentence_alternatives: false,
+            first_page_rows: DEFAULT_FIRST_PAGE_ROWS,
             single_character_only: false,
             fuzzy_pinyin: FuzzyPinyinOptions::default(),
             frequency: FrequencyAdjustmentOptions::default(),
             local_modes: LocalModeOptions::default(),
             english: EnglishInputOptions::default(),
             expressive: MixedExpressiveOptions::default(),
+            japanese_mixing: false,
             wubi: WubiInputOptions::default(),
             personal_context: true,
             sentence_association: SentenceAssociationOptions::default(),
@@ -105,6 +116,7 @@ impl SessionOptions {
             command_table: Vec::new(),
             mention_entries: Vec::new(),
             quick_phrase_table: Vec::new(),
+            chaizi_traditional_output: false,
         }
     }
 }
@@ -114,7 +126,7 @@ impl SessionOptions {
 pub struct SessionSnapshot {
     pub scheme: SchemeType,
     pub local_mode: LocalInputMode,
-    /// The non-letter characters `character` takes in this state: the active local mode's `spelling_symbols`, or while nothing is composed the keys that open the `/` and `@` modes. A host or runtime that would send one of these as punctuation sends it as a character instead.
+    /// The non-letter characters `character` takes in this state: the active local mode's `spelling_symbols` (拆字按光标处列出部件分隔符 `'` 和微软双拼的韵母 `;`), or while nothing is composed the keys that open the `/` and `@` modes. A host or runtime that would send one of these as punctuation sends it as a character instead.
     pub spelling_symbols: String,
     pub preedit: String,
     pub raw_segmentation: String,
@@ -142,4 +154,8 @@ pub struct SessionSnapshot {
     pub candidate_answers_key: Vec<bool>,
     /// The scheme's openable candidate list is showing (the Korean Hanja list). Hosts read this instead of inferring it from the scheme and a non-empty list.
     pub candidate_list_open: bool,
+    /// 整句改字时改好的整句，否则为空。宿主在它非空时把它画在行内代替拼音。
+    pub conversion: String,
+    /// 整句改字的光标和光标处那一段，按 `conversion` 的字（Unicode 标量）计：光标在第 `.0` 个字之前，`.0..1` 是候选所替换的那一段；光标在句末时两者都等于字数。不在改字时为 `(0, 0)`。
+    pub conversion_focus: (usize, usize),
 }

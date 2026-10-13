@@ -13,24 +13,48 @@ use std::sync::Arc;
 use crate::assets;
 use crate::error::Result;
 use crate::helpcode::SharedKeymap;
+use crate::japanese::matrix::BestPath;
+use crate::japanese::provider::WholeReadingLemma;
+use crate::japanese::romaji::is_romaji_complete;
+use crate::japanese::JapaneseRomajiScheme;
 use crate::paths::RuntimePaths;
 use crate::pinyin::autocorrect::autocorrect_suppression_key;
 use crate::quanpin::QuanpinScheme;
-use crate::shuangpin::profile::profile;
 use crate::shuangpin::query::{
     apply_segmentation_cases, detect_active_double_helpcode_length, remove_manual_delimiters,
     segment_input, to_quanpin_segmentation, trim_trailing_letters_preserve_delimiters,
 };
 use crate::shuangpin::ShuangpinProfile;
+use crate::shuangpin::ShuangpinScheme;
 use crate::types::{
-    autocorrect_type, CandidateSource, FuzzyPinyinOptions, QueryRequest, SchemeKey, SchemeSet,
-    SchemeType, SentenceAssociationOptions, ShuangpinProfileKind, WordItem, WubiInputOptions,
+    autocorrect_type, CandidateSource, FirstPageRows, FuzzyPinyinOptions, QueryRequest, SchemeKey,
+    SchemeSet, SchemeType, SentenceAssociationOptions, WordItem, WubiInputOptions,
 };
 use crate::user_dictionary::typo_profile::PersonalTypoProfile;
 use crate::vietnamese::{
     InputMethod as VietnameseInputMethod, ToneStyle as VietnameseToneStyle, VietnameseScheme,
 };
+use crate::wubi::scheme::PINYIN_LOOKUP_PREFIX;
 use crate::zhuyin::scheme::{ListCandidate, ZhuyinKey, ZhuyinScheme};
+
+/// 日文混输「认得」的成本上限：最佳整句的路径成本不超过每个假名这么多。随包模型里每个假名（连小写的ぁぃぅぇぉ）都有单字词条，未知假名回退从来用不上，只看回退等于什么都认得（`xiexie` 是ぃエィ絵），所以再按成本卡。按真实模型校准（`real_model_calibrates_mixed_japanese_signals`）：拼音拆不开又没有精确词条的日文（食べます 1430、わかった 1448、疲れた 1575、待って 1768 每假名）都在 1800 以内，`konnichiha` 的今イチは（2114）、`hello` 的へっぉ（3593）、`tokyo` 的ときょ（2985）在外面；拿 `quanpin-words-v1` 的拼音删一个键或对调两键造出的 36180 个拆不开的输入里，没有精确词条却过了这条线的有 155 个（0.43%），多是 `n` 规则拼出的ちゃうん、じゃん一类。
+const MIXED_JAPANESE_KNOWN_COST_PER_KANA: i64 = 1_800;
+
+/// 日文混输「精确」信号要求的最短读音：整段读音至少这么多拍（`count_morae`，拗音的小写假名不单算）才算精确。mozc 词库里两拍的读音几乎都有词条（人名、片假名词），只看有没有词条时 421 个单音节拼音里 177 个（`ai` あい、`hao` はお、`kai` かい、`you` よう、`shou` しょう……）会混进日文；按真实模型校准（`real_model_calibrates_mixed_japanese_signals`），要求三拍以后单音节剩 20 个（`bian` びあん、`jian` 一类），`quanpin-words-v1` 25119 个词里从 1537 个降到 931 个，`sushi`（すし）也不再混进来；按字符数算三个时拗音、外来音的读法（`shou`、`shen` しぇん、`fan` ふぁん）挡不住，单音节还有 45 个。
+const MIXED_JAPANESE_EXACT_MIN_MORAE: usize = 3;
+
+/// 日文混输的「精确」信号：整段读音有完全相同读音的词条，并且读音至少 `MIXED_JAPANESE_EXACT_MIN_MORAE` 拍。
+pub(crate) fn counts_as_exact_japanese(lemma: WholeReadingLemma) -> bool {
+    lemma.exact && lemma.morae >= MIXED_JAPANESE_EXACT_MIN_MORAE
+}
+
+/// 日文混输的「认得」信号：最佳整句没有未知假名，成本也在 `MIXED_JAPANESE_KNOWN_COST_PER_KANA` 以内。
+pub(crate) fn reads_as_known_japanese(path: &BestPath) -> bool {
+    path.unknown_kana == 0
+        && path.cost
+            <= MIXED_JAPANESE_KNOWN_COST_PER_KANA
+                .saturating_mul(i64::try_from(path.kana).unwrap_or(i64::MAX))
+}
 
 // 混输拼音回退的短批次直接扫描已有词，避免为一次合并创建临时哈希表。
 const SMALL_PINYIN_FALLBACK: usize = 64;
@@ -59,7 +83,9 @@ pub struct ImeSession {
     scheme: Scheme,
     registry: ProviderRegistry,
     state: CompositionState,
-    profile: ShuangpinProfileKind,
+    /// 光标前缀查询复用的临时请求存储，避免每次分页重新分配请求字段。
+    scratch_request: QueryRequest,
+    profile: &'static ShuangpinProfile,
     vietnamese_method: VietnameseInputMethod,
     vietnamese_style: VietnameseToneStyle,
     wubi_options: WubiInputOptions,
@@ -72,12 +98,30 @@ pub struct ImeSession {
     shuangpin_helpcode: bool,
     fuzzy: FuzzyPinyinOptions,
     sentence_alternatives: bool,
+    /// 首页行数随每个请求交给各方案引擎；只影响词库要不要并入补全词。
+    first_page_rows: FirstPageRows,
     sentence_association: SentenceAssociationOptions,
     rescoring_context: String,
     typo_profile: Arc<PersonalTypoProfile>,
     /// 五笔混输拼音回退使用的方案和请求缓冲，逐键刷新时复用。
     mixed_pinyin_scheme: QuanpinScheme,
     mixed_pinyin_request: QueryRequest,
+    /// 日文混输把拼音组字当罗马字查日文时用的方案和请求缓冲，逐键复用。
+    mixed_japanese_scheme: JapaneseRomajiScheme,
+    mixed_japanese_request: QueryRequest,
+}
+
+/// 日文混输对当前组字的判断：整段按罗马字转换出的最佳日文，以及决定要不要给、放在哪里的信号。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MixedJapaneseConversion {
+    /// 整段读音的最佳整句，与日文方案候选的第一行相同。
+    pub text: String,
+    /// 整段读音至少三拍，并且正好是日文词库里某个词条的读音（`counts_as_exact_japanese`）。
+    pub exact: bool,
+    /// 最佳整句每个假名都落在词条里（没有用到未知假名回退），并且路径成本不超过每个假名 `MIXED_JAPANESE_KNOWN_COST_PER_KANA`。
+    pub known: bool,
+    /// 拼音拆不成完整音节（全拼 `is_complete_pinyin_input`，双拼 `is_complete_input` 为假），与混输英文领先用的是同一个判定。
+    pub pinyin_incomplete: bool,
 }
 
 impl ImeSession {
@@ -86,7 +130,7 @@ impl ImeSession {
     pub fn new(
         scheme: SchemeType,
         enabled: SchemeSet,
-        profile: ShuangpinProfileKind,
+        profile: &'static ShuangpinProfile,
         paths: &RuntimePaths,
         cantonese_dictionary: PathBuf,
         zhuyin_dictionary: PathBuf,
@@ -115,6 +159,7 @@ impl ImeSession {
             )?,
             registry,
             state: CompositionState::default(),
+            scratch_request: QueryRequest::default(),
             profile,
             vietnamese_method: VietnameseInputMethod::default(),
             vietnamese_style: VietnameseToneStyle::default(),
@@ -126,11 +171,14 @@ impl ImeSession {
             shuangpin_helpcode: false,
             fuzzy: FuzzyPinyinOptions::default(),
             sentence_alternatives: false,
+            first_page_rows: FirstPageRows::default(),
             sentence_association: SentenceAssociationOptions::default(),
             rescoring_context: String::new(),
             typo_profile: PersonalTypoProfile::shared(&paths.user(assets::USER_JOURNAL)),
             mixed_pinyin_scheme: QuanpinScheme::new(),
             mixed_pinyin_request: QueryRequest::default(),
+            mixed_japanese_scheme: JapaneseRomajiScheme::new(),
+            mixed_japanese_request: QueryRequest::default(),
         };
         session.bind_wubi_scheme();
         Ok(session)
@@ -164,6 +212,47 @@ impl ImeSession {
     /// 会话允许运行的方案。
     pub fn enabled_schemes(&self) -> SchemeSet {
         self.registry.enabled()
+    }
+
+    /// 日文混输开着时在会话构造里调用：后台预热日文模型。会话不带日文时什么也不做。
+    pub fn warm_up_japanese(&self) {
+        self.registry.warm_up_japanese();
+    }
+
+    /// 日文混输（实验选项）：把当前全拼、双拼组字的整段输入当成罗马字，判断要不要混进一行日文。只在可以给出一行时答 `Some`，也就是整段读音至少三拍且有完全相同读音的词条（`exact`），或者拼音拆不开且最佳整句的每个假名都认得（`pinyin_incomplete && known`）。领不领先由会话按这几个信号定（`InputSession::mixed_japanese_row`）。输入必须只有 a-z（不带撇号、`;`）、整段都能转成假名、至少两个假名；方案不是全拼、双拼，会话不带日文（没有 provider），或者日文模型缺失时一律答 `None`，只能拼出假名的输入不算。先算便宜的两个信号，拼音拆得开又没有精确词条时不跑整句搜索。
+    pub fn mixed_japanese_conversion(&mut self) -> Option<MixedJapaneseConversion> {
+        let scheme = self.current_scheme_type();
+        if !matches!(scheme, SchemeType::Quanpin | SchemeType::Shuangpin) {
+            return None;
+        }
+        let raw = self.state.request.raw_input.as_str();
+        if raw.is_empty()
+            || !raw.bytes().all(|byte| byte.is_ascii_lowercase())
+            || !is_romaji_complete(raw)
+        {
+            return None;
+        }
+        let pinyin_incomplete = !queries::spells_whole_syllables(raw, scheme, self.profile);
+        self.mixed_japanese_scheme.set_raw_input(raw, "");
+        let mut request = std::mem::take(&mut self.mixed_japanese_request);
+        self.mixed_japanese_scheme.build_request_into(&mut request);
+        let conversion = self
+            .registry
+            .japanese_whole_reading_lemma(&request)
+            .map(counts_as_exact_japanese)
+            .filter(|exact| *exact || pinyin_incomplete)
+            .and_then(|exact| {
+                let path = self.registry.japanese_whole_reading_best_path(&request)?;
+                let known = reads_as_known_japanese(&path);
+                (exact || (pinyin_incomplete && known)).then_some(MixedJapaneseConversion {
+                    text: path.text,
+                    exact,
+                    known,
+                    pinyin_incomplete,
+                })
+            });
+        self.mixed_japanese_request = request;
+        conversion
     }
 
     /// `scheme.handle_key` then `refresh_candidates`; `SchemeKey::Requery` only refreshes.
@@ -368,10 +457,12 @@ impl ImeSession {
         }
     }
 
-    /// Takes the letters a selected Cantonese row covers out of the composition and answers what is left; returns whether letters are left composing.
-    pub fn select_cantonese(&mut self, item: &WordItem) -> bool {
-        let composing = self.scheme.select_cantonese(item);
-        self.refresh_candidates();
+    /// 按候选覆盖的字节数选择粤语候选，提交时无需复制完整候选行。
+    pub fn select_cantonese_end(&mut self, end: usize) -> bool {
+        let composing = self.scheme.select_cantonese_end(end);
+        if composing {
+            self.refresh_candidates();
+        }
         composing
     }
 
@@ -462,11 +553,16 @@ impl ImeSession {
 
     /// Candidates for a raw prefix through a scratch scheme of the current type, leaving the live composition alone (caret-prefix decoding, overlays.md §7.6).
     pub fn query_raw_candidates(&mut self, raw: &str, raw_with_cases: &str) -> Vec<WordItem> {
-        let request = self.raw_request(raw, raw_with_cases);
-        if !request.valid {
-            return Vec::new();
-        }
-        self.decode(&request).candidates
+        self.with_raw_request(
+            |session, request| session.build_raw_request(raw, raw_with_cases, request),
+            |session, request| {
+                if request.valid {
+                    session.decode(request).candidates
+                } else {
+                    Vec::new()
+                }
+            },
+        )
     }
 
     /// 扩展当前请求的光标前缀，直接借用请求里的带大小写原文，避免调用方先复制前缀。
@@ -481,18 +577,53 @@ impl ImeSession {
         } else {
             &self.state.request.raw_input_with_cases
         };
-        let Some(raw_with_cases) = raw_with_cases.get(..prefix_end) else {
+        if raw_with_cases.get(..prefix_end).is_none() {
             return false;
-        };
-        let request = self.raw_request(raw, raw_with_cases);
-        request.valid
-            && self
-                .registry
-                .expand_initial_candidates(&request, candidates)
+        }
+        self.with_raw_request(
+            |session, request| {
+                let raw_with_cases = if session.state.request.raw_input_with_cases.is_empty() {
+                    &session.state.request.raw_input
+                } else {
+                    &session.state.request.raw_input_with_cases
+                };
+                let raw_with_cases = &raw_with_cases[..prefix_end];
+                session.build_raw_request(raw, raw_with_cases, request);
+            },
+            |session, request| {
+                request.valid
+                    && session
+                        .registry
+                        .expand_initial_candidates(request, candidates)
+            },
+        )
     }
 
     /// The request a scratch scheme of the current type builds for `raw`, with the session's switches applied. The current scheme was activated before it became current, so building its scratch twin cannot fail, except for Zhuyin, whose `msime-zhuyin.db` connection belongs to the live editor: an invalid request stands for both, and Zhuyin keeps its caret at the end, so it never decodes a caret prefix.
-    fn raw_request(&self, raw: &str, raw_with_cases: &str) -> QueryRequest {
+    fn build_raw_request(&self, raw: &str, raw_with_cases: &str, request: &mut QueryRequest) {
+        match self.current_scheme_type() {
+            SchemeType::Quanpin => {
+                QuanpinScheme::build_request_from_raw_into(raw, raw_with_cases, request)
+            }
+            SchemeType::Shuangpin => ShuangpinScheme::build_request_from_raw_into(
+                self.profile,
+                raw,
+                raw_with_cases,
+                request,
+            ),
+            _ => return self.raw_request_through_scheme(raw, raw_with_cases, request),
+        }
+        self.apply_request_options(request);
+        self.apply_autocorrect_suppression(request);
+        apply_shuangpin_helpcode_segmentation(request, self.profile);
+    }
+
+    fn raw_request_through_scheme(
+        &self,
+        raw: &str,
+        raw_with_cases: &str,
+        request: &mut QueryRequest,
+    ) {
         let Ok(mut scratch) = Scheme::new(
             self.current_scheme_type(),
             self.profile,
@@ -501,14 +632,29 @@ impl ImeSession {
             self.registry.cantonese_inventory(),
             None,
         ) else {
-            return QueryRequest::default();
+            *request = QueryRequest::default();
+            return;
         };
         if let Some(wubi) = scratch.as_wubi_mut() {
             wubi.set_mixed_pinyin_allowed(self.wubi_options.mixed_pinyin);
             wubi.set_extended_length_allowed(self.wubi_options.mixed_pinyin);
+            wubi.set_pinyin_lookup_allowed(!self.wubi_options.mixed_pinyin);
         }
         scratch.set_raw_input(raw, raw_with_cases);
-        self.prepare_request(&scratch)
+        let built = self.prepare_request(&scratch);
+        request.clone_from(&built);
+    }
+
+    fn with_raw_request<R>(
+        &mut self,
+        build: impl FnOnce(&Self, &mut QueryRequest),
+        use_request: impl FnOnce(&mut Self, &QueryRequest) -> R,
+    ) -> R {
+        let mut request = std::mem::take(&mut self.scratch_request);
+        build(self, &mut request);
+        let result = use_request(self, &request);
+        self.scratch_request = request;
+        result
     }
 
     pub fn set_helpcode_keymap(&mut self, keymap: Option<SharedKeymap>) {
@@ -550,6 +696,11 @@ impl ImeSession {
     /// Carried on every request; the engines reset their caches when it changes (overlays.md §1.6.1).
     pub fn set_sentence_association(&mut self, options: SentenceAssociationOptions) {
         self.sentence_association = options;
+    }
+
+    /// 首页行数随每个请求交给各方案引擎；只影响词库要不要并入补全词。
+    pub fn set_first_page_rows(&mut self, rows: FirstPageRows) {
+        self.first_page_rows = rows;
     }
 
     pub fn set_rescoring_context(&mut self, context: &str) {
@@ -609,7 +760,7 @@ impl ImeSession {
         self.scheme.build_request_into(&mut request);
         self.apply_request_options(&mut request);
         self.apply_autocorrect_suppression(&mut request);
-        apply_shuangpin_helpcode_segmentation(&mut request, profile(self.profile));
+        apply_shuangpin_helpcode_segmentation(&mut request, self.profile);
         reuse_request_preedit(&request, &mut self.state.preedit);
         if !request.valid {
             // An emptied composition is an invalid request, and Backspace never goes through `reset`: the next code must be answered by the wubi table again.
@@ -698,7 +849,7 @@ impl ImeSession {
         let mut request = scheme.build_request();
         self.apply_request_options(&mut request);
         self.apply_autocorrect_suppression(&mut request);
-        apply_shuangpin_helpcode_segmentation(&mut request, profile(self.profile));
+        apply_shuangpin_helpcode_segmentation(&mut request, self.profile);
         request
     }
 
@@ -712,6 +863,7 @@ impl ImeSession {
             self.autocorrect_types & autocorrect_type::NEIGHBOR != 0;
         request.fuzzy_pinyin = self.fuzzy;
         request.sentence_association = self.sentence_association;
+        request.first_page_rows = self.first_page_rows;
         request
             .rescoring_context
             .clone_from(&self.rescoring_context);
@@ -723,7 +875,12 @@ impl ImeSession {
             return;
         }
         self.typo_profile.refresh_if_changed();
-        let key = autocorrect_suppression_key(&request.raw_input, &request.raw_input_with_cases);
+        let cases = if request.enable_quanpin_helpcode {
+            &request.raw_input_with_cases
+        } else {
+            &request.raw_input
+        };
+        let key = autocorrect_suppression_key(&request.raw_input, cases);
         if !self.typo_profile.suppressed(&key) {
             return;
         }
@@ -734,6 +891,12 @@ impl ImeSession {
 
     /// Query the request's provider and, for wubi with mixed pinyin, append the quanpin rows for the same letters (ime_session.cpp:333-368). The quanpin request gets the session switches and the autocorrect suppression, so a correction the user refused by committing raw stays refused when the same letters arrive through mixed Wubi. A pinyin tail skips the wubi table: those letters are the rest of a spelling, not a code.
     fn decode(&mut self, request: &QueryRequest) -> Decoded {
+        if let Some((raw, raw_with_cases)) = self.pinyin_lookup_spelling(request) {
+            return Decoded {
+                candidates: self.query_pinyin_lookup(raw, raw_with_cases),
+                wubi_table_answered: false,
+            };
+        }
         let pinyin_tail = request.scheme == SchemeType::Wubi
             && self.wubi_options.mixed_pinyin
             && self.pinyin_tail;
@@ -777,10 +940,48 @@ impl ImeSession {
         }
     }
 
+    /// 五笔请求是临时拼音反查时，去掉引导键 `z` 之后的拼音原文（不带大小写的和带大小写的）。混输关闭时五笔码里不会出现 `z`，所以以 `z` 开头的五笔请求只能来自反查；混输打开时 `z` 是拼音字母，没有反查。
+    fn pinyin_lookup_spelling<'a>(&self, request: &'a QueryRequest) -> Option<(&'a str, &'a str)> {
+        if request.scheme != SchemeType::Wubi || self.wubi_options.mixed_pinyin {
+            return None;
+        }
+        let raw = request
+            .raw_input
+            .strip_prefix(char::from(PINYIN_LOOKUP_PREFIX))?;
+        let raw_with_cases = request.raw_input_with_cases.get(1..).unwrap_or(raw);
+        Some((raw, raw_with_cases))
+    }
+
+    /// 反查只查全拼词库，不查五笔码表：`z` 后面的字母是拼音，不是五笔码。全拼请求带上会话的开关和自动纠错抑制，与混输的拼音回退一致；同一个词只留第一行。
+    fn query_pinyin_lookup(&mut self, raw: &str, raw_with_cases: &str) -> Vec<WordItem> {
+        self.mixed_pinyin_scheme.set_raw_input(raw, raw_with_cases);
+        let mut request = std::mem::take(&mut self.mixed_pinyin_request);
+        self.mixed_pinyin_scheme.build_request_into(&mut request);
+        self.apply_request_options(&mut request);
+        self.apply_autocorrect_suppression(&mut request);
+        let mut rows = if request.valid {
+            self.registry.query(&request)
+        } else {
+            Vec::new()
+        };
+        self.mixed_pinyin_request = request;
+        retain_unique_pinyin_rows(&mut rows);
+        rows
+    }
+
+    /// 当前组字是五笔的临时拼音反查（`z` 引导）。
+    pub fn wubi_pinyin_lookup_active(&self) -> bool {
+        self.scheme
+            .as_wubi()
+            .is_some_and(|wubi| wubi.in_pinyin_lookup())
+    }
+
     fn bind_wubi_scheme(&mut self) {
         let mixed_pinyin = self.wubi_options.mixed_pinyin;
         if let Some(wubi) = self.scheme.as_wubi_mut() {
             wubi.set_mixed_pinyin_allowed(mixed_pinyin);
+            // 混输打开时 `z` 已经是拼音字母，引导反查只在混输关闭时有意义。
+            wubi.set_pinyin_lookup_allowed(!mixed_pinyin);
         }
     }
 }

@@ -137,9 +137,9 @@ public final class VoiceResultStore {
 
     private <T> T locked(LockedAction<T> action) throws Failure {
         try {
-            rejectSymlinkComponents(directory);
+            SafePaths.rejectSymlinkComponents(directory);
             Files.createDirectories(directory);
-            rejectSymlinkComponents(directory);
+            SafePaths.rejectSymlinkComponents(directory);
             if (!Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS))
                 throw new Failure(Reason.UNAVAILABLE);
             Path lockPath = directory.resolve(LOCK_NAME);
@@ -161,10 +161,6 @@ public final class VoiceResultStore {
         } catch (IOException | SecurityException error) {
             throw new Failure(Reason.UNAVAILABLE, error);
         }
-    }
-
-    private static void rejectSymlinkComponents(Path path) throws IOException {
-        SafePaths.rejectSymlinkComponents(path);
     }
 
     private static Entry readFile(Path result, long nowMillis) throws Failure, IOException {
@@ -251,9 +247,6 @@ public final class VoiceResultStore {
     }
 
     private static boolean validText(String text) {
-        return text != null && !TextPolicy.stripped(text).isEmpty()
-            && TextPolicy.withinCodePoints(text, MAXIMUM_CHARACTERS)
-            && !TextPolicy.hasControlExceptWhitespace(text)
-            && TextPolicy.validUnicode(text);
+        return TextPolicy.validBoundedText(text, MAXIMUM_CHARACTERS);
     }
 }

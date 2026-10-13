@@ -11,6 +11,8 @@ pub enum CloudClipboardError {
     Unavailable,
     OutcomeUnknown,
     Conflict,
+    /// 原生 provider 回报的其他错误码（`{"ok":false,"error":"<code>"}`），例如端到端加密驱动的 `clipboard_device_pending`。只收不超过 64 个字符的 ASCII 标识符，宿主再决定哪些转交给面板。
+    Service(String),
 }
 
 #[derive(Deserialize)]
@@ -102,10 +104,16 @@ impl CloudClipboardSession {
         let result: Value =
             serde_json::from_slice(&response).map_err(|_| CloudClipboardError::OutcomeUnknown)?;
         if result.get("ok").and_then(Value::as_bool) != Some(true) {
-            return Err(if result["ok"] == false && result["error"] == "conflict" {
-                CloudClipboardError::Conflict
-            } else {
-                CloudClipboardError::Unavailable
+            return Err(match (result["ok"].as_bool(), result["error"].as_str()) {
+                (Some(false), Some("conflict")) => CloudClipboardError::Conflict,
+                (Some(false), Some("invalid")) => CloudClipboardError::Invalid,
+                (Some(false), Some(code))
+                    if code != "unavailable"
+                        && msime_client_core::is_bounded_ascii_identifier(code, 64) =>
+                {
+                    CloudClipboardError::Service(code.to_owned())
+                }
+                _ => CloudClipboardError::Unavailable,
             });
         }
         result
@@ -169,6 +177,62 @@ mod tests {
                 listener.accept().unwrap_err().kind(),
                 std::io::ErrorKind::WouldBlock
             );
+        }
+    }
+
+    #[test]
+    fn provider_error_codes_reach_the_host() {
+        for (response, expected) in [
+            (
+                r#"{"ok":false,"error":"clipboard_device_pending"}"#,
+                CloudClipboardError::Service("clipboard_device_pending".into()),
+            ),
+            (
+                r#"{"ok":false,"error":"conflict"}"#,
+                CloudClipboardError::Conflict,
+            ),
+            (
+                r#"{"ok":false,"error":"clipboard_key_conflict","status":409}"#,
+                CloudClipboardError::Service("clipboard_key_conflict".into()),
+            ),
+            (
+                r#"{"ok":false,"error":"invalid","status":400}"#,
+                CloudClipboardError::Invalid,
+            ),
+            (
+                r#"{"ok":false,"error":"unavailable"}"#,
+                CloudClipboardError::Unavailable,
+            ),
+            (
+                r#"{"ok":false,"error":"bad code!"}"#,
+                CloudClipboardError::Unavailable,
+            ),
+            (r#"{"ok":false}"#, CloudClipboardError::Unavailable),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("cloud.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            let session = CloudClipboardSession::parse(
+                &serde_json::json!({"version":1,"path":path,"host_pid":std::process::id()})
+                    .to_string(),
+            )
+            .unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = vec![];
+                socket.read_to_end(&mut request).unwrap();
+                let action: Value = serde_json::from_slice(&request[4..]).unwrap();
+                assert_eq!(action["operation"], "approve");
+                socket
+                    .write_all(&(response.len() as u32).to_be_bytes())
+                    .unwrap();
+                socket.write_all(response.as_bytes()).unwrap();
+            });
+            let result = session.request(
+                &serde_json::json!({"operation":"approve","device_id":"0123456789abcdef".repeat(2)}),
+            );
+            assert_eq!(result, Err(expected), "{response}");
+            server.join().unwrap();
         }
     }
 

@@ -64,6 +64,27 @@ final class CustomServiceTests: XCTestCase {
     XCTAssertEqual(CustomServiceConfiguration.loadPreset(.custom, defaults: defaults).model, custom.model)
   }
 
+  func testRetiredEveryAPIVoiceModelReadsAsTheCurrentDefault() throws {
+    let suite = "msime-everyapi-tests-\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    XCTAssertEqual(CustomServiceConfiguration.loadVoicePreset(.everyAPI, defaults: defaults).model,
+                   "volc.seedasr.sauc.duration")
+    // Saved before the default changed: both the active configuration and the preset copy name the retired model.
+    defaults.set("everyAPI", forKey: "service.voice.provider")
+    defaults.set("openai/whisper-large-v3-turbo", forKey: "service.voice.model")
+    defaults.set("openai/whisper-large-v3-turbo", forKey: "service.voice.presets.everyAPI.model")
+    XCTAssertEqual(CustomServiceConfiguration.load(.voice, defaults: defaults).model, "volc.seedasr.sauc.duration")
+    XCTAssertEqual(CustomServiceConfiguration.loadVoicePreset(.everyAPI, defaults: defaults).model,
+                   "volc.seedasr.sauc.duration")
+    // A model the user picked, and the same name under another provider, are kept.
+    defaults.set("my-model", forKey: "service.voice.model")
+    XCTAssertEqual(CustomServiceConfiguration.load(.voice, defaults: defaults).model, "my-model")
+    defaults.set("openai/whisper-large-v3-turbo", forKey: "service.voice.presets.groq.model")
+    XCTAssertEqual(CustomServiceConfiguration.loadVoicePreset(.groq, defaults: defaults).model,
+                   "openai/whisper-large-v3-turbo")
+  }
+
   func testVoicePresetsPreserveCustomAndDoNotChangeAI() throws {
     let suite = "msime-voice-tests-\(UUID().uuidString)"
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

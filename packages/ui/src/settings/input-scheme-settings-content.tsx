@@ -30,6 +30,7 @@ import {
 import { TouchKeyboardSchemesSection } from "./touch-keyboard-schemes-section";
 import { LanguageCard } from "./language-card";
 import { WubiSection } from "./wubi-section";
+import { WubiCodeLookupSection, type WubiCodeLookupClient } from "./wubi-code-lookup-section";
 import { ResourcePackRow, resourcePackForScheme, type ResourcePacks } from "./resource-packs";
 
 export interface InputSchemeSettingsContentProps {
@@ -42,22 +43,24 @@ export interface InputSchemeSettingsContentProps {
   inputSchemes?: readonly InputScheme[];
   /** 运行中的版本（`HostCapabilities.edition`），不是 full 时才有：本版本没有的方案和触屏键盘不列出，只有一个方案时隐藏方案选择。 */
   edition?: EditionInfo;
-  macosShuangpinKeymap?: boolean;
-  macosWubiAutoCommitUnique?: boolean;
+  /** 「输入时显示双拼键位提示」的当前值，宿主不画双拼键位图时不传；改动写进共享偏好 `shuangpin_keymap_hint`。 */
+  shuangpinKeymapHint?: boolean;
   /** macOS 的输入法列表；有它时在方案组末尾显示「菜单栏入口」。 */
   macosInputModes?: MacosInputModesClient;
   onError?: (message: string) => void;
   onPreferencesChange: (patch: Partial<Preferences>) => void;
   onSelectTouchKeyboardScheme: (scheme: TouchKeyboardScheme) => void;
   onToggleTouchKeyboardScheme: (scheme: TouchKeyboardScheme, enabled: boolean) => void;
-  onMacosShuangpinKeymapChange: (enabled: boolean) => void;
-  onMacosWubiAutoCommitUniqueChange: (enabled: boolean) => void;
   /** 宿主提供按需资源包时传入（目前只有 macOS）：选用日文、粤拼、注音或笔画会照常保存方案并开始下载对应词库，下载完成前运行时按缺少词库回退。 */
   resourcePacks?: ResourcePacks;
   /** HarmonyOS 手机把触屏方案画成「语言与方案」卡片，而不是每个方案一个开关，余下的方案选项收在其下方的「更多选项」折叠区里。仅在 `hasTouchKeyboardSchemes` 时生效。 */
   languageCard?: boolean;
   /** 把某个触屏方案设为当前方案，若它处于关闭状态则先启用；语言卡片的面板使用它。默认为 `onSelectTouchKeyboardScheme`。 */
   onEnableAndSelectTouchKeyboardScheme?: (scheme: TouchKeyboardScheme) => void;
+  /** 宿主能查五笔编码时传入（词库请求 `wubi_codes`）；有它且五笔的设置在显示时，方案组之后出现「五笔查码」。 */
+  wubiCodeLookup?: WubiCodeLookupClient;
+  /** 宿主能校验自定义双拼表时传入，打开自定义双拼的编辑页；见 `InputSchemeDetailsSection` 的同名属性。 */
+  onEditCustomShuangpin?: () => void;
 }
 
 /** Shared input mode, scheme selector, scheme details, and Wubi composition for settings hosts. */
@@ -69,18 +72,17 @@ export function InputSchemeSettingsContent({
   macos,
   inputSchemes = baseInputSchemes,
   edition,
-  macosShuangpinKeymap,
-  macosWubiAutoCommitUnique,
+  shuangpinKeymapHint,
   macosInputModes,
   onError = () => {},
   onPreferencesChange,
   onSelectTouchKeyboardScheme,
   onToggleTouchKeyboardScheme,
-  onMacosShuangpinKeymapChange,
-  onMacosWubiAutoCommitUniqueChange,
   resourcePacks,
   languageCard = false,
   onEnableAndSelectTouchKeyboardScheme = onSelectTouchKeyboardScheme,
+  wubiCodeLookup,
+  onEditCustomShuangpin,
 }: InputSchemeSettingsContentProps) {
   // 方案改动立即写入草稿（随自动保存生效），需要词库的方案再在后台下载，不等下载完成。
   const onSchemeChange = (patch: Partial<Preferences>) => {
@@ -130,10 +132,12 @@ export function InputSchemeSettingsContent({
     <WubiSection
       preferences={preferences}
       mixedPinyinDefault={edition?.wubi_mixed_pinyin_default}
-      autoCommitUnique={macos ? macosWubiAutoCommitUnique : undefined}
       onChange={onPreferencesChange}
-      onAutoCommitUniqueChange={onMacosWubiAutoCommitUniqueChange}
     />
+  );
+  // 查码和五笔的开关一样只在五笔用得上时出现；宿主没有给查码入口时（例如不经共享设置页的原生设置窗口）整组不画。
+  const wubiCodeLookupGroup = showWubiSection && wubiCodeLookup && (
+    <WubiCodeLookupSection lookup={wubiCodeLookup} profile={preferences.wubi_profile} />
   );
   const schemePackRow = resourcePacks && schemePack && (
     <ResourcePackRow packs={resourcePacks} id={schemePack} />
@@ -143,100 +147,110 @@ export function InputSchemeSettingsContent({
       touchKeyboardSchemes.enabled.includes("vietnamese") &&
       touchOptions.some(([scheme]) => scheme === "vietnamese");
     return (
-      <GroupList title="语言与方案">
-        <LanguageCard
-          available={touchOptions.map(([scheme]) => scheme)}
-          enabled={touchKeyboardSchemes.enabled}
-          selected={selectedTouchKeyboardScheme}
-          wubiProfile={preferences.wubi_profile}
-          onSelect={onEnableAndSelectTouchKeyboardScheme}
-          onToggle={onToggleTouchKeyboardScheme}
-          onWubiProfileChange={(wubi_profile) => onPreferencesChange({ wubi_profile })}
-        />
-        {(schemePackRow || wubiSection || vietnamese) && (
-          <MoreOptions>
-            {schemePackRow}
-            {wubiSection}
-            {/* 越南语是唯一有自己选项（输入法和声调位置）的触屏语言。详情区在触屏宿主上隐藏其各行，因为那里原先由方案开关列表代替选择器，所以这里按没有触屏列表时越南语方案的画法单独绘制；其他方案的各行保持隐藏。 */}
-            {vietnamese && (
-              <InputSchemeDetailsSection
-                scheme="vietnamese"
-                shuangpinProfile={preferences.shuangpin_profile}
-                wubiProfile={preferences.wubi_profile}
-                macos={false}
-                hasTouchKeyboardSchemes={false}
-                onShuangpinProfileChange={(shuangpin_profile: ShuangpinProfile) =>
-                  onPreferencesChange({ shuangpin_profile })
-                }
-                vietnamese={preferences.vietnamese}
-                onVietnameseChange={(next) => onPreferencesChange({ vietnamese: next })}
-              />
-            )}
-          </MoreOptions>
-        )}
-      </GroupList>
+      <>
+        <GroupList title="语言与方案">
+          <LanguageCard
+            available={touchOptions.map(([scheme]) => scheme)}
+            enabled={touchKeyboardSchemes.enabled}
+            selected={selectedTouchKeyboardScheme}
+            wubiProfile={preferences.wubi_profile}
+            onSelect={onEnableAndSelectTouchKeyboardScheme}
+            onToggle={onToggleTouchKeyboardScheme}
+            onWubiProfileChange={(wubi_profile) => onPreferencesChange({ wubi_profile })}
+          />
+          {(schemePackRow || wubiSection || vietnamese) && (
+            <MoreOptions>
+              {schemePackRow}
+              {wubiSection}
+              {/* 越南语是唯一有自己选项（输入法和声调位置）的触屏语言。详情区在触屏宿主上隐藏其各行，因为那里原先由方案开关列表代替选择器，所以这里按没有触屏列表时越南语方案的画法单独绘制；其他方案的各行保持隐藏。 */}
+              {vietnamese && (
+                <InputSchemeDetailsSection
+                  scheme="vietnamese"
+                  shuangpinProfile={preferences.shuangpin_profile}
+                  wubiProfile={preferences.wubi_profile}
+                  macos={false}
+                  hasTouchKeyboardSchemes={false}
+                  onShuangpinProfileChange={(shuangpin_profile: ShuangpinProfile) =>
+                    onPreferencesChange({ shuangpin_profile })
+                  }
+                  onEditCustomShuangpin={onEditCustomShuangpin}
+                  vietnamese={preferences.vietnamese}
+                  onVietnameseChange={(next) => onPreferencesChange({ vietnamese: next })}
+                />
+              )}
+            </MoreOptions>
+          )}
+        </GroupList>
+        {wubiCodeLookupGroup}
+      </>
     );
   }
   return (
-    <GroupList title="方案">
-      <InputModeSection
-        scheme={preferences.scheme}
-        lastChineseScheme={preferences.last_chinese_scheme}
-        supportedSchemes={inputSchemes}
-        editionSchemes={edition?.input_schemes}
-        defaultScheme={defaultScheme}
-        hidden={hasTouchKeyboardSchemes}
-        onChange={onSchemeChange}
-      />
-      {hasTouchKeyboardSchemes && (
-        <TouchKeyboardSchemesSection
-          options={touchOptions}
-          enabled={touchKeyboardSchemes.enabled}
-          selected={selectedTouchKeyboardScheme}
-          onSelect={(scheme) => onSelectTouchKeyboardScheme(scheme as TouchKeyboardScheme)}
-          onToggle={(scheme, enabled) =>
-            onToggleTouchKeyboardScheme(scheme as TouchKeyboardScheme, enabled)
+    <>
+      <GroupList title="方案">
+        <InputModeSection
+          scheme={preferences.scheme}
+          lastChineseScheme={preferences.last_chinese_scheme}
+          supportedSchemes={inputSchemes}
+          editionSchemes={edition?.input_schemes}
+          defaultScheme={defaultScheme}
+          hidden={hasTouchKeyboardSchemes}
+          onChange={onSchemeChange}
+        />
+        {hasTouchKeyboardSchemes && (
+          <TouchKeyboardSchemesSection
+            options={touchOptions}
+            enabled={touchKeyboardSchemes.enabled}
+            selected={selectedTouchKeyboardScheme}
+            onSelect={(scheme) => onSelectTouchKeyboardScheme(scheme as TouchKeyboardScheme)}
+            onToggle={(scheme, enabled) =>
+              onToggleTouchKeyboardScheme(scheme as TouchKeyboardScheme, enabled)
+            }
+          />
+        )}
+        <InputSchemeSelectorSection
+          hidden={hasTouchKeyboardSchemes || (!chineseSchemes && !outsideEdition)}
+          value={selectorValue}
+          supportedSchemes={inputSchemes}
+          editionSchemes={edition?.input_schemes}
+          defaultScheme={defaultScheme}
+          lastChineseScheme={preferences.last_chinese_scheme}
+          onChange={(scheme: InputSchemeSelectorValue) =>
+            onSchemeChange({ scheme, last_chinese_scheme: scheme })
           }
         />
-      )}
-      <InputSchemeSelectorSection
-        hidden={hasTouchKeyboardSchemes || (!chineseSchemes && !outsideEdition)}
-        value={selectorValue}
-        supportedSchemes={inputSchemes}
-        editionSchemes={edition?.input_schemes}
-        defaultScheme={defaultScheme}
-        lastChineseScheme={preferences.last_chinese_scheme}
-        onChange={(scheme: InputSchemeSelectorValue) =>
-          onSchemeChange({ scheme, last_chinese_scheme: scheme })
-        }
-      />
-      <InputSchemeDetailsSection
-        scheme={preferences.scheme}
-        shuangpinProfile={preferences.shuangpin_profile}
-        wubiProfile={preferences.wubi_profile}
-        macos={macos}
-        hasTouchKeyboardSchemes={hasTouchKeyboardSchemes}
-        touchKeyboardHasWubi={touchHasWubi}
-        macosShuangpinKeymap={macosShuangpinKeymap}
-        onShuangpinProfileChange={(shuangpin_profile: ShuangpinProfile) =>
-          onPreferencesChange({ shuangpin_profile })
-        }
-        onWubiProfileChange={(wubi_profile: WubiProfile) => onPreferencesChange({ wubi_profile })}
-        onMacosShuangpinKeymapChange={onMacosShuangpinKeymapChange}
-        vietnamese={preferences.vietnamese}
-        onVietnameseChange={(vietnamese) => onPreferencesChange({ vietnamese })}
-      />
-      {schemePackRow}
-      {wubiSection}
-      {macos && (
-        <MacosInputModeEntriesSection
-          client={macosInputModes}
+        <InputSchemeDetailsSection
           scheme={preferences.scheme}
-          inputSchemes={inputSchemes}
-          edition={edition}
-          onError={onError}
+          shuangpinProfile={preferences.shuangpin_profile}
+          wubiProfile={preferences.wubi_profile}
+          macos={macos}
+          hasTouchKeyboardSchemes={hasTouchKeyboardSchemes}
+          touchKeyboardHasWubi={touchHasWubi}
+          shuangpinKeymapHint={shuangpinKeymapHint}
+          onShuangpinProfileChange={(shuangpin_profile: ShuangpinProfile) =>
+            onPreferencesChange({ shuangpin_profile })
+          }
+          onEditCustomShuangpin={onEditCustomShuangpin}
+          onWubiProfileChange={(wubi_profile: WubiProfile) => onPreferencesChange({ wubi_profile })}
+          onShuangpinKeymapHintChange={(shuangpin_keymap_hint) =>
+            onPreferencesChange({ shuangpin_keymap_hint })
+          }
+          vietnamese={preferences.vietnamese}
+          onVietnameseChange={(vietnamese) => onPreferencesChange({ vietnamese })}
         />
-      )}
-    </GroupList>
+        {schemePackRow}
+        {wubiSection}
+        {macos && (
+          <MacosInputModeEntriesSection
+            client={macosInputModes}
+            scheme={preferences.scheme}
+            inputSchemes={inputSchemes}
+            edition={edition}
+            onError={onError}
+          />
+        )}
+      </GroupList>
+      {wubiCodeLookupGroup}
+    </>
   );
 }

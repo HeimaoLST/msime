@@ -81,7 +81,7 @@ public final class CustomSkinLibrary {
             if (id == null || name == null) continue;
             name = TextPolicy.trimmed(name);
             if (id.isEmpty() || !boundedName(name) || design == null) continue;
-            long updatedAt = BoundsPolicy.nonNegative(KeyboardGeometry.strictLong(item.opt("updated_at"), 0));
+            long updatedAt = BoundsPolicy.nonNegative(NumberPolicy.strictLong(item.opt("updated_at"), 0));
             result.add(new Item(id, name, design, updatedAt));
         }
         return List.copyOf(result);
@@ -186,11 +186,6 @@ public final class CustomSkinLibrary {
         SafePaths.ensureDirectory(directory);
     }
 
-    /** org.json's optString coerces numbers and booleans; persisted library fields are strings. */
-    static String strictString(Object value) {
-        return JsonPolicy.strictString(value);
-    }
-
     // ---- 设计参数的导出与导入（云同步与分享用；不含照片） ----
 
     /** 导出库里全部设计的设计参数，见 {@link #exportDesigns(List, long)}。 */
@@ -243,6 +238,21 @@ public final class CustomSkinLibrary {
         });
     }
 
+    /**
+     * 把库整份换回 `items`（通常是改动之前 {@link #read} 读到的那份）：本地备份恢复中途失败时撤销已经并进来的皮肤用（#5659）。设计里的照片引用原样写回，照片文件本身不受合并影响，所以撤销后皮肤和恢复前完全一样。在锁里原子写入；写不下（超过库的字节上限）时抛 IOException。
+     */
+    public static void replaceAll(Path preferencesDirectory, List<Item> items) throws IOException {
+        Path root = checkedRoot(preferencesDirectory);
+        ensureSafeDirectory(root);
+        locked(root, () -> {
+            JSONArray values = new JSONArray();
+            for (Item item : items)
+                values.put(entry(item.id(), item.name(), item.design(), item.updatedAt()));
+            if (!write(root, values)) throw new IOException("custom skin library too large");
+            return null;
+        });
+    }
+
     /** {@link #mergeDesigns} 的结果：合并后的库与新增或更新的条目数。 */
     public record Merge(List<Item> items, int changed) {}
 
@@ -267,7 +277,7 @@ public final class CustomSkinLibrary {
             if (id == null || id.isEmpty() || name == null || design == null) continue;
             name = TextPolicy.trimmed(name);
             if (!boundedName(name)) continue;
-            long updatedAt = BoundsPolicy.nonNegative(KeyboardGeometry.strictLong(value.opt("updated_at"), 0));
+            long updatedAt = BoundsPolicy.nonNegative(NumberPolicy.strictLong(value.opt("updated_at"), 0));
             int position = indexOf(result, id);
             if (position >= 0) {
                 Item current = result.get(position);

@@ -1,5 +1,6 @@
 #include "InputSchemeTraits.h"
 #include <cassert>
+#include <utility>
 
 using namespace msime::windows::scheme;
 
@@ -14,10 +15,13 @@ int main() {
   static_assert(input_mode_code(InputMode::Vietnamese) == L'5');
   static_assert(input_mode_code(InputMode::Tibetan) == L'6');
   static_assert(input_mode_code(InputMode::Stroke) == L'7');
+  static_assert(input_mode_code(InputMode::Shuangpin) == L'8');
+  static_assert(input_mode_code(InputMode::Wubi) == L'9');
   for (const auto mode : {InputMode::Chinese, InputMode::Japanese, InputMode::Korean, InputMode::Cantonese,
-                          InputMode::Zhuyin, InputMode::Vietnamese, InputMode::Tibetan, InputMode::Stroke})
+                          InputMode::Zhuyin, InputMode::Vietnamese, InputMode::Tibetan, InputMode::Stroke,
+                          InputMode::Shuangpin, InputMode::Wubi})
     assert(input_mode_from_code(input_mode_code(mode)) == mode);
-  assert(input_mode_from_code(L'9') == InputMode::Chinese);
+  assert(input_mode_from_code(L':') == InputMode::Chinese);
   assert(input_mode_from_code(L'\0') == InputMode::Chinese);
 
   // Every configured scheme maps to the mode its view reports, and the mode back to a scheme with the same traits.
@@ -33,6 +37,7 @@ int main() {
     assert(HostSmartPunctuation(representative) == HostSmartPunctuation(scheme));
     assert(ScriptConversionApplies(representative) == ScriptConversionApplies(scheme));
     assert(CommitsOnBlur(representative) == CommitsOnBlur(scheme));
+    assert(OpensTableModes(representative) == OpensTableModes(scheme));
     assert(LetterPassesWhileIdle(representative, false, L'x') == LetterPassesWhileIdle(scheme, false, L'x'));
   }
   for (int scheme = Quanpin; scheme <= Stroke; ++scheme)
@@ -41,6 +46,11 @@ int main() {
   // 笔画有自己的模式：它的 trait 与全拼不同，TIP 不能把它当中文模式处理。
   assert(input_mode(Stroke) == InputMode::Stroke && mode_scheme(InputMode::Stroke) == Stroke);
   assert(input_mode("stroke") == InputMode::Stroke);
+  // 双拼和五笔的码只给语言栏图标用：TIP 仍按全拼键入它们，语言是中文。
+  assert(input_mode(Shuangpin) == InputMode::Shuangpin && mode_scheme(InputMode::Shuangpin) == Quanpin);
+  assert(input_mode(Wubi) == InputMode::Wubi && mode_scheme(InputMode::Wubi) == Quanpin);
+  assert(input_language(InputMode::Shuangpin) == InputLanguage::Chinese &&
+         input_language(InputMode::Wubi) == InputLanguage::Chinese);
 
   // The scheme that runs, as host-api's effective_scheme picks it: Cantonese, Zhuyin and Stroke need their dictionary, and without it the last Chinese scheme that can run takes over, then quanpin.
   constexpr LanguageDictionaryPresence none{};
@@ -102,6 +112,55 @@ int main() {
   assert(!is_chinese_scheme_name("tibetan") && input_language(InputMode::Tibetan) == InputLanguage::Tibetan);
   assert(!is_chinese_scheme_name("pinyin"));
 
+  // Ctrl+Shift+J：中文方案去日语，日语和其他语言回到上次的中文方案。
+  static_assert(offers_japanese_toggle(full));
+  for (const int chinese : {Quanpin, Shuangpin, Wubi, Cantonese, Zhuyin, Stroke})
+    assert(japanese_toggle_target(chinese, "wubi", all, full) == Japanese);
+  for (const int language : {Japanese, Korean, Vietnamese, Tibetan})
+    assert(japanese_toggle_target(language, "shuangpin", all, full) == Shuangpin);
+  assert(japanese_toggle_target(Japanese, "stroke", stroke_only, full) == Stroke);
+  // 上次的中文方案跑不起来（词库没装、不是中文方案或根本没有）时退回默认的全拼，和 effective_scheme 一样。
+  assert(japanese_toggle_target(Japanese, "zhuyin", none, full) == Quanpin);
+  assert(japanese_toggle_target(Japanese, "korean", none, full) == Quanpin);
+  assert(japanese_toggle_target(Japanese, "", none, full) == Quanpin);
+  // 只有日语、或者只有中文方案的版本不切换，按键交给应用。
+  assert(!offers_japanese_toggle(wubi));
+  assert(japanese_toggle_target(Wubi, "wubi", all, wubi) == -1);
+  OfferedSchemes japanese_only;
+  japanese_only.offered[Japanese] = true;
+  japanese_only.fallback = Japanese;
+  assert(!offers_japanese_toggle(japanese_only));
+  assert(japanese_toggle_target(Japanese, "quanpin", all, japanese_only) == -1);
+  // 版本的默认方案不是中文方案时，退到它提供的第一个跑得起来的中文方案。
+  OfferedSchemes japanese_and_stroke;
+  japanese_and_stroke.offered[Japanese] = japanese_and_stroke.offered[Stroke] = true;
+  japanese_and_stroke.fallback = Japanese;
+  assert(offers_japanese_toggle(japanese_and_stroke));
+  assert(japanese_toggle_target(Japanese, "quanpin", stroke_only, japanese_and_stroke) == Stroke);
+  assert(japanese_toggle_target(Japanese, "quanpin", none, japanese_and_stroke) == -1);
+  // 发布的版本里只有 full 同时提供两头。
+  static_assert(offers_japanese_toggle(built) == (MSIME_EDITION_IS_FULL != 0));
+  // Server 写回存储的两项，从存储里的名字算起：离开中文时记下实际运行的中文方案，替换存储里旧的 last_chinese_scheme。
+  const auto toggled = [](const char *scheme, const char *last, LanguageDictionaryPresence installed,
+                           OfferedSchemes offered) {
+    const auto write = japanese_toggle_write(scheme, last, installed, offered);
+    return std::pair{write.scheme, write.last_chinese_scheme};
+  };
+  assert(toggled("shuangpin", "quanpin", all, full) == std::pair(Japanese, Shuangpin));
+  assert(toggled("cantonese", "wubi", all, full) == std::pair(Japanese, Cantonese));
+  // 存储里的粤拼词库没装，实际跑的是上次的五笔，记下的是五笔而不是跑不起来的粤拼。
+  assert(toggled("cantonese", "wubi", none, full) == std::pair(Japanese, Wubi));
+  // 日语和其他语言回到 last_chinese_scheme，它同时也是写回的 last_chinese_scheme。
+  assert(toggled("japanese", "shuangpin", all, full) == std::pair(Shuangpin, Shuangpin));
+  assert(toggled("korean", "stroke", stroke_only, full) == std::pair(Stroke, Stroke));
+  // 上次的中文方案跑不起来时退回全拼，并把全拼记成 last_chinese_scheme。
+  assert(toggled("japanese", "zhuyin", none, full) == std::pair(Quanpin, Quanpin));
+  assert(toggled("tibetan", "", none, full) == std::pair(Quanpin, Quanpin));
+  // 不同时提供两头的版本不切换，什么都不写。
+  assert(toggled("wubi", "wubi", all, wubi) == std::pair(-1, -1));
+  assert(toggled("japanese", "quanpin", all, japanese_only) == std::pair(-1, -1));
+  assert(toggled("japanese", "quanpin", none, japanese_and_stroke) == std::pair(-1, -1));
+
   // Schemes 0-4 keep the rules they had before Cantonese, Zhuyin and Vietnamese existed: only the pinyin and shape schemes convert to Traditional, only Korean composes letters into text or opens its list.
   assert(ScriptConversionApplies(Quanpin) && ScriptConversionApplies(Wubi) && !ScriptConversionApplies(Japanese) &&
          !ScriptConversionApplies(Korean));
@@ -141,17 +200,21 @@ int main() {
   // 只有越南文词和藏文音节串在 Esc 之后继续组字；其他组字（包括方案 0-4 和笔画）都被 Esc 丢弃。
   for (int scheme = Quanpin; scheme <= Stroke; ++scheme)
     assert(CancelRestoresRaw(scheme) == (scheme == Vietnamese || scheme == Tibetan));
+  // 整句改字只在全拼和双拼里有；未知的方案号也没有。
+  for (int scheme = Quanpin; scheme <= Stroke + 1; ++scheme)
+    assert(EditsSentence(scheme) == (scheme == Quanpin || scheme == Shuangpin));
   // Only the Zhuyin list refuses the mouse; the Korean Hanja list and every Chinese list stay clickable, and an unknown number keeps the mouse too.
   for (int scheme = Quanpin; scheme <= Stroke + 1; ++scheme)
     assert(KeyboardOnlyCandidateList(scheme) == (scheme == Zhuyin));
   // Every mode code passes the TIP's frame check, the ones after Chinese and Japanese included, and so does a code from a newer Server, which reads as Chinese; an empty payload or one longer than a character does not.
   for (const auto mode : {InputMode::Chinese, InputMode::Japanese, InputMode::Korean, InputMode::Cantonese,
-                          InputMode::Zhuyin, InputMode::Vietnamese, InputMode::Tibetan, InputMode::Stroke}) {
+                          InputMode::Zhuyin, InputMode::Vietnamese, InputMode::Tibetan, InputMode::Stroke,
+                          InputMode::Shuangpin, InputMode::Wubi}) {
     const wchar_t payload[4] = {input_mode_code(mode), L'\0', L'\0', L'\0'};
     assert(is_input_mode_payload(payload, 4));
     assert(input_mode_from_code(payload[0]) == mode);
   }
-  const wchar_t newer[4] = {L'9', L'\0', L'\0', L'\0'};
+  const wchar_t newer[4] = {L':', L'\0', L'\0', L'\0'};
   assert(is_input_mode_payload(newer, 4) && input_mode_from_code(newer[0]) == InputMode::Chinese);
   const wchar_t empty[4] = {L'\0', L'\0', L'\0', L'\0'};
   const wchar_t longer[4] = {L'2', L'2', L'\0', L'\0'};

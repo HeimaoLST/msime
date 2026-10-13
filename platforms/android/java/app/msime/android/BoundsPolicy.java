@@ -20,6 +20,10 @@ public final class BoundsPolicy {
         return Math.max(minimum, Math.min(value, maximum));
     }
 
+    public static double bounded(double value, double minimum, double maximum, double fallback) {
+        return Double.isFinite(value) ? bounded(value, minimum, maximum) : fallback;
+    }
+
     public static int nonNegative(int value) {
         return Math.max(0, value);
     }
@@ -53,6 +57,16 @@ public final class BoundsPolicy {
     }
     public static long atLeast(long value, long minimum) {
         return Math.max(value, minimum);
+    }
+
+    /** Validate a bounded page cursor without allowing backward or skipped pages. */
+    public static boolean validPageCursor(int requestedOffset, int count, int pageSize,
+            long nextOffset, boolean complete) {
+        return requestedOffset >= 0 && pageSize > 0 && count >= 0 && count <= pageSize
+            && nextOffset >= requestedOffset
+            && nextOffset <= (long) requestedOffset + pageSize
+            && nextOffset <= Integer.MAX_VALUE
+            && (complete || nextOffset > requestedOffset);
     }
 
 }

@@ -116,6 +116,8 @@ constexpr std::uint32_t ClientSuspended = 14;   // temporary focus route reset; 
 constexpr std::uint32_t FocusRestored = 15;
 // The TSF auto-closed a paired punctuation whose opening half the Server may have resolved, so the Engine's nesting count must be paid back as if the closing key had been typed. keycode: the opening key, always '<'. No reply.
 constexpr std::uint32_t PairedPunctuationAutoClosed = 16;
+// TIP 报告当前字段的属性，keycode 是 FanyImeFieldTraits 的位，没有回复。属性属于这个客户端而不是哪一次焦点：Server 不管它此刻是否持有焦点都收下，下一次激活和之后的每个键都按它算。只在协商到 FanyImeProtocol::FieldTraits 之后发送，旧 Server 不认这个事件，会把它当作非法帧断开连接；旧 TIP 不发，Server 那边的属性保持未知。TIP 在按键、状态快照和 FocusRestored 之前比较一次，变了才发，换了 Main 连接后重发。
+constexpr std::uint32_t FieldTraits = 17;
 constexpr std::uint32_t IMESwitch = 7;
 constexpr std::uint32_t PuncSwitch = 8;
 constexpr std::uint32_t DoubleSingleByteSwitch = 9;
@@ -128,6 +130,26 @@ constexpr bool IsTerminalDeactivation(std::uint32_t event_type)
     return event_type == ClientDeactivated;
 }
 } // namespace FanyImePipeEventType
+
+// FieldTraits 事件的载荷。位值和 crates/host-api/include/msime_client.h 的 MSIME_TRAIT_SECURE、MSIME_TRAIT_ELEVATED 相同（platforms/windows/src/input/LifecyclePolicy.h 里有静态断言），这个头不依赖那份 C 头。
+namespace FanyImeFieldTraits
+{
+// 密码框：TIP 只能从「键盘停用或空上下文」认出它（KeyPressStatistics.h 的 ShouldCountKeyPress 用同一个判据），安全桌面（登录、UAC）也算。
+constexpr std::uint32_t Secure = 0x01u;
+// 客户端进程以管理员身份运行（TokenElevation），或者查不出来（见 ProcessElevated）。
+constexpr std::uint32_t Elevated = 0x40u;
+// TIP 会报的全部位；其余位的 FieldTraits 帧是非法帧。
+constexpr std::uint32_t Reported = Secure | Elevated;
+// TIP 查进程令牌的结果：`queried` 是 OpenProcessToken 和 GetTokenInformation(TokenElevation) 都成功了，`tokenElevated` 是查到的 TokenIsElevated。查不出来时当作提权：「提权窗口里不运行脚本」靠的就是这一位，少报会让它落空；ELEVATED 不让声音和特效静音，多报一次用户察觉不到。
+constexpr bool ProcessElevated(bool queried, bool tokenElevated)
+{
+    return !queried || tokenElevated;
+}
+constexpr std::uint32_t Observe(bool keyboardDisabled, bool secureMode, bool elevated)
+{
+    return (keyboardDisabled || secureMode ? Secure : 0u) | (elevated ? Elevated : 0u);
+}
+} // namespace FanyImeFieldTraits
 
 // OR'd into modifiers_down on Main-pipe packets. Server strips it before any
 // key-modifier policy runs. Used so UILess hosts (games) never get an HWND.
@@ -285,7 +307,7 @@ constexpr std::uint32_t UpdateVoiceComposition = 15;
 constexpr std::uint32_t CancelVoiceComposition = 16;
 // Streaming ASR: replace the inline composition with this snapshot and commit.
 constexpr std::uint32_t CommitVoiceComposition = 17;
-// Payload: one character naming the configured scheme's family, "0" quanpin, shuangpin or wubi, "1" Japanese, "2" Korean, "3" Cantonese, "4" Zhuyin, "5" Vietnamese, "6" Tibetan, "7" Stroke (platforms/windows/common/InputSchemeTraits.h InputMode). A DLL reads a code it does not know as "0".
+// 载荷是一个字符，表示所配置方案的类别："0" 全拼，"1" 日文，"2" 韩文，"3" 粤拼，"4" 注音，"5" 越南文，"6" 藏文，"7" 笔画，"8" 双拼，"9" 五笔（platforms/windows/common/InputSchemeTraits.h 的 InputMode）。"8"、"9" 只决定任务栏图标，TIP 按全拼键入它们。DLL 把不认识的码读成 "0"。
 constexpr std::uint32_t InputModeChanged = 18;
 // Payload "1" when Caps Lock is on. Server is the source of truth.
 constexpr std::uint32_t CapsLockChanged = 19;
@@ -299,11 +321,13 @@ constexpr std::uint32_t CancelKeyboardComposition = 22;
 // Commit a completed Wubi code while preserving letters already buffered after it.
 // Payload: "<consumed>\t<text>".
 constexpr std::uint32_t CommitCandidateAndContinue = 27;
-// Which of the V, "/" and "@" local modes the Engine opens, so the TIP routes their keys as composition input. Payload: three '0'/'1' flags in that order. Each is already false outside the pinyin schemes, where the Engine opens none of them.
+// Which of the V, "/" and "@" local modes the Engine opens, so the TIP routes their keys as composition input. Payload: three '0'/'1' flags in that order. Each is already false in a scheme where the Engine does not open its mode: V opens only in the pinyin schemes (`opens_local_modes`), "/" and "@" in the pinyin schemes and Wubi (`opens_table_modes`), so a Wubi "/" with the command flag on is expected. All three are false in the Engine's own English mode.
 constexpr std::uint32_t LocalModeTriggersChanged = 28;
 // Payload "1" while the focused client's Engine is in its own English mode (Ctrl+Shift+E, the toolbar or tray English), "0" otherwise. The TIP keeps reporting Chinese there, so this is the only way it learns that every letter belongs to the Engine: under Stroke it otherwise hands idle letters other than the five strokes to the application (InputSchemeTraits.h LetterPassesWhileIdle).
 constexpr std::uint32_t DedicatedEnglishChanged = 29;
-constexpr std::uint32_t MaxKnown = DedicatedEnglishChanged;
+// 载荷为 "1" 时组字中的 ';' 和 '\'' 选第二、第三个候选（偏好 `second_third_candidate`），否则为 "0"。只有打开时 TIP 才把这两个键归类为数字选词；两边共用的规则在 platforms/windows/common/SecondThirdCandidatePolicy.h。旧版 TIP 丢弃这个帧，两个键照常是标点。
+constexpr std::uint32_t SecondThirdCandidateChanged = 30;
+constexpr std::uint32_t MaxKnown = SecondThirdCandidateChanged;
 // Source compatibility for the Server's historical spellings.
 constexpr std::uint32_t SwitchToEn = SwitchToEnglish;
 constexpr std::uint32_t SwitchToCn = SwitchToChinese;

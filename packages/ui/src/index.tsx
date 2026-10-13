@@ -1,9 +1,16 @@
+import type { DictionaryCollectionsClient } from "./dictionary/dictionary-collections";
+import type {
+  BuiltinShuangpinProfile,
+  ShuangpinCustomProblem,
+  ShuangpinCustomProfile,
+} from "./settings/shuangpin-custom-profile";
 import { useConfirm } from "./core/confirm";
 import { NavItem } from "./core/platform-controls";
 import { ToastProvider } from "./core/toast";
 import { appThemeStyle, seasonAttr } from "./core/app-theme-style";
 import type { AppThemeClient, FeedbackClient, HostChromeClient } from "./core/host-contracts";
 import { SetupWarningStrip } from "./keyboard/setup-status-card";
+import { KeyboardSwitchGuideHost } from "./keyboard/keyboard-switch-guide";
 import { TryKeyboardPage } from "./keyboard/try-keyboard-page";
 import { mobilePageTitle } from "./settings/mobile-tab-helpers";
 import { desktopDownloadUrl, fallbackAppVersion } from "./settings/app-resources";
@@ -33,6 +40,7 @@ import { settingsThemePreferences } from "./settings/settings-theme-preferences"
 import type { VoiceDeviceReader } from "./voice/voice-device-picker";
 import type { LocalVoiceModelClient } from "./voice/local-models";
 import type { ResourcePackClient } from "./settings/resource-packs";
+import type { WubiCodeLookup } from "./settings/wubi-code-lookup-section";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
   type DictionaryEntry,
@@ -123,6 +131,11 @@ import { useOpenPanel } from "./settings/use-open-panel";
 import { useClipboardHistoryToggle } from "./settings/use-clipboard-history-toggle";
 import { useTouchKeyboardSchemeSelection } from "./settings/use-touch-keyboard-scheme-selection";
 import { useSettingsDestinationActions } from "./settings/use-settings-destination-actions";
+import {
+  communityGalleryPage,
+  useCommunityGallerySubview,
+} from "./settings/use-community-gallery-subview";
+import { CommunityGallerySubview } from "./settings/community-gallery-subview";
 import { useMacosSettings } from "./settings/use-macos-settings";
 import type { MacosInputModesClient } from "./settings/macos-input-mode-entries-section";
 import { useWindowState } from "./settings/use-window-state";
@@ -171,6 +184,11 @@ export {
 } from "./settings/use-settings-navigation";
 export { useSettingsContentScrollReset } from "./settings/use-settings-content-scroll-reset";
 export { useUpdateCheck, type UseUpdateCheckOptions } from "./settings/use-update-check";
+export type {
+  HostReleaseUpdate,
+  UpdateCheckRequest,
+  UpdateCheckResult,
+} from "./settings/update-manifest";
 export {
   aiSettingsPreferences,
   type AiSettingsPreferences,
@@ -311,6 +329,12 @@ export {
   useSettingsDestinationActions,
   type UseSettingsDestinationActionsOptions,
 } from "./settings/use-settings-destination-actions";
+export {
+  communityGalleryPage,
+  useCommunityGallerySubview,
+  type CommunityGallerySubviewOptions,
+  type CommunityGalleryView,
+} from "./settings/use-community-gallery-subview";
 export { useMacosSettings, type UseMacosSettingsOptions } from "./settings/use-macos-settings";
 export {
   MacosInputModeEntriesSection,
@@ -403,6 +427,7 @@ import {
   type McpServerStatus,
 } from "./settings/mcp-connect";
 import * as settings from "./settings/settings-style";
+import { FluentIcon } from "./core/fluent-icons";
 import {
   AccountPage,
   type AccountClient,
@@ -411,6 +436,10 @@ import {
 } from "./account/account-page";
 import { ChatPage, type ChatClient } from "./chat/chat-page";
 import { HomePage, MoreSettingsPage, type HomePageActions } from "./keyboard/home-page";
+import {
+  ScreenKeyboardLayoutContext,
+  screenKeyboardLayoutFor,
+} from "./keyboard/screen-keyboard-preview";
 import { useSettingsPlatform } from "./theme/settings-platform";
 import { SettingsFormContext } from "./settings/settings-form-context";
 import { createSettingsReloadAction } from "./settings/settings-reload-action";
@@ -436,6 +465,8 @@ import { PluginsSettingsPage } from "./settings/pages/plugins-page";
 import type { PluginClient } from "./settings/plugins-section";
 import type { PluginPreferences } from "./settings/plugin-preferences";
 import { AboutSettingsPage } from "./settings/pages/about-page";
+import { UsageReportingSettingsPage } from "./settings/pages/usage-reporting-page";
+import { PrivacySettingsPage } from "./settings/pages/privacy-page";
 import type {
   CustomHelpcodeSchema,
   HelpcodePackOption,
@@ -459,7 +490,7 @@ import { defaultTouchKeyboardSchemes } from "./settings/touch-keyboard-scheme-he
 import { logo } from "./settings/settings-options";
 import type { CommunitySkinClient } from "./community/community-skins";
 import { communityDestinationView } from "./community/community-destination";
-import type { CommunityResourceClient } from "./community/community-resources";
+import type { CommunityResource, CommunityResourceClient } from "./community/community-resources";
 import type { CandidateSkinCommunityClient } from "./community/community-candidate-skins";
 import { CommunityPluginsPage, type CommunityPluginClient } from "./community/community-plugins";
 import * as communityStyle from "./community/community-style";
@@ -578,12 +609,14 @@ export {
   type ChatModel,
   type ChatModels,
 } from "./chat/chat-page";
+export { CHAT_SYSTEM_PROMPT } from "./chat/chat-prompt";
 export {
   HomePage,
   MoreSettingsPage,
   type HomePageActions,
   type MoreSettingsGroup,
 } from "./keyboard/home-page";
+export { openKeyboardSwitchGuide } from "./keyboard/keyboard-switch-guide";
 export {
   WelcomeFlowPage,
   type OnboardingActions,
@@ -629,9 +662,13 @@ export {
 export {
   CLOUD_CLIPBOARD_DISABLED,
   CLOUD_CLIPBOARD_MAX_UTF16,
+  CLOUD_CLIPBOARD_PENDING,
+  CLOUD_CLIPBOARD_RELAY_UNAUTHORIZED,
+  CLOUD_CLIPBOARD_RELAY_UNSUPPORTED,
   CLOUD_CLIPBOARD_SIGNED_OUT,
   CLOUD_CLIPBOARD_UNAVAILABLE,
   cloudClipboardAvailabilityNote,
+  cloudClipboardErrorMessage,
   cloudClipboardFailure,
   type CloudClipboardAvailability,
   type CloudClipboardRequest,
@@ -697,6 +734,17 @@ export {
   type PluginKind,
   type PluginPackage,
   type PluginsSectionProps,
+  SCRIPT_CAPABILITIES,
+  ScriptGrantDialog,
+  capabilityLabels,
+  scriptGrantState,
+  scriptResidualRisk,
+  toggleCapability,
+  type ScriptCapability,
+  type ScriptGrant,
+  type ScriptGrantDialogProps,
+  type ScriptGrantsResult,
+  type ScriptHealth,
 } from "./settings/plugins-section";
 export {
   DEFAULT_MELODY_PACK,
@@ -841,16 +889,30 @@ export {
   type TraditionalChineseOutputSectionProps,
 } from "./settings/traditional-chinese-output-section";
 export {
+  ChineseEnglishSpacingSection,
+  type ChineseEnglishSpacingSectionProps,
+} from "./settings/chinese-english-spacing-section";
+export {
   CloudCandidatesSection,
   type CloudCandidatesSectionProps,
 } from "./settings/cloud-candidates-section";
 export {
   TelemetryRow,
   TelemetrySection,
-  usageReportingDescription,
+  UsageReportingDetails,
+  usageReportingEndpoint,
+  usageReportingSummary,
   type TelemetrySectionProps,
 } from "./settings/telemetry-section";
 export { WubiSection, type WubiPreferences, type WubiSectionProps } from "./settings/wubi-section";
+export {
+  WubiCodeLookupSection,
+  WUBI_CODE_LOOKUP_MAX_LENGTH,
+  type WubiCodeLookup,
+  type WubiCodeLookupClient,
+  type WubiCodeLookupSectionProps,
+  type WubiTextCodes,
+} from "./settings/wubi-code-lookup-section";
 export {
   InputModeSection,
   type InputModeScheme,
@@ -868,6 +930,19 @@ export {
   type ShuangpinProfile,
   type WubiProfile,
 } from "./settings/input-scheme-details-section";
+export {
+  ShuangpinCustomEditor,
+  type ShuangpinCustomEditorProps,
+} from "./settings/shuangpin-custom-editor";
+export {
+  parseShuangpinCustomProfile,
+  shuangpinCustomProblemMessage,
+  type BuiltinShuangpinProfile,
+  type ShuangpinCustomProblem,
+  type ShuangpinCustomProfile,
+  type ShuangpinCustomProfileClient,
+  type ShuangpinCustomTablePart,
+} from "./settings/shuangpin-custom-profile";
 export {
   TranslationProviderSettingsSection,
   type TranslationProviderSettingsSectionProps,
@@ -1084,7 +1159,6 @@ export {
   type SettingsTextareaFieldProps,
 } from "./settings/settings-textarea-field";
 export { SettingsInputField, type SettingsInputFieldProps } from "./settings/settings-input-field";
-export { ModelSelect, type ModelSelectProps } from "./settings/model-select";
 export {
   AiCredentialSection,
   type AiCredentialSectionProps,
@@ -1118,7 +1192,7 @@ export {
 } from "./settings/password-setting-field";
 export { TextSettingField, type TextSettingFieldProps } from "./settings/text-setting-field";
 export { SelectSettingField, type SelectSettingFieldProps } from "./settings/select-setting-field";
-export { ModelSettingField, type ModelSettingFieldProps } from "./settings/model-setting-field";
+export { ModelPickerRows, type ModelPickerRowsProps } from "./settings/model-picker-rows";
 export {
   EndpointSettingField,
   type EndpointSettingFieldProps,
@@ -1440,7 +1514,11 @@ export {
   type CandidateAppearance,
   type CandidateOrientation,
 } from "./candidate/candidate-themes";
-import { describeInstallerTrust } from "./settings/update-manifest";
+import {
+  describeInstallerTrust,
+  type UpdateCheckRequest,
+  type UpdateCheckResult,
+} from "./settings/update-manifest";
 import { editionUsesHelpcode } from "./settings/input-scheme-options";
 export {
   serializeWindowHostMessage,
@@ -1524,12 +1602,14 @@ export {
   LocalModelManager,
   formatModelBytes,
   localModelErrorMessage,
+  localModelImportErrorMessage,
   localModelInUse,
   localModelProgressPercent,
   validModelMirror,
   visibleLocalModels,
   type LocalVoiceModel,
   type LocalVoiceModelClient,
+  type LocalVoiceModelImportFile,
   type LocalVoiceModelList,
   type LocalVoiceModelProgress,
 } from "./voice/local-models";
@@ -1554,6 +1634,10 @@ export type KeybindingPreferences = {
   switch_language_ctrl_alt_space: boolean;
   toggle_character_set_ctrl_shift_f: boolean;
   toggle_fullwidth_option_shift_h: boolean;
+  /** 单按 Caps Lock 切换中英文，长按照常是大写锁定。缺省为关。 */
+  switch_language_caps_lock?: boolean;
+  /** Ctrl+Shift+J 在中文和日语之间切换。缺省为关。 */
+  toggle_japanese_ctrl_shift_j?: boolean;
 };
 export type HostPlatform = "windows" | "macos" | "linux" | "android" | "ios" | "harmony";
 /** Mirrors `client-core::preferences::InputScheme`. */
@@ -1575,14 +1659,20 @@ export type VietnamesePreferences = {
   input_method?: "telex" | "vni";
   tone_style?: "modern" | "classic";
 };
+/** 对应 `client-core::preferences::AppInputModeRule`。 */
+export type AppInputModeRule = "chinese" | "english";
 /** Mirrors `client-core::host_surface::HostCapabilities`. */
 export interface HostCapabilities {
   platform: HostPlatform;
+  /** HarmonyOS input-method extensions and the settings ability share files only when the signed HAP has a data-group id. */
+  harmony_shared_sandbox?: boolean;
   /** Whether settings use the phone navigation and touch-oriented surface. */
   mobile_settings: boolean;
   restart_input_method: boolean;
   panel_windows: boolean;
   ime_mode_scope: boolean;
+  /** 宿主按 `app_input_mode_rules` 给指定应用定起始中英文模式（macOS 和 Windows）。 */
+  app_input_mode_rules?: boolean;
   typing_statistics: boolean;
   /** The host has wired the shared 背单词 entry point. */
   vocabulary_review: boolean;
@@ -1607,11 +1697,13 @@ export interface HostCapabilities {
   candidate_font_controls: boolean;
   candidate_preedit_font: boolean;
   candidate_page_number: boolean;
-  /** 宿主按 `show_app_logo` 显示或隐藏候选窗和悬浮工具栏左端的水杉 logo（目前只有 macOS）。 */
+  /** 宿主按 `show_app_logo` 显示或隐藏候选窗和悬浮工具栏左端的水杉 logo（macOS 和 Windows）。 */
   app_logo?: boolean;
+  /** 宿主按 `expand_candidates` 让横排候选窗按 ↓ 展开成多行候选网格（目前只有 macOS）。 */
+  expand_candidates?: boolean;
   candidate_row_colors: boolean;
   candidate_selection_appearance: boolean;
-  /** The host outlines the candidate panel in the border colour. Linux does (Fcitx5's classic UI theme) without any hover state. */
+  /** 宿主用边框颜色给候选窗描边。Linux 由 Fcitx5 的 classicui 主题描边，没有 hover 状态；IBus 面板描不了，运行中的 IBus 宿主以 `candidate_panel_limit: "ibus_panel"` 说明。 */
   candidate_border_color: boolean;
   /** The host draws its own floating candidate window and scales its font and geometry by `candidate_scale_percent`. */
   candidate_window_scale: boolean;
@@ -1619,19 +1711,27 @@ export interface HostCapabilities {
   candidate_window_opacity: boolean;
   /** The host rounds its candidate card by `candidate_corner_radius`, ahead of the skin package's radius. */
   candidate_corner_radius: boolean;
+  /** The host insets its candidates from the card's edge by `candidate_padding`, ahead of the skin package's padding. Only macOS so far. */
+  candidate_padding: boolean;
   candidate_follow_cursor: boolean;
   input_mode_hud: boolean;
+  /** 宿主在系统菜单栏放一个常驻状态项显示当前输入模式。只有 macOS 提供：Windows 有托盘语言栏，Linux 有输入法面板，触屏键盘的键面已显示模式。 */
+  input_mode_status_item: boolean;
   candidate_english_font: boolean;
   english_suggestions: boolean;
   helpcode_shift_entry: boolean;
   skin_directory_import: boolean;
   /** The one candidate page size the host draws; set when the host offers no choice. */
   fixed_candidate_page_size?: number;
+  /** 宿主能排的最大每页候选数：macOS、Linux、Android 为 10（第十个用 0 键选），其余为 9。 */
+  max_candidate_page_size?: number;
   /** The one candidate layout the host draws; set when the host offers no choice. */
   fixed_candidate_layout?: "horizontal" | "vertical";
   /** The touch keyboard picks its toolbar buttons from `touch_toolbar`. */
   touch_toolbar_components: boolean;
   shuangpin_preedit: boolean;
+  /** 宿主在双拼组字时按 `shuangpin_keymap_hint` 在候选窗旁画键位图（macOS 和 Windows）。 */
+  shuangpin_keymap_hint?: boolean;
   /** The host routes the Ctrl+Shift+Alt maintenance chords. */
   maintenance_shortcuts: boolean;
   /** The host reserves Option/Alt+Shift+H for the character width. */
@@ -1648,8 +1748,16 @@ export interface HostCapabilities {
   os_version?: string;
   /** The CPU architecture the host was built for (Rust's `std::env::consts::ARCH`, e.g. `x86_64`, `aarch64`); the update check picks this machine's Linux package by it. */
   arch?: string;
-  /** Why the Linux desktop panel drawing the candidate list ignores the candidate font, colours and skin, as the running host reported it. Absent when the panel honours them. */
-  candidate_panel_limit?: "gnome_shell" | "fcitx_theme" | "kimpanel";
+  /** 内核版本（Linux 的 `/proc/sys/kernel/osrelease`），「关于」页系统信息用；宿主读不到时缺省。 */
+  kernel_version?: string;
+  /** 桌面会话（Linux 的 `XDG_CURRENT_DESKTOP` 与 `XDG_SESSION_TYPE`，如 `ubuntu:GNOME (wayland)`）。 */
+  desktop_session?: string;
+  /** 水杉实际挂在哪个输入法框架上（Linux 的 `IBus` / `Fcitx5`），取自运行中的宿主写的状态。 */
+  input_method_framework?: string;
+  /** 设备型号（Linux 的 DMI 厂商与产品名）。 */
+  device_model?: string;
+  /** 运行中的 Linux 宿主报告的、画候选列表的桌面面板为什么不理会候选字体、颜色和皮肤；面板全都照办时缺省。`ibus_panel` 是部分不生效：IBus 面板接收字体和颜色，不接收圆角、边框颜色和皮肤的装饰图。 */
+  candidate_panel_limit?: "gnome_shell" | "fcitx_theme" | "kimpanel" | "ibus_panel";
   /** The host plays the sound packs in `plugins`: key sounds, the melody, the commit sound and the achievement jingle. */
   key_sound: boolean;
   /** The host routes the V, / and @ modes: it hands / and @ to the runtime, keeps digits as input while a mode spells with them, and loads the command tables and the @ name list. */
@@ -1658,10 +1766,20 @@ export interface HostCapabilities {
   music: boolean;
   /** The host draws the typing effects and the combo count `msime_client_typing_effect` answers with. */
   typing_effects: boolean;
+  /** 宿主向会话报告大写锁定状态，「大写锁定时使用英文标点」在这里有效（目前只有 macOS）。 */
+  caps_lock_punctuation?: boolean;
+  /** 宿主能分辨 Caps Lock 的轻点和长按并撤回大写锁定，「单按 Caps Lock 切换中英文」在这里有效（三个桌面宿主）。 */
+  caps_lock_language_switch?: boolean;
+  /** 快捷模式只从实体键盘的 Shift+字母进入，「Shift+字母进入快捷模式」总开关在这里有意义（三个桌面宿主）。 */
+  shift_letter_entry_switch?: boolean;
+  /** 宿主处理 Ctrl+Shift+J 在中文和日语之间切换（Windows 和 Linux）。本版本还要同时提供中文方案和日语，设置页才显示它的开关。 */
+  japanese_toggle_shortcut?: boolean;
   /** 背单词书目列出单词本插件（`pack-<插件 id>` 词书）。 */
   wordbook_packs: boolean;
   /** 符号面板显示已安装的符号集插件。 */
   symbol_set_packs: boolean;
+  /** 插件页显示「脚本插件（实验）」分组和授权页（macOS 和 Linux 的宿主）。 */
+  script_plugins?: boolean;
   /** The input schemes this host offers; the others are shown disabled. */
   input_schemes: InputScheme[];
   /** 运行中的版本，不是 full 时才有。缺省就是 full：所有方案都属于本版本，`input_schemes` 之外的方案只是这个宿主暂不支持，显示为禁用；有它时，`edition.input_schemes` 之外的方案在本版本里不存在，设置页直接不列出。 */
@@ -1717,6 +1835,8 @@ export type Preferences = {
   voice_input?: VoiceInputPreferences;
   local_modes?: LocalModePreferences;
   clipboard_history?: boolean;
+  /** 自建云剪贴板中继的地址和令牌；缺省或地址为空表示走水杉账号。两项要么都空，要么都合规，见 `crates/client-core/src/clipboard_relay.rs`。 */
+  cloud_clipboard_relay?: { url: string; token: string };
   cloud_candidates?: boolean;
   candidate_translations?: boolean;
   candidate_english_gloss?: boolean;
@@ -1734,13 +1854,23 @@ export type Preferences = {
   fuzzy_pinyin?: FuzzyPinyinPreferences;
   frequency?: FrequencyPreferences;
   word_character?: { enabled: boolean; keys: "brackets" | "minus_equal" };
+  /** 组字时 `;` 选第二个候选、`'` 选第三个。关闭时不写进文档；目前只有 Windows 接入，本页不显示这一项。 */
+  second_third_candidate?: { enabled: boolean; keys: "semicolon_quote" };
   navigation?: NavigationPreferences;
   keybindings?: KeybindingPreferences;
   scheme: InputScheme;
   /** Width used when desktop hosts commit printable ASCII characters. */
   character_width?: "halfwidth" | "fullwidth";
   wubi_code_hint?: boolean;
-  touch_keyboard_layout?: "twenty_six_key" | "nine_key" | "handwriting";
+  /** 五笔四码唯一候选自动上屏；缺省为开。 */
+  wubi_auto_commit_unique?: boolean;
+  /** 触屏键盘的布局；`fourteen_key` 是全拼 14 键，`nine_key_shuangpin` 是九键双拼，都只配全拼。 */
+  touch_keyboard_layout?:
+    | "twenty_six_key"
+    | "nine_key"
+    | "handwriting"
+    | "fourteen_key"
+    | "nine_key_shuangpin";
   touch_keyboard_schemes?: TouchKeyboardSchemePreferences;
   touch_key_spacing_tenths?: number;
   touch_row_spacing_tenths?: number;
@@ -1748,15 +1878,30 @@ export type Preferences = {
   touch_voice_shortcut?: boolean;
   /** 九宫格数字层的排列：电话（1 2 3 在上）或计算器（7 8 9 在上）。 */
   touch_number_keypad_order?: "phone" | "calculator";
+  /** 26 键按「123」时的数字层：一行 1 到 0，或九宫格那样的 3×3 数字键。 */
+  touch_twenty_six_key_number_layout?: "row" | "nine_key";
+  /** 触屏 26 键双拼时在字母键底部画声母/韵母提示；缺省为开。 */
+  touch_shuangpin_key_hints?: boolean;
   touch_toolbar?: Partial<TouchToolbarPreferences>;
   default_ime_mode?: "chinese" | "english";
   ime_mode_scope?: "app" | "global";
+  /** 应用例外：键是应用标识（macOS 的 bundle id、Windows 的进程基名），值是切到该应用时的起始模式。没有规则时文档里没有这个键。 */
+  app_input_mode_rules?: Record<string, AppInputModeRule>;
   last_chinese_scheme?: ChineseScheme | null;
-  shuangpin_profile: "xiaohe" | "ziranma" | "shoudao" | "microsoft";
+  /** `custom` 用下面的 `shuangpin_custom_profile`；表不能用时输入法按小鹤运行。 */
+  shuangpin_profile: BuiltinShuangpinProfile | "custom";
+  /** 自定义双拼的键位表。选别的方案时保留，切回 `custom` 还能用；空表不写进文档。 */
+  shuangpin_custom_profile?: ShuangpinCustomProfile;
+  /** 九键双拼用哪张表，只有触屏宿主用；等于默认值 `migala3` 时文档里没有这一项。 */
+  nine_key_shuangpin_profile?: "migala2" | "migala3" | "gushi2_low" | "custom";
+  /** 九键双拼的自定义表，形状同 `shuangpin_custom_profile`，键是数字；空表不写进文档。 */
+  nine_key_shuangpin_custom_profile?: ShuangpinCustomProfile;
   /** 五笔用 86 还是 98 码表，只在方案为五笔时起作用；缺省为 86。 */
   wubi_profile?: "wubi86" | "wubi98";
   /** macOS exposes the native shuangpin preedit presentation in the appearance page. */
   shuangpin_preedit_uses_raw?: boolean;
+  /** 「输入时显示双拼键位提示」。没选过时文档里没有这一项，按关显示；macOS 那时仍沿用本机旧的选择。 */
+  shuangpin_keymap_hint?: boolean;
   vietnamese?: VietnamesePreferences;
   wubi_mixed_pinyin?: boolean;
   /** 只出单字：全拼、双拼、五笔和粤拼的候选只留单个汉字；缺省为关。 */
@@ -1771,9 +1916,13 @@ export type Preferences = {
   candidate_opacity_percent?: number;
   /** Candidate card corner radius in points (0-32). Absent or null follows the skin package's radius, then the host's own. */
   candidate_corner_radius?: number | null;
+  /** Space between the candidate card's edge and its candidates in points (0-16), before the scale. Absent or null follows the skin package, then the host's own (macOS 6pt). */
+  candidate_padding?: number | null;
   candidate_follow_cursor?: boolean;
-  /** macOS-only non-activating badge shown after switching Chinese/English input. */
+  /** 切换中英文后在光标旁短暂显示的徽标（macOS、Windows、Linux 和鸿蒙 2in1）。 */
   input_mode_hud?: boolean;
+  /** macOS 菜单栏里常驻显示当前输入模式（中/双/五/日……，英文时为「英」）的状态项，默认关闭。 */
+  input_mode_status_item?: boolean;
   candidate_font_family?: string;
   candidate_english_font?: string | null;
   candidate_fallback_fonts?: string[];
@@ -1784,6 +1933,8 @@ export type Preferences = {
   show_candidate_page_number?: boolean;
   /** 候选窗和悬浮工具栏左端的水杉 logo。新装默认隐藏，旧文档缺这个字段时读成显示。 */
   show_app_logo?: boolean;
+  /** 「展开候选」：横排候选窗按 ↓ 展开成多行候选网格，默认关闭。 */
+  expand_candidates?: boolean;
   /** The one theme for the candidate window, floating toolbar, menus and touch keyboard. `theme` stays the light/dark mode that `system` and the settings window follow. */
   global_theme?: GlobalTheme;
   /** What the `custom` global theme is made of: an external candidate skin package, the seven candidate colour pickers and the keyboard editor design. */
@@ -1810,7 +1961,10 @@ export type Preferences = {
   smart_punctuation_direct_letter?: boolean;
   paired_punctuation?: boolean;
   punctuation_lock?: "follow" | "chinese" | "english";
+  caps_lock_ascii_punctuation?: boolean;
   traditional_chinese_output?: boolean;
+  /** 中英文之间加空格：上屏文本里汉字与 ASCII 字母、数字相邻处加一个半角空格。缺省为关，关着时文档里没有这个键。 */
+  chinese_english_spacing?: boolean;
   /** Sound packs, music and command tables; the document leaves it out while every value is the default. */
   plugins?: PluginPreferences;
 };
@@ -2025,8 +2179,21 @@ export interface DictionaryClient {
   ): Promise<{ text: string; has_more: boolean }>;
   retry?(request_id: string): Promise<void>;
   dismissFailure?(request_id: string): Promise<void>;
+  /** 一种词库的词条总数，含内置词条；手机「词库」页的「拼音词库」行显示它。 */
+  count?(kind: LocalDictionaryKind): Promise<number>;
+  /** 五笔查码（词库请求 `wubi_codes`，只读）：`text` 里每个汉字和整段词的 86、98 五笔编码。宿主提供它时，五笔的设置下面出现「五笔查码」。 */
+  wubiCodes?(text: string): Promise<WubiCodeLookup>;
 }
 export { dictionaryKindKeyHint } from "./settings/pages/dictionary-page";
+export type {
+  DictionaryCollection,
+  DictionaryCollectionKind,
+  DictionaryCollectionSource,
+  DictionaryCollectionWord,
+  DictionaryCollectionImportReport,
+  DictionaryCollectionsView,
+  DictionaryCollectionsClient,
+} from "./dictionary/dictionary-collections";
 
 export type FloatingToolbarPreferences = {
   enabled: boolean;
@@ -2087,6 +2254,12 @@ export interface SettingsClient {
    * The colours a host draws for a theme, from the same `resolve` the input method runs (`msime_client_resolve_theme`), with the custom theme's package read from the host's own skin directory. Absent on hosts whose bridge has no theme call; the picker and built-in previews read `themeCatalog` and need no host.
    */
   resolveTheme?: (request: ResolveThemeRequest) => Promise<ResolvedTheme>;
+  /** 编辑中的自定义双拼表有什么问题，能用时是 `null`。与 MCP 保存前的校验结论相同，但宿主不为它留下任何东西，页面每改一个键都可以问。和 `builtinShuangpinTable` 都提供时，输入页才提供自定义双拼的编辑、导入和导出。 */
+  validateShuangpinCustomProfile?: (
+    profile: ShuangpinCustomProfile,
+  ) => Promise<ShuangpinCustomProblem | null>;
+  /** 内置双拼方案的键位表，编辑自定义方案时从它开始。 */
+  builtinShuangpinTable?: (name: BuiltinShuangpinProfile) => Promise<ShuangpinCustomProfile | null>;
   readSkinImage?: SkinImageReader;
   readSkinFont?: SkinFontReader;
   readSkinToolbarCss?: (id: string, relative?: string) => Promise<string | null>;
@@ -2103,6 +2276,8 @@ export interface SettingsClient {
   save(revision: number, preferences: Preferences): Promise<Snapshot>;
   onPreferencesChanged?(listener: (snapshot: Snapshot) => void): Promise<() => void>;
   dictionary?: DictionaryClient;
+  /** 命名词库：新建、导入、启用停用、装社区词库。提供它的宿主在手机的「词库」页按词库列出，而不是按种类查词条。 */
+  dictionaryCollections?: DictionaryCollectionsClient;
   /** 原子地恢复内置词库并清除全部学习数据；宿主只在真正能清除的平台（三个桌面宿主）上提供它。 */
   resetLearnedData?: () => Promise<void>;
   /**
@@ -2118,17 +2293,15 @@ export interface SettingsClient {
   /** Open the folder holding the preferences document, where a repair leaves its backup. */
   openPreferencesDirectory?: () => Promise<void>;
   readAppVersion?: () => Promise<string>;
+  /** 经由 `msime_client_core::update_check`（Tauri 的 `update_check` 命令，或原生宿主上的 `msime_client_update_check`）把本平台、本版本最新的已发布版本与当前运行的版本号比较。未提供时关于页不提供检查更新。 */
+  checkUpdate?: (request: UpdateCheckRequest) => Promise<UpdateCheckResult>;
   openExternalUrl?: (url: string) => Promise<void>;
   /** The console's app notices; the host fetches and caches the feed and remembers dismissals. Absent shows none. */
   notices?: NoticesClient;
   /** macOS opens the versioned third-party notices shipped with the app bundle. */
   openThirdPartyLicenses?: () => Promise<void>;
-  /** macOS keeps the native shuangpin keymap panel preference outside shared Engine preferences. */
+  /** 「输入时显示双拼键位提示」以前只存在 macOS 本机 defaults 里，现在是共享偏好 `shuangpin_keymap_hint`。文档里还没有这一项时，macOS 输入法仍按本机的旧选择显示键位图，设置页读这个值只为显示同一个状态；改动写进共享偏好。 */
   loadMacosShuangpinKeymap?: () => Promise<boolean>;
-  saveMacosShuangpinKeymap?: (enabled: boolean) => Promise<void>;
-  /** macOS keeps Wubi unique-candidate auto-commit in the native input-method defaults domain. */
-  loadMacosWubiAutoCommitUnique?: () => Promise<boolean>;
-  saveMacosWubiAutoCommitUnique?: (enabled: boolean) => Promise<void>;
   copyText?: (text: string) => Promise<void>;
   /** The desktop hosts ship `msime-mcp` beside the settings app and report where it is and the entry an AI assistant runs it with. */
   mcpServerStatus?: () => Promise<McpServerStatus>;
@@ -2149,8 +2322,10 @@ export interface SettingsClient {
    * the review inline rather than offering a button that opens nothing. */
   openVocabulary?: () => Promise<void>;
   openCloudClipboard?: () => Promise<void>;
-  /** Sends cloud clipboard requests from the settings window itself, over the signed-in account; with it the local clipboard history can send an entry to the cloud. */
+  /** 设置窗口自己发云剪贴板请求，经登录的水杉账号或配置的自建中继；有它时本机剪贴板历史可以把一条发到云剪贴板。 */
   cloudClipboardRequest?: CloudClipboardRequest;
+  /** 这个宿主的云剪贴板会按偏好 `cloud_clipboard_relay` 改走自建中继；有它时「剪贴板」页显示同步方式和中继的地址、令牌。 */
+  cloudClipboardRelay?: boolean;
   openCloudDictionary?: () => Promise<void>;
   restartInputMethod?: () => Promise<void>;
   /** macOS installs/updates the separate InputMethodKit bundle before registering it. */
@@ -2191,6 +2366,10 @@ export interface SettingsClient {
    * Ask the host for an installed local speech model directory (one holding msime-model.json), resolving to null when the user cancels. The model is loaded by path and a file input hands back contents instead, so only the host can answer this.
    */
   pickVoiceModelPath?: () => Promise<string | null>;
+  /** 应用例外的「添加应用…」：宿主弹出系统的选应用对话框，交回规则用的标识（macOS 的 Bundle ID，Windows 的程序文件名）和应用名称，用户取消时为 null；所选不是应用程序时以 `not_application` 拒绝。没有它的宿主只能手填应用标识。 */
+  pickApplication?: () => Promise<{ id: string; name: string } | null>;
+  /** 应用例外列表的显示名称：按规则标识查本机装着的应用，查不到的不返回（macOS）。 */
+  applicationNames?: (ids: string[]) => Promise<Record<string, string>>;
   /** The host's on-device speech model store; hosts that provide it offer the `local` provider with a model manager. */
   localVoiceModels?: LocalVoiceModelClient;
   /** 按需下载的资源包（日文词库、「粤语、注音与笔画词库」、手写模型）。只有 macOS 提供：发布包不再内置它们，选用对应方案时由设置页下载。 */
@@ -2252,6 +2431,8 @@ export interface PreferencesRecovery {
  * Its page icon is the app logo, which the design does not put in the bar either — its first tab is the `settings` glyph. Three of the four tabs would otherwise be a subject and the fourth a brand.
  */
 export {
+  customTranslationKeyIssue,
+  isDeepLApiEndpoint,
   tencentCredentialIssue,
   translationEndpointIssue,
 } from "./settings/translation-validation";
@@ -2362,6 +2543,7 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     showEnglishSuggestions,
     showHelpcodeShiftEntry,
     showShuangpinPreedit,
+    showShuangpinKeymapHint,
     showCharacterWidth,
     aiProviderCredentials,
     showVoiceCommitMode,
@@ -2374,7 +2556,9 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     showCandidateWindowScale,
     showCandidateWindowOpacity,
     showCandidateCornerRadius,
+    showCandidatePadding,
     showInputModeHUD,
+    showInputModeStatusItem,
     showVoiceCaptureDevices,
     showDesktopMaintenanceShortcuts,
     showFullwidthChord,
@@ -2387,8 +2571,10 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     showTypingEffects,
     showTypingEffectStyles,
     showTypingEffectPacks,
+    typingEffectsFlashOnly,
     showWordbookPacks,
     showSymbolSetPacks,
+    showScriptPlugins,
   } = capabilities;
   const {
     fullwidthChord,
@@ -2439,14 +2625,7 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     dismissInputSourceStartup,
     inputSourceStartup,
     onDeviceDownloadable,
-    setSavedShuangpinKeymap,
-    setSavedWubiAutoCommitUnique,
-    setShuangpinKeymap,
-    setWubiAutoCommitUnique,
     shuangpinKeymap: macosShuangpinKeymap,
-    wubiAutoCommitUnique: macosWubiAutoCommitUnique,
-    savedShuangpinKeymap: savedMacosShuangpinKeymap,
-    savedWubiAutoCommitUnique: savedMacosWubiAutoCommitUnique,
   } = useMacosSettings({ client, macos: macosPlatform, setError });
   const restoredMobilePage =
     mobilePlatform &&
@@ -2463,13 +2642,11 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     ),
   );
   const [accountLoginReturnPage, setAccountLoginReturnPage] = useState<SettingsPageId | null>(null);
-  // Each bottom tab owns a navigation stack in the source app. This shared page has a flat route,
-  // so remember the visible leaf for each tab: leaving 输入 for 社区 and returning to 键盘 must
-  // restore 输入 rather than reset the first tab to 首页.
+  // 源应用里每个底部标签页各有一个导航栈，这个共享页面只有一条扁平路由，所以为每个标签页记住它显示着的那一页：从「输入」去「统计」再回到「设置」，要回到「输入」，而不是把第一个标签页重置为首页。
   const mobileInitialTab = mobileTabForPage(page);
   const mobileLastPageByTab = useRef<Record<MobilePrimaryPageId, SettingsPageId>>({
     home: mobileInitialTab === "home" ? page : "home",
-    community: mobileInitialTab === "community" ? page : "community",
+    chat: mobileInitialTab === "chat" ? page : "chat",
     "typing-statistics": mobileInitialTab === "typing-statistics" ? page : "typing-statistics",
     account: mobileInitialTab === "account" ? page : "account",
   });
@@ -2595,7 +2772,6 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
   } = useSettingsPersistence({
     client,
     mobile: mobilePlatform,
-    macos: macosPlatform,
     mounted,
     snapshot,
     draft,
@@ -2605,14 +2781,6 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     setError,
     setNotice,
     setRecoveredBackup,
-    macosShuangpinKeymap,
-    savedMacosShuangpinKeymap,
-    saveMacosShuangpinKeymap: client.saveMacosShuangpinKeymap,
-    setSavedMacosShuangpinKeymap: setSavedShuangpinKeymap,
-    macosWubiAutoCommitUnique,
-    savedMacosWubiAutoCommitUnique,
-    saveMacosWubiAutoCommitUnique: client.saveMacosWubiAutoCommitUnique,
-    setSavedMacosWubiAutoCommitUnique: setSavedWubiAutoCommitUnique,
   });
 
   const { restoreDefaults, recoverPreferences } = usePreferenceRecovery({
@@ -2646,23 +2814,19 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     busy: updateBusy,
     checkForUpdate,
     status: updateStatus,
+    supported: updateCheckSupported,
   } = useUpdateCheck({
-    clientHostedPlatform,
-    releasePlatform: client.host?.platform ?? null,
+    checkUpdate: client.checkUpdate,
+    platform: client.host?.platform ?? null,
     edition: client.host?.edition?.id,
     arch: client.host?.arch,
-    releasePageUrl: platformReleasesPageUrl,
     currentAppVersion,
   });
 
   const openPanel = useOpenPanel({ setError });
 
   // Only a failed save leaves changes unsaved for long; 重新读取 then asks before discarding them.
-  const dirty =
-    (!!draft && !!snapshot && !deepEqual(draft, snapshot.preferences)) ||
-    (macosShuangpinKeymap !== undefined && macosShuangpinKeymap !== savedMacosShuangpinKeymap) ||
-    (macosWubiAutoCommitUnique !== undefined &&
-      macosWubiAutoCommitUnique !== savedMacosWubiAutoCommitUnique);
+  const dirty = !!draft && !!snapshot && !deepEqual(draft, snapshot.preferences);
   const { ai, storedAiCredential } = aiSettingsPreferences(
     draft?.ai_assistant,
     providerCredentials,
@@ -2742,6 +2906,7 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     mobile: mobilePlatform,
     macos: macosPlatform,
     linux: linuxPlatform,
+    windows: windowsPlatform,
     candidateEnglishGlossAvailable: Boolean(client.candidateEnglishGloss),
     onDeviceDownloadable,
     onChange: onTranslationChange,
@@ -2761,6 +2926,7 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     macos: macosPlatform,
     android: androidPlatform,
     harmony: harmonyPlatform,
+    windows: windowsPlatform,
     nativeVoicePlatform,
     localModelsAvailable: client.localVoiceModels !== undefined,
     onChange: onVoiceChange,
@@ -2768,7 +2934,7 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
   const providerPresetControls = createProviderPresetControl(client.openExternalUrl);
   const floatingToolbar = floatingToolbarPreferences(draft);
   const { themeMode, settingsTheme, globalTheme, customColors, customTouchKeyboardSkin } =
-    settingsThemePreferences(draft);
+    settingsThemePreferences(draft, host?.platform);
   const dark = useSettingsTheme(themeMode, settingsTheme);
   // 两种 HarmonyOS 外观都用用户的应用主题（水杉四季或某个固定季节）着色；每种外观取哪些 token 由 `appThemeStyle` 决定。
   const resolvedAppTheme = useResolvedAppTheme(
@@ -2812,13 +2978,11 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     linuxPlatform ||
     windowsPlatform ||
     macosPlatform;
-  // Physical-keyboard shortcuts and a desktop floating toolbar have no phone surface. HarmonyOS keeps those controls in the input-method panel on a 2-in-1, but its phone panel is still a touch keyboard, so the settings entry must not leak the PC key descriptions into the phone's "全部设置" list.
+  // 手机上不提供实体键盘快捷键页和桌面悬浮工具栏。HarmonyOS 在 2-in-1 上把这些控件放在输入法面板里，手机的面板仍是触屏键盘，设置里不能把电脑按键的说明带进手机的列表。
   //
-  // The shortcuts page carries the hardware-keyboard chords, so it is hidden where the host does not route any of them rather than where the platform happens to be a phone. Any of these devices can have a keyboard attached, and its owner has to be able to reach the switches the host already reads; hiding the page by platform name left them unreachable on Android.
+  // 快捷键页以前只在宿主一个快捷键都不路由时隐藏，好让接了实体键盘的手机用户改得到宿主读取的开关（Android 曾因按平台隐藏而改不到）。现在手机上一律不提供：接实体键盘的手机用户很少，这一页对其余用户是噪音；宿主照旧按默认值处理这些按键。
   const mobileHiddenPageIds: readonly SettingsPageId[] = [
-    ...(showModeSwitchShortcuts || showPanelShortcuts || showDesktopMaintenanceShortcuts
-      ? []
-      : (["shortcuts"] as const)),
+    "shortcuts",
     "floating-toolbar",
     // Sound packs, music and the / and @ modes all belong to a physical keyboard and a desktop candidate window; a phone keeps its own keyboard feedback settings.
     "plugins",
@@ -2848,8 +3012,11 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
       mobileHiddenPageIds,
       mobilePageTitle,
     });
-  // A sub-page lights its parent in the navigation and offers the way back to it.
-  const navigationPage: SettingsPageId = subPageParents[page] ?? page;
+  // 子页面在导航里点亮它的上级页面，并提供回到上级的入口。触屏宿主上「AI 对话」是底部的「对话」标签页，不再是「AI 辅助」的子页面，标签页的根页面没有上级。
+  const navigationPage: SettingsPageId =
+    mobilePlatform && mobilePrimaryPageIds.includes(page as MobilePrimaryPageId)
+      ? page
+      : (subPageParents[page] ?? page);
   const { mobileActiveTab, selectPage, selectMobileTab, openAccountLogin, finishAccountLogin } =
     useSettingsNavigation({
       mobilePlatform,
@@ -2864,15 +3031,24 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
       setAccountLoginReturnPage,
       accountLoginReturnPage,
     });
-  // HarmonyOS 手机设计稿给每个页面都加大标题（包括 设置、社区、统计、我的）；其他触屏宿主有三个标签页一打开就是已经表明自身名称的内容。
+  // HarmonyOS 手机设计稿给每个页面都加大标题（包括 设置、统计、我的）；其他触屏宿主的三个标签页一打开就是已经表明自身名称的内容。
   const untitledOnPhone: readonly SettingsPageId[] =
     settingsPlatform === "harmony" ? [] : ["home", "typing-statistics", "account"];
-  // 设计稿里从一个页面内部打开另一个页面的行，例如「AI 辅助」上的「AI 对话」。
+  // 设计稿里从一个页面内部打开另一个页面的行，例如「词库」上的「背单词」。
   const pageEntry = (id: SettingsPageId) => availablePages.find((item) => item.id === id);
+  const { communityGallery, openCommunityGallery, closeCommunityGallery } =
+    useCommunityGallerySubview({
+      mobile: mobilePlatform,
+      page,
+      selectPage,
+      hasSkins: Boolean(client.communitySkins),
+    });
   const { openCommunity, openLocalDesigns } = useSettingsDestinationActions({
     selectPage,
     setShowTouchSkinEditor,
     setCommunityDestination,
+    // 触屏宿主没有「社区」页，去社区的入口（「我的」里的社区作品各行、皮肤页的「在线皮肤」）都在对应功能页里打开完整图库。
+    openCommunityGallery: mobilePlatform ? openCommunityGallery : undefined,
   });
   const {
     category: initialCommunityCategory,
@@ -2924,7 +3100,9 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     showCandidateWindowScale,
     showCandidateWindowOpacity,
     showCandidateCornerRadius,
+    showCandidatePadding,
     showInputModeHUD,
+    showInputModeStatusItem,
     showVoiceCaptureDevices,
     showFullwidthChord,
     fullwidthChord,
@@ -2946,8 +3124,10 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     showTypingEffects,
     showTypingEffectStyles,
     showTypingEffectPacks,
+    typingEffectsFlashOnly,
     showWordbookPacks,
     showSymbolSetPacks,
+    showScriptPlugins,
     snapshot,
     draft,
     setDraft,
@@ -2975,6 +3155,7 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     communityDestination,
     updateStatus,
     updateBusy,
+    updateCheckSupported,
     availableUpdate,
     currentAppVersion,
     copyFeedbackGroup,
@@ -2988,9 +3169,7 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     mobileKeyboardFeedback,
     mobileKeyboardFeedbackBusy,
     macosShuangpinKeymap,
-    setShuangpinKeymap,
-    macosWubiAutoCommitUnique,
-    setWubiAutoCommitUnique,
+    showShuangpinKeymapHint,
     setPhrases,
     phrases,
     phrasePage,
@@ -3147,6 +3326,9 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     initialCommunityCategory,
     initialCommunityScope,
     initialCommunityMine,
+    communityGallery,
+    openCommunityGallery,
+    closeCommunityGallery,
   };
 }
 
@@ -3159,6 +3341,17 @@ function ShellToasts({ enabled, children }: { enabled: boolean; children: ReactN
 export type SettingsPageModel = ReturnType<typeof useSettingsPageModel>;
 
 export function SettingsPage(props: SettingsPageProps) {
+  // 宿主自己的屏幕键盘布局：没写 `layout` 的键盘预览按它画，手机上不画桌面键盘。
+  return (
+    <ScreenKeyboardLayoutContext.Provider
+      value={screenKeyboardLayoutFor(props.client.host?.platform)}
+    >
+      <SettingsShell {...props} />
+    </ScreenKeyboardLayoutContext.Provider>
+  );
+}
+
+function SettingsShell(props: SettingsPageProps) {
   const { onReplayOnboarding } = props;
   const model = useSettingsPageModel(props);
   // The 插件 page shows either the installed packs (a page of the settings form) or the community gallery, which has its own search form and so is drawn outside the settings one.
@@ -3173,6 +3366,7 @@ export function SettingsPage(props: SettingsPageProps) {
     client,
     confirmation,
     confirm,
+    host,
     androidPlatform,
     iosPlatform,
     harmonyPlatform,
@@ -3223,8 +3417,19 @@ export function SettingsPage(props: SettingsPageProps) {
     initialCommunityCategory,
     initialCommunityScope,
     initialCommunityMine,
+    communityGallery,
+    closeCommunityGallery,
     currentAppVersion,
   } = model;
+  // 对话页第一次打开后就一直挂着（见下方渲染处），切走只隐藏。
+  const [chatMounted, setChatMounted] = useState(page === "chat");
+  // 对话页的输入框正在打字：底部标签栏让开，键盘上方只留输入栏，和常见的聊天应用一样。
+  const [chatTyping, setChatTyping] = useState(false);
+  // 首页「试用键盘」切到对话页时加一，对话页随即聚焦输入框、弹出键盘；点底部标签进来不加，不弹键盘。
+  const [chatFocusRequest, setChatFocusRequest] = useState(0);
+  useEffect(() => {
+    if (page === "chat") setChatMounted(true);
+  }, [page]);
   // 任一种 HarmonyOS 外观（手机或 2-in-1）：两者都用应用主题着色，并带有设计稿的 toast。
   const harmonyLook = settingsPlatform === "harmony" || settingsPlatform === "hm2";
   // HarmonyOS 手机外观：推入标签页的每个页面都带返回按钮并会滑入，另外三个标签页使用更紧凑的标签页列表。
@@ -3233,6 +3438,8 @@ export function SettingsPage(props: SettingsPageProps) {
   const pushedPage = harmonyPhone && !tabRootPage;
   // 「试用键盘」是一页对话：对话区在页面内滚动，输入栏贴着内容区底部，和 Android 的试用页一样不带底部标签栏，键盘弹起时输入栏直接落在键盘上方。
   const fillsContent = mobilePlatform && page === "try-keyboard";
+  // 触屏上的「对话」标签同样是一页对话，内容区撑满、输入栏贴底，但它是标签页，底部标签栏照常显示。
+  const contentFills = fillsContent || (mobilePlatform && page === "chat");
   const pageColumnRef = useRef<HTMLDivElement>(null);
   const launchPage = useRef(page);
   // 从一个推入页面再推入的页面（反馈 到 帮助）会保留内容列的动画类，所以要重启动画，而不是让它停在已结束的状态。用重启动画而不是按页面给内容列设 key，能让表单页面像在其他宿主上一样保持挂载、保留状态。
@@ -3245,6 +3452,18 @@ export function SettingsPage(props: SettingsPageProps) {
     }
   }, [page, pushedPage]);
   const reloadSettings = createSettingsReloadAction({ dirty, reload, confirm });
+  // 社区图库「添加」词库的去处：宿主有命名词库时装成一个独立的词库，否则导入本机词库。「社区」页和功能页里的图库共用。
+  const communityLocalDictionary = client.dictionaryCollections
+    ? {
+        ...client.dictionary,
+        installCollection: async (resource: CommunityResource) => {
+          await client.dictionaryCollections?.installCommunity(resource);
+        },
+      }
+    : client.dictionary;
+  const recordCommunitySkin = (id: string) => {
+    void client.typingStatistics?.recordSkin?.(id);
+  };
   const { onOpenPage } = createSettingsPageSelection({ selectPage });
   const statusActions = createSettingsStatusActions({
     recoverPreferences,
@@ -3289,7 +3508,7 @@ export function SettingsPage(props: SettingsPageProps) {
     page === "skin" && Boolean(client.communityCandidateSkins) && skinView === "community";
   const pluginCommunityShown =
     page === "plugins" && Boolean(client.communityPlugins) && pluginView === "community";
-  // 子页面（「AI 辅助」下的「AI 对话」、「词库」下的「背单词」、「帮助与反馈」下的「帮助」）在返回时写出父页面的名字。
+  // 子页面（「词库」下的「背单词」、「帮助与反馈」下的「帮助」，桌面上还有「AI 辅助」下的「AI 对话」）在返回时写出父页面的名字。
   const parentPage =
     navigationPage !== page ? availablePages.find((item) => item.id === navigationPage) : undefined;
   // HarmonyOS 手机和边缘滑动一样，沿导航推入的 WebView 历史返回。设置打开时所在的页面身后没有设置的历史条目（最多只有宿主自己的，比如引导页的），所以从那里按钮改为向上，以替换当前条目的方式去到上级页面或所在标签页的根页面：如果推入新条目，刚离开的页面会留在上级页面后面，系统返回手势会回到它。此后上级页面占据最底部的条目，所以它自己的返回按钮也同样向上。
@@ -3314,7 +3533,7 @@ export function SettingsPage(props: SettingsPageProps) {
     macShell || settingsPlatform === "hm2" || ipadShell || (winShell && !titlebarShown);
   const sidebarBrandShown = !mobilePlatform && !titlebarShown;
   const navNeedle = navQuery.trim().toLocaleLowerCase();
-  // iPad 的标签栏已有社区、统计和我的；`settingsPageProjections` 在手机和 iPad 上都不把这几个标签页列进侧栏，这里不必再过滤一次。
+  // iPad 的标签栏已有对话、统计和我的；`settingsPageProjections` 在手机和 iPad 上都不把这几个标签页列进侧栏，这里不必再过滤一次。
   const shownSidebarGroups = navNeedle
     ? sidebarGroups
         .map((group) => ({
@@ -3368,6 +3587,7 @@ export function SettingsPage(props: SettingsPageProps) {
     >
       <ShellToasts enabled={harmonyLook}>
         {confirmation}
+        <KeyboardSwitchGuideHost setup={client.home?.setup} />
         {titlebarShown && (
           <WindowTitlebar
             linux={linuxShell}
@@ -3382,7 +3602,7 @@ export function SettingsPage(props: SettingsPageProps) {
         )}
         <div className={settings.body} data-settings-body="">
           {/* A bottom tab bar. `order-2` seats it below the content while the DOM keeps it ahead, so assistive technology and keyboard focus still reach the navigation first, and the bottom padding clears the gesture inset. Hidden above phone width, where the sidebar serves. */}
-          {mobilePlatform && !fillsContent && (
+          {mobilePlatform && !fillsContent && !(page === "chat" && chatTyping) && (
             <MobileSettingsTabs
               tabs={mobilePrimaryPages}
               activeTab={mobileActiveTab}
@@ -3446,7 +3666,7 @@ export function SettingsPage(props: SettingsPageProps) {
           <main
             ref={settingsContentRef}
             id="settings-content"
-            className={`${settings.content} ${ipadSidebarShown ? "" : "ipad:col-span-2"} ${fillsContent ? "flex flex-col" : ""}`}
+            className={`${settings.content} ${ipadSidebarShown ? "" : "ipad:col-span-2"} ${contentFills ? "flex flex-col" : ""}`}
             aria-labelledby="page-title"
             onScroll={
               collapsingTitle
@@ -3455,12 +3675,19 @@ export function SettingsPage(props: SettingsPageProps) {
             }
           >
             {collapsingTitle && (
-              // The large title's compact stand-in once it scrolls away. Decorative: the `h1` below still names the page.
-              <div
-                className={settings.collapsedTitle(titleCollapsedOn === page)}
-                aria-hidden="true"
-              >
-                {pageTitle}
+              // The large title's compact stand-in once it scrolls away. The title is decorative: the `h1` below still names the page. The back button is not: the large header's own scrolls away with the title, and a pushed page that has been scrolled had no way back but the system gesture.
+              <div className={settings.collapsedTitle(titleCollapsedOn === page)}>
+                {pushedPage && titleCollapsedOn === page && (
+                  <button
+                    type="button"
+                    className={settings.collapsedBackButton}
+                    aria-label="返回"
+                    onClick={goBack}
+                  >
+                    <FluentIcon name="arrow_left" size={22} />
+                  </button>
+                )}
+                <span aria-hidden="true">{pageTitle}</span>
               </div>
             )}
             {macShell && (
@@ -3470,13 +3697,11 @@ export function SettingsPage(props: SettingsPageProps) {
             )}
             <div
               ref={pageColumnRef}
-              className={`${settings.contentColumn} ${pushedPage ? "animate-ms-push-in motion-reduce:animate-none" : ""} ${fillsContent ? "flex min-h-0 flex-1 flex-col" : ""}`}
-              // 社区、统计 和 我的 使用更紧凑的标签页列表，样式表依据这个属性区分。
+              className={`${settings.contentColumn} ${pushedPage ? "animate-ms-push-in motion-reduce:animate-none" : ""} ${contentFills ? "flex min-h-0 flex-1 flex-col" : ""}`}
+              // 统计 和 我的 使用更紧凑的标签页列表，样式表依据这个属性区分。
               data-tab-page={harmonyPhone && tabRootPage && page !== "home" ? "" : undefined}
             >
-              {/* Three of the four tabs open on something that already names them — a headline, a
-                profile card, a row of figures — and the source prints no page title over any of
-                them. 社区 is the one that does. Hidden rather than dropped: it labels `main`. */}
+              {/* 三个标签页一打开都是已经表明自身的内容（标题行、资料卡、一排数字），源应用不在它们上面印页面标题。标题是隐藏而不是去掉：它为 `main` 提供名称。 */}
               {parentPage && !harmonyPhone && (
                 <button
                   type="button"
@@ -3526,7 +3751,13 @@ export function SettingsPage(props: SettingsPageProps) {
                   preferences={draft}
                   actions={client.home}
                   onOpenPage={onOpenPage}
-                  onOpenChat={onOpenChat}
+                  onOpenChat={
+                    onOpenChat &&
+                    (() => {
+                      setChatFocusRequest((count) => count + 1);
+                      onOpenChat();
+                    })
+                  }
                   touchLayout={mobilePlatform}
                   ios={iosPlatform}
                   rootPages={mobileSecondaryGroups
@@ -3537,6 +3768,7 @@ export function SettingsPage(props: SettingsPageProps) {
               {client.home && page === "try-keyboard" && (
                 <TryKeyboardPage
                   actions={client.home}
+                  switchAway={!harmonyPlatform}
                   chat={client.chat}
                   onLogin={openAccountLogin}
                   onOpenUrl={
@@ -3580,9 +3812,9 @@ export function SettingsPage(props: SettingsPageProps) {
                   onOpenLocalDesigns={
                     client.customTouchKeyboardSkins ? openLocalDesigns : undefined
                   }
-                  onOpenCommunity={
-                    client.communitySkins && client.communityResources ? openCommunity : undefined
-                  }
+                  // Windows 的社区页只有词包与回复模板，没有皮肤画廊；它的候选窗口皮肤社区在主题页。
+                  onOpenCommunity={client.communityResources ? openCommunity : undefined}
+                  communityHasSkins={Boolean(client.communitySkins)}
                   onOpenCloudDictionary={
                     client.openCloudDictionary
                       ? () => {
@@ -3631,13 +3863,19 @@ export function SettingsPage(props: SettingsPageProps) {
                   appVersion={currentAppVersion}
                 />
               )}
-              {client.chat && page === "chat" && (
-                <ChatPage
-                  client={client.chat}
-                  autoFocus={mobilePlatform}
-                  touch={mobilePlatform}
-                  onLogin={openAccountLogin}
-                />
+              {/* 触屏上「对话」是常驻的底部标签：第一次打开后一直挂着，切到别的标签只是隐藏，对话记录和进行中的回复都不丢；点标签进来不弹键盘，点输入框或从首页「试用键盘」进来才弹，与 Android 的对话标签一致。 */}
+              {client.chat && (page === "chat" || (mobilePlatform && chatMounted)) && (
+                <div className={page === "chat" ? "contents" : undefined} hidden={page !== "chat"}>
+                  <ChatPage
+                    client={client.chat}
+                    touch={mobilePlatform}
+                    active={page === "chat"}
+                    onComposerFocusChange={setChatTyping}
+                    focusRequest={chatFocusRequest}
+                    setup={client.home}
+                    onLogin={openAccountLogin}
+                  />
+                </div>
               )}
               {page === "community" && (
                 <CommunityPage
@@ -3648,17 +3886,33 @@ export function SettingsPage(props: SettingsPageProps) {
                   initialMine={initialCommunityMine}
                   initialCategory={initialCommunityCategory}
                   initialScope={initialCommunityScope}
-                  localDictionary={client.dictionary}
+                  localDictionary={communityLocalDictionary}
                   localSkinLibrary={client.customSkinLibrary}
                   mobile={mobilePlatform}
                   onLogin={openAccountLogin}
                   preferences={draft}
                   // 从皮肤库应用的皮肤和其他偏好修改一样：先进入草稿，再由表单的自动保存写入。
                   onApplyPreferences={setDraft}
-                  onSkinApplied={(id: string) => {
-                    void client.typingStatistics?.recordSkin?.(id);
-                  }}
+                  onSkinApplied={recordCommunitySkin}
                   look={harmonyPlatform && mobilePlatform ? "harmony" : undefined}
+                />
+              )}
+              {/* 触屏宿主在功能页里打开的完整社区图库。画在设置表单之外：图库自带搜索和发布表单，嵌在设置的 <form> 里会被 WebView 当成外层表单提交。 */}
+              {communityGallery && page === communityGalleryPage(communityGallery.category) && (
+                <CommunityGallerySubview
+                  key={`${communityGallery.category}:${communityGallery.scope}:${communityGallery.initialMine}`}
+                  view={communityGallery}
+                  skins={client.communitySkins}
+                  resources={client.communityResources}
+                  theme={keyboardPreviewTheme}
+                  localDictionary={communityLocalDictionary}
+                  localSkinLibrary={client.customSkinLibrary}
+                  onLogin={openAccountLogin}
+                  preferences={draft}
+                  onApplyPreferences={setDraft}
+                  onSkinApplied={recordCommunitySkin}
+                  look={harmonyPlatform && mobilePlatform ? "harmony" : undefined}
+                  onClose={closeCommunityGallery}
                 />
               )}
               {client.typingStatistics && page === "typing-statistics" && (
@@ -3785,6 +4039,9 @@ export function SettingsPage(props: SettingsPageProps) {
                       onOpenSystemKeyboardSettings={externalActions.onOpenSystemKeyboardSettings}
                     />
                     <AboutSettingsPage />
+                    <UsageReportingSettingsPage />
+                    {/* 只在打开着时渲染：它和「关于」用同一个统计开关，常驻的话桌面上会有两个。 */}
+                    {page === "privacy" && <PrivacySettingsPage />}
                   </SettingsFormContext.Provider>
                   <SettingsFormFooter
                     draft={draft}

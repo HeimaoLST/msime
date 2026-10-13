@@ -1,9 +1,16 @@
 import { useEffect, useRef, useState } from "react";
+import type { InputScheme } from "../index";
 import { useAsyncActionRunner } from "../core/use-async-action";
 import type { ConfirmRequest } from "../core/confirm";
 import * as settings from "./settings-style";
 import { withoutRemovedPack, type PluginPreferences } from "./plugin-preferences";
-import { missingSelections, packKindLabel, pluginErrorMessage } from "./plugin-catalog-helpers";
+import {
+  missingSelections,
+  packKindLabel,
+  pluginErrorCode,
+  pluginErrorMessage,
+  schemeOpensTableModes,
+} from "./plugin-catalog-helpers";
 import type {
   MentionEntry,
   PluginCatalogResult,
@@ -11,8 +18,11 @@ import type {
   PluginKind,
   PluginPackage,
   PluginSettingsPage,
+  ScriptCapability,
+  ScriptGrantsResult,
 } from "./plugin-types";
 import { PluginListView } from "./plugin-list-view";
+import { runningScriptIds, scriptResidualRisk, ScriptPluginDetailView } from "./plugin-script-view";
 import { MissingPluginView, PluginDetailView } from "./plugin-detail-view";
 import { PluginSoundEffectsView } from "./plugin-sound-effects-view";
 import { mentionListIssue, PluginMentionsView } from "./plugin-mentions-view";
@@ -30,7 +40,20 @@ export type {
   PluginPhrase,
   PluginSettingsPage,
   PluginSymbolGroup,
+  ScriptCapability,
+  ScriptGrant,
+  ScriptGrantsResult,
+  ScriptHealth,
 } from "./plugin-types";
+export {
+  SCRIPT_CAPABILITIES,
+  ScriptGrantDialog,
+  capabilityLabels,
+  scriptGrantState,
+  scriptResidualRisk,
+  toggleCapability,
+  type ScriptGrantDialogProps,
+} from "./plugin-script-view";
 export { kindLabels, pluginErrorMessage } from "./plugin-catalog-helpers";
 export { MAX_MENTIONS, mentionListIssue } from "./plugin-mentions-view";
 
@@ -50,14 +73,28 @@ export interface PluginsSectionProps {
   effectStyles?: boolean;
   /** The host draws an installed effect pack's style and parameters (`msime_client_typing_effect_settings`); only read where `effectStyles` is true. */
   effectPacks?: boolean;
+  /** 宿主把每种特效样式都画成候选卡片闪一下，越强的样式闪得越亮，不画火花（HarmonyOS）；只在 `effectStyles` 为真时读取。 */
+  effectFlashOnly?: boolean;
   /** 快捷短语（K 模式）是否打开：`local_modes.quick_phrase`；关闭时短语表详情提示去打开。 */
   quickPhraseMode?: boolean;
+  /** / 指令是否打开：`local_modes.command`，缺省为关；关闭时指令表详情提示打开，列表不把已启用的指令表标成生效。 */
+  commandMode?: boolean;
+  /** @ 模式是否打开：`local_modes.mention`，缺省为关；关闭时 @ 名单提示打开。 */
+  mentionMode?: boolean;
+  /** 打开「输入 → 快捷模式」里的 / 指令或 @ 模式，留在当前页面；没有时提示改为跳到输入页（`onOpenPage`）。 */
+  onLocalMode?: (mode: "command" | "mention") => void;
+  /** 当前输入方案；只有全拼、双拼和五笔打开 K、/ 和 @ 模式，其他方案下列表（已启用短语表、指令表的标记和 @ 名单的说明）和详情都会说明。缺省时按能打开处理，不提示。 */
+  scheme?: InputScheme;
   /** 宿主使用辅助码（设置里显示辅助码这一组）；辅助码表包只在这时标记和报告缺失。 */
   helpcode?: boolean;
   /** 宿主的背单词书目列出单词本插件（`HostCapabilities.wordbook_packs`）。 */
   wordbookPacks?: boolean;
   /** 宿主的符号面板显示符号集插件（`HostCapabilities.symbol_set_packs`）。 */
   symbolSetPacks?: boolean;
+  /** 宿主运行脚本插件（`HostCapabilities.script_plugins`）：显示「脚本插件（实验）」分组和授权页。 */
+  scriptPlugins?: boolean;
+  /** 宿主平台（`HostCapabilities.platform`），授权页按它说明这个平台上同一用户下的程序能伪造授权。 */
+  platform?: string;
   /** 在背单词里选中一本书并打开背单词；没有背单词的宿主为空。 */
   onOpenWordbook?: (book: string) => void;
   /** 打开设置里的另一页（输入、背单词）；没有时详情里不显示这些链接。 */
@@ -94,10 +131,17 @@ export function PluginsSection({
   typingEffects = false,
   effectStyles = false,
   effectPacks = false,
+  effectFlashOnly = false,
   quickPhraseMode = true,
+  commandMode = false,
+  mentionMode = false,
+  onLocalMode,
+  scheme,
   helpcode = false,
   wordbookPacks = false,
   symbolSetPacks = false,
+  scriptPlugins = false,
+  platform,
   onOpenWordbook,
   onOpenPage,
   active,
@@ -112,14 +156,25 @@ export function PluginsSection({
   const [mentions, setMentions] = useState<MentionEntry[]>([]);
   const [savedMentions, setSavedMentions] = useState<MentionEntry[]>([]);
   const [view, setView] = useState<PluginView>(listView);
+  const [scriptGrants, setScriptGrants] = useState<ScriptGrantsResult | null>(null);
   const mentionsEditable = triggers && Boolean(client);
-  const clientGeneration = useAsyncGeneration(active, client, mentionsEditable);
+  // 只有运行脚本插件的桌面宿主有授权方法。
+  const scriptsShown = scriptPlugins && Boolean(client?.scriptGrants);
+  // The engine opens K, / and @ only under some schemes; when the current one cannot, no switch helps, so the list names the scheme first.
+  const schemeOpens = scheme ? schemeOpensTableModes(scheme) : true;
+  const mentionModeGap = !schemeOpens
+    ? "；当前方案打不开 @ 模式"
+    : mentionMode
+      ? ""
+      : "；@ 模式未开";
+  const clientGeneration = useAsyncGeneration(active, client, mentionsEditable, scriptsShown);
   const { busy: working, run: runAsyncPluginAction } = useAsyncActionRunner(
     onError,
     setNotice,
     active,
     client,
     mentionsEditable,
+    scriptsShown,
   );
   // The page stays mounted while hidden, so a reload on the next visit must not overwrite edits that were never saved.
   const mentionsDirtyRef = useRef(false);
@@ -132,6 +187,7 @@ export function PluginsSection({
     if (!client) {
       setCatalog({ packages: [], issues: [] });
       setCatalogState("loading");
+      setScriptGrants(null);
       return;
     }
     if (!active) return;
@@ -150,6 +206,16 @@ export function PluginsSection({
         setCatalogState((state) => (state === "loaded" ? state : "failed"));
         onError(pluginErrorMessage(error, "无法读取插件列表，请重试。"));
       });
+    if (scriptsShown) {
+      void client.scriptGrants!()
+        .then((next) => {
+          if (generation === clientGeneration.current) setScriptGrants(next);
+        })
+        .catch((error: unknown) => {
+          if (generation === clientGeneration.current)
+            onError(pluginErrorMessage(error, "无法读取脚本插件的授权，请重试。"));
+        });
+    }
     if (mentionsEditable) {
       void client
         .loadMentions()
@@ -165,7 +231,7 @@ export function PluginsSection({
     }
     // `onError` is the page's setter and stable; the effect reloads on a visit, not on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, client, mentionsEditable]);
+  }, [active, client, mentionsEditable, scriptsShown]);
 
   // Leaving the page or switching to 社区插件 closes the open view: the next visit starts at the list.
   useEffect(() => {
@@ -225,6 +291,11 @@ export function PluginsSection({
       if (generation !== clientGeneration.current) return;
       setCatalog(next);
       setCatalogState("loaded");
+      // 导入或删除脚本包时宿主在同一把锁里改了授权条目，一起重读。
+      if (scriptsShown) {
+        const grants = await client.scriptGrants!();
+        if (generation === clientGeneration.current) setScriptGrants(grants);
+      }
     } catch (error) {
       if (generation === clientGeneration.current)
         onError(pluginErrorMessage(error, "无法读取插件列表，请重试。"));
@@ -272,6 +343,49 @@ export function PluginsSection({
     }, "删除失败，请重试。");
   };
 
+  const scriptPacks = scriptsShown ? catalog.packages.filter((pack) => pack.kind === "script") : [];
+  const runningScripts = runningScriptIds(scriptGrants, scriptPacks);
+
+  // 写授权：包在页面读到之后被换过（`plugin_script_changed`）时重读目录和授权，页面换成现在的内容哈希，再把错误抛给调用方说明。
+  const writeScriptGrant = async (
+    pack: PluginPackage,
+    enabled: boolean,
+    granted: ScriptCapability[],
+  ) => {
+    try {
+      return await client!.setScriptGrant!(pack.id, pack.content_hash ?? "", enabled, granted);
+    } catch (error) {
+      if (pluginErrorCode(error) === "plugin_script_changed") await refresh();
+      throw error;
+    }
+  };
+
+  // 授权对话框里的确认：失败时抛出，由对话框说明原因（例如超出内存总账）。
+  const grantScript = async (pack: PluginPackage, granted: ScriptCapability[]) => {
+    const generation = clientGeneration.current;
+    const next = await writeScriptGrant(pack, true, granted);
+    if (generation === clientGeneration.current) setScriptGrants(next);
+  };
+
+  const revokeScript = async (pack: PluginPackage) => {
+    await runPluginAction(async (isCurrent) => {
+      const next = await writeScriptGrant(pack, false, []);
+      if (isCurrent()) setScriptGrants(next);
+    }, "停用失败，请重试。");
+  };
+
+  const moveScript = async (id: string, offset: -1 | 1) => {
+    const position = runningScripts.indexOf(id);
+    const target = position + offset;
+    if (position < 0 || target < 0 || target >= runningScripts.length) return;
+    const order = [...runningScripts];
+    [order[position], order[target]] = [order[target], order[position]];
+    await runPluginAction(async (isCurrent) => {
+      const next = await client!.reorderScripts!(order);
+      if (isCurrent()) setScriptGrants(next);
+    }, "执行顺序没有保存，请重试。");
+  };
+
   const setCommandTable = (id: string, enabled: boolean) =>
     onChange({
       ...preferences,
@@ -314,7 +428,24 @@ export function PluginsSection({
       const pack = catalog.packages.find(
         (item) => item.kind === view.packKind && item.id === view.id,
       );
-      if (pack) {
+      if (pack && pack.kind === "script") {
+        if (scriptsShown) {
+          return (
+            <ScriptPluginDetailView
+              pack={pack}
+              grants={scriptGrants}
+              running={runningScripts}
+              platform={platform}
+              working={working}
+              onGrant={(granted) => grantScript(pack, granted)}
+              onRevoke={() => void revokeScript(pack)}
+              onMove={(offset) => void moveScript(pack.id, offset)}
+              onRemove={(target) => void removePack(target)}
+              onBack={backToList}
+            />
+          );
+        }
+      } else if (pack) {
         return (
           <PluginDetailView
             pack={pack}
@@ -323,7 +454,10 @@ export function PluginsSection({
             music={music}
             triggers={triggers}
             effectPacks={effectPacksDrawn}
+            effectFlashOnly={effectFlashOnly}
             quickPhraseMode={quickPhraseMode}
+            commandMode={commandMode}
+            scheme={scheme}
             helpcode={helpcode}
             wordbookPacks={wordbookPacks}
             symbolSetPacks={symbolSetPacks}
@@ -332,6 +466,7 @@ export function PluginsSection({
             onChange={onChange}
             onCommandTable={setCommandTable}
             onPhraseTable={setPhraseTable}
+            onLocalMode={onLocalMode}
             onOpenPage={onOpenPage}
             onRemove={(target) => void removePack(target)}
             onBack={backToList}
@@ -364,6 +499,7 @@ export function PluginsSection({
           typingEffects={typingEffects}
           effectStyles={effectStyles}
           effectPacks={effectPacks}
+          effectFlashOnly={effectFlashOnly}
           onChange={onChange}
           onBack={backToList}
         />
@@ -377,6 +513,10 @@ export function PluginsSection({
           issue={mentionIssue}
           dirty={mentionsDirty}
           working={working}
+          mode={mentionMode}
+          scheme={scheme}
+          onEnableMode={onLocalMode && (() => onLocalMode("mention"))}
+          onOpenPage={onOpenPage}
           onSave={() => void saveMentions()}
           onBack={backToList}
         />
@@ -390,12 +530,15 @@ export function PluginsSection({
         missing={missing}
         kinds={actedKinds}
         preferences={preferences}
+        modes={{ quickPhrase: quickPhraseMode, command: commandMode, schemeOpens }}
         triggers={triggers}
         soundEffects={soundEffects}
         soundEffectsDescription={`${soundEffectParts.join("、")}的开关与音量`}
         mentionsEditable={mentionsEditable}
         mentionsDescription={
-          mentionsDirty ? "有未保存的修改" : `${savedMentions.length} 条，只保存在本机`
+          mentionsDirty
+            ? "有未保存的修改"
+            : `${savedMentions.length} 条，只保存在本机${mentionModeGap}`
         }
         working={working}
         notice={notice}
@@ -406,6 +549,16 @@ export function PluginsSection({
         }
         onOpenMissing={(packKind, id) =>
           openView({ kind: "missing", packKind, id }, `missing/${packKind}/${id}`)
+        }
+        scripts={
+          scriptsShown
+            ? {
+                packages: scriptPacks,
+                grants: scriptGrants,
+                running: runningScripts,
+                risk: scriptResidualRisk(platform),
+              }
+            : null
         }
       />
     );

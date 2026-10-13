@@ -30,6 +30,8 @@ test("keeps the current settings route registry in navigation order", () => {
     "chat",
     "vocabulary",
     "help",
+    "usage-reporting",
+    "privacy",
     "try-keyboard",
     "more",
   ]);
@@ -48,6 +50,8 @@ test("keeps navigation groups and nested route ownership aligned", () => {
     chat: "ai",
     vocabulary: "dictionary",
     help: "feedback",
+    "usage-reporting": "about",
+    privacy: "account",
     "try-keyboard": "home",
   });
 });

@@ -74,10 +74,10 @@ fn read_lease_at(directory: &std::fs::File, name: &OsStr) -> std::io::Result<Str
         rustix::fs::Mode::empty(),
     )?;
     let file = std::fs::File::from(fd);
-    if !file.metadata()?.is_file() {
+    if !file.metadata()?.is_file() || !crate::file_lock::has_single_link(&file)? {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "lease is not a regular file",
+            "lease is not a single-link regular file",
         ));
     }
     let bytes = crate::bounded_io::read_bounded_file_with(file, MAX_LEASE_BYTES, || (), |_| ())
@@ -114,10 +114,10 @@ fn open_lease_lock_at(directory: &std::fs::File) -> std::io::Result<std::fs::Fil
         }
     };
     let file = std::fs::File::from(fd);
-    if !file.metadata()?.is_file() {
+    if !file.metadata()?.is_file() || !crate::file_lock::has_single_link(&file)? {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "lease lock is not a regular file",
+            "lease lock is not a single-link regular file",
         ));
     }
     Ok(file)
@@ -203,7 +203,7 @@ impl Lease {
         // The owner line tells this lease from one another writer put up; the expiry alone could coincide.
         let contents = format!("{expiry}\n{}\n", self.owner);
         #[cfg(not(unix))]
-        let mut file = {
+        let file = {
             let mut file = OpenOptions::new();
             file.write(true).create_new(true);
             file
@@ -511,6 +511,32 @@ mod tests {
         let path = directory.path().join(LEASE_NAME);
         std::fs::write(&path, vec![b'x'; MAX_LEASE_BYTES as usize + 1]).unwrap();
         assert_eq!(read_lease(&path), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_linked_lease_is_ignored() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("lease");
+        std::fs::write(&outside_file, b"synthetic\n").unwrap();
+        std::fs::hard_link(&outside_file, directory.path().join(LEASE_NAME)).unwrap();
+        msime_path_trust::open_to_other_users(directory.path()).unwrap();
+
+        assert_eq!(read_lease(&directory.path().join(LEASE_NAME)), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_linked_lease_lock_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("lock");
+        std::fs::write(&outside_file, b"synthetic").unwrap();
+        std::fs::hard_link(&outside_file, directory.path().join(LEASE_LOCK_NAME)).unwrap();
+        let directory_handle = open_lease_directory(directory.path()).unwrap();
+
+        assert!(open_lease_lock_at(&directory_handle).is_err());
     }
 
     #[test]

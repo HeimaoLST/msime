@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/path-trust", "crates/client-core", "crates/engine", "crates/engine-wasm", "crates/input-runtime", "crates/host-api", "crates/host-windows", "crates/host-macos", "crates/tauri-mobile-platform", "crates/ios-native-ffi", "crates/mcp-server", "crates/dict-builder", "crates/backend-engine", "crates/pack-tool", "apps/desktop/src-tauri"]
+members = ["crates/path-trust", "crates/client-core", "crates/engine", "crates/engine-wasm", "crates/input-runtime", "crates/host-api", "crates/host-windows", "crates/host-macos", "crates/tauri-mobile-platform", "crates/ios-native-ffi", "crates/mcp-server", "crates/dict-builder", "crates/backend-engine", "crates/pack-tool", "crates/script-runtime", "crates/clipboard-relay", "apps/desktop/src-tauri"]
 # Everything except the desktop app: a bare `cargo test` should cover the
 # libraries, and msime-desktop needs a built frontend and a packaged platform
 # bundle before its build script will run.
@@ -15,6 +15,7 @@ default-members = [
     "crates/tauri-mobile-platform",
     "crates/ios-native-ffi",
     "crates/mcp-server",
+    "crates/script-runtime",
 ]
 resolver = "2"
 
@@ -97,3 +98,35 @@ opt-level = 3
 
 [profile.dev.package.symphonia-codec-vorbis]
 opt-level = 3
+
+# 脚本插件在按键路径上由 wasmi 解释执行（每个钩子都在会话线程上同步跑完），而本机安装的输入法是 dev 构建（见上）。不优化的解释器每条指令慢一个数量级以上，会把 fuel 预算对应的耗时推出按键延迟的预算；libm 也加上，解释器的浮点指令会调到它。只优化这几个包，工作区自己的 crate 照样编得快。
+[profile.dev.package.msime-script-runtime]
+opt-level = 3
+
+# wasmi 的解释器按条指令尾调用下一条的处理函数，靠 LLVM 把它们优化成跳转（构建脚本在 opt-level 2、3 时选这条路）。打开 debug-assertions 时处理函数里的断言让这一步失效，每执行一条指令栈就深一层：dev 构建里一个死循环的 `candidates` 钩子（125 000 fuel）要 2 到 4 MiB 的原生栈，Windows Server 工作线程默认只有 1 MiB。关掉断言后和 release 一样，256 KiB 的栈跑满任何一个钩子的配额，`tests::a_hook_running_out_of_fuel_fits_a_small_native_stack` 守着它。
+[profile.dev.package.wasmi]
+opt-level = 3
+debug-assertions = false
+
+[profile.dev.package.wasmi_core]
+opt-level = 3
+
+[profile.dev.package.wasmi_ir]
+opt-level = 3
+
+[profile.dev.package.wasmi_collections]
+opt-level = 3
+
+[profile.dev.package.wasmparser]
+opt-level = 3
+
+[profile.dev.package.libm]
+opt-level = 3
+
+# ewts 0.1.3（藏文方案的威利转换）在 `converter.rs:136` 用 `self.ind - 2` 回看，第二个辅音就是 `w` 这类可作下加字的字母时（`bw`、`yw`）`usize` 下溢。release 不检查溢出，回绕后 `get_con_at` 得到 `None`，退回独立的 wa（`བཝ`），这就是用户一直拿到的结果；检查溢出的构建则在这一键 panic。对这一个 crate 关掉检查，dev、release 和任何全局打开 overflow-checks 的构建都得到同一个结果。release 段同时打开 debug-assertions：cargo 只在两者取值不同时才显式传 `-C overflow-checks=off`，否则 `RUSTFLAGS=-Cdebug-assertions`（cargo-fuzz 就是这样构建的）会把溢出检查重新带回来；ewts 里没有 `debug_assert!`，打开它不改变任何行为。上游修复是 emgyrz/ewts-rs#1，上游发版后删掉这两段。fuzz/Cargo.toml 有同样的一段。
+[profile.dev.package.ewts]
+overflow-checks = false
+
+[profile.release.package.ewts]
+debug-assertions = true
+overflow-checks = false

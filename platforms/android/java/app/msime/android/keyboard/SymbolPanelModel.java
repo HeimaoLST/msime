@@ -3,14 +3,17 @@ package app.msime.android;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.function.Predicate;
 
 /** Immutable symbol categories shared by the Android full-screen symbol panel. */
 public final class SymbolPanelModel {
     public static final int COLUMNS = 5;
     /** 「常用」最多记这么多个，正好六行。 */
     public static final int RECENTS_LIMIT = 30;
-    /** 最长的内置条目是「@gmail.com」这类网络后缀；存储里超长的条目当作损坏丢掉。 */
+    /** 最长的内置条目是「@protonmail.com」这类邮箱后缀（15 个码位）；存储里超长的条目当作损坏丢掉。 */
     public static final int MAX_SYMBOL_CODE_POINTS = 32;
+    /** 不超过这么多码位的条目在五列格里用正常字号；更长的（`http://`、邮箱后缀）缩小字号并单行省略，见 {@link #cellTextSizeSp}。 */
+    public static final int SHORT_SYMBOL_CODE_POINTS = 4;
     public static final String RECENTS_TITLE = "常用";
     public static final String RECENTS_EMPTY_HINT = "点过的符号会出现在这里";
     /** Engine 目录（`msime-others.db` 的 `kaomoji_catalog`、`symbol_catalog`）里的两种分类，就是 `msime_client_emoji_catalog_request` 的 `category`。 */
@@ -77,10 +80,7 @@ public final class SymbolPanelModel {
             "一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
             "Ⅰ", "Ⅱ", "Ⅲ", "Ⅳ", "Ⅴ", "Ⅵ", "Ⅶ", "Ⅷ", "Ⅸ", "Ⅹ",
             "½", "⅓", "¼", "‰", "′", "″", "㎡", "㎏", "㎝", "№")),
-        new Category("网络", List.of(
-            "@", "#", "/", "\\", ":", "_", "-", "+", "=", "&",
-            "?", "%", "~", "^", "*", "|", "<", ">", "$", "€",
-            "http://", "https://", "www.", ".com", ".cn", ".net", ".org", ".io", "@qq.com", "@gmail.com")));
+        new Category("网络", network()));
 
     /**
      * 写死的分类之后，是 Engine 目录里的颜文字和各类符号（#5667「文本符号过少」）。数据随词库 `msime-others.db` 发布，与 iOS 键盘和桌面面板读的是同一份；上级分类的中文名与 iOS 的 `KeyboardEmojiCatalog.symbolParentTitles` 相同，顺序按目录里的顺序。
@@ -102,6 +102,32 @@ public final class SymbolPanelModel {
 
     private SymbolPanelModel() { }
 
+    /** 「网络」分类：网址和常用符号，后面接全部邮箱后缀（{@link EmailSuffixPolicy#SUFFIXES}，#6147），和邮箱输入框里候选栏给的是同一份。 */
+    private static List<String> network() {
+        ArrayList<String> values = new ArrayList<>(List.of(
+            "@", "#", "/", "\\", ":", "_", "-", "+", "=", "&",
+            "?", "%", "~", "^", "*", "|", "<", ">", "$", "€",
+            "http://", "https://", "www.", ".com", ".cn", ".net", ".org", ".io"));
+        values.addAll(EmailSuffixPolicy.SUFFIXES);
+        return values;
+    }
+
+    /**
+     * 符号格里一个条目的字号（sp）：颜文字 14；不超过 {@link #SHORT_SYMBOL_CODE_POINTS} 个码位的 18；更长的在五列格里放不下，9 个码位以内 13，再长 11，并由面板设成单行、放不下时末尾省略，不折行（#6147）。
+     */
+    public static float cellTextSizeSp(Category category, String symbol) {
+        if (category.kaomoji()) return 14;
+        int length = TextPolicy.codePointLength(symbol);
+        if (length <= SHORT_SYMBOL_CODE_POINTS) return 18;
+        return length <= 9 ? 13 : 11;
+    }
+
+    /** 这个条目要不要单行省略：比 {@link #SHORT_SYMBOL_CODE_POINTS} 长的非颜文字条目。 */
+    public static boolean singleLineCell(Category category, String symbol) {
+        return !category.kaomoji() && symbol != null
+            && TextPolicy.codePointLength(symbol) > SHORT_SYMBOL_CODE_POINTS;
+    }
+
     /** 左列的全部分类：第一个是「常用」，内容就是 `recents`（最近点的在前），然后是写死的分类，最后是 Engine 目录里的分类。 */
     public static List<Category> categories(List<String> recents) {
         ArrayList<Category> values = new ArrayList<>(FIXED_CATEGORIES.size() + 1);
@@ -118,27 +144,14 @@ public final class SymbolPanelModel {
 
     /** 读回存储的记录：丢掉空串、超长条目和重复项，最多保留 {@link #RECENTS_LIMIT} 个。 */
     public static List<String> normalizeRecents(List<String> stored) {
-        LinkedHashSet<String> unique = new LinkedHashSet<>(RECENTS_LIMIT);
-        if (stored != null) {
-            for (String symbol : stored) {
-                if (!validSymbol(symbol)) continue;
-                unique.add(symbol);
-                if (unique.size() == RECENTS_LIMIT) break;
-            }
-        }
-        return List.copyOf(unique);
+        return ListPolicy.normalizeRecents(stored, RECENTS_LIMIT, SymbolPanelModel::validSymbol);
     }
 
     /** 点了 `selected` 之后的记录：它排到最前，原来的位置去掉，超出上限的最旧一个被挤掉。 */
     public static List<String> recordRecent(List<String> stored, String selected) {
         if (!validSymbol(selected)) throw new IllegalArgumentException("Invalid recent symbol");
-        ArrayList<String> reordered = new ArrayList<>(RECENTS_LIMIT);
-        reordered.add(selected);
-        for (String symbol : normalizeRecents(stored)) {
-            if (reordered.size() == RECENTS_LIMIT) break;
-            if (!selected.equals(symbol)) reordered.add(symbol);
-        }
-        return List.copyOf(reordered);
+        return ListPolicy.recordRecent(stored, selected, RECENTS_LIMIT,
+            SymbolPanelModel::validSymbol);
     }
 
     /** 能不能记进「常用」：空串和超过 {@link #MAX_SYMBOL_CODE_POINTS} 个码位的不记。 */
@@ -152,9 +165,8 @@ public final class SymbolPanelModel {
 
     /** 一页的游标是否自洽：条数不超过页大小，下一页从本页之后开始、前进不超过页大小，没读完时必须前进。与表情目录的规则相同。 */
     public static boolean validCatalogCursor(int requestedOffset, int count, long nextOffset, boolean complete) {
-        return requestedOffset >= 0 && count >= 0 && count <= CATALOG_PAGE_SIZE
-            && nextOffset >= requestedOffset && nextOffset <= (long) requestedOffset + CATALOG_PAGE_SIZE
-            && (complete || nextOffset > requestedOffset);
+        return BoundsPolicy.validPageCursor(requestedOffset, count, CATALOG_PAGE_SIZE,
+            nextOffset, complete);
     }
 
     /** 把新一页接在已显示的后面：同一个符号在目录里可能属于好几个小类（`symbol_catalog` 的主键是符号加小类），只显示第一次；总数不超过 {@link #MAX_CATALOG_ITEMS}。 */
@@ -165,6 +177,37 @@ public final class SymbolPanelModel {
             unique.add(text);
         }
         return List.copyOf(unique);
+    }
+
+    /**
+     * 去掉这台设备字体画不出来的目录符号（#6070）：「箭头」里的 ⭠⭡⭢⭣⭤⭥⮂⮃⮐⮑、「爱心」里 Unicode 15 的 🩷🩵🩶 在 Android 11 的系统字体里没有字形，格子是空白，点了上屏的也是一个看不见的字。`drawable` 在设备上是 `Paint.hasGlyph`，与表情面板的过滤相同；它只在整串能排成一个字形时才回答「能画」，所以只用在一条就是一个字形的符号上。颜文字是好几个字形拼成的，`hasGlyph` 对它一律回答「不能」，原样保留。游标照旧按目录扫过的行数前进，这里只影响显示哪些。
+     */
+    public static List<String> renderableCatalogItems(List<String> items, boolean kaomoji, Predicate<String> drawable) {
+        if (kaomoji) return List.copyOf(items);
+        ArrayList<String> kept = new ArrayList<>(items.size());
+        for (String text : items) if (drawable.test(text)) kept.add(text);
+        return List.copyOf(kept);
+    }
+
+    /**
+     * 「常用」里去掉这台设备画不出来的符号（#6070）：目录过滤上线前点过的空白格（⭠、🩷 等）已经记进了「常用」，而面板一打开就是「常用」，不过滤的话第一屏仍是空白格。「常用」里还有「http://」「@gmail.com」这类多字形的条目，`hasGlyph` 对它们一律回答「不能」，所以只判断一个码位（可带变体选择符）的条目，其余原样保留。
+     */
+    public static List<String> renderableRecents(List<String> recents, Predicate<String> drawable) {
+        ArrayList<String> kept = new ArrayList<>(recents.size());
+        for (String text : recents) if (!singleCodePoint(text) || drawable.test(text)) kept.add(text);
+        return List.copyOf(kept);
+    }
+
+    private static boolean singleCodePoint(String text) {
+        int count = 0;
+        for (int index = 0; index < text.length(); ) {
+            int codePoint = text.codePointAt(index);
+            index += Character.charCount(codePoint);
+            boolean variationSelector = (codePoint >= 0xFE00 && codePoint <= 0xFE0F)
+                || (codePoint >= 0xE0100 && codePoint <= 0xE01EF);
+            if (!variationSelector && ++count > 1) return false;
+        }
+        return count == 1;
     }
 
     /** 已显示的条数到了上限，就当作读完了，不再要下一页。 */

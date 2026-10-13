@@ -1,7 +1,7 @@
 package app.msime.android;
 
 /**
- * 读音行上的组字光标：点读音行把引擎的组字光标移到点中的字母前（#5613），光标不在末尾时把它画进读音行。
+ * 读音行上的组字光标：点读音行把引擎的组字光标移到点中的字母前（#5613），光标不在末尾时把它画进读音行；画出来的是一条皮肤强调色的竖条（#6110，{@code CompositionCaretSpan}），文本里仍是一个 {@link #CARET_MARK}，下标换算不受影响。
  *
  * <p>引擎的光标是 {@code caret_position}，一个落在 {@code editing_text}（打下的原始按键，全拼是字母，九键是数字）里的字节偏移；读音行画的却不一定是这串按键：九键画的是首选读法的拼音（{@code 9426} 画成 {@code xi'an}）或选过拼音后的 {@code ni'426}，里面还夹着引擎自己加的音节分隔。两者按顺序对齐：读音行里只在显示时才有的分隔（{@code '} 和空格）跳过，字母对数字时按九键键位比，其余逐字相同。对不上的读音（读音行显示的不是这串按键）一律不处理，光标照旧在末尾。
  *
@@ -68,10 +68,10 @@ public final class CompositionCaretPolicy {
     public static int tapTarget(int prefixLength, String display, String editing, int caretMark, int tapped) {
         int[] map = alignment(display, editing);
         if (map == null || tapped < 0) return -1;
-        int offset = tapped - Math.max(0, prefixLength);
+        int offset = tapped - BoundsPolicy.nonNegative(prefixLength);
         if (offset <= 0) return 0;
         if (caretMark >= 0 && offset > caretMark) offset--;
-        return map[Math.min(offset, display.length())];
+        return map[BoundsPolicy.atMost(offset, display.length())];
     }
 
     /** 光标 {@code caret} 该画在读音的哪个下标前；光标在末尾或对不上时返回 -1。同一个光标位置对应好几处时（中间隔着显示用的分隔）画在最后一处，也就是分隔后面：引擎的退格先删光标前的切分。 */
@@ -90,6 +90,17 @@ public final class CompositionCaretPolicy {
         if (display == null) return "";
         if (markIndex < 0 || markIndex > display.length()) return display;
         return display.substring(0, markIndex) + CARET_MARK + display.substring(markIndex);
+    }
+
+    /**
+     * 光标符在读音行整段标题（{@link PhrasePreeditPolicy#title}：已选的词 + 带光标符的读音）里的下标，宿主据此把它画成竖条（#6110）；没有画光标时返回 -1。规则与 {@code title} 相同：本地模式不加前缀。
+     *
+     * @param caretMark {@link #markIndex} 的结果，光标符插在读音的这个下标前
+     */
+    public static int markInTitle(String phrasePrefix, int caretMark, boolean localMode) {
+        if (caretMark < 0) return -1;
+        int prefix = localMode || phrasePrefix == null ? 0 : phrasePrefix.length();
+        return prefix + caretMark;
     }
 
     /**

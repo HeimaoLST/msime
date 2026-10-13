@@ -4,6 +4,7 @@ struct SettingsSyncView: View {
   let session: BackendAccountSession
   let client: BackendAccountClient
   @State private var loadedUserID: String?
+  @State private var loadedSessionID: UUID?
   @State private var cloud: BackendAccountClient.Preferences?
   @State private var schema: BackendAccountClient.PreferenceSchema?
   @State private var busy = false
@@ -11,6 +12,8 @@ struct SettingsSyncView: View {
   @State private var applying = false
   @State private var uploading = false
   @State private var pending: Task<Void, Never>?
+  /// 让离开页面后仍在取消中的旧请求不能释放新页面的忙碌状态或覆盖新数据。
+  @State private var request = ViewRequestGeneration()
   private let device = UIDevice.current.userInterfaceIdiom == .pad ? " iPad " : " iPhone "
 
   var body: some View {
@@ -20,7 +23,7 @@ struct SettingsSyncView: View {
                         detail: cloud.map { "第 \($0.revision) 版" } ?? "尚未读取",
                         symbol: "icloud")
         SettingsActionRow(title: "刷新", detail: "重新读取云端当前版本", symbol: "arrow.clockwise") {
-          pending = Task { await load() }
+          startLoad()
         }
       } header: {
         SettingsGroupHeader(title: "云端")
@@ -44,56 +47,119 @@ struct SettingsSyncView: View {
     .settingsStatus(busy: busy, message: message)
     .disabled(busy)
     .navigationTitle("设置同步")
-    .task { await load() }
-    .onDisappear { pending?.cancel(); cloud = nil }
+    .task { request.appear(); startLoad() }
+    .onDisappear {
+      ViewRequestTask.disappear(request: $request, pending: $pending)
+      busy = false
+      cloud = nil; schema = nil; loadedUserID = nil; loadedSessionID = nil
+    }
     .alert("上传本机设置？", isPresented: $uploading) {
       Button("取消", role: .cancel) { }
-      Button("上传") { pending = Task { await upload() } }
+      Button("上传") { startUpload() }
     } message: { Text("更新云端对应设置，包括自定义皮肤的背景图片；保留其他平台专属设置。版本冲突时需刷新后重新确认。") }
     .alert("应用云端设置？", isPresented: $applying) {
       Button("取消", role: .cancel) { }
       Button("应用") {
-        pending = Task { await apply() }
+        startApply()
       }
     } message: { Text("将替换本机对应设置，包括词库学习开关；不会下载词库或开启数据上传。") }
   }
-  @MainActor private func load() async {
-    guard !busy else { return }
-    busy = true; message = nil
-    defer { busy = false }
+  @MainActor private func startLoad() {
+    ViewRequestTask.run(request: $request, busy: $busy, message: $message,
+                        pending: $pending) { id in await load(requestID: id) }
+  }
+  @MainActor private func load(requestID id: UUID) async {
+    guard request.isCurrent(id) else { return }
     do {
       let identity = try await session.credentials()
-      let fields = try await client.preferenceSchema(token: identity.token)
-      let values = try await client.preferences(token: identity.token)
-      guard try await session.user()?.id == identity.userID else { throw CancellationError() }
+      try request.checkCurrent(id)
+      let fields = try await session.authenticated(matchingUserID: identity.userID,
+                                                   matchingSessionID: identity.sessionID) { token in
+        try await client.preferenceSchema(token: token)
+      }.value
+      try request.checkCurrent(id)
+      let values = try await session.authenticated(matchingUserID: identity.userID,
+                                                   matchingSessionID: identity.sessionID) { token in
+        try await client.preferences(token: token)
+      }.value
+      try request.checkCurrent(id)
+      try await session.requireSession(matchingUserID: identity.userID, matchingSessionID: identity.sessionID)
+      try request.checkCurrent(id)
       try Task.checkCancellation()
-      schema = fields; cloud = values; loadedUserID = identity.userID
-    } catch is CancellationError { }
-    catch { message = "无法读取云端设置，请稍后重试。" }
+      schema = fields; cloud = values; loadedUserID = identity.userID; loadedSessionID = identity.sessionID
+    } catch is CancellationError {
+      guard request.isCurrent(id) else { return }
+    }
+    catch {
+      guard request.isCurrent(id) else { return }
+      message = "无法读取云端设置，请稍后重试。"
+    }
   }
-  @MainActor private func apply() async {
+  @MainActor private func startApply() {
+    guard request.isVisible, !busy, let cloud, let loadedUserID, let loadedSessionID else { return }
+    ViewRequestTask.run(request: $request, busy: $busy, message: $message,
+                        pending: $pending) { id in
+      await apply(cloud: cloud, userID: loadedUserID, sessionID: loadedSessionID, requestID: id)
+    }
+  }
+  @MainActor private func apply(cloud: BackendAccountClient.Preferences,
+                                userID: String,
+                                sessionID: UUID,
+                                requestID id: UUID) async {
+    guard request.isCurrent(id) else { return }
     do {
-      guard let cloud, let loadedUserID, try await session.user()?.id == loadedUserID else { throw BackendAccountClient.Failure(status: 401) }
+      try await session.requireSession(matchingUserID: userID, matchingSessionID: sessionID)
+      try request.checkCurrent(id)
       try Task.checkCancellation()
       try IOSCloudSettings.apply(cloud.settings)
+      try request.checkCurrent(id)
       message = "已应用云端设置。"
-    } catch is CancellationError { }
-    catch { message = "账号已变化或云端设置不兼容，本机设置未更改，请重新读取。" }
+    } catch is CancellationError {
+      guard request.isCurrent(id) else { return }
+    }
+    catch {
+      guard request.isCurrent(id) else { return }
+      message = "账号已变化或云端设置不兼容，本机设置未更改，请重新读取。"
+    }
   }
-  @MainActor private func upload() async {
-    guard !busy, let cloud, let schema else { return }
-    busy = true; message = nil
-    defer { busy = false }
+  @MainActor private func startUpload() {
+    guard request.isVisible, !busy, let cloud, let schema, let loadedUserID, let loadedSessionID else { return }
+    ViewRequestTask.run(request: $request, busy: $busy, message: $message,
+                        pending: $pending) { id in
+      await upload(cloud: cloud, schema: schema, userID: loadedUserID, sessionID: loadedSessionID, requestID: id)
+    }
+  }
+  @MainActor private func upload(cloud: BackendAccountClient.Preferences,
+                                 schema: BackendAccountClient.PreferenceSchema,
+                                 userID: String,
+                                 sessionID: UUID,
+                                 requestID id: UUID) async {
+    guard request.isCurrent(id) else { return }
     do {
       let values = try BackendAccountClient.mergedPreferences(cloud, replacing: IOSCloudSettings.snapshot(), schema: schema)
-      let identity = try await session.credentials()
-      guard identity.userID == loadedUserID else { throw BackendAccountClient.Failure(status: 401) }
+      let identity = try await session.credentials(matchingUserID: userID,
+                                                   matchingSessionID: sessionID)
+      try request.checkCurrent(id)
       try Task.checkCancellation()
-      self.cloud = try await client.putPreferences(values, token: identity.token)
+      let updated = try await session.authenticated(matchingUserID: identity.userID,
+                                                   matchingSessionID: identity.sessionID) { token in
+        try await client.putPreferences(values, token: token)
+      }.value
+      try request.checkCurrent(id)
+      try await session.requireSession(matchingUserID: identity.userID, matchingSessionID: identity.sessionID)
+      try request.checkCurrent(id)
+      try Task.checkCancellation()
+      self.cloud = updated
       message = "本机设置已上传。"
-    } catch is CancellationError { }
+    } catch is CancellationError {
+      guard request.isCurrent(id) else { return }
+    }
     catch let error as BackendAccountClient.Failure {
+      guard request.isCurrent(id) else { return }
       message = error.status == 409 ? "云端设置已被其他设备更新，请刷新后重新确认。" : error.localizedDescription
-    } catch { message = "上传未完成，请稍后重试。" }
+    } catch {
+      guard request.isCurrent(id) else { return }
+      message = "上传未完成，请稍后重试。"
+    }
   }
 }

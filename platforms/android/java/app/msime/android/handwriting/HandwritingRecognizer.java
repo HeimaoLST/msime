@@ -1,5 +1,6 @@
 package app.msime.android;
 
+import android.view.inputmethod.InputConnection;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -56,6 +57,13 @@ public interface HandwritingRecognizer extends AutoCloseable {
         return TextPolicy.tailCodePoints(text, MAX_PRE_CONTEXT);
     }
 
+    /** Reads and bounds the editor context shared by touch and stylus handwriting. */
+    static String preContext(InputConnection connection) {
+        if (connection == null) return "";
+        CharSequence before = connection.getTextBeforeCursor(MAX_PRE_CONTEXT, 0);
+        return clipPreContext(before == null ? "" : before.toString());
+    }
+
     Availability availability();
     void download(DownloadListener listener);
     void recognize(Request request, RecognitionListener listener);
@@ -68,9 +76,7 @@ public interface HandwritingRecognizer extends AutoCloseable {
         for (String value : values) {
             if (value == null) continue;
             String candidate = TextPolicy.stripped(value);
-            if (candidate.isEmpty()
-                    || TextPolicy.utf8Length(candidate) > MAX_CANDIDATE_BYTES
-                    || TextPolicy.hasControl(candidate) || !TextPolicy.validUnicode(candidate)) continue;
+            if (!TextPolicy.boundedNonBlank(candidate, MAX_CANDIDATE_BYTES)) continue;
             accepted.add(candidate);
             if (accepted.size() == MAX_CANDIDATES) break;
         }

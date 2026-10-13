@@ -1,7 +1,7 @@
 import { useId, useState, type KeyboardEvent } from "react";
 import { ScreenKeyboardPreview } from "./screen-keyboard-preview";
 import { groupTitle } from "../core/platform-controls-style";
-import { keyboardThemeId, themeEntry } from "../theme/global-theme";
+import { globalThemeTitle, keyboardThemeId, themeEntry } from "../theme/global-theme";
 import { useCandidatePreviewTheme } from "../candidate/candidate-preview-theme";
 import { ActionButton } from "../core/action-button";
 import { FluentIcon } from "../core/fluent-icons";
@@ -10,11 +10,11 @@ import type { ImeSetupClient } from "../core/host-contracts";
 import type { Preferences } from "../index";
 import { touchKeyboardSchemeTitle } from "../settings/touch-keyboard-scheme-helpers";
 import { SetupStatusCard } from "./setup-status-card";
+import { logo } from "../settings/app-resources";
 import {
   RootSettingsList,
   RootSettingsRowView,
   rootSettingsGroups,
-  skinTitle as rootSkinTitle,
   type RootPage,
 } from "./root-settings-list";
 
@@ -121,6 +121,7 @@ export function HomePage({
         preferences={preferences}
         actions={actions}
         onOpenPage={onOpenPage}
+        onOpenChat={onOpenChat}
         rootPages={rootPages}
       />
     );
@@ -143,17 +144,19 @@ const searchField =
 /**
  * 触屏首页，即「设置」根页（大标题由外壳绘制）：一个搜索胶囊、设置状态卡片，以及分组行形式的各页面。有查询时隐藏卡片和分组，列出标题或当前值包含查询的行，与 Android 的「设置」页一样；Escape 清空查询。
  *
- * 「试用键盘」在宿主有对应窗口时打开宿主的键盘，否则打开子页面「试用键盘」；宿主打开窗口失败时也回退到这里。
+ * 「试用键盘」在宿主有对应窗口时打开宿主的键盘，否则切到「对话」标签并弹出键盘，与 Android 和 iOS 一样：试键盘就是在那里打字发给 AI。没有对话的宿主打开子页面「试用键盘」；宿主打开窗口失败时也按同样的顺序回退。
  */
 function TouchHomePage({
   preferences,
   actions,
   onOpenPage,
+  onOpenChat,
   rootPages,
 }: {
   preferences: Preferences;
   actions?: HomePageActions;
   onOpenPage: (page: string) => void;
+  onOpenChat?: () => void;
   rootPages?: readonly RootPage[];
 }) {
   const [query, setQuery] = useState("");
@@ -169,13 +172,14 @@ function TouchHomePage({
         )
     : [];
 
+  const tryInPage = () => (onOpenChat ? onOpenChat() : onOpenPage("try-keyboard"));
   const tryKeyboard = () => {
     const openKeyboard = actions?.openKeyboard;
     if (!openKeyboard) {
-      onOpenPage("try-keyboard");
+      tryInPage();
       return;
     }
-    void openKeyboard().catch(() => onOpenPage("try-keyboard"));
+    void openKeyboard().catch(tryInPage);
   };
   const searchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key !== "Escape" || !query) return;
@@ -261,7 +265,7 @@ function DesktopHomePage({
   const selected = themeEntry(preferences.global_theme).id;
   const skin = keyboardThemeId(selected, preferences.custom_theme);
   const customDesign = preferences.custom_theme?.keyboard ?? undefined;
-  const skinTitle = rootSkinTitle(preferences);
+  const skinTitle = globalThemeTitle(preferences.global_theme);
   const invokeAction = (action?: () => Promise<void>) => {
     if (action) void action();
   };
@@ -292,11 +296,7 @@ function DesktopHomePage({
           <p className="mt-1.5 mb-0 text-muted">从一次顺手的表达开始</p>
         </div>
         {/* 桌面端把品牌标志保留在句子旁，那里的标题栏是窗口装饰，而不是手机屏幕的顶部。 */}
-        <img
-          className="size-12 opacity-80"
-          src={new URL("../assets/msime.svg", import.meta.url).href}
-          alt=""
-        />
+        <img className="size-12 opacity-80" src={logo} alt="" />
       </header>
       <button type="button" className={`${card} flex flex-col gap-3 p-4`} onClick={openKeyboard}>
         <div className="flex items-center justify-between gap-3">

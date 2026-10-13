@@ -1,4 +1,5 @@
 import type { ReactNode, SelectHTMLAttributes } from "react";
+import { ControlledSelect } from "../core/controlled-select";
 import { SettingField } from "./setting-field";
 
 export interface SelectSettingFieldProps extends Omit<
@@ -27,14 +28,9 @@ export function SelectSettingField({
 }: SelectSettingFieldProps) {
   return (
     <SettingField label={label} description={description} className={fieldClassName}>
-      <select
-        {...selectProps}
-        aria-label={inputLabel}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      >
+      <ControlledSelect {...selectProps} aria-label={inputLabel} value={value} onChange={onChange}>
         {children}
-      </select>
+      </ControlledSelect>
     </SettingField>
   );
 }

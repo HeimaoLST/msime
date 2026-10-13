@@ -1,18 +1,48 @@
 import Foundation
+import CryptoKit
 
-@MainActor final class SyntheticDictionaryAPI: DesktopCloudDictionaryAPI {
+@MainActor final class SyntheticSnapshotTarget: DesktopSnapshotTarget {
+  let version = "synthetic-local-version"
+  func currentVersion() throws -> String { version }
+  func stage(_ snapshot: BackendPreparedSnapshot) async throws -> any DesktopSnapshotActivation {
+    throw BackendAccountClient.Failure(status: 500)
+  }
+}
+
+@MainActor final class SyntheticDictionaryAPI: DesktopCloudDictionaryAPI, DesktopSnapshotAPI {
   var calls = 0
   var failure: Int?
   var lastRevision: Int64 = 0
   var lastExport: URL?
+  var snapshotSource: URL?
   var lastCode = ""
   var lastPosition: Int?
   var lastReplacement: BackendAccountClient.DictionaryValue?
   var lastMode: BackendAccountClient.RankingMode?
   var invalidPage = false
+  var rejectFirstList = false
+  var rejectEveryList = false
+  var listTokens: [String] = []
+  var rejectFirstCatalog = false
+  var rejectEveryCatalog = false
+  var catalogTokens: [String] = []
   func dictionaryCatalog(_ kind: BackendAccountClient.DictionaryKind, code: String, offset: Int, scheme: String, profile: String, token: String) async throws -> BackendAccountClient.DictionaryCatalog {
-    try tick(); assert(scheme == "shuangpin" && profile == "xiaohe")
+    catalogTokens.append(token)
+    if rejectFirstCatalog || rejectEveryCatalog { rejectFirstCatalog = false; throw BackendAccountClient.Failure(status: 401) }
+    try tick(); assert((scheme == "shuangpin" && profile == "xiaohe") || (kind == .quick && code.isEmpty && scheme == "pinyin" && profile == "xiaohe"))
     return .init(entries: [.init(kind:kind, code:"he'cheng", word:"合成", weight:100)], offset:invalidPage ? offset + 1 : offset, has_more:offset == 0, revision:0, normalized:"he'cheng")
+  }
+  func dictionarySnapshot(token: String) async throws -> BackendAccountClient.DownloadedSnapshot {
+    guard let snapshotSource else { throw BackendAccountClient.Failure(status: 500) }
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("msime-synthetic-download-" + UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+    let file = root.appendingPathComponent("msime-dictionary-snapshot.ndjson")
+    try FileManager.default.copyItem(at: snapshotSource, to: file)
+    return .init(url: file, envelope: try BackendSnapshotEnvelope.inspect(file))
+  }
+  func restoreDictionarySnapshot(file: URL, expectedSHA256: String, revision: Int64, token: String) async throws -> BackendAccountClient.SnapshotRestoreResult {
+    assertionFailure("已取消的预览不应恢复云端快照")
+    throw BackendAccountClient.Failure(status: 500)
   }
   func editCatalog(_ entry: BackendAccountClient.CatalogEntry, revision: Int64, replacement: BackendAccountClient.DictionaryValue?, token: String) async throws -> BackendAccountClient.DictionaryChange {
     try tick(); lastCode = entry.code; lastRevision = revision; lastReplacement = replacement
@@ -40,6 +70,8 @@ import Foundation
   }
   func tick() throws { calls += 1; if let failure { throw BackendAccountClient.Failure(status: failure) } }
   func dictionary(_ kind: BackendAccountClient.DictionaryKind, search: String, offset: Int, token: String) async throws -> BackendAccountClient.DictionaryPage {
+    listTokens.append(token)
+    if rejectFirstList || rejectEveryList { rejectFirstList = false; throw BackendAccountClient.Failure(status: 401) }
     try tick()
     return .init(entries: [.init(id: String(repeating: "a", count: 64), kind: kind, code: "synthetic", word: "合成", weight: 100, revision: 17)], has_more: offset == 0, offset: offset)
   }
@@ -70,12 +102,54 @@ import Foundation
 @main enum DesktopCloudDictionaryProviderTest {
   @MainActor static func main() async throws {
     let api = SyntheticDictionaryAPI()
+    try await restorationPreviewCancellation(api)
     var provider: BackendCloudDictionaryProvider? = .init(client: api, credentials: { "synthetic-token" })
     try await advanced(provider!, api)
     for kind in ["pinyin", "wubi", "quick", "english"] {
       let page = try await provider!.execute(["operation":"list", "kind":kind, "offset":100, "search":"合成"])
       assert(page["offset"] as? Int == 100 && page["has_more"] as? Bool == false)
     }
+    let retryAPI = SyntheticDictionaryAPI()
+    retryAPI.rejectFirstList = true
+    var currentToken = "stale-token"
+    var refreshes = 0
+    let retrying = BackendCloudDictionaryProvider(client: retryAPI, credentials: { currentToken },
+                                                   refreshCredentials: { rejected in
+      assert(rejected == "stale-token")
+      refreshes += 1
+      currentToken = "fresh-token"
+      return currentToken
+    })
+    _ = try await retrying.execute(["operation":"list", "kind":"pinyin", "offset":0, "search":"合成"])
+    assert(retryAPI.listTokens == ["stale-token", "fresh-token"] && refreshes == 1)
+    let persistentAPI = SyntheticDictionaryAPI()
+    persistentAPI.rejectEveryList = true
+    var persistentRefreshes = 0
+    let persistent = BackendCloudDictionaryProvider(client: persistentAPI, credentials: { "stale-token" },
+                                                    refreshCredentials: { _ in
+      persistentRefreshes += 1
+      return "fresh-token"
+    })
+    do {
+      _ = try await persistent.execute(["operation":"list", "kind":"pinyin", "offset":0, "search":"合成"])
+      assertionFailure("a second 401 must fail")
+    } catch let failure as BackendAccountClient.Failure {
+      assert(failure.status == 401)
+    }
+    assert(persistentAPI.listTokens == ["stale-token", "fresh-token"] && persistentRefreshes == 1)
+    let switchedAPI = SyntheticDictionaryAPI()
+    switchedAPI.rejectFirstList = true
+    var switchedRefreshes = 0
+    let switched = BackendCloudDictionaryProvider(client: switchedAPI, credentials: { "stale-token" },
+                                                  refreshCredentials: { _ in
+      switchedRefreshes += 1
+      throw CancellationError()
+    })
+    do {
+      _ = try await switched.execute(["operation":"list", "kind":"pinyin", "offset":0, "search":"合成"])
+      assertionFailure("an account switch must stop the retry")
+    } catch is CancellationError { }
+    assert(switchedAPI.listTokens == ["stale-token"] && switchedRefreshes == 1)
     _ = try await provider!.execute(["operation":"add", "kind":"quick", "code":"k2", "word":String(repeating:"界",count:199), "weight":100])
     _ = try await provider!.execute(["operation":"update", "kind":"pinyin", "id":String(repeating:"a",count:64), "revision":17, "code":"he'cheng", "word":"合成", "weight":100])
     assert(api.lastRevision == 17)
@@ -127,6 +201,91 @@ import Foundation
     let count = api.calls
     do { _ = try await missing.execute(["operation":"add","kind":"pinyin","code":"he","word":"合","weight":1]); assertionFailure("signed-out write") } catch { }
     assert(api.calls == count)
+  }
+
+  @MainActor static func restorationPreviewCancellation(_ api: SyntheticDictionaryAPI) async throws {
+    let source = FileManager.default.temporaryDirectory.appendingPathComponent("msime-synthetic-" + UUID().uuidString + ".ndjson")
+    defer { try? FileManager.default.removeItem(at: source) }
+    let header = #"{"type":"header","format":"msime-dictionary-snapshot","version":1,"revision":0}"#
+    let body = Data((header + "\n").utf8)
+    let digest = SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
+    let footer = #"{"type":"footer","records":1,"sha256":"\#(digest)"}"#
+    try (body + Data((footer + "\n").utf8)).write(to: source)
+    let snapshots = BackendDesktopSnapshots(client: api, credentials: { "synthetic-token" }, choose: { _ in source })
+    let result = try await snapshots.execute(["operation":"snapshot_restore_preview"])
+    let token = result["previewToken"] as! String
+    let cancelled = try await snapshots.execute(["operation":"snapshot_restore_cancel"])
+    assert(cancelled["cancelled"] as? Bool == true)
+    do {
+      _ = try await snapshots.execute(["operation":"snapshot_restore_native", "token":token])
+      assertionFailure("已取消的预览仍可恢复")
+    } catch let failure as BackendAccountClient.Failure {
+      assert(failure.status == 400)
+    }
+    let empty = BackendDesktopSnapshots(client: api, credentials: { "synthetic-token" }, choose: { _ in nil })
+    let dismissed = try await empty.execute(["operation":"snapshot_restore_preview"])
+    assert(dismissed["saved"] as? Bool == false)
+
+    let statusAPI = SyntheticDictionaryAPI()
+    statusAPI.snapshotSource = source
+    var signedIn = true
+    let statusOwner = BackendDesktopSnapshots(client: statusAPI, credentials: {
+      if !signedIn { throw CancellationError() }
+      return "synthetic-token"
+    }, capture: { SyntheticSnapshotTarget() })
+    let staged = try await statusOwner.execute(["operation":"snapshot_preview"])
+    _ = try await statusOwner.execute(["operation":"snapshot_enqueue", "token":staged["previewToken"]!])
+    signedIn = false
+    let hidden = try await statusOwner.execute(["operation":"snapshot_status"])
+    assert(hidden["request"] is NSNull)
+    let cancelledAfterLogout = try await statusOwner.execute(["operation":"snapshot_cancel"])
+    assert(cancelledAfterLogout["request"] is NSNull)
+
+    let retryAPI = SyntheticDictionaryAPI()
+    retryAPI.rejectFirstCatalog = true
+    var currentToken = "stale-token"
+    var refreshes = 0
+    let retrying = BackendDesktopSnapshots(client: retryAPI, credentials: {
+      currentToken
+    }, refreshCredentials: { rejected in
+      assert(rejected == "stale-token")
+      refreshes += 1
+      currentToken = "fresh-token"
+      return currentToken
+    }, choose: { _ in source })
+    let preview = try await retrying.execute(["operation":"snapshot_restore_preview"])
+    assert(preview["expectedRevision"] as? Int64 == 0)
+    assert(retryAPI.catalogTokens == ["stale-token", "fresh-token"] && refreshes == 1)
+
+    let persistentAPI = SyntheticDictionaryAPI()
+    persistentAPI.rejectEveryCatalog = true
+    var persistentRefreshes = 0
+    let persistent = BackendDesktopSnapshots(client: persistentAPI, credentials: { "stale-token" },
+                                             refreshCredentials: { _ in
+      persistentRefreshes += 1
+      return "fresh-token"
+    }, choose: { _ in source })
+    do {
+      _ = try await persistent.execute(["operation":"snapshot_restore_preview"])
+      assertionFailure("a second 401 must fail")
+    } catch let failure as BackendAccountClient.Failure {
+      assert(failure.status == 401)
+    }
+    assert(persistentAPI.catalogTokens == ["stale-token", "fresh-token"] && persistentRefreshes == 1)
+
+    let switchedAPI = SyntheticDictionaryAPI()
+    switchedAPI.rejectFirstCatalog = true
+    var switchedRefreshes = 0
+    let switched = BackendDesktopSnapshots(client: switchedAPI, credentials: { "stale-token" },
+                                           refreshCredentials: { _ in
+      switchedRefreshes += 1
+      throw CancellationError()
+    }, choose: { _ in source })
+    do {
+      _ = try await switched.execute(["operation":"snapshot_restore_preview"])
+      assertionFailure("an account switch must stop the retry")
+    } catch is CancellationError { }
+    assert(switchedAPI.catalogTokens == ["stale-token"] && switchedRefreshes == 1)
   }
 
   @MainActor static func advanced(_ provider: BackendCloudDictionaryProvider, _ api: SyntheticDictionaryAPI) async throws {
@@ -191,9 +350,10 @@ import Foundation
       checks += 1; if checks > 1 { throw CancellationError() }; return "synthetic-token"
     })
     do { _ = try await changed.execute(catalog as NSDictionary); assertionFailure("stale catalog exposed") } catch { }
-    let snapshots = BackendDesktopSnapshots(credentials: { throw CancellationError() })
+    let snapshots = BackendDesktopSnapshots(credentials: { throw CancellationError() }, capture: { SyntheticSnapshotTarget() })
     let status = try await snapshots.execute(["operation":"snapshot_status"])
     assert(status["nativeFiles"] as? Bool == true)
+    assert(status["localVersion"] as? String == "synthetic-local-version")
     let cancelled = try await snapshots.execute(["operation":"snapshot_cancel"])
     assert(cancelled["request"] is NSNull)
   }

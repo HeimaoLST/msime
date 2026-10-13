@@ -1,12 +1,15 @@
 package app.msime.android;
 
+import app.msime.android.LayoutPolicy;
+
+
 import app.msime.android.core.InputViewValuePolicy;
 import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.content.res.ColorStateList;
 import android.graphics.Color;
+import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.InsetDrawable;
@@ -32,6 +35,8 @@ final class ImePanels {
     private static final String SYMBOL_RECENTS_KEY = "items";
     private final MSIMEInputService s;
     private SharedPreferences symbolPreferences;
+    // 只在主线程上用（打开符号面板、点符号记进「常用」时）；`emojiGlyphPaint` 归 `emojiWorker`，Paint 不能跨线程共用。
+    private final Paint symbolRecentsGlyphPaint = new Paint();
     private int replyReadGeneration;
     private int replyMenuReadGeneration;
 
@@ -87,7 +92,7 @@ final class ImePanels {
         tab.setContentDescription("表情分类 " + entry.title());
         if (Build.VERSION.SDK_INT >= 30)
             tab.setStateDescription(tab.isSelected() ? "已选中" : "未选中");
-        s.emojiTabs.addView(tab, KeyboardGeometry.weightedMatchParentParams(1));
+        s.emojiTabs.addView(tab, LayoutPolicy.weightedMatchParentParams(1));
     }
 
     private static void compactEmojiButton(Button button) {
@@ -103,7 +108,8 @@ final class ImePanels {
             if (tab.isSelected()) {
                 GradientDrawable face = DrawablePolicy.rounded(
                     Color.parseColor(s.emojiSkin.keyBackground()), s.pixels(8));
-                tab.setBackground(new InsetDrawable(face, s.pixels(2), s.pixels(3), s.pixels(2), s.pixels(3)));
+                ViewPolicy.setBackground(tab,
+                    new InsetDrawable(face, s.pixels(2), s.pixels(3), s.pixels(2), s.pixels(3)));
                 ViewPolicy.setActiveAlpha(tab, true, .6f);
             } else {
                 ViewPolicy.clearBackground(tab);
@@ -123,12 +129,12 @@ final class ImePanels {
         LinearLayout row = null;
         for (EmojiCatalogModel.Item item : s.emojiItems) {
             if (row == null || row.getChildCount() == EmojiCatalogModel.COLUMNS) {
-                row = KeyboardGeometry.row(s);
+                row = LayoutPolicy.row(s);
                 row.setWeightSum(EmojiCatalogModel.COLUMNS);
-                s.emojiGrid.addView(row, KeyboardGeometry.matchWidthHeightPx(rowHeight));
+                s.emojiGrid.addView(row, LayoutPolicy.matchWidthHeightPx(rowHeight));
             }
             Button cell = emojiCell(item);
-            row.addView(cell, KeyboardGeometry.weightedMatchParentParams(1));
+            row.addView(cell, LayoutPolicy.weightedMatchParentParams(1));
         }
         renderEmojiStatus();
         s.imeStyler.applySkin();
@@ -414,7 +420,7 @@ final class ImePanels {
             java.util.List<CommunitySkinCache.Entry> communityItems) {
         if (s.skinPanel == null) return;
         s.skinPanel.removeAllViews();
-        KeyboardGeometry.setPaddingDp(s.skinPanel, s, 8, 10, 8, 6);
+        LayoutPolicy.setPaddingDp(s.skinPanel, s, 8, 10, 8, 6);
         // 目录里的全局主题按共享目录的顺序（含水杉四季与春夏秋冬），后面接「我的设计」。
         JSONObject customTheme = preferences == null ? null : preferences.optJSONObject("custom_theme");
         java.util.List<MSIMEInputService.SkinChoice> choices =
@@ -424,6 +430,8 @@ final class ImePanels {
             if (entry == null) continue;
             String id = InputViewValuePolicy.textOr(entry, "id", "");
             if (id.isEmpty()) continue;
+            // 只列当前明暗下的主题：浅色键盘里不出现深色主题，反之亦然。
+            if (!KeyboardSkin.fitsMode(JsonPolicy.strictString(entry.opt("appearance")), hostDark)) continue;
             String themeName = InputViewValuePolicy.textOr(entry, "title", id);
             KeyboardSkin choice = "custom".equals(id) ? s.themeSkin(id, customTheme, hostDark)
                 : KeyboardSkin.resolved(entry, themeName, hostDark, null);
@@ -455,7 +463,9 @@ final class ImePanels {
         }
         choices.removeIf(choice -> "custom".equals(choice.id()) && choice.design() == null
             && namedKeys.contains(choice.skin().key()));
-        String globalTheme = InputViewValuePolicy.textOr(preferences, "global_theme", "system");
+        // 所选主题属于另一种明暗时键盘按跟随系统画，选中态也落在跟随系统上。
+        String globalTheme = KeyboardSkin.effectiveTheme(themes,
+            InputViewValuePolicy.textOr(preferences, "global_theme", "system"), hostDark);
         PagedTileGrid grid = new PagedTileGrid(s);
         grid.setGrid(4, 2);
         // 行高容下按 390:292 的迷你键盘（约 86 dp 宽时 65 dp 高）、描边和下方的名字；行距、列距取设计的 6 / 10。
@@ -519,7 +529,7 @@ final class ImePanels {
     /** 皮肤保存回来（成功或失败）后清掉临时选中态，下次按偏好画。 */
     void finishSkinPick() {
         pendingSkinKey = null;
-        if (s.skinScroll != null && s.skinScroll.getVisibility() == View.VISIBLE) renderSkinPicker();
+        if (ViewPolicy.isVisible(s.skinScroll)) renderSkinPicker();
     }
 
     private void styleSkinPicker(java.util.List<KeyboardSkinCard> cards) {
@@ -532,15 +542,15 @@ final class ImePanels {
 
     /** 分页网格加下方页点：皮肤面板与输入方式面板共用。 */
     private void addPagedGrid(LinearLayout parent, PagedTileGrid grid, int initialPage) {
-        parent.addView(grid, KeyboardGeometry.matchWidthWrapParams());
-        parent.addView(new View(s), KeyboardGeometry.weightedZeroParams(1));
+        parent.addView(grid, LayoutPolicy.matchWidthWrapParams());
+        parent.addView(new View(s), LayoutPolicy.weightedZeroParams(1));
         KeyboardPagerDots dots = new KeyboardPagerDots(s);
         dots.setTag(PAGER_DOTS_TAG);
         dots.setCount(grid.pageCount());
         dots.setActive(initialPage, false);
         if (grid.pageCount() > 1) ViewPolicy.show(dots);
         else ViewPolicy.setInvisible(dots);
-        LinearLayout.LayoutParams dotParams = KeyboardGeometry.linearParamsPx(
+        LinearLayout.LayoutParams dotParams = LayoutPolicy.linearParamsPx(
             s.pixels(Math.round(KeyboardPagerDots.totalWidthDp(
                 BoundsPolicy.bounded(grid.pageCount(), 1, Integer.MAX_VALUE)))), s.pixels(10));
         dotParams.gravity = Gravity.CENTER_HORIZONTAL;
@@ -565,68 +575,68 @@ final class ImePanels {
      * <p>间距取键盘自己的键距和行距，圆角和底色取当前皮肤的键帽，所以浅色、深色和自定义皮肤下都与键区一致。九宫格和回复卡片用 `KEY` 角色交给皮肤遍历上色；分段控件、源文字卡片、行内「粘贴」和操作列由 {@link #styleReplyKeyboard()} 在皮肤遍历之后单独上色。
      */
     LinearLayout createReplyKeyboard() {
-        LinearLayout root = KeyboardGeometry.column(s);
-        KeyboardGeometry.setSymmetricPaddingDp(root, s, 6, 5);
+        LinearLayout root = LayoutPolicy.column(s);
+        LayoutPolicy.setSymmetricPaddingDp(root, s, 6, 5);
         ViewPolicy.setBackgroundColor(root, Color.parseColor(s.skin.background()));
         root.setContentDescription("高情商回复键盘");
 
-        s.replyHeader = KeyboardGeometry.row(s);
+        s.replyHeader = LayoutPolicy.row(s);
         ViewPolicy.setCenteredVertically(s.replyHeader);
-        s.replyModeControl = KeyboardGeometry.row(s);
-        KeyboardGeometry.setSymmetricPaddingDp(s.replyModeControl, s, 2, 2);
+        s.replyModeControl = LayoutPolicy.row(s);
+        LayoutPolicy.setSymmetricPaddingDp(s.replyModeControl, s, 2, 2);
         s.replyReplyModeButton = replySegment("帮你回", "帮你回模式", ReplyKeyboardModel.Mode.REPLY);
         s.replyPolishModeButton = replySegment("帮润色", "帮润色模式", ReplyKeyboardModel.Mode.POLISH);
-        s.replyHeader.addView(s.replyModeControl, KeyboardGeometry.linearParamsPx(
+        s.replyHeader.addView(s.replyModeControl, LayoutPolicy.linearParamsPx(
             s.pixels(200), LinearLayout.LayoutParams.MATCH_PARENT));
-        s.replyHeader.addView(new View(s), KeyboardGeometry.weightedHeightPxParams(1, 1));
+        s.replyHeader.addView(new View(s), LayoutPolicy.weightedHeightPxParams(1, 1));
         s.replyTemplateButton = s.shortcutButton(s.replyHeader, "模板",
             KeyboardShortcutIconPolicy.Icon.BOOKMARK, this::showReplyTemplates);
         s.replyTemplateButton.setContentDescription("回复模板");
-        s.replyTemplateButton.setLayoutParams(KeyboardGeometry.linearParamsPx(
+        s.replyTemplateButton.setLayoutParams(LayoutPolicy.linearParamsPx(
             s.pixels(44), LinearLayout.LayoutParams.MATCH_PARENT));
-        root.addView(s.replyHeader, KeyboardGeometry.matchWidthHeightPx(s.pixels(36)));
+        root.addView(s.replyHeader, LayoutPolicy.matchWidthHeightPx(s.pixels(36)));
 
         // 源文字和「粘贴」在同一张卡片里：点文字和点「粘贴」都是粘贴，与 iOS 相同。
-        s.replySourceCard = KeyboardGeometry.row(s);
+        s.replySourceCard = LayoutPolicy.row(s);
         ViewPolicy.setCenteredVertically(s.replySourceCard);
-        KeyboardGeometry.setPaddingDp(s.replySourceCard, s, 10, 0, 6, 0);
+        LayoutPolicy.setPaddingDp(s.replySourceCard, s, 10, 0, 6, 0);
         s.replySourceButton = MSIMEInputService.role(s.button(s.replySourceCard, MSIMEInputService.REPLY_SOURCE_PLACEHOLDER,
             this::pasteReplySource), KeyboardKeyRole.PLAIN);
         ViewPolicy.setSingleLineEllipsized(s.replySourceButton);
         ViewPolicy.setStartCenteredTextSizeSp(s.replySourceButton, 15);
         s.replySourceButton.setContentDescription("回复源文字");
         compactReplyControl(s.replySourceButton, 0);
-        s.replySourceButton.setLayoutParams(KeyboardGeometry.weightedMatchParentParams(1));
+        s.replySourceButton.setLayoutParams(LayoutPolicy.weightedMatchParentParams(1));
         s.replyPasteButton = MSIMEInputService.role(s.button(s.replySourceCard, "粘贴", this::pasteReplySource),
             KeyboardKeyRole.PLAIN);
         s.replyPasteButton.setContentDescription("粘贴回复源文字");
         ViewPolicy.setTextSizeSp(s.replyPasteButton, 13);
         compactReplyControl(s.replyPasteButton, s.pixels(10));
-        LinearLayout.LayoutParams pasteParams = KeyboardGeometry.wrapMatchParentParams();
+        LinearLayout.LayoutParams pasteParams = LayoutPolicy.wrapMatchParentParams();
         pasteParams.setMarginStart(s.pixels(6));
         s.replyPasteButton.setLayoutParams(pasteParams);
-        root.addView(s.replySourceCard, KeyboardGeometry.matchWidthHeightPx(s.pixels(38)));
+        root.addView(s.replySourceCard, LayoutPolicy.matchWidthHeightPx(s.pixels(38)));
 
-        s.replyBody = KeyboardGeometry.row(s);
+        s.replyBody = LayoutPolicy.row(s);
         s.replyScroll = new ScrollView(s);
         s.replyScroll.setFillViewport(true);
         s.replyScroll.setVerticalScrollBarEnabled(false);
-        s.replyMain = KeyboardGeometry.column(s);
+        s.replyMain = LayoutPolicy.column(s);
         s.replyMain.setContentDescription("回复风格与候选");
         s.replyScroll.addView(s.replyMain);
-        s.replyBody.addView(s.replyScroll, KeyboardGeometry.weightedMatchParentParams(1));
-        s.replyActions = KeyboardGeometry.column(s);
-        s.replyBody.addView(s.replyActions, KeyboardGeometry.linearParamsPx(
+        s.replyBody.addView(s.replyScroll, LayoutPolicy.weightedMatchParentParams(1));
+        s.replyActions = LayoutPolicy.column(s);
+        s.replyBody.addView(s.replyActions, LayoutPolicy.linearParamsPx(
             s.pixels(60), LinearLayout.LayoutParams.MATCH_PARENT));
-        root.addView(s.replyBody, KeyboardGeometry.weightedWidthParams(1));
+        root.addView(s.replyBody, LayoutPolicy.weightedWidthParams(1));
 
-        LinearLayout footer = KeyboardGeometry.row(s);
+        LinearLayout footer = LayoutPolicy.row(s);
         ViewPolicy.setCenteredVertically(footer);
         s.replyProgress = new android.widget.ProgressBar(s, null,
             android.R.attr.progressBarStyleSmall);
         s.replyProgress.setIndeterminate(true);
         ViewPolicy.hide(s.replyProgress);
-        LinearLayout.LayoutParams progressParams = KeyboardGeometry.linearParamsPx(
+        LinearLayout.LayoutParams progressParams = LayoutPolicy.linearParamsPx(
             s.pixels(12), s.pixels(12));
         progressParams.setMarginEnd(s.pixels(4));
         footer.addView(s.replyProgress, progressParams);
@@ -634,7 +644,7 @@ final class ImePanels {
         ViewPolicy.setSingleLineEllipsized(s.replyStatus);
         ViewPolicy.clearFontPadding(s.replyStatus);
         s.replyStatus.setContentDescription("高情商回复键盘状态");
-        footer.addView(s.replyStatus, KeyboardGeometry.weightedWrapParams(1));
+        footer.addView(s.replyStatus, LayoutPolicy.weightedWrapParams(1));
         // 「选风格」只在已有回复时出现，点它回到风格九宫格。
         s.replyStyleResetButton = MSIMEInputService.role(s.button(footer, "选风格", () -> {
             s.replyModel.chooseStyle();
@@ -644,9 +654,9 @@ final class ImePanels {
         s.replyStyleResetButton.setContentDescription("重新选择回复风格");
         ViewPolicy.setTextSizeSp(s.replyStyleResetButton, 12);
         compactReplyControl(s.replyStyleResetButton, s.pixels(6));
-        s.replyStyleResetButton.setLayoutParams(KeyboardGeometry.wrapMatchParentParams());
+        s.replyStyleResetButton.setLayoutParams(LayoutPolicy.wrapMatchParentParams());
         ViewPolicy.hide(s.replyStyleResetButton);
-        root.addView(footer, KeyboardGeometry.matchWidthHeightPx(s.pixels(18)));
+        root.addView(footer, LayoutPolicy.matchWidthHeightPx(s.pixels(18)));
         return root;
     }
 
@@ -657,7 +667,7 @@ final class ImePanels {
             renderReplyKeyboard();
         });
         compactReplyControl(segment, 0);
-        segment.setLayoutParams(KeyboardGeometry.weightedMatchParentParams(1));
+        segment.setLayoutParams(LayoutPolicy.weightedMatchParentParams(1));
         return segment;
     }
 
@@ -672,7 +682,7 @@ final class ImePanels {
     Button replyAction(String label, String description, Runnable action) {
         Button button = replyButton(s.replyActions, label, description, action);
         compactReplyControl(button, 0);
-        button.setLayoutParams(KeyboardGeometry.weightedWidthParams(1));
+        button.setLayoutParams(LayoutPolicy.weightedWidthParams(1));
         return button;
     }
 
@@ -697,7 +707,7 @@ final class ImePanels {
             ? MSIMEInputService.REPLY_SOURCE_PLACEHOLDER : s.replyModel.source());
         if (!hasReplies) {
             for (int start = 0; start < ReplyKeyboardModel.STYLES.size(); start += 3) {
-                LinearLayout row = KeyboardGeometry.row(s);
+                LinearLayout row = LayoutPolicy.row(s);
                 for (int column = 0; column < 3; column++) {
                     ReplyKeyboardModel.Style style = ReplyKeyboardModel.STYLES.get(start + column);
                     Button choice = MSIMEInputService.role(s.button(row, style.emoji() + " " + style.label(),
@@ -706,12 +716,12 @@ final class ImePanels {
                     ViewPolicy.setEnabled(choice, !busy);
                     ViewPolicy.setActiveAlpha(choice, !busy, .45f);
                     ViewPolicy.clearMinimumSize(choice);
-                    KeyboardGeometry.setHorizontalPaddingDp(choice, s, 4);
+                    LayoutPolicy.setHorizontalPaddingDp(choice, s, 4);
                     ViewPolicy.setMaxLines(choice, 1);
                     ViewPolicy.setAutoSizeSp(choice, 10, 14, 1);
-                    choice.setLayoutParams(KeyboardGeometry.weightedMatchParentParams(1));
+                    choice.setLayoutParams(LayoutPolicy.weightedMatchParentParams(1));
                 }
-                s.replyMain.addView(row, KeyboardGeometry.weightedWidthParams(1));
+                s.replyMain.addView(row, LayoutPolicy.weightedWidthParams(1));
             }
         } else {
             for (String reply : s.replyModel.replies()) {
@@ -720,8 +730,8 @@ final class ImePanels {
                 ViewPolicy.setStartCenteredTextSizeSp(candidate, 15);
                 candidate.setContentDescription("回复候选，点按插入");
                 ViewPolicy.clearMinimumSize(candidate);
-                KeyboardGeometry.setSymmetricPaddingDp(candidate, s, 10, 10);
-                candidate.setLayoutParams(KeyboardGeometry.matchWidthWrapParams());
+                LayoutPolicy.setSymmetricPaddingDp(candidate, s, 10, 10);
+                candidate.setLayoutParams(LayoutPolicy.matchWidthWrapParams());
             }
         }
         replyAction("⌫", "删除源文字", () -> {
@@ -804,33 +814,37 @@ final class ImePanels {
         int accent = Color.parseColor(s.skin.accent());
         int onAccent = Color.parseColor(s.skin.onAccent());
         Typeface base = s.skin.monospaced() ? Typeface.MONOSPACE : Typeface.DEFAULT;
-        s.replyModeControl.setBackground(replySurface(ImeStyler.fade(s.skin.keyForeground(), .08), radius));
+        ViewPolicy.setBackground(s.replyModeControl,
+            replySurface(ImeStyler.fade(s.skin.keyForeground(), .08), radius));
         for (Button segment : new Button[] {s.replyReplyModeButton, s.replyPolishModeButton}) {
             boolean selected = segment.isSelected();
-            segment.setBackground(selected ? replySurface(Color.parseColor(s.skin.keyBackground()),
+            ViewPolicy.setBackground(segment, selected ? replySurface(Color.parseColor(s.skin.keyBackground()),
                 BoundsPolicy.nonNegative(radius - s.pixels(2))) : null);
             ViewPolicy.setTextColor(segment, foreground);
-            segment.setTypeface(Typeface.create(base, selected ? Typeface.BOLD : Typeface.NORMAL));
+            ViewPolicy.setTypeface(segment,
+                Typeface.create(base, selected ? Typeface.BOLD : Typeface.NORMAL));
             ViewPolicy.clearElevation(segment);
         }
-        s.replySourceCard.setBackground(replySurface(Color.parseColor(s.skin.keyBackground()), radius));
+        ViewPolicy.setBackground(s.replySourceCard,
+            replySurface(Color.parseColor(s.skin.keyBackground()), radius));
         ViewPolicy.setTextColor(s.replySourceButton, s.replyModel.source().isEmpty()
             ? ImeStyler.fade(s.skin.keyForeground(), .55) : foreground);
-        s.replyPasteButton.setBackground(new InsetDrawable(replySurface(accent, radius),
+        ViewPolicy.setBackground(s.replyPasteButton, new InsetDrawable(replySurface(accent, radius),
             0, s.pixels(6), 0, s.pixels(6)));
         // setBackground 会把 InsetDrawable 的内边距（左右为 0）套到按钮上，冲掉前面设的左右留白，文字就贴着色块边缘；换完背景再设回来。
-        KeyboardGeometry.setHorizontalPaddingDp(s.replyPasteButton, s, 12);
+        LayoutPolicy.setHorizontalPaddingDp(s.replyPasteButton, s, 12);
         ViewPolicy.setTextColor(s.replyPasteButton, onAccent);
         ViewPolicy.clearElevation(s.replyPasteButton);
         for (int index = 0; index < s.replyActions.getChildCount(); index++) {
             if (!(s.replyActions.getChildAt(index) instanceof Button action)) continue;
             boolean primary = action == s.replyPrimaryAction;
-            action.setBackground(replySurface(primary ? accent : ImeStyler.fade(s.skin.keyBackground(), .7), radius));
+            ViewPolicy.setBackground(action,
+                replySurface(primary ? accent : ImeStyler.fade(s.skin.keyBackground(), .7), radius));
             ViewPolicy.setTextColor(action, primary ? onAccent : foreground);
             ViewPolicy.clearElevation(action);
         }
         ViewPolicy.setTextColor(s.replyStatus, ImeStyler.fade(s.skin.keyForeground(), .7));
-        s.replyProgress.setIndeterminateTintList(ColorStateList.valueOf(accent));
+        ProgressBarPolicy.setIndeterminateTint(s.replyProgress, accent);
     }
 
     void showAiPolish() {
@@ -885,7 +899,7 @@ final class ImePanels {
     void finishAiPolish(long generation, String result, AiPolishClient.Failure failure) {
         if (s.aiOperation == null || s.aiOperation.generation() != generation
                 || s.aiPolishContainer == null
-                || s.aiPolishContainer.getVisibility() != View.VISIBLE) return;
+                || !ViewPolicy.isVisible(s.aiPolishContainer)) return;
         s.aiOperation = null;
         s.aiBusy = false;
         if (!s.aiTargetMatches() || s.aiRequestConfiguration == null
@@ -924,17 +938,17 @@ final class ImePanels {
         if (s.aiPolishPanel == null || s.aiPolishActions == null) return;
         s.aiPolishPanel.removeAllViews();
         s.aiPolishActions.removeAllViews();
-        KeyboardGeometry.setSymmetricPaddingDp(s.aiPolishPanel, s, 10, 6);
-        KeyboardGeometry.setPaddingDp(s.aiPolishActions, s, 10, 0, 10, 8);
-        LinearLayout header = KeyboardGeometry.row(s);
+        LayoutPolicy.setSymmetricPaddingDp(s.aiPolishPanel, s, 10, 6);
+        LayoutPolicy.setPaddingDp(s.aiPolishActions, s, 10, 0, 10, 8);
+        LinearLayout header = LayoutPolicy.row(s);
         ViewPolicy.setCenteredVertically(header);
         TextView title = aiText(s.aiOutputText.isEmpty() ? "AI 润色" : "润色结果", 15);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        header.addView(title, KeyboardGeometry.weightedWrapParams(1));
+        ViewPolicy.setTypeface(title, Typeface.DEFAULT_BOLD);
+        header.addView(title, LayoutPolicy.weightedWrapParams(1));
         Button back = MSIMEInputService.role(s.button(header, "返回键盘", s::closeAiPolish), KeyboardKeyRole.GLYPH);
         ViewPolicy.setTextSizeSp(back, 13);
         compactReplyControl(back, s.pixels(8));
-        back.setLayoutParams(KeyboardGeometry.linearParamsPx(
+        back.setLayoutParams(LayoutPolicy.linearParamsPx(
             LinearLayout.LayoutParams.WRAP_CONTENT, s.pixels(32)));
         s.aiPolishPanel.addView(header);
         java.util.List<TextView> secondary = new java.util.ArrayList<>(3);
@@ -952,17 +966,17 @@ final class ImePanels {
             secondary.add(destination);
         }
         TextView label = aiText(s.aiOutputText.isEmpty() ? "待发送的选中文字" : "润色结果", 12);
-        KeyboardGeometry.setPaddingDp(label, s, 0, 6, 0, 4);
+        LayoutPolicy.setPaddingDp(label, s, 0, 6, 0, 4);
         s.aiPolishPanel.addView(label);
         secondary.add(label);
         TextView content = aiText(s.aiOutputText.isEmpty() ? s.aiSourceText : s.aiOutputText, 15);
-        KeyboardGeometry.setSymmetricPaddingDp(content, s, 12, 10);
+        LayoutPolicy.setSymmetricPaddingDp(content, s, 12, 10);
         content.setContentDescription(s.aiOutputText.isEmpty() ? "待润色文字" : "AI 润色结果");
-        s.aiPolishPanel.addView(content, KeyboardGeometry.matchWidthWrapParams());
+        s.aiPolishPanel.addView(content, LayoutPolicy.matchWidthWrapParams());
         Button primary;
         if (s.aiBusy) {
             TextView progress = aiText("正在请求…", 12);
-            KeyboardGeometry.setPaddingDp(progress, s, 0, 6, 0, 0);
+            LayoutPolicy.setPaddingDp(progress, s, 0, 6, 0, 0);
             s.aiPolishPanel.addView(progress);
             secondary.add(progress);
             primary = s.button(s.aiPolishActions, "取消请求", () -> {
@@ -980,15 +994,16 @@ final class ImePanels {
         }
         compactReplyControl(primary, 0);
         ViewPolicy.setTextSizeSp(primary, 15);
-        primary.setLayoutParams(KeyboardGeometry.matchWidthHeightPx(s.pixels(44)));
+        primary.setLayoutParams(LayoutPolicy.matchWidthHeightPx(s.pixels(44)));
         s.imeStyler.applySkin();
         // 换肤遍历之后补上卡片底色、次要字色和主操作的强调色。
         float radius = s.pixels(10);
-        content.setBackground(replySurface(Color.parseColor(s.skin.keyBackground()), radius));
+        ViewPolicy.setBackground(content,
+            replySurface(Color.parseColor(s.skin.keyBackground()), radius));
         for (TextView text : secondary) ViewPolicy.setTextColor(text, ImeStyler.fade(s.skin.keyForeground(), .6));
         if (error != null) ViewPolicy.setTextColor(error, Color.parseColor(s.skin.accent()));
         boolean busy = s.aiBusy;
-        primary.setBackground(replySurface(busy ? ImeStyler.fade(s.skin.keyBackground(), .7)
+        ViewPolicy.setBackground(primary, replySurface(busy ? ImeStyler.fade(s.skin.keyBackground(), .7)
             : Color.parseColor(s.skin.accent()), radius));
         ViewPolicy.setTextColor(primary, busy ? Color.parseColor(s.skin.keyForeground()) : Color.parseColor(s.skin.onAccent()));
         ViewPolicy.setActiveAlpha(primary, primary.isEnabled(), .45f);
@@ -997,7 +1012,7 @@ final class ImePanels {
 
     private TextView aiText(CharSequence text, float sizeSp) {
         TextView view = ViewPolicy.textLabel(s, text, sizeSp);
-        KeyboardGeometry.setKeyTextSize(view, sizeSp);
+        KeyboardTypographyPolicy.setKeyTextSize(view, sizeSp);
         return view;
     }
 
@@ -1023,7 +1038,7 @@ final class ImePanels {
     void renderSchemePicker() {
         if (s.schemePanel == null) return;
         s.schemePanel.removeAllViews();
-        KeyboardGeometry.setPaddingDp(s.schemePanel, s, 8, 14, 8, 6);
+        LayoutPolicy.setPaddingDp(s.schemePanel, s, 8, 14, 8, 6);
         // 4×2 分页网格：已启用的方案按共享目录的顺序，英文 26 键排在第三格（方案不够时排最后），末尾是「+ 添加语言」。
         java.util.List<KeyboardScheme> schemes = s.visibleSchemes;
         final int englishIndex = BoundsPolicy.bounded(2, 0, schemes.size());
@@ -1109,6 +1124,7 @@ final class ImePanels {
             s.clipboardTab, s.clipboardHistoryEnabled, cloudAllowed);
         clipboardClearPending = false;
         clipboardActionText = null;
+        clipboardSwipedText = null;
         endClipboardSegmentation();
         // 补读一次：键盘进程没在运行时复制的内容，监听收不到。
         s.captureClipboard(ClipboardCapturePolicy.Trigger.PANEL_OPENED, false);
@@ -1119,7 +1135,7 @@ final class ImePanels {
     }
 
     boolean clipboardPanelOpen() {
-        return s.clipboardScroll != null && s.clipboardScroll.getVisibility() == View.VISIBLE;
+        return ViewPolicy.isVisible(s.clipboardScroll);
     }
 
     boolean cloudClipboardAllowed() {
@@ -1133,47 +1149,104 @@ final class ImePanels {
         s.clipboardTab = tab;
         clipboardClearPending = false;
         clipboardActionText = null;
+        clipboardSwipedText = null;
         endClipboardSegmentation();
         renderClipboardHistory();
     }
 
+    /** 「云端」这一刻归谁：`id` 是水杉账号编号或中继的绑定，`generation` 是账号的登录代次（中继为 0），`relay` 说明走哪条路。 */
+    private record CloudOwner(boolean relay, String id, long generation) {}
+
     /**
-     * Ask the service for this account's cloud list, off the main thread.
+     * 「云端」这一刻归谁。偏好里配置了自建中继时是中继，绑定由地址和令牌算出（{@link CloudClipboardRelay#binding}），不需要登录；否则是水杉账号的登录绑定，读不到时为 null。
+     *
+     * <p>只看内存里的偏好快照，不读文件，主线程上可以调用。快照最多晚一秒（偏好每秒重读一次），所以后台线程真正发请求之前还会再问一次共享层（{@link CloudClipboardRelay#selected}），两边不一致就按失败处理，绝不改走账号。
+     */
+    private CloudOwner cloudClipboardOwner() {
+        JSONObject preferences = s.preferencesSnapshot == null ? null : s.preferencesSnapshot.optJSONObject("preferences");
+        String relay = CloudClipboardRelay.binding(preferences);
+        if (!relay.isEmpty()) return new CloudOwner(true, relay, 0L);
+        app.msime.android.SyncSwitch.Binding binding = SyncSignals.binding(s);
+        return binding == null ? null : new CloudOwner(false, binding.accountId(), binding.generation());
+    }
+
+    /**
+     * Ask the service (or the user's own relay) for the cloud list, off the main thread.
      *
      * <p>The answer is drawn only if the field and the panel are still the ones it was asked for; otherwise it is dropped. Errors carry no response text, and nothing about the request is logged.
+     *
+     * <p>配置了中继就只读中继；面板打开后中继设置变了（换了地址或令牌、改回了账号），这次读取按失败处理，下次刷新时按新的设置来。
      */
     void refreshCloudClipboard() {
         if (!cloudClipboardAllowed()) return;
+        CloudOwner owner = cloudClipboardOwner();
+        String accountId = owner == null ? "" : owner.id();
+        long bindingGeneration = owner == null ? -1L : owner.generation();
+        boolean relay = owner != null && owner.relay();
+        s.cloudClipboardAccountId = accountId;
+        s.cloudClipboardBindingGeneration = bindingGeneration;
         long generation = ++s.cloudClipboardGeneration;
         s.cloudClipboardStatus = CloudClipboardPanelPolicy.Status.LOADING;
         s.cloudClipboardItems = java.util.List.of();
+        s.cloudClipboardSessionId = "";
         if (s.clipboardTab == CloudClipboardPanelPolicy.Tab.CLOUD) renderClipboardHistory();
+        if (owner == null || accountId.isEmpty()) {
+            s.cloudClipboardStatus = CloudClipboardPanelPolicy.Status.SIGNED_OUT;
+            if (s.clipboardTab == CloudClipboardPanelPolicy.Tab.CLOUD) renderClipboardHistory();
+            return;
+        }
         try {
             s.cloudClipboardWorker.execute(() -> {
                 CloudClipboardPanelPolicy.Status status;
                 java.util.List<BackendAccount.ClipboardItem> items = java.util.List.of();
+                String sessionId = "";
                 try {
-                    BackendAccount account = new BackendAccount(s);
-                    // Throws when the session owner cannot tell right now, which is a retry, not a sign-in.
-                    if (account.currentAccessToken().isEmpty()) {
-                        status = CloudClipboardPanelPolicy.Status.SIGNED_OUT;
-                    } else {
-                        BackendAccount.ClipboardPage page = account.clipboard("");
-                        status = CloudClipboardPanelPolicy.loaded(page.enabled(), page.items().size());
+                    // 快照和偏好文件对不上（中继设置刚改过）时抛出 relay_changed，按失败处理，绝不在配置了中继时经账号读。
+                    CloudClipboardRelay route = CloudClipboardRelay.forPanel(s, relay, accountId);
+                    if (route != null) {
+                        BackendAccount.ClipboardPage page = BackendAccount.clipboardPage(
+                            route.drive(CloudClipboardE2e.Operation.list("")));
+                        status = CloudClipboardPanelPolicy.loaded(page.enabled(), page.pending(), page.items().size());
                         if (CloudClipboardPanelPolicy.showsItems(status)) items = page.items();
+                        sessionId = accountId;
+                    } else {
+                        BackendAccount account = new BackendAccount(s);
+                        // Throws when the session owner cannot tell right now, which is a retry, not a sign-in.
+                        BackendAccount.SessionCredential session = account.currentSession();
+                        if (session.token().isEmpty()) {
+                            status = CloudClipboardPanelPolicy.Status.SIGNED_OUT;
+                        } else {
+                            BackendAccount.ClipboardPage page = account.clipboard("", session.sessionId(),
+                                CloudClipboardNativeDriver.local(s));
+                            status = CloudClipboardPanelPolicy.loaded(page.enabled(), page.pending(), page.items().size());
+                            if (CloudClipboardPanelPolicy.showsItems(status)) items = page.items();
+                            sessionId = session.sessionId();
+                        }
                     }
+                } catch (CloudApi.Failure error) {
+                    status = CloudClipboardPanelPolicy.failed(error.status, error.code);
                 } catch (BackendAccount.RequestException error) {
-                    status = CloudClipboardPanelPolicy.failed(error.status);
+                    status = CloudClipboardPanelPolicy.failed(error.status, error.code);
                 } catch (Exception | LinkageError error) {
                     status = CloudClipboardPanelPolicy.Status.FAILED;
                 }
                 CloudClipboardPanelPolicy.Status answer = status;
                 java.util.List<BackendAccount.ClipboardItem> answered = items;
+                String answeredSessionId = sessionId;
                 s.main.post(() -> {
                     if (!CloudClipboardPanelPolicy.accepts(generation, s.cloudClipboardGeneration)
-                            || !clipboardPanelOpen() || !cloudClipboardAllowed()) return;
+                            || !clipboardPanelOpen()) return;
+                    if (!acceptsCurrentBinding(accountId, bindingGeneration)) {
+                        s.closeClipboardHistory();
+                        return;
+                    }
+                    if (!cloudClipboardAllowed()) {
+                        s.closeClipboardHistory();
+                        return;
+                    }
                     s.cloudClipboardStatus = answer;
                     s.cloudClipboardItems = answered;
+                    s.cloudClipboardSessionId = answeredSessionId;
                     if (s.clipboardTab == CloudClipboardPanelPolicy.Tab.CLOUD) renderClipboardHistory();
                 });
             });
@@ -1182,34 +1255,57 @@ final class ImePanels {
         }
     }
 
-    /** Send one local entry to the account's cloud clipboard, because the user asked for exactly this one. */
+    /** Send one local entry to the cloud clipboard (the account's, or the user's own relay when one is set), because the user asked for exactly this one. */
     void uploadClipboardText(String text) {
         boolean cloudAllowed = cloudClipboardAllowed();
+        CloudOwner owner = cloudClipboardOwner();
+        String accountId = owner == null ? "" : owner.id();
+        long bindingGeneration = owner == null ? -1L : owner.generation();
+        boolean relay = owner != null && owner.relay();
+        if (!CloudClipboardPanelPolicy.acceptsBinding(
+                s.cloudClipboardAccountId, s.cloudClipboardBindingGeneration,
+                accountId, bindingGeneration) || s.cloudClipboardSessionId.isEmpty()) {
+            s.closeClipboardHistory();
+            return;
+        }
         if (!CloudClipboardPanelPolicy.canUpload(cloudAllowed, s.cloudClipboardStatus, text)) {
-            s.notice(s.cloudClipboardStatus == CloudClipboardPanelPolicy.Status.SIGNED_OUT
-                    || s.cloudClipboardStatus == CloudClipboardPanelPolicy.Status.DISABLED
+            s.notice(CloudClipboardPanelPolicy.explains(s.cloudClipboardStatus)
                     ? CloudClipboardPanelPolicy.message(s.cloudClipboardStatus, 0)
                     : "这条记录无法发到云剪贴板");
             return;
         }
         long generation = s.cloudClipboardGeneration;
+        String sessionId = s.cloudClipboardSessionId;
         try {
             s.cloudClipboardWorker.execute(() -> {
                 CloudClipboardPanelPolicy.Status failure = null;
                 try {
-                    new BackendAccount(s).addClipboard(text);
+                    // 中继设置在这一页读出之后改过时抛出 relay_changed：不发，绝不在配置了中继时发到账号，也不发到刚换掉的中继。
+                    CloudClipboardRelay route = CloudClipboardRelay.forPanel(s, relay, sessionId);
+                    if (route != null) {
+                        BackendAccount.clipboardItem(route.drive(CloudClipboardE2e.Operation.add(text)));
+                    } else {
+                        new BackendAccount(s).addClipboard(text, sessionId, CloudClipboardNativeDriver.local(s));
+                    }
+                } catch (CloudApi.Failure error) {
+                    failure = CloudClipboardPanelPolicy.failed(error.status, error.code);
                 } catch (BackendAccount.RequestException error) {
-                    failure = CloudClipboardPanelPolicy.failed(error.status);
+                    failure = CloudClipboardPanelPolicy.failed(error.status, error.code);
                 } catch (Exception | LinkageError error) {
                     failure = CloudClipboardPanelPolicy.Status.FAILED;
                 }
                 CloudClipboardPanelPolicy.Status result = failure;
                 s.main.post(() -> {
                     if (!CloudClipboardPanelPolicy.acceptsUploadResult(
-                            generation, s.cloudClipboardGeneration) || !clipboardPanelOpen()) return;
+                            generation, s.cloudClipboardGeneration)
+                            || !clipboardPanelOpen()) return;
+                    if (!acceptsCurrentBinding(accountId, bindingGeneration)) {
+                        s.closeClipboardHistory();
+                        return;
+                    }
                     s.notice(result == null ? "已发到云剪贴板"
-                        : result == CloudClipboardPanelPolicy.Status.SIGNED_OUT
-                            ? CloudClipboardPanelPolicy.SIGNED_OUT_MESSAGE
+                        : CloudClipboardPanelPolicy.explains(result)
+                            ? CloudClipboardPanelPolicy.message(result, 0)
                             : "未能发到云剪贴板，请稍后重试");
                     // Re-read rather than splice the entry in: the service deduplicates and orders the list.
                     refreshCloudClipboard();
@@ -1222,8 +1318,21 @@ final class ImePanels {
 
     void insertCloudClipboardText(String text) {
         // Re-checked at the tap: the list was drawn for this field, but a field never gets cloud text once it has turned sensitive.
-        if (!cloudClipboardAllowed()) return;
+        CloudOwner owner = cloudClipboardOwner();
+        if (owner == null || !CloudClipboardPanelPolicy.canUseCloudRows(
+                cloudClipboardAllowed(), s.cloudClipboardStatus,
+                s.cloudClipboardAccountId, s.cloudClipboardBindingGeneration,
+                owner.id(), owner.generation())) {
+            s.closeClipboardHistory();
+            return;
+        }
         s.insertClipboardText(text);
+    }
+
+    private boolean acceptsCurrentBinding(String accountId, long bindingGeneration) {
+        CloudOwner current = cloudClipboardOwner();
+        return current != null && CloudClipboardPanelPolicy.acceptsBinding(
+            accountId, bindingGeneration, current.id(), current.generation());
     }
 
     /** 顶行的「清空」点过一次、正在等用户确认；换分段、重开面板都会撤销。 */
@@ -1235,7 +1344,8 @@ final class ImePanels {
         if (s.clipboardPanel == null || s.clipboardHistory == null) return;
         s.clipboardPanel.removeAllViews();
         clipboardCardRow = null;
-        KeyboardGeometry.setSymmetricPaddingDp(s.clipboardPanel, s, 8, 8);
+        clipboardSwipedCell = null;
+        LayoutPolicy.setSymmetricPaddingDp(s.clipboardPanel, s, 8, 8);
         boolean cloudAllowed = cloudClipboardAllowed();
         if (!cloudAllowed) s.clipboardTab = CloudClipboardPanelPolicy.Tab.LOCAL;
         boolean cloud = s.clipboardTab == CloudClipboardPanelPolicy.Tab.CLOUD;
@@ -1243,9 +1353,18 @@ final class ImePanels {
             renderClipboardSegmentation();
             return;
         }
-        java.util.List<TextView> notes = new java.util.ArrayList<>(1);
+        java.util.List<TextView> notes = new java.util.ArrayList<>(2);
+        // 本机历史在画顶行之前读一次：顶行的条数和下面的卡片用的是同一份，不读第二次。读不出来时 items 为 null，提示照旧画在下面。
+        java.util.List<ClipboardHistory.Item> items = null;
+        if (!cloud && s.clipboardHistoryEnabled) {
+            try {
+                items = s.clipboardHistory.load();
+            } catch (IllegalStateException error) {
+                items = null;
+            }
+        }
         // 顶部一行小号操作：本机 / 云端分段（云端可用时）、刷新或清空；返回由工具栏的「返回键盘」负责。
-        LinearLayout header = KeyboardGeometry.row(s);
+        LinearLayout header = LayoutPolicy.row(s);
         ViewPolicy.setCenteredVertically(header);
         boolean confirmingClear = !cloud && s.clipboardHistoryEnabled && clipboardClearPending;
         // 等待确认清空时顶行整行给问句和两个按钮，分段先让出位置，窄屏上也放得下。
@@ -1253,7 +1372,21 @@ final class ImePanels {
             addClipboardTab(header, CloudClipboardPanelPolicy.TAB_LOCAL, CloudClipboardPanelPolicy.Tab.LOCAL);
             addClipboardTab(header, CloudClipboardPanelPolicy.TAB_CLOUD, CloudClipboardPanelPolicy.Tab.CLOUD);
         }
-        if (!confirmingClear) header.addView(new View(s), KeyboardGeometry.weightedZeroParams(1));
+        if (!confirmingClear) {
+            // 分段和「清空」之间原来是一块空白，现在居中写「已存条数/上限」（#5905），不另占地方；没有可数的内容时它是空的，布局和原来一样。
+            Integer count = cloud
+                ? CloudClipboardPanelPolicy.cloudCount(s.cloudClipboardStatus, s.cloudClipboardItems.size())
+                : items == null ? null : items.size();
+            TextView counter = ViewPolicy.centeredText(s,
+                CloudClipboardPanelPolicy.countLabel(s.clipboardTab, count), 12);
+            KeyboardTypographyPolicy.setKeyTextSize(counter, 12);
+            ViewPolicy.setMaxLinesEllipsized(counter, 1);
+            String description = CloudClipboardPanelPolicy.countDescription(s.clipboardTab, count);
+            if (description.isEmpty()) ViewPolicy.hideFromAccessibility(counter);
+            else counter.setContentDescription(description);
+            header.addView(counter, LayoutPolicy.weightedMatchParentParams(1));
+            notes.add(counter);
+        }
         if (cloud) {
             Button refresh = clipboardAction(header, "刷新", this::refreshCloudClipboard);
             ViewPolicy.setEnabled(refresh,
@@ -1262,10 +1395,10 @@ final class ImePanels {
         } else if (confirmingClear) {
             // 确认画在面板顶行里，不弹对话框：对话框会让输入法进程崩掉或抢走编辑器焦点，键盘随之收起（#5605）。
             TextView question = ViewPolicy.textLabel(s, "清空全部历史（含固定项）？", 13);
-            KeyboardGeometry.setKeyTextSize(question, 13);
+            KeyboardTypographyPolicy.setKeyTextSize(question, 13);
             ViewPolicy.setMaxLinesEllipsized(question, 1);
-            KeyboardGeometry.setHorizontalPaddingDp(question, s, 6);
-            header.addView(question, KeyboardGeometry.weightedZeroParams(1));
+            LayoutPolicy.setHorizontalPaddingDp(question, s, 6);
+            header.addView(question, LayoutPolicy.weightedZeroParams(1));
             clipboardAction(header, "取消", () -> {
                 clipboardClearPending = false;
                 renderClipboardHistory();
@@ -1276,51 +1409,69 @@ final class ImePanels {
             });
             confirm.setContentDescription("确认清空剪贴板历史");
         } else if (s.clipboardHistoryEnabled) {
+            // 「搜索」打开应用里可搜索的剪贴板历史页（#5973）：键盘里没有可输入的文本框，查询框放在应用里。没有可搜的记录（空或读不出）时不放。
+            if (items != null && !items.isEmpty()) {
+                Button search = clipboardAction(header, "搜索", s::openClipboardSearch);
+                search.setContentDescription("在水杉应用里搜索剪贴板历史");
+            }
             // 复制会自动记录，不再需要「保存当前」。
             clipboardAction(header, "清空", () -> {
                 clipboardClearPending = true;
                 clipboardActionText = null;
+                clipboardSwipedText = null;
                 renderClipboardHistory();
             });
         }
-        s.clipboardPanel.addView(header, KeyboardGeometry.matchWidthHeightPx(s.pixels(32)));
+        s.clipboardPanel.addView(header, LayoutPolicy.matchWidthHeightPx(s.pixels(32)));
         if (cloud) {
             renderCloudClipboard(notes);
         } else if (!s.clipboardHistoryEnabled) {
             notes.add(clipboardNote("剪贴板历史未开启，可在设置中开启"));
+        } else if (items == null) {
+            notes.add(clipboardNote("历史记录无法读取，请清空后重试"));
         } else {
-            try {
-                java.util.List<ClipboardHistory.Item> items = s.clipboardHistory.load();
-                if (items.isEmpty()) notes.add(clipboardNote("复制的文字会自动出现在这里，点按即可插入\n只保存在本机"));
-                long now = System.currentTimeMillis();
-                int columns = s.clipboardColumns;
-                ClipboardHistory.Item actionItem = null;
-                for (int index = 0; index < items.size(); index++) {
-                    ClipboardHistory.Item item = items.get(index);
-                    String meta = (item.pinned() ? "已置顶 · " : "") + "本机 · " + relativeTime(item.timestamp(), now);
-                    boolean managed = item.text().equals(clipboardActionText);
-                    Button card = clipboardCard(index, items.size(), item.text(), meta, managed,
-                        () -> s.insertClipboardText(item.text()));
-                    card.setContentDescription((item.pinned() ? "已置顶；" : "") + "点按插入剪贴板记录，长按管理");
-                    card.setOnLongClickListener(ignored -> {
-                        s.imeKeyFeedback.playFeedback(card);
-                        clipboardActionText = item.text();
-                        clipboardClearPending = false;
-                        renderClipboardHistory();
-                        return true;
-                    });
-                    if (managed) actionItem = item;
-                    // 操作行放在这条所在那一行的下面：双列时跨在两条下方，不插进两条中间。
-                    boolean rowEnds = index == items.size() - 1
-                        || ClipboardLayoutPolicy.row(index + 1, columns) != ClipboardLayoutPolicy.row(index, columns);
-                    if (rowEnds && actionItem != null) {
-                        renderClipboardItemActions(actionItem, cloudAllowed);
-                        actionItem = null;
+            if (items.isEmpty()) notes.add(clipboardNote("复制的文字会自动出现在这里，点按即可插入\n只保存在本机"));
+            long now = System.currentTimeMillis();
+            int columns = s.clipboardColumns;
+            float reveal = ClipboardSwipePolicy.revealWidth(DimensionPolicy.density(s), clipboardCellWidth(columns));
+            boolean swipedPresent = false;
+            ClipboardHistory.Item actionItem = null;
+            for (int index = 0; index < items.size(); index++) {
+                ClipboardHistory.Item item = items.get(index);
+                String meta = (item.pinned() ? "已置顶 · " : "") + "本机 · "
+                    + RelativeTimePolicy.timestampAgo(item.timestamp(), now);
+                boolean managed = item.text().equals(clipboardActionText);
+                boolean swiped = item.text().equals(clipboardSwipedText);
+                swipedPresent |= swiped;
+                Button card = newClipboardCard(item.text(), meta, managed, () -> {
+                    // 有一条左滑打开着时，点任何一张卡片只把它收回，不插入。
+                    if (clipboardSwipedText != null) {
+                        closeClipboardSwipe();
+                        return;
                     }
+                    s.insertClipboardText(item.text());
+                });
+                card.setContentDescription((item.pinned() ? "已置顶；" : "") + "点按插入剪贴板记录，左滑删除，长按管理");
+                card.setOnLongClickListener(ignored -> {
+                    s.imeKeyFeedback.playFeedback(card);
+                    clipboardActionText = item.text();
+                    clipboardClearPending = false;
+                    clipboardSwipedText = null;
+                    renderClipboardHistory();
+                    return true;
+                });
+                placeClipboardCell(index, items.size(), clipboardSwipeCell(card, item, swiped, reveal));
+                if (managed) actionItem = item;
+                // 操作行放在这条所在那一行的下面：双列时跨在两条下方，不插进两条中间。
+                boolean rowEnds = index == items.size() - 1
+                    || ClipboardLayoutPolicy.row(index + 1, columns) != ClipboardLayoutPolicy.row(index, columns);
+                if (rowEnds && actionItem != null) {
+                    renderClipboardItemActions(actionItem, cloudAllowed);
+                    actionItem = null;
                 }
-            } catch (IllegalStateException error) {
-                notes.add(clipboardNote("历史记录无法读取，请清空后重试"));
             }
+            // 打开着的那一条已经不在了（别处删掉或清空）：不再记着它。
+            if (!swipedPresent) clipboardSwipedText = null;
         }
         s.imeStyler.applySkin();
         for (TextView note : notes) ViewPolicy.setTextColor(note, ImeStyler.fade(s.skin.keyForeground(), .6));
@@ -1332,9 +1483,8 @@ final class ImePanels {
      * <p>原来是 `PopupMenu`：弹出菜单是可获得焦点的窗口，打开时编辑器的窗口失去焦点，在 Via 这类用系统 WebView 的浏览器里键盘随即被收起（#5653）。画在面板里的按钮不会碰窗口焦点。
      */
     private void renderClipboardItemActions(ClipboardHistory.Item item, boolean cloudAllowed) {
-        LinearLayout row = KeyboardGeometry.row(s);
-        ViewPolicy.setCenteredVertically(row);
-        row.setContentDescription("剪贴板记录操作");
+        // 操作分两行：一行放不下「添加到常用语」「发到云剪贴板」两个长按钮和其余几个短按钮，挤在一行时每个按钮都被截成省略号。阅读顺序是 固定、删除、编辑、分词、添加到常用语、发到云剪贴板、收起。
+        LinearLayout row = addClipboardItemActionRow();
         clipboardItemAction(row, item.pinned() ? "取消固定" : "固定", () -> {
             clipboardActionText = null;
             s.setClipboardItemPinned(item);
@@ -1343,10 +1493,21 @@ final class ImePanels {
             clipboardActionText = null;
             s.removeClipboardItem(item);
         });
+        // 编辑在应用里做（#5971）：键盘里没有可输入的文本框，增删改放在应用里，和常用语（#5673）一样。
+        clipboardItemAction(row, "编辑", () -> {
+            clipboardActionText = null;
+            s.editClipboardItem(item);
+        });
         clipboardItemAction(row, "分词", () -> startClipboardSegmentation(item.text()));
+        LinearLayout more = addClipboardItemActionRow();
+        clipboardItemAction(more, CommonPhrasesPanelPolicy.ADD_FROM_CLIPBOARD, () -> {
+            clipboardActionText = null;
+            renderClipboardHistory();
+            addClipboardTextToPhrases(item.text());
+        });
         // 只要有云端分段就提供这个操作，让用户发现得了；只有这次打开面板的拉取确认账号已登录且开着云剪贴板时它才真正执行。
         if (cloudAllowed) {
-            Button upload = clipboardItemAction(row, CloudClipboardPanelPolicy.UPLOAD_ACTION, () -> {
+            Button upload = clipboardItemAction(more, CloudClipboardPanelPolicy.UPLOAD_ACTION, () -> {
                 clipboardActionText = null;
                 renderClipboardHistory();
                 uploadClipboardText(item.text());
@@ -1354,13 +1515,50 @@ final class ImePanels {
             ViewPolicy.setEnabledWithAlpha(upload, CloudClipboardPanelPolicy.canUpload(
                 cloudAllowed, s.cloudClipboardStatus, item.text()), .45f);
         }
-        clipboardItemAction(row, "收起", () -> {
+        clipboardItemAction(more, "收起", () -> {
             clipboardActionText = null;
             renderClipboardHistory();
         });
-        LinearLayout.LayoutParams params = KeyboardGeometry.matchWidthHeightPx(s.pixels(38));
+    }
+
+    /** 操作行里的一行：加在面板里当前位置（紧贴被长按那条的下方），返回给调用方往里放按钮。 */
+    private LinearLayout addClipboardItemActionRow() {
+        LinearLayout row = LayoutPolicy.row(s);
+        ViewPolicy.setCenteredVertically(row);
+        row.setContentDescription("剪贴板记录操作");
+        LinearLayout.LayoutParams params = LayoutPolicy.matchWidthHeightPx(s.pixels(38));
         params.topMargin = s.pixels(4);
         s.clipboardPanel.addView(row, params);
+        return row;
+    }
+
+    /**
+     * 长按操作行里的「添加到常用语」（#5909）：把这一条存成无编码常用语，之后在键盘的「常用语」面板里点一下就能上屏。
+     *
+     * <p>经 {@link CommonPhrasesStore#add} 写入，校验、去重、条数上限和标记同步都在那里；常用语读写要等文件锁，放在 `preferencesWorker` 上，结果回到主线程用 `notice` 说出来。剪贴板历史不限 1000 字、允许回车和制表符，常用语都不行：先把回车换成换行，仍存不下的在这里拦下，按实际原因说明（{@link CommonPhrasesPanelPolicy#clipboardRefusal}）。
+     */
+    private void addClipboardTextToPhrases(String entry) {
+        String text = CommonPhrasesPanelPolicy.clipboardPhraseText(entry);
+        String refusal = CommonPhrasesPanelPolicy.clipboardRefusal(text);
+        if (refusal != null) {
+            s.notice(refusal);
+            return;
+        }
+        try {
+            s.preferencesWorker.execute(() -> {
+                CommonPhrasesStore.Result result;
+                try {
+                    result = CommonPhrasesStore.add(s, text);
+                } catch (RuntimeException | LinkageError error) {
+                    result = null;
+                }
+                String notice = CommonPhrasesPanelPolicy.clipboardAddNotice(
+                    result != null && result.ok(), result == null ? "" : result.failure());
+                s.main.post(() -> s.notice(notice));
+            });
+        } catch (java.util.concurrent.RejectedExecutionException error) {
+            s.notice(CommonPhrasesStore.failureMessage(""));
+        }
     }
 
     /** 正在分词的那一条切出的片段；没有在分词时为 null。 */
@@ -1376,6 +1574,7 @@ final class ImePanels {
     private void startClipboardSegmentation(String text) {
         clipboardActionText = null;
         clipboardClearPending = false;
+        clipboardSwipedText = null;
         clipboardSegments = ClipboardSegmentation.segment(text,
             java.text.BreakIterator.getWordInstance(java.util.Locale.CHINESE));
         clipboardSegmentSelected = new boolean[clipboardSegments.size()];
@@ -1400,11 +1599,11 @@ final class ImePanels {
      */
     private void renderClipboardSegmentation() {
         java.util.List<TextView> notes = new java.util.ArrayList<>(1);
-        LinearLayout content = KeyboardGeometry.column(s);
+        LinearLayout content = LayoutPolicy.column(s);
         if (clipboardSegmentsTruncated) {
             TextView note = centeredNote("这条记录很长，只对开头 " + ClipboardSegmentation.MAX_CHARS + " 个字分词", 13);
-            KeyboardGeometry.setSymmetricPaddingDp(note, s, 12, 20);
-            content.addView(note, KeyboardGeometry.matchWidthWrapParams());
+            LayoutPolicy.setSymmetricPaddingDp(note, s, 12, 20);
+            content.addView(note, LayoutPolicy.matchWidthWrapParams());
             notes.add(note);
         }
         WrapRowLayout words = new WrapRowLayout(s, s.pixels(6), s.pixels(6));
@@ -1414,24 +1613,24 @@ final class ImePanels {
             if (segment.separator()) continue;
             words.addView(clipboardSegmentButton(segment.text(), index));
         }
-        content.addView(words, KeyboardGeometry.matchWidthWrapParams());
+        content.addView(words, LayoutPolicy.matchWidthWrapParams());
         ScrollView wordScroll = new ScrollView(s);
-        wordScroll.addView(content, KeyboardGeometry.scrollMatchWidthWrapParams());
-        LinearLayout.LayoutParams scrollParams = KeyboardGeometry.linearParamsPx(
+        wordScroll.addView(content, LayoutPolicy.scrollMatchWidthWrapParams());
+        LinearLayout.LayoutParams scrollParams = LayoutPolicy.linearParamsPx(
             LinearLayout.LayoutParams.MATCH_PARENT, 1);
         scrollParams.weight = 1;
         s.clipboardPanel.addView(wordScroll, scrollParams);
-        LinearLayout bar = KeyboardGeometry.row(s);
+        LinearLayout bar = LayoutPolicy.row(s);
         ViewPolicy.setCenteredVertically(bar);
         clipboardAction(bar, "取消", () -> {
             endClipboardSegmentation();
             renderClipboardHistory();
         }).setContentDescription("取消分词，回到剪贴板历史");
         clipboardSegmentStatus = ViewPolicy.textLabel(s, "", 13);
-        KeyboardGeometry.setKeyTextSize(clipboardSegmentStatus, 13);
+        KeyboardTypographyPolicy.setKeyTextSize(clipboardSegmentStatus, 13);
         ViewPolicy.setMaxLinesEllipsized(clipboardSegmentStatus, 1);
-        KeyboardGeometry.setHorizontalPaddingDp(clipboardSegmentStatus, s, 6);
-        bar.addView(clipboardSegmentStatus, KeyboardGeometry.weightedZeroParams(1));
+        LayoutPolicy.setHorizontalPaddingDp(clipboardSegmentStatus, s, 6);
+        bar.addView(clipboardSegmentStatus, LayoutPolicy.weightedZeroParams(1));
         clipboardSegmentSelectAll = clipboardAction(bar, "全选", () -> {
             boolean select = !allSegmentsSelected();
             for (int index = 0; index < clipboardSegmentSelected.length; index++)
@@ -1444,7 +1643,7 @@ final class ImePanels {
             s.insertClipboardText(text);
         });
         clipboardSegmentConfirm.setContentDescription("插入选中的词");
-        LinearLayout.LayoutParams barParams = KeyboardGeometry.matchWidthHeightPx(s.pixels(32));
+        LinearLayout.LayoutParams barParams = LayoutPolicy.matchWidthHeightPx(s.pixels(32));
         barParams.topMargin = s.pixels(6);
         s.clipboardPanel.addView(bar, barParams);
         s.imeStyler.applySkin();
@@ -1458,7 +1657,7 @@ final class ImePanels {
         ViewPolicy.setAllCapsFalse(button);
         button.setText(text);
         ViewPolicy.setTextSizeSp(button, 15);
-        KeyboardGeometry.setSymmetricPaddingDp(button, s, 10, 6);
+        LayoutPolicy.setSymmetricPaddingDp(button, s, 10, 6);
         ViewPolicy.clearMinimumSize(button);
         ViewPolicy.clearStateListAnimator(button);
         // 不能直接用词片文字做描述：换肤遍历按描述前缀「候选 」「按键 」识别候选和按键。
@@ -1504,7 +1703,7 @@ final class ImePanels {
         compactReplyControl(button, s.pixels(4));
         ViewPolicy.setMaxLinesEllipsized(button, 1);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-            0, LinearLayout.LayoutParams.MATCH_PARENT, Math.max(2, label.length()));
+            0, LinearLayout.LayoutParams.MATCH_PARENT, BoundsPolicy.atLeast(label.length(), 2));
         params.setMarginStart(s.pixels(3));
         params.setMarginEnd(s.pixels(3));
         button.setLayoutParams(params);
@@ -1515,21 +1714,21 @@ final class ImePanels {
         Button button = MSIMEInputService.role(s.button(header, label, action), KeyboardKeyRole.GLYPH);
         ViewPolicy.setTextSizeSp(button, 13);
         compactReplyControl(button, s.pixels(10));
-        button.setLayoutParams(KeyboardGeometry.wrapMatchParentParams());
+        button.setLayoutParams(LayoutPolicy.wrapMatchParentParams());
         return button;
     }
 
     private TextView clipboardNote(String text) {
         TextView note = centeredNote(text, 13);
-        KeyboardGeometry.setSymmetricPaddingDp(note, s, 12, 20);
-        s.clipboardPanel.addView(note, KeyboardGeometry.matchWidthWrapParams());
+        LayoutPolicy.setSymmetricPaddingDp(note, s, 12, 20);
+        s.clipboardPanel.addView(note, LayoutPolicy.matchWidthWrapParams());
         return note;
     }
 
 
     private TextView centeredNote(String text, float sizeSp) {
         TextView note = ViewPolicy.centeredText(s, text, sizeSp);
-        KeyboardGeometry.setKeyTextSize(note, sizeSp);
+        KeyboardTypographyPolicy.setKeyTextSize(note, sizeSp);
         return note;
     }
 
@@ -1543,6 +1742,13 @@ final class ImePanels {
      */
     private Button clipboardCard(int index, int count, String text, String meta, boolean selected,
             Runnable action) {
+        Button card = newClipboardCard(text, meta, selected, action);
+        placeClipboardCell(index, count, card);
+        return card;
+    }
+
+    /** 只造卡片，不放进面板；本机历史要先把它包进左滑容器（{@link #clipboardSwipeCell}）再放。 */
+    private Button newClipboardCard(String text, String meta, boolean selected, Runnable action) {
         KeyboardPressButton card = ViewPolicy.newPressButton(s);
         card.setKeyboardRole(KeyboardKeyRole.KEY);
         android.text.SpannableStringBuilder label = new android.text.SpannableStringBuilder(text);
@@ -1560,25 +1766,30 @@ final class ImePanels {
         card.setText(label);
         ViewPolicy.setStartCenteredTextSizeSp(card, 15);
         ViewPolicy.setMaxLinesEllipsized(card, 3);
-        KeyboardGeometry.setSymmetricPaddingDp(card, s, 12, 8);
+        LayoutPolicy.setSymmetricPaddingDp(card, s, 12, 8);
         ViewPolicy.clearMinimumHeight(card);
         ViewPolicy.clearStateListAnimator(card);
         bindFeedbackAction(card, action);
+        return card;
+    }
+
+    /** 把第 `index` 条（卡片本身，或包着它的左滑容器）按列数放进面板。 */
+    private void placeClipboardCell(int index, int count, View cell) {
         int columns = s.clipboardColumns;
         if (columns <= 1) {
-            LinearLayout.LayoutParams params = KeyboardGeometry.matchWidthWrapParams();
+            LinearLayout.LayoutParams params = LayoutPolicy.matchWidthWrapParams();
             params.topMargin = s.pixels(6);
-            s.clipboardPanel.addView(card, params);
-            return card;
+            s.clipboardPanel.addView(cell, params);
+            return;
         }
         int column = index % columns;
         if (column == 0 || clipboardCardRow == null) {
-            clipboardCardRow = KeyboardGeometry.row(s);
-            LinearLayout.LayoutParams rowParams = KeyboardGeometry.matchWidthWrapParams();
+            clipboardCardRow = LayoutPolicy.row(s);
+            LinearLayout.LayoutParams rowParams = LayoutPolicy.matchWidthWrapParams();
             rowParams.topMargin = s.pixels(6);
             s.clipboardPanel.addView(clipboardCardRow, rowParams);
         }
-        clipboardCardRow.addView(card, clipboardCellParams(column));
+        clipboardCardRow.addView(cell, clipboardCellParams(column));
         boolean lastInRow = index == count - 1
             || ClipboardLayoutPolicy.row(index + 1, columns) != ClipboardLayoutPolicy.row(index, columns);
         if (lastInRow) {
@@ -1586,7 +1797,208 @@ final class ImePanels {
                 clipboardCardRow.addView(new View(s), clipboardCellParams(empty));
             clipboardCardRow = null;
         }
-        return card;
+    }
+
+    /** 左滑露出删除按钮的那一条（共享存储以文字标识条目）；同一时间只有一条打开，没有时为 null（#5962）。渲染时按它把那张卡片直接画成打开的样子。 */
+    private String clipboardSwipedText;
+    /** 打开着的那一格，收回时用；每次渲染重建，没有时为 null。 */
+    private ClipboardSwipeCell clipboardSwipedCell;
+
+    /**
+     * 本机历史的一格：底下靠右是删除按钮，上面盖着卡片。卡片往左滑让开，露出删除按钮，点它才删（#5962）；手势的判定在 {@link ClipboardSwipePolicy}。
+     *
+     * <p>删除按钮只在卡片让开（拖动中或打开着）时显示，收着时是 `INVISIBLE`：按住卡片时按压动画会把卡片缩小一圈，底下的删除按钮若一直在，就会从卡片边上露出来（在模拟器上看到过）。收着时它也不可点、不被读屏读到。读屏用户和不会滑的用户仍然从长按操作行里的「删除」删。
+     */
+    // 监听只在横滑时接手，其余按压原样交给卡片，点击由它自己发出，见 ClipboardSwipeCell。
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    private FrameLayout clipboardSwipeCell(Button card, ClipboardHistory.Item item, boolean open, float reveal) {
+        FrameLayout cell = new FrameLayout(s);
+        KeyboardIconKey trash = new KeyboardIconKey(s, KeyboardIconKey.Kind.TRASH);
+        trash.setKeyboardRole(KeyboardKeyRole.ACCENT);
+        // 节点 text 留给读屏，图标代替文字画出来。
+        trash.setText("删除");
+        trash.setContentDescription("删除这条剪贴板记录");
+        ViewPolicy.clearMinimumSize(trash);
+        ViewPolicy.clearStateListAnimator(trash);
+        // 不让删除按钮的文字高度把这一格撑得比卡片高：格高只由卡片决定。
+        ViewPolicy.setPadding(trash, 0, 0, 0, 0);
+        bindFeedbackAction(trash, () -> {
+            clipboardSwipedText = null;
+            clipboardSwipedCell = null;
+            clipboardActionText = null;
+            s.removeClipboardItem(item);
+        });
+        // 删除按钮比让开的距离窄一点，和卡片之间留出与卡片间距相同的空隙。
+        int trashWidth = BoundsPolicy.atLeast(Math.round(reveal) - s.pixels(6), 1);
+        FrameLayout.LayoutParams trashParams = new FrameLayout.LayoutParams(trashWidth,
+            FrameLayout.LayoutParams.MATCH_PARENT, Gravity.END);
+        cell.addView(trash, trashParams);
+        cell.addView(card, LayoutPolicy.frameMatchParentParams());
+        ClipboardSwipeCell swipe = new ClipboardSwipeCell(card, trash, item.text(), reveal);
+        card.setTranslationX(open ? -reveal : 0f);
+        swipe.showTrash(open);
+        if (open) clipboardSwipedCell = swipe;
+        card.setOnTouchListener(swipe);
+        return cell;
+    }
+
+    /** 收回打开着的那一条（有的话）。点任何一张卡片、开始滑另一条时先收回它；长按、换分段、重开面板、清空和分词会整面板重画，靠清掉 {@link #clipboardSwipedText} 收回。 */
+    private void closeClipboardSwipe() {
+        ClipboardSwipeCell cell = clipboardSwipedCell;
+        clipboardSwipedText = null;
+        clipboardSwipedCell = null;
+        if (cell != null) cell.settle(false);
+    }
+
+    /**
+     * 一格的横滑。按下、轻微移动、点按和长按都照常交给卡片自己；手指越过 touch slop 且明显是横向（{@link ClipboardSwipePolicy#claims}）时才接手：不让外层面板拦截去滚动，给卡片补一个取消把按下态、待触发的长按和点按撤掉，之后卡片跟手移动，松手按 {@link ClipboardSwipePolicy#settlesOpen} 停在打开或收回。
+     *
+     * <p>位移动画用自己的 `ObjectAnimator`，不用 `View.animate()`：卡片的按压反馈（`KeyboardPressFeedback`）也走 `animate()`，按下、松开时会 `cancel()` 它，两边共用一个动画器就会互相打断，卡片停在半路、或者一直保持按下的缩小（在模拟器上看到过）。
+     *
+     * <p>卡片的点击仍由 `KeyboardPressButton` 自己在松手时发出（这里没接手的按压原样交给它），所以监听里不调 `performClick`。
+     */
+    private final class ClipboardSwipeCell implements View.OnTouchListener {
+        private final Button card;
+        private final View trash;
+        private final String text;
+        private final float reveal;
+        private final float density;
+        private final int touchSlop;
+        private android.animation.ObjectAnimator settling;
+        private float downX;
+        private float downY;
+        private float startOffset;
+        private boolean openAtDown;
+        private boolean dragging;
+        private android.view.VelocityTracker velocity;
+
+        ClipboardSwipeCell(Button card, View trash, String text, float reveal) {
+            this.card = card;
+            this.trash = trash;
+            this.text = text;
+            this.reveal = reveal;
+            density = DimensionPolicy.density(s);
+            touchSlop = android.view.ViewConfiguration.get(s).getScaledTouchSlop();
+        }
+
+        @Override public boolean onTouch(View view, android.view.MotionEvent event) {
+            switch (event.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN -> {
+                    downX = event.getRawX();
+                    downY = event.getRawY();
+                    // 不在这里停掉正在进行的收回动画：没有拖起来的轻点要让它照常放完，否则卡片会停在半路。
+                    openAtDown = card.getTranslationX() < 0;
+                    dragging = false;
+                    recycleVelocity();
+                    velocity = android.view.VelocityTracker.obtain();
+                    track(event);
+                    return false;
+                }
+                case android.view.MotionEvent.ACTION_MOVE -> {
+                    track(event);
+                    float dx = event.getRawX() - downX;
+                    if (!dragging) {
+                        if (!ClipboardSwipePolicy.claims(dx, event.getRawY() - downY, touchSlop,
+                                openAtDown)) return false;
+                        dragging = true;
+                        // 接手时卡片可能还在收回的动画里：停在当前位置，再从这里跟手，不跳。
+                        stopSettling();
+                        startOffset = card.getTranslationX() - dx;
+                        if (card.getParent() != null) card.getParent().requestDisallowInterceptTouchEvent(true);
+                        android.view.MotionEvent cancel = android.view.MotionEvent.obtain(event);
+                        cancel.setAction(android.view.MotionEvent.ACTION_CANCEL);
+                        card.onTouchEvent(cancel);
+                        cancel.recycle();
+                        // 同一时间只有一条打开：开始滑这一条时先收回另一条。
+                        if (clipboardSwipedCell != null && clipboardSwipedCell != this) closeClipboardSwipe();
+                        showTrash(true);
+                    }
+                    card.setTranslationX(ClipboardSwipePolicy.offset(startOffset, dx, reveal));
+                    return true;
+                }
+                case android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                    boolean handled = dragging;
+                    if (dragging) {
+                        float velocityX = 0f;
+                        if (velocity != null && event.getActionMasked() == android.view.MotionEvent.ACTION_UP) {
+                            track(event);
+                            velocity.computeCurrentVelocity(1000);
+                            velocityX = velocity.getXVelocity();
+                        }
+                        boolean open = ClipboardSwipePolicy.settlesOpen(card.getTranslationX(), velocityX, reveal, density);
+                        if (open) {
+                            clipboardSwipedText = text;
+                            clipboardSwipedCell = this;
+                        } else if (clipboardSwipedCell == this || text.equals(clipboardSwipedText)) {
+                            clipboardSwipedText = null;
+                            clipboardSwipedCell = null;
+                        }
+                        settle(open);
+                    }
+                    dragging = false;
+                    recycleVelocity();
+                    return handled;
+                }
+                default -> {
+                    return dragging;
+                }
+            }
+        }
+
+        /** 把卡片动画到打开或收回的位置；收回的动画放完、卡片回到原位后再藏起删除按钮，动画里它还露在卡片右边。 */
+        void settle(boolean open) {
+            stopSettling();
+            android.animation.ObjectAnimator animator = android.animation.ObjectAnimator.ofFloat(
+                card, View.TRANSLATION_X, card.getTranslationX(), open ? -reveal : 0f);
+            animator.setDuration(ClipboardSwipePolicy.SETTLE_MILLIS);
+            if (!open) animator.addListener(new android.animation.AnimatorListenerAdapter() {
+                private boolean cancelled;
+
+                @Override public void onAnimationCancel(android.animation.Animator animation) {
+                    cancelled = true;
+                }
+
+                @Override public void onAnimationEnd(android.animation.Animator animation) {
+                    if (!cancelled) showTrash(false);
+                }
+            });
+            settling = animator;
+            animator.start();
+        }
+
+        /** 删除按钮只在卡片让开时显示：收着时 `INVISIBLE`，既不会在按压动画缩小卡片时从边上露出来，也点不到、读屏读不到。 */
+        void showTrash(boolean shown) {
+            if (shown) ViewPolicy.show(trash);
+            else ViewPolicy.setInvisible(trash);
+        }
+
+        private void stopSettling() {
+            if (settling != null) settling.cancel();
+            settling = null;
+        }
+
+        // 速度按屏幕坐标算：卡片跟着手指移动，事件里相对卡片的坐标会把位移吃掉一部分。
+        private void track(android.view.MotionEvent event) {
+            if (velocity == null) return;
+            android.view.MotionEvent screen = android.view.MotionEvent.obtain(event);
+            screen.setLocation(event.getRawX(), event.getRawY());
+            velocity.addMovement(screen);
+            screen.recycle();
+        }
+
+        private void recycleVelocity() {
+            if (velocity != null) velocity.recycle();
+            velocity = null;
+        }
+    }
+
+    /** 一格的宽度（像素），给双列时的删除区限宽用；面板还没量过时为 0，删除区按默认宽度。 */
+    private float clipboardCellWidth(int columns) {
+        int width = s.clipboardPanel.getWidth() - s.clipboardPanel.getPaddingLeft()
+            - s.clipboardPanel.getPaddingRight();
+        if (width <= 0) return 0f;
+        int count = BoundsPolicy.atLeast(columns, 1);
+        return (width - s.pixels(6) * (count - 1)) / (float) count;
     }
 
     /** 双列里的一格：等宽、与同一行的另一条同高，两格之间留 6 dp。 */
@@ -1595,27 +2007,6 @@ final class ImePanels {
             0, LinearLayout.LayoutParams.MATCH_PARENT, 1);
         if (column > 0) params.setMarginStart(s.pixels(6));
         return params;
-    }
-
-    /** 「刚刚 / N 分钟前 / N 小时前 / N 天前」；时间戳早于 2001 年的按秒解读。 */
-    static String relativeTime(long timestamp, long now) {
-        if (timestamp <= 0) return "";
-        long millis = timestamp < 100_000_000_000L ? timestamp * 1000 : timestamp;
-        long minutes = BoundsPolicy.nonNegative(now - millis) / 60_000;
-        if (minutes < 1) return "刚刚";
-        if (minutes < 60) return minutes + " 分钟前";
-        if (minutes < 60 * 24) return (minutes / 60) + " 小时前";
-        return (minutes / (60 * 24)) + " 天前";
-    }
-
-    /** 云端条目的更新时间（ISO-8601）换成相对时间；解析不了就不显示。 */
-    static String relativeTime(String iso, long now) {
-        if (iso == null || iso.isEmpty()) return "";
-        try {
-            return relativeTime(java.time.Instant.parse(iso).toEpochMilli(), now);
-        } catch (java.time.format.DateTimeParseException error) {
-            return "";
-        }
     }
 
     void addClipboardTab(LinearLayout tabs, String title, CloudClipboardPanelPolicy.Tab tab) {
@@ -1638,7 +2029,7 @@ final class ImePanels {
         for (int index = 0; index < count; index++) {
             BackendAccount.ClipboardItem item = s.cloudClipboardItems.get(index);
             Button card = clipboardCard(index, count, item.text(),
-                "云端 · " + relativeTime(item.updatedAt(), now), false,
+                "云端 · " + RelativeTimePolicy.isoAgo(item.updatedAt(), now), false,
                 () -> insertCloudClipboardText(item.text()));
             card.setContentDescription("点按插入云剪贴板记录");
         }
@@ -1677,8 +2068,7 @@ final class ImePanels {
             }
             final String note = message;
             s.main.post(() -> {
-                if (generation != phraseGeneration || s.phraseScroll == null
-                        || s.phraseScroll.getVisibility() != View.VISIBLE) return;
+                if (generation != phraseGeneration || !ViewPolicy.isVisible(s.phraseScroll)) return;
                 renderCommonPhrases(phrases, note);
             });
         };
@@ -1692,13 +2082,13 @@ final class ImePanels {
     private void renderCommonPhrases(java.util.List<String> phrases, String message) {
         LinearLayout panel = s.phrasePanel;
         panel.removeAllViews();
-        KeyboardGeometry.setPaddingDp(panel, s, 8, 4, 8, 8);
+        LayoutPolicy.setPaddingDp(panel, s, 8, 4, 8, 8);
         s.imeStyler.applySkinBackground(panel);
         TextView note = null;
         if (message != null) {
             note = centeredNote(message, 14);
-            KeyboardGeometry.setPaddingDp(note, s, 12, 24, 12, 24);
-            panel.addView(note, KeyboardGeometry.matchWidthWrapParams());
+            LayoutPolicy.setPaddingDp(note, s, 12, 24, 12, 24);
+            panel.addView(note, LayoutPolicy.matchWidthWrapParams());
         }
         java.util.List<View> lines = new java.util.ArrayList<>(phrases.size());
         for (String phrase : phrases) {
@@ -1712,12 +2102,12 @@ final class ImePanels {
                 });
             ViewPolicy.setStartCenteredTextSizeSp(row, 15);
             ViewPolicy.setMaxLinesEllipsized(row, 2);
-            KeyboardGeometry.setSymmetricPaddingDp(row, s, 12, 8);
-            panel.addView(row, KeyboardGeometry.matchWidthWrapParams());
+            LayoutPolicy.setSymmetricPaddingDp(row, s, 12, 8);
+            panel.addView(row, LayoutPolicy.matchWidthWrapParams());
             View hairline = new View(s);
-            LinearLayout.LayoutParams line = KeyboardGeometry.matchWidthHeightPx(
-                KeyboardGeometry.atLeastOnePixel(s, 1));
-            KeyboardGeometry.setHorizontalMargins(line, s.pixels(12));
+            LinearLayout.LayoutParams line = LayoutPolicy.matchWidthHeightPx(
+                DimensionPolicy.atLeastOnePixel(s, 1));
+            LayoutPolicy.setHorizontalMargins(line, s.pixels(12));
             panel.addView(hairline, line);
             lines.add(hairline);
         }
@@ -1728,8 +2118,8 @@ final class ImePanels {
                 s.closeCommonPhrases();
                 s.openHostPage("PHRASES");
             });
-            KeyboardGeometry.setHorizontalPaddingDp(manage, s, 24);
-            LinearLayout.LayoutParams params = KeyboardGeometry.wrapParams();
+            LayoutPolicy.setHorizontalPaddingDp(manage, s, 24);
+            LinearLayout.LayoutParams params = LayoutPolicy.wrapParams();
             params.gravity = Gravity.CENTER_HORIZONTAL;
             if (!phrases.isEmpty()) params.topMargin = s.pixels(8);
             panel.addView(manage, params);
@@ -1813,7 +2203,7 @@ final class ImePanels {
             });
         symbolPreferences = s.getSharedPreferences(SYMBOL_RECENTS_PREFERENCES, Context.MODE_PRIVATE);
         ViewPolicy.hide(s.symbolPanel);
-        s.keyboardSurface.addView(s.symbolPanel, KeyboardGeometry.frameMatchParentParams());
+        s.keyboardSurface.addView(s.symbolPanel, LayoutPolicy.frameMatchParentParams());
     }
 
     /** 「常用」的使用记录：只存在本机，格式和表情的最近使用一样是一个 JSON 字符串数组。 */
@@ -1823,13 +2213,14 @@ final class ImePanels {
         if (document == null || document.length() > 16_384) return List.of();
         try {
             JSONArray values = new JSONArray(document);
-            int count = Math.min(values.length(), SymbolPanelModel.RECENTS_LIMIT * 2);
+            int count = BoundsPolicy.atMost(values.length(), SymbolPanelModel.RECENTS_LIMIT * 2);
             ArrayList<String> stored = new ArrayList<>(count);
             for (int index = 0; index < count; index++) {
                 Object value = values.opt(index);
                 if (value instanceof String) stored.add((String) value);
             }
-            return SymbolPanelModel.normalizeRecents(stored);
+            return SymbolPanelModel.renderableRecents(SymbolPanelModel.normalizeRecents(stored),
+                symbolRecentsGlyphPaint::hasGlyph);
         } catch (JSONException error) {
             return List.of();
         }
@@ -1866,6 +2257,8 @@ final class ImePanels {
             SymbolCatalogPage page = null;
             try {
                 page = decodeSymbolCatalogPage(NativeClient.emojiCatalog(query, resources), offset, category.kaomoji());
+                page = new SymbolCatalogPage(SymbolPanelModel.renderableCatalogItems(page.items(),
+                    category.kaomoji(), s.emojiGlyphPaint::hasGlyph), page.nextOffset(), page.complete());
             } catch (JSONException | RuntimeException | LinkageError ignored) {
                 // 读不出目录时面板只说「暂时不可用」，不把资源路径或目录内容写进任何地方。
             }
@@ -1893,7 +2286,7 @@ final class ImePanels {
                 throw new JSONException("Invalid symbol catalog item");
             items.add((String) text);
         }
-        long nextOffset = KeyboardGeometry.strictLong(value.opt("next_offset"), -1);
+        long nextOffset = NumberPolicy.strictLong(value.opt("next_offset"), -1);
         Object complete = value.opt("complete");
         if (!(complete instanceof Boolean)
                 || !SymbolPanelModel.validCatalogCursor(offset, items.size(), nextOffset, (Boolean) complete))
@@ -1905,17 +2298,17 @@ final class ImePanels {
         s.emojiPreferences = s.getSharedPreferences(MSIMEInputService.EMOJI_RECENTS_PREFERENCES, Context.MODE_PRIVATE);
         s.emojiRecents = s.loadEmojiRecents();
         // 设计：盖在键区上、不盖顶部一行；上面是每行八个的表情网格（可见三行，可滚动），底栏是 ABC | 分类 | ⌫。高度由 PanelSurface 限定为键区高度。
-        s.emojiPanel = KeyboardGeometry.column(s);
-        KeyboardGeometry.setSymmetricPaddingDp(s.emojiPanel, s, 6, 4);
+        s.emojiPanel = LayoutPolicy.column(s);
+        LayoutPolicy.setSymmetricPaddingDp(s.emojiPanel, s, 6, 4);
         ViewPolicy.setBackgroundColor(s.emojiPanel, Color.parseColor(s.skin.background()));
         s.emojiPanel.setContentDescription("表情面板");
         ViewPolicy.setFocusable(s.emojiPanel, true);
-        s.emojiGrid = KeyboardGeometry.column(s);
+        s.emojiGrid = LayoutPolicy.column(s);
         s.emojiGridScroll = new ScrollView(s);
         s.emojiGridScroll.setFillViewport(false);
         s.emojiGridScroll.setVerticalScrollBarEnabled(false);
         s.emojiGridScroll.setContentDescription("表情网格；每行八个");
-        s.emojiGridScroll.addView(s.emojiGrid, KeyboardGeometry.scrollMatchWidthWrapParams());
+        s.emojiGridScroll.addView(s.emojiGrid, LayoutPolicy.scrollMatchWidthWrapParams());
         s.emojiGridScroll.setOnScrollChangeListener((view, scrollX, scrollY, oldX, oldY) -> {
             if (scrollY > oldY && !view.canScrollVertically(1)) s.loadEmojiPage();
         });
@@ -1924,27 +2317,27 @@ final class ImePanels {
                 oldLeft, oldTop, oldRight, oldBottom) -> {
             if (bottom - top != oldBottom - oldTop && s.emojiPickerVisible()) view.post(this::renderEmojiGrid);
         });
-        s.emojiPanel.addView(s.emojiGridScroll, KeyboardGeometry.weightedWidthParams(1));
-        LinearLayout bar = KeyboardGeometry.row(s);
+        s.emojiPanel.addView(s.emojiGridScroll, LayoutPolicy.weightedWidthParams(1));
+        LinearLayout bar = LayoutPolicy.row(s);
         ViewPolicy.setCenteredVertically(bar);
         Button abc = MSIMEInputService.role(s.button(bar, "ABC", s::closeEmojiPicker), KeyboardKeyRole.ACCENT);
         ViewPolicy.setTextSizeSp(abc, 14);
         compactReplyControl(abc, 0);
         abc.setContentDescription("返回键盘");
-        abc.setLayoutParams(KeyboardGeometry.linearParams(s, 60, 40));
-        s.emojiTabs = KeyboardGeometry.row(s);
+        abc.setLayoutParams(LayoutPolicy.linearParams(s, 60, 40));
+        s.emojiTabs = LayoutPolicy.row(s);
         s.emojiTabs.setContentDescription("表情分类");
-        LinearLayout.LayoutParams tabsParams = KeyboardGeometry.weightedHeightPxParams(s.pixels(40), 1);
-        KeyboardGeometry.setHorizontalMargins(tabsParams, s.pixels(6));
+        LinearLayout.LayoutParams tabsParams = LayoutPolicy.weightedHeightPxParams(s.pixels(40), 1);
+        LayoutPolicy.setHorizontalMargins(tabsParams, s.pixels(6));
         bar.addView(s.emojiTabs, tabsParams);
         Button deleteEmoji = MSIMEInputService.role(s.button(bar, "⌫", this::deleteFromEmojiPicker),
             KeyboardKeyRole.ACCENT);
         ViewPolicy.setTextSizeSp(deleteEmoji, 18);
         compactReplyControl(deleteEmoji, 0);
         deleteEmoji.setContentDescription("删除");
-        deleteEmoji.setLayoutParams(KeyboardGeometry.linearParams(s, 60, 40));
-        s.emojiPanel.addView(bar, KeyboardGeometry.matchWidthHeightPx(s.pixels(46)));
+        deleteEmoji.setLayoutParams(LayoutPolicy.linearParams(s, 60, 40));
+        s.emojiPanel.addView(bar, LayoutPolicy.matchWidthHeightPx(s.pixels(46)));
         ViewPolicy.hide(s.emojiPanel);
-        s.keyboardSurface.addView(s.emojiPanel, KeyboardGeometry.frameMatchParentParams());
+        s.keyboardSurface.addView(s.emojiPanel, LayoutPolicy.frameMatchParentParams());
     }
 }

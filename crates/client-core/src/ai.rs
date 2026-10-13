@@ -5,6 +5,7 @@ use thiserror::Error;
 use crate::preferences::AI_PROVIDERS;
 
 pub mod endpoint;
+pub mod settings;
 
 #[derive(Debug, Clone, Error, Eq, PartialEq)]
 pub enum AiError {
@@ -87,40 +88,7 @@ pub fn chat_completion_http_request(
     if endpoint::validate(endpoint).is_err() || request.candidate_limit != config.candidate_limit {
         return Err(AiError::InvalidConfiguration);
     }
-    // Two key spaces reach this map and they never intersected. The reference
-    // keeps one slot per provider id, and this function has always read that.
-    // The settings page, however, stores the token under the endpoint's origin
-    // ("https://api.deepseek.com:443") and clears the legacy flat field, so a
-    // user who pasted a key got InvalidConfiguration and no request was ever
-    // sent. Android reads the origin key, which is why it kept working and why
-    // re-keying the page would break it instead. Accept either.
-    let origin = endpoint::credential_origin(&config.endpoint);
-    let usable = |token: &&String| {
-        let token = token.trim();
-        !token.is_empty()
-            && !token.starts_with("FAKESECRET_")
-            && !(token.starts_with('<') && token.ends_with('>'))
-    };
-    let token = config
-        .tokens
-        .get(&config.provider)
-        .filter(usable)
-        .or_else(|| {
-            origin
-                .as_deref()
-                .and_then(|key| config.tokens.get(key))
-                .filter(usable)
-        })
-        .map(String::as_str)
-        .unwrap_or(&config.token)
-        .trim();
-    if token.is_empty()
-        || !crate::text::is_bounded_text(token, 4096)
-        || token.starts_with("FAKESECRET_")
-        || (token.starts_with('<') && token.ends_with('>'))
-    {
-        return Err(AiError::InvalidConfiguration);
-    }
+    let token = credential_for_endpoint(config).ok_or(AiError::InvalidConfiguration)?;
     let prompt = match config.prompt_id.as_str() {
         "custom_2" => &config.prompt_custom_2,
         "custom_3" => &config.prompt_custom_3,
@@ -144,6 +112,55 @@ pub fn chat_completion_http_request(
         "body":body,"timeout_ms":8000,"connect_timeout_ms":2500,"max_response_bytes":1048576})))
 }
 
+/// Resolve a secret only for the configured endpoint's origin. Never log the result.
+/// Origin-scoped entries also record an explicit clear, so even an empty entry
+/// must not fall back to a stale provider or flat token.
+pub fn credential_for_endpoint(
+    config: &crate::preferences::AiAssistantPreferences,
+) -> Option<&str> {
+    let origin = endpoint::credential_origin(config.endpoint.trim())?;
+    if let Some(token) = config.tokens.get(&origin) {
+        return usable_ai_token(token);
+    }
+    if legacy_provider_origin(&config.provider) != Some(origin.as_str()) {
+        return None;
+    }
+    if let Some(token) = config.tokens.get(&config.provider) {
+        return usable_ai_token(token);
+    }
+    (config.provider == "deepseek")
+        .then_some(config.token.as_str())
+        .and_then(usable_ai_token)
+}
+
+fn usable_ai_token(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()
+        && crate::text::is_bounded_text(value, 4096)
+        && !value.starts_with("FAKESECRET_")
+        && !(value.starts_with('<') && value.ends_with('>')))
+    .then_some(value)
+}
+
+/// Provider slots predate origin-scoped storage. They are safe to read only
+/// while the endpoint still belongs to that provider's built-in service.
+fn legacy_provider_origin(provider: &str) -> Option<&'static str> {
+    Some(match provider {
+        "everyapi" => "https://api.everyapi.ai:443",
+        "openai" => "https://api.openai.com:443",
+        "anthropic" => "https://api.anthropic.com:443",
+        "gemini" => "https://generativelanguage.googleapis.com:443",
+        "deepseek" => "https://api.deepseek.com:443",
+        "qwen" => "https://dashscope.aliyuncs.com:443",
+        "kimi" => "https://api.moonshot.cn:443",
+        "zhipu" => "https://open.bigmodel.cn:443",
+        "siliconflow" => "https://api.siliconflow.cn:443",
+        "groq" => "https://api.groq.com:443",
+        "openrouter" => "https://openrouter.ai:443",
+        _ => return None,
+    })
+}
+
 /// Parse a bounded successful HTTP body containing JSON-mode chat content.
 /// Preserve provider order, omit invalid/duplicate entries, and honor the caller's
 /// configured limit. None denotes an invalid envelope; an empty list is no result.
@@ -164,7 +181,7 @@ pub fn parse_chat_completion_response(body: &[u8], limit: u8) -> Option<AiSugges
         .as_str()?;
     let inner: serde_json::Value = serde_json::from_str(content).ok()?;
     let entries = inner.get("candidates")?.as_array()?;
-    let mut candidates: Vec<AiSuggestion> = Vec::with_capacity(usize::from(limit));
+    let mut candidates: Vec<AiSuggestion> = Vec::new();
     for entry in entries {
         let Some(text) = entry.get("text").and_then(serde_json::Value::as_str) else {
             continue;
@@ -174,6 +191,9 @@ pub fn parse_chat_completion_response(body: &[u8], limit: u8) -> Option<AiSugges
             || candidates.iter().any(|candidate| candidate.text == text)
         {
             continue;
+        }
+        if candidates.is_empty() {
+            candidates.reserve_exact(usize::from(limit));
         }
         candidates.push(AiSuggestion { text: text.into() });
         if candidates.len() == usize::from(limit) {
@@ -341,13 +361,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["甲", "乙"]
         );
+        assert_eq!(response.candidates.capacity(), 2);
         response.validate(2).unwrap();
-        assert!(
+        let empty =
             parse_chat_completion_response(&envelope(serde_json::json!({"candidates":[]})), 1)
-                .unwrap()
-                .candidates
-                .is_empty()
-        );
+                .unwrap();
+        assert!(empty.candidates.is_empty());
+        assert_eq!(empty.candidates.capacity(), 0);
     }
     #[test]
     fn response_rejects_malformed_envelopes_and_bounds() {
@@ -393,7 +413,7 @@ mod tests {
     fn http_descriptor_resolves_private_slots_and_prompt_selection() {
         let mut config = crate::preferences::AiAssistantPreferences {
             enabled: true,
-            endpoint: "https://synthetic.invalid/chat".into(),
+            endpoint: "https://api.deepseek.com/chat/completions".into(),
             model: "synthetic-model".into(),
             token: "synthetic-legacy".into(),
             prompt_custom_2: "second prompt".into(),
@@ -440,14 +460,13 @@ mod tests {
             "Bearer synthetic-origin"
         );
 
-        // The provider slot still wins when both are present, which is the
-        // shape the reference uses.
+        // The current endpoint's origin wins over a legacy provider slot.
         let mut both = origin_only.clone();
         both.tokens
             .insert("deepseek".into(), "synthetic-provider".into());
         assert_eq!(
             descriptor(&both)["headers"]["Authorization"],
-            "Bearer synthetic-provider"
+            "Bearer synthetic-origin"
         );
 
         // A placeholder in the provider slot must not shadow a real origin key.
@@ -501,8 +520,8 @@ mod tests {
             .tokens
             .insert("deepseek".into(), "<placeholder>".into());
         assert_eq!(
-            descriptor(&config)["headers"]["Authorization"],
-            "Bearer synthetic-legacy"
+            chat_completion_http_request(&config, &request),
+            Err(AiError::InvalidConfiguration)
         );
         for endpoint in [
             "file:///synthetic",
@@ -514,23 +533,76 @@ mod tests {
             assert!(chat_completion_http_request(&config, &request).is_err());
         }
         config.endpoint = "http://localhost:8080/chat".into();
+        config
+            .tokens
+            .insert("http://localhost:8080".into(), "synthetic-local".into());
         assert!(chat_completion_http_request(&config, &request).is_ok());
         config.endpoint = "http://api.deepseek.com/chat".into();
         assert!(chat_completion_http_request(&config, &request).is_err());
         config.endpoint = "http://localhost.example/chat".into();
         assert!(chat_completion_http_request(&config, &request).is_err());
         config.endpoint = "http://[::1]:8080/chat".into();
+        config
+            .tokens
+            .insert("http://[::1]:8080".into(), "synthetic-local".into());
         assert!(chat_completion_http_request(&config, &request).is_ok());
         config.endpoint = "http://10.0.0.8:1234/v1/chat/completions".into();
+        config
+            .tokens
+            .insert("http://10.0.0.8:1234".into(), "synthetic-local".into());
         assert!(chat_completion_http_request(&config, &request).is_ok());
         config.endpoint = "http://8.8.8.8/v1/chat/completions".into();
         assert!(chat_completion_http_request(&config, &request).is_err());
+        config.endpoint = "https://api.deepseek.com/chat/completions".into();
+        config.tokens.clear();
         config.token = "bad\r\nheader".into();
         assert!(chat_completion_http_request(&config, &request).is_err());
         config.enabled = false;
         assert_eq!(
             chat_completion_http_request(&config, &request).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn request_uses_only_credentials_bound_to_the_current_custom_origin() {
+        let mut config = crate::preferences::AiAssistantPreferences {
+            enabled: true,
+            provider: "deepseek".into(),
+            endpoint: "https://custom.invalid/v1/chat/completions".into(),
+            model: "synthetic-model".into(),
+            token: "synthetic-flat-legacy".into(),
+            ..Default::default()
+        };
+        config
+            .tokens
+            .insert("deepseek".into(), "synthetic-provider-legacy".into());
+        let request = AiSuggestionRequest {
+            segmented_pinyin: vec!["ni".into()],
+            context: String::new(),
+            candidate_limit: config.candidate_limit,
+        };
+        assert_eq!(
+            chat_completion_http_request(&config, &request),
+            Err(AiError::InvalidConfiguration)
+        );
+        config.tokens.insert(
+            "https://custom.invalid:443".into(),
+            "synthetic-current-origin".into(),
+        );
+        let descriptor = chat_completion_http_request(&config, &request)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            descriptor["headers"]["Authorization"],
+            "Bearer synthetic-current-origin"
+        );
+        config
+            .tokens
+            .insert("https://custom.invalid:443".into(), "  ".into());
+        assert_eq!(
+            chat_completion_http_request(&config, &request),
+            Err(AiError::InvalidConfiguration)
         );
     }
 }

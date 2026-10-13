@@ -108,28 +108,30 @@ impl CantoneseScheme {
     /// The typed letters with a space at each syllable boundary (`nei hou`). Letters no syllable reads follow after a space as typed, and a trailing `'` stays visible so the key shows an effect.
     pub fn editing_text(&self) -> String {
         let reading = self.segmentation();
-        let mut text = String::with_capacity(
-            reading
-                .syllables
-                .iter()
-                .map(|syllable| syllable.end - syllable.start)
-                .sum::<usize>()
-                .saturating_add(reading.syllables.len().saturating_sub(1)),
-        );
+        let mut text = String::new();
         self.editing_text_into(&reading, &mut text);
         text
     }
 
     fn editing_text_into(&self, reading: &Segmentation, text: &mut String) {
-        let capacity = reading
+        let prefix_capacity = reading
             .syllables
             .iter()
             .map(|syllable| syllable.end - syllable.start)
             .sum::<usize>()
             .saturating_add(reading.syllables.len().saturating_sub(1));
+        let rest = self.input[reading.end()..].trim_start_matches('\'');
+        let suffix_capacity = if rest.is_empty() {
+            usize::from(self.input.ends_with('\''))
+        } else {
+            rest.len().saturating_add(usize::from(prefix_capacity > 0))
+        };
         text.clear();
-        if text.capacity() < capacity {
-            text.reserve(capacity - text.capacity());
+        let capacity = prefix_capacity.saturating_add(suffix_capacity);
+        if text.capacity() == 0 {
+            text.reserve_exact(capacity);
+        } else {
+            text.reserve(capacity);
         }
         for (index, syllable) in reading.syllables.iter().enumerate() {
             if index > 0 {
@@ -137,7 +139,6 @@ impl CantoneseScheme {
             }
             text.push_str(&self.input[syllable.start..syllable.end]);
         }
-        let rest = self.input[reading.end()..].trim_start_matches('\'');
         if !rest.is_empty() {
             if !text.is_empty() {
                 text.push(' ');
@@ -288,7 +289,12 @@ impl CantoneseScheme {
 
     /// Takes the letters `candidate` covers out of the composition, with the boundary after them. Returns whether letters are left composing; the caller commits the candidate's text either way.
     pub fn select(&mut self, candidate: &CantoneseCandidate) -> bool {
-        self.input.drain(..candidate.end);
+        self.select_end(candidate.end)
+    }
+
+    /// 按候选覆盖的字节数删掉组字前缀，避免提交路径复制整行候选。
+    pub fn select_end(&mut self, end: usize) -> bool {
+        self.input.drain(..end);
         let boundaries = self.input.len() - self.input.trim_start_matches('\'').len();
         self.input.drain(..boundaries);
         !self.input.is_empty()
@@ -492,6 +498,53 @@ mod tests {
             key: "nei".to_owned(),
             syllables,
             end: 3,
+        }
+    }
+
+    #[test]
+    fn editing_text_growing_buffer_allocates_once() {
+        for suffix in ["", "zz", "'"] {
+            let input = format!("{}{suffix}", "nei".repeat(20));
+            let scheme = typed(&input);
+            let reading = scheme.segmentation();
+            let expected_suffix = if suffix == "zz" { " zz" } else { suffix };
+            let expected = format!("{}{expected_suffix}", vec!["nei"; 20].join(" "));
+            for capacity in [16, 0, 128] {
+                let mut text = String::with_capacity(capacity);
+                if capacity > 0 {
+                    text.push_str("舊值");
+                }
+                let old_capacity = text.capacity();
+                let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+                    scheme.editing_text_into(&reading, &mut text);
+                });
+                assert_eq!(text, expected);
+                assert_eq!(allocations, usize::from(old_capacity < expected.len()));
+                let capacity = text.capacity();
+                let empty = typed("");
+                let reading = empty.segmentation();
+                let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+                    empty.editing_text_into(&reading, &mut text);
+                });
+                assert!(text.is_empty());
+                assert_eq!(allocations, 0);
+                assert_eq!(text.capacity(), capacity);
+            }
+        }
+    }
+
+    #[test]
+    fn editing_text_suffix_cold_buffer_allocates_once() {
+        for suffix in ["zz", "'"] {
+            let scheme = typed(&format!("{}{suffix}", "nei".repeat(20)));
+            let reading = scheme.segmentation();
+            let mut text = String::new();
+            let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+                scheme.editing_text_into(&reading, &mut text);
+            });
+            let suffix = if suffix == "zz" { " zz" } else { suffix };
+            assert_eq!(text, format!("{}{suffix}", vec!["nei"; 20].join(" ")));
+            assert_eq!(allocations, 1, "尾部与分隔符应纳入首次容量预留");
         }
     }
 

@@ -5,6 +5,7 @@ import UIKit
 struct SettingsView: View {
   @Environment(\.scenePhase) private var scenePhase
   @EnvironmentObject private var router: SettingsRouter
+  @EnvironmentObject private var navigation: AppNavigation
   @State private var scheme = InputSchemePreference.scheme
   @State private var skin = KeyboardTheme.current
   @State private var values: [SettingsPage: String] = [:]
@@ -29,7 +30,7 @@ struct SettingsView: View {
               Task.detached(priority: .utility) { AppNotices.dismiss(notice.id) }
             }
           }
-          KeyboardStatusCard(scheme: scheme, tryout: .push)
+          KeyboardStatusCard(scheme: scheme, tryout: navigation.openChat)
         }
         ForEach(Array(groups.enumerated()), id: \.offset) { _, group in
           DesignCard(radius: MetasequoiaTheme.cardRadius) {
@@ -43,7 +44,7 @@ struct SettingsView: View {
       .padding(.bottom, 20)
     }
     .scrollDismissesKeyboard(.interactively)
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .overlay {
       if groups.isEmpty { ContentUnavailableView.search(text: query) }
     }
@@ -82,7 +83,7 @@ struct SettingsView: View {
     default: chinesePunctuation = preferences?["chinese_punctuation"] as? Bool ?? true
     }
     let learning = InputHabitPreference.settings(in: preferences).learning
-    let keys = scheme == .nineKey || scheme == .japaneseNineKey ? "9 键" : "26 键"
+    let keys = scheme == .nineKey || scheme == .japaneseNineKey ? "9 键" : scheme == .fourteenKey ? "14 键" : "26 键"
     let height = KeyboardLayoutPreference.sharedHeightAdjustment(preferences?["touch_keyboard_height_adjustment"])
       ?? KeyboardLayoutPreference.heightAdjustment
     let language = VoicePolishSettings(preferences).language

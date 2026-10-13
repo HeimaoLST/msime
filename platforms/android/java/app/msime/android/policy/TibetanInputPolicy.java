@@ -13,6 +13,6 @@ public final class TibetanInputPolicy {
 
     /** Engine 是否在组藏文：藏文方案且不在专用英文下。藏文没有本地模式。 */
     public static boolean active(int scheme, boolean dedicatedEnglish) {
-        return scheme == TIBETAN_SCHEME && !dedicatedEnglish;
+        return InputSchemeTraits.active(scheme, TIBETAN_SCHEME, dedicatedEnglish);
     }
 }

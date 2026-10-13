@@ -1,11 +1,14 @@
 #include "../src/core/ClientEngine.h"
+#include "../../../common/HostApiString.h"
 #include "msime_client.h"
+#include "system/CapsLockRelease.h"
 #include <algorithm>
 #include <cstdlib>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -44,6 +47,8 @@ struct Observation {
   std::vector<PreeditAttribute> preedit_attributes;
   std::string auxiliary;
   gboolean auxiliary_visible = FALSE;
+  // UpdateAuxiliaryText 显示出这一行的次数，测试据此区分一次提示和两次，不必等到超时。
+  int auxiliary_shows = 0;
   // HideLookupTable and HideAuxiliaryText in the order they arrived.
   std::vector<std::string> hides;
   std::vector<std::string> candidates;
@@ -93,6 +98,10 @@ struct Observation {
   bool autocorrect_properties_registered = false;
   bool autocorrect_transposition = false;
   bool autocorrect_neighbor = false;
+  // The active helpcode-pack marker is kept in the fixed IBus menu so it can
+  // appear after a preference reload; it must stay hidden when no pack is
+  // selected.
+  bool helpcode_schema_pack_visible = false;
   bool learning_enabled = false;
   bool learning_sensitive = false;
   int delete_surrounding_calls = 0;
@@ -155,6 +164,8 @@ void signal(GDBusConnection *, const gchar *, const gchar *, const gchar *,
   if (std::string(name) == "UpdateAuxiliaryText") {
     seen.auxiliary = ibus_text_get_text(IBUS_TEXT(object));
     g_variant_get_child(parameters, 1, "b", &seen.auxiliary_visible);
+    if (seen.auxiliary_visible)
+      ++seen.auxiliary_shows;
   }
   auto observe_property = [&](auto &&self, IBusProperty *property) -> void {
     const std::string key = ibus_property_get_key(property);
@@ -205,6 +216,8 @@ void signal(GDBusConnection *, const gchar *, const gchar *, const gchar *,
     }
     if (key == "EnglishMode")
       seen.english_mode = ibus_property_get_state(property) == PROP_STATE_CHECKED;
+    if (key == "HelpcodeSchemaPack")
+      seen.helpcode_schema_pack_visible = ibus_property_get_visible(property);
     if (key == "EmojiCandidates")
       seen.emoji_candidates = ibus_property_get_state(property) == PROP_STATE_CHECKED;
     if (key.rfind("GlobalTheme/", 0) == 0 &&
@@ -341,11 +354,18 @@ GVariant *call(GDBusConnection *connection, const char *destination,
 
 int main(int argc, char **argv) {
   if (argc != 2 && !(argc == 3 && (std::string(argv[2]) == "--page-number" ||
-                                  std::string(argv[2]) == "--ctrl-space")))
+                                  std::string(argv[2]) == "--ctrl-space" ||
+                                  std::string(argv[2]) == "--empty-translation" ||
+                                  std::string(argv[2]) == "--caps-lock" ||
+                                  std::string(argv[2]) == "--japanese-toggle" ||
+                                  std::string(argv[2]) == "--chaizi" ||
+                                  std::string(argv[2]) == "--stale-candidate-click")))
     return 2;
   try {
     // This fixture asserts RegisterProperties and must exercise the real menu path.
     g_unsetenv("MSIME_DISABLE_IBUS_PROPERTIES");
+    // 宿主按桌面名判断是不是 GNOME Shell（候选面板状态见下），在 GNOME 桌面里跑这个测试也不能改变它的结论。
+    g_unsetenv("XDG_CURRENT_DESKTOP");
     // Synthetic fixture only; the production host does not invoke this
     // bootstrap.
     gchar *temporary = g_dir_make_tmp("msime-ibus-test-XXXXXX", nullptr);
@@ -369,11 +389,8 @@ int main(int argc, char **argv) {
         {"resources", argv[1]},
         {"state_root",
          root.string()}}.dump();
-    std::unique_ptr<char, decltype(&msime_client_string_free)> prepared(
-        msime_client_prepare_host(
-            reinterpret_cast<const uint8_t *>(bootstrap.data()),
-            bootstrap.size()),
-        msime_client_string_free);
+    auto prepared = msime::host_api::own_string(msime_client_prepare_host(
+        reinterpret_cast<const uint8_t *>(bootstrap.data()), bootstrap.size()));
     auto result = nlohmann::json::parse(prepared.get());
     require(result.at("ok").get<bool>(), "Locked dictionary bootstrap failed");
     auto options = result.at("value");
@@ -503,14 +520,32 @@ int main(int argc, char **argv) {
                          std::to_string(call))
                             .c_str());
     };
+#if IBUS_CHECK_VERSION(1, 5, 27)
+    // 全局引擎下没有输入框获得焦点时，IBus 让自己的 "fake" 上下文获得焦点，这时没有可以显示模式的输入框。信号按顺序到达，所以只有 fake 焦点没显示提示时，下面输入框的提示才是第一次。
+    invoke("FocusInId", g_variant_new("(ss)", "/org/freedesktop/IBus/InputContext_1", "fake"));
+    invoke("FocusOut");
+#endif
     invoke("FocusIn");
     // #2589: a new focus shows the current mode the way a switch does, then the hint goes away by itself. The replay IBus sends while it names the client is the same focus and must not show it again.
     require(wait_until([&] { return seen.auxiliary == "中" && seen.auxiliary_visible; }),
             "Focus did not show the input mode");
+    require(seen.auxiliary_shows == 1, "Focusing IBus's fake context showed the input mode");
     require(wait_until([&] { return !seen.auxiliary_visible; }), "Focus mode hint did not hide");
     invoke("FocusIn");
     require(!wait_until([&] { return seen.auxiliary_visible; }) || seen.auxiliary != "中",
             "A repeated focus showed the input mode again");
+    // GNOME Shell 以外，IBus 宿主告诉设置页它的面板只接收字体和颜色（candidate-panel.json 的 ibus_panel），设置页据此说明圆角、边框颜色和皮肤的装饰图不生效。目录名随安装版本，所以按文件名找。
+    const auto panel_status = [&] {
+      std::error_code error;
+      for (const auto &entry : std::filesystem::recursive_directory_iterator(runtime, error))
+        if (entry.path().filename() == "candidate-panel.json") {
+          std::ifstream in(entry.path(), std::ios::binary);
+          return std::string(std::istreambuf_iterator<char>(in), {});
+        }
+      return std::string{};
+    };
+    require(wait_until([&] { return panel_status() == "{\"host\":\"ibus\",\"limit\":\"ibus_panel\"}\n"; }),
+            ("IBus 宿主没有在候选面板状态里报告 ibus_panel：[" + panel_status() + "]").c_str());
     const auto finish = [&] {
       g_dbus_connection_signal_unsubscribe(client, subscription);
       ibus_object_destroy(IBUS_OBJECT(engine));
@@ -522,6 +557,130 @@ int main(int argc, char **argv) {
       g_test_dbus_down(bus);
       g_object_unref(bus);
     };
+    if (argc == 3 && std::string(argv[2]) == "--empty-translation") {
+      const auto socket = (root / "empty-translation.sock").string();
+      TranslationProviderFixture provider(socket);
+      auto translated = options;
+      translated.erase("preferences_directory");
+      translated["translation_provider_socket"] = socket;
+      translated["preferences"]["translation_target_language"] = "fr";
+      translated["preferences"]["candidate_translations"] = true;
+      translated["preferences"]["candidate_english_gloss"] = false;
+      ibus_object_destroy(IBUS_OBJECT(engine));
+      g_object_unref(engine);
+      msime_ibus_configure(translated.dump());
+      engine = create_engine();
+      seen = Observation{};
+      invoke("FocusIn");
+      phrase();
+      const auto has_gloss = [&] {
+        return !seen.candidates.empty() &&
+               seen.candidates.front().find("synthetic gloss") != std::string::npos;
+      };
+      require(wait_until(has_gloss), "空回包测试先显示合成译文");
+      provider.empty_translations = true;
+      invoke("PropertyActivate", g_variant_new("(su)", "TranslateSentence", PROP_STATE_CHECKED));
+      require(wait_until([&] { return provider.requests >= 2; }), "整句翻译请求应到达合成服务");
+      const auto settled = g_get_monotonic_time() + G_USEC_PER_SEC;
+      while (g_get_monotonic_time() < settled) {
+        while (g_main_context_iteration(nullptr, FALSE)) {}
+        g_usleep(1000);
+      }
+      require(has_gloss(), "IBus 异步空回包不能清掉当前候选释义");
+      invoke("PropertyActivate", g_variant_new("(su)", "CandidateTranslations", PROP_STATE_UNCHECKED));
+      require(!has_gloss(), "主动关闭翻译仍应清理当前候选释义");
+      finish();
+      return 0;
+    }
+    // 多义译文临时页上的点选。IBus 的点击只带槽位号，宿主要按面板上实际显示的那一页去解释它。默认模式的流程停在更前面一处与此无关的失败上，到不了这里，所以单独成一个模式。
+    if (argc == 3 && std::string(argv[2]) == "--stale-candidate-click") {
+      const auto socket = (root / "stale-candidate-click.sock").string();
+      TranslationProviderFixture provider(socket);
+      provider.multi_sense = true;
+      const auto open_senses = [&](size_t page_size) {
+        auto translated = options;
+        translated.erase("preferences_directory");
+        translated["translation_provider_socket"] = socket;
+        translated["preferences"]["candidate_translations"] = true;
+        translated["preferences"]["candidate_page_size"] = page_size;
+        // 与默认模式的多义用例同理：英文目标会被随包的离线词典以单义抢答，换成别的语言才走到合成服务。
+        translated["preferences"]["translation_target_language"] = "ja";
+        ibus_object_destroy(IBUS_OBJECT(engine));
+        g_object_unref(engine);
+        msime_ibus_configure(translated.dump());
+        engine = create_engine();
+        seen = Observation{};
+        invoke("FocusIn");
+        phrase();
+        require(wait_until([&] {
+                  return !seen.candidates.empty() &&
+                         seen.candidates.front().find("first sense") != std::string::npos;
+                }),
+                "多义译文没有显示在候选上");
+        seen.committed.clear();
+        auto opened = call(client, destination, "ProcessKeyEvent",
+                           g_variant_new("(uuu)", IBUS_Return, 0, IBUS_CONTROL_MASK));
+        g_variant_unref(opened);
+      };
+      // 第二页译文上的点选按渲染时记下的全局序号选，选中的是面板上被点的那一条。
+      open_senses(1);
+      require(seen.candidates == std::vector<std::string>{"first sense"},
+              "Ctrl+Enter 没有打开每页一条的译文页");
+      require(key(IBUS_Page_Down) && seen.candidates == std::vector<std::string>{"second sense"},
+              "Page Down 没有翻到第二页译文");
+      invoke("CandidateClicked", g_variant_new("(uuu)", 0, 1, 0));
+      require(seen.committed == "second sense",
+              ("第二页译文的点选没有上屏被点的那一条：committed=[" + seen.committed + "]").c_str());
+      // 译文页开着时别的视图换掉了它。这里是菜单改每页候选数：组字中页长要等组字结束才变，但宿主照样换上会话当前的视图并画出来；异步到达的译文、云候选和偏好更新同样会换掉 s.view。面板上显示的已经是普通候选，点选和数字键都要作用于它们，而不是按一页已经不在的译文去选。
+      for (const bool click : {true, false}) {
+        open_senses(2);
+        require(seen.candidates == std::vector<std::string>{"first sense", "second sense"},
+                "Ctrl+Enter 没有打开译文页");
+        invoke("PropertyActivate", g_variant_new("(su)", "CandidatePageSize/3", PROP_STATE_CHECKED));
+        require(!seen.candidates.empty() && seen.candidates.front() != "first sense",
+                "菜单改每页候选数没有换掉译文页");
+        const auto shown = seen.candidates.front();
+        if (click)
+          invoke("CandidateClicked", g_variant_new("(uuu)", 0, 1, 0));
+        else
+          require(key('1'), "数字键 1 没有被处理");
+        require(!seen.committed.empty() && seen.committed.find("sense") == std::string::npos &&
+                    shown.rfind(seen.committed, 0) == 0,
+                (std::string(click ? "点选" : "数字键") +
+                 "上屏的不是面板上显示的第一个候选：shown=[" + shown + "] committed=[" +
+                 seen.committed + "]")
+                    .c_str());
+      }
+      // 普通候选页走同一道快照栅栏：第二页的点选按快照里的全局序号选；Reset 清掉快照之后，点选和滚轮什么都不做。默认模式里有同样的用例，但它在这之前就停下了。
+      auto plain = options;
+      plain.erase("preferences_directory");
+      ibus_object_destroy(IBUS_OBJECT(engine));
+      g_object_unref(engine);
+      msime_ibus_configure(plain.dump());
+      engine = create_engine();
+      seen = Observation{};
+      invoke("FocusIn");
+      phrase();
+      const auto first_page = seen.candidates;
+      require(key(IBUS_Page_Down) && !seen.candidates.empty() && seen.candidates != first_page,
+              "Page Down 没有翻到第二页候选");
+      const auto second_page_first = seen.candidates.front();
+      invoke("CandidateClicked", g_variant_new("(uuu)", 0, 1, 0));
+      require(!seen.committed.empty() && second_page_first.rfind(seen.committed, 0) == 0,
+              ("第二页的点选没有按全局序号选：shown=[" + second_page_first + "] committed=[" +
+               seen.committed + "]")
+                  .c_str());
+      phrase();
+      invoke("Reset");
+      const auto committed_before_reset_click = seen.committed;
+      invoke("CandidateClicked", g_variant_new("(uuu)", 0, 1, 0));
+      invoke("CandidateClicked", g_variant_new("(uuu)", 0, 4, 0));
+      settle_lookup();
+      require(seen.committed == committed_before_reset_click && !seen.lookup_visible,
+              "Reset 之后的点选或滚轮动了已经清掉的快照");
+      finish();
+      return 0;
+    }
     if (argc == 3 && std::string(argv[2]) == "--ctrl-space") {
       msime_ibus_configure(options.dump());
       invoke("FocusIn");
@@ -574,6 +733,286 @@ int main(int argc, char **argv) {
       invoke("Disable");
       finish();
       std::cout << "IBus Ctrl+Space defaults, passthrough, hot-reload and repeat passed\n";
+      return 0;
+    }
+    // 单按 Caps Lock 切换中英文，从真实的 process_key 驱动。撤回大写锁定换成测试的实现：数撤回了几次，也能让它失败，不碰 X 服务器。按下事件带按下前的锁定状态，松开事件带按下后的。
+    if (argc == 3 && std::string(argv[2]) == "--caps-lock") {
+      static int releases = 0;
+      static bool release_works = true;
+      msime::linux_host::replace_caps_lock_release_for_testing(+[] { return true; }, +[] {
+        ++releases;
+        return release_works;
+      });
+      msime_ibus_configure(options.dump());
+      invoke("FocusIn");
+      require(wait_until([&] { return seen.input_enabled; }), "Caps Lock test does not start in Chinese");
+      // 大写锁定从关到开的一次按下和松开；松开本身永远不吃掉，和裸 Shift 一样。
+      const auto tap = [&](guint extra = 0) {
+        require(!key(IBUS_Caps_Lock, extra), "Caps Lock press was consumed");
+        require(!key(IBUS_Caps_Lock, extra | IBUS_LOCK_MASK | IBUS_RELEASE_MASK), "Caps Lock release was consumed");
+      };
+      // 缺省关：轻点只是大写锁定，不撤回也不切换。
+      tap();
+      require(seen.input_enabled && releases == 0, "Caps Lock switched with the preference off");
+      const auto set_binding = [&](bool enabled) {
+        nlohmann::json snapshot;
+        std::ifstream(root / "preferences.json") >> snapshot;
+        snapshot["revision"] = snapshot.at("revision").get<uint64_t>() + 1;
+        snapshot["preferences"]["keybindings"]["switch_language_caps_lock"] = enabled;
+        std::ofstream(root / "next.json") << snapshot.dump();
+        std::filesystem::rename(root / "next.json", root / "preferences.json");
+      };
+      set_binding(true);
+      // wait_until 到点后还会再问一次，所以认定之后不再轻点。
+      bool switched = false;
+      require(wait_until([&] {
+                if (!switched) {
+                  tap();
+                  switched = !seen.input_enabled;
+                }
+                return switched;
+              }),
+              "Enabling Caps Lock switching did not hot-reload");
+      require(releases == 1, "a tap released Caps Lock other than once");
+      // 英文透传时同样处理，切回中文。
+      tap();
+      require(seen.input_enabled && releases == 2, "a Caps Lock tap did not switch back from English passthrough");
+      // 按住超过 300 毫秒是要大写锁定。
+      require(!key(IBUS_Caps_Lock), "held Caps Lock press was consumed");
+      g_usleep(350 * 1000);
+      require(!key(IBUS_Caps_Lock, IBUS_LOCK_MASK | IBUS_RELEASE_MASK), "held Caps Lock release was consumed");
+      require(seen.input_enabled && releases == 2, "a long Caps Lock press switched or released the lock");
+      // 大写锁定开着时按 Caps Lock 是关掉它。
+      require(!key(IBUS_Caps_Lock, IBUS_LOCK_MASK) && !key(IBUS_Caps_Lock, IBUS_RELEASE_MASK),
+              "Caps Lock that turns the lock off was consumed");
+      require(seen.input_enabled && releases == 2, "turning Caps Lock off switched");
+      // 按着 Caps Lock 打字是在用大写锁定。
+      require(!key(IBUS_Caps_Lock), "Caps Lock press before a letter was consumed");
+      require(!key('A', IBUS_LOCK_MASK) && !key('A', IBUS_LOCK_MASK | IBUS_RELEASE_MASK),
+              "a Caps Lock letter was composed");
+      require(!key(IBUS_Caps_Lock, IBUS_LOCK_MASK | IBUS_RELEASE_MASK), "Caps Lock release after a letter was consumed");
+      require(seen.input_enabled && releases == 2, "typing while Caps Lock was held switched");
+      // 和修饰键一起按是组合键。
+      tap(IBUS_SHIFT_MASK);
+      require(seen.input_enabled && releases == 2, "Shift+Caps Lock switched");
+      // 撤不回大写锁定就不切换。
+      release_works = false;
+      tap();
+      require(seen.input_enabled && releases == 3, "a Caps Lock tap switched although the lock stayed on");
+      release_works = true;
+      // 组字中先上屏原文再切换，和裸 Shift 一样。
+      const auto committed = seen.committed;
+      require(key('n') && key('i') && seen.preedit == "ni", "Caps Lock composition test did not compose");
+      tap();
+      require(!seen.input_enabled && seen.committed == committed + "ni" && releases == 4,
+              "a Caps Lock tap did not commit the reading before switching");
+      tap();
+      require(seen.input_enabled, "a Caps Lock tap did not switch back after the commit");
+      set_binding(false);
+      bool ignored = false;
+      require(wait_until([&] {
+                if (!ignored) {
+                  const int before = releases;
+                  tap();
+                  ignored = releases == before;
+                }
+                return ignored;
+              }),
+              "Disabling Caps Lock switching did not hot-reload");
+      invoke("Disable");
+      finish();
+      msime::linux_host::replace_caps_lock_release_for_testing(nullptr, nullptr);
+      std::cout << "IBus Caps Lock tap, long press, chords, failed release and hot-reload passed\n";
+      return 0;
+    }
+    // Ctrl+Shift+J 在中文方案和日语之间切换，从真实的 process_key 驱动：缺省关时交给应用；打开后中文方案去日语并把这个中文方案写进 last_chinese_scheme，再按回到它；一次按下只切换一次；英文模式和 Engine 的英文模式里交给应用。
+    if (argc == 3 && std::string(argv[2]) == "--japanese-toggle") {
+      msime_ibus_configure(options.dump());
+      invoke("FocusIn");
+      require(wait_until([&] { return seen.input_enabled; }), "Ctrl+Shift+J test does not start in Chinese");
+      const guint chord_mask = IBUS_CONTROL_MASK | IBUS_SHIFT_MASK;
+      // 一次按下和松开；松开的归属和按下一致。
+      const auto chord = [&] {
+        const bool pressed = key(IBUS_J, chord_mask);
+        require(key(IBUS_j, chord_mask | IBUS_RELEASE_MASK) == pressed,
+                "Ctrl+Shift+J press and release have different ownership");
+        return pressed;
+      };
+      const auto stored = [&] {
+        nlohmann::json snapshot;
+        std::ifstream(root / "preferences.json") >> snapshot;
+        return snapshot.at("preferences");
+      };
+      const auto stored_revision = [&] {
+        try {
+          nlohmann::json snapshot;
+          std::ifstream(root / "preferences.json") >> snapshot;
+          return snapshot.at("revision").get<uint64_t>();
+        } catch (...) {
+          return uint64_t{0};
+        }
+      };
+      const auto stored_becomes = [&](const char *scheme, const char *last) {
+        return wait_until([&] {
+          try {
+            const auto preferences = stored();
+            return preferences.value("scheme", std::string("quanpin")) == scheme &&
+                   preferences.value("last_chinese_scheme", std::string("quanpin")) == last;
+          } catch (...) {
+            return false;
+          }
+        });
+      };
+      const auto set_preferences = [&](bool enabled, const char *scheme, const char *last) {
+        nlohmann::json snapshot;
+        std::ifstream(root / "preferences.json") >> snapshot;
+        snapshot["revision"] = snapshot.at("revision").get<uint64_t>() + 1;
+        snapshot["preferences"]["keybindings"]["toggle_japanese_ctrl_shift_j"] = enabled;
+        snapshot["preferences"]["scheme"] = scheme;
+        snapshot["preferences"]["last_chinese_scheme"] = last;
+        std::ofstream(root / "next.json") << snapshot.dump();
+        std::filesystem::rename(root / "next.json", root / "preferences.json");
+      };
+      // 缺省关：组合键交给应用，方案不变。
+      require(!chord() && stored().value("scheme", std::string("quanpin")) == "quanpin",
+              "Ctrl+Shift+J was taken with the preference off");
+      // 打开后从双拼出发；存储里记着的上一个中文方案故意是全拼，切走时要换成双拼。
+      set_preferences(true, "shuangpin", "quanpin");
+      bool switched = false;
+      require(wait_until([&] {
+                if (!switched) switched = chord();
+                return switched;
+              }),
+              "Enabling Ctrl+Shift+J did not hot-reload");
+      require(stored_becomes("japanese", "shuangpin"),
+              "Ctrl+Shift+J did not switch shuangpin to Japanese and remember shuangpin");
+      require(wait_until([&] { return seen.scheme_entries["Scheme/Japanese"]; }),
+              "the scheme menu does not show Japanese after Ctrl+Shift+J");
+      require(key('a') && wait_until([&] {
+                return !seen.candidates.empty() && seen.candidates.front().find("あ") != std::string::npos;
+              }),
+              "Ctrl+Shift+J did not switch the Engine to Japanese");
+      invoke("Reset");
+      // 按住时的自动重复归这次按下，不再切换。
+      require(key(IBUS_J, chord_mask), "Ctrl+Shift+J back to Chinese was not taken");
+      for (int repeat = 0; repeat < 3; ++repeat)
+        require(key(IBUS_J, chord_mask), "a held Ctrl+Shift+J repeat escaped");
+      require(key(IBUS_j, chord_mask | IBUS_RELEASE_MASK), "the Ctrl+Shift+J release escaped");
+      require(stored_becomes("shuangpin", "shuangpin"), "Ctrl+Shift+J did not return from Japanese to shuangpin");
+      // 存储里的方案已经显示在菜单上，说明那次保存和随后的发布都走完了。
+      const auto settled = [&] {
+        try {
+          const auto scheme = stored().value("scheme", std::string("quanpin"));
+          return seen.scheme_entries[scheme == "japanese" ? "Scheme/Japanese" : "Scheme/Shuangpin"];
+        } catch (...) {
+          return false;
+        }
+      };
+      const auto stored_scheme = [&] {
+        try {
+          return stored().value("scheme", std::string("quanpin"));
+        } catch (...) {
+          return std::string{};
+        }
+      };
+      // 快速连按两下想切过去再切回来：第二下赶上第一次保存还没落盘时吃掉但不切换，落盘之后则照常切回；哪种情况都不能交给应用，否则浏览器会拿它开开发者工具。两种情况取决于保存线程的快慢，所以之后按存储实际的样子补按，回到双拼再往下测。
+      require(wait_until(settled), "the store did not settle before the double press");
+      const auto revision = stored_revision();
+      require(chord(), "the first of two quick Ctrl+Shift+J presses was not taken");
+      require(chord(), "the second of two quick Ctrl+Shift+J presses reached the application");
+      require(wait_until([&] { return stored_revision() > revision && settled(); }),
+              "the first of two quick Ctrl+Shift+J presses was not saved");
+      for (int attempt = 0; attempt < 5 && !(stored_scheme() == "shuangpin" && settled()); ++attempt) {
+        if (stored_scheme() == "japanese")
+          require(chord(), "Ctrl+Shift+J back to shuangpin after the double press was not taken");
+        wait_until([&] { return stored_scheme() == "shuangpin" && settled(); });
+      }
+      require(stored_becomes("shuangpin", "shuangpin"), "the double press did not end back on shuangpin");
+      // 英文模式交给应用。
+      invoke("PropertyActivate", g_variant_new("(su)", "InputMode", PROP_STATE_UNCHECKED));
+      require(wait_until([&] { return !seen.input_enabled; }), "English mode fixture failed");
+      require(!chord() && stored_becomes("shuangpin", "shuangpin"), "Ctrl+Shift+J was taken in English mode");
+      invoke("PropertyActivate", g_variant_new("(su)", "InputMode", PROP_STATE_CHECKED));
+      require(wait_until([&] { return seen.input_enabled; }), "Chinese mode fixture failed");
+      // Engine 自己的英文模式（Ctrl+Shift+E）里 IBus 仍是中文状态，这时同样交给应用。
+      require(key(IBUS_E, chord_mask) && wait_until([&] { return seen.english_mode; }),
+              "dedicated English fixture failed");
+      key(IBUS_e, chord_mask | IBUS_RELEASE_MASK);
+      require(!chord() && stored_becomes("shuangpin", "shuangpin"),
+              "Ctrl+Shift+J was taken in the Engine's English mode");
+      require(key(IBUS_E, chord_mask) && wait_until([&] { return !seen.english_mode; }),
+              "leaving dedicated English failed");
+      key(IBUS_e, chord_mask | IBUS_RELEASE_MASK);
+      // 关掉后又交给应用。热重载之前按下的仍会切换，那次保存落盘、菜单跟上之后再按，直到不再被吃掉。赶上保存还没落盘的那一下被吃掉却不切换，等不到变化，所以每次只等一轮、按次数收尾。
+      set_preferences(false, "shuangpin", "shuangpin");
+      bool ignored = false;
+      for (int attempt = 0; attempt < 10 && !ignored; ++attempt) {
+        wait_until(settled);
+        const auto before = stored_scheme();
+        if (!chord())
+          ignored = true;
+        else
+          wait_until([&] { return stored_scheme() != before && settled(); });
+      }
+      require(ignored, "Disabling Ctrl+Shift+J did not hot-reload");
+      const auto last = stored();
+      for (int repeat = 0; repeat < 3; ++repeat)
+        require(!chord(), "a disabled Ctrl+Shift+J was taken");
+      require(stored() == last, "a disabled Ctrl+Shift+J changed the scheme");
+      invoke("Disable");
+      finish();
+      std::cout << "IBus Ctrl+Shift+J Japanese toggle, repeat, English modes and hot-reload passed\n";
+      return 0;
+    }
+    // 拆字反查在桌面默认关：偏好里没有这个键时 Shift+C 留给应用。从快捷模式菜单打开后 Shift+C 进入，跟在部件后面的 ' 由 Engine 列进 spelling_symbols，IBus 把它当字符交给 Engine 当部件分隔符；空格上屏首行。再关掉又交给应用。
+    if (argc == 3 && std::string(argv[2]) == "--chaizi") {
+      msime_ibus_configure(options.dump());
+      invoke("FocusIn");
+      require(wait_until([&] { return seen.input_enabled; }), "chaizi test does not start in Chinese");
+      const auto stored_chaizi = [&](bool expected) {
+        return wait_until([&] {
+          try {
+            nlohmann::json snapshot;
+            std::ifstream(root / "preferences.json") >> snapshot;
+            return snapshot.at("preferences").at("local_modes").value("chaizi", !expected) == expected;
+          } catch (...) {
+            return false;
+          }
+        });
+      };
+      require(!key('c', IBUS_SHIFT_MASK) && !seen.preedit_visible && seen.committed.empty(),
+              "Shift+C was taken while the chaizi switch was absent");
+      invoke("PropertyActivate", g_variant_new("(su)", "LocalModes/chaizi", PROP_STATE_CHECKED));
+      require(stored_chaizi(true), "Chaizi enable was not persisted");
+      // 菜单开关先保存，保存回调再应用新快照，所以等到 Shift+C 被接住为止。
+      bool entered = false;
+      require(wait_until([&] {
+                if (!entered) entered = key('c', IBUS_SHIFT_MASK) && seen.preedit_visible;
+                return entered;
+              }),
+              "Shift+C did not enter the chaizi mode once it was on");
+      for (const guint keyval : {guint('h'), guint('u'), guint('o'), guint(IBUS_apostrophe), guint('h'),
+                                 guint('u'), guint('o'), guint('h'), guint('u'), guint('o')})
+        require(key(keyval), "The chaizi mode did not take a component letter or the separator");
+      require(seen.lookup_visible && !seen.candidates.empty() &&
+                  seen.candidates.front().find("焱") != std::string::npos,
+              "The chaizi mode did not find 焱 from huo'huohuo");
+      require(key(IBUS_space) && seen.committed == "焱" && !seen.preedit_visible,
+              "Space did not commit the chaizi row");
+      invoke("PropertyActivate", g_variant_new("(su)", "LocalModes/chaizi", PROP_STATE_UNCHECKED));
+      require(stored_chaizi(false), "Chaizi disable was not persisted");
+      seen.committed.clear();
+      bool released = false;
+      require(wait_until([&] {
+                if (!released) released = !key('c', IBUS_SHIFT_MASK) && !seen.preedit_visible;
+                if (!released) invoke("Reset");
+                return released;
+              }),
+              "Turning chaizi off did not hand Shift+C back");
+      require(seen.committed.empty(), "a disabled Shift+C committed text");
+      invoke("Disable");
+      finish();
+      std::cout << "IBus chaizi switch, Shift+C entry, apostrophe separator and commit passed\n";
       return 0;
     }
     if (argc == 3) {
@@ -1815,6 +2254,26 @@ int main(int argc, char **argv) {
             "Initial input and clipboard properties were not available");
     require(seen.desktop_help && seen.desktop_feedback && seen.desktop_dictionary,
             "Linux desktop tools did not publish help, feedback and dictionary routes");
+    require(!seen.helpcode_schema_pack_visible,
+            "IBus exposed an empty helpcode-pack marker without a selected pack");
+    // The marker stays in the same fixed menu when a pack becomes configured,
+    // but its visibility must flip on for the active pack.
+    ibus_object_destroy(IBUS_OBJECT(engine));
+    g_object_unref(engine);
+    auto packed_options = options;
+    packed_options["preferences"]["plugins"]["helpcode_pack_quanpin"] = "synthetic-pack";
+    msime_ibus_configure(packed_options.dump());
+    engine = create_engine();
+    seen = Observation{};
+    invoke("FocusIn");
+    require(seen.helpcode_schema_pack_visible,
+            "IBus hid the active helpcode-pack marker");
+    ibus_object_destroy(IBUS_OBJECT(engine));
+    g_object_unref(engine);
+    msime_ibus_configure(options.dump());
+    engine = create_engine();
+    seen = Observation{};
+    invoke("FocusIn");
     {
       // The top of the menu follows the design order: 中文/英文; 全角/标点/译文; 输入方案; 主题/词库…/设置…/关于.
       const std::vector<std::string> design{

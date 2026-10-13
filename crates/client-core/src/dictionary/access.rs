@@ -8,6 +8,7 @@ use std::path::Path;
 /// A guard held for the lifetime of every Engine/session using the paths.
 pub struct DictionaryAccess {
     _files: Vec<File>,
+    roots: Vec<(std::path::PathBuf, crate::file_lock::PrivateDirectory)>,
 }
 
 impl DictionaryAccess {
@@ -19,6 +20,17 @@ impl DictionaryAccess {
     /// Acquire exclusive maintenance access without waiting. `None` means sessions/writers are active.
     pub fn try_maintenance(user: &Path, dictionaries: &Path) -> io::Result<Option<Self>> {
         Self::acquire(user, dictionaries, true)
+    }
+
+    /// Return a handle to one of the roots captured when this lease was acquired.
+    /// The handle remains bound to the original directory if its path is later replaced.
+    pub fn directory(&self, path: &Path) -> io::Result<crate::file_lock::PrivateDirectory> {
+        let canonical = path.canonicalize()?;
+        self.roots
+            .iter()
+            .find(|(root, _)| root == &canonical)
+            .map(|(_, directory)| directory.try_clone())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "directory is not leased"))?
     }
 
     fn acquire(user: &Path, dictionaries: &Path, exclusive: bool) -> io::Result<Option<Self>> {
@@ -34,9 +46,12 @@ impl DictionaryAccess {
         roots.sort();
         roots.dedup();
         let mut files = Vec::with_capacity(roots.len());
+        let mut directories = Vec::with_capacity(roots.len());
         for root in roots {
-            let file = crate::file_lock::open_private_lock_file(
-                root.join(".msime-dictionary-access.lock"),
+            let directory = crate::file_lock::open_private_directory(&root)?;
+            let file = crate::file_lock::open_private_lock_file_at(
+                &directory,
+                std::ffi::OsStr::new(".msime-dictionary-access.lock"),
             )?;
             let acquired = if exclusive {
                 crate::file_lock::try_exclusive(&file)?
@@ -47,8 +62,12 @@ impl DictionaryAccess {
                 return Ok(None);
             }
             files.push(file);
+            directories.push((root, directory));
         }
-        Ok(Some(Self { _files: files }))
+        Ok(Some(Self {
+            _files: files,
+            roots: directories,
+        }))
     }
 }
 
@@ -122,5 +141,30 @@ mod tests {
             .path()
             .join(".msime-dictionary-access.lock")
             .exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maintenance_directory_handle_survives_root_replacement() {
+        use std::fs;
+
+        let root = tempfile::tempdir().unwrap();
+        let user = root.path().join("user");
+        let dictionaries = root.path().join("dictionaries");
+        fs::create_dir(&user).unwrap();
+        fs::create_dir(&dictionaries).unwrap();
+        let access = DictionaryAccess::try_maintenance(&user, &dictionaries)
+            .unwrap()
+            .unwrap();
+        let bound = access.directory(&user).unwrap();
+
+        let moved = root.path().join("moved-user");
+        fs::rename(&user, &moved).unwrap();
+        fs::create_dir(&user).unwrap();
+        crate::file_lock::write_private_file_at(&bound, std::ffi::OsStr::new("marker"), b"bound")
+            .unwrap();
+
+        assert_eq!(fs::read(moved.join("marker")).unwrap(), b"bound");
+        assert!(!user.join("marker").exists());
     }
 }

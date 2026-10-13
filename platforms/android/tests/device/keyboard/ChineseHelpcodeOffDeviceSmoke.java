@@ -1,0 +1,60 @@
+package app.msime.android.test;
+
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import org.json.JSONObject;
+
+/** 辅助码关闭时，完整拼音后按 Shift+字母（#7162）：字母不能丢。 */
+public final class ChineseHelpcodeOffDeviceSmoke extends DeviceSmoke {
+    @Override protected String successDescription() {
+        return "Shift letter after a complete quanpin syllable with helpcode off";
+    }
+
+    @Override protected void runChecks() throws Exception {
+        File root = getTargetContext().getFilesDir();
+        JSONObject options = new JSONObject(new String(Files.readAllBytes(
+            new File(root, "runtime-options.json").toPath()), StandardCharsets.UTF_8));
+        File directory = new File(options.getString("preferences_directory")).getCanonicalFile();
+        File preferences = new File(directory, "preferences.json");
+        byte[] original = preferences.exists() ? Files.readAllBytes(preferences.toPath()) : null;
+        long revision = original == null ? 0
+            : new JSONObject(new String(original, StandardCharsets.UTF_8)).getLong("revision");
+        JSONObject configured = new JSONObject(options.getJSONObject("preferences").toString())
+            .put("scheme", "quanpin")
+            .put("touch_keyboard_layout", "twenty_six_key")
+            .put("quanpin_helpcode", new JSONObject().put("enabled", false).put("schema", "ziranma"));
+        try {
+            stage = "disable quanpin helpcode";
+            publish(preferences, new JSONObject().put("format_version", 1)
+                .put("revision", revision + 1).put("preferences", configured).toString()
+                .getBytes(StandardCharsets.UTF_8));
+            restartIme();
+            openEditor();
+            tap(field("msime-test-plain"));
+
+            stage = "complete quanpin composition";
+            for (String letter : new String[] {"n", "i", "h", "a", "o"}) tap(key(letter));
+            await(field("msime-test-plain").and(node -> equalsText("nihao", node.getText())));
+
+            stage = "shift letter after the composition";
+            tap(key("⇧"));
+            await(key("O"));
+            tap(key("O"));
+            // 引擎在拼音组字中接收大写字母（#7146），O 以大写并入组字、不上屏；引擎一旦拒收而宿主不处理，O 就会丢，输入框停在 nihao。
+            await(field("msime-test-plain").and(node -> equalsText("nihaoO", node.getText())));
+            await(key("o"));
+        } finally {
+            shellDiscard("am start -W -n app.msime.android/app.msime.android.home.HomeActivity");
+            if (original == null) Files.deleteIfExists(preferences.toPath());
+            else publish(preferences, original);
+        }
+    }
+
+
+    private void openEditor() throws Exception {
+        shellDiscard("am start -W -f 0x10008000 -n app.msime.android.test/app.msime.android.test.EditorActivity");
+    }
+
+
+}

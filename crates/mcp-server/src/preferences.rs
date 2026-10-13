@@ -4,12 +4,15 @@
 
 use msime_client_core::edition::Edition;
 use msime_client_core::preferences::{
-    CandidateLayout, CharacterWidthPreference, ChineseScheme, DefaultImeMode, InputScheme,
-    Preferences, PreferencesSnapshot, PreferencesStore, ShuangpinProfile, WubiProfile,
+    AppInputModeRule, CandidateLayout, CharacterWidthPreference, ChineseScheme, DefaultImeMode,
+    InputScheme, NineKeyShuangpinProfile, Preferences, PreferencesSnapshot, PreferencesStore,
+    ShuangpinCustomProfile, ShuangpinProfile, WubiProfile,
 };
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -46,6 +49,111 @@ pub enum Profile {
     Ziranma,
     Shoudao,
     Microsoft,
+    /// 用户自己的键位表，即 `shuangpin_custom_profile`。没有可用的表时不能选它。
+    Custom,
+}
+
+/// 自定义双拼方案的键位表。`initials` 只写 zh ch sh 三个多字母声母（单字母声母仍在自己的字母键上），`finals` 写全 33 个韵母（a o e i u v ai ei ui ao ou iu ie ve ue an en in un ang eng ing ong ia ua uo uai ian uan iao iang uang iong），`zero_initials` 给 12 个零声母音节（a ai an ang ao e ei en eng er o ou）各一个两键编码。键是小写字母或 `;`，`;` 只能做第二个键；ü 写作 v。两个音节不能落在同一个两键编码上。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+pub struct CustomShuangpinTable {
+    #[serde(default)]
+    pub initials: BTreeMap<String, String>,
+    #[serde(default)]
+    pub finals: BTreeMap<String, String>,
+    #[serde(default)]
+    pub zero_initials: BTreeMap<String, String>,
+}
+
+impl From<&ShuangpinCustomProfile> for CustomShuangpinTable {
+    fn from(value: &ShuangpinCustomProfile) -> Self {
+        Self {
+            initials: value.initials.clone(),
+            finals: value.finals.clone(),
+            zero_initials: value.zero_initials.clone(),
+        }
+    }
+}
+
+impl From<&CustomShuangpinTable> for ShuangpinCustomProfile {
+    fn from(value: &CustomShuangpinTable) -> Self {
+        Self {
+            initials: value.initials.clone(),
+            finals: value.finals.clone(),
+            zero_initials: value.zero_initials.clone(),
+        }
+    }
+}
+
+/// 触屏九键双拼（手机键盘的「九键双拼」布局）用哪张表。
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "snake_case")]
+pub enum NineKeyProfile {
+    /// 米旮旯 2。
+    Migala2,
+    /// 米旮旯 3。
+    Migala3,
+    /// 辜氏 2 低重码。
+    Gushi2Low,
+    /// 用户自己的表，即 `nine_key_shuangpin_custom_profile`。没有可用的表时不能选它。
+    Custom,
+}
+
+impl From<NineKeyShuangpinProfile> for NineKeyProfile {
+    fn from(value: NineKeyShuangpinProfile) -> Self {
+        match value {
+            NineKeyShuangpinProfile::Migala2 => Self::Migala2,
+            NineKeyShuangpinProfile::Migala3 => Self::Migala3,
+            NineKeyShuangpinProfile::Gushi2Low => Self::Gushi2Low,
+            NineKeyShuangpinProfile::Custom => Self::Custom,
+        }
+    }
+}
+
+impl From<NineKeyProfile> for NineKeyShuangpinProfile {
+    fn from(value: NineKeyProfile) -> Self {
+        match value {
+            NineKeyProfile::Migala2 => Self::Migala2,
+            NineKeyProfile::Migala3 => Self::Migala3,
+            NineKeyProfile::Gushi2Low => Self::Gushi2Low,
+            NineKeyProfile::Custom => Self::Custom,
+        }
+    }
+}
+
+/// 九键双拼的自定义表：每个音节两位数字，第一位是声母所在的键，第二位是韵母所在的键。`initials` 写全 23 个声母（b p m f d t n l g k h j q x r z c s y w zh ch sh），`finals` 写全 33 个韵母（同 26 键自定义表），各一个数字；`zero_initials` 给 12 个零声母音节（a ai an ang ao e ei en eng er o ou）各两位数字。数字是 0 到 9；ü 写作 v。一个两位编码可以对应好几个音节。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+pub struct NineKeyShuangpinTable {
+    #[serde(default)]
+    pub initials: BTreeMap<String, String>,
+    #[serde(default)]
+    pub finals: BTreeMap<String, String>,
+    #[serde(default)]
+    pub zero_initials: BTreeMap<String, String>,
+}
+
+impl From<&ShuangpinCustomProfile> for NineKeyShuangpinTable {
+    fn from(value: &ShuangpinCustomProfile) -> Self {
+        Self {
+            initials: value.initials.clone(),
+            finals: value.finals.clone(),
+            zero_initials: value.zero_initials.clone(),
+        }
+    }
+}
+
+impl From<&NineKeyShuangpinTable> for ShuangpinCustomProfile {
+    fn from(value: &NineKeyShuangpinTable) -> Self {
+        Self {
+            initials: value.initials.clone(),
+            finals: value.finals.clone(),
+            zero_initials: value.zero_initials.clone(),
+        }
+    }
 }
 
 /// 五笔码表版本。
@@ -116,6 +224,7 @@ impl From<ShuangpinProfile> for Profile {
             ShuangpinProfile::Ziranma => Self::Ziranma,
             ShuangpinProfile::Shoudao => Self::Shoudao,
             ShuangpinProfile::Microsoft => Self::Microsoft,
+            ShuangpinProfile::Custom => Self::Custom,
         }
     }
 }
@@ -127,6 +236,7 @@ impl From<Profile> for ShuangpinProfile {
             Profile::Ziranma => Self::Ziranma,
             Profile::Shoudao => Self::Shoudao,
             Profile::Microsoft => Self::Microsoft,
+            Profile::Custom => Self::Custom,
         }
     }
 }
@@ -159,6 +269,24 @@ impl From<DefaultImeMode> for StartMode {
 }
 
 impl From<StartMode> for DefaultImeMode {
+    fn from(value: StartMode) -> Self {
+        match value {
+            StartMode::Chinese => Self::Chinese,
+            StartMode::English => Self::English,
+        }
+    }
+}
+
+impl From<AppInputModeRule> for StartMode {
+    fn from(value: AppInputModeRule) -> Self {
+        match value {
+            AppInputModeRule::Chinese => Self::Chinese,
+            AppInputModeRule::English => Self::English,
+        }
+    }
+}
+
+impl From<StartMode> for AppInputModeRule {
     fn from(value: StartMode) -> Self {
         match value {
             StartMode::Chinese => Self::Chinese,
@@ -211,7 +339,13 @@ pub struct PreferencesView {
     pub revision: u64,
     pub scheme: Scheme,
     pub shuangpin_profile: Profile,
-    /// Candidates per page, 1 to 9.
+    /// 保存着的自定义双拼键位表，没有时为 null。
+    pub shuangpin_custom_profile: Option<CustomShuangpinTable>,
+    /// 触屏九键双拼用哪张表（Android 的九键双拼布局）。
+    pub nine_key_shuangpin_profile: NineKeyProfile,
+    /// 保存着的九键双拼自定义表，没有时为 null。
+    pub nine_key_shuangpin_custom_profile: Option<NineKeyShuangpinTable>,
+    /// 每页候选数，1 到 10，第十个用数字键 0 选；Windows、iOS 和鸿蒙最多显示 9 个。
     pub candidate_page_size: u8,
     /// Candidate font size in points, 12 to 32.
     pub candidate_font_size: u8,
@@ -221,17 +355,23 @@ pub struct PreferencesView {
     pub candidate_opacity_percent: u8,
     /// Corner radius of the candidate window in points, 0 to 32. Null means the skin's or the platform's own radius.
     pub candidate_corner_radius: Option<u8>,
+    /// Space between the candidate window's edge and its candidates in points, 0 to 16, before the overall size scales it (macOS only). Null means the skin's or the platform's own padding.
+    pub candidate_padding: Option<u8>,
     pub candidate_layout: Layout,
     pub candidate_follow_cursor: bool,
     /// Select candidates with the number row.
     pub number_row_selection: bool,
-    /// Show a badge when switching between Chinese and English (macOS).
+    /// 切换中英文时显示「中」或「英」的提示（macOS、Windows、Linux 和 HarmonyOS）。
     pub input_mode_hud: bool,
-    /// Show the app logo at the left end of the candidate window and the floating toolbar (macOS).
+    /// 在候选窗和悬浮工具栏左端显示水杉 logo（macOS 和 Windows；其他宿主始终显示，没有这个开关）。
     pub show_app_logo: bool,
+    /// 候选窗显示页码（Linux 是辅助文本里的当前页/总页数，macOS 是首行的「1 / 3」和 ‹ › 翻页按钮）。这个开关不改变键盘和滚轮翻页；滚轮翻页由 `navigation.mouse_wheel` 另外控制，默认关闭，所以 macOS 上关掉它又没开滚轮时，鼠标就不能翻页了。
+    pub show_candidate_page_number: bool,
     pub fuzzy_pinyin: bool,
     /// The mode a newly focused text field starts in.
     pub default_ime_mode: StartMode,
+    /// 应用例外（macOS 和 Windows）：切到这些应用时固定从这里给的模式开始，优先于按应用记忆和 `default_ime_mode`；用户在应用里手动切换后，本次停留期间让位。键在 macOS 上是 bundle id，在 Windows 上是程序文件名（如 `code.exe`，不分大小写）。
+    pub app_input_mode_rules: BTreeMap<String, StartMode>,
     /// The width of the ASCII letters, digits and punctuation the input method outputs.
     pub character_width: Width,
     /// Type Chinese punctuation in Chinese mode.
@@ -242,10 +382,14 @@ pub struct PreferencesView {
     pub traditional_chinese_output: bool,
     /// 五笔用 86 还是 98 码表。
     pub wubi_profile: WubiVersion,
-    /// In Wubi, answer a code with no match with candidates from the same pinyin spelling.
+    /// 五笔拼音混输：五笔候选之后接着列出同一串字母的全拼候选，五笔编码打不出时直接出拼音候选。
     pub wubi_mixed_pinyin: bool,
     /// In Wubi, show the rest of each candidate's code after the typed keys.
     pub wubi_code_hint: bool,
+    /// 双拼组字时在候选窗旁显示当前方案的键位图（macOS 和 Windows）。null 表示从没设置过：macOS 这时沿用本机旧的设置，其他宿主为关。
+    pub shuangpin_keymap_hint: Option<bool>,
+    /// 五笔里，完整四码且只有一个候选时在第四键提交。
+    pub wubi_auto_commit_unique: bool,
     /// Whether the input method writes its diagnostic log: focus changes, slow requests, candidate window and dictionary events and failures, never what is typed.
     pub diagnostic_log_server: bool,
     /// Windows only: whether the TIP adds its composition and key-latency records to the diagnostic log.
@@ -263,18 +407,32 @@ impl From<&PreferencesSnapshot> for PreferencesView {
             revision: snapshot.revision,
             scheme: preferences.scheme.into(),
             shuangpin_profile: preferences.shuangpin_profile.into(),
+            shuangpin_custom_profile: (!preferences.shuangpin_custom_profile.is_empty())
+                .then(|| CustomShuangpinTable::from(&preferences.shuangpin_custom_profile)),
+            nine_key_shuangpin_profile: preferences.nine_key_shuangpin_profile.into(),
+            nine_key_shuangpin_custom_profile: (!preferences
+                .nine_key_shuangpin_custom_profile
+                .is_empty())
+            .then(|| NineKeyShuangpinTable::from(&preferences.nine_key_shuangpin_custom_profile)),
             candidate_page_size: preferences.candidate_page_size,
             candidate_font_size: preferences.candidate_font_size,
             candidate_scale_percent: preferences.candidate_scale_percent,
             candidate_opacity_percent: preferences.candidate_opacity_percent,
             candidate_corner_radius: preferences.candidate_corner_radius,
+            candidate_padding: preferences.candidate_padding,
             candidate_layout: preferences.candidate_layout.into(),
             candidate_follow_cursor: preferences.candidate_follow_cursor,
             number_row_selection: preferences.number_row_selection,
             input_mode_hud: preferences.input_mode_hud,
             show_app_logo: preferences.show_app_logo,
+            show_candidate_page_number: preferences.show_candidate_page_number,
             fuzzy_pinyin: preferences.fuzzy_pinyin.enabled,
             default_ime_mode: preferences.default_ime_mode.into(),
+            app_input_mode_rules: preferences
+                .app_input_mode_rules
+                .iter()
+                .map(|(id, rule)| (id.clone(), (*rule).into()))
+                .collect(),
             character_width: preferences.character_width.into(),
             chinese_punctuation: preferences.chinese_punctuation,
             smart_punctuation: preferences.smart_punctuation,
@@ -282,6 +440,8 @@ impl From<&PreferencesSnapshot> for PreferencesView {
             wubi_profile: preferences.wubi_profile.into(),
             wubi_mixed_pinyin: preferences.wubi_mixed_pinyin,
             wubi_code_hint: preferences.wubi_code_hint,
+            shuangpin_keymap_hint: preferences.shuangpin_keymap_hint,
+            wubi_auto_commit_unique: preferences.wubi_auto_commit_unique,
             diagnostic_log_server: preferences.diagnostic_log.server,
             diagnostic_log_tsf: preferences.diagnostic_log.tsf,
             game_candidate_overlay: preferences.game_compatibility.candidate_overlay,
@@ -298,8 +458,15 @@ pub struct PreferencesChange {
     /// The revision `get_preferences` returned. The change is refused if the preferences have changed since; read them again and retry.
     pub expected_revision: u64,
     pub scheme: Option<ChineseSchemeChoice>,
+    /// `custom` 需要一张可用的键位表：已经保存着，或者在 `shuangpin_custom_profile` 里一起给出。
     pub shuangpin_profile: Option<Profile>,
-    /// 1 to 9.
+    /// 整张替换自定义双拼键位表。不能用的表会被拒绝，并说明哪里不对。
+    pub shuangpin_custom_profile: Option<CustomShuangpinTable>,
+    /// `custom` 需要一张可用的九键双拼表：已经保存着，或者在 `nine_key_shuangpin_custom_profile` 里一起给出。只换表，不切换键盘布局。
+    pub nine_key_shuangpin_profile: Option<NineKeyProfile>,
+    /// 整张替换九键双拼自定义表。不能用的表会被拒绝，并说明哪一项不对。
+    pub nine_key_shuangpin_custom_profile: Option<NineKeyShuangpinTable>,
+    /// 1 到 10。无论存的是多少，Windows、iOS 和鸿蒙最多显示 9 个。
     pub candidate_page_size: Option<u8>,
     /// 12 to 32.
     pub candidate_font_size: Option<u8>,
@@ -310,14 +477,20 @@ pub struct PreferencesChange {
     /// 0 to 32, or null to return to the skin's or the platform's own radius.
     #[serde(default, deserialize_with = "present")]
     pub candidate_corner_radius: Option<Option<u8>>,
+    /// 0 to 16, or null to return to the skin's or the platform's own padding.
+    #[serde(default, deserialize_with = "present")]
+    pub candidate_padding: Option<Option<u8>>,
     pub candidate_layout: Option<Layout>,
     pub candidate_follow_cursor: Option<bool>,
     pub number_row_selection: Option<bool>,
     pub input_mode_hud: Option<bool>,
     pub show_app_logo: Option<bool>,
+    pub show_candidate_page_number: Option<bool>,
     /// Turning fuzzy pinyin on for the first time also turns on every fuzzy rule, as the settings page does.
     pub fuzzy_pinyin: Option<bool>,
     pub default_ime_mode: Option<StartMode>,
+    /// 整张替换应用例外表，`{}` 清空。最多 32 条；标识非空、不超过 64 字节、两端没有空白、不含控制字符和 `/` `\`，按 ASCII 不分大小写不能重复。
+    pub app_input_mode_rules: Option<BTreeMap<String, StartMode>>,
     pub character_width: Option<Width>,
     pub chinese_punctuation: Option<bool>,
     pub smart_punctuation: Option<bool>,
@@ -325,6 +498,10 @@ pub struct PreferencesChange {
     pub wubi_profile: Option<WubiVersion>,
     pub wubi_mixed_pinyin: Option<bool>,
     pub wubi_code_hint: Option<bool>,
+    /// `null` clears the shared choice so macOS can again consult its legacy host preference.
+    #[serde(default, deserialize_with = "present")]
+    pub shuangpin_keymap_hint: Option<Option<bool>>,
+    pub wubi_auto_commit_unique: Option<bool>,
     /// Turn on to look into a problem the user reports, and off again once it is understood.
     pub diagnostic_log_server: Option<bool>,
     /// Windows only; the other platforms keep it for the Windows settings to find.
@@ -337,18 +514,24 @@ impl PreferencesChange {
     pub(crate) fn is_empty(&self) -> bool {
         self.scheme.is_none()
             && self.shuangpin_profile.is_none()
+            && self.shuangpin_custom_profile.is_none()
+            && self.nine_key_shuangpin_profile.is_none()
+            && self.nine_key_shuangpin_custom_profile.is_none()
             && self.candidate_page_size.is_none()
             && self.candidate_font_size.is_none()
             && self.candidate_scale_percent.is_none()
             && self.candidate_opacity_percent.is_none()
             && self.candidate_corner_radius.is_none()
+            && self.candidate_padding.is_none()
             && self.candidate_layout.is_none()
             && self.candidate_follow_cursor.is_none()
             && self.number_row_selection.is_none()
             && self.input_mode_hud.is_none()
             && self.show_app_logo.is_none()
+            && self.show_candidate_page_number.is_none()
             && self.fuzzy_pinyin.is_none()
             && self.default_ime_mode.is_none()
+            && self.app_input_mode_rules.is_none()
             && self.character_width.is_none()
             && self.chinese_punctuation.is_none()
             && self.smart_punctuation.is_none()
@@ -356,6 +539,8 @@ impl PreferencesChange {
             && self.wubi_profile.is_none()
             && self.wubi_mixed_pinyin.is_none()
             && self.wubi_code_hint.is_none()
+            && self.shuangpin_keymap_hint.is_none()
+            && self.wubi_auto_commit_unique.is_none()
             && self.diagnostic_log_server.is_none()
             && self.diagnostic_log_tsf.is_none()
             && self.game_candidate_overlay.is_none()
@@ -370,6 +555,15 @@ impl PreferencesChange {
         }
         if let Some(profile) = self.shuangpin_profile {
             preferences.shuangpin_profile = profile.into();
+        }
+        if let Some(table) = &self.shuangpin_custom_profile {
+            preferences.shuangpin_custom_profile = table.into();
+        }
+        if let Some(profile) = self.nine_key_shuangpin_profile {
+            preferences.nine_key_shuangpin_profile = profile.into();
+        }
+        if let Some(table) = &self.nine_key_shuangpin_custom_profile {
+            preferences.nine_key_shuangpin_custom_profile = table.into();
         }
         if let Some(size) = self.candidate_page_size {
             preferences.candidate_page_size = size;
@@ -386,6 +580,9 @@ impl PreferencesChange {
         if let Some(radius) = self.candidate_corner_radius {
             preferences.candidate_corner_radius = radius;
         }
+        if let Some(padding) = self.candidate_padding {
+            preferences.candidate_padding = padding;
+        }
         if let Some(layout) = self.candidate_layout {
             preferences.candidate_layout = layout.into();
         }
@@ -401,11 +598,20 @@ impl PreferencesChange {
         if let Some(value) = self.show_app_logo {
             preferences.show_app_logo = value;
         }
+        if let Some(value) = self.show_candidate_page_number {
+            preferences.show_candidate_page_number = value;
+        }
         if let Some(value) = self.fuzzy_pinyin {
             preferences.fuzzy_pinyin.enabled = value;
         }
         if let Some(mode) = self.default_ime_mode {
             preferences.default_ime_mode = mode.into();
+        }
+        if let Some(rules) = &self.app_input_mode_rules {
+            preferences.app_input_mode_rules = rules
+                .iter()
+                .map(|(id, mode)| (id.clone(), (*mode).into()))
+                .collect();
         }
         if let Some(width) = self.character_width {
             preferences.character_width = width.into();
@@ -427,6 +633,12 @@ impl PreferencesChange {
         }
         if let Some(value) = self.wubi_code_hint {
             preferences.wubi_code_hint = value;
+        }
+        if let Some(value) = self.shuangpin_keymap_hint {
+            preferences.shuangpin_keymap_hint = value;
+        }
+        if let Some(value) = self.wubi_auto_commit_unique {
+            preferences.wubi_auto_commit_unique = value;
         }
         if let Some(value) = self.diagnostic_log_server {
             preferences.diagnostic_log.server = value;
@@ -488,6 +700,22 @@ pub fn update(
     }
     let mut preferences = previous.preferences.clone();
     change.apply(&mut preferences);
+    // 键位表合不合法只有 Engine 说了算：给了新表，或者要用自定义方案，就先校验，免得存下一张输入法用不了、只能悄悄退回小鹤的表。
+    if change.shuangpin_custom_profile.is_some()
+        || preferences.shuangpin_profile == ShuangpinProfile::Custom
+    {
+        msime_host_api::validate_custom_shuangpin_profile(&preferences.shuangpin_custom_profile)
+            .map_err(|error| format!("the custom shuangpin table cannot be used: {error}"))?;
+    }
+    // 九键双拼的表同理，由 Engine 校验。
+    if change.nine_key_shuangpin_custom_profile.is_some()
+        || preferences.nine_key_shuangpin_profile == NineKeyShuangpinProfile::Custom
+    {
+        msime_host_api::validate_nine_key_shuangpin_custom_profile(
+            &preferences.nine_key_shuangpin_custom_profile,
+        )
+        .map_err(|error| format!("the nine-key shuangpin table cannot be used: {error}"))?;
+    }
     let snapshot = store
         .save(change.expected_revision, preferences)
         .map_err(|error| error.to_string())?;
@@ -507,8 +735,20 @@ const TOO_LARGE: &str = "the runtime options would be too large for the input me
 
 /// Replace the preferences in the runtime-options document, the way `sync_runtime_options` in the desktop app does. Everything else in the document, the skin catalog included, is kept as it is.
 fn publish_to_runtime_options(path: &Path, preferences: &Preferences) -> Result<(), String> {
-    use std::io::Write;
-    let file = crate::bounded::open_private(path).map_err(|_| "cannot read the runtime options")?;
+    let parent = path.parent().ok_or("cannot read the runtime options")?;
+    let name = path.file_name().ok_or("cannot read the runtime options")?;
+    let directory = msime_client_core::file_lock::open_private_directory(parent)
+        .map_err(|_| "cannot read the runtime options")?;
+    publish_to_runtime_options_at(&directory, name, preferences)
+}
+
+fn publish_to_runtime_options_at(
+    directory: &msime_client_core::file_lock::PrivateDirectory,
+    name: &OsStr,
+    preferences: &Preferences,
+) -> Result<(), String> {
+    let file = msime_client_core::file_lock::open_private_file_at(directory, name)
+        .map_err(|_| "cannot read the runtime options")?;
     let bytes = crate::bounded::read(file, LINUX_RUNTIME_OPTIONS_LIMIT as u64).map_err(
         |error| match error {
             crate::bounded::ReadError::TooLarge => TOO_LARGE,
@@ -533,16 +773,7 @@ fn publish_to_runtime_options(path: &Path, preferences: &Preferences) -> Result<
     if bytes.len() > LINUX_RUNTIME_OPTIONS_LIMIT {
         return Err(TOO_LARGE.into());
     }
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(parent).map_err(|_| "cannot write the runtime options")?;
-    temporary
-        .write_all(&bytes)
-        .and_then(|()| temporary.as_file().sync_all())
-        .map_err(|_| "cannot write the runtime options")?;
-    temporary
-        .persist(path)
-        .map(|_| ())
+    msime_client_core::file_lock::write_private_file_at(directory, name, &bytes)
         .map_err(|_| "cannot write the runtime options".into())
 }
 
@@ -582,9 +813,22 @@ mod tests {
             ShuangpinProfile::Ziranma,
             ShuangpinProfile::Shoudao,
             ShuangpinProfile::Microsoft,
+            ShuangpinProfile::Custom,
         ] {
             same(json!(Profile::from(profile)), json!(profile));
             assert_eq!(ShuangpinProfile::from(Profile::from(profile)), profile);
+        }
+        for profile in [
+            NineKeyShuangpinProfile::Migala2,
+            NineKeyShuangpinProfile::Migala3,
+            NineKeyShuangpinProfile::Gushi2Low,
+            NineKeyShuangpinProfile::Custom,
+        ] {
+            same(json!(NineKeyProfile::from(profile)), json!(profile));
+            assert_eq!(
+                NineKeyShuangpinProfile::from(NineKeyProfile::from(profile)),
+                profile
+            );
         }
         for profile in [WubiProfile::Wubi86, WubiProfile::Wubi98] {
             same(json!(WubiVersion::from(profile)), json!(profile));
@@ -597,6 +841,10 @@ mod tests {
         for mode in [DefaultImeMode::Chinese, DefaultImeMode::English] {
             same(json!(StartMode::from(mode)), json!(mode));
             assert_eq!(DefaultImeMode::from(StartMode::from(mode)), mode);
+        }
+        for rule in [AppInputModeRule::Chinese, AppInputModeRule::English] {
+            same(json!(StartMode::from(rule)), json!(rule));
+            assert_eq!(AppInputModeRule::from(StartMode::from(rule)), rule);
         }
         for width in [
             CharacterWidthPreference::Halfwidth,
@@ -612,6 +860,139 @@ mod tests {
             expected_revision: revision,
             ..PreferencesChange::default()
         }
+    }
+
+    /// 小鹤的键位，只把 ing 从 k 挪到 `;`。
+    fn custom_table() -> CustomShuangpinTable {
+        serde_json::from_value(json!({
+            "initials": { "zh": "v", "ch": "i", "sh": "u" },
+            "finals": {
+                "iu": "q", "ei": "w", "e": "e", "uan": "r", "ue": "t", "ve": "t", "un": "y",
+                "u": "u", "i": "i", "uo": "o", "o": "o", "ie": "p", "a": "a", "ong": "s",
+                "iong": "s", "ai": "d", "en": "f", "eng": "g", "ang": "h", "an": "j",
+                "uai": "k", "ing": ";", "uang": "l", "iang": "l", "ou": "z", "ua": "x",
+                "ia": "x", "ao": "c", "ui": "v", "v": "v", "in": "b", "iao": "n", "ian": "m"
+            },
+            "zero_initials": {
+                "a": "aa", "ai": "ai", "an": "an", "ang": "ah", "ao": "ao", "e": "ee",
+                "ei": "ei", "en": "en", "eng": "eg", "er": "er", "o": "oo", "ou": "ou"
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_custom_shuangpin_profile_needs_a_table_the_engine_accepts() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = directory.path().join("runtime-options.json");
+        std::fs::write(&options, br#"{"api_version":1}"#).unwrap();
+        let before = load(directory.path(), Edition::full()).unwrap();
+        assert_eq!(before.shuangpin_custom_profile, None);
+        let run = |change: &PreferencesChange| {
+            update(directory.path(), &options, Edition::full(), change)
+        };
+
+        // 没有表就不能选自定义方案。
+        let refused = run(&PreferencesChange {
+            shuangpin_profile: Some(Profile::Custom),
+            ..change(before.revision)
+        })
+        .unwrap_err();
+        assert!(
+            refused.starts_with("the custom shuangpin table cannot be used: initials unit"),
+            "{refused}"
+        );
+        // 给出的表不能用，也拒绝，并说明哪里冲突。
+        let mut colliding = custom_table();
+        colliding.finals.insert("ang".into(), "k".into());
+        let refused = run(&PreferencesChange {
+            shuangpin_custom_profile: Some(colliding),
+            ..change(before.revision)
+        })
+        .unwrap_err();
+        assert!(refused.contains("reads as both"), "{refused}");
+        assert_eq!(
+            PreferencesStore::new(directory.path())
+                .load()
+                .unwrap()
+                .revision,
+            before.revision
+        );
+
+        let updated = run(&PreferencesChange {
+            scheme: Some(ChineseSchemeChoice::Shuangpin),
+            shuangpin_profile: Some(Profile::Custom),
+            shuangpin_custom_profile: Some(custom_table()),
+            ..change(before.revision)
+        })
+        .unwrap();
+        assert_eq!(updated.shuangpin_profile, Profile::Custom);
+        assert_eq!(updated.shuangpin_custom_profile, Some(custom_table()));
+        let stored = PreferencesStore::new(directory.path()).load().unwrap();
+        assert_eq!(
+            stored.preferences.shuangpin_custom_profile,
+            ShuangpinCustomProfile::from(&custom_table())
+        );
+    }
+
+    #[test]
+    fn a_nine_key_shuangpin_table_is_read_and_written_after_the_engine_accepts_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = directory.path().join("runtime-options.json");
+        std::fs::write(&options, br#"{"api_version":1}"#).unwrap();
+        let before = load(directory.path(), Edition::full()).unwrap();
+        assert_eq!(before.nine_key_shuangpin_profile, NineKeyProfile::Migala3);
+        assert_eq!(before.nine_key_shuangpin_custom_profile, None);
+        let run = |change: &PreferencesChange| {
+            update(directory.path(), &options, Edition::full(), change)
+        };
+        // 内置方案直接能选。
+        let updated = run(&PreferencesChange {
+            nine_key_shuangpin_profile: Some(NineKeyProfile::Gushi2Low),
+            ..change(before.revision)
+        })
+        .unwrap();
+        assert_eq!(
+            updated.nine_key_shuangpin_profile,
+            NineKeyProfile::Gushi2Low
+        );
+        // 没有表就不能选自定义方案；给出的表不能用也拒绝，并指出哪一项。
+        let refused = run(&PreferencesChange {
+            nine_key_shuangpin_profile: Some(NineKeyProfile::Custom),
+            ..change(updated.revision)
+        })
+        .unwrap_err();
+        assert!(
+            refused.starts_with("the nine-key shuangpin table cannot be used: initials unit"),
+            "{refused}"
+        );
+        let table = NineKeyShuangpinTable::from(
+            &msime_host_api::builtin_nine_key_shuangpin_custom_profile(
+                NineKeyShuangpinProfile::Migala2,
+            )
+            .unwrap(),
+        );
+        let mut broken = table.clone();
+        broken.zero_initials.insert("a".into(), "6".into());
+        let refused = run(&PreferencesChange {
+            nine_key_shuangpin_custom_profile: Some(broken),
+            ..change(updated.revision)
+        })
+        .unwrap_err();
+        assert!(
+            refused.contains("zero_initials unit \"a\" has an invalid key \"6\""),
+            "{refused}"
+        );
+        let saved = run(&PreferencesChange {
+            nine_key_shuangpin_profile: Some(NineKeyProfile::Custom),
+            nine_key_shuangpin_custom_profile: Some(table.clone()),
+            ..change(updated.revision)
+        })
+        .unwrap();
+        assert_eq!(saved.nine_key_shuangpin_profile, NineKeyProfile::Custom);
+        assert_eq!(saved.nine_key_shuangpin_custom_profile, Some(table));
+        // 26 键的自定义表不受影响。
+        assert_eq!(saved.shuangpin_custom_profile, None);
     }
 
     #[test]
@@ -648,6 +1029,7 @@ mod tests {
                 character_width: Some(Width::Fullwidth),
                 traditional_chinese_output: Some(true),
                 wubi_code_hint: Some(false),
+                wubi_auto_commit_unique: Some(false),
                 diagnostic_log_server: Some(true),
                 ..change(before.revision)
             },
@@ -660,6 +1042,7 @@ mod tests {
         assert_eq!(updated.character_width, Width::Fullwidth);
         assert!(updated.traditional_chinese_output);
         assert!(!updated.wubi_code_hint);
+        assert!(!updated.wubi_auto_commit_unique);
         assert!(updated.diagnostic_log_server && !updated.diagnostic_log_tsf);
         assert_eq!(updated.revision, before.revision + 1);
 
@@ -679,6 +1062,7 @@ mod tests {
         expected.character_width = CharacterWidthPreference::Fullwidth;
         expected.traditional_chinese_output = true;
         expected.wubi_code_hint = false;
+        expected.wubi_auto_commit_unique = false;
         expected.diagnostic_log.server = true;
         expected.fuzzy_pinyin = stored.preferences.fuzzy_pinyin.clone();
         assert_eq!(json!(stored.preferences), json!(expected));
@@ -690,7 +1074,7 @@ mod tests {
         };
         assert!(update(directory.path(), &options, Edition::full(), &stale).is_err());
         let invalid = PreferencesChange {
-            candidate_page_size: Some(10),
+            candidate_page_size: Some(11),
             ..change(updated.revision)
         };
         assert!(update(directory.path(), &options, Edition::full(), &invalid).is_err());
@@ -704,6 +1088,63 @@ mod tests {
             assert!(document.get("preferences").is_none());
         }
         assert_eq!(document["candidate_skin_catalog"][0]["id"], "kept");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publishing_runtime_options_stays_in_an_open_parent_after_replacement() {
+        use std::ffi::OsStr;
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("state");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&original).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let options = original.join("runtime-options.json");
+        std::fs::write(&options, br#"{"api_version":1}"#).unwrap();
+        let directory = msime_client_core::file_lock::open_private_directory(&original).unwrap();
+
+        let moved = root.path().join("moved");
+        std::fs::rename(&original, &moved).unwrap();
+        symlink(&outside, &original).unwrap();
+
+        publish_to_runtime_options_at(
+            &directory,
+            OsStr::new("runtime-options.json"),
+            &Preferences::default(),
+        )
+        .unwrap();
+
+        let written: Value =
+            serde_json::from_slice(&std::fs::read(moved.join("runtime-options.json")).unwrap())
+                .unwrap();
+        assert!(written.get("preferences").is_some());
+        assert!(!outside.join("runtime-options.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publishing_runtime_options_rejects_a_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let linked = root.path().join("linked");
+        symlink(outside.path(), &linked).unwrap();
+        let outside_options = outside.path().join("runtime-options.json");
+        std::fs::write(&outside_options, br#"{"api_version":1}"#).unwrap();
+
+        let result = publish_to_runtime_options(
+            &linked.join("runtime-options.json"),
+            &Preferences::default(),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(&outside_options).unwrap(),
+            br#"{"api_version":1}"#
+        );
     }
 
     /// 五笔版只能选五笔：别的方案被拒绝，偏好不动；还没有偏好文件时读到的是五笔版的默认值。
@@ -803,7 +1244,124 @@ mod tests {
         assert!(update(directory.path(), &options, Edition::full(), &invalid).is_err());
     }
 
+    /// 页码开关默认开着，代理能关掉它，写进共享偏好的就是宿主读的 `show_candidate_page_number`（#7316）。
+    #[test]
+    fn the_page_number_switch_is_read_and_written() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = directory.path().join("runtime-options.json");
+        std::fs::write(&options, br#"{"api_version":1}"#).unwrap();
+        let before = load(directory.path(), Edition::full()).unwrap();
+        assert!(before.show_candidate_page_number);
+
+        let hidden: PreferencesChange = serde_json::from_value(json!({
+            "expected_revision": before.revision,
+            "show_candidate_page_number": false,
+        }))
+        .unwrap();
+        assert!(!hidden.is_empty());
+        let updated = update(directory.path(), &options, Edition::full(), &hidden).unwrap();
+        assert!(!updated.show_candidate_page_number);
+        let stored = PreferencesStore::new(directory.path()).load().unwrap();
+        assert!(!stored.preferences.show_candidate_page_number);
+    }
+
+    /// 卡片内边距能设、能交还皮肤，超出 0 到 16 的值被拒（#7316）。
+    #[test]
+    fn the_candidate_padding_is_set_and_returned_to_the_skin() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = directory.path().join("runtime-options.json");
+        std::fs::write(&options, br#"{"api_version":1}"#).unwrap();
+        let before = load(directory.path(), Edition::full()).unwrap();
+        assert_eq!(before.candidate_padding, None);
+
+        let tight: PreferencesChange = serde_json::from_value(json!({
+            "expected_revision": before.revision,
+            "candidate_padding": 2,
+        }))
+        .unwrap();
+        assert!(!tight.is_empty());
+        let updated = update(directory.path(), &options, Edition::full(), &tight).unwrap();
+        assert_eq!(updated.candidate_padding, Some(2));
+        let stored = PreferencesStore::new(directory.path()).load().unwrap();
+        assert_eq!(stored.preferences.candidate_padding, Some(2));
+
+        let cleared: PreferencesChange = serde_json::from_value(json!({
+            "expected_revision": updated.revision,
+            "candidate_padding": null,
+        }))
+        .unwrap();
+        assert!(!cleared.is_empty());
+        let updated = update(directory.path(), &options, Edition::full(), &cleared).unwrap();
+        assert_eq!(updated.candidate_padding, None);
+
+        let invalid = PreferencesChange {
+            candidate_padding: Some(Some(17)),
+            ..change(updated.revision)
+        };
+        assert!(update(directory.path(), &options, Edition::full(), &invalid).is_err());
+    }
+
     /// 代理只能开关游戏里的候选窗，用户写下的两张进程表原样保留。
+    #[test]
+    fn app_input_mode_rules_and_the_keymap_hint_are_set_and_invalid_rules_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = directory.path().join("runtime-options.json");
+        std::fs::write(&options, br#"{"api_version":1}"#).unwrap();
+        let store = PreferencesStore::new(directory.path());
+        let before = load(directory.path(), Edition::full()).unwrap();
+        assert!(before.app_input_mode_rules.is_empty());
+        assert_eq!(before.shuangpin_keymap_hint, None);
+
+        let set: PreferencesChange = serde_json::from_value(json!({
+            "expected_revision": before.revision,
+            "app_input_mode_rules": { "code.exe": "english", "com.tencent.xinWeChat": "chinese" },
+            "shuangpin_keymap_hint": true,
+        }))
+        .unwrap();
+        assert!(!set.is_empty());
+        let updated = update(directory.path(), &options, Edition::full(), &set).unwrap();
+        assert_eq!(updated.app_input_mode_rules["code.exe"], StartMode::English);
+        assert_eq!(updated.shuangpin_keymap_hint, Some(true));
+        let stored = store.load().unwrap().preferences;
+        assert_eq!(
+            stored.app_input_mode_rules["com.tencent.xinWeChat"],
+            AppInputModeRule::Chinese
+        );
+        assert_eq!(stored.shuangpin_keymap_hint, Some(true));
+
+        // 只差大小写的两条会让 Windows 上同一个进程拿到两种模式，存储层拒绝，原来的表不变。
+        let duplicate: PreferencesChange = serde_json::from_value(json!({
+            "expected_revision": updated.revision,
+            "app_input_mode_rules": { "Code.exe": "chinese", "code.exe": "english" },
+        }))
+        .unwrap();
+        assert!(update(directory.path(), &options, Edition::full(), &duplicate).is_err());
+        assert_eq!(
+            store.load().unwrap().preferences.app_input_mode_rules.len(),
+            2
+        );
+
+        let untouched: PreferencesChange = serde_json::from_value(json!({
+            "expected_revision": updated.revision,
+            "app_input_mode_rules": {},
+        }))
+        .unwrap();
+        assert_eq!(untouched.shuangpin_keymap_hint, None);
+        let untouched = update(directory.path(), &options, Edition::full(), &untouched).unwrap();
+        assert_eq!(untouched.shuangpin_keymap_hint, Some(true));
+
+        let cleared: PreferencesChange = serde_json::from_value(json!({
+            "expected_revision": untouched.revision,
+            "shuangpin_keymap_hint": null,
+            "app_input_mode_rules": {},
+        }))
+        .unwrap();
+        assert_eq!(cleared.shuangpin_keymap_hint, Some(None));
+        let cleared = update(directory.path(), &options, Edition::full(), &cleared).unwrap();
+        assert!(cleared.app_input_mode_rules.is_empty());
+        assert_eq!(cleared.shuangpin_keymap_hint, None);
+    }
+
     #[test]
     fn the_game_candidate_overlay_switch_leaves_the_process_lists_alone() {
         let directory = tempfile::tempdir().unwrap();

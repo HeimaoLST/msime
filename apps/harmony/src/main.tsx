@@ -5,7 +5,10 @@ import {
   SettingsPage,
   SettingsStartupPage,
   WelcomeFlowPage,
+  openKeyboardSwitchGuide,
   type DictionaryClient,
+  type DictionaryCollectionsClient,
+  type DictionaryCollectionsView,
   type DictionaryEntry,
   type DictionaryManifest,
   type DictionaryImportResult,
@@ -48,11 +51,15 @@ import {
   type CloudDictionaryPanelClient,
   type SettingsClient,
   type Snapshot,
+  type PreferencesRecovery,
+  type UpdateCheckRequest,
+  type UpdateCheckResult,
   type StatisticsRetention,
   type TypingStatisticsClient,
   type VocabularyReviewClient,
   type VocabularyReviewStatus,
   type TypingStatisticsStatus,
+  type WubiCodeLookup,
   type LocalVoiceModelClient,
   type LocalVoiceModelList,
   type LocalVoiceModelProgress,
@@ -153,6 +160,8 @@ interface NativeBridge {
    * `{"ok":true,"ready":boolean,"value":{"enabled":boolean|null,"current":boolean|null}}`：本键盘是否已在系统中启用、是否为当前输入法。和 `onboardingStatus` 一样是同步调用，宿主第一次读取完成前 `ready` 一直为 false。
    */
   setupStatus(): string;
+  /** 现在重新读一次设置状态，有变化时照常调用 `msimeHarmonySetupChanged`。从键盘的 🌐 菜单切换输入法不会触发宿主监听的 `imeChange`，引导打开期间靠它轮询。 */
+  refreshSetupStatus(): void;
   /**
    * 应用主题：`{operation:"load"}` 和 `{operation:"save",id}` 回复 `{ok,value:{id}}`；`{operation:"resolve",dark}` 回复 `msime_client_resolve_app_theme` 对已保存主题在本月的解析结果；`{operation:"catalog"}` 回复 `msime_client_app_theme_catalog` 的结果。
    */
@@ -169,6 +178,8 @@ interface NativeBridge {
   onboardingFinished(): void;
   /** `{"ok":true,"value":string|null}`：键盘要求本窗口打开的页面，只交出一次，第二次读取回复 null。 */
   pendingPage(): string;
+  /** 页面的第一帧已经上屏：宿主撤掉页面加载期间盖在网页上的启动画面。 */
+  launchPainted(): void;
 }
 
 declare global {
@@ -405,6 +416,11 @@ function imeSetupClient(native: NativeBridge): ImeSetupClient | undefined {
         setupListeners.delete(listener);
       };
     },
+    // 宿主重读后有变化时经 `msimeHarmonySetupChanged` 推回来，和别的变化一样。
+    refresh:
+      typeof native.refreshSetupStatus === "function"
+        ? () => native.refreshSetupStatus()
+        : undefined,
   };
 }
 
@@ -543,9 +559,9 @@ function splashSeen(native: NativeBridge): boolean {
 }
 
 /**
- * 键盘功能面板直接打开的页面：「词库」「反馈」和「关于」。与 `EntryAbility` 从 Want 中接受的列表相同；其他值都不是本页承诺过的链接，而改为打开「输入」（未知页面 id 就会解析到它）比停在原处更让人摸不着头脑。
+ * 键盘直接打开的页面：功能面板的「词库」「反馈」「关于」和皮肤选择器的「更多皮肤」。与 `EntryAbility` 从 Want 中接受的列表（`SettingsPageLink.PAGES`）相同，scripts/test-harmony-settings-links.py 核对两份一致；其他值都不是本页承诺过的链接，而改为打开「输入」（未知页面 id 就会解析到它）比停在原处更让人摸不着头脑。
  */
-const LINKED_PAGES: readonly string[] = ["dictionary", "feedback", "about"];
+const LINKED_PAGES: readonly string[] = ["dictionary", "feedback", "about", "skin"];
 
 function linkedPage(value: unknown): string | undefined {
   return typeof value === "string" && LINKED_PAGES.includes(value) ? value : undefined;
@@ -572,13 +588,25 @@ globalThis.msimeHarmonyOpenPage = (page: string) => {
   else queuedLinkedPage = linked;
 };
 
+/** Google 登录等浏览器跳回最多 300 秒（client-core 的 `GOOGLE_SIGN_IN_TIMEOUT`），之后还要用授权码换 token；默认的 30 秒会在用户还在浏览器里时就报超时。取消由页面的「取消」经 google_cancel 完成，不靠这个超时。 */
+const GOOGLE_SIGN_IN_TIMEOUT_MS = 6 * 60 * 1000;
+
 function accountClient(native: NativeBridge): AccountClient {
   const request = <T,>(action: Record<string, unknown>): Promise<T> =>
     bridgeRequest(native, "account", JSON.stringify(action)).then(unwrap<T>);
-  const user = (value: { id: string; display_name: string; created_at: string }) => ({
+  // 头像地址原样交给页面，页面据此决定何时重新取头像；图片本身由宿主的 `avatar` 下载（页面只放行 `data:` 图片），不认可的地址在宿主那边被拒绝。
+  const user = (value: {
+    id: string;
+    display_name: string;
+    created_at: string;
+    avatar_url?: string | null;
+  }) => ({
     id: value.id,
     displayName: value.display_name,
     createdAt: value.created_at,
+    ...(typeof value.avatar_url === "string" && value.avatar_url.startsWith("https://")
+      ? { avatarUrl: value.avatar_url }
+      : {}),
   });
   const profile = (value: {
     user: { id: string; display_name: string; created_at: string };
@@ -602,6 +630,7 @@ function accountClient(native: NativeBridge): AccountClient {
         email: value.providers.email === true,
         phone: value.providers.phone === true,
         apple: value.providers.apple === true,
+        google: value.providers.google === true,
       };
     },
     requestCode: async (provider, target) => {
@@ -618,6 +647,23 @@ function accountClient(native: NativeBridge): AccountClient {
       }>({ operation: "login", challenge_id: challengeId, credential: code });
       return { user: value.user ? user(value.user) : null };
     },
+    // 宿主在 127.0.0.1 上监听、用系统浏览器打开 Google，等它跳回来再用授权码登录；页面只看到结果。
+    googleLogin: async () => {
+      const value = unwrap<{
+        user: { id: string; display_name: string; created_at: string };
+      }>(
+        await bridgeRequest(
+          native,
+          "account",
+          JSON.stringify({ operation: "google_sign_in" }),
+          GOOGLE_SIGN_IN_TIMEOUT_MS,
+        ),
+      );
+      return { user: value.user ? user(value.user) : null };
+    },
+    googleCancel: async () => {
+      await request({ operation: "google_cancel" });
+    },
     profile: async () =>
       profile(
         await request<{
@@ -632,6 +678,9 @@ function accountClient(native: NativeBridge): AccountClient {
           identities: { provider: string }[];
         }>({ operation: "rename", display_name: displayName }),
       ),
+    // 头像的 `data:` 地址：宿主按 client-core 的头像规则从会话用户的地址下载并校验，没有头像或取不到时为 null，页面显示名字首字。
+    avatar: async () =>
+      (await request<{ data_url: string | null }>({ operation: "avatar" })).data_url ?? null,
     logout: async (all) => {
       await request({ operation: "logout", all });
     },
@@ -917,6 +966,8 @@ function localVoiceModelClient(native: NativeBridge): LocalVoiceModelClient {
   return {
     list: () => request<LocalVoiceModelList>({ operation: "list" }),
     install: (id) => request<string>({ operation: "install", id }, 6 * 60 * 60 * 1000),
+    // 等用户在系统选择器里选文件，再复制和解压几百 MB，期限和下载一样放宽。
+    import: (id) => request<string | null>({ operation: "import", id }, 6 * 60 * 60 * 1000),
     cancel: (id) => request<boolean>({ operation: "cancel", id }),
     remove: async (id) => {
       await request<null>({ operation: "remove", id });
@@ -930,7 +981,11 @@ function localVoiceModelClient(native: NativeBridge): LocalVoiceModelClient {
   };
 }
 
+/**
+ * 云剪贴板面板的动作原样交给原生账号桥接：`operation` 改名为 `clipboard_operation`，其余字段（`search`、`text`、`id`、`enabled`、`device_id`）不动。列表、上传和 `devices`、`approve`、`reject`、`remove`、`reset` 在原生一侧经端到端加密驱动，结果是驱动给的形状；错误以 `{code}` 抛出，码是驱动或账号桥接给的（例如 `clipboard_device_pending`）。
+ */
 function cloudClipboardClient(native: NativeBridge, close: () => void): CloudClipboardPanelClient {
+  type Response = Awaited<ReturnType<CloudClipboardPanelClient["request"]>>;
   return {
     close: async () => close(),
     copyText: async (text) => native.copyText(text),
@@ -940,11 +995,15 @@ function cloudClipboardClient(native: NativeBridge, close: () => void): CloudCli
         native,
         "account",
         JSON.stringify({ operation: "clipboard", clipboard_operation: operation, ...payload }),
+        // 一次操作是驱动依次发出的几个请求（首次使用时取密钥状态、登记本机、建钥、再取状态、列表），每个都有自己 30 秒的读超时，页面这边等得比单个请求久。
+        CLOUD_CLIPBOARD_TIMEOUT_MS,
       );
-      return unwrap<{ items?: { id: string; text: string }[]; enabled?: boolean }>(value);
+      return unwrap<Response>(value);
     },
   };
 }
+
+const CLOUD_CLIPBOARD_TIMEOUT_MS = 2 * 60 * 1000;
 
 type CloudDictionaryPage = "main" | "catalog" | "candidates" | "files" | "apply";
 
@@ -1067,12 +1126,33 @@ function makeClient(
         offset,
         limit,
       }),
+    count: async (kind: LocalDictionaryKind) =>
+      dictionaryReply<{ count: number }>({ operation: "count", kind }).count,
     retry: async (request_id: string) => {
       dictionaryReply<{ applied: boolean }>({ operation: "retry", request_id });
     },
     dismissFailure: async (request_id: string) => {
       dictionaryReply<{ applied: boolean }>({ operation: "dismiss_failure", request_id });
     },
+    // 只读码表，`DictionaryMaintenancePolicy` 把它当读操作：组字时也能查，不会停掉键盘会话。
+    wubiCodes: async (text: string) =>
+      dictionaryReply<WubiCodeLookup>({ operation: "wubi_codes", text }),
+  };
+  // 命名词库。导入要解析最多 16 MiB 的文本，所以走 startRequest 在原生工作线程上执行，并给足两分钟；其余操作只改几个小文件。
+  const collectionsReply = async (action: Record<string, unknown>) =>
+    unwrap<DictionaryCollectionsView>(
+      await bridgeRequest(native, "dictionary_collections", JSON.stringify(action), 120000),
+    );
+  const dictionaryCollections: DictionaryCollectionsClient = {
+    load: () => collectionsReply({ operation: "load" }),
+    flush: () => collectionsReply({ operation: "flush" }),
+    create: (name) => collectionsReply({ operation: "create", name, kind: "pinyin" }),
+    delete: (id) => collectionsReply({ operation: "delete", id }),
+    setEnabled: (id, enabled) => collectionsReply({ operation: "set_enabled", id, enabled }),
+    addWords: (id, entries) => collectionsReply({ operation: "add_words", id, entries }),
+    importFile: (name, format, text) =>
+      collectionsReply({ operation: "import", name, kind: "pinyin", format, text }),
+    installCommunity: (resource) => collectionsReply({ operation: "install_community", resource }),
   };
   const userWordCount = (): number | undefined => {
     try {
@@ -1178,11 +1258,7 @@ function makeClient(
   // 只读一次：能力记录在应用运行期间不会变化，下面的反馈报告据此写明版本。
   const host = unwrap<HostCapabilities>(native.hostCapabilities());
   const setup = imeSetupClient(native);
-  // 状态栏和导航栏属于窗口，只有宿主够得着。
-  const chrome: HostChromeClient | undefined =
-    typeof native.setSystemBars === "function"
-      ? { setSystemBars: (bars) => native.setSystemBars(JSON.stringify(bars)) }
-      : undefined;
+  const chrome = hostChrome(native);
   // 「反馈」经账号桥接提交：有人登录时桥接附上已登录的会话，无人登录时附上设备的匿名账号会话（宿主在原生层持有，与 Android 一致）。只有两者都没有时（例如匿名注册还没成功）提交才会以 `account_unauthorized` 被拒绝，页面会如实提示。
   const feedback: FeedbackClient = {
     submit: async (report) => {
@@ -1244,7 +1320,34 @@ function makeClient(
       const document = JSON.stringify({ format_version: 1, revision: revision + 1, preferences });
       return unwrap<Snapshot>(native.savePreferences(revision, document));
     },
+    // 「修复配置文件…」：只在页面报「配置文件无法读取或版本较新」并且用户点了之后才调用。旧版本读不懂新版本写的文件时，原文件备份在旁边，能认的设置保留，其余恢复默认。
+    recoverPreferences: async (): Promise<PreferencesRecovery> => {
+      const value = unwrap<{
+        recovered: boolean;
+        snapshot: Snapshot;
+        backup_path?: string;
+        salvaged?: boolean;
+      }>(await bridgeRequest(native, "repair_preferences", ""));
+      return {
+        snapshot: value.snapshot,
+        backupPath: value.recovered ? (value.backup_path ?? null) : null,
+        salvaged: value.salvaged ?? false,
+      };
+    },
     readAppVersion: async () => native.appVersion(),
+    // GitHub 的发布列表由 Rust 在原生工作线程上读取和比较（`msime_client_update_check`），平台由 ArkTS 填入。
+    checkUpdate: async (request: UpdateCheckRequest) =>
+      unwrap<UpdateCheckResult>(
+        await bridgeRequest(
+          native,
+          "update_check",
+          JSON.stringify({
+            current_version: request.currentVersion,
+            ...(request.edition === undefined ? {} : { edition: request.edition }),
+            ...(request.arch === undefined ? {} : { arch: request.arch }),
+          }),
+        ),
+      ),
     scanSkinCatalog: async () => unwrap<SkinCatalog>(native.scanSkinCatalog()),
     readSkinImage: async (id: string, relative: string) =>
       unwrap<SkinImage>(native.readSkinImage(id, relative)),
@@ -1295,6 +1398,7 @@ function makeClient(
       },
     },
     dictionary,
+    dictionaryCollections,
     typingStatistics,
     vocabularyReview,
     aiAssistant,
@@ -1338,9 +1442,13 @@ function makeClient(
       // The reply is unwrapped rather than ignored so a host that could not open the picker says
       // so, which the card reports; the welcome flow's own copy of this call is the exception,
       // because that screen has its own failure to show and nothing to add to it.
-      showInputMethodPicker: async () => {
-        unwrap<boolean>(native.showInputMethodPicker());
-      },
+      // 手机上不弹系统的选择对话框（OpenHarmony 自带的那个没有样式的列表），改成引导用户长按键盘下方的 🌐，见 `openKeyboardSwitchGuide`。2in1 用实体键盘，键盘下方没有 🌐，照旧弹系统对话框。
+      showInputMethodPicker:
+        host.mobile_settings !== false
+          ? openKeyboardSwitchGuide
+          : async () => {
+              unwrap<boolean>(native.showInputMethodPicker());
+            },
       // 「设置」卡片各项检查背后的两项设置状态，在 2in1 上也是「输入」和「关于」页警告条的依据。2in1 没有首页要画，但仍需要这些操作：警告条调用的是同样两个。
       setup,
     },
@@ -1436,9 +1544,12 @@ function HarmonyWelcomeFlow({
         // 资源由键盘启动时就绪，这里没有单独的步骤要执行；流程需要的是这个 promise，而不是实际工作。
         prepareResources: async () => {},
         openSystemKeyboardSettings: async () => native.openSystemKeyboardSettings(),
-        showInputMethodPicker: async () => {
-          native.showInputMethodPicker();
-        },
+        showInputMethodPicker:
+          mobileSettings !== false
+            ? openKeyboardSwitchGuide
+            : async () => {
+                native.showInputMethodPicker();
+              },
       }}
       // 方案步骤只提供本版本和本宿主具备的键盘。
       edition={client.host?.edition}
@@ -1596,18 +1707,56 @@ function HarmonySettings({
   );
 }
 
+/** 告诉宿主页面已经画出来了。只在页面加载时调用：桥接对象在页面加载前就已注册，等它只是以防万一；等不到时宿主几秒后自己撤掉启动画面。 */
+function reportLaunchPainted(): void {
+  whenBridgeReady()
+    .then((native) => {
+      if (typeof native.launchPainted === "function") native.launchPainted();
+    })
+    .catch(() => undefined);
+}
+
+/**
+ * 子树第一次提交后再等两帧（第一帧回调时这一帧还没上屏）调用 `onPainted`。
+ *
+ * 冷启动时宿主在网页上盖着和系统启动窗一模一样的启动画面，页面加载期间不露出空白的网页。设置页第一次提交时还在读设置（「正在读取设置」），但读取是同步的桥接调用，下一个微任务就带着设置重画，所以两帧之后上屏的已经是设置本身；欢迎流程的第一帧则是和启动窗一样的开屏。撤掉盖板时看到的就是画好的页面。
+ */
+function AfterFirstPaint({ onPainted, children }: { onPainted: () => void; children: ReactNode }) {
+  useEffect(() => {
+    let second = 0;
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(onPainted);
+    });
+    return () => {
+      cancelAnimationFrame(first);
+      cancelAnimationFrame(second);
+    };
+  }, [onPainted]);
+  return children;
+}
+
+/** 状态栏和导航栏属于窗口，只有宿主够得着。 */
+function hostChrome(native: NativeBridge): HostChromeClient | undefined {
+  return typeof native.setSystemBars === "function"
+    ? { setSystemBars: (bars) => native.setSystemBars(JSON.stringify(bars)) }
+    : undefined;
+}
+
 const root = document.getElementById("root");
 if (root) {
   const app = createRoot(root);
   // 启动页是第一帧，所以必须在它渲染前设好主题。它跟随系统，直到知道用户自选外观的欢迎流程或设置页接管文档。
   const stopFollowingSystemTheme = followSystemTheme();
-  // Waiting for the bridge took up to five seconds against a blank white window. Every other host
-  // shows the shared startup page while it opens; there was never a reason for this one not to.
-  app.render(
-    <StrictMode>
-      <SettingsStartupPage />
-    </StrictMode>,
-  );
+  // 等桥接最多要五秒。手机上这段时间什么都不画：宿主盖着和系统启动窗一样的画面（跟随系统深浅色），等设置页或首次启动的欢迎流程画出来才撤掉，中间不露出启动页、空白网页或「正在读取设置」。二合一是桌面形态，照旧显示共享的启动页。此时还不知道宿主报告的形态，按与样式表 max-phone 相同的宽度判断。
+  const phoneLaunch = window.matchMedia("(max-width: 600px)").matches;
+  if (!phoneLaunch)
+    app.render(
+      <StrictMode>
+        <AfterFirstPaint onPainted={reportLaunchPainted}>
+          <SettingsStartupPage />
+        </AfterFirstPaint>
+      </StrictMode>,
+    );
   whenBridgeReady()
     .then(async (native) => {
       // A refused query answers "no onboarding": someone who has been using the keyboard for weeks
@@ -1616,18 +1765,21 @@ if (root) {
       // 在页面表明欢迎流程不会挡路之前，宿主会暂缓显示通知卡片。页面直接打开设置时（包括等首次读取等太久而放弃之后），不会再有别的地方告诉它。
       if (!onboarding && typeof native.onboardingFinished === "function")
         native.onboardingFinished();
-      // 两者都在这里、在 React 之外读取，因为都是一次性的宿主读取：链接的页面只交出一次，而闪屏标记马上就要写入。
+      // 两者都在这里、在 React 之外读取，因为都是一次性的宿主读取：链接的页面只交出一次，而闪屏标记会在欢迎流程播完开屏时写入。
       const linkedPage = pendingLinkedPage(native);
       const splashUnseen = !splashSeen(native);
       stopFollowingSystemTheme();
+      // 开屏只属于首次启动：欢迎流程在闪屏标记未写入时播它，平时冷启动直接进设置。
       app.render(
         <StrictMode>
-          <HarmonySettings
-            native={native}
-            onboarding={onboarding}
-            splashUnseen={splashUnseen}
-            linkedPage={linkedPage}
-          />
+          <AfterFirstPaint onPainted={reportLaunchPainted}>
+            <HarmonySettings
+              native={native}
+              onboarding={onboarding}
+              splashUnseen={splashUnseen}
+              linkedPage={linkedPage}
+            />
+          </AfterFirstPaint>
         </StrictMode>,
       );
     })

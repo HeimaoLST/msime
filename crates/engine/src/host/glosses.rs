@@ -142,7 +142,7 @@ pub fn candidate_target_glosses(
     if database_path.is_empty() {
         return Err(EngineError::failed(diagnostics::OFFLINE_GLOSS_UNAVAILABLE));
     }
-    let database_path = crate::paths::sqlite_path_no_follow(Path::new(database_path))
+    let database_path = crate::paths::sqlite_read_only_path_no_follow(Path::new(database_path))
         .map_err(|_| EngineError::failed(diagnostics::OFFLINE_GLOSS_UNAVAILABLE))?;
     let connection = Connection::open_with_flags(
         &database_path,
@@ -205,9 +205,13 @@ pub fn english_phonetics(database_path: &str, words: &[String]) -> Result<Vec<St
     if database_path.is_empty() {
         return Err(EngineError::failed(diagnostics::PRONUNCIATION_UNAVAILABLE));
     }
+    let database_path = crate::paths::sqlite_read_only_path_no_follow(Path::new(database_path))
+        .map_err(|_| EngineError::failed(diagnostics::PRONUNCIATION_UNAVAILABLE))?;
     let connection = Connection::open_with_flags(
-        database_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+        &database_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW
+            | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
     )
     .map_err(|_| EngineError::failed(diagnostics::PRONUNCIATION_UNAVAILABLE))?;
     connection
@@ -259,8 +263,13 @@ fn open_gloss_dictionary(path: &Path) -> Option<EnglishDictionary> {
 }
 
 /// `candidate_gloss_key` (bridge.cpp:149-188): `(key, chinese_to_english)`, or `None` for a row that gets no gloss. Emoji and kaomoji never do; text of ASCII letters, spaces, `-` and `'` with at least one letter is looked up lowercased as English; otherwise any Han character makes the whole text a Chinese key. `&str` is valid UTF-8, so the C++ rejection of malformed text cannot arise.
+///
+/// 日文混输行（`CandidateSource::MixedJapanese`）也没有释义：私、寿司 这样的汉字是日文，拿去查中文释义会在日文下面写出中文意思，和日文方案、临时日文不出释义一致。
 pub(super) fn candidate_gloss_key(text: &str, source: u8) -> Option<(String, bool)> {
-    if source == CandidateSource::Emoji as u8 || source == CandidateSource::Kaomoji as u8 {
+    if source == CandidateSource::Emoji as u8
+        || source == CandidateSource::Kaomoji as u8
+        || source == CandidateSource::MixedJapanese as u8
+    {
         return None;
     }
     let latin = text

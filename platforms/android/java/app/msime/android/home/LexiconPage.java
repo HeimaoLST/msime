@@ -1,8 +1,10 @@
 package app.msime.android.home;
 
-import app.msime.android.TextPolicy;
+import app.msime.android.LayoutPolicy;
+
+import app.msime.android.DrawablePolicy;
+import app.msime.android.ThemeColorPolicy;
 import android.content.Context;
-import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
@@ -20,6 +22,7 @@ import app.msime.android.DictionaryCollectionsStore;
 import app.msime.android.InputFeatureToggle;
 import app.msime.android.HttpBodyPolicy;
 import app.msime.android.ListPolicy;
+import app.msime.android.NumberPolicy;
 import app.msime.android.TextPolicy;
 import app.msime.android.ViewPolicy;
 import java.io.IOException;
@@ -33,20 +36,19 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * 词库页：已安装（内置拼音词库加各个命名词库），管理组（新建、导入、导出、刷新），发现词库（社区），学习组「记忆新词」，以及只在 Tauri 合包里出现的「更多」组（背单词、云词库，P21）。
+ * 词库页：已安装（内置拼音词库加各个命名词库），管理组（新建、导入、导出、刷新），发现词库（社区里的前几个，末尾「浏览更多词库」进社区词库的完整列表），学习组「记忆新词」，以及只在 Tauri 合包里出现的「更多」组（背单词、云词库，P21）。
  *
  * <p>导入、导出和刷新原先是大标题行右侧的三个胶囊，窄屏上把「词库」两个字挤成「词…」（#5682），现在和新建一起放在「已安装」下面那张卡片里，行间有分隔线；大标题和其他详情页一样只放标题。
  *
  * <p>命名词库的元数据和词条都经 {@link DictionaryCollectionsStore}；导入和导出走系统文件选择器（SAF），不申请存储权限。导入来源对话框只列 client-core 实际接受的格式。
  */
-public final class LexiconPage extends DetailPage {
+public final class LexiconPage extends ReloadingDetailPage {
     private static final String BUILTIN_KIND = "pinyin";
     private static final int DISCOVER_LIMIT = 8;
 
     /** 渲染一次需要的全部数据；`builtinCount` 为负表示读不到。 */
     private record Model(DictionaryCollectionsStore.View view, long builtinCount, boolean learning, String failure) {}
 
-    @Nullable private LinearLayout column;
     @Nullable private Model model;
     @Nullable private List<CommunityCatalog.Item> discover;
     @Nullable private String discoverFailure;
@@ -59,20 +61,20 @@ public final class LexiconPage extends DetailPage {
     private final ActivityResultLauncher<String> createDocument =
         registerForActivityResult(new ActivityResultContracts.CreateDocument("text/plain"), this::onExportPicked);
 
-    @Override protected void buildContent(LinearLayout column, Bundle args) {
-        this.column = column;
+    @Override protected void onContentReady() {
         if (model != null) render();
-        reload(false);
+    }
+
+    @Override protected void onInitialReloadScheduled() {
         loadDiscover();
     }
 
-    @Override protected void onBecameVisible() {
-        if (column != null) reload(false);
+    @Override protected void reload() {
+        reload(false);
     }
 
-    @Override public void onDestroyView() {
-        column = null;
-        super.onDestroyView();
+    @Override protected void onContentDestroyed() {
+        installing.clear();
     }
 
     // ---- 数据 ----
@@ -94,8 +96,7 @@ public final class LexiconPage extends DetailPage {
         // 打开页面也顺手送一批导入词库的待写入词条：返回的视图和 load 一样，只是多送了一批，不必等用户点刷新。
         DictionaryCollectionsStore.Result<DictionaryCollectionsStore.View> view = DictionaryCollectionsStore.flush(context);
         DictionaryCollectionsStore.Result<Long> count = DictionaryCollectionsStore.builtinCount(context, BUILTIN_KIND);
-        JSONObject snapshot = HostStore.loadPreferences(context);
-        JSONObject preferences = snapshot == null ? null : snapshot.optJSONObject("preferences");
+        JSONObject preferences = KeyboardSheets.preferences(context);
         boolean learning = preferences == null
             ? InputFeatureToggle.LEARNING.enabledByDefault()
             : preferences.optBoolean(InputFeatureToggle.LEARNING.key(), InputFeatureToggle.LEARNING.enabledByDefault());
@@ -107,14 +108,9 @@ public final class LexiconPage extends DetailPage {
     private void loadDiscover() {
         HostTask.runNetwork(this, context -> new CommunityCatalog(context).list(CommunityRequest.Kind.DICTIONARY, "", 0, null),
             page -> {
-                if (page == null || page.failed()) {
-                    discover = null;
-                    discoverFailure = page == null ? "暂时连不上社区，稍后再试。" : page.failure();
-                } else {
-                    List<CommunityCatalog.Item> items = page.items();
-                    discover = CommunityRequest.limitedCopy(items, DISCOVER_LIMIT);
-                    discoverFailure = null;
-                }
+                CommunityCatalog.Discovery result = CommunityCatalog.discovery(page, DISCOVER_LIMIT);
+                discover = result.items();
+                discoverFailure = result.failure();
                 render();
             });
     }
@@ -122,7 +118,7 @@ public final class LexiconPage extends DetailPage {
     // ---- 渲染 ----
 
     private void render() {
-        LinearLayout target = column;
+        LinearLayout target = contentColumn();
         Model current = model;
         if (target == null || current == null) return;
         Context context = requireContext();
@@ -130,15 +126,15 @@ public final class LexiconPage extends DetailPage {
 
         GroupCard installed = GroupCard.add(target, "已安装").withDividers(58);
         String builtinCount = current.builtinCount() < 0 ? null
-            : DictionaryCollectionsStore.countLabel(current.builtinCount());
+            : NumberPolicy.groupedCount(current.builtinCount());
         installed.addView(KeyboardSheets.badgeNavRow(context, "汉", "拼音词库", builtinCount, "已启用",
-            Ui.accent(context), () -> openDetail(DictionaryCollectionsStore.BUILTIN_PINYIN, "拼音词库")));
+            ThemeColorPolicy.accent(context), () -> openDetail(DictionaryCollectionsStore.BUILTIN_PINYIN, "拼音词库")));
         for (DictionaryCollectionsStore.Collection collection : current.view().collections()) {
-            String subtitle = DictionaryCollectionsStore.countLabel(collection.entryCount())
+            String subtitle = NumberPolicy.groupedCount(collection.entryCount())
                 + ("community".equals(collection.sourceType()) ? " · 社区" : "");
-            installed.addView(KeyboardSheets.badgeNavRow(context, Ui.initial(collection.name(), "词"), collection.name(),
+            installed.addView(KeyboardSheets.badgeNavRow(context, TextPolicy.initial(collection.name(), "词"), collection.name(),
                 subtitle, collection.enabled() ? "已启用" : "已停用",
-                collection.enabled() ? Ui.accent(context) : Ui.subText(context),
+                collection.enabled() ? ThemeColorPolicy.accent(context) : ThemeColorPolicy.subText(context),
                 () -> openDetail(collection.id(), collection.name())));
         }
         installed.footer("点进词库可以启用、停用和编辑词条。已启用的词库会一起参与候选。");
@@ -163,12 +159,15 @@ public final class LexiconPage extends DetailPage {
         } else {
             for (CommunityCatalog.Item item : items) community.addView(discoverRow(item, current.view()));
         }
+        // 这里只列前几个，完整列表（搜索、详情、举报）压在词库页上面，返回回到这里。
+        community.nav("浏览更多词库", "搜索社区里的全部词库", null,
+            () -> CommunityFragment.browse(context, CommunityRequest.Kind.DICTIONARY));
 
         GroupCard learning = GroupCard.add(target, "学习");
         InputFeatureToggle toggle = InputFeatureToggle.LEARNING;
         learning.toggle(toggle.title(), toggle.description(), current.learning(), this::saveLearning);
 
-        if (Ui.tauriAvailable()) {
+        if (ManagementUi.available()) {
             GroupCard more = GroupCard.add(target, "更多");
             more.nav("背单词", "在管理界面里复习收藏的单词", null, this::openVocabularyReview);
             more.nav("云词库", "在管理界面里管理云端词库", null, this::openCloudDictionary);
@@ -177,7 +176,7 @@ public final class LexiconPage extends DetailPage {
 
     /** 第一次读就失败时页面上什么数据也没有；刷新入口在管理卡片里，这里单独留一张卡片给它，不让页面空着没法重试。 */
     private void renderUnavailable() {
-        LinearLayout target = column;
+        LinearLayout target = contentColumn();
         if (target == null) return;
         Context context = requireContext();
         target.removeAllViews();
@@ -190,36 +189,34 @@ public final class LexiconPage extends DetailPage {
     private View discoverRow(CommunityCatalog.Item item, DictionaryCollectionsStore.View view) {
         Context context = requireContext();
         LinearLayout row = KeyboardSheets.baseRow(context);
-        row.addView(KeyboardSheets.badge(context, Ui.initial(item.name(), "词")));
+        row.addView(KeyboardSheets.badge(context, TextPolicy.initial(item.name(), "词")));
         List<String> parts = new ArrayList<>(2);
         if (!item.author().isEmpty()) parts.add("@" + item.author());
         JSONArray words = item.payload() == null ? null : item.payload().optJSONArray("words");
-        if (words != null) parts.add(DictionaryCollectionsStore.countLabel(words.length()));
+        if (words != null) parts.add(NumberPolicy.groupedCount(words.length()));
         if (parts.isEmpty() && !item.description().isEmpty()) parts.add(item.description());
         row.addView(KeyboardSheets.texts(context, item.name(), parts.isEmpty() ? null : String.join(" · ", parts),
-                Ui.text(context)),
-            Ui.weightWrap(1f));
+                ThemeColorPolicy.text(context)),
+            LayoutPolicy.weightedWrapParams(1f));
         boolean added = view.installed(item.id());
         boolean busy = installing.contains(item.id());
         boolean enabled = !added && !busy;
         TextView button;
         if (enabled) {
-            button = Ui.pillButton(context, "添加", Ui.TEXT_BUTTON_SMALL, 500,
-                Ui.accentSoft(context), Ui.accent(context), Ui.BUTTON_PADDING_H, Ui.BUTTON_PADDING_V,
+            button = ViewPolicy.pillButton(context, "添加", Ui.TEXT_BUTTON_SMALL, 500,
+                ThemeColorPolicy.accentSoft(context), ThemeColorPolicy.accent(context), Ui.BUTTON_PADDING_H, Ui.BUTTON_PADDING_V,
                 Ui.COMPACT_BUTTON_MIN_HEIGHT, 0, () -> install(item));
         } else {
-            button = Ui.styledLabel(context, added ? "已添加" : "添加中",
-                Ui.TEXT_BUTTON_SMALL, 500, Ui.subText(context));
-            ViewPolicy.setCentered(button);
-            ViewPolicy.setSingleLine(button);
-            ViewPolicy.setBackground(button, Ui.pillRipple(context,
-                added ? Ui.rowBackground(context) : Ui.accentSoft(context)));
-            Ui.setButtonPadding(button, context);
-            Ui.setTextMinHeightDp(button, context, Ui.COMPACT_BUTTON_MIN_HEIGHT);
+            button = ViewPolicy.centeredSingleLineLabel(context, added ? "已添加" : "添加中",
+                Ui.TEXT_BUTTON_SMALL, 500, ThemeColorPolicy.subText(context));
+            ViewPolicy.setBackground(button, ViewPolicy.pillRipple(context,
+                added ? ThemeColorPolicy.rowBackground(context) : ThemeColorPolicy.accentSoft(context)));
+            ViewPolicy.setButtonPadding(context, button);
+            ViewPolicy.setTextMinHeightDp(context, button, Ui.COMPACT_BUTTON_MIN_HEIGHT);
             ViewPolicy.setEnabled(button, false);
         }
-        button.setAccessibilityDelegate(KeyboardSheets.buttonDelegate(button.getText() + "，" + item.name()));
-        LinearLayout.LayoutParams params = Ui.rowGapParams(context);
+        button.setAccessibilityDelegate(HomeButtonPolicy.buttonDelegate(button.getText() + "，" + item.name()));
+        LinearLayout.LayoutParams params = LayoutPolicy.rowGapParams(context, Ui.ROW_GAP);
         row.addView(button, params);
         return row;
     }
@@ -304,7 +301,7 @@ public final class LexiconPage extends DetailPage {
         DictionaryCollectionsStore.ImportReport report = result.value().importReport();
         if (report == null) return "已导入「" + name + "」";
         StringBuilder message = new StringBuilder("已导入「").append(name).append("」，")
-            .append(DictionaryCollectionsStore.countLabel(report.imported()));
+            .append(NumberPolicy.groupedCount(report.imported()));
         if (report.duplicates() > 0) message.append("，跳过重复 ").append(report.duplicates()).append(" 条");
         if (report.failed() > 0) message.append("，").append(report.failed()).append(" 行无法识别");
         if (report.truncated()) message.append("，词库已满");
@@ -384,25 +381,19 @@ public final class LexiconPage extends DetailPage {
     // ---- 只在 Tauri 合包里有用的入口（P21），跳转写法与原 KeyboardFragment / AccountFragment 一致 ----
 
     private void openVocabularyReview() {
-        if (!Ui.tauriAvailable()) {
+        if (!ManagementUi.available()) {
             MsToast.show(requireContext(), "背单词需要管理界面合包，请使用 Tauri 合包打开。");
             return;
         }
-        Intent intent = new Intent();
-        intent.setClassName(requireContext(), "app.msime.android.MainActivity");
-        intent.putExtra("msime_settings_page", "vocabulary");
-        startActivity(intent);
+        startActivity(ManagementUi.settingsPage(requireContext(), "vocabulary"));
     }
 
     private void openCloudDictionary() {
-        if (!Ui.tauriAvailable()) {
+        if (!ManagementUi.available()) {
             MsToast.show(requireContext(), "云词库需要管理界面合包，请使用 Tauri 合包打开。您仍可在本机使用词库设置。");
             return;
         }
-        Intent intent = new Intent();
-        intent.setClassName(requireContext(), "app.msime.android.MainActivity");
-        intent.putExtra("msime_mobile_panel", "cloud-dictionary");
-        startActivity(intent);
+        startActivity(ManagementUi.mobilePanel(requireContext(), "cloud-dictionary"));
     }
 
 }

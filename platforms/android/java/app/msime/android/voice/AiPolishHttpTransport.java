@@ -26,10 +26,9 @@ public final class AiPolishHttpTransport implements AiPolishClient.Transport {
             HttpURLConnection target = connection;
             cancellation.attach(target::disconnect);
             if (cancellation.cancelled()) throw new AiPolishClient.Failure(AiPolishClient.Reason.CANCELLED);
-            connection.setInstanceFollowRedirects(false);
+            HttpConnectionPolicy.rejectRedirects(connection);
             connection.setRequestMethod("POST");
-            connection.setConnectTimeout(60_000);
-            connection.setReadTimeout(60_000);
+            HttpConnectionPolicy.setTimeouts(connection, 60_000, 60_000);
             connection.setDoOutput(true);
             connection.setFixedLengthStreamingMode(bytes.length);
             connection.setRequestProperty("Content-Type", "application/json");
@@ -40,7 +39,7 @@ public final class AiPolishHttpTransport implements AiPolishClient.Transport {
             }
             try (OutputStream output = connection.getOutputStream()) { output.write(bytes); }
             int status = connection.getResponseCode();
-            if (status < 200 || status >= 300)
+            if (!HttpConnectionPolicy.isSuccessful(status))
                 throw new AiPolishClient.Failure(AiPolishClient.Reason.UNAVAILABLE);
             byte[] response;
             try (InputStream input = connection.getInputStream()) {
@@ -53,7 +52,7 @@ public final class AiPolishHttpTransport implements AiPolishClient.Transport {
             JSONObject document = new JSONObject(TextPolicy.utf8(response));
             Object content = document.getJSONArray("choices").getJSONObject(0)
                 .getJSONObject("message").opt("content");
-            return strictContent(content);
+            return JsonPolicy.strictStringOrEmpty(content);
         } catch (AiPolishClient.Failure error) {
             throw error;
         } catch (IOException | JSONException | ClassCastException | SecurityException error) {
@@ -71,8 +70,4 @@ public final class AiPolishHttpTransport implements AiPolishClient.Transport {
     }
 
     /** Chat completions carry text; do not let org.json coerce malformed values into prose. */
-    static String strictContent(Object value) {
-        return AiProviderResponse.strictContent(value);
-    }
-
 }

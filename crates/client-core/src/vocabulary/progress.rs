@@ -13,11 +13,9 @@ use super::wordbook::{self, Wordbook};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::File;
-#[cfg(not(unix))]
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// The largest progress document that will be read.
+/// The largest progress document that will be read or written.
 ///
 /// A studied card serialises to roughly 120 bytes. Four mebibytes is tens of thousands of cards —
 /// past any real study history, and small enough that a damaged file cannot exhaust memory on a
@@ -37,6 +35,9 @@ const MAX_REVIEWS_PER_DAY: u32 = 86_400;
 pub const DEFAULT_NEW_CARDS_PER_DAY: usize = 20;
 /// The most cards one session will hand out, new and due together.
 pub const DEFAULT_SESSION_LIMIT: usize = 200;
+
+const PROGRESS_FILE: &str = "vocabulary-progress.json";
+const LOCK_FILE: &str = "vocabulary-progress.lock";
 
 #[derive(Debug, thiserror::Error)]
 pub enum VocabularyProgressError {
@@ -185,16 +186,27 @@ impl VocabularyProgress {
         Ok(())
     }
 
-    /// Drop day counts older than `MAX_RETAINED_DAYS` before `today`.
+    /// Drop old counts and keep at most `MAX_RETAINED_DAYS` recorded days, including `today`.
     ///
     /// Card schedules are never pruned. A card the user studied two years ago and has not seen
     /// since is exactly the card the schedule exists to bring back.
     fn prune(&mut self, today: &str) {
-        let Some(boundary) = crate::calendar::shift_day(today, -(MAX_RETAINED_DAYS as i64)) else {
-            return;
-        };
-        self.daily
-            .retain(|day, _| day.as_str() >= boundary.as_str());
+        if let Some(boundary) = crate::calendar::shift_day(today, -((MAX_RETAINED_DAYS - 1) as i64))
+        {
+            self.daily
+                .retain(|day, _| day.as_str() >= boundary.as_str());
+        }
+        // A clock rewind can leave future records in the window. Keep today's answer and the
+        // newest other records if their combined count exceeds the document's fixed limit.
+        let mut excess = self.daily.len().saturating_sub(MAX_RETAINED_DAYS);
+        self.daily.retain(|day, _| {
+            if day != today && excess > 0 {
+                excess -= 1;
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 
@@ -288,6 +300,11 @@ pub struct VocabularyProgressStore {
     directory: PathBuf,
 }
 
+struct ProgressLock {
+    directory: crate::file_lock::PrivateDirectory,
+    _lock: File,
+}
+
 impl VocabularyProgressStore {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
@@ -300,12 +317,7 @@ impl VocabularyProgressStore {
         &self.directory
     }
 
-    #[cfg(not(unix))]
-    fn path(&self) -> PathBuf {
-        self.directory.join("vocabulary-progress.json")
-    }
-
-    fn lock(&self) -> Result<File, VocabularyProgressError> {
+    fn lock(&self) -> Result<ProgressLock, VocabularyProgressError> {
         if let Some(parent) = self.directory.parent() {
             crate::storage::reject_symlink(parent)?;
         }
@@ -315,15 +327,25 @@ impl VocabularyProgressStore {
                 "vocabulary progress directory is not a real directory",
             )));
         }
-        let lock =
-            crate::file_lock::open_lock_file(self.directory.join("vocabulary-progress.lock"))?;
+        let directory = crate::file_lock::open_private_directory(&self.directory)?;
+        let lock = crate::file_lock::open_private_lock_file_at(
+            &directory,
+            std::ffi::OsStr::new(LOCK_FILE),
+        )?;
         crate::file_lock::exclusive(&lock)?;
-        Ok(lock)
+        Ok(ProgressLock {
+            directory,
+            _lock: lock,
+        })
     }
 
-    fn read_locked(&self) -> Result<VocabularyProgress, VocabularyProgressError> {
-        let file = match crate::storage::open_private_file_in(
-            &self.directory.join("vocabulary-progress.json"),
+    fn read_locked(
+        &self,
+        lock: &ProgressLock,
+    ) -> Result<VocabularyProgress, VocabularyProgressError> {
+        let file = match crate::file_lock::open_private_file_at(
+            &lock.directory,
+            std::ffi::OsStr::new(PROGRESS_FILE),
         ) {
             Ok(file) => file,
             // A missing file is a fresh profile. A damaged one is not, and is never overwritten
@@ -333,9 +355,6 @@ impl VocabularyProgressStore {
             }
             Err(_) => return Err(VocabularyProgressError::InvalidDocument),
         };
-        if file.metadata()?.len() > MAX_DOCUMENT_BYTES {
-            return Err(VocabularyProgressError::InvalidDocument);
-        }
         let bytes = crate::bounded_io::read_bounded_file(file, MAX_DOCUMENT_BYTES, || {
             VocabularyProgressError::InvalidDocument
         })?;
@@ -344,34 +363,27 @@ impl VocabularyProgressStore {
         Ok(value)
     }
 
-    fn write_locked(&self, value: &VocabularyProgress) -> Result<(), VocabularyProgressError> {
+    fn write_locked(
+        &self,
+        lock: &ProgressLock,
+        value: &VocabularyProgress,
+    ) -> Result<(), VocabularyProgressError> {
         value.validate()?;
         let bytes = serde_json::to_vec(value)?;
-        #[cfg(unix)]
-        {
-            let directory = crate::storage::open_private_directory(&self.directory)?;
-            crate::storage::write_private_file_at(
-                &directory,
-                std::ffi::OsStr::new("vocabulary-progress.json"),
-                &bytes,
-            )?;
-            Ok(())
+        if bytes.len() > MAX_DOCUMENT_BYTES as usize {
+            return Err(VocabularyProgressError::InvalidDocument);
         }
-        #[cfg(not(unix))]
-        {
-            let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
-            temporary.write_all(&bytes)?;
-            temporary.as_file().sync_all()?;
-            temporary
-                .persist(self.path())
-                .map(|_| ())
-                .map_err(|error| VocabularyProgressError::Io(error.error))
-        }
+        crate::file_lock::write_private_file_at(
+            &lock.directory,
+            std::ffi::OsStr::new(PROGRESS_FILE),
+            &bytes,
+        )?;
+        Ok(())
     }
 
     pub fn load(&self) -> Result<VocabularyProgress, VocabularyProgressError> {
-        let _lock = self.lock()?;
-        self.read_locked()
+        let lock = self.lock()?;
+        self.read_locked(&lock)
     }
 
     /// Record that the user answered `word` from `book` with `grade` on `today`.
@@ -396,10 +408,8 @@ impl VocabularyProgressStore {
             return Err(VocabularyProgressError::UnknownWord);
         }
 
-        let _lock = self.lock()?;
-        let mut document = self.read_locked()?;
-        document.prune(today);
-
+        let lock = self.lock()?;
+        let mut document = self.read_locked(&lock)?;
         let words = document.cards.entry(book.id.clone()).or_default();
         if words.len() >= wordbook::MAX_ENTRIES && !words.contains_key(word) {
             return Err(VocabularyProgressError::InvalidDocument);
@@ -432,7 +442,9 @@ impl VocabularyProgressStore {
             return Err(VocabularyProgressError::CountExhausted);
         }
 
-        self.write_locked(&document)?;
+        document.prune(today);
+
+        self.write_locked(&lock, &document)?;
         Ok(next)
     }
 
@@ -448,10 +460,10 @@ impl VocabularyProgressStore {
         if !settings.is_valid() {
             return Err(VocabularyProgressError::InvalidDocument);
         }
-        let _lock = self.lock()?;
-        let mut document = self.read_locked()?;
+        let lock = self.lock()?;
+        let mut document = self.read_locked(&lock)?;
         document.settings = settings;
-        self.write_locked(&document)?;
+        self.write_locked(&lock, &document)?;
         Ok(document)
     }
 
@@ -465,18 +477,52 @@ impl VocabularyProgressStore {
         if !wordbook::id_is_well_formed(wordbook) {
             return Err(VocabularyProgressError::InvalidWordbook);
         }
-        let _lock = self.lock()?;
-        let mut document = self.read_locked()?;
+        let lock = self.lock()?;
+        let mut document = self.read_locked(&lock)?;
         document.cards.remove(wordbook);
-        self.write_locked(&document)?;
+        self.write_locked(&lock, &document)?;
+        Ok(document)
+    }
+
+    /// Forget a removed book's schedule and clear its selection if it is still selected. Read
+    /// the current settings under the same lock as the replacement so a newer selection from
+    /// another host is neither cleared nor overwritten by a stale snapshot.
+    pub fn remove_wordbook_progress(
+        &self,
+        wordbook: &str,
+    ) -> Result<VocabularyProgress, VocabularyProgressError> {
+        if !wordbook::id_is_well_formed(wordbook) {
+            return Err(VocabularyProgressError::InvalidWordbook);
+        }
+        let lock = self.lock()?;
+        let mut document = self.read_locked(&lock)?;
+        document.cards.remove(wordbook);
+        if document.settings.wordbook == wordbook {
+            document.settings.wordbook.clear();
+        }
+        self.write_locked(&lock, &document)?;
+        Ok(document)
+    }
+
+    /// Clear review history while preserving the latest settings. The read and replacement share
+    /// one lock, so another host cannot update settings between them, and a crash cannot leave an
+    /// intermediate document with default settings.
+    pub fn clear_review_progress(&self) -> Result<VocabularyProgress, VocabularyProgressError> {
+        let lock = self.lock()?;
+        let settings = self.read_locked(&lock)?.settings;
+        let document = VocabularyProgress {
+            settings,
+            ..VocabularyProgress::default()
+        };
+        self.write_locked(&lock, &document)?;
         Ok(document)
     }
 
     /// Forget everything.
     pub fn reset(&self) -> Result<VocabularyProgress, VocabularyProgressError> {
-        let _lock = self.lock()?;
+        let lock = self.lock()?;
         let document = VocabularyProgress::default();
-        self.write_locked(&document)?;
+        self.write_locked(&lock, &document)?;
         Ok(document)
     }
 }
@@ -514,6 +560,28 @@ mod tests {
     fn a_missing_file_is_a_fresh_profile() {
         let (_directory, store) = store();
         assert_eq!(store.load().unwrap(), VocabularyProgress::default());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn progress_writes_stay_bound_to_the_locked_directory_after_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("progress");
+        fs::create_dir(&directory).unwrap();
+        let store = VocabularyProgressStore::new(&directory);
+        let lock = store.lock().unwrap();
+
+        let moved = root.path().join("progress-moved");
+        fs::rename(&directory, &moved).unwrap();
+        fs::create_dir(&directory).unwrap();
+
+        store
+            .write_locked(&lock, &VocabularyProgress::default())
+            .unwrap();
+
+        assert!(moved.join("vocabulary-progress.json").exists());
+        assert!(!directory.join("vocabulary-progress.json").exists());
+        fs::remove_dir_all(moved).unwrap();
     }
 
     #[test]
@@ -591,6 +659,36 @@ mod tests {
     }
 
     #[test]
+    fn writing_an_oversized_document_does_not_make_progress_unreadable() {
+        let (_directory, store) = store();
+        let state = CardState {
+            interval_days: 1,
+            reviews: 1,
+            last_reviewed: TODAY.to_owned(),
+            ..CardState::new(TODAY)
+        };
+        let words = (0..wordbook::MAX_ENTRIES)
+            .map(|index| (format!("word{index:05}"), state.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let document = VocabularyProgress {
+            cards: BTreeMap::from([
+                ("book-one".to_owned(), words.clone()),
+                ("book-two".to_owned(), words),
+            ]),
+            ..VocabularyProgress::default()
+        };
+        assert!(serde_json::to_vec(&document).unwrap().len() as u64 > MAX_DOCUMENT_BYTES);
+
+        let lock = store.lock().unwrap();
+        assert!(matches!(
+            store.write_locked(&lock, &document),
+            Err(VocabularyProgressError::InvalidDocument)
+        ));
+        drop(lock);
+        assert_eq!(store.load().unwrap(), VocabularyProgress::default());
+    }
+
+    #[test]
     fn a_document_with_an_out_of_range_card_is_rejected() {
         let (directory, store) = store();
         let path = directory.path().join("vocabulary-progress.json");
@@ -640,10 +738,92 @@ mod tests {
     }
 
     #[test]
+    fn a_new_answer_after_366_recorded_days_remains_writable() {
+        let (_directory, store) = store();
+        let start = "2025-01-01";
+        let mut document = VocabularyProgress::default();
+        for offset in 0..MAX_RETAINED_DAYS {
+            let day = crate::calendar::shift_day(start, offset as i64).unwrap();
+            document.daily.insert(
+                day,
+                DailyReviewCounts {
+                    answered: 1,
+                    introduced: 0,
+                },
+            );
+        }
+        fs::write(
+            store.directory().join(PROGRESS_FILE),
+            serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+
+        let next_day = crate::calendar::shift_day(start, MAX_RETAINED_DAYS as i64).unwrap();
+        store
+            .answer(
+                &book_of(&["synthetic"]),
+                "synthetic",
+                ReviewGrade::Unknown,
+                &next_day,
+            )
+            .unwrap();
+        let saved = store.load().unwrap();
+        assert_eq!(saved.daily.len(), MAX_RETAINED_DAYS);
+        assert_eq!(saved.answered_on(start), 0);
+        assert_eq!(saved.answered_on(&next_day), 1);
+    }
+
+    #[test]
+    fn a_clock_rewind_keeps_new_answers_writable_with_a_future_day() {
+        let (_directory, store) = store();
+        let boundary =
+            crate::calendar::shift_day(TODAY, -((MAX_RETAINED_DAYS - 1) as i64)).unwrap();
+        let tomorrow = crate::calendar::shift_day(TODAY, 1).unwrap();
+        let mut document = VocabularyProgress::default();
+        for offset in 0..MAX_RETAINED_DAYS - 1 {
+            let day = crate::calendar::shift_day(&boundary, offset as i64).unwrap();
+            document.daily.insert(
+                day,
+                DailyReviewCounts {
+                    answered: 1,
+                    introduced: 0,
+                },
+            );
+        }
+        document.daily.insert(
+            tomorrow.clone(),
+            DailyReviewCounts {
+                answered: 1,
+                introduced: 0,
+            },
+        );
+        fs::write(
+            store.directory().join(PROGRESS_FILE),
+            serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+
+        store
+            .answer(
+                &book_of(&["synthetic"]),
+                "synthetic",
+                ReviewGrade::Unknown,
+                TODAY,
+            )
+            .unwrap();
+        let saved = store.load().unwrap();
+        assert_eq!(saved.daily.len(), MAX_RETAINED_DAYS);
+        assert_eq!(saved.answered_on(TODAY), 1);
+        assert_eq!(saved.answered_on(&tomorrow), 1);
+        assert_eq!(saved.answered_on(&boundary), 0);
+    }
+
+    #[test]
     fn retention_keeps_the_exact_boundary_day() {
         let (_directory, store) = store();
         let book = book_of(&["ubiquitous", "ephemeral"]);
-        let boundary = crate::calendar::shift_day(TODAY, -(MAX_RETAINED_DAYS as i64)).unwrap();
+        let boundary =
+            crate::calendar::shift_day(TODAY, -((MAX_RETAINED_DAYS - 1) as i64)).unwrap();
 
         store
             .answer(&book, "ubiquitous", ReviewGrade::Known, &boundary)
@@ -681,6 +861,71 @@ mod tests {
 
         store.reset().unwrap();
         assert_eq!(store.load().unwrap(), VocabularyProgress::default());
+    }
+
+    #[test]
+    fn clearing_review_progress_keeps_the_latest_settings() {
+        let (_directory, store) = store();
+        let book = book_of(&["ubiquitous"]);
+        store
+            .answer(&book, "ubiquitous", ReviewGrade::Known, TODAY)
+            .unwrap();
+        store
+            .set_settings(VocabularyReviewSettings {
+                wordbook: book.id.clone(),
+                new_per_day: 12,
+                session_limit: 80,
+            })
+            .unwrap();
+        let stale = store.load().unwrap();
+        store
+            .set_settings(VocabularyReviewSettings {
+                wordbook: "kaoyan".to_owned(),
+                new_per_day: 7,
+                session_limit: 40,
+            })
+            .unwrap();
+
+        let reset = store.clear_review_progress().unwrap();
+        assert_eq!(reset.settings.new_per_day, 7);
+        assert_eq!(reset.settings.session_limit, 40);
+        assert_ne!(reset.settings.wordbook, stale.settings.wordbook);
+        assert_eq!(reset.settings.wordbook, "kaoyan");
+        assert!(reset.cards.is_empty());
+        assert!(reset.daily.is_empty());
+        assert_eq!(store.load().unwrap(), reset);
+    }
+
+    #[test]
+    fn removing_a_book_preserves_a_newer_selection_and_the_day_counts() {
+        let (_directory, store) = store();
+        let book = book_of(&["ubiquitous"]);
+        store
+            .answer(&book, "ubiquitous", ReviewGrade::Known, TODAY)
+            .unwrap();
+        store
+            .set_settings(VocabularyReviewSettings {
+                wordbook: book.id.clone(),
+                ..VocabularyReviewSettings::default()
+            })
+            .unwrap();
+        let stale = store.load().unwrap();
+        store
+            .set_settings(VocabularyReviewSettings {
+                wordbook: "kaoyan".to_owned(),
+                new_per_day: 8,
+                session_limit: 50,
+            })
+            .unwrap();
+
+        let removed = store.remove_wordbook_progress(&book.id).unwrap();
+        assert_ne!(removed.settings.wordbook, stale.settings.wordbook);
+        assert_eq!(removed.settings.wordbook, "kaoyan");
+        assert_eq!(removed.settings.new_per_day, 8);
+        assert_eq!(removed.settings.session_limit, 50);
+        assert!(removed.card(&book.id, "ubiquitous").is_none());
+        assert_eq!(removed.answered_on(TODAY), 1);
+        assert_eq!(store.load().unwrap(), removed);
     }
 
     #[test]
@@ -948,6 +1193,7 @@ mod tests {
             store.directory().join("vocabulary-progress.json"),
         )
         .unwrap();
+        msime_path_trust::open_to_other_users(store.directory()).unwrap();
 
         assert!(matches!(
             store.load(),

@@ -13,7 +13,8 @@ struct ProviderIcon: View {
           .font(.system(size: size * 0.45, weight: .medium))
           .foregroundStyle(MetasequoiaTheme.accent)
       } else {
-        Image(id == "everyAPI" ? "EveryAPI" : "Provider-\(id)")
+        // 阿里云百炼的语音识别用千问的标志。
+        Image(id == "everyAPI" ? "EveryAPI" : id == "bailian" ? "Provider-qwen" : "Provider-\(id)")
           .resizable().scaledToFit().padding(id == "everyAPI" ? 0 : size * 0.16)
       }
     }
@@ -51,10 +52,8 @@ struct ProviderPickerView: View {
           } label: {
             HStack(spacing: 14) {
               ProviderIcon(id: option.id)
-              VStack(alignment: .leading, spacing: 4) {
-                Text(option.title).font(.body.weight(.medium)).foregroundStyle(.primary)
-                Text(option.subtitle).font(.caption).foregroundStyle(.secondary)
-              }
+              SettingsOptionLabel(title: option.title, detail: option.subtitle,
+                                  titleFont: .body.weight(.medium), detailFont: .caption, spacing: 4)
               Spacer(minLength: 8)
               if selected == option.id {
                 Image(systemName: "checkmark.circle.fill")

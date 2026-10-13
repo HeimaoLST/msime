@@ -42,22 +42,26 @@ public final class OnlineCandidatePolicy {
 
     /** Read the positive host session id without JSONObject's lossy numeric conversions. */
     public static long sessionId(Object raw, long fallback) {
-        long value = KeyboardGeometry.strictLong(raw, fallback);
+        long value = NumberPolicy.strictLong(raw, fallback);
         return value > 0 ? value : fallback;
     }
 
     /**
      * Identity of one online request.
      *
-     * <p>{@code assistant} is the AI configuration document when the assistant is enabled and
-     * empty otherwise: changing model or prompt has to ask again for the same composition, while a
+     * <p>The eligibility flags are part of the identity too: when one provider becomes eligible
+     * or ineligible while the other remains available, the host must invalidate an in-flight
+     * request and schedule the new provider state. {@code assistant} is the AI configuration
+     * document when the assistant is enabled and empty otherwise: changing model or prompt has to
+     * ask again for the same composition, while a
      * query that only advanced its generation without changing the cache key must not, and a
      * disabled assistant's settings are not going to be consulted either way.
      */
     public static String signature(long sessionId, String cacheKey, String identity,
-            boolean cloudCandidates, String assistant) {
+            boolean cloudCandidates, boolean cloudEligible, boolean aiEligible, String assistant) {
         return "session=" + sessionId + "|cache=" + field(cacheKey)
             + "|identity=" + field(identity) + "|cloud=" + cloudCandidates
+            + "|cloud_eligible=" + cloudEligible + "|ai_eligible=" + aiEligible
             + "|assistant=" + field(assistant);
     }
 
@@ -83,12 +87,6 @@ public final class OnlineCandidatePolicy {
     public static int aiCandidateLimit(int limit) {
         return limit >= 1 && limit <= MAX_CANDIDATE_LIMIT ? limit : 0;
     }
-
-    /** Provider JSON fields that are text must not be accepted through org.json coercion. */
-    public static String strictText(Object value) {
-        return JsonPolicy.strictString(value);
-    }
-
 
     /** Whether a cloud body is small enough to hand to the shared parser. */
     public static boolean acceptsCloudBody(String body) {
@@ -117,9 +115,7 @@ public final class OnlineCandidatePolicy {
         List<String> result = new ArrayList<>(BoundsPolicy.bounded(texts.size(), 0, boundedLimit));
         for (String text : texts) {
             if (result.size() == boundedLimit) break;
-            if (text == null || TextPolicy.trimmed(text).isEmpty() || TextPolicy.utf8Length(text) > MAX_CANDIDATE_BYTES
-                    || TextPolicy.hasControl(text) || !TextPolicy.validUnicode(text)
-                    || result.contains(text)) {
+            if (!TextPolicy.boundedNonBlank(text, MAX_CANDIDATE_BYTES) || result.contains(text)) {
                 continue;
             }
             result.add(text);
@@ -127,10 +123,8 @@ public final class OnlineCandidatePolicy {
         return result;
     }
 
-    private static String text(String value) { return TextPolicy.emptyIfNull(value); }
-
     private static String field(String value) {
-        value = text(value);
+        value = TextPolicy.emptyIfNull(value);
         return value.length() + ":" + value;
     }
 

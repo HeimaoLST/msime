@@ -1,10 +1,12 @@
 #import "ShuangpinKeymapPanel.h"
 // Migrated from MSIME-Apple b637828e15eafcb5e459edd270a962dd14517285.
 
+#import "../candidate/CandidatePlacement.h"
+#import "../candidate/CandidateWindowLevel.h"
 #include "ShuangpinProfileNames.h"
 #include "msime_client.h"
+#include "../../../common/HostApiString.h"
 #include <cstring>
-#include <memory>
 
 namespace
 {
@@ -27,8 +29,8 @@ NSDictionary<NSString *, NSString *> *ProfileTable(char *(*query)(const uint8_t 
 {
     const char *profile =
         msime::mac::NormalizeShuangpinSchema(profileName.UTF8String != nullptr ? profileName.UTF8String : "");
-    std::unique_ptr<char, decltype(&msime_client_string_free)> raw(
-        query(reinterpret_cast<const uint8_t *>(profile), std::strlen(profile)), msime_client_string_free);
+    auto raw = msime::host_api::own_string(
+        query(reinterpret_cast<const uint8_t *>(profile), std::strlen(profile)));
     if (!raw)
     {
         return @{};
@@ -302,7 +304,7 @@ NSRect MSIMEShuangpinKeymapPanelFrame(NSRect caretRect, NSSize panelSize, CGFloa
     }
 
     self.floatingPanel = YES;
-    self.level = NSPopUpMenuWindowLevel;
+    self.level = MSIMECandidateWindowLevel();
     self.becomesKeyOnlyIfNeeded = YES;
     self.hidesOnDeactivate = NO;
     self.opaque = NO;
@@ -422,20 +424,7 @@ NSRect MSIMEShuangpinKeymapPanelFrame(NSRect caretRect, NSSize panelSize, CGFloa
 
 - (void)showNearCaretRect:(NSRect)caretRect candidateClearance:(CGFloat)candidateClearance
 {
-    NSScreen *targetScreen = nil;
-    NSPoint caretPoint = NSMakePoint(NSMidX(caretRect), NSMidY(caretRect));
-    for (NSScreen *screen in NSScreen.screens)
-    {
-        if (NSPointInRect(caretPoint, screen.frame))
-        {
-            targetScreen = screen;
-            break;
-        }
-    }
-    if (targetScreen == nil)
-    {
-        targetScreen = NSScreen.mainScreen;
-    }
+    NSScreen *targetScreen = MSIMEScreenForPoint(NSMakePoint(NSMidX(caretRect), NSMidY(caretRect)));
     if (targetScreen == nil)
     {
         [self orderOut:nil];

@@ -4,6 +4,7 @@
 #import <Foundation/Foundation.h>
 
 #include "msime_client.h"
+#include "../../../common/HostApiString.h"
 
 #include <string>
 #include <utility>
@@ -28,14 +29,14 @@ struct HostReply
 HostReply CallHost(HostCall call, NSData *request)
 {
     HostReply reply;
-    char *raw = call(static_cast<const uint8_t *>(request.bytes), request.length);
-    if (raw == nullptr)
+    auto raw = msime::host_api::own_string(
+        call(static_cast<const uint8_t *>(request.bytes), request.length));
+    if (!raw)
     {
         reply.error = "no response";
         return reply;
     }
-    NSData *data = [NSData dataWithBytes:raw length:std::char_traits<char>::length(raw)];
-    msime_client_string_free(raw);
+    NSData *data = [NSData dataWithBytes:raw.get() length:std::char_traits<char>::length(raw.get())];
     NSDictionary *envelope = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
     if (![envelope isKindOfClass:NSDictionary.class])
     {
@@ -86,6 +87,31 @@ std::optional<double> OptionalNumberField(NSDictionary *object, NSString *key)
     NSNumber *value = object[key];
     if (![value isKindOfClass:NSNumber.class]) return std::nullopt;
     return value.doubleValue;
+}
+
+SkinAnimationPreset AnimationPreset(NSString *value)
+{
+    const std::string name = value.UTF8String ?: "";
+    if (name == "fade") return SkinAnimationPreset::fade;
+    if (name == "fade_scale") return SkinAnimationPreset::fade_scale;
+    if (name == "slide_up") return SkinAnimationPreset::slide_up;
+    if (name == "spring") return SkinAnimationPreset::spring;
+    if (name == "glow") return SkinAnimationPreset::glow;
+    return SkinAnimationPreset::none;
+}
+
+SkinAnimation AnimationFromJSON(NSDictionary *object)
+{
+    SkinAnimation animation;
+    if (![object isKindOfClass:NSDictionary.class]) return animation;
+    animation.enter = AnimationPreset(object[@"enter"]);
+    animation.exit = AnimationPreset(object[@"exit"]);
+    animation.selection = AnimationPreset(object[@"selection"]);
+    const double duration = NumberField(object, @"durationMs");
+    const double stagger = NumberField(object, @"staggerMs");
+    if (duration >= 40.0 && duration <= 600.0) animation.durationMs = duration;
+    if (stagger >= 0.0 && stagger <= 80.0) animation.staggerMs = stagger;
+    return animation;
 }
 
 std::vector<std::string> StringArrayField(NSDictionary *object, NSString *key)
@@ -191,6 +217,7 @@ std::optional<SkinPackage> PackageFromJSON(id value)
         package.toolbar.dark = ToolbarColorsFromJSON(toolbar[@"dark"]);
         package.toolbar.light = ToolbarColorsFromJSON(toolbar[@"light"]);
     }
+    package.animation = AnimationFromJSON(object[@"animation"]);
     NSDictionary *license = object[@"license"];
     if ([license isKindOfClass:NSDictionary.class])
     {
@@ -435,13 +462,12 @@ const std::vector<ThemeCatalogEntry> &ThemeCatalog()
         std::vector<ThemeCatalogEntry> result;
         @autoreleasepool
         {
-            char *raw = msime_client_theme_catalog();
-            if (raw == nullptr)
+            auto raw = msime::host_api::own_string(msime_client_theme_catalog());
+            if (!raw)
             {
                 return result;
             }
-            NSData *data = [NSData dataWithBytes:raw length:std::char_traits<char>::length(raw)];
-            msime_client_string_free(raw);
+            NSData *data = [NSData dataWithBytes:raw.get() length:std::char_traits<char>::length(raw.get())];
             NSDictionary *envelope = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
             NSDictionary *value = [envelope isKindOfClass:NSDictionary.class] && [envelope[@"ok"] isEqual:@YES]
                                       ? envelope[@"value"]
@@ -528,9 +554,15 @@ ResolvedSkin ResolveSkin(std::string_view globalTheme, const CustomTheme &custom
         {
             customTheme[@"base"] = @(custom.base.c_str());
         }
+        // 两个槽位都原样带上：深色模式取哪一个、包在不在这个明暗下画，都由共享解析器决定。
         if (!custom.candidateSkin.empty() && IsSafeSkinId(custom.candidateSkin) && !IsGlobalThemeId(custom.candidateSkin))
         {
             customTheme[@"candidate_skin"] = @(custom.candidateSkin.c_str());
+        }
+        if (!custom.candidateSkinDark.empty() && IsSafeSkinId(custom.candidateSkinDark) &&
+            !IsGlobalThemeId(custom.candidateSkinDark))
+        {
+            customTheme[@"candidate_skin_dark"] = @(custom.candidateSkinDark.c_str());
         }
         NSMutableDictionary *colors = [NSMutableDictionary dictionary];
         const std::pair<NSString *, const std::string *> pickers[] = {
@@ -614,6 +646,7 @@ ResolvedSkin ResolveSkin(std::string_view globalTheme, const CustomTheme &custom
             if (const auto package = LoadSkinPackage(skinsRoot, resolved.candidateSkin))
             {
                 resolved.name = package->name;
+                resolved.animation = package->animation;
                 resolved.decorationTopDip = package->decorationTopDip;
                 resolved.decorationWidthDip = package->decorationWidthDip;
                 resolved.decorationAlign = package->decorationAlign;

@@ -1,17 +1,19 @@
 package app.msime.android.home;
 
+import app.msime.android.ThemeColorPolicy;
+import app.msime.android.LayoutPolicy;
+
+import app.msime.android.DimensionPolicy;
+
 import android.content.ContentResolver;
 import android.content.Context;
-import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.text.Editable;
 import android.text.InputType;
-import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -25,12 +27,17 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
 import app.msime.android.AppEdition;
+import app.msime.android.DrawablePolicy;
+import app.msime.android.AppVersionPolicy;
 import app.msime.android.core.InputViewValuePolicy;
 import app.msime.android.CloudApi;
 import app.msime.android.BitmapPolicy;
 import app.msime.android.FeedbackApi;
 import app.msime.android.FeedbackImagePolicy;
+import app.msime.android.ImageViewPolicy;
+import app.msime.android.KeyboardGeometry;
 import app.msime.android.R;
+import app.msime.android.TextPolicy;
 import app.msime.android.ViewPolicy;
 import java.io.IOException;
 import java.io.InputStream;
@@ -38,6 +45,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Future;
 import org.json.JSONObject;
 
 /**
@@ -59,6 +67,7 @@ public final class FeedbackPage extends DetailPage {
     private final List<byte[]> screenshots = new ArrayList<>(FeedbackApi.MAX_SCREENSHOTS);
     private boolean sending;
     private boolean sent;
+    @Nullable private Future<?> submitTask;
 
     @Nullable private EditText detail;
     @Nullable private TextView counter;
@@ -80,71 +89,66 @@ public final class FeedbackPage extends DetailPage {
 
         GroupCard description = GroupCard.add(column, "描述");
         LinearLayout card = description.card();
-        EditText input = Ui.styledInput(context, Ui.TEXT_ROW_TITLE, 400, Ui.text(context));
+        EditText input = ViewPolicy.styledInput(context, Ui.TEXT_ROW_TITLE, 400, ThemeColorPolicy.text(context));
         input.setHint("遇到了什么问题？可以写复现步骤、出错的词或期望的结果");
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
             | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         ViewPolicy.setTopStart(input);
         ViewPolicy.setMinLines(input, 4);
         ViewPolicy.clearBackground(input);
-        input.setHintTextColor(Ui.subText(context));
-        Ui.setSymmetricPaddingDp(input, requireContext(), 16, 14);
+        input.setHintTextColor(ThemeColorPolicy.subText(context));
+        ViewPolicy.setSymmetricPaddingDp(requireContext(), input, 16, 14);
         input.setText(draft);
         input.setContentDescription("描述");
-        card.addView(input, Ui.matchWidth());
+        card.addView(input, LayoutPolicy.matchWidthWrapParams());
         detail = input;
 
-        View rule = Ui.hairlineView(context);
-        LinearLayout.LayoutParams ruleParams = Ui.matchWidthHeightPx(Ui.hairlinePx(context));
-        ruleParams.setMarginStart(Ui.dp(requireContext(), 16));
+        View rule = ViewPolicy.newColorView(context, ThemeColorPolicy.hairline(context));
+        LinearLayout.LayoutParams ruleParams = LayoutPolicy.matchWidthHeightPx(
+            DimensionPolicy.atLeastOnePixel(context, 0.5f));
+        ruleParams.setMarginStart(DimensionPolicy.pixels(requireContext(), 16));
         card.addView(rule, ruleParams);
 
         HorizontalScrollView strip = new HorizontalScrollView(context);
         strip.setHorizontalScrollBarEnabled(false);
-        LinearLayout shots = Ui.row(context);
-        Ui.setPaddingDp(shots, requireContext(), 16, 10, 16, 0);
+        LinearLayout shots = LayoutPolicy.row(context);
+        ViewPolicy.setPaddingDp(requireContext(), shots, 16, 10, 16, 0);
         strip.addView(shots);
-        card.addView(strip, Ui.matchWidth());
+        card.addView(strip, LayoutPolicy.matchWidthWrapParams());
         thumbnails = shots;
 
-        LinearLayout add = Ui.row(context);
+        LinearLayout add = LayoutPolicy.row(context);
         ViewPolicy.setCenteredVertically(add);
-        Ui.setPaddingDp(add, requireContext(), 16, 12, 16, 14);
+        ViewPolicy.setPaddingDp(requireContext(), add, 16, 12, 16, 14);
         add.setContentDescription("添加截图，最多 " + FeedbackApi.MAX_SCREENSHOTS + " 张");
-        ImageView icon = Ui.decorativeIcon(context, R.drawable.ms_w4_me2_image, Ui.accent(context));
-        add.addView(icon, Ui.squareParams(requireContext(), 20));
-        TextView label = Ui.styledLabel(context, "添加截图", Ui.TEXT_ROW_TITLE, 400, Ui.accent(context));
-        LinearLayout.LayoutParams labelParams = Ui.wrap();
-        labelParams.setMarginStart(Ui.dp(requireContext(), 10));
+        ImageView icon = ImageViewPolicy.decorative(context, R.drawable.ms_w4_me2_image, ThemeColorPolicy.accent(context));
+        add.addView(icon, LayoutPolicy.squareParams(requireContext(), 20));
+        TextView label = ViewPolicy.styledLabel(context, "添加截图", Ui.TEXT_ROW_TITLE, 400, ThemeColorPolicy.accent(context));
+        LinearLayout.LayoutParams labelParams = LayoutPolicy.wrapParams();
+        labelParams.setMarginStart(DimensionPolicy.pixels(requireContext(), 10));
         add.addView(label, labelParams);
-        Ui.makeClickable(add, context, () -> picker.launch("image/*"));
-        card.addView(add, Ui.matchWidth());
+        ViewPolicy.makeClickable(add, context, () -> picker.launch("image/*"));
+        card.addView(add, LayoutPolicy.matchWidthWrapParams());
         addShot = add;
 
-        TextView count = Ui.styledLabel(context, "", 13, 400, Ui.subText(context));
-        Ui.setPaddingDp(count, requireContext(), Ui.GROUP_TITLE_INSET, 6,
+        TextView count = ViewPolicy.styledLabel(context, "", 13, 400, ThemeColorPolicy.subText(context));
+        ViewPolicy.setPaddingDp(requireContext(), count, Ui.GROUP_TITLE_INSET, 6,
             Ui.GROUP_TITLE_INSET, 0);
-        description.view().addView(count, Ui.matchWidth());
+        description.view().addView(count, LayoutPolicy.matchWidthWrapParams());
         counter = count;
 
-        TextView button = Ui.textButton(context, "", 16, 600, Ui.onAccent(context), null,
+        TextView button = ViewPolicy.textButton(context, "", 16, 600, ThemeColorPolicy.onAccent(context), null,
             Ui.ACTION_BUTTON_MIN_HEIGHT, this::submit);
         ViewPolicy.setPoliteLiveRegion(button);
-        LinearLayout.LayoutParams buttonParams = Ui.matchWidth();
-        buttonParams.topMargin = Ui.dp(requireContext(), Ui.GROUP_GAP);
+        LinearLayout.LayoutParams buttonParams = LayoutPolicy.matchWidthWrapParams();
+        buttonParams.topMargin = DimensionPolicy.pixels(requireContext(), Ui.GROUP_GAP);
         column.addView(button, buttonParams);
         submit = button;
 
-        input.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) {}
-
-            @Override public void onTextChanged(CharSequence text, int start, int before, int count) {}
-
-            @Override public void afterTextChanged(Editable text) {
-                draft = text.toString();
-                if (sent) sent = false;
-                refresh();
-            }
+        ViewPolicy.afterTextChanged(input, text -> {
+            draft = text.toString();
+            if (sent) sent = false;
+            refresh();
         });
 
         GroupCard channels = GroupCard.add(column, "其他渠道").withDividers(Ui.ROW_PADDING_H);
@@ -160,6 +164,13 @@ public final class FeedbackPage extends DetailPage {
     }
 
     @Override public void onDestroyView() {
+        if (submitTask != null) {
+            submitTask.cancel(true);
+            submitTask = null;
+        }
+        // The submission result is fenced to this view; reset its transient state so a rebuilt
+        // page does not keep the submit button disabled after the old callback is dropped.
+        sending = false;
         detail = null;
         counter = null;
         submit = null;
@@ -183,17 +194,17 @@ public final class FeedbackPage extends DetailPage {
     private void refresh() {
         Context context = getContext();
         if (context == null || counter == null || submit == null) return;
-        int length = FeedbackApi.length(draft);
+        int length = TextPolicy.codePointLength(draft);
         counter.setText(length + " / " + FeedbackApi.MAX_TEXT);
         ViewPolicy.setTextColor(counter,
-            length > FeedbackApi.MAX_TEXT ? Ui.danger(context) : Ui.subText(context));
+            length > FeedbackApi.MAX_TEXT ? ThemeColorPolicy.danger(context) : ThemeColorPolicy.subText(context));
         boolean ready = !sending && !sent && FeedbackApi.validText(draft);
         submit.setText(sent ? "已提交" : sending ? "正在提交…" : "提交");
         ViewPolicy.setEnabled(submit, ready);
-        ViewPolicy.setTextColor(submit, ready ? Ui.onAccent(context) : Ui.subText(context));
-        int fill = ready ? Ui.accent(context)
-            : Ui.color(context, com.google.android.material.R.attr.colorSurfaceContainerHighest);
-        ViewPolicy.setBackground(submit, Ui.rippleOn(context, fill, Ui.dp(requireContext(), Ui.GROUP_RADIUS)));
+        ViewPolicy.setTextColor(submit, ready ? ThemeColorPolicy.onAccent(context) : ThemeColorPolicy.subText(context));
+        int fill = ready ? ThemeColorPolicy.accent(context)
+            : ThemeColorPolicy.color(context, com.google.android.material.R.attr.colorSurfaceContainerHighest);
+        ViewPolicy.setBackground(submit, ViewPolicy.ripple(context, fill, DimensionPolicy.pixels(requireContext(), Ui.GROUP_RADIUS)));
         if (addShot != null) ViewPolicy.setEnabledWithAlpha(addShot,
             screenshots.size() < FeedbackApi.MAX_SCREENSHOTS && !sending, 0.38f);
     }
@@ -213,16 +224,16 @@ public final class FeedbackPage extends DetailPage {
             BitmapFactory.Options options = new BitmapFactory.Options();
             options.inSampleSize = 4;
             image.setImageBitmap(BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options));
-            ViewPolicy.setBackground(image, Ui.rounded(Ui.rowBackground(context), Ui.dp(requireContext(), 10)));
+            ViewPolicy.setBackground(image, DrawablePolicy.rounded(ThemeColorPolicy.rowBackground(context), DimensionPolicy.pixels(requireContext(), 10)));
             image.setClipToOutline(true);
             image.setContentDescription("截图 " + (index + 1));
-            frame.addView(image, Ui.squareFrameParams(requireContext(), Ui.THUMBNAIL_SIZE));
+            frame.addView(image, LayoutPolicy.squareFrameParams(requireContext(), Ui.THUMBNAIL_SIZE));
             ImageView remove = new ImageView(context);
             remove.setImageResource(R.drawable.ms_w4_me2_close);
-            Ui.setImageTint(remove,
-                Ui.color(context, com.google.android.material.R.attr.colorOnSurfaceInverse));
-            ViewPolicy.setBackground(remove, Ui.pill(Ui.color(context, com.google.android.material.R.attr.colorSurfaceInverse)));
-            Ui.setSymmetricPaddingDp(remove, requireContext(), 3, 3);
+            ImageViewPolicy.setTint(remove,
+                ThemeColorPolicy.color(context, com.google.android.material.R.attr.colorOnSurfaceInverse));
+            ViewPolicy.setBackground(remove, DrawablePolicy.pill(ThemeColorPolicy.color(context, com.google.android.material.R.attr.colorSurfaceInverse)));
+            ViewPolicy.setSymmetricPaddingDp(requireContext(), remove, 3, 3);
             remove.setContentDescription("移除截图 " + (index + 1));
             ViewPolicy.bindClick(remove, () -> {
                 if (sending) return;
@@ -230,11 +241,11 @@ public final class FeedbackPage extends DetailPage {
                 renderThumbnails();
                 refresh();
             });
-            FrameLayout.LayoutParams removeParams = Ui.squareFrameParams(requireContext(), 20);
+            FrameLayout.LayoutParams removeParams = LayoutPolicy.squareFrameParams(requireContext(), 20);
             removeParams.gravity = Gravity.TOP | Gravity.END;
             frame.addView(remove, removeParams);
-            LinearLayout.LayoutParams params = Ui.squareParams(requireContext(), Ui.THUMBNAIL_SIZE);
-            params.setMarginEnd(Ui.dp(requireContext(), 8));
+            LinearLayout.LayoutParams params = LayoutPolicy.squareParams(requireContext(), Ui.THUMBNAIL_SIZE);
+            params.setMarginEnd(DimensionPolicy.pixels(requireContext(), 8));
             strip.addView(frame, params);
         }
     }
@@ -247,7 +258,7 @@ public final class FeedbackPage extends DetailPage {
         ContentResolver resolver = requireContext().getContentResolver();
         if (uris.size() > room) MsToast.show(requireContext(), "最多附 " + FeedbackApi.MAX_SCREENSHOTS + " 张截图");
         List<Uri> copy = new ArrayList<>(chosen);
-        AboutPage.network(this, () -> {
+        NetworkTask.run(this, () -> {
             List<byte[]> encoded = new ArrayList<>(copy.size());
             for (Uri uri : copy) {
                 byte[] bytes = reencode(resolver, uri);
@@ -299,9 +310,10 @@ public final class FeedbackPage extends DetailPage {
         boolean withDiagnostics = diagnostics;
         List<FeedbackApi.Screenshot> shots = new ArrayList<>(screenshots.size());
         for (byte[] bytes : screenshots) shots.add(new FeedbackApi.Screenshot("image/jpeg", bytes));
-        AboutPage.network(this, () -> new FeedbackApi(new CloudApi(application)).submit(kind, text,
+        submitTask = NetworkTask.run(this, () -> new FeedbackApi(new CloudApi(application)).submit(kind, text,
             UpdateJobService.currentVersion(application), AppEdition.current().id(),
             withDiagnostics ? collectDiagnostics(application) : null, shots), outcome -> {
+            submitTask = null;
             sending = false;
             if (outcome.error() != null) {
                 refresh();
@@ -318,7 +330,7 @@ public final class FeedbackPage extends DetailPage {
 
     private static String failureMessage(Exception error) {
         if (error instanceof CloudApi.Failure failure) {
-            if (failure.status == 429) return "提交得太频繁了，请过一会儿再试";
+            if (failure.rateLimited()) return "提交得太频繁了，请过一会儿再试";
             if (failure.unavailable()) return "反馈服务暂时没有开放，可以改用下面的渠道";
             if (failure.network()) return "连不上服务器，请检查网络后重试";
         }
@@ -332,8 +344,7 @@ public final class FeedbackPage extends DetailPage {
         values.put("os", "Android " + Build.VERSION.RELEASE + "（API " + Build.VERSION.SDK_INT + "）");
         values.put("app_version", appVersion(context));
         values.put("edition", AppEdition.current().id());
-        JSONObject snapshot = HostStore.loadPreferences(context);
-        JSONObject preferences = snapshot == null ? null : snapshot.optJSONObject("preferences");
+        JSONObject preferences = KeyboardSheets.preferences(context);
         if (preferences != null) {
             values.put("scheme", preferences.optString("scheme", ""));
             values.put("keyboard_layout", InputViewValuePolicy.textOr(preferences, "touch_keyboard_layout", ""));
@@ -346,8 +357,8 @@ public final class FeedbackPage extends DetailPage {
 
     private static String appVersion(Context context) {
         try {
-            PackageInfo info = context.getPackageManager().getPackageInfo(context.getPackageName(), 0);
-            return (info.versionName == null ? "—" : info.versionName) + " (" + info.getLongVersionCode() + ")";
+            AppVersionPolicy.Version version = AppVersionPolicy.current(context);
+            return (version.name() == null ? "—" : version.name()) + " (" + version.code() + ")";
         } catch (PackageManager.NameNotFoundException missing) {
             return "—";
         }
@@ -359,9 +370,7 @@ public final class FeedbackPage extends DetailPage {
 
     /** 没装 Telegram 又没有浏览器时，退而复制链接。 */
     private void openTelegram() {
-        try {
-            startActivity(new android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(TELEGRAM_URL)));
-        } catch (android.content.ActivityNotFoundException missing) {
+        if (!LinkActions.open(requireContext(), TELEGRAM_URL)) {
             copy("Telegram", TELEGRAM_URL, "已复制群组链接");
         }
     }

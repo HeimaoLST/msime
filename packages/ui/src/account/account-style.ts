@@ -7,13 +7,24 @@
  * it wanted to or not. Each piece is named here instead.
  */
 
-export const page = "flex flex-col gap-3.5";
+import { fieldLabel } from "../core/form-style";
+import {
+  looseStack,
+  spaciousStack,
+  standardPage,
+  standardStack,
+  tightStack,
+} from "../core/page-style";
+import { mobileGroupSurface } from "../core/platform-controls-style";
+import { rowHeading, rowText } from "../core/row-style";
+
+export const page = standardPage;
 export const section = "section m-0";
-export const heading = "m-0 [font-size:var(--p-row-fs)] font-semibold [color:var(--p-text)]";
+export const heading = rowHeading;
 export const note = "mt-[7px] mb-0 [font-size:var(--p-sub-fs)] [color:var(--p-sub)]";
 export const muted = "text-xs [color:var(--p-sub)]";
 
-export const field = "flex flex-col gap-[7px] text-xs text-secondary";
+export const field = fieldLabel;
 export const input =
   "min-h-[38px] w-full rounded-lg border border-control-border bg-[var(--dropdown-bg)] px-2.5 py-[7px] font-[inherit] text-body focus:border-accent";
 export const primary =
@@ -21,7 +32,7 @@ export const primary =
 /** A row of buttons that wraps rather than overflowing; every account surface uses the same one. */
 export const actionRow =
   "flex flex-wrap items-center gap-[9px] [&>.secondary]:m-0 [&>.danger-text]:m-0";
-export const stack = "flex flex-col gap-4";
+export const stack = looseStack;
 
 /** A status line from the page's own actions, set apart from the cards instead of floating as bare text above them. */
 export const status = "m-0 rounded-lg bg-subtle px-3.5 py-2.5 text-[13px] text-secondary";
@@ -78,7 +89,7 @@ export const modalHeading = "flex items-center justify-between gap-3 [&>h2]:m-0"
 
 /** Two columns of facts, one on a phone where a value would otherwise be squeezed to a few glyphs. */
 export const details =
-  "m-0 grid grid-cols-2 gap-3 pt-1 max-phone:grid-cols-1 [&>div]:min-w-0 [&>div]:rounded-lg [&>div]:bg-subtle [&>div]:p-3 [&_dt]:text-xs [&_dt]:[color:var(--p-sub)] [&_dd]:mt-[5px] [&_dd]:mb-0 [&_dd]:ml-0 [&_dd]:break-anywhere [&_dd]:[color:var(--p-text)]";
+  "m-0 grid grid-cols-2 gap-3 pt-1 max-phone:grid-cols-1 [&>div]:min-w-0 [&>div]:rounded-lg [&>div]:bg-subtle [&>div]:p-3 [&_dt]:text-xs [&_dt]:[color:var(--p-sub)] [&_dd]:mt-[5px] [&_dd]:mb-0 [&_dd]:ml-0 [&_dd]:wrap-anywhere [&_dd]:[color:var(--p-text)]";
 export const code = "flex flex-col gap-3 pt-0.5";
 
 // ---- the signed-in settings, drawn as the platform's grouped rows ----
@@ -91,13 +102,12 @@ export const dangerButton =
   "cursor-pointer whitespace-nowrap rounded-lg border border-danger bg-danger px-3.5 py-[7px] text-white disabled:cursor-default disabled:opacity-60";
 /** Something that belongs to a group but is not a row of its own, such as a confirmation, given the row's surface and padding. */
 export const rowBlock = "bg-[var(--p-row-bg)] [padding:var(--p-row-pad)]";
-export const footnote = "m-0 px-1 text-xs leading-relaxed [color:var(--p-sub)]";
 export const confirmation = "rounded-lg border border-edge bg-subtle p-3.5 [&>p]:mt-0 [&>p]:mb-3";
 
 export const communityActions =
   "flex items-center justify-between gap-4 [&>div]:min-w-0 [&>.secondary]:m-0 [&>.secondary]:shrink-0 [&>.secondary]:grow-0 [&>.secondary]:basis-auto";
 
-export const mobileMenu = "flex flex-col gap-2.5";
+export const mobileMenu = tightStack;
 export const mobileMenuSummary =
   "w-fit cursor-pointer list-none rounded-lg border border-control-border px-3.5 py-[7px] text-body after:ml-2 after:text-muted after:content-['⌄'] open:after:content-['⌃'] [&::-webkit-details-marker]:hidden";
 export const mobileMenuBody = "flex flex-wrap items-center gap-[9px]";
@@ -121,7 +131,7 @@ export const iconState = (selected: boolean) =>
 // ---- HarmonyOS 手机上的 我的 ----
 
 /** 标签页的纵向堆叠：外壳在它上方画 30px 的 我的 标题，卡片与各分组之间间隔 18px。 */
-export const mePage = "flex flex-col gap-[18px]";
+export const mePage = spaciousStack;
 /** 个人资料卡片：未登录时点击登录，已登录时打开 个人资料。 */
 export const meCard =
   "m-0 flex w-full min-w-0 cursor-pointer items-center gap-3.5 rounded-[20px] border-0 bg-[var(--p-group-bg)] p-4 text-left [font-family:inherit] [color:var(--p-text)] active:bg-[var(--p-press)] disabled:cursor-default";
@@ -134,7 +144,6 @@ export const meCardSubtitle = "truncate text-[13px] [color:var(--p-sub)]";
 export const meCardChevron = "shrink-0 opacity-55 [color:var(--p-sub)]";
 export const meGroup = "flex min-w-0 flex-col gap-[7px]";
 export const meGroupTitle = "m-0 px-1 text-[14px] font-medium [color:var(--p-sub)]";
-export const meFooter = "m-0 px-4 text-center text-xs leading-relaxed [color:var(--p-sub)]";
 
 // ---- 我的 的子页面（个人资料、其他平台下载） ----
 
@@ -168,7 +177,7 @@ export const profileRowButton =
 export const profileRowLabel = "shrink-0 text-[16px]";
 export const profileRowValue =
   "min-w-0 flex-1 truncate text-right text-[15px] [color:var(--p-sub)]";
-export const profileRowChevron = "shrink-0 opacity-55 [color:var(--p-sub)]";
+export const profileRowChevron = meCardChevron;
 /** 设计稿里的破坏性操作：一整行居中的红色文字。 */
 export const profileDangerRow =
   "m-0 flex min-h-[50px] w-full cursor-pointer items-center justify-center border-0 bg-transparent px-4 text-[16px] [font-family:inherit] [color:#FF3B30] active:bg-[var(--p-press)] disabled:cursor-default disabled:opacity-50";
@@ -187,7 +196,7 @@ export const sheetTitle = "m-0 text-[22px] font-bold [color:var(--p-text)]";
 export const sheetSubtitle = "m-0 text-[14px] leading-snug [color:var(--p-sub)]";
 export const sheetClose =
   "m-0 flex size-[30px] shrink-0 cursor-pointer items-center justify-center rounded-full border-0 bg-[var(--p-seg-bg)] p-0 [color:var(--p-text)] active:opacity-70 disabled:cursor-default disabled:opacity-50";
-export const sheetBody = "flex flex-col gap-3";
+export const sheetBody = standardStack;
 /** 登录选项：用强调色浅色填充的 50px 色调按钮。 */
 export const sheetChoice =
   "m-0 h-[50px] w-full cursor-pointer rounded-xl border-0 bg-[var(--accent-soft)] px-4 text-[17px] font-semibold [font-family:inherit] [color:var(--p-accent-text)] active:opacity-80 disabled:cursor-default disabled:opacity-60 aria-pressed:shadow-[inset_0_0_0_1.5px_var(--accent-color)]";
@@ -202,7 +211,7 @@ export const sheetHintError = "m-0 text-[13px] leading-snug text-danger";
 export const sheetFooter = "m-0 text-center text-xs [color:var(--p-sub)]";
 export const sheetFooterLink =
   "m-0 cursor-pointer border-0 bg-transparent p-0 text-xs [font-family:inherit] [color:var(--p-sub)] underline-offset-2 active:underline";
-export const sheetQuiet = "flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5";
+export const sheetQuiet = signInFooter;
 
 // ---- 其他平台下载 ----
 
@@ -210,20 +219,20 @@ export const downloadHero =
   "flex min-w-0 items-center gap-3.5 rounded-[20px] bg-[var(--accent-soft)] p-4 [color:var(--p-text)]";
 export const downloadHeroTile =
   "flex size-11 flex-none items-center justify-center rounded-xl [background:var(--accent-color)] [color:var(--p-on-accent)]";
-export const downloadHeroText = "flex min-w-0 flex-1 flex-col gap-0.5";
+export const downloadHeroText = rowText;
 export const downloadHeroTitle = "text-[15px] font-semibold";
-export const downloadHeroUrl = "truncate text-[13px] [color:var(--p-sub)]";
+export const downloadHeroUrl = meCardSubtitle;
 export const downloadPill =
   "m-0 shrink-0 cursor-pointer whitespace-nowrap rounded-full border-0 px-3.5 py-1.5 text-[13px] font-semibold [font-family:inherit] [background:var(--accent-color)] [color:var(--p-on-accent)] active:opacity-80";
-export const downloadRows = "overflow-hidden rounded-[20px] bg-[var(--p-group-bg)]";
+export const downloadRows = mobileGroupSurface;
 export const downloadRow =
   "m-0 flex w-full min-w-0 items-center gap-3 border-x-0 border-t border-b-0 border-solid border-[var(--p-hair)] bg-transparent px-3.5 py-3 text-left [font-family:inherit] [color:var(--p-text)] first:border-t-0";
 export const downloadRowButton = "cursor-pointer active:bg-[var(--p-press)]";
 export const downloadTile =
   "flex size-9 flex-none items-center justify-center rounded-[9px] bg-[var(--p-seg-bg)] [color:var(--p-text)]";
-export const downloadRowText = "flex min-w-0 flex-1 flex-col gap-0.5";
-export const downloadRowName = "text-[15px] font-semibold";
-export const downloadRowMeta = "text-xs [color:var(--p-sub)]";
+export const downloadRowText = rowText;
+export const downloadRowName = downloadHeroTitle;
+export const downloadRowMeta = muted;
 export const downloadRowPill = (current: boolean) =>
   `shrink-0 whitespace-nowrap rounded-full px-3 py-[5px] text-[13px] font-semibold ${
     current

@@ -60,10 +60,13 @@ fn read(connection: &Connection, prefix: &str, limit: usize) -> rusqlite::Result
             ))
         },
     )?;
-    let mut candidates = Vec::with_capacity(limit);
+    let mut candidates = Vec::new();
     for row in rows {
         // A NULL key or value is skipped and a NULL weight reads as 0, as `sqlite3_column_*` did.
         if let (Some(key), Some(value), weight) = row? {
+            if candidates.capacity() == 0 {
+                candidates.reserve_exact(limit);
+            }
             candidates.push(WordItem::new(
                 key,
                 value,
@@ -78,14 +81,17 @@ fn read(connection: &Connection, prefix: &str, limit: usize) -> rusqlite::Result
 
 /// 宿主短语表里 Engine 能用的行：编码是 1..=`KEY_LIMIT` 个小写字母，文本非空白、不超过 `TEXT_UTF16_LIMIT` 个 UTF-16 单元、不含控制字符；按启用顺序最多保留 `TABLE_LIMIT` 行，再按编码稳定排序，同一编码内保持启用顺序。
 pub fn usable_quick_phrase_table(table: &[QuickPhraseEntry]) -> Vec<QuickPhraseEntry> {
-    let mut usable = Vec::with_capacity(table.len().min(TABLE_LIMIT));
-    usable.extend(
-        table
-            .iter()
-            .filter(|entry| usable_entry(entry))
-            .take(TABLE_LIMIT)
-            .cloned(),
-    );
+    let mut usable = Vec::new();
+    for entry in table
+        .iter()
+        .filter(|entry| usable_entry(entry))
+        .take(TABLE_LIMIT)
+    {
+        if usable.capacity() == 0 {
+            usable.reserve_exact(table.len().min(TABLE_LIMIT));
+        }
+        usable.push(entry.clone());
+    }
     usable.sort_by(|a, b| a.key.cmp(&b.key));
     usable
 }
@@ -218,6 +224,12 @@ mod tests {
         );
         assert_eq!(rows.candidates[0].source, CandidateSource::QuickPhrase);
         assert_eq!(rows.candidates[0].weight, 20);
+        assert_eq!(rows.candidates.capacity(), 10);
+
+        let empty = query_quick_phrases_with_limit("z", &path, 10);
+        assert!(empty.diagnostic.is_none());
+        assert!(empty.candidates.is_empty());
+        assert_eq!(empty.candidates.capacity(), 0);
 
         let limited = query_quick_phrases_with_limit("a", &path, 2);
         assert_eq!(limited.diagnostic, None);
@@ -282,6 +294,18 @@ mod tests {
             .collect::<Vec<_>>();
         let usable = usable_quick_phrase_table(&table);
         assert_eq!(usable.capacity(), table.len().min(TABLE_LIMIT));
+    }
+
+    #[test]
+    fn all_invalid_rows_do_not_reserve_input_capacity() {
+        let table = [
+            phrase("A", "大写编码"),
+            phrase("a1", "数字编码"),
+            phrase("", "空编码"),
+        ];
+        let usable = usable_quick_phrase_table(&table);
+        assert!(usable.is_empty());
+        assert_eq!(usable.capacity(), 0);
     }
 
     #[test]

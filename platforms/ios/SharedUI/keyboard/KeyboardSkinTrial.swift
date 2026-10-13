@@ -46,7 +46,7 @@ struct KeyboardSkinTrialStore {
       design: design.normalized)
     let data = try JSONEncoder().encode(trial)
     try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    try data.write(to: file, options: IOSSharedPaths.protectedAtomicWriteOptions)
     // The keyboard takes its theme from the shared document, so a trial the document did not take would not show.
     guard let mapping = GlobalThemePreference.applyingDesign(trial.design),
           MetasequoiaInputSessionBridge.updateSharedPreferences(stateRoot: stateRoot, mapping) else {
@@ -62,6 +62,8 @@ struct KeyboardSkinTrialStore {
     if !keep { restore(trial) }
     try FileManager.default.removeItem(at: file)
   }
+  /// A trial is open: the shared document holds a design the user has not kept yet.
+  var hasPendingTrial: Bool { (try? pending()) != nil }
   func restorePending() throws {
     guard let trial = try pending() else { return }
     try finish(trial.id, keep: false)

@@ -119,7 +119,11 @@ pub fn parse(text: &str, max_bytes: usize) -> Result<WordbookImportReport, Wordb
         return Err(WordbookImportError::ControlCharacters);
     }
 
-    let delimiter = if text.contains('\t') {
+    let first_data_line = text.lines().find(|line| {
+        let trimmed = line.trim();
+        !trimmed.is_empty() && !trimmed.starts_with('#')
+    });
+    let delimiter = if first_data_line.is_some_and(|line| line.contains('\t')) {
         Delimiter::Tab
     } else {
         Delimiter::Comma
@@ -132,17 +136,30 @@ pub fn parse(text: &str, max_bytes: usize) -> Result<WordbookImportReport, Wordb
         ..WordbookImportReport::default()
     };
     let mut seen = HashSet::with_capacity(row_capacity);
+    let mut examined = 0;
+    let mut quoted_continuation = false;
     for (index, line) in text.lines().enumerate() {
-        if report.entries.len() >= MAX_ROWS {
-            report.truncated = true;
-            break;
-        }
         let line = line.trim_end_matches('\r');
+        if quoted_continuation {
+            quoted_continuation = split_columns(Delimiter::Comma, line, true).1;
+            continue;
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        match parse_row(delimiter, line) {
+        if examined >= MAX_ROWS {
+            report.truncated = true;
+            break;
+        }
+        examined += 1;
+        let (columns, unclosed_quote) = split_columns(delimiter, line, false);
+        if unclosed_quote {
+            record(&mut report, index + 1, WordbookImportIssue::ColumnCount);
+            quoted_continuation = true;
+            continue;
+        }
+        match parse_row(columns) {
             Ok(entry) => {
                 if seen.insert(entry.word.clone()) {
                     report.entries.push(entry);
@@ -169,8 +186,7 @@ fn record(report: &mut WordbookImportReport, line: usize, issue: WordbookImportI
     }
 }
 
-fn parse_row(delimiter: Delimiter, line: &str) -> Result<WordbookEntry, WordbookImportIssue> {
-    let columns = split_columns(delimiter, line);
+fn parse_row(columns: Vec<String>) -> Result<WordbookEntry, WordbookImportIssue> {
     let (word, phonetic, meaning) = match columns.len() {
         2 => (columns[0].as_str(), "", columns[1].as_str()),
         3 => (
@@ -220,46 +236,61 @@ fn parse_row(delimiter: Delimiter, line: &str) -> Result<WordbookEntry, Wordbook
 /// commonest real file would parse as four columns and be rejected wholesale. A doubled quote
 /// inside a quoted field is one literal quote. Tab-delimited files need none of this: a gloss does
 /// not contain a tab, and the exporters that emit tabs do not quote.
-fn split_columns(delimiter: Delimiter, line: &str) -> Vec<String> {
+fn split_columns(delimiter: Delimiter, line: &str, mut quoted: bool) -> (Vec<String>, bool) {
     let separator = match delimiter {
         Delimiter::Tab => '\t',
         Delimiter::Comma => ',',
     };
     if delimiter == Delimiter::Tab {
-        return line.splitn(4, separator).map(str::to_owned).collect();
+        return (
+            line.splitn(4, separator).map(str::to_owned).collect(),
+            false,
+        );
     }
 
     let mut columns = Vec::with_capacity(4);
     let mut current = String::new();
-    let mut quoted = false;
+    let mut field_started = quoted;
     let mut characters = line.chars().peekable();
     while let Some(character) = characters.next() {
         match character {
             '"' if quoted => {
                 if characters.peek() == Some(&'"') {
                     characters.next();
-                    current.push('"');
+                    if columns.len() < 4 {
+                        current.push('"');
+                    }
                 } else {
                     quoted = false;
                 }
             }
-            '"' if current.trim().is_empty() => {
+            '"' if !field_started => {
                 // An opening quote only counts at the start of a field; a quote in the middle of
                 // unquoted text is an apostrophe-style character, not a delimiter.
                 current.clear();
                 quoted = true;
+                field_started = true;
             }
             c if c == separator && !quoted => {
-                columns.push(std::mem::take(&mut current));
-                if columns.len() == 4 {
-                    return columns;
+                if columns.len() < 4 {
+                    columns.push(std::mem::take(&mut current));
+                }
+                field_started = false;
+            }
+            c => {
+                if columns.len() < 4 {
+                    current.push(c);
+                }
+                if !c.is_whitespace() {
+                    field_started = true;
                 }
             }
-            c => current.push(c),
         }
     }
-    columns.push(current);
-    columns
+    if columns.len() < 4 {
+        columns.push(current);
+    }
+    (columns, quoted)
 }
 
 #[cfg(test)]
@@ -310,6 +341,34 @@ mod tests {
     }
 
     #[test]
+    fn an_unclosed_quoted_gloss_is_not_imported_as_a_truncated_meaning() {
+        let report = parse("valid,adj. 完整的\nbroken,\"first\n", LIMIT).unwrap();
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].word, "valid");
+        assert_eq!(report.failed, 1);
+        assert_eq!(
+            report.first_failures,
+            vec![WordbookImportFailure {
+                line: 2,
+                issue: WordbookImportIssue::ColumnCount,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_multiline_quoted_gloss_does_not_import_its_continuation_as_a_word() {
+        let report = parse(
+            "broken,\"first\nphantom,meaning\"\nvalid,adj. 完整的\n",
+            LIMIT,
+        )
+        .unwrap();
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].word, "valid");
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.first_failures[0].line, 1);
+    }
+
+    #[test]
     fn a_leading_byte_order_mark_is_not_part_of_the_first_word() {
         let report = parse("\u{feff}ubiquitous,adj. 无处不在的\n", LIMIT).unwrap();
         assert_eq!(
@@ -326,6 +385,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.entries.len(), 2);
+        assert_eq!(report.failed, 0);
+    }
+
+    #[test]
+    fn tabs_in_comments_do_not_turn_a_comma_file_into_a_tab_file() {
+        let report = parse("# 来源\t合成样例\nubiquitous,adj. 无处不在的\n", LIMIT).unwrap();
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].word, "ubiquitous");
         assert_eq!(report.failed, 0);
     }
 
@@ -436,6 +503,20 @@ mod tests {
         }
         let report = parse(&text, 64 * 1024 * 1024).unwrap();
         assert_eq!(report.entries.len(), MAX_ROWS);
+        assert!(report.truncated);
+    }
+
+    #[test]
+    fn invalid_rows_count_toward_the_examined_row_limit() {
+        let mut text = String::from("first,adj. 合成\n");
+        for _ in 1..MAX_ROWS {
+            text.push_str("invalid row\n");
+        }
+        text.push_str("last,adj. 合成\n");
+
+        let report = parse(&text, 64 * 1024 * 1024).unwrap();
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.failed, MAX_ROWS - 1);
         assert!(report.truncated);
     }
 

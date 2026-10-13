@@ -19,7 +19,7 @@ public final class ZhuyinInputPolicy {
 
     /** Whether the Engine's Dachen editor takes the keys: the Zhuyin scheme outside dedicated English. Zhuyin has no local modes. */
     public static boolean active(int scheme, boolean dedicatedEnglish) {
-        return scheme == ZHUYIN_SCHEME && !dedicatedEnglish;
+        return InputSchemeTraits.active(scheme, ZHUYIN_SCHEME, dedicatedEnglish);
     }
 
     /** Whether the candidate list of the composition is open: the Zhuyin rules with candidates on the view, since the Engine lists none until the list opens. */

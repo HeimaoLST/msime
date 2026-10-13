@@ -45,6 +45,28 @@ fn texts(document: &CommonPhrases) -> Vec<&str> {
         .collect()
 }
 
+#[cfg(unix)]
+#[test]
+fn common_phrase_writes_stay_bound_to_the_locked_directory_after_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("preferences");
+    fs::create_dir(&directory).unwrap();
+    let store = CommonPhrasesStore::new(&directory);
+    let lock = store.lock().unwrap();
+
+    let moved = root.path().join("preferences-moved");
+    fs::rename(&directory, &moved).unwrap();
+    fs::create_dir(&directory).unwrap();
+
+    store
+        .write_locked(&lock, &CommonPhrases::default())
+        .unwrap();
+
+    assert!(moved.join(FILE_NAME).exists());
+    assert!(!directory.join(FILE_NAME).exists());
+    fs::remove_dir_all(moved).unwrap();
+}
+
 #[test]
 fn common_phrases_start_empty_and_keep_multiline_text() {
     let (_root, store) = fresh();
@@ -227,6 +249,18 @@ fn common_phrases_pack_limits_and_kind_are_enforced() {
     let refs: Vec<&str> = full.iter().map(String::as_str).collect();
     let outcome = store.install_pack(&pack(3, 1, &refs)).unwrap();
     assert_eq!(outcome.skipped, 0);
+}
+
+#[test]
+fn invalid_local_pack_phrases_do_not_reserve_normalization_capacity() {
+    let long = "字".repeat(MAX_PHRASE_UTF16 + 1);
+    let resource = pack(1, 1, &[&long]);
+
+    let (normalized, skipped) = super::normalized_pack_texts(&resource);
+
+    assert!(normalized.is_empty());
+    assert_eq!(normalized.capacity(), 0);
+    assert_eq!(skipped, 1);
 }
 
 #[test]

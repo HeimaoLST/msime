@@ -1,3 +1,5 @@
+import type { InputScheme } from "../index";
+import { schemeTitle } from "./label-helpers";
 import type { EffectStyle, PluginPreferences } from "./plugin-preferences";
 import type { PluginKind, PluginPackage } from "./plugin-types";
 
@@ -11,19 +13,20 @@ export const kindLabels: Record<PluginKind, string> = {
   helpcode: "辅助码表",
   wordbook: "单词本",
   symbol_set: "符号集",
+  script: "脚本插件",
 };
 
 /** 按键旋律（`mode = "sequence"` 的音效包）的类型显示名。 */
 export const melodyKindLabel = "音效包·旋律";
 
-/** 一个包的类型显示名：旋律音效包显示为「音效包·旋律」，其余用 `kindLabels`。 */
+/** 一个包的类型显示名：旋律音效包显示为「音效包·旋律」，其余用 `kindLabels`。`PluginKind` 之外的类型（开发构建的设置页能导入、但页面不列出的脚本插件）显示为「插件」。 */
 export function packKindLabel(pack: Pick<PluginPackage, "kind" | "mode">): string {
   return pack.kind === "sound" && pack.mode === "sequence"
     ? melodyKindLabel
-    : kindLabels[pack.kind];
+    : (kindLabels[pack.kind] ?? "插件");
 }
 
-/** The order the 我的插件 list groups the installed packs in. */
+/** 我的插件列表给已安装插件分组的顺序。脚本插件不在其中：它们有自己的「脚本插件（实验）」分组，只在宿主运行脚本插件时显示。 */
 export const kindOrder: readonly PluginKind[] = [
   "sound",
   "effect",
@@ -46,12 +49,16 @@ export function effectStyleLabel(style: EffectStyle): string {
   return effectStyleOptions.find((option) => option.value === style)?.label ?? style;
 }
 
+/** 宿主调用失败时 `{code, detail}` 里的 `code`；不是这个形状时为空串。 */
+export function pluginErrorCode(error: unknown): string {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code: unknown }).code)
+    : "";
+}
+
 /** The sentence for a failed host call. The desktop shell's commands and the HarmonyOS bridge both reject with `{code, detail}`, the codes being client-core's `PluginFailure`; `detail`, when present, is the rule client-core reports. */
 export function pluginErrorMessage(error: unknown, fallback: string): string {
-  const code =
-    typeof error === "object" && error !== null && "code" in error
-      ? String((error as { code: unknown }).code)
-      : "";
+  const code = pluginErrorCode(error);
   const detail =
     typeof error === "object" && error !== null && "detail" in error
       ? (error as { detail: unknown }).detail
@@ -68,6 +75,18 @@ export function pluginErrorMessage(error: unknown, fallback: string): string {
       return "这个 id 属于内置插件，不能覆盖或删除。";
     case "plugin_storage":
       return "插件目录不可用，请检查数据目录的权限。";
+    case "plugin_script_memory":
+      return "启用后会超出输入法留给脚本插件的内存（64 MiB），先停用别的脚本插件再试。";
+    case "plugin_script_limit":
+      return "最多同时启用 8 个脚本插件，先停用一个再试。";
+    case "plugin_script_changed":
+      return "这个插件的内容在你打开之后变了，页面已经重新读取，请看过现在的内容再试。";
+    case "plugin_script_grants_format":
+      return "授权文件是更新版本的水杉输入法写的，这个版本不能修改它。";
+    case "plugin_script_grant_invalid":
+      return `授权不符合要求${reason}。`;
+    case "plugin_script_missing":
+      return `找不到这个脚本插件${reason}。`;
     case "mention_invalid":
       return `名单有误${reason}。`;
     case "mention_format":
@@ -117,35 +136,78 @@ export function selectedPack(
   );
 }
 
-/** What the preferences currently do with a pack, as the list marks it: 使用中 for the selected sound, effect or music pack, 当前旋律 for the selected melody, 已启用 with its priority for an enabled command table; null when the pack is not in use or the host does not act on its kind (`kinds`, the same set the missing selections are limited to). */
+/** Whether anything plays from the key-sound pack: its key samples, its commit sample (the commit sound and the combo's tier-up) or its achievement jingle. Mirrors `host-api::key_sound::SoundSettings::uses_key_pack`. */
+export function keySoundPackPlays(preferences: PluginPreferences): boolean {
+  const { key_sound, commit_sound, achievements } = preferences;
+  return (
+    (key_sound.enabled && key_sound.mode === "keys") ||
+    commit_sound.enabled ||
+    achievements.enabled ||
+    (preferences.combo_counter && preferences.combo_tier_sound)
+  );
+}
+
+/** Whether keys play the selected melody: key sounds on, in melody mode. */
+export function melodyPlays(preferences: PluginPreferences): boolean {
+  return preferences.key_sound.enabled && preferences.key_sound.mode === "melody";
+}
+
+/** 决定短语表和指令表是否被读取的条件：输入页「快捷模式」里的两个开关 `local_modes.quick_phrase`（K 模式）和 `local_modes.command`（/ 指令），以及 `schemeOpens`，即当前输入方案能否打开这些模式（`schemeOpensTableModes`；不知道方案时为 true）。 */
+export type PluginTableModes = { quickPhrase: boolean; command: boolean; schemeOpens: boolean };
+
+/** 能打开 K、/ 和 @ 模式的输入方案，即 `engine::SchemeType::opens_table_modes`：全拼、双拼和五笔。其他方案下短语表、指令表和 @ 名单都用不上。 */
+export function schemeOpensTableModes(scheme: InputScheme): boolean {
+  return scheme === "quanpin" || scheme === "shuangpin" || scheme === "wubi";
+}
+
+/** 当前方案打不开某个模式时，短语表、指令表和 @ 名单详情里的说明；方案能打开它或不知道方案时为 null。`mode` 是模式的名字，例如「指令（/ 模式）」。 */
+export function schemeTableModeNote(scheme: InputScheme | undefined, mode: string): string | null {
+  if (!scheme || schemeOpensTableModes(scheme)) return null;
+  return `当前输入方案「${schemeTitle(scheme)}」打不开${mode}，切换到全拼、双拼或五笔后才能用。`;
+}
+
+/** What the preferences currently do with a pack, as the list marks it: 使用中 for the selected sound, effect or music pack, 当前旋律 for the selected melody, 已启用 with its priority for an enabled command or phrase table; null when the pack is not in use or the host does not act on its kind (`kinds`, the same set the missing selections are limited to). A pack that is selected while the switch that plays it is off is marked 已选 or 已启用 with that switch named instead, and an enabled table whose mode the current scheme cannot open says so before any switch, so the list never says a pack is in use when the input method ignores it. */
 export function packMarker(
   pack: PluginPackage,
   preferences: PluginPreferences,
   kinds: ReadonlySet<PluginKind>,
+  modes: PluginTableModes,
 ): string | null {
   if (!kinds.has(pack.kind)) return null;
   switch (pack.kind) {
     case "sound":
-      if (soundPackUse(pack) === "sequence")
-        return preferences.melody.pack === pack.id ? "当前旋律" : null;
-      return preferences.key_sound.pack === pack.id ? "使用中" : null;
+      if (soundPackUse(pack) === "sequence") {
+        if (preferences.melody.pack !== pack.id) return null;
+        return melodyPlays(preferences) ? "当前旋律" : "已选 · 按键旋律未开";
+      }
+      if (preferences.key_sound.pack !== pack.id) return null;
+      if (keySoundPackPlays(preferences)) return "使用中";
+      return preferences.key_sound.enabled ? "已选 · 发声方式是按键旋律" : "已选 · 按键音未开";
     case "effect":
       return preferences.effect_pack === pack.id ? "使用中" : null;
     case "music":
-      return preferences.music.pack === pack.id ? "使用中" : null;
+      if (preferences.music.pack !== pack.id) return null;
+      return preferences.music.enabled ? "使用中" : "已选 · 背景音乐未开";
     case "command_table": {
       const position = preferences.command_tables.indexOf(pack.id);
-      return position >= 0 ? `已启用 · 第 ${position + 1} 位` : null;
+      if (position < 0) return null;
+      if (!modes.schemeOpens) return "已启用 · 当前方案打不开 / 指令";
+      return modes.command ? `已启用 · 第 ${position + 1} 位` : "已启用 · / 指令未开";
     }
     case "phrase_table": {
       const position = preferences.phrase_tables.indexOf(pack.id);
-      return position >= 0 ? `已启用 · 第 ${position + 1} 位` : null;
+      if (position < 0) return null;
+      if (!modes.schemeOpens) return "已启用 · 当前方案打不开 K 模式";
+      return modes.quickPhrase ? `已启用 · 第 ${position + 1} 位` : "已启用 · K 模式未开";
     }
     case "helpcode":
       return helpcodePackUses(preferences, pack.id);
     // 单词本没有偏好：选中哪本书在背单词里；符号集装上就显示。
     case "wordbook":
     case "symbol_set":
+      return null;
+    // 脚本插件的标记由「脚本插件（实验）」分组按授权状态给出。
+    case "script":
       return null;
   }
 }

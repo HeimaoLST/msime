@@ -1,36 +1,30 @@
 import app.msime.android.CloudApi;
 import app.msime.android.CloudClipboardApi;
+import app.msime.android.JsonPolicy;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class CloudApiSmoke {
     public static void main(String[] arguments) throws Exception {
-        java.lang.reflect.Method strictBoolean = CloudClipboardApi.class.getDeclaredMethod(
-            "strictBoolean", Object.class);
-        strictBoolean.setAccessible(true);
-        check(Boolean.TRUE.equals(strictBoolean.invoke(null, Boolean.TRUE)),
+        check(Boolean.TRUE.equals(JsonPolicy.strictBoolean(Boolean.TRUE)),
             "cloud clipboard booleans accept JSON booleans");
-        check(strictBoolean.invoke(null, "true") == null,
+        check(JsonPolicy.strictBoolean("true") == null,
             "cloud clipboard booleans must reject strings instead of coercing them");
-        check(strictBoolean.invoke(null, 1) == null,
+        check(JsonPolicy.strictBoolean(1) == null,
             "cloud clipboard booleans must reject numbers instead of coercing them");
-        java.lang.reflect.Method strictString = CloudClipboardApi.class.getDeclaredMethod(
-            "strictString", Object.class);
-        strictString.setAccessible(true);
-        check("synthetic".equals(strictString.invoke(null, "synthetic")),
+        check("synthetic".equals(JsonPolicy.strictString("synthetic")),
             "cloud clipboard strings accept JSON strings");
-        check(strictString.invoke(null, 7) == null,
+        check(JsonPolicy.strictString(7) == null,
             "cloud clipboard strings must reject numbers instead of coercing them");
-        java.lang.reflect.Method strictInteger = CloudClipboardApi.class.getDeclaredMethod(
-            "strictInteger", Object.class);
-        strictInteger.setAccessible(true);
-        check(Integer.valueOf(7).equals(strictInteger.invoke(null, Integer.valueOf(7))),
+        check(Integer.valueOf(7).equals(JsonPolicy.strictInteger(Integer.valueOf(7))),
             "cloud clipboard retention accepts JSON integers");
-        check(strictInteger.invoke(null, "7") == null,
+        check(JsonPolicy.strictInteger("7") == null,
             "cloud clipboard retention rejects numeric strings instead of coercing them");
-        check(strictInteger.invoke(null, Double.valueOf(7.5)) == null,
+        check(JsonPolicy.strictInteger(Double.valueOf(7.5)) == null,
             "cloud clipboard retention rejects fractional numbers instead of truncating them");
         // multipart 按 RFC 7578 编码，行尾 CRLF，文件段带 filename，结尾 `--boundary--`。
         byte[] encoded = CloudApi.encodeMultipart("b0und", List.of(
@@ -77,6 +71,121 @@ public final class CloudApiSmoke {
         CloudApi.Response response = api.send("GET", "/v1/users/me", null, CloudApi.Auth.ACCOUNT);
         check(response.status() == 204 && seen.size() == 2, "a rejected token is refreshed and retried once");
         check("MSIME/Android".equals(seen.get(0).get("User-Agent")), "plain User-Agent on every request");
+
+        AtomicReference<String> login = new AtomicReference<>("synthetic-login-a");
+        CloudApi.Tokens changing = new CloudApi.Tokens() {
+            @Override public String token(String rejected) { return "synthetic-login-a".equals(login.get()) ? stale : fresh; }
+            public String sessionId() { return login.get(); }
+        };
+        AtomicInteger oldCalls = new AtomicInteger();
+        CloudApi oldRequest = new CloudApi((method, path, headers, body) -> {
+            oldCalls.incrementAndGet();
+            login.set("synthetic-login-b");
+            return new CloudApi.Exchange(401, null, null, new byte[0]);
+        }, changing, rejected -> "");
+        try {
+            oldRequest.send("GET", "/v1/users/me", null, CloudApi.Auth.ACCOUNT);
+            throw new AssertionError("an old request must not retry after a new login");
+        } catch (CloudApi.Failure failure) {
+            check("session_changed".equals(failure.code), "new login cancels a rejected old request");
+            check(oldCalls.get() == 1, "new login receives no old request retry");
+        }
+        login.set("synthetic-login-a");
+        CloudApi successfulOldRequest = new CloudApi((method, path, headers, body) -> {
+            login.set("synthetic-login-b");
+            return new CloudApi.Exchange(200, null, null, new byte[0]);
+        }, changing, rejected -> "");
+        try {
+            successfulOldRequest.send("GET", "/v1/users/me", null, CloudApi.Auth.ACCOUNT);
+            throw new AssertionError("an old response must not survive a new login");
+        } catch (CloudApi.Failure failure) {
+            check("session_changed".equals(failure.code), "new login discards a successful old response");
+        }
+        AtomicReference<String> sameTokenLogin = new AtomicReference<>("synthetic-login-a");
+        CloudApi.Tokens reusedToken = new CloudApi.Tokens() {
+            @Override public String token(String rejected) { return stale; }
+            @Override public String sessionId() { return sameTokenLogin.get(); }
+        };
+        CloudApi sameTokenRequest = new CloudApi((method, path, headers, body) -> {
+            sameTokenLogin.set("synthetic-login-b");
+            return new CloudApi.Exchange(200, null, null, new byte[0]);
+        }, reusedToken, rejected -> "");
+        try {
+            sameTokenRequest.send("GET", "/v1/users/me", null, CloudApi.Auth.ACCOUNT);
+            throw new AssertionError("login identity must be checked even when tokens match");
+        } catch (CloudApi.Failure failure) {
+            check("session_changed".equals(failure.code), "new login with the same token is cancelled");
+        }
+        AtomicReference<String> rotatingToken = new AtomicReference<>(stale);
+        CloudApi.Tokens rotatingLogin = new CloudApi.Tokens() {
+            @Override public String token(String rejected) {
+                if (rejected != null) rotatingToken.set(fresh);
+                return rotatingToken.get();
+            }
+            @Override public String sessionId() { return "synthetic-login-a"; }
+        };
+        CloudApi sameLoginRetry = new CloudApi((method, path, headers, body) ->
+            new CloudApi.Exchange(("Bearer " + fresh).equals(headers.get("Authorization")) ? 204 : 401,
+                null, null, new byte[0]), rotatingLogin, rejected -> "");
+        check(sameLoginRetry.send("GET", "/v1/users/me", null, CloudApi.Auth.ACCOUNT).status() == 204,
+            "a token refresh in the same login still retries");
+
+        AtomicReference<String> clipboardLogin = new AtomicReference<>("synthetic-login-a");
+        AtomicInteger clipboardDeletes = new AtomicInteger();
+        CloudApi.Tokens clipboardTokens = new CloudApi.Tokens() {
+            @Override public String token(String rejected) { return stale; }
+            @Override public String sessionId() { return clipboardLogin.get(); }
+        };
+        CloudApi clipboardTransport = new CloudApi((method, path, headers, body) -> {
+            if ("DELETE".equals(method)) clipboardDeletes.incrementAndGet();
+            return new CloudApi.Exchange(204, null, null, new byte[0]);
+        }, clipboardTokens, rejected -> "");
+        CloudApi boundClipboard = clipboardTransport.forAccountSession(
+            clipboardTransport.currentAccountSessionId());
+        CloudClipboardApi clipboardPage = new CloudClipboardApi(boundClipboard, null);
+        boundClipboard.send("GET", CloudClipboardApi.PATH, null, CloudApi.Auth.ACCOUNT);
+        clipboardLogin.set("synthetic-login-b");
+        try {
+            clipboardPage.requireCurrentSession();
+            throw new AssertionError("an old clipboard row must not be copied after a new login");
+        } catch (CloudApi.Failure failure) {
+            check("session_changed".equals(failure.code), "old clipboard row rejects a new login");
+        }
+        try {
+            clipboardPage.clear();
+            throw new AssertionError("an old clipboard page must not clear the new account");
+        } catch (CloudApi.Failure failure) {
+            check("session_changed".equals(failure.code), "old clipboard page rejects a new login");
+            check(clipboardDeletes.get() == 0, "the new account receives no old-page delete");
+        }
+
+        // 端到端驱动要自己读错误响应：exchange 不论状态码都交回，401 仍先换令牌重试一次，连不上仍抛出。
+        byte[] conflict = "{\"error\":{\"code\":\"clipboard_key_conflict\"}}".getBytes(StandardCharsets.UTF_8);
+        CloudApi.Exchange refused = new CloudApi((method, path, headers, body) ->
+            new CloudApi.Exchange(409, "application/json", null, conflict), rejected -> stale, rejected -> "")
+            .exchange("POST", CloudClipboardApi.PATH, null, CloudApi.Auth.ACCOUNT);
+        check(refused.status() == 409 && java.util.Arrays.equals(refused.body(), conflict),
+            "exchange hands a non-2xx status and its body back instead of throwing");
+        List<String> exchangeTokens = new ArrayList<>();
+        CloudApi.Exchange retried = new CloudApi((method, path, headers, body) -> {
+            exchangeTokens.add(headers.get("Authorization"));
+            boolean ok = ("Bearer " + fresh).equals(headers.get("Authorization"));
+            return new CloudApi.Exchange(ok ? 200 : 401, null, null, new byte[0]);
+        }, rejected -> rejected == null ? stale : fresh, rejected -> "")
+            .exchange("GET", CloudClipboardApi.PATH, null, CloudApi.Auth.ACCOUNT);
+        check(retried.status() == 200 && exchangeTokens.size() == 2, "exchange still retries a rejected token once");
+        CloudApi.Exchange stillDenied = new CloudApi((method, path, headers, body) ->
+            new CloudApi.Exchange(401, null, null, new byte[0]), rejected -> stale, rejected -> "")
+            .exchange("GET", CloudClipboardApi.PATH, null, CloudApi.Auth.ACCOUNT);
+        check(stillDenied.status() == 401, "a repeated 401 is handed back to the driver");
+        try {
+            new CloudApi((method, path, headers, body) -> {
+                throw new java.io.IOException("offline");
+            }, rejected -> stale, rejected -> "").exchange("GET", CloudClipboardApi.PATH, null, CloudApi.Auth.ACCOUNT);
+            throw new AssertionError("an offline exchange must fail");
+        } catch (CloudApi.Failure failure) {
+            check(failure.network(), "an offline exchange is a transport failure, not a status for the driver");
+        }
 
         CloudApi denied = new CloudApi((method, path, headers, body) ->
             new CloudApi.Exchange(401, null, null, new byte[0]), rejected -> stale, rejected -> "");

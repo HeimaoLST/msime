@@ -1,12 +1,15 @@
 import app.msime.android.DictionarySnapshotQueue;
 import app.msime.android.DictionarySnapshotWorker;
 import app.msime.android.DictionarySnapshotPolicy;
+import app.msime.android.JsonPolicy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 public final class DictionarySnapshotQueueSmoke {
@@ -22,17 +25,11 @@ public final class DictionarySnapshotQueueSmoke {
     }
 
     public static void main(String[] args) throws Exception {
-        java.lang.reflect.Method strictBoolean = DictionarySnapshotWorker.class.getDeclaredMethod(
-            "strictBoolean", Object.class);
-        strictBoolean.setAccessible(true);
-        check(Boolean.TRUE.equals(strictBoolean.invoke(null, Boolean.TRUE)));
-        check(strictBoolean.invoke(null, "true") == null);
-        java.lang.reflect.Method strictString = DictionarySnapshotWorker.class.getDeclaredMethod(
-            "strictString", Object.class);
-        strictString.setAccessible(true);
-        check("legacy".equals(strictString.invoke(null, "legacy")));
-        check(strictString.invoke(null, 1) == null);
-        check(strictString.invoke(null, Boolean.TRUE) == null);
+        check(Boolean.TRUE.equals(JsonPolicy.strictBoolean(Boolean.TRUE)));
+        check(JsonPolicy.strictBoolean("true") == null);
+        check("legacy".equals(JsonPolicy.strictString("legacy")));
+        check(JsonPolicy.strictString(1) == null);
+        check(JsonPolicy.strictString(Boolean.TRUE) == null);
         check(DictionarySnapshotPolicy.handle(42L, -1) == 42L);
         check(DictionarySnapshotPolicy.handle(42.5, -1) == -1);
         check(DictionarySnapshotPolicy.handle(true, -1) == -1);
@@ -105,6 +102,16 @@ public final class DictionarySnapshotQueueSmoke {
             Files.delete(workerQueuePath.resolve("worker.lock"));
             String version = "local-v1:legacy:" + "a".repeat(64);
             check(DictionarySnapshotQueue.validVersion(version));
+            queue.publishLocalVersion(version);
+            check(queue.read().localVersion().equals(version));
+            Path linkedStateSource = root.resolve("outside-state.bin");
+            Files.copy(root.resolve("queue/state.bin"), linkedStateSource);
+            Path linkedState = root.resolve("queue/state.bin");
+            Files.delete(linkedState);
+            Files.createLink(linkedState, linkedStateSource);
+            fails(DictionarySnapshotQueue.Reason.INVALID, queue::read);
+            Files.delete(linkedState);
+            queue.publishLocalVersion(version);
             UUID receipt = UUID.randomUUID();
             String receiptVersion = "local-v1:" + receipt + ":" + "b".repeat(64);
             check(DictionarySnapshotQueue.validVersion(receiptVersion));
@@ -114,6 +121,11 @@ public final class DictionarySnapshotQueueSmoke {
             String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
                 .digest(Files.readAllBytes(source)));
             String account = "fixture-account";
+            Path linkedSource = root.resolve("linked-download.ndjson");
+            Files.createLink(linkedSource, source);
+            fails(DictionarySnapshotQueue.Reason.INVALID,
+                () -> queue.enqueue(linkedSource, account, 42, version, digest));
+            Files.delete(linkedSource);
             fails(DictionarySnapshotQueue.Reason.INVALID,
                 () -> queue.enqueue(source, account, 42, version, "0".repeat(64)));
             try (Stream<Path> entries = Files.list(root.resolve("queue"))) {
@@ -127,9 +139,9 @@ public final class DictionarySnapshotQueueSmoke {
                 && queued.request().status() == DictionarySnapshotQueue.Status.QUEUED);
             check(Files.exists(queue.filePath(id)));
             try (DictionarySnapshotQueue.WorkerLease lease = queue.acquireWorkerLease()) {
-                DictionarySnapshotQueue.Request claimed = queue.claim(lease);
+                DictionarySnapshotQueue.Request claimed = queue.claim(lease, () -> account);
                 check(claimed.status() == DictionarySnapshotQueue.Status.PREPARING);
-                check(queue.complete(id, lease, version, false,
+                check(queue.complete(id, lease, version, false, () -> account,
                     () -> "local-v1:" + id + ":" + "b".repeat(64)));
             }
             check(queue.read().request().status() == DictionarySnapshotQueue.Status.APPLIED);
@@ -137,14 +149,14 @@ public final class DictionarySnapshotQueueSmoke {
             String preparingVersion = "local-v1:" + id + ":" + "b".repeat(64);
             queue.enqueue(source, account, 42, preparingVersion, digest);
             try (DictionarySnapshotQueue.WorkerLease lease = queue.acquireWorkerLease()) {
-                check(queue.claim(lease).status() == DictionarySnapshotQueue.Status.PREPARING);
+                check(queue.claim(lease, () -> account).status() == DictionarySnapshotQueue.Status.PREPARING);
                 queue.cancel(account);
             }
             check(queue.read().request().status() == DictionarySnapshotQueue.Status.CANCELLED);
             String appliedVersion = preparingVersion;
             UUID recovered = queue.enqueue(source, account, 43, appliedVersion, digest);
             try (DictionarySnapshotQueue.WorkerLease lease = queue.acquireWorkerLease()) {
-                check(queue.claim(lease).status() == DictionarySnapshotQueue.Status.PREPARING);
+                check(queue.claim(lease, () -> account).status() == DictionarySnapshotQueue.Status.PREPARING);
                 queue.publishLocalVersion("local-v1:" + recovered + ":" + "c".repeat(64));
             }
             check(queue.read().request().status() == DictionarySnapshotQueue.Status.APPLIED);
@@ -154,15 +166,15 @@ public final class DictionarySnapshotQueueSmoke {
             String recoveredVersion = "local-v1:" + recovered + ":" + "c".repeat(64);
             UUID failed = queue.enqueue(source, account, 43, recoveredVersion, digest);
             try (DictionarySnapshotQueue.WorkerLease lease = queue.acquireWorkerLease()) {
-                queue.claim(lease);
+                queue.claim(lease, () -> account);
                 queue.fail(failed, lease);
             }
             check(queue.read().request().status() == DictionarySnapshotQueue.Status.FAILED);
             check(!Files.exists(queue.filePath(failed)));
             UUID second = queue.enqueue(source, account, 43, recoveredVersion, digest);
             try (DictionarySnapshotQueue.WorkerLease lease = queue.acquireWorkerLease()) {
-                queue.claim(lease);
-                check(!queue.complete(second, lease, "local-v1:legacy:" + "d".repeat(64), false,
+                queue.claim(lease, () -> account);
+                check(!queue.complete(second, lease, "local-v1:legacy:" + "d".repeat(64), false, () -> account,
                     () -> "local-v1:legacy:" + "e".repeat(64)));
             }
             check(queue.read().request().status() == DictionarySnapshotQueue.Status.CONFLICT);
@@ -181,6 +193,83 @@ public final class DictionarySnapshotQueueSmoke {
             queue.publishLocalVersion(lateReceipt);
             check(queue.read().request().status() == DictionarySnapshotQueue.Status.CANCELLED);
             check(lateReceipt.equals(queue.read().localVersion()));
+
+            UUID stale = queue.enqueue(source, account, 45, lateReceipt, digest);
+            try (DictionarySnapshotQueue.WorkerLease lease = queue.acquireWorkerLease()) {
+                check(queue.claim(lease, () -> null) == null);
+                check(queue.read().request().status() == DictionarySnapshotQueue.Status.QUEUED);
+                check(Files.exists(queue.filePath(stale)));
+                check(queue.claim(lease, () -> "") == null);
+            }
+            check(queue.read().request().status() == DictionarySnapshotQueue.Status.CANCELLED);
+            check(!Files.exists(queue.filePath(stale)));
+
+            UUID replaced = queue.enqueue(source, account, 46, lateReceipt, digest);
+            try (DictionarySnapshotQueue.WorkerLease lease = queue.acquireWorkerLease()) {
+                check(queue.claim(lease, () -> "replacement-account") == null);
+            }
+            check(queue.read().request().status() == DictionarySnapshotQueue.Status.CANCELLED);
+            check(!Files.exists(queue.filePath(replaced)));
+
+            UUID switchedDuringPreparation = queue.enqueue(source, account, 47, lateReceipt, digest);
+            AtomicReference<String> currentAccount = new AtomicReference<>(account);
+            AtomicBoolean activated = new AtomicBoolean();
+            try (DictionarySnapshotQueue.WorkerLease lease = queue.acquireWorkerLease()) {
+                check(queue.claim(lease, currentAccount::get).status() == DictionarySnapshotQueue.Status.PREPARING);
+                currentAccount.set(null);
+                check(!queue.complete(switchedDuringPreparation, lease, lateReceipt, false,
+                    currentAccount::get, () -> {
+                        activated.set(true);
+                        return "local-v1:" + switchedDuringPreparation + ":" + "e".repeat(64);
+                    }));
+                check(!activated.get());
+                check(queue.read().request().status() == DictionarySnapshotQueue.Status.PREPARING);
+                check(Files.exists(queue.filePath(switchedDuringPreparation)));
+                currentAccount.set("");
+                check(!queue.complete(switchedDuringPreparation, lease, lateReceipt, false,
+                    currentAccount::get, () -> {
+                        activated.set(true);
+                        return "local-v1:" + switchedDuringPreparation + ":" + "e".repeat(64);
+                    }));
+            }
+            check(!activated.get());
+            check(queue.read().request().status() == DictionarySnapshotQueue.Status.CANCELLED);
+            check(!Files.exists(queue.filePath(switchedDuringPreparation)));
+
+            // 原生快照准备和激活只认版本里的 64 位摘要；带前缀的整串会被原生侧当成越界请求拒绝。
+            String digestOnly = "a".repeat(64);
+            check(digestOnly.equals(DictionarySnapshotQueue.nativeVersion("local-v1:legacy:" + digestOnly)));
+            check(digestOnly.equals(DictionarySnapshotQueue.nativeVersion("local-v1:" + id + ":" + digestOnly)));
+            fails(DictionarySnapshotQueue.Reason.INVALID, () -> DictionarySnapshotQueue.nativeVersion(digestOnly));
+            fails(DictionarySnapshotQueue.Reason.INVALID, () -> DictionarySnapshotQueue.nativeVersion(null));
+            fails(DictionarySnapshotQueue.Reason.INVALID,
+                () -> DictionarySnapshotQueue.nativeVersion("local-v1:legacy:" + "A".repeat(64)));
+
+            // 本地备份恢复的请求不属于任何账号：未登录（空字符串）、已登录（真实账号 id）、账号暂时读不到（null）时都照常认领和激活，退出登录取消账号请求时也碰不到它。
+            String restoreVersion = lateReceipt;
+            String[][] restoreAccounts = { {""}, {"signed-in-account"}, {null} };
+            for (String[] current : restoreAccounts) {
+                UUID restore = queue.enqueue(source, DictionarySnapshotQueue.LOCAL_RESTORE_OWNER, 0,
+                    restoreVersion, digest);
+                queue.cancel(account);
+                check(queue.read().request().status() == DictionarySnapshotQueue.Status.QUEUED);
+                AtomicBoolean restored = new AtomicBoolean();
+                String next = "local-v1:" + restore + ":" + "f".repeat(64);
+                try (DictionarySnapshotQueue.WorkerLease lease = queue.acquireWorkerLease()) {
+                    DictionarySnapshotQueue.Request claimed = queue.claim(lease, () -> current[0]);
+                    check(claimed != null && claimed.id().equals(restore)
+                        && claimed.status() == DictionarySnapshotQueue.Status.PREPARING);
+                    check(queue.complete(restore, lease, restoreVersion, false, () -> current[0], () -> {
+                        restored.set(true);
+                        return next;
+                    }));
+                }
+                check(restored.get());
+                check(queue.read().request().status() == DictionarySnapshotQueue.Status.APPLIED);
+                check(next.equals(queue.read().localVersion()));
+                check(!Files.exists(queue.filePath(restore)));
+                restoreVersion = next;
+            }
             System.out.println("Android dictionary snapshot queue: atomic files, hash bounds, lease and conflict guards passed");
         } finally {
             try (Stream<Path> paths = Files.walk(root)) {

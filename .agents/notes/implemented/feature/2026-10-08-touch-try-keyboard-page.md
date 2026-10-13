@@ -11,7 +11,7 @@ Status: implemented
 
 ## Decision
 
-- 「试用键盘」是共享设置外壳里的一个子页面：`settings-page-registry.ts` 注册 `try-keyboard`，`subPageParents` 把它挂在 `home` 下。它只在触屏宿主上、并且有首页时出现（`settingsPageProjections`），不进任何导航分组，不挂共享表单，也没有重新读取。首页的 `TouchHomePage` 在宿主没有 `openKeyboard`、或者 `openKeyboard` 失败时调用 `onOpenPage("try-keyboard")`。HarmonyOS 手机外壳因此自动给它加上返回按钮和推入动画；其他触屏外壳照常显示「‹ 设置」。
+- 「试用键盘」是共享设置外壳里的一个子页面：`settings-page-registry.ts` 注册 `try-keyboard`，`subPageParents` 把它挂在 `home` 下。它只在触屏宿主上、有首页并且没有 AI 对话时出现（`settingsPageProjections`），不进任何导航分组，不挂共享表单，也没有重新读取。首页的 `TouchHomePage` 在宿主没有 `openKeyboard`、或者 `openKeyboard` 失败时，有对话就切到「对话」标签，没有才调用 `onOpenPage("try-keyboard")`，见 [触屏首页的「试用键盘」切到「对话」标签](2026-10-11-touch-try-keyboard-is-the-chat-tab.md)。HarmonyOS 手机外壳因此自动给它加上返回按钮和推入动画；其他触屏外壳照常显示「‹ 设置」。
 - 页面本身（`packages/ui/src/keyboard/try-keyboard-page.tsx`）照 Android 的试用页做：
   - 第一条是水杉的问候；进页面就在后台加载模型目录，并把焦点交给输入框，系统随即弹出键盘。
   - 输入框限 2000 字，最多长到 4 行。宿主提供 AI 对话时，回车键显示「发送」，按下就发送；组字中的回车和 Shift+回车不发送。

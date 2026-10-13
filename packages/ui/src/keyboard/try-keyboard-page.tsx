@@ -1,3 +1,4 @@
+import { SendStopButton } from "../core/send-stop-button";
 import MarkdownIt from "markdown-it";
 import {
   useEffect,
@@ -8,27 +9,21 @@ import {
   type MouseEvent,
 } from "react";
 import type { ChatClient, ChatMessage } from "../chat/chat-page";
-import { boundedHistory } from "../chat/chat-history";
+import { chatRequest } from "../chat/chat-prompt";
+import { resizeChatComposer } from "../chat/chat-composer-size";
 import { chatError } from "../chat/chat-errors";
 import { errorCode } from "../core/error-code";
 import { errorMessage } from "../core/error-message";
 import { useToast } from "../core/toast";
+import { touchHairline } from "../core/touch-style";
 import { makeDefaultAction, useImeSetupState, type SetupActions } from "./setup-status-card";
 
 /** 草稿上限，与 Android 和 Apple 的试用页相同。2000 个字符最多 8000 字节，在 client-core 单条消息 16 KiB 的上限之内，所以发送前不必再按字节检查。 */
 const DRAFT_LIMIT = 2000;
 /** 对话区最多保留的气泡数，超过时从最早的开始丢，与 Android 相同。 */
 const BUBBLE_LIMIT = 60;
-/** 一次请求最多带的对话条数：加上开头的系统约定正好是 client-core 允许的 14 条。 */
-const CONTEXT_LIMIT = 13;
 const GREETING = "你好，我是水杉输入法。打几个字发给我试试，比如 shuishan。";
 const GREETING_WITHOUT_CHAT = "你好，我是水杉输入法。在下面打几个字试试，比如 shuishan。";
-const SYSTEM_PROMPT =
-  "你是水杉输入法里的 AI 助手。除非用户明确要求使用其他语言，一律用简体中文回答，回答简洁。";
-/** 输入框最多长到 4 行，之后在框内滚动。 */
-const FIELD_MAX_LINES = 4;
-const FIELD_LINE_HEIGHT = 22;
-
 // 回复按 Markdown 显示：原始 HTML 当文字、不渲染图片，所以一条回复不会去网络上加载任何东西；链接由下面的点按处理交给外部浏览器。
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true }).disable("image");
 const openableLink = /^(https?:|mailto:)/i;
@@ -41,10 +36,10 @@ type Bubble = {
 };
 
 // 细线用内阴影而不是 border：HarmonyOS 的 WebView 有缩放，1px 边框算出来是 0.92px，ArkWeb 重新光栅化这种圆角边框时会把按钮的下半截整块涂成边框色。
-const hairline = "border-0 [box-shadow:inset_0_0_0_1px_var(--p-hair)]";
-const chip = `m-0 shrink-0 cursor-pointer whitespace-nowrap rounded-full ${hairline} bg-[var(--p-group-bg)] px-3 py-1.5 text-[13px] [font-family:inherit] [color:var(--p-text)] active:opacity-70`;
+
+const chip = `m-0 shrink-0 cursor-pointer whitespace-nowrap rounded-full ${touchHairline} bg-[var(--p-group-bg)] px-3 py-1.5 text-[13px] [font-family:inherit] [color:var(--p-text)] active:opacity-70`;
 const bubbleBase =
-  "max-w-[80%] rounded-[18px] px-3.5 py-2.5 text-[15px] leading-[1.5] break-anywhere";
+  "max-w-[80%] rounded-[18px] px-3.5 py-2.5 text-[15px] leading-[1.5] wrap-anywhere";
 const sendButton =
   "m-0 flex size-10 shrink-0 cursor-pointer items-center justify-center rounded-full border-0 p-0 [background:var(--accent-color)] [color:var(--p-on-accent)] active:opacity-80 disabled:cursor-default disabled:opacity-40";
 
@@ -58,11 +53,14 @@ export function TryKeyboardPage({
   chat,
   onLogin,
   onOpenUrl,
+  switchAway = true,
 }: {
   actions?: SetupActions;
   chat?: ChatClient;
   onLogin?: () => void;
   onOpenUrl?: (url: string) => void;
+  /** 水杉已启用且是当前输入法时，是否还提供「切换输入法」去换别的输入法。HarmonyOS 手机不提供：它打开的是系统的选择输入法弹窗，样子粗糙，键盘下方本来就有系统的切换键。 */
+  switchAway?: boolean;
 }) {
   const state = useImeSetupState(actions?.setup);
   const toast = useToast();
@@ -136,11 +134,7 @@ export function TryKeyboardPage({
   }, [bubbles, sending]);
 
   const resizeField = () => {
-    const element = field.current;
-    if (!element) return;
-    element.style.height = "auto";
-    const max = FIELD_LINE_HEIGHT * FIELD_MAX_LINES + 16;
-    element.style.height = `${Math.min(element.scrollHeight, max)}px`;
+    resizeChatComposer(field.current);
   };
   useLayoutEffect(resizeField, [draft]);
 
@@ -165,11 +159,7 @@ export function TryKeyboardPage({
       if (generation.current !== version) return;
       const selected = model.current;
       if (!selected) throw catalogError.current ?? new Error("no chat model");
-      const history = boundedHistory(conversation).slice(-CONTEXT_LIMIT);
-      const reply = await chat.complete(
-        [{ role: "system", content: SYSTEM_PROMPT }, ...history],
-        selected,
-      );
+      const reply = await chat.complete(chatRequest(conversation), selected);
       if (generation.current !== version) return;
       append("assistant", reply);
     } catch (cause) {
@@ -215,7 +205,12 @@ export function TryKeyboardPage({
   };
 
   const notReady = state?.enabled === false || state?.current === false;
-  const switchAction = makeDefaultAction(actions, state) ?? actions?.showInputMethodPicker;
+  // 没启用或不是当前输入法时，这个按钮带用户把设置补完；都好了以后它只剩换走水杉这一个用处。
+  const switchAction = notReady
+    ? (makeDefaultAction(actions, state) ?? actions?.showInputMethodPicker)
+    : switchAway
+      ? actions?.showInputMethodPicker
+      : undefined;
   const runHostAction = (action: () => Promise<void>) =>
     void action().catch((error: unknown) => toast(errorMessage(error)));
 
@@ -318,36 +313,20 @@ export function TryKeyboardPage({
           value={draft}
           maxLength={DRAFT_LIMIT}
           enterKeyHint={chat ? "send" : "enter"}
-          className={`m-0 min-h-10 min-w-0 flex-1 resize-none rounded-[20px] ${hairline} bg-[var(--p-group-bg)] px-3.5 py-2 text-[16px] leading-[22px] [color:var(--p-text)] [font-family:inherit] outline-none placeholder:[color:var(--p-sub)]`}
+          className={`m-0 min-h-10 min-w-0 flex-1 resize-none rounded-[20px] ${touchHairline} bg-[var(--p-group-bg)] px-3.5 py-2 text-[16px] leading-[22px] [color:var(--p-text)] [font-family:inherit] outline-none placeholder:[color:var(--p-sub)]`}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={fieldKeyDown}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
         />
         {chat && (
-          <button
-            type="button"
+          <SendStopButton
             className={sendButton}
-            aria-label={sending ? "停止" : "发送"}
-            disabled={!sending && !draft.trim()}
-            // 发送后键盘留着，接着打下一句。
-            onPointerDown={(event) => event.preventDefault()}
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => (sending ? stop() : void send())}
-          >
-            {sending ? (
-              <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
-                <rect width="14" height="14" rx="2" fill="currentColor" />
-              </svg>
-            ) : (
-              <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  d="M11 20V7.83l-5.59 5.59L4 12l8-8 8 8-1.41 1.41L13 7.83V20h-2Z"
-                  fill="currentColor"
-                />
-              </svg>
-            )}
-          </button>
+            sending={sending}
+            sendDisabled={!draft.trim()}
+            onStop={stop}
+            onSend={() => void send()}
+          />
         )}
       </div>
     </section>

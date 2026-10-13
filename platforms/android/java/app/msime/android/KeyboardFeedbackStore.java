@@ -3,12 +3,9 @@ package app.msime.android;
 import android.content.Context;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -66,25 +63,13 @@ public final class KeyboardFeedbackStore {
         Path parent = file.getParent();
         if (parent == null) throw new IOException("feedback directory unavailable");
         ensureSafeDirectory(parent);
-        Path temporary = Files.createTempFile(parent, FILE_NAME + ".", ".tmp");
+        String encoded;
         try {
-            String encoded;
-            try {
-                encoded = encode(settings);
-            } catch (JSONException error) {
-                throw new IOException("feedback encoding failed", error);
-            }
-            Files.write(temporary, encoded.getBytes(StandardCharsets.UTF_8),
-                StandardOpenOption.TRUNCATE_EXISTING);
-            try {
-                Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException ignored) {
-                Files.move(temporary, file, StandardCopyOption.REPLACE_EXISTING);
-            }
-        } finally {
-            Files.deleteIfExists(temporary);
+            encoded = encode(settings);
+        } catch (JSONException error) {
+            throw new IOException("feedback encoding failed", error);
         }
+        FilePolicy.writeAtomically(file, encoded.getBytes(StandardCharsets.UTF_8));
     }
 
     static void ensureSafeDirectory(Path directory) throws IOException {
@@ -103,18 +88,9 @@ public final class KeyboardFeedbackStore {
     public static Settings fromValues(Object soundEnabled, Object hapticsEnabled,
                                       Object hapticStrength) {
         String strength = hapticStrength instanceof String ? (String) hapticStrength : "medium";
-        return new Settings(booleanValue(soundEnabled, true), booleanValue(hapticsEnabled, false),
+        return new Settings(JsonPolicy.strictBoolean(soundEnabled, true),
+            JsonPolicy.strictBoolean(hapticsEnabled, false),
             KeyboardFeedbackPreferences.strength(strength));
-    }
-
-    /** Persisted flags are typed JSON booleans; do not accept org.json's string coercion. */
-    static Boolean strictBoolean(Object value) {
-        return JsonPolicy.strictBoolean(value);
-    }
-
-    static boolean booleanValue(Object value, boolean fallback) {
-        Boolean parsed = strictBoolean(value);
-        return parsed == null ? fallback : parsed;
     }
 
     static String encode(Settings settings) throws JSONException {

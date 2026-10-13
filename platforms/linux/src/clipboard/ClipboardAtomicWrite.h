@@ -4,7 +4,6 @@
 #include <unistd.h>
 
 #include <cerrno>
-#include <cstdio>
 #include <array>
 #include <filesystem>
 #include <optional>
@@ -12,8 +11,8 @@
 #include <string_view>
 #include <system_error>
 #include <sys/stat.h>
-#include <vector>
 
+#include "../core/AtomicFileWrite.h"
 #include "../core/SafePath.h"
 
 namespace msime::linux_host {
@@ -43,7 +42,14 @@ inline int open_clipboard_lock(const std::filesystem::path &history) {
   if (!clipboard_directory_is_safe(directory)) return -1;
   auto lock = history;
   lock += ".lock";
-  return ::open(lock.c_str(), O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+  const int descriptor = ::open(lock.c_str(), O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (descriptor < 0) return -1;
+  struct stat metadata {};
+  if (::fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode) || metadata.st_nlink != 1) {
+    ::close(descriptor);
+    return -1;
+  }
+  return descriptor;
 }
 
 // Remove the history file only when its parent remains a real directory. The
@@ -66,7 +72,7 @@ inline std::optional<std::string> read_clipboard_file(const std::filesystem::pat
   const int descriptor = ::open(file.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
   if (descriptor < 0) return std::nullopt;
   struct stat metadata {};
-  if (::fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
+  if (::fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode) || metadata.st_nlink != 1) {
     ::close(descriptor);
     return std::nullopt;
   }
@@ -96,37 +102,7 @@ inline bool write_clipboard_file_atomically(const std::filesystem::path &file,
                                             std::string_view content) {
   const auto directory = file.has_parent_path() ? file.parent_path() : std::filesystem::path(".");
   if (!prepare_clipboard_directory(directory)) return false;
-  std::error_code error;
-  std::string pattern = (directory / ".msime-clipboard-XXXXXX").string();
-  std::vector<char> name(pattern.begin(), pattern.end());
-  name.push_back('\0');
-  const int descriptor = ::mkstemp(name.data());
-  if (descriptor < 0) return false;
-  const std::filesystem::path temporary(name.data());
-  bool ok = true;
-  const char *bytes = content.data();
-  std::size_t remaining = content.size();
-  while (remaining > 0) {
-    const ssize_t written = ::write(descriptor, bytes, remaining);
-    if (written <= 0) {
-      if (errno == EINTR) continue;
-      ok = false;
-      break;
-    }
-    bytes += written;
-    remaining -= static_cast<std::size_t>(written);
-  }
-  if (ok && ::fsync(descriptor) != 0) ok = false;
-  if (::close(descriptor) != 0) ok = false;
-  if (!ok) {
-    std::filesystem::remove(temporary, error);
-    return false;
-  }
-  if (::rename(temporary.c_str(), file.c_str()) != 0) {
-    std::filesystem::remove(temporary, error);
-    return false;
-  }
-  return true;
+  return publish_file_atomically(file, content, (directory / ".msime-clipboard-XXXXXX").string());
 }
 
 } // namespace msime::linux_host

@@ -1,4 +1,6 @@
+import app.msime.android.CandidateGlossPolicy;
 import app.msime.android.CandidateTranslationPolicy;
+import app.msime.android.CandidateTranslationRoute;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -24,6 +26,46 @@ public final class CandidateTranslationPolicySmoke {
                 .equals(List.of("safe")), "oversized gloss rows are not insertable");
         check(CandidateTranslationPolicy.insertionGlosses("坏\uD800\n好")
                 .equals(List.of("好")), "invalid Unicode gloss rows are not insertable");
+        // 一行里用分号连起来的几个义项要能分别上屏（#6997）：长按「我的」只给一个「my; mine」，点了连分号一起上屏。
+        check(CandidateTranslationPolicy.insertionGlosses("my; mine").equals(List.of("my", "mine")),
+            "ASCII semicolon separates insertable senses");
+        check(CandidateTranslationPolicy.insertionGlosses("苹果；家伙").equals(List.of("苹果", "家伙")),
+            "full-width semicolon separates insertable senses");
+        check(CandidateTranslationPolicy.insertionGlosses(" ; ；").isEmpty(),
+            "whitespace-only senses are not insertable");
+        check(CandidateTranslationPolicy.insertionGlosses("a;;b").equals(List.of("a", "b"))
+                && CandidateTranslationPolicy.insertionGlosses(";; a ;").equals(List.of("a")),
+            "empty senses are dropped");
+        check(CandidateTranslationPolicy.insertionGlosses("my; my").equals(List.of("my")),
+            "a repeated sense is offered once");
+        check(CandidateTranslationPolicy.insertionGlosses("my; mine\nmon; ma")
+                .equals(List.of("my", "mine", "mon", "ma")),
+            "target rows keep their order and each row splits into its senses");
+        check(CandidateTranslationPolicy.insertionGlosses("my; mine\nmon")
+                .equals(List.of("my", "mine", "mon")),
+            "a line break stays the target separator, never part of a sense");
+        check(CandidateTranslationPolicy.insertionGlosses("hello; hi\nhello")
+                .equals(List.of("hello", "hi")),
+            "a sense shared by two targets is offered once");
+        check(CandidateTranslationPolicy.insertionGlosses("1;2;3;4;5;6;7;8;9;10")
+                .equals(List.of("1", "2", "3", "4", "5", "6", "7", "8", "9")),
+            "the long-press menu offers at most nine senses");
+        check(CandidateTranslationPolicy.insertionGlosses("1;2;3;4;5;6;7;8;9;10\nb")
+                .equals(List.of("1", "2", "3", "4", "5", "6", "7", "8", "b")),
+            "a long first target still leaves the second target a menu item");
+        check(CandidateTranslationPolicy.insertionGlosses("1;2;3;4;5;6;7;8;9;10\n1")
+                .equals(List.of("1", "2", "3", "4", "5", "6", "7", "8", "9")),
+            "a duplicate secondary sense does not waste a menu slot");
+        check(CandidateTranslationPolicy.insertionGlosses("1;2;3;4;5;6;7;8;9;10\n")
+                .equals(List.of("1", "2", "3", "4", "5", "6", "7", "8", "9")),
+            "an empty secondary row does not waste a menu slot");
+        check(!CandidateTranslationPolicy.userTranslationSourceAllowed(6)
+                && !CandidateTranslationPolicy.userTranslationSourceAllowed(7)
+                && !CandidateTranslationPolicy.userTranslationSourceAllowed(13),
+            "emoji, kaomoji, and mixed Japanese candidates are not sent to user services");
+        check(CandidateTranslationPolicy.userTranslationSourceAllowed(0)
+                && CandidateTranslationPolicy.userTranslationSourceAllowed(12),
+            "ordinary candidate sources remain eligible for user services");
         check(CandidateTranslationPolicy.glossLines(List.of("en"), true, false, Set.of()) == 1,
             "offline English keeps its row when online translation is off");
         check(CandidateTranslationPolicy.glossLines(List.of("ja"), true, false, Set.of()) == 0,
@@ -94,6 +136,13 @@ public final class CandidateTranslationPolicySmoke {
             "the 훈음 takes its own row under the Hanja");
         check(CandidateTranslationPolicy.renderedOwnRowLines("나라 이름 한\nKorea\n韓国") == 4,
             "each gloss row follows the 훈음 row");
+        // #6997：辅助码和释义共用一行，候选条为释义预留的行数不用知道辅助码在不在，切方案、开关辅助码时键盘不变高。
+        check(CandidateTranslationPolicy.renderedOwnRowLines(CandidateGlossPolicy.annotation("(ab)", "my; mine", true))
+                == CandidateTranslationPolicy.renderedOwnRowLines(CandidateGlossPolicy.annotation("", "my; mine", true)),
+            "a helpcode before the gloss adds no row");
+        check(CandidateTranslationPolicy.renderedOwnRowLines(CandidateGlossPolicy.annotation("(ab)", "my\nmon", true))
+                == CandidateTranslationPolicy.renderedOwnRowLines(CandidateGlossPolicy.annotation("", "my\nmon", true)),
+            "a helpcode before two target glosses adds no row");
         check(CandidateTranslationPolicy.reservedGlossRows(0, false) == 0
                 && CandidateTranslationPolicy.reservedGlossRows(1, false) == 1
                 && CandidateTranslationPolicy.reservedGlossRows(2, false) == 2,
@@ -103,29 +152,61 @@ public final class CandidateTranslationPolicySmoke {
         check(CandidateTranslationPolicy.reservedGlossRows(1, true) == 1
                 && CandidateTranslationPolicy.reservedGlossRows(2, true) == 2,
             "the 훈음 shares the first gloss row, so Korean reserves no more rows than any other scheme");
-        // The account endpoint receives candidate words, so only an explicit choice may reach it.
-        check(!CandidateTranslationPolicy.accountSelected(true, false, false, false),
+        // 水杉账号会收到候选词，只有明确选了它才走；用户自己的服务（含凭据可用的腾讯）总是优先。
+        check(!account(true, false, false, false, false),
             "candidate translations alone never select the account");
-        check(!CandidateTranslationPolicy.accountSelected(false, false, false, false),
+        check(!account(false, false, false, false, false),
             "nothing chosen sends nothing");
-        check(CandidateTranslationPolicy.accountSelected(true, true, false, false),
+        check(account(true, true, false, false, false),
             "an explicit account choice selects the account");
-        check(!CandidateTranslationPolicy.accountSelected(false, true, false, false),
+        check(!account(false, true, false, false, false),
             "turning candidate translations off overrides the account choice");
-        check(!CandidateTranslationPolicy.accountSelected(true, true, true, false),
+        check(!account(true, true, true, false, false),
             "the user's own NiuTrans service wins over the account");
-        check(!CandidateTranslationPolicy.accountSelected(true, true, false, true),
+        check(!account(true, true, false, true, false),
             "the user's own custom service wins over the account");
+        check(!account(true, true, false, false, true),
+            "usable Tencent credentials win over the account");
+        CandidateTranslationRoute none = CandidateTranslationRoute.NONE;
         check(CandidateTranslationPolicy.displayInvalidated(true, false, true, true,
-                true, true, List.of("en"), List.of("en")),
+                true, true, List.of("en"), List.of("en"), none, none),
             "turning off offline glosses clears the displayed rows");
         check(CandidateTranslationPolicy.displayInvalidated(true, true, true, true,
-                true, true, List.of("en"), List.of("ja")),
+                true, true, List.of("en"), List.of("ja"), none, none),
             "changing translation targets clears the displayed rows");
         check(!CandidateTranslationPolicy.displayInvalidated(true, true, true, true,
-                true, true, List.of("en"), List.of("en")),
+                true, true, List.of("en"), List.of("en"), none, none),
             "unrelated preference refresh keeps the displayed rows");
+        check(CandidateTranslationPolicy.displayInvalidated(true, true, true, true,
+                false, false, List.of("en"), List.of("en"), none, customRoute("key")),
+            "choosing a translation service clears the displayed rows");
+        check(CandidateTranslationPolicy.displayInvalidated(true, true, true, true,
+                false, false, List.of("en"), List.of("en"), customRoute("old"), customRoute("new")),
+            "changing a service credential clears the displayed rows");
+        check(!CandidateTranslationPolicy.displayInvalidated(true, true, true, true,
+                false, false, List.of("en"), List.of("en"), customRoute("key"), customRoute("key")),
+            "rereading the same service keeps the displayed rows");
+        check(CandidateTranslationPolicy.acceptsBinding("7:account-a", "7:account-a"),
+            "a translation response remains valid for the same account binding");
+        check(CandidateTranslationPolicy.acceptsBinding("7:", "7:"),
+            "the anonymous translation identity still has a stable binding snapshot");
+        check(!CandidateTranslationPolicy.acceptsBinding("7:account-a", "8:account-a")
+                && !CandidateTranslationPolicy.acceptsBinding("7:account-a", "7:account-b")
+                && !CandidateTranslationPolicy.acceptsBinding("7:account-a", null),
+            "a binding change or unavailable account rejects a stale translation response");
         System.out.println("Android candidate translation language policy passed");
+    }
+
+    private static boolean account(boolean translations, boolean account, boolean niutrans,
+            boolean custom, boolean tencent) {
+        return CandidateTranslationPolicy.route(translations, account, niutrans, "app", "key",
+            custom, "https://translate.example/api", "", tencent, "AKIDsynthetic", "synthetic", "")
+            .provider() == CandidateTranslationRoute.Provider.ACCOUNT;
+    }
+
+    private static CandidateTranslationRoute customRoute(String key) {
+        return CandidateTranslationPolicy.route(true, false, false, "", "", true,
+            "https://translate.example/api", key, false, "", "", "");
     }
 
     private static void check(boolean condition, String message) {

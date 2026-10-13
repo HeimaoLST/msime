@@ -1,4 +1,4 @@
-//! Wubi key handling (`R/schemes/wubi_scheme.*`): letters `a..=y`, `z` only while mixed pinyin is allowed, at most four letters or 32 while the pinyin fallback is extending the code.
+//! 五笔按键处理（`R/schemes/wubi_scheme.*`）：字母 `a..=y`，`z` 只在允许混输拼音时收；最多四个字母，混输的拼音回退正在延长组字时最多 32 个。混输关闭时，组字开头的 `z` 打开临时拼音反查：之后的字母都是拼音，最多 32 个。
 
 use crate::types::{QueryRequest, SchemeKey, SchemeType};
 
@@ -13,7 +13,12 @@ pub struct WubiScheme {
     mixed_pinyin_allowed: bool,
     /// A fifth letter is refused unless mixed input found that the table cannot answer the code in hand, so `nihao` can be finished while a fluent wubi typist sees no change.
     extended_length_allowed: bool,
+    /// 混输关闭时由会话打开：组字以 `z` 开头就是临时拼音反查。五笔码不用 `z`，混输关闭时这个键原本被拒绝、交回宿主，所以占用它不会挡住任何五笔码。混输打开时 `z` 已经是拼音字母，会话会把这里关掉。
+    pinyin_lookup_allowed: bool,
 }
+
+/// 临时拼音反查的引导键。
+pub const PINYIN_LOOKUP_PREFIX: u8 = b'z';
 
 fn is_wubi_letter(lower: u8, mixed_pinyin_allowed: bool) -> bool {
     (b'a'..=b'y').contains(&lower) || (mixed_pinyin_allowed && lower == b'z')
@@ -36,9 +41,14 @@ impl WubiScheme {
             SchemeKey::Backspace => self.raw.pop().is_some(),
             SchemeKey::Letter(letter) if letter.is_ascii_alphabetic() => {
                 let lower = letter.to_ascii_lowercase();
-                if is_wubi_letter(lower, self.mixed_pinyin_allowed)
-                    && self.raw.len() < self.max_code_length()
-                {
+                let opens_lookup = self.pinyin_lookup_allowed
+                    && self.raw.is_empty()
+                    && lower == PINYIN_LOOKUP_PREFIX;
+                // 反查里的字母是拼音，`z` 和其余字母一样收下。
+                let accepted = opens_lookup
+                    || self.in_pinyin_lookup()
+                    || is_wubi_letter(lower, self.mixed_pinyin_allowed);
+                if accepted && self.raw.len() < self.max_code_length() {
                     self.raw.push(char::from(lower));
                     true
                 } else {
@@ -77,27 +87,54 @@ impl WubiScheme {
         self.raw.clone()
     }
 
-    /// Host editing: lowercase, filter to the alphabet and clip to the current limit. The C++ read `raw_input_with_cases` when it was non-empty; after lowercasing both spellings give the same code, so either may be passed.
+    /// 宿主编辑：转小写、只留字母表里的字母、按当前上限截断。C++ 在 `raw_input_with_cases` 非空时读它；转小写后两种拼写给出同一个码，传哪个都行。反查允许时，第一个字母是 `z` 的文本整段按反查收：字母全部保留，上限 32。
     pub fn set_raw_input(&mut self, raw: &str) {
-        let limit = self.max_code_length();
+        let lookup = self.pinyin_lookup_allowed
+            && raw
+                .bytes()
+                .find(u8::is_ascii_alphabetic)
+                .is_some_and(|first| first.to_ascii_lowercase() == PINYIN_LOOKUP_PREFIX);
+        // 上限由新文本决定，不能读旧组字：旧组字是反查时 `max_code_length` 会给出 32。
+        let limit = if lookup || self.extended_length_allowed {
+            MAX_MIXED_CODE_LENGTH
+        } else {
+            MAX_CODE_LENGTH
+        };
+        let mixed_pinyin_allowed = self.mixed_pinyin_allowed;
         self.raw.clear();
         self.raw.reserve(limit.min(raw.len()));
         self.raw.extend(
             raw.bytes()
                 .map(|byte| byte.to_ascii_lowercase())
-                .filter(|&lower| is_wubi_letter(lower, self.mixed_pinyin_allowed))
+                .filter(|&lower| {
+                    if lookup {
+                        lower.is_ascii_lowercase()
+                    } else {
+                        is_wubi_letter(lower, mixed_pinyin_allowed)
+                    }
+                })
                 .take(limit)
                 .map(char::from),
         );
     }
 
-    /// Exactly four letters. Longer mixed-pinyin spellings are fallback queries, not complete wubi codes.
+    /// 正好四个字母。更长的混输拼音是回退查询，不是完整的五笔码；反查里的字母是拼音，四个字母也不是完整五笔码。
     pub fn has_complete_code(&self) -> bool {
-        self.raw.len() == MAX_CODE_LENGTH
+        self.raw.len() == MAX_CODE_LENGTH && !self.in_pinyin_lookup()
     }
 
     pub fn set_mixed_pinyin_allowed(&mut self, allowed: bool) {
         self.mixed_pinyin_allowed = allowed;
+    }
+
+    /// 打开或关闭 `z` 临时拼音反查。只决定下一次组字能否以 `z` 开头，已在组字中的文本不变。
+    pub fn set_pinyin_lookup_allowed(&mut self, allowed: bool) {
+        self.pinyin_lookup_allowed = allowed;
+    }
+
+    /// 当前组字是临时拼音反查：反查允许且组字以 `z` 开头。
+    pub fn in_pinyin_lookup(&self) -> bool {
+        self.pinyin_lookup_allowed && self.raw.as_bytes().first() == Some(&PINYIN_LOOKUP_PREFIX)
     }
 
     pub fn set_extended_length_allowed(&mut self, allowed: bool) {
@@ -105,7 +142,7 @@ impl WubiScheme {
     }
 
     fn max_code_length(&self) -> usize {
-        if self.extended_length_allowed {
+        if self.extended_length_allowed || self.in_pinyin_lookup() {
             MAX_MIXED_CODE_LENGTH
         } else {
             MAX_CODE_LENGTH
@@ -175,6 +212,73 @@ mod tests {
         assert_eq!(scheme.preedit(), "");
         typed(&mut scheme, "zhongguo");
         assert_eq!(scheme.preedit(), "zhon");
+    }
+
+    #[test]
+    fn a_leading_z_opens_the_pinyin_lookup() {
+        let mut scheme = WubiScheme::new();
+        scheme.set_pinyin_lookup_allowed(true);
+        typed(&mut scheme, "zzhongguo");
+        assert_eq!(scheme.preedit(), "zzhongguo");
+        assert!(scheme.in_pinyin_lookup());
+        assert!(!scheme.has_complete_code());
+
+        // 反查最多 32 个字母，与混输拼音的上限相同。
+        scheme.reset();
+        typed(&mut scheme, &"z".repeat(40));
+        assert_eq!(scheme.preedit().len(), MAX_MIXED_CODE_LENGTH);
+
+        // 四个字母的反查不是完整五笔码。
+        scheme.reset();
+        typed(&mut scheme, "zhao");
+        assert!(!scheme.has_complete_code());
+
+        // 只有组字开头的 `z` 引导反查；五笔码中间的 `z` 照旧拒绝。
+        scheme.reset();
+        typed(&mut scheme, "wqz");
+        assert_eq!(scheme.preedit(), "wq");
+        assert!(!scheme.in_pinyin_lookup());
+
+        // 退格删掉 `z` 就离开反查。
+        scheme.reset();
+        typed(&mut scheme, "zh");
+        scheme.handle_key(SchemeKey::Backspace);
+        assert!(scheme.in_pinyin_lookup());
+        scheme.handle_key(SchemeKey::Backspace);
+        assert_eq!(scheme.preedit(), "");
+        assert!(!scheme.in_pinyin_lookup());
+        typed(&mut scheme, "abcde");
+        assert_eq!(scheme.preedit(), "abcd");
+    }
+
+    #[test]
+    fn the_pinyin_lookup_stays_closed_unless_allowed() {
+        let mut scheme = WubiScheme::new();
+        typed(&mut scheme, "zhao");
+        assert_eq!(scheme.preedit(), "hao");
+        assert!(!scheme.in_pinyin_lookup());
+
+        // 混输里的 `z` 是拼音字母，不是反查。
+        let mut mixed = WubiScheme::new();
+        mixed.set_mixed_pinyin_allowed(true);
+        typed(&mut mixed, "zhao");
+        assert_eq!(mixed.preedit(), "zhao");
+        assert!(!mixed.in_pinyin_lookup());
+        assert!(mixed.has_complete_code());
+    }
+
+    #[test]
+    fn set_raw_input_keeps_a_lookup_spelling_whole() {
+        let mut scheme = WubiScheme::new();
+        scheme.set_pinyin_lookup_allowed(true);
+        scheme.set_raw_input("Z'zhong-guo");
+        assert_eq!(scheme.preedit(), "zzhongguo");
+        assert!(scheme.in_pinyin_lookup());
+
+        // 不以 `z` 开头的文本仍是五笔码：`z` 被滤掉，四码截断。
+        scheme.set_raw_input("nihaoz");
+        assert_eq!(scheme.preedit(), "niha");
+        assert!(!scheme.in_pinyin_lookup());
     }
 
     #[test]

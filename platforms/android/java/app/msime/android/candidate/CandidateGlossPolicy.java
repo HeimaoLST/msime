@@ -20,9 +20,10 @@ public final class CandidateGlossPolicy {
 
     /** Read a JSON integer without org.json's lossy numeric coercion. */
     public static long strictInteger(Object value) {
-        if (!(value instanceof Integer) && !(value instanceof Long))
+        Long parsed = JsonPolicy.strictLong(value);
+        if (parsed == null)
             throw new IllegalArgumentException("Expected JSON integer");
-        return ((Number) value).longValue();
+        return parsed;
     }
 
     /** Return a fallback for a missing or malformed protocol integer instead of coercing it. */
@@ -36,13 +37,9 @@ public final class CandidateGlossPolicy {
 
     /** Read a JSON string without org.json's implicit scalar-to-string coercion. */
     public static String strictString(Object value) {
-        if (!(value instanceof String)) throw new IllegalArgumentException("Expected JSON string");
-        return (String) value;
-    }
-
-    /** Read a JSON boolean without org.json's implicit string coercion. */
-    public static Boolean strictBoolean(Object value) {
-        return JsonPolicy.strictBoolean(value);
+        String parsed = JsonPolicy.strictString(value);
+        if (parsed == null) throw new IllegalArgumentException("Expected JSON string");
+        return parsed;
     }
 
     /** Whether an apply-translations response carries a typed JSON success flag. */
@@ -50,11 +47,16 @@ public final class CandidateGlossPolicy {
         return JsonPolicy.strictTrue(value);
     }
 
-    /** Engine annotations (for example Wubi codes) occupy the shared hint slot first. */
+    /**
+     * 候选的提示位：Engine 注释（双拼辅助码、五笔剩余编码等）在前，释义跟在同一行后面。
+     *
+     * <p>以前 Engine 注释独占提示位，双拼默认在候选栏显示辅助码，每个候选都带辅助码，释义就只能长按才看到（#6997）。和韩语汉字的 훈음 一样共用第一行而不是另起一行：候选条按释义行数预留高度（{@link CandidateTranslationPolicy#reservedGlossRows}），另起一行就得看辅助码显不显示来加高，切方案或开关辅助码时键盘高度会跳。第二目标语言的释义仍各占一行，行数和只有释义时相同。
+     */
     public static String annotation(
             String engineAnnotation, String translation, boolean glossEnabled) {
-        if (engineAnnotation != null && !engineAnnotation.isEmpty()) return engineAnnotation;
-        return glossEnabled && validEntry(translation) ? translation : "";
+        String gloss = glossEnabled && validEntry(translation) ? translation : "";
+        if (engineAnnotation == null || engineAnnotation.isEmpty()) return gloss;
+        return gloss.isEmpty() ? engineAnnotation : engineAnnotation + " · " + gloss;
     }
 
     /**
@@ -77,12 +79,16 @@ public final class CandidateGlossPolicy {
         return gloss.isEmpty() ? suffix : suffix + "，释义：" + gloss;
     }
 
+    /** 读屏念的提示和释义，和 {@link #annotation} 画出来的一致：两者都有时都念。 */
     public static String accessibilitySuffix(
             String engineAnnotation, String translation, boolean glossEnabled) {
-        if (engineAnnotation != null && !engineAnnotation.isEmpty())
-            return "，提示：" + engineAnnotation;
-        String gloss = annotation(engineAnnotation, translation, glossEnabled);
-        return gloss.isEmpty() ? "" : "，英文释义：" + gloss;
+        String hint = engineAnnotation == null || engineAnnotation.isEmpty() ? "" : "，提示：" + engineAnnotation;
+        return hint + glossAccessibilitySuffix(translation, glossEnabled);
+    }
+
+    /** 读屏念的释义部分，没有释义或释义关着时为空。 */
+    public static String glossAccessibilitySuffix(String translation, boolean glossEnabled) {
+        return glossEnabled && validEntry(translation) ? "，英文释义：" + translation : "";
     }
 
     public static boolean validEntry(String value) {

@@ -3,6 +3,7 @@
 //! Same `mod tests` as before, so `use super::*` still names the parent.
 
 use super::*;
+use crate::cloud::clipboard_e2e::HttpRequest;
 use std::collections::HashMap;
 use std::io::Read;
 use std::net::TcpListener;
@@ -56,19 +57,24 @@ fn validates_clipboard_boundaries() {
         id: valid_id.clone(),
         text: "fixture clipboard text".into(),
         updated_at: "2026-01-01T00:00:00Z".into(),
+        pinned: false,
+        device: "Fixture".into(),
     };
-    assert!(validate_clipboard_page(&AccountClipboardPage {
+    let page = |items| AccountClipboardPage {
         enabled: true,
-        items: vec![item(); 50],
-    })
-    .is_ok());
+        retention_days: 0,
+        items,
+        e2e: AccountClipboardE2e {
+            status: AccountClipboardE2eStatus::Ready,
+            code: "0000 0000 0000 0000".into(),
+            pending_devices: 0,
+            undecryptable: 0,
+        },
+    };
+    assert!(validate_clipboard_page(&page(vec![item(); 50])).is_ok());
     let mut too_many = vec![item(); 50];
     too_many.push(item());
-    assert!(validate_clipboard_page(&AccountClipboardPage {
-        enabled: true,
-        items: too_many,
-    })
-    .is_err());
+    assert!(validate_clipboard_page(&page(too_many)).is_err());
 }
 
 #[test]
@@ -130,6 +136,23 @@ fn validates_chat_catalog_and_request_boundaries() {
         id: "fixture-chat".into(),
     });
     assert!(validate_chat_models(&duplicate).is_err());
+}
+
+#[test]
+fn model_catalog_validation_stops_after_the_first_invalid_id() {
+    let consumed = std::cell::Cell::new(0);
+    let models = std::iter::from_fn(|| {
+        let index = consumed.get();
+        consumed.set(index + 1);
+        match index {
+            0 => Some(""),
+            1 => Some("unused"),
+            _ => None,
+        }
+    });
+
+    assert!(!valid_model_catalog(models, "unused", 33, 200));
+    assert_eq!(consumed.get(), 1);
 }
 
 #[test]
@@ -253,6 +276,37 @@ impl AccountSessionStorage for SharedMemoryStorage {
     }
 }
 
+#[derive(Clone)]
+struct ReplacingLockStorage {
+    inner: MemoryStorage,
+    replacement: SavedAccountSession,
+    replaced: Arc<AtomicBool>,
+}
+
+impl AccountSessionStorage for ReplacingLockStorage {
+    fn load(&self) -> Result<Option<SavedAccountSession>, AccountError> {
+        self.inner.load()
+    }
+    fn save(&self, session: &SavedAccountSession) -> Result<(), AccountError> {
+        self.inner.save(session)
+    }
+    fn clear(&self) -> Result<(), AccountError> {
+        self.inner.clear()
+    }
+    fn shared_across_processes(&self) -> bool {
+        true
+    }
+    fn with_refresh_lock<T>(
+        &self,
+        body: impl FnOnce() -> Result<T, AccountError>,
+    ) -> Result<T, AccountError> {
+        if !self.replaced.swap(true, Ordering::SeqCst) {
+            self.inner.save(&self.replacement)?;
+        }
+        body()
+    }
+}
+
 #[derive(Clone, Default)]
 struct FailingLockStorage(MemoryStorage);
 
@@ -285,12 +339,14 @@ impl AccountSessionStorage for FailingLockStorage {
 struct FakeApi {
     refreshes: Arc<AtomicUsize>,
     reject_refresh: Arc<AtomicBool>,
+    reject_logout: Arc<AtomicBool>,
     refresh_gate: Option<Arc<(Mutex<bool>, Condvar)>>,
     preferences_started: Arc<AtomicBool>,
     preferences_gate: Option<Arc<(Mutex<bool>, Condvar)>>,
     put_preferences_started: Arc<AtomicBool>,
     put_preferences_gate: Option<Arc<(Mutex<bool>, Condvar)>>,
     logins: Arc<Mutex<Vec<(String, String)>>>,
+    profile_calls: Arc<AtomicUsize>,
 }
 
 impl FakeApi {
@@ -298,12 +354,14 @@ impl FakeApi {
         Self {
             refreshes: Arc::new(AtomicUsize::new(0)),
             reject_refresh: Arc::new(AtomicBool::new(false)),
+            reject_logout: Arc::new(AtomicBool::new(false)),
             refresh_gate: None,
             preferences_started: Arc::new(AtomicBool::new(false)),
             preferences_gate: None,
             put_preferences_started: Arc::new(AtomicBool::new(false)),
             put_preferences_gate: None,
             logins: Arc::new(Mutex::new(Vec::new())),
+            profile_calls: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -364,6 +422,7 @@ impl AccountApi for FakeApi {
     }
 
     fn profile(&self, _access_token: &str) -> Result<AccountProfile, AccountError> {
+        self.profile_calls.fetch_add(1, Ordering::SeqCst);
         Ok(AccountProfile {
             user: user(),
             identities: vec![AccountProfileIdentity {
@@ -378,7 +437,11 @@ impl AccountApi for FakeApi {
     }
 
     fn logout(&self, _access_token: &str, _all: bool) -> Result<(), AccountError> {
-        Ok(())
+        if self.reject_logout.load(Ordering::SeqCst) {
+            Err(AccountError::Unavailable)
+        } else {
+            Ok(())
+        }
     }
 
     fn delete_account(&self, _access_token: &str) -> Result<(), AccountError> {
@@ -467,6 +530,7 @@ fn installed(storage: &MemoryStorage, expires_at_unix_ms: u64) {
     *storage.0.lock().unwrap() = Some(SavedAccountSession {
         tokens: tokens(b'a', b'b', 900),
         expires_at_unix_ms,
+        session_id: None,
     });
 }
 
@@ -755,6 +819,7 @@ fn sign_out_does_not_clear_when_shared_lock_cannot_be_taken() {
         .save(&SavedAccountSession {
             tokens: tokens(b'a', b'b', 900),
             expires_at_unix_ms: valid_future_expiry(),
+            session_id: None,
         })
         .unwrap();
     let session = BackendAccountSession::new(FakeApi::new(), storage.clone());
@@ -795,6 +860,179 @@ fn logout_clears_local_session_before_remote_result() {
     session.logout(true).unwrap();
     assert!(storage.load().unwrap().is_none());
     assert_eq!(session.status().unwrap(), None);
+}
+
+#[test]
+fn logout_remote_failure_still_invalidates_local_identity() {
+    let storage = MemoryStorage::default();
+    installed(&storage, valid_future_expiry());
+    let api = FakeApi::new();
+    api.reject_logout.store(true, Ordering::SeqCst);
+    let session = BackendAccountSession::new(api, storage);
+
+    assert_eq!(session.logout(true), Err(AccountError::Unavailable));
+    assert_eq!(
+        session.with_current_identity(|identity| Ok(identity.map(|(user, _)| user.to_owned()))),
+        Ok(None)
+    );
+}
+
+#[test]
+fn logout_cleanup_receives_old_identity_even_when_remote_logout_fails() {
+    let storage = MemoryStorage::default();
+    installed(&storage, valid_future_expiry());
+    let api = FakeApi::new();
+    api.reject_logout.store(true, Ordering::SeqCst);
+    let session = BackendAccountSession::new(api, storage.clone());
+    let mut pending_snapshot_owner = Some("fixture-user".to_owned());
+
+    assert_eq!(
+        session.logout_with_cleanup(true, |account_id| {
+            if pending_snapshot_owner.as_deref() == account_id {
+                pending_snapshot_owner = None;
+            }
+        }),
+        Err(AccountError::Unavailable)
+    );
+    assert_eq!(pending_snapshot_owner, None);
+    assert!(storage.load().unwrap().is_none());
+}
+
+#[test]
+fn switching_accounts_cancels_only_the_previous_snapshot_owner() {
+    let storage = MemoryStorage::default();
+    let mut previous = tokens(b'a', b'b', 900);
+    previous.user.id = "previous-user".into();
+    storage
+        .save(&SavedAccountSession {
+            tokens: previous,
+            expires_at_unix_ms: valid_future_expiry(),
+            session_id: None,
+        })
+        .unwrap();
+    let session = BackendAccountSession::new(FakeApi::new(), storage.clone());
+    let mut cancelled = None;
+    assert_eq!(session.status().unwrap().unwrap().id, "previous-user");
+
+    session
+        .sign_in_with_cleanup("synthetic-challenge", "123456", |account_id| {
+            assert_eq!(
+                storage.load().unwrap().unwrap().tokens.user.id,
+                "fixture-user"
+            );
+            cancelled = Some(account_id.to_owned());
+        })
+        .unwrap();
+
+    assert_eq!(cancelled.as_deref(), Some("previous-user"));
+}
+
+#[test]
+fn signing_in_again_as_same_account_keeps_its_pending_snapshot() {
+    let storage = MemoryStorage::default();
+    installed(&storage, valid_future_expiry());
+    let session = BackendAccountSession::new(FakeApi::new(), storage);
+    let mut cancelled = false;
+
+    session
+        .sign_in_with_cleanup("synthetic-challenge", "123456", |_| cancelled = true)
+        .unwrap();
+
+    assert!(!cancelled);
+}
+
+#[test]
+fn stale_logout_does_not_clear_or_cancel_a_new_login() {
+    let storage = MemoryStorage::default();
+    installed(&storage, 0);
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let mut api = FakeApi::new();
+    api.refresh_gate = Some(Arc::clone(&gate));
+    let started = Arc::clone(&api.refreshes);
+    let session = Arc::new(BackendAccountSession::new(api, storage.clone()));
+    let cleanup_called = Arc::new(AtomicBool::new(false));
+    let worker = {
+        let session = Arc::clone(&session);
+        let cleanup_called = Arc::clone(&cleanup_called);
+        thread::spawn(move || {
+            session.logout_with_cleanup(true, |_| {
+                cleanup_called.store(true, Ordering::SeqCst);
+            })
+        })
+    };
+    while started.load(Ordering::SeqCst) == 0 {
+        thread::yield_now();
+    }
+    session.sign_in("synthetic-challenge", "123456").unwrap();
+    let (lock, ready) = &*gate;
+    *lock.lock().unwrap() = true;
+    ready.notify_all();
+
+    assert_eq!(worker.join().unwrap(), Err(AccountError::Cancelled));
+    assert!(!cleanup_called.load(Ordering::SeqCst));
+    assert_eq!(session.status().unwrap(), Some(user()));
+    assert!(storage.load().unwrap().is_some());
+}
+
+#[test]
+fn revoked_logout_still_cancels_its_pending_snapshot() {
+    let storage = MemoryStorage::default();
+    installed(&storage, 0);
+    let api = FakeApi::new();
+    api.reject_refresh.store(true, Ordering::SeqCst);
+    let session = BackendAccountSession::new(api, storage);
+    let mut cancelled_owner = None;
+
+    assert_eq!(
+        session.logout_with_cleanup(true, |account_id| {
+            cancelled_owner = account_id.map(str::to_owned);
+        }),
+        Err(AccountError::Unauthorized)
+    );
+    assert_eq!(cancelled_owner.as_deref(), Some("fixture-user"));
+    assert_eq!(session.status().unwrap(), None);
+}
+
+#[test]
+fn delete_and_forget_cleanup_receive_old_identity() {
+    let storage = MemoryStorage::default();
+    installed(&storage, valid_future_expiry());
+    let session = BackendAccountSession::new(FakeApi::new(), storage.clone());
+    let mut deleted_owner = Some("fixture-user".to_owned());
+    session
+        .delete_account_with_cleanup(|account_id| {
+            if deleted_owner.as_deref() == account_id {
+                deleted_owner = None;
+            }
+        })
+        .unwrap();
+    assert_eq!(deleted_owner, None);
+
+    installed(&storage, valid_future_expiry());
+    let session = BackendAccountSession::new(FakeApi::new(), storage);
+    let mut forgotten_owner = Some("fixture-user".to_owned());
+    session
+        .forget_with_cleanup(|account_id| {
+            if forgotten_owner.as_deref() == account_id {
+                forgotten_owner = None;
+            }
+        })
+        .unwrap();
+    assert_eq!(forgotten_owner, None);
+}
+
+#[test]
+fn host_cleanup_runs_after_local_token_is_removed() {
+    let storage = MemoryStorage::default();
+    installed(&storage, valid_future_expiry());
+    let session = BackendAccountSession::new(FakeApi::new(), storage.clone());
+
+    session
+        .forget_with_cleanup(|account_id| {
+            assert_eq!(account_id, Some("fixture-user"));
+            assert!(storage.load().unwrap().is_none());
+        })
+        .unwrap();
 }
 
 #[test]
@@ -855,6 +1093,86 @@ fn account_request_is_cancelled_when_same_user_signs_in_again_before_completion(
 }
 
 #[test]
+fn shared_account_request_does_not_retry_after_same_user_signs_in_again() {
+    let storage = SharedMemoryStorage::default();
+    installed(&storage.0, valid_future_expiry());
+    let stale = BackendAccountSession::new(FakeApi::new(), storage.clone());
+    let replacement = BackendAccountSession::new(FakeApi::new(), storage);
+    let attempts = AtomicUsize::new(0);
+
+    let result = request_with_account_session(&FakeApi::new(), &stale, true, |_, _| {
+        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            replacement
+                .sign_in("synthetic-challenge", "123456")
+                .unwrap();
+            Err(AccountError::Unauthorized)
+        } else {
+            Ok("stale retry")
+        }
+    });
+
+    assert_eq!(result, Err(AccountError::Cancelled));
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn shared_account_request_discards_success_after_same_user_signs_in_again() {
+    let storage = SharedMemoryStorage::default();
+    installed(&storage.0, valid_future_expiry());
+    let stale = BackendAccountSession::new(FakeApi::new(), storage.clone());
+    let replacement = BackendAccountSession::new(FakeApi::new(), storage);
+
+    let result = request_with_account_session(&FakeApi::new(), &stale, true, |_, _| {
+        replacement
+            .sign_in("synthetic-challenge", "123456")
+            .unwrap();
+        Ok("stale result")
+    });
+
+    assert_eq!(result, Err(AccountError::Cancelled));
+}
+
+#[test]
+fn profile_followup_rejects_same_users_new_login_before_request() {
+    let storage = SharedMemoryStorage::default();
+    installed(&storage.0, valid_future_expiry());
+    let api = FakeApi::new();
+    let profile_calls = Arc::clone(&api.profile_calls);
+    let stale = BackendAccountSession::new(api, storage.clone());
+    let (user_id, _, generation) = stale.credentials_with_generation(None, None).unwrap();
+    let replacement = BackendAccountSession::new(FakeApi::new(), storage);
+    replacement
+        .sign_in("synthetic-challenge", "123456")
+        .unwrap();
+
+    assert_eq!(
+        stale.profile_for_login(Some((&user_id, generation))),
+        Err(AccountError::Cancelled)
+    );
+    assert_eq!(profile_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn shared_logout_does_not_clear_same_users_new_session_while_waiting_for_lock() {
+    let inner = MemoryStorage::default();
+    installed(&inner, valid_future_expiry());
+    let mut replacement = inner.load().unwrap().unwrap();
+    replacement.session_id = Some(uuid::Uuid::new_v4());
+    let storage = ReplacingLockStorage {
+        inner: inner.clone(),
+        replacement: replacement.clone(),
+        replaced: Arc::new(AtomicBool::new(false)),
+    };
+    let stale = BackendAccountSession::new(FakeApi::new(), storage);
+
+    assert_eq!(stale.logout(false), Err(AccountError::Cancelled));
+    assert_eq!(
+        inner.load().unwrap().unwrap().session_id,
+        replacement.session_id
+    );
+}
+
+#[test]
 fn a_generation_guard_rejects_a_same_user_relogin_before_local_write() {
     let storage = MemoryStorage::default();
     installed(&storage, valid_future_expiry());
@@ -887,6 +1205,34 @@ fn a_generation_guard_rejects_a_same_user_relogin_before_local_write() {
         session.put_preferences_with_generation(&cloud, generation, "fixture-user"),
         Err(AccountError::Cancelled)
     );
+}
+
+#[test]
+fn current_identity_guard_tracks_same_user_relogin() {
+    let storage = MemoryStorage::default();
+    installed(&storage, valid_future_expiry());
+    let session = BackendAccountSession::new(FakeApi::new(), storage);
+    let original = session
+        .with_current_identity(|identity| {
+            Ok(identity.map(|(user, generation)| (user.to_owned(), generation)))
+        })
+        .unwrap()
+        .unwrap();
+
+    session.forget().unwrap();
+    assert_eq!(
+        session.with_current_identity(|identity| Ok(identity.map(|(user, _)| user.to_owned()))),
+        Ok(None)
+    );
+    session.sign_in("synthetic-challenge", "123456").unwrap();
+    let current = session
+        .with_current_identity(|identity| {
+            Ok(identity.map(|(user, generation)| (user.to_owned(), generation)))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.0, original.0);
+    assert_ne!(current.1, original.1);
 }
 
 #[test]
@@ -993,6 +1339,95 @@ fn transport_rejects_oversized_responses() {
     let origin = serve_once(response);
     let client = BackendAccountClient::loopback(&origin).unwrap();
     assert_eq!(client.providers(), Err(AccountError::Unavailable));
+}
+
+fn clipboard_request(method: &str, path: &str, body: Option<&str>) -> HttpRequest {
+    HttpRequest {
+        method: method.into(),
+        path: path.into(),
+        body: body.map(str::to_owned),
+    }
+}
+
+#[test]
+fn clipboard_transport_hands_error_responses_to_the_driver_with_the_token() {
+    let body = r#"{"error":{"code":"clipboard_key_conflict","message":"conflict"}}"#;
+    let (origin, captured) = serve_once_and_capture(
+        format!(
+            "HTTP/1.1 409 Conflict\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes(),
+    );
+    let client = BackendAccountClient::loopback(&origin).unwrap();
+    let response = client
+        .clipboard_e2e(
+            &clipboard_request(
+                "POST",
+                "/v1/users/me/clipboard",
+                Some(r#"{"ciphertext":"v1.x","key_id":"k","dedup":"d"}"#),
+            ),
+            &token(b'a'),
+        )
+        .unwrap();
+    assert_eq!(response.status, 409);
+    assert_eq!(response.body, body);
+    let request = String::from_utf8(captured.recv().unwrap())
+        .unwrap()
+        .to_lowercase();
+    assert!(request.starts_with("post /v1/users/me/clipboard http/1.1\r\n"));
+    assert!(request.contains(&format!("authorization: bearer {}\r\n", token(b'a'))));
+    assert!(request.ends_with(r#"{"ciphertext":"v1.x","key_id":"k","dedup":"d"}"#));
+}
+
+#[test]
+fn clipboard_transport_fits_a_full_page_of_ciphertext_but_stays_bounded() {
+    let page = |bytes: usize| {
+        let body = "x".repeat(bytes);
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    };
+    let list = clipboard_request("GET", "/v1/users/me/clipboard", None);
+    // 50 条、每条 16384 个字符的密文再加上其余字段，超过其他账号请求的 1 MiB。
+    let full = MAX_JSON_BYTES + 512 * 1024;
+    let client = BackendAccountClient::loopback(&serve_once(page(full))).unwrap();
+    assert_eq!(
+        client
+            .clipboard_e2e(&list, &token(b'a'))
+            .unwrap()
+            .body
+            .len(),
+        full
+    );
+    let client = BackendAccountClient::loopback(&serve_once(page(
+        super::clipboard::MAX_CLIPBOARD_RESPONSE_BYTES + 1,
+    )))
+    .unwrap();
+    assert_eq!(
+        client.clipboard_e2e(&list, &token(b'a')),
+        Err(AccountError::Unavailable)
+    );
+}
+
+#[test]
+fn clipboard_transport_only_sends_clipboard_paths() {
+    let client = BackendAccountClient::loopback("http://127.0.0.1:9").unwrap();
+    for (method, path) in [
+        ("GET", "/v1/users/me/profile"),
+        ("GET", "/v1/users/me/clipboardx"),
+        ("GET", "/v1/users/me/clipboard/../profile"),
+        ("PATCH", "/v1/users/me/clipboard"),
+        ("GET", "https://example.test/v1/users/me/clipboard"),
+    ] {
+        assert_eq!(
+            client.clipboard_e2e(&clipboard_request(method, path, None), &token(b'a')),
+            Err(AccountError::Invalid),
+            "{method} {path}"
+        );
+    }
 }
 
 #[test]
@@ -1888,25 +2323,33 @@ fn avatar_uploads_are_read_by_their_contents() {
     std::fs::write(&large, oversized).unwrap();
     let empty = directory.path().join("empty.png");
     std::fs::write(&empty, b"").unwrap();
-    let link = directory.path().join("link.png");
-    msime_path_trust::untrusted_symlink(&png, &link).unwrap();
-    let outside = tempfile::tempdir().unwrap();
-    let outside_png = outside.path().join("outside.png");
-    std::fs::write(&outside_png, b"\x89PNG\r\n\x1a\nexternal").unwrap();
-    let linked_parent = directory.path().join("linked-parent");
-    msime_path_trust::untrusted_symlink(outside.path(), &linked_parent).unwrap();
-    let nested_link = linked_parent.join("outside.png");
-    for path in [&gif, &webp, &large, &empty, &link, directory.path()] {
+    for path in [&gif, &webp, &large, &empty, directory.path()] {
         assert_eq!(
             read_account_avatar_upload(path),
             Err(AccountError::Invalid),
             "{path:?}"
         );
     }
-    assert_eq!(
-        read_account_avatar_upload(&nested_link),
-        Err(AccountError::Invalid)
-    );
+    // A symlink needs privileges on Windows; the symlink cases run on unix only.
+    #[cfg(unix)]
+    {
+        let link = directory.path().join("link.png");
+        msime_path_trust::untrusted_symlink(&png, &link).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_png = outside.path().join("outside.png");
+        std::fs::write(&outside_png, b"\x89PNG\r\n\x1a\nexternal").unwrap();
+        let linked_parent = directory.path().join("linked-parent");
+        msime_path_trust::untrusted_symlink(outside.path(), &linked_parent).unwrap();
+        let nested_link = linked_parent.join("outside.png");
+        assert_eq!(
+            read_account_avatar_upload(&link),
+            Err(AccountError::Invalid)
+        );
+        assert_eq!(
+            read_account_avatar_upload(&nested_link),
+            Err(AccountError::Invalid)
+        );
+    }
     assert_eq!(
         read_account_avatar_upload(Path::new("relative.png")),
         Err(AccountError::Invalid)
@@ -2094,6 +2537,7 @@ fn expired_session() -> SavedAccountSession {
     SavedAccountSession {
         tokens: tokens(b'a', b'b', 900),
         expires_at_unix_ms: 1,
+        session_id: None,
     }
 }
 
@@ -2137,6 +2581,7 @@ fn a_rejected_refresh_keeps_a_session_another_process_saved_meanwhile() {
             .save(&SavedAccountSession {
                 tokens: tokens(b'c', b'f', 900),
                 expires_at_unix_ms: valid_future_expiry(),
+                session_id: None,
             })
             .unwrap();
     }));
@@ -2172,6 +2617,7 @@ fn session_file_layouts_round_trip_and_read_each_other() {
     let session = SavedAccountSession {
         tokens: tokens(b'a', b'b', 900),
         expires_at_unix_ms: 1_790_000_000_123,
+        session_id: Some(uuid::Uuid::nil()),
     };
     let apple = session_file(directory.path());
     apple.save(&session).unwrap();
@@ -2179,17 +2625,46 @@ fn session_file_layouts_round_trip_and_read_each_other() {
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert!(value.get("expiresAt").is_some());
     assert!(value.get("expires_at_unix_ms").is_none());
+    assert_eq!(
+        value.get("sessionID").and_then(|id| id.as_str()),
+        Some("00000000-0000-0000-0000-000000000000")
+    );
 
     let native = FileAccountSessionStorage::new(directory.path(), AccountSessionFileLayout::Native);
+    let read_from_apple = native.load().unwrap().unwrap();
     assert_eq!(
-        native.load().unwrap().unwrap().expires_at_unix_ms,
+        read_from_apple.expires_at_unix_ms,
         session.expires_at_unix_ms
     );
+    assert_eq!(read_from_apple.session_id, session.session_id);
     native.save(&session).unwrap();
+    let read_from_native = apple.load().unwrap().unwrap();
     assert_eq!(
-        apple.load().unwrap().unwrap().expires_at_unix_ms,
+        read_from_native.expires_at_unix_ms,
         session.expires_at_unix_ms
     );
+    assert_eq!(read_from_native.session_id, session.session_id);
+}
+
+#[test]
+fn legacy_apple_session_gets_one_id_shared_by_both_processes() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = session_file(directory.path());
+    storage
+        .save(&SavedAccountSession {
+            tokens: tokens(b'a', b'b', 900),
+            expires_at_unix_ms: valid_future_expiry(),
+            session_id: None,
+        })
+        .unwrap();
+    let first = BackendAccountSession::new(FakeApi::new(), storage.clone());
+    let second = BackendAccountSession::new(FakeApi::new(), storage.clone());
+
+    let _ = first.credentials(None, None).unwrap();
+    let id = storage.load().unwrap().unwrap().session_id;
+    assert!(id.is_some());
+    let _ = second.credentials(None, None).unwrap();
+    assert_eq!(storage.load().unwrap().unwrap().session_id, id);
 }
 
 #[cfg(unix)]
@@ -2280,4 +2755,177 @@ fn moderation_refusals_are_told_apart_by_the_error_code() {
         "account_screening_unavailable"
     );
     assert_eq!(AccountError::Banned.code(), "account_banned");
+}
+
+#[test]
+fn google_loopback_plan_checks_the_target_and_the_url_before_a_host_opens_it() {
+    let target = google_loopback_target(53682);
+    assert_eq!(target, "http://127.0.0.1:53682/callback");
+    let url = google_authorization_url(&target, GOOGLE_FIXTURE_STATE);
+    assert_eq!(
+        google_loopback_plan(&url, &target, 600),
+        Ok(GoogleLoopbackPlan {
+            state: GOOGLE_FIXTURE_STATE.into(),
+            wait: GOOGLE_SIGN_IN_TIMEOUT,
+        })
+    );
+    // 等待时长扣掉提交授权码的余量，不超过 challenge 的寿命。
+    assert_eq!(
+        google_loopback_plan(&url, &target, 90).map(|plan| plan.wait),
+        Ok(Duration::from_secs(60))
+    );
+    assert_eq!(
+        google_loopback_plan(&url, &target, 30),
+        Err(AccountError::Unavailable)
+    );
+    // 链接指向别的监听，或回跳地址不是回环形状，都不打开。
+    assert_eq!(
+        google_loopback_plan(&url, &google_loopback_target(53683), 600),
+        Err(AccountError::Unavailable)
+    );
+    let foreign = "http://192.168.1.2:53682/callback";
+    assert_eq!(
+        google_loopback_plan(
+            &google_authorization_url(foreign, GOOGLE_FIXTURE_STATE),
+            foreign,
+            600
+        ),
+        Err(AccountError::Unavailable)
+    );
+}
+
+#[test]
+fn google_loopback_reply_answers_the_browser_with_the_same_page_as_the_desktop_listener() {
+    let state = GOOGLE_FIXTURE_STATE;
+    let code = google_loopback_reply(
+        Some(&format!(
+            "GET /callback?state={state}&code=4%2F0Afixture HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+        )),
+        state,
+        None,
+    );
+    assert_eq!(code.outcome, GoogleCallback::Code("4/0Afixture".into()));
+    assert!(code.response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(code.response.contains("已收到 Google 授权"));
+    let (head, body) = code.response.split_once("\r\n\r\n").unwrap();
+    assert!(head.contains(&format!("Content-Length: {}\r\n", body.len())));
+    assert!(head.contains("Content-Security-Policy: default-src 'none'"));
+
+    let denied = google_loopback_reply(
+        Some(&format!(
+            "GET /callback?state={state}&error=access_denied HTTP/1.1\r\n\r\n"
+        )),
+        state,
+        None,
+    );
+    assert_eq!(
+        denied.outcome,
+        GoogleCallback::Failed(AccountError::Cancelled)
+    );
+    assert!(denied.response.contains("已取消 Google 登录"));
+
+    // 别的路径、别的 state、没读完整的请求头，都不是回跳：回 404，继续等。
+    for head in [
+        Some("GET /favicon.ico HTTP/1.1\r\n\r\n".to_owned()),
+        Some("GET /callback?state=other&code=x HTTP/1.1\r\n\r\n".to_owned()),
+        None,
+    ] {
+        let reply = google_loopback_reply(head.as_deref(), state, None);
+        assert_eq!(reply.outcome, GoogleCallback::Ignored);
+        assert!(reply.response.starts_with("HTTP/1.1 404 Not Found\r\n"));
+    }
+    // 桌面不传返回链接，页面上没有回到应用的按钮。
+    assert!(!code.response.contains("class=\"return\""));
+}
+
+// 手机上浏览器占满屏幕：宿主给了能拉回应用的链接时，回跳页多一个「回到水杉输入法」按钮；链接不合格时不画按钮，回跳照常完成。
+#[test]
+fn google_loopback_reply_offers_a_way_back_to_the_app_when_the_host_has_one() {
+    let state = GOOGLE_FIXTURE_STATE;
+    let head = format!("GET /callback?state={state}&code=4%2F0Afixture HTTP/1.1\r\n\r\n");
+    let reply = google_loopback_reply(Some(&head), state, Some("msime://auth/google"));
+    assert_eq!(reply.outcome, GoogleCallback::Code("4/0Afixture".into()));
+    assert!(reply
+        .response
+        .contains("<a class=\"return\" href=\"msime://auth/google\">回到水杉输入法</a>"));
+    let (head_part, body) = reply.response.split_once("\r\n\r\n").unwrap();
+    assert!(head_part.contains(&format!("Content-Length: {}\r\n", body.len())));
+
+    let denied = format!("GET /callback?state={state}&error=access_denied HTTP/1.1\r\n\r\n");
+    let reply = google_loopback_reply(Some(&denied), state, Some("msime://auth/google"));
+    assert!(reply.response.contains("回到水杉输入法"));
+
+    // 一个不是回跳的请求回 404，不给按钮。
+    let stray = google_loopback_reply(
+        Some("GET /favicon.ico HTTP/1.1\r\n\r\n"),
+        state,
+        Some("msime://auth/google"),
+    );
+    assert!(!stray.response.contains("class=\"return\""));
+
+    for link in [
+        "https://example.com/",
+        "http://127.0.0.1/",
+        "javascript:alert(1)",
+        "data://text/html",
+        "msime://auth/\"><script>",
+        "msime://auth google",
+        "Msime://auth",
+        "://auth",
+        "msime:auth",
+    ] {
+        let reply = google_loopback_reply(Some(&head), state, Some(link));
+        assert!(!reply.response.contains("class=\"return\""), "{link}");
+        assert_eq!(reply.outcome, GoogleCallback::Code("4/0Afixture".into()));
+    }
+    let long = format!("msime://{}", "a".repeat(130));
+    assert!(!google_loopback_reply(Some(&head), state, Some(&long))
+        .response
+        .contains("class=\"return\""));
+}
+
+#[test]
+fn desktop_settings_sync_uploads_input_keys_and_applies_only_for_the_reading_user() {
+    let storage = MemoryStorage::default();
+    installed(&storage, valid_future_expiry());
+    let api = FakeApi::new();
+    let uploads = Arc::clone(&api.put_preferences_started);
+    let session = BackendAccountSession::new(api, storage);
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::preferences::PreferencesStore::new(root.path());
+    let edition = Some(crate::edition::Edition::full());
+
+    // 本机的 input.* 键合并进云端文档，别的平台的键原样保留。
+    let uploaded = settings_sync::upload_desktop_settings(&session, &store, edition).unwrap();
+    assert!(uploads.load(Ordering::SeqCst));
+    assert_eq!(uploaded.revision, 43);
+    assert!(uploaded.settings.contains_key("input.schema"));
+    assert_eq!(
+        uploaded.settings.get("platform.ios.nine_key"),
+        Some(&AccountPreferenceValue::Boolean(true))
+    );
+
+    // 页面下载时是另一个账号：取消，不读本机偏好。
+    let cloud = session.preferences().unwrap();
+    assert_eq!(
+        settings_sync::prepare_desktop_settings_apply(
+            &session,
+            &store,
+            edition,
+            "another-user",
+            cloud.clone(),
+        )
+        .unwrap_err(),
+        AccountError::Cancelled
+    );
+    let (revision, applied) = settings_sync::prepare_desktop_settings_apply(
+        &session,
+        &store,
+        edition,
+        "fixture-user",
+        cloud,
+    )
+    .unwrap();
+    assert_eq!(revision, store.load().unwrap().revision);
+    assert!(applied.validate().is_ok());
 }

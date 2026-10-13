@@ -6,6 +6,7 @@ import type {
   ImeSetupState,
 } from "../../../../packages/ui/src/core/host-contracts";
 import type { ChatClient } from "../../../../packages/ui/src/chat/chat-page";
+import { CHAT_SYSTEM_PROMPT } from "../../../../packages/ui/src/chat/chat-prompt";
 import { ToastProvider } from "../../../../packages/ui/src/core/toast";
 import { TryKeyboardPage } from "../../../../packages/ui/src/keyboard/try-keyboard-page";
 
@@ -83,7 +84,7 @@ test("Enter sends the draft as an AI chat and shows the reply as Markdown", asyn
   expect(bubbles(page).slice(1)).toEqual(["你好", "你好，我在。"]);
   expect(chat.complete).toHaveBeenCalledWith(
     [
-      { role: "system", content: expect.stringContaining("水杉输入法里的 AI 助手") },
+      { role: "system", content: CHAT_SYSTEM_PROMPT },
       { role: "user", content: "你好" },
     ],
     "model-a",
@@ -199,6 +200,27 @@ test("the switch button names the step that is missing and takes it", () => {
   cleanup();
   renderPage({ actions: { ...actions, setup: setup({ enabled: true, current: true }) } });
   expect(screen.getByRole("button", { name: "切换输入法" })).toBeTruthy();
+});
+
+// HarmonyOS 手机不提供换走水杉的按钮：它打开的是系统粗糙的选择输入法弹窗，键盘下方本来就有系统的切换键。设置没补完时的两个按钮照旧。
+test("without switchAway the page offers no way to switch away once 水杉 is set up", () => {
+  const openSystemKeyboardSettings = vi.fn().mockResolvedValue(undefined);
+  const showInputMethodPicker = vi.fn().mockResolvedValue(undefined);
+  const actions = { openSystemKeyboardSettings, showInputMethodPicker };
+
+  renderPage({
+    switchAway: false,
+    actions: { ...actions, setup: setup({ enabled: true, current: true }) },
+  });
+  expect(screen.queryByRole("button", { name: "切换输入法" })).toBeNull();
+
+  cleanup();
+  renderPage({
+    switchAway: false,
+    actions: { ...actions, setup: setup({ enabled: true, current: false }) },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "当前不是水杉输入法？点此切换" }));
+  expect(showInputMethodPicker).toHaveBeenCalledOnce();
 });
 
 test("收起键盘 is offered while the field has focus and takes the focus away", () => {

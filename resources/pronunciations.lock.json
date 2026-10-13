@@ -17,5 +17,19 @@
   "outputs": [
     "en-phonetic.db",
     "pronunciations-NOTICE.txt"
+  ],
+  "built": [
+    {
+      "name": "en-phonetic.db",
+      "url": "https://github.com/metasequoiaime/chinese-ime-lm/releases/download/pronunciations-ecdict-82c9872/en-phonetic.db",
+      "sha256": "6cef99eb379e6b922fa2dfc036b5b83c453c0ecb6115d2ea2327315de01968b4",
+      "size": 5718016
+    },
+    {
+      "name": "pronunciations-NOTICE.txt",
+      "url": "https://github.com/metasequoiaime/chinese-ime-lm/releases/download/pronunciations-ecdict-82c9872/pronunciations-NOTICE.txt",
+      "sha256": "2fe28b604e5fd2b5d54fc1ab00dd100c64c23f953a1f139190e5f1144b32f261",
+      "size": 1275
+    }
   ]
 }

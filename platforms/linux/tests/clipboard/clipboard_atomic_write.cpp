@@ -28,6 +28,23 @@ int main() {
   assert(!msime::linux_host::read_clipboard_file(linked_store, 1024));
   const auto loaded = msime::linux_host::read_clipboard_file(file, 1024);
   assert(loaded && *loaded == "[\"synthetic\"]");
+  const auto hardlink_store = directory / "hardlink-history.json";
+  const auto hardlink_target = root / "hardlink-target.json";
+  std::ofstream(hardlink_target) << "[\"outside\"]";
+  std::filesystem::create_hard_link(hardlink_target, hardlink_store);
+  assert(!msime::linux_host::read_clipboard_file(hardlink_store, 1024));
+  assert(std::filesystem::exists(hardlink_store));
+  assert(std::filesystem::exists(hardlink_target));
+  std::filesystem::remove(hardlink_store);
+
+  const auto hardlink_lock = file.string() + ".lock";
+  const auto hardlink_lock_target = root / "hardlink-lock-target";
+  std::ofstream(hardlink_lock_target) << "outside lock";
+  std::filesystem::create_hard_link(hardlink_lock_target, hardlink_lock);
+  assert(msime::linux_host::open_clipboard_lock(file) < 0);
+  assert(std::filesystem::exists(hardlink_lock));
+  assert(std::filesystem::exists(hardlink_lock_target));
+  std::filesystem::remove(hardlink_lock);
 
   const auto external_directory = root / "external-state";
   std::filesystem::create_directories(external_directory / "nested");

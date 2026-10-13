@@ -1,3 +1,6 @@
+import { ControlledInput } from "../core/controlled-input";
+import { textInput } from "../core/platform-controls-style";
+
 export interface EndpointInputProps {
   label: string;
   value: string;
@@ -15,13 +18,14 @@ export function EndpointInput({
   placeholder,
 }: EndpointInputProps) {
   return (
-    <input
+    <ControlledInput
+      className={textInput}
       aria-label={label}
       type="url"
       value={value}
       disabled={disabled}
       placeholder={placeholder}
-      onChange={(event) => onChange(event.target.value)}
+      onChange={onChange}
     />
   );
 }

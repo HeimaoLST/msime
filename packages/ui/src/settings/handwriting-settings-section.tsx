@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { SettingsGroupNote } from "./settings-group-note";
 import * as surface from "../keyboard/panel-surface-style";
 import { GroupList } from "../core/platform-controls";
+import * as platform from "../core/platform-controls-style";
 import { handwritingPrivacyText } from "./handwriting-platform-notice";
 import * as settings from "./settings-style";
 import { OpenPanelRow } from "./open-panel-row";
@@ -14,6 +15,8 @@ import type {
   HandwritingStrokeColor,
   MobileKeyboardFeedback,
 } from "./mobile-keyboard-feedback-section";
+import { HandwritingPadPreview } from "./handwriting-pad-preview";
+import { keyboardThemeId } from "../theme/global-theme";
 
 /** 文件里没有值时 HarmonyOS 键盘绘制所用的默认值（`KeyboardFeedback.DEFAULTS`），用于已加载设置中缺少的字段。 */
 const DEFAULT_DELAY_MS = 600;
@@ -28,12 +31,6 @@ const strokeColorOptions: readonly [HandwritingStrokeColor, string][] = [
   ["white", "白色"],
   ["blue", "蓝色"],
 ];
-
-/** 分组与其下方的说明，两者间距与分组标题到其各行的间距一样紧凑。 */
-const groupWithFooter = "flex min-w-0 flex-col gap-[var(--p-g-title-gap)]";
-/** HarmonyOS 手机上分组下方 13px 的脚注，与分组标题对齐。 */
-const groupFooter =
-  "m-0 [padding:var(--p-g-title-pad)] text-[13px] leading-[18px] [color:var(--p-sub)]";
 
 /**
  * 滑块移动期间其值保存在页面上，静止后保存一次。否则拖动的每一步都会单独保存一次键盘设置文件，而一次仍在进行的保存会让下一次保存变成空操作，从而丢掉手指最后停留的值。
@@ -59,10 +56,13 @@ function HarmonyHandwritingPadGroups({
   value,
   busy,
   onChange,
+  preview,
 }: {
   value: MobileKeyboardFeedback;
   busy: boolean;
   onChange: (value: MobileKeyboardFeedback) => void;
+  /** 预览手写板用的皮肤；拿不到表单时不画预览。 */
+  preview?: Pick<Parameters<typeof HandwritingPadPreview>[0], "theme" | "skin" | "customDesign">;
 }) {
   const [delay, setDelay] = useSettledSlider(
     value.handwritingDelayMs ?? DEFAULT_DELAY_MS,
@@ -74,6 +74,19 @@ function HarmonyHandwritingPadGroups({
   );
   return (
     <>
+      {/* 预览跟着下面的设置走：拖动滑块时用正在拖的值，不等保存。 */}
+      {preview && (
+        <GroupList title="预览">
+          <div className={settings.phoneKeyboardPreview}>
+            <HandwritingPadPreview
+              {...preview}
+              delayMs={delay}
+              strokeColor={value.handwritingStrokeColor ?? DEFAULT_STROKE_COLOR}
+              strokeWidth={width}
+            />
+          </div>
+        </GroupList>
+      )}
       <GroupList title="书写">
         <SliderRow
           title="识别等待时间"
@@ -87,7 +100,7 @@ function HarmonyHandwritingPadGroups({
           onChange={setDelay}
         />
       </GroupList>
-      <div className={groupWithFooter}>
+      <div className={platform.group}>
         <GroupList title="笔迹">
           <SelectRow
             title="笔迹颜色"
@@ -119,7 +132,7 @@ function HarmonyHandwritingPadGroups({
             onChange={setWidth}
           />
         </GroupList>
-        <p className={groupFooter}>{handwritingPrivacyText("harmony")}</p>
+        <p className={platform.groupFooter}>{handwritingPrivacyText("harmony")}</p>
       </div>
     </>
   );
@@ -150,7 +163,7 @@ export function HandwritingSettingsSection({
 }) {
   const form = useOptionalSettingsForm();
   const padSettings = form?.mobileKeyboardFeedback;
-  // HarmonyOS 手机以手写板的「书写」和「笔迹」两组开头，隐私说明移到「笔迹」下方作为脚注，启用手写的入口放在它们之后。只有上报了这些字段的键盘才会读取它们，所以其他键盘上不显示这两组。
+  // HarmonyOS 手机只有手写板的「书写」和「笔迹」两组，隐私说明是「笔迹」的脚注，与 Android 的 `HandwritingPage` 一样不再附启用说明：启用输入法归首页状态卡片和欢迎流程，用户能走到这页调手写板，说明键盘已经在用。只有上报了这些字段的键盘才会读取它们，其他键盘上不显示这两组，页面退回启用说明。
   const harmonyPad =
     harmony && mobile && padSettings?.handwritingDelayMs !== undefined ? padSettings : undefined;
   const systemSettingsRow = (title: string, label: string) =>
@@ -186,14 +199,18 @@ export function HandwritingSettingsSection({
       {sdkPrivacyRow}
     </GroupList>
   ) : harmony ? (
-    <>
-      {harmonyPad && form && (
-        <HarmonyHandwritingPadGroups
-          value={harmonyPad}
-          busy={form.mobileKeyboardFeedbackBusy}
-          onChange={(value) => void form.saveMobileKeyboardFeedback(value)}
-        />
-      )}
+    harmonyPad && form ? (
+      <HarmonyHandwritingPadGroups
+        value={harmonyPad}
+        busy={form.mobileKeyboardFeedbackBusy}
+        onChange={(value) => void form.saveMobileKeyboardFeedback(value)}
+        preview={{
+          theme: form.keyboardPreviewTheme,
+          skin: keyboardThemeId(form.globalTheme, form.draft.custom_theme),
+          customDesign: form.customTouchKeyboardSkin,
+        }}
+      />
+    ) : (
       <GroupList title="HarmonyOS 键盘手写">
         <SettingsGroupNote>
           {mobile
@@ -201,13 +218,34 @@ export function HandwritingSettingsSection({
             : "请在系统输入法设置中启用水杉输入法；2-in-1 候选窗口不绘制键面，请先从悬浮工具栏打开屏幕键盘，再从方案选择器切换到“手写”。"}
         </SettingsGroupNote>
         {systemSettingsRow("系统输入法设置", "打开系统输入法设置")}
-        {!harmonyPad && <SettingsGroupNote>{handwritingPrivacyText("harmony")}</SettingsGroupNote>}
+        <SettingsGroupNote>{handwritingPrivacyText("harmony")}</SettingsGroupNote>
       </GroupList>
-    </>
+    )
   ) : macos ? (
     <GroupList title="macOS 手写识别板">
+      {openHandwriting && (
+        <OpenPanelRow
+          title="打开手写识别板"
+          description="使用鼠标或触控书写，识别后点击候选字复制"
+          action={onOpenHandwriting}
+          className={`secondary ${settings.openButton}`}
+        />
+      )}
+      <SettingsPreviewBlock aria-label="手写识别板预览">
+        <div className={surface.mock}>
+          <div className={surface.mockCanvas}>
+            <span className={surface.mockStroke}>水</span>
+          </div>
+          <div className={surface.mockCandidates}>
+            <span>水</span>
+            <span>永</span>
+            <span>木</span>
+            <span>未</span>
+          </div>
+        </div>
+      </SettingsPreviewBlock>
       <SettingsGroupNote>
-        请在要输入的应用里，从输入法悬浮工具栏或输入法菜单打开手写面板；识别出的字直接输入到该应用。
+        从这里打开可识别并复制文字。要直接输入到应用，请在目标应用中从输入法悬浮工具栏或菜单打开手写板。
       </SettingsGroupNote>
     </GroupList>
   ) : (

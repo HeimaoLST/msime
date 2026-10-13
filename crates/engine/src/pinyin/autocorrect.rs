@@ -279,9 +279,9 @@ struct Search {
 impl Search {
     fn new(length: usize, k: usize) -> Self {
         Self {
-            best: (0..=length).map(|_| Vec::with_capacity(k)).collect(),
+            best: (0..=length).map(|_| Vec::new()).collect(),
             arrival: 0,
-            sequences: HashMap::with_capacity(length.saturating_mul(k)),
+            sequences: HashMap::new(),
             k,
         }
     }
@@ -338,6 +338,9 @@ impl Search {
             if end == length && edge_count == 0 {
                 continue;
             }
+            if self.sequences.is_empty() {
+                self.sequences.reserve(length.saturating_mul(self.k));
+            }
             let next_sequence = self.sequences.len() + 1;
             let sequence = *self
                 .sequences
@@ -345,6 +348,9 @@ impl Search {
                 .or_insert(next_sequence);
             let arrival = self.arrival;
             self.arrival += 1;
+            if self.best[end].capacity() == 0 {
+                self.best[end].reserve_exact(self.k);
+            }
             self.best[end].push(Hypothesis {
                 edge_count,
                 prev_index: parent_index,
@@ -555,8 +561,59 @@ mod tests {
     fn search_allocates_only_position_beams() {
         let search = Search::new(4, 3);
         assert_eq!(search.best.len(), 5);
-        assert!(search.best.iter().all(|slot| slot.capacity() >= 3));
-        assert!(search.sequences.capacity() >= 12);
+        assert!(search.best.iter().all(|slot| slot.capacity() == 0));
+        assert_eq!(search.sequences.capacity(), 0);
+    }
+
+    #[test]
+    fn search_defers_beam_allocations_until_a_position_receives_a_path() {
+        let (search, allocations) =
+            crate::ime::personal_rerank::allocations::count(|| Search::new(64, 9));
+        assert!(search.best.iter().all(|slot| slot.capacity() == 0));
+        assert!(
+            allocations <= 3,
+            "empty position beams should not allocate: {allocations}"
+        );
+    }
+
+    #[test]
+    fn search_defers_sequence_interning_allocation_until_a_path_exists() {
+        let search = Search::new(64, 9);
+
+        assert!(search.sequences.is_empty());
+        assert_eq!(search.sequences.capacity(), 0);
+    }
+
+    #[test]
+    fn search_reserves_a_beam_when_the_first_path_arrives() {
+        let mut search = Search::new(1, 3);
+        search.best[0].push(Hypothesis {
+            edge_count: 0,
+            prev_index: NO_PREDECESSOR,
+            arrival: 0,
+            weight: 0,
+            raw_length: 0,
+            syllable: "",
+            corrected: false,
+            sequence: 0,
+        });
+
+        search.extend(1, 0, 1, "shi", true, TRANSPOSITION_WEIGHT);
+
+        assert_eq!(search.best[1].len(), 1);
+        assert_eq!(search.best[1].capacity(), 3);
+        assert!(search.sequences.capacity() >= 3);
+    }
+
+    #[test]
+    fn unreadable_input_does_not_allocate_unreachable_position_beams() {
+        let _ = autocorrect_cut_kbest("qqqqqqqq", ALL_FOUR, 9);
+        let (cuts, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            autocorrect_cut_kbest("qqqqqqqq", ALL_FOUR, 9)
+        });
+
+        assert!(cuts.is_empty());
+        assert_eq!(allocations, 2);
     }
 
     #[test]

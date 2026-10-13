@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { testHost } from "../support/host";
-import { settingsFormReady } from "../support/settings-form";
+import { selectSettingsTab, settingsFormReady } from "../support/settings-form";
 import { afterEach, expect, test, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { SettingsPage, type EditionInfo, type HostCapabilities, type Snapshot } from "@msime/ui";
@@ -73,7 +73,6 @@ async function openInputPage(
   );
   await settingsFormReady();
   fireEvent.click(screen.getByRole("button", { name: "输入" }));
-  await screen.findByRole("switch", { name: "启用模糊音" });
 }
 
 test("full keeps every scheme, the input modes, helper codes and 临时日语", async () => {
@@ -89,10 +88,13 @@ test("full keeps every scheme, the input modes, helper codes and 临时日语", 
       "切换中文、日文、韩文、越南文或藏文输入，并保留各模式上次选择的方案；此平台暂不支持越南文、藏文",
     ),
   ).toBeTruthy();
+  selectSettingsTab("进阶");
   expect(screen.getByRole("region", { name: "辅助码" })).toBeTruthy();
   expect(screen.getByRole("switch", { name: /^临时日语/ })).toBeTruthy();
+  selectSettingsTab("候选与联想");
+  expect(screen.getByRole("switch", { name: /^日文混输（实验）/ })).toBeTruthy();
   // 全拼时不显示五笔的设置。
-  expect(screen.queryByRole("switch", { name: "编码打不出时用拼音候选" })).toBeNull();
+  expect(screen.queryByRole("switch", { name: "五笔拼音混输" })).toBeNull();
 });
 
 test("the wubi edition offers no other scheme and always shows the Wubi settings", async () => {
@@ -116,20 +118,22 @@ test("the wubi edition offers no other scheme and always shows the Wubi settings
     expect(screen.queryByRole("radio", { name })).toBeNull();
   }
   expect(screen.queryByText(/此平台暂不支持/)).toBeNull();
-  const mixed = screen.getByRole("switch", { name: "编码打不出时用拼音候选" }) as HTMLInputElement;
+  const mixed = screen.getByRole("switch", { name: "五笔拼音混输" }) as HTMLInputElement;
   expect(mixed.checked).toBe(true);
   // 五笔不用辅助码，这一组不显示；模糊音在混拼查全拼时照常起作用。
   expect(screen.queryByRole("region", { name: "辅助码" })).toBeNull();
+  selectSettingsTab("进阶");
   expect(screen.getByRole("switch", { name: "启用模糊音" })).toBeTruthy();
-  // 五笔版不带临时日文。
+  // 五笔版不带临时日文，用同一份日文词典的日文混输也不列出。
   expect(screen.queryByRole("switch", { name: /^临时日语/ })).toBeNull();
+  expect(screen.queryByRole("switch", { name: /^日文混输（实验）/ })).toBeNull();
   expect(screen.getByRole("switch", { name: /^临时英文/ })).toBeTruthy();
 });
 
 test("the wubi edition keeps a mixed-pinyin choice the user turned off", async () => {
   await openInputPage(wubiHost, { scheme: "wubi", wubi_mixed_pinyin: false });
 
-  const mixed = screen.getByRole("switch", { name: "编码打不出时用拼音候选" }) as HTMLInputElement;
+  const mixed = screen.getByRole("switch", { name: "五笔拼音混输" }) as HTMLInputElement;
   expect(mixed.checked).toBe(false);
 });
 
@@ -144,8 +148,11 @@ test("the pinyin edition lists only its two schemes and names the fallback for a
   expect(screen.getByText("已回退到全拼")).toBeTruthy();
   // 拼音版没有日文、韩文、越南文方案，输入模式只剩「中文」，不显示。
   expect(screen.queryByRole("radio", { name: "中文" })).toBeNull();
+  selectSettingsTab("进阶");
   expect(screen.getByRole("region", { name: "辅助码" })).toBeTruthy();
   expect(screen.getByRole("switch", { name: /^临时日语/ })).toBeTruthy();
+  selectSettingsTab("候选与联想");
+  expect(screen.getByRole("switch", { name: /^日文混输（实验）/ })).toBeTruthy();
 });
 
 test("a pinyin-edition document naming Japanese shows the scheme host-api runs", async () => {
@@ -183,6 +190,7 @@ test("a touch host lists 键盘神经联想 only when its edition ships the keyb
 
 test("the desktop 桌面神经联想 switch is not tied to the keyboard model", async () => {
   await openInputPage(wubiHost);
+  selectSettingsTab("候选与联想");
   expect(screen.getByRole("switch", { name: "桌面神经联想" })).toBeTruthy();
 });
 

@@ -40,7 +40,6 @@ const preferences = {
 const rootPages: RootPage[] = [
   { id: "input", title: "输入" },
   { id: "expression", title: "表达" },
-  { id: "shortcuts", title: "外接键盘快捷键" },
   { id: "dictionary", title: "词库" },
   { id: "skin", title: "皮肤" },
   { id: "appearance", title: "候选栏" },
@@ -72,6 +71,7 @@ function renderTouchHome(
   options: {
     actions?: Parameters<typeof HomePage>[0]["actions"];
     onOpenPage?: (page: string) => void;
+    onOpenChat?: () => void;
     pages?: RootPage[];
   } = {},
 ) {
@@ -82,6 +82,7 @@ function renderTouchHome(
         preferences={preferences}
         actions={options.actions}
         onOpenPage={onOpenPage}
+        onOpenChat={options.onOpenChat}
         touchLayout
         rootPages={options.pages ?? rootPages}
       />
@@ -122,7 +123,6 @@ test("root rows follow the design's grouping and order, with every other offered
     "输入",
     "表达",
     "词库",
-    "外接键盘快捷键",
     "语音输入",
     "手写输入",
     "剪贴板",
@@ -134,7 +134,7 @@ test("root rows follow the design's grouping and order, with every other offered
   expect(groupOf("键盘")).toBe(groupOf("皮肤"));
   expect(groupOf("候选栏")).toBe(groupOf("皮肤"));
   expect(groupOf("输入")).not.toBe(groupOf("皮肤"));
-  expect(groupOf("外接键盘快捷键")).toBe(groupOf("输入"));
+  expect(groupOf("词库")).toBe(groupOf("输入"));
   expect(groupOf("手写输入")).toBe(groupOf("语音输入"));
   expect(groupOf("AI 辅助")).toBe(groupOf("剪贴板"));
   expect(groupOf("开发者选项")).not.toBe(groupOf("剪贴板"));
@@ -143,11 +143,10 @@ test("root rows follow the design's grouping and order, with every other offered
 
 test("root rows show only the pages the shell offers", () => {
   const { home } = renderTouchHome({
-    pages: rootPages.filter((page) => !["shortcuts", "developer", "handwriting"].includes(page.id)),
+    pages: rootPages.filter((page) => !["developer", "handwriting"].includes(page.id)),
   });
 
   const titles = rowTitles(home);
-  expect(titles).not.toContain("外接键盘快捷键");
   expect(titles).not.toContain("开发者选项");
   expect(titles).not.toContain("手写输入");
   expect(titles).toContain("语音输入");
@@ -239,10 +238,10 @@ test("search lists the rows whose title or value matches, case-insensitively, an
   expect(rowTitles(home)).toEqual(["表达"]);
 
   fireEvent.change(search, { target: { value: "  键盘 " } });
-  expect(rowTitles(home)).toEqual(["键盘", "外接键盘快捷键"]);
+  expect(rowTitles(home)).toEqual(["键盘"]);
 
-  fireEvent.click(screen.getByRole("button", { name: "外接键盘快捷键" }));
-  expect(onOpenPage).toHaveBeenCalledWith("shortcuts");
+  fireEvent.click(screen.getByRole("button", { name: "键盘" }));
+  expect(onOpenPage).toHaveBeenCalledWith("screen-keyboard");
 });
 
 test("search says so when nothing matches", () => {
@@ -389,7 +388,26 @@ test("试用键盘 keeps a host's own keyboard window, and falls back to the sub
   await waitFor(() => expect(onOpenPage.mock.calls).toEqual([["try-keyboard"]]));
 });
 
-test("the HarmonyOS phone shell pushes 试用键盘 as a sub-page of 设置 and goes back to it", async () => {
+// 有对话的宿主在「对话」标签里试键盘，与 Android 和 iOS 一样；宿主自己的键盘窗口打不开时也落到那里。
+test("试用键盘 goes to the chat when the host has one, also when its keyboard window fails", async () => {
+  const onOpenPage = vi.fn();
+  const onOpenChat = vi.fn();
+  renderTouchHome({ actions: {}, onOpenPage, onOpenChat });
+  fireEvent.click(within(statusCard()).getByRole("button", { name: "试用键盘" }));
+  expect(onOpenChat).toHaveBeenCalledOnce();
+
+  cleanup();
+  renderTouchHome({
+    actions: { openKeyboard: vi.fn().mockRejectedValue(new Error("no window")) },
+    onOpenPage,
+    onOpenChat,
+  });
+  fireEvent.click(within(statusCard()).getByRole("button", { name: "试用键盘" }));
+  await waitFor(() => expect(onOpenChat).toHaveBeenCalledTimes(2));
+  expect(onOpenPage).not.toHaveBeenCalled();
+});
+
+test("a HarmonyOS phone shell without chat pushes 试用键盘 as a sub-page of 设置 and goes back to it", async () => {
   render(
     <SettingsPage
       client={{

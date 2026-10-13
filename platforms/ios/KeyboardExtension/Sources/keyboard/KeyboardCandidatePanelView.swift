@@ -44,6 +44,8 @@ final class KeyboardCandidatePanelView: UIView {
   private let candidateFamilies: [String]
   private var annotations: [KeyboardCandidateAnnotation]
   private var markers: [[CandidateMarker]]
+  /// AI 座位上的占位行（「…」或「—」）的下标：画成次要色，读屏念等待中或没有结果，不当成真候选（#6888）。
+  private var aiPlaceholders: Set<Int>
   private let display: (String) -> String
   private let onSelect: (Int) -> Void
   /// 长按候选块时提供的菜单。与候选条共用：在候选条里能管理词条的长按，展开列表后不应失效。
@@ -68,8 +70,24 @@ final class KeyboardCandidatePanelView: UIView {
     return min(columns, max(needed, annotated ? annotatedSpan : 1, 1))
   }
 
+  /// 按顺序把占 `spans` 列的格子装进 `columns` 列的各行，返回每格的行、起始列和实际占的列数。一行剩下的列放不下下一格时换行，与不开启 dense 填充的 CSS 网格一样；换行前那一格拉宽到行尾，网格右边不留空。最后一行不拉宽，一两个候选不会被撑成一整条。Android（`CandidateGridPolicy.place`）与鸿蒙（`ExpandedCandidateLayout.rows`）是同一条规则。
+  static func place(spans: [Int], columns: Int) -> [(row: Int, column: Int, span: Int)] {
+    var cells: [(row: Int, column: Int, span: Int)] = []
+    var row = 0, column = 0
+    for span in spans {
+      if column > 0, column + span > columns {
+        if let last = cells.indices.last { cells[last].span = columns - cells[last].column }
+        row += 1
+        column = 0
+      }
+      cells.append((row, column, span))
+      column += span
+    }
+    return cells
+  }
+
   init(candidates: [String], preedit: String, annotations: [KeyboardCandidateAnnotation] = [],
-       markers: [[CandidateMarker]] = [],
+       markers: [[CandidateMarker]] = [], aiPlaceholders: Set<Int> = [],
        candidateScale: CGFloat = 1, preeditScale: CGFloat = 1, candidateFamilies: [String] = [],
        selectedIndex: Int = 0, showsHeader: Bool = true,
        display: @escaping (String) -> String,
@@ -82,6 +100,7 @@ final class KeyboardCandidatePanelView: UIView {
     self.candidateFamilies = candidateFamilies
     self.annotations = annotations
     self.markers = markers
+    self.aiPlaceholders = aiPlaceholders
     self.display = display
     self.menuElements = menuElements
     self.onSelect = onSelect
@@ -247,13 +266,15 @@ final class KeyboardCandidatePanelView: UIView {
     setNeedsLayout()
   }
 
-  /// 换成另一代候选（九键面板里选拼音、退格或筛选之后），面板不关，回到列表开头。
-  func reload(candidates: [String], annotations: [KeyboardCandidateAnnotation], markers: [[CandidateMarker]]) {
+  /// 换成另一代候选，面板不关。九键面板里选拼音、退格或筛选之后回到列表开头；只是 AI 座位那一行变了时 `keepingScrollPosition` 留在原处，用户正看着的那几行不动（#6888）。
+  func reload(candidates: [String], annotations: [KeyboardCandidateAnnotation], markers: [[CandidateMarker]],
+              aiPlaceholders: Set<Int> = [], keepingScrollPosition: Bool = false) {
     self.candidates = candidates
     self.annotations = annotations
     self.markers = markers
+    self.aiPlaceholders = aiPlaceholders
     count.text = "\(candidates.count) 个候选"
-    scrollView.setContentOffset(.zero, animated: false)
+    if !keepingScrollPosition { scrollView.setContentOffset(.zero, animated: false) }
     rebuildChips()
     setNeedsLayout()
   }
@@ -279,18 +300,13 @@ final class KeyboardCandidatePanelView: UIView {
     let content = max(0, width - padding * 2)
     let columns = Self.columns(width: content)
     let columnWidth = max(0, (content - spacing * CGFloat(columns - 1)) / CGFloat(columns))
-    // 逐行排列：一行剩余空间放不下的候选从下一行开始，与不开启 dense 填充的 CSS 网格一样。
+    let spans = chips.map {
+      Self.span(titleWidth: $0.titleWidth, annotated: $0.glossLines > 0, columns: columns, columnWidth: columnWidth)
+    }
     var rows: [[(chip: CandidateGridButton, column: Int, span: Int)]] = [[]]
-    var column = 0
-    for chip in chips {
-      let span = Self.span(titleWidth: chip.titleWidth, annotated: chip.glossLines > 0,
-                           columns: columns, columnWidth: columnWidth)
-      if column > 0, column + span > columns {
-        rows.append([])
-        column = 0
-      }
-      rows[rows.count - 1].append((chip, column, span))
-      column += span
+    for (chip, cell) in zip(chips, Self.place(spans: spans, columns: columns)) {
+      if cell.row >= rows.count { rows.append([]) }
+      rows[rows.count - 1].append((chip, cell.column, cell.span))
     }
     var y = padding
     for row in rows where !row.isEmpty {
@@ -346,6 +362,8 @@ final class KeyboardCandidatePanelView: UIView {
     configuration.attributedTitle = title
     configuration.baseForegroundColor = selected || marks.contains { $0.symbol == "pin.fill" }
       ? skin.accent : skin.keyForeground
+    let aiPlaceholder = aiPlaceholders.contains(index)
+    if aiPlaceholder { configuration.baseForegroundColor = secondary }
     configuration.contentInsets = Self.cellInsets
     configuration.background.cornerRadius = skin.cornerRadius
     let fill = selected ? skin.accentSoft : skin.keyBackground
@@ -367,6 +385,7 @@ final class KeyboardCandidatePanelView: UIView {
       ? "候选词 \(number)：\(text)"
       : "候选词 \(number)：\(text)，\(annotation.accessibilityDescription)"
     for marker in marks { chip.accessibilityLabel? += "，\(marker.spoken)" }
+    if aiPlaceholder { chip.accessibilityLabel = "候选词 \(number)：\(CandidateMarker.aiPendingSpoken(candidate))" }
     if selected { chip.accessibilityTraits.insert(.selected) }
     // 在长按打开菜单时才构建，而不是一开始就给每个候选块建好：这个面板会排出整个列表，像 `yi` 这样的查询有几百个。
     chip.menu = UIMenu(children: [

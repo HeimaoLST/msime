@@ -1,3 +1,12 @@
+import { ControlledCheckbox } from "../core/controlled-checkbox";
+import { downloadBlob } from "../core/download-blob";
+import { trackAsyncSubscription } from "../core/async-subscription";
+import {
+  readOptionalJson,
+  readOptionalStorage,
+  writeOptionalJson,
+  writeOptionalStorage,
+} from "../core/optional-storage";
 import { useConfirm } from "../core/confirm";
 import { clamp } from "../core/number";
 import { utf8ByteLength } from "../core/text";
@@ -39,6 +48,7 @@ import {
   type Modifier,
 } from "./keyboard-input";
 import { keyboardSkinStyles } from "./keyboard-skin-styles";
+import { keyboardDeliveryNotice, MACOS_KEYBOARD_GUIDANCE } from "./keyboard-delivery-notice";
 import { keyboardRows, nineKeyRows } from "./panel-keyboard-layouts";
 import { CloudDictionaryEntryForm } from "./cloud-dictionary-entry-form";
 import { CloudDictionaryEntryCard } from "./cloud-dictionary-entry-card";
@@ -68,8 +78,22 @@ import {
   WINDOWS_HANDWRITING_STROKES,
 } from "./handwriting-input";
 import {
+  CloudClipboardDeviceList,
+  CloudClipboardPendingNotice,
+  CloudClipboardWaitingDevices,
+} from "./cloud-clipboard-devices";
+import {
+  cloudClipboardErrorMessage,
+  cloudClipboardFailure,
+} from "../settings/cloud-clipboard-send";
+import {
   candidateMutationCode,
+  cloudClipboardDeviceStatus,
+  cloudClipboardE2e,
   cloudClipboardItems,
+  type CloudClipboardDeviceShape,
+  type CloudClipboardDeviceStatusShape,
+  type CloudClipboardE2eShape,
   cloudDictionaryCatalogEntries,
   cloudDictionaryEntries,
   cloudResponseInteger,
@@ -152,18 +176,37 @@ export interface VoicePanelClient extends PanelClient {
   copyText?(text: string): Promise<void>;
 }
 
+/** 云剪贴板面板发给宿主的动作，见 `docs/cloud-clipboard-e2e.md` 的「共享面板的动作」。 */
 export type CloudClipboardAction =
   | { operation: "list"; search: string }
   | { operation: "add"; text: string }
   | { operation: "delete"; id: string }
-  | { operation: "set_enabled"; enabled: boolean };
-export type CloudClipboardItem = { id: string; text: string };
+  | { operation: "set_enabled"; enabled: boolean }
+  | { operation: "devices" }
+  | { operation: "approve" | "reject" | "remove"; device_id: string }
+  | { operation: "reset" };
+export type CloudClipboardItem = {
+  id: string;
+  text: string;
+  updated_at?: string;
+  pinned?: boolean;
+  device?: string;
+};
+/** 宿主的回答：`list` 带 `items`、`enabled`、`retention_days` 和 `e2e`，设备管理动作带 `status`、`device_id`、`code` 和 `devices`。各字段由 `cloud-response` 里的读取函数逐项核对。 */
+export type CloudClipboardResponse = {
+  items?: CloudClipboardItem[];
+  enabled?: boolean;
+  retention_days?: number;
+  e2e?: unknown;
+  status?: unknown;
+  device_id?: unknown;
+  code?: unknown;
+  devices?: unknown;
+};
 export interface CloudClipboardPanelClient extends PanelClient {
   canSendText?(): Promise<boolean>;
   copyText?(text: string): Promise<void>;
-  request(
-    action: CloudClipboardAction,
-  ): Promise<{ items?: CloudClipboardItem[]; enabled?: boolean }>;
+  request(action: CloudClipboardAction): Promise<CloudClipboardResponse>;
 }
 
 export type { CloudDictionaryKind } from "./cloud-dictionary-kind-tabs";
@@ -177,6 +220,7 @@ export type CloudDictionaryAction =
   | { operation: "snapshot_restore"; text: string; expected_sha256: string; revision: number }
   | { operation: "snapshot_restore_native"; token: string }
   | { operation: "snapshot_restore_cancel" }
+  | { operation: "snapshot_choose_restore" }
   | { operation: "snapshot_enqueue"; token: string }
   | { operation: "snapshot_status" }
   | { operation: "snapshot_cancel" }
@@ -326,6 +370,8 @@ export interface CloudDictionaryPanelClient extends PanelClient {
   request(action: CloudDictionaryAction): Promise<CloudDictionaryResponse>;
   snapshot?: boolean;
   snapshotNative?: boolean;
+  /** 「应用到本机」由这个面板自己处理队列（Windows 设置应用）：入列后马上应用、输入暂停，没能应用的请求只在面板开着时重试，输入法不会在空闲时自己应用。 */
+  snapshotAppliesInPanel?: boolean;
   exportNative?: boolean;
   chooseSnapshotRestore?(): Promise<CloudDictionaryResponse>;
   downloadToLocal?(entry: CloudDictionaryEntry): Promise<void>;
@@ -379,23 +425,13 @@ export function KeyboardPanel({
   customDesign?: TouchKeyboardSkinDesign;
 }) {
   const [activeLayout, setActiveLayout] = useState<"twenty_six_key" | "nine_key">(() => {
-    let saved: string | null = null;
-    try {
-      saved =
-        typeof window !== "undefined" ? window.localStorage.getItem("msime.keyboard.layout") : null;
-    } catch {
-      /* restricted webviews may deny storage */
-    }
+    const saved = readOptionalStorage("msime.keyboard.layout");
     return saved === "nine_key" || saved === "twenty_six_key" ? saved : layout;
   });
   function switchLayout() {
     const next = activeLayout === "nine_key" ? "twenty_six_key" : "nine_key";
     setActiveLayout(next);
-    try {
-      window.localStorage.setItem("msime.keyboard.layout", next);
-    } catch {
-      /* preference is optional */
-    }
+    writeOptionalStorage("msime.keyboard.layout", next);
   }
   const previousHostLayout = useRef(layout);
   useEffect(() => {
@@ -430,7 +466,14 @@ export function KeyboardPanel({
       : sourceRows;
   const [, setActiveModifiers] = useState<Set<Modifier>>(new Set());
   const modifiersRef = useRef<Set<Modifier>>(new Set());
-  const [notice, setNotice] = useState("Touch keyboard");
+  const [notice, setNotice] = useState(
+    platform === "macos" ? MACOS_KEYBOARD_GUIDANCE : "Touch keyboard",
+  );
+  const platformRef = useLatestRef(platform);
+  useEffect(() => {
+    if (platform === "macos")
+      setNotice((shown) => (shown === "Touch keyboard" ? MACOS_KEYBOARD_GUIDANCE : shown));
+  }, [platform]);
   const [openingVoice, setOpeningVoice] = useState(false);
   type QueuedKey = { request: KeyboardInputRequest; description: string };
   const inputQueue = useRef<{
@@ -456,8 +499,8 @@ export function KeyboardPanel({
     modifiersRef.current = new Set();
     setActiveModifiers(new Set());
     if (client.rememberInputTarget)
-      void client.rememberInputTarget().catch(() => {
-        if (queue.active) setNotice("未能记录前台输入窗口");
+      void client.rememberInputTarget().catch((error: unknown) => {
+        if (queue.active) setNotice(keyboardDeliveryNotice(error, platformRef.current));
       });
     const stopForBlur = () => stopKeyRepeat();
     window.addEventListener("blur", stopForBlur);
@@ -512,11 +555,11 @@ export function KeyboardPanel({
           // earlier key is delivered.
           if (client.rememberInputTarget) await client.rememberInputTarget();
           await client.sendKey(next.request);
-        } catch {
-          // Delivery may have partially succeeded; never replay a failed key.
+        } catch (error: unknown) {
+          // 发送可能已部分成功；不重放失败按键，清空队列并停止长按连发。
           queue.pending = [];
           stopKeyRepeat();
-          if (queue.active) setNotice("按键发送失败，后续排队按键已取消，请确认输入位置后继续");
+          if (queue.active) setNotice(keyboardDeliveryNotice(error, platform));
           return;
         }
         if (queue.active) setNotice(`已发送：${next.description}`);
@@ -682,7 +725,7 @@ export function KeyboardPanel({
       aria-label="屏幕键盘"
     >
       <NativePanelHeader
-        className={`native-panel-header ${surface.keyboardHeader}`}
+        className={surface.keyboardHeader}
         drag={drag}
         closeDisabled={openingVoice}
         onClose={closeKeyboard}
@@ -860,13 +903,7 @@ export function HandwritingPanel({
     packs.ensure("handwriting");
   }, [handwritingPack, packs]);
   const [activationMode, setActivationMode] = useState<"copy" | "input">(() => {
-    try {
-      return window.localStorage.getItem("msime.handwriting.activation") === "input"
-        ? "input"
-        : "copy";
-    } catch {
-      return "copy";
-    }
+    return readOptionalStorage("msime.handwriting.activation") === "input" ? "input" : "copy";
   });
   const effectiveMode =
     activationMode === "copy" && !client.copyHandwritingCandidate
@@ -877,11 +914,7 @@ export function HandwritingPanel({
   function selectActivation(mode: "copy" | "input") {
     if (!recognitionQueue.current.active || closingRef.current) return;
     setActivationMode(mode);
-    try {
-      window.localStorage.setItem("msime.handwriting.activation", mode);
-    } catch {
-      /* optional preference */
-    }
+    writeOptionalStorage("msime.handwriting.activation", mode);
   }
   const [strokes, setStrokes] = useState<InkStroke[]>([]);
   const [redoStrokes, setRedoStrokes] = useState<InkStroke[]>([]);
@@ -1316,14 +1349,16 @@ export function HandwritingPanel({
             >
               复制
             </button>
-            <button
-              type="button"
-              aria-pressed={effectiveMode === "input"}
-              disabled={closing || submitting || !client.submitHandwritingCandidate}
-              onClick={() => selectActivation("input")}
-            >
-              输入
-            </button>
+            {client.submitHandwritingCandidate && (
+              <button
+                type="button"
+                aria-pressed={effectiveMode === "input"}
+                disabled={closing || submitting}
+                onClick={() => selectActivation("input")}
+              >
+                输入
+              </button>
+            )}
           </div>
           <div
             className={surface.candidateGrid}
@@ -1570,9 +1605,8 @@ export function VoicePanel({
   useEffect(() => {
     if (!client.onVoiceUpdate) return;
     const generation = voiceGeneration.current;
-    let unlisten: (() => void) | undefined;
-    void client
-      .onVoiceUpdate((update) => {
+    return trackAsyncSubscription(
+      client.onVoiceUpdate((update) => {
         if (generation !== voiceGeneration.current || !busyRef.current) return;
         if (update.level !== undefined) {
           if (
@@ -1608,15 +1642,9 @@ export function VoicePanel({
               ? "正在识别…"
               : "正在录音并识别…",
         );
-      })
-      .then((stop) => {
-        if (generation === voiceGeneration.current) unlisten = stop;
-        else stop();
-      })
-      .catch(() => undefined);
-    return () => {
-      unlisten?.();
-    };
+      }),
+      () => generation === voiceGeneration.current,
+    );
   }, [client, voiceGeneration]);
 
   async function recognize() {
@@ -1878,16 +1906,54 @@ export function VoicePanel({
   );
 }
 
+/** 云剪贴板面板里等待用户确认的操作：关闭、重置或移除一台设备，三者都会清掉云端条目。 */
+type CloudClipboardConfirmation =
+  | { kind: "disable" }
+  | { kind: "reset" }
+  | { kind: "remove"; device: CloudClipboardDeviceShape };
+
+function cloudClipboardConfirmationText(confirmation: CloudClipboardConfirmation): {
+  label: string;
+  message: string;
+  action: string;
+} {
+  switch (confirmation.kind) {
+    case "disable":
+      return {
+        label: "关闭云剪贴板",
+        message:
+          "关闭云剪贴板会删除云端历史和全部设备登记；重新开启后，其他设备都需要重新允许。是否继续？",
+        action: "确认关闭并删除历史",
+      };
+    case "reset":
+      return {
+        label: "重置云剪贴板",
+        message:
+          "重置后，云端的全部条目会被清空，本设备换用一把新密钥；其他所有设备都需要在本设备上重新允许，才能继续使用云剪贴板。是否继续？",
+        action: "确认重置",
+      };
+    case "remove":
+      return {
+        label: "移除设备",
+        message: `移除「${confirmation.device.name || "未命名设备"}」后，云端的全部条目会被清空并换用新密钥；其他所有设备（包括仍在使用的）都需要在本设备上重新允许。是否继续？`,
+        action: "确认移除",
+      };
+  }
+}
+
 export function CloudClipboardPanel({ client }: { client: CloudClipboardPanelClient }) {
   const [inputAvailable, setInputAvailable] = useState(
     Boolean(client.sendText && !client.canSendText),
   );
-  const [confirmDisable, setConfirmDisable] = useState(false);
+  const [confirmation, setConfirmation] = useState<CloudClipboardConfirmation | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [search, setSearch] = useState("");
   const [items, setItems] = useState<CloudClipboardItem[]>([]);
   const [draft, setDraft] = useState("");
   const [enabled, setEnabled] = useState(true);
+  const [e2e, setE2e] = useState<CloudClipboardE2eShape | null>(null);
+  const [devices, setDevices] = useState<CloudClipboardDeviceStatusShape | null>(null);
+  const [showDevices, setShowDevices] = useState(false);
   const [notice, setNotice] = useState("只上传你明确选择的内容");
   const {
     busy,
@@ -1898,6 +1964,7 @@ export function CloudClipboardPanel({ client }: { client: CloudClipboardPanelCli
   } = usePanelAction(setNotice);
   const draftRevision = useAsyncGeneration();
   const searchRef = useLatestRef(search);
+  const showDevicesRef = useLatestRef(showDevices);
   const cloudGeneration = useAsyncGeneration(client);
 
   async function load(revision: number, nextSearch: string) {
@@ -1908,19 +1975,42 @@ export function CloudClipboardPanel({ client }: { client: CloudClipboardPanelCli
       if (revision === refreshRevision.current) {
         setItems([]);
         setLoaded(false);
-        setConfirmDisable(false);
+        setE2e(null);
+        setDevices(null);
+        setConfirmation(null);
       }
       throw error;
     }
     if (revision !== refreshRevision.current) return;
+    const nextE2e = cloudClipboardE2e(result);
     setItems(cloudClipboardItems(result));
+    setE2e(nextE2e);
     setLoaded(true);
     if (typeof result.enabled === "boolean") setEnabled(result.enabled);
     setNotice("云剪贴板已刷新");
+    // 有设备在等本机允许，或用户打开了设备列表时，再取一次设备状态；取不到不影响条目。
+    if (nextE2e?.status === "ready" && (nextE2e.pending_devices > 0 || showDevicesRef.current)) {
+      try {
+        const status = cloudClipboardDeviceStatus(await client.request({ operation: "devices" }));
+        if (revision === refreshRevision.current) setDevices(status);
+      } catch {
+        if (revision === refreshRevision.current) setDevices(null);
+      }
+    } else {
+      setDevices(null);
+    }
   }
 
   function refresh(nextSearch = searchRef.current) {
-    return run((revision) => load(revision, nextSearch), "无法访问云剪贴板服务");
+    return run(async (revision) => {
+      try {
+        await load(revision, nextSearch);
+      } catch (error) {
+        // 错误码各有说明（例如自建中继拒绝了令牌、本设备待批准），认不出的仍说服务访问不了。
+        if (revision === refreshRevision.current)
+          setNotice(cloudClipboardErrorMessage(error, "无法访问云剪贴板服务"));
+      }
+    }, "无法访问云剪贴板服务");
   }
 
   useEffect(() => {
@@ -1928,6 +2018,8 @@ export function CloudClipboardPanel({ client }: { client: CloudClipboardPanelCli
     busyRef.current = false;
     setItems([]);
     setLoaded(false);
+    setE2e(null);
+    setDevices(null);
     setInputAvailable(Boolean(client.sendText && !client.canSendText));
     if (client.canSendText)
       void client
@@ -1937,7 +2029,7 @@ export function CloudClipboardPanel({ client }: { client: CloudClipboardPanelCli
             setInputAvailable(available && Boolean(client.sendText));
         })
         .catch(() => {
-          if (generation === cloudGeneration.current) setInputAvailable(false);
+          if (generation === cloudGeneration.current) setNotice("未能记录前台输入窗口");
         });
     if (client.rememberInputTarget)
       void client.rememberInputTarget().catch(() => {
@@ -1949,6 +2041,44 @@ export function CloudClipboardPanel({ client }: { client: CloudClipboardPanelCli
     };
   }, [client, cloudGeneration, invalidate]);
 
+  /** 发出一个可能失败的动作，失败时按错误码给出说明；成功后刷新条目，再显示 `success`。 */
+  function act(
+    action: CloudClipboardAction,
+    success: string,
+    failure: string,
+    after?: (result: CloudClipboardResponse) => void,
+  ) {
+    return run(async (revision) => {
+      let result: CloudClipboardResponse;
+      try {
+        result = await client.request(action);
+      } catch (error) {
+        if (revision !== refreshRevision.current) return;
+        const message = cloudClipboardErrorMessage(error, failure);
+        // 本设备其实还在等待允许，或者云剪贴板已被关闭：刷新一次，让面板换成对应的样子。
+        if (cloudClipboardFailure(error) !== "unavailable") {
+          try {
+            await load(revision, searchRef.current);
+          } catch {
+            // 刷新失败时 load 已清空列表，这里只保留动作本身的失败说明。
+          }
+        }
+        if (revision === refreshRevision.current) setNotice(message);
+        return;
+      }
+      if (revision !== refreshRevision.current) return;
+      after?.(result);
+      try {
+        await load(revision, searchRef.current);
+      } catch {
+        if (revision === refreshRevision.current)
+          setNotice(`${success}，但历史刷新失败，请点击刷新`);
+        return;
+      }
+      if (revision === refreshRevision.current) setNotice(success);
+    }, failure);
+  }
+
   function add() {
     if (!enabled || draft.trim().length === 0 || draft.length > 4000) {
       if (draft.trim().length === 0) setNotice("请输入要上传的文本");
@@ -1956,45 +2086,84 @@ export function CloudClipboardPanel({ client }: { client: CloudClipboardPanelCli
       return;
     }
     const uploadedRevision = draftRevision.current;
-    return run(async (revision) => {
-      await client.request({ operation: "add", text: draft });
-      if (revision !== refreshRevision.current) return;
-      if (uploadedRevision === draftRevision.current) setDraft("");
-      try {
-        await load(revision, searchRef.current);
-      } catch {
-        if (revision === refreshRevision.current) setNotice("已上传，但历史刷新失败，请点击刷新");
-      }
-    }, "上传失败，请确认账号 provider 已连接");
+    return act(
+      { operation: "add", text: draft },
+      "已上传",
+      "上传失败，请确认账号 provider 已连接",
+      () => {
+        if (uploadedRevision === draftRevision.current) setDraft("");
+      },
+    );
   }
 
   function remove(id: string) {
-    return run(async (revision) => {
-      await client.request({ operation: "delete", id });
-      if (revision !== refreshRevision.current) return;
-      try {
-        await load(revision, searchRef.current);
-      } catch {
-        if (revision === refreshRevision.current) setNotice("已删除，但历史刷新失败，请点击刷新");
-      }
-    }, "删除失败");
+    return act({ operation: "delete", id }, "已删除", "删除失败");
+  }
+
+  function deviceAction(action: CloudClipboardAction, success: string, failure: string) {
+    return act(action, success, failure, (result) => {
+      const status = cloudClipboardDeviceStatus(result);
+      if (status) setDevices(status);
+    });
   }
 
   function toggle(confirmed = false) {
     if (enabled && !confirmed) {
-      setConfirmDisable(true);
+      setConfirmation({ kind: "disable" });
       return;
     }
-    setConfirmDisable(false);
+    setConfirmation(null);
     const next = !enabled;
     return run(async (revision) => {
       const result = await client.request({ operation: "set_enabled", enabled: next });
       if (revision !== refreshRevision.current) return;
       const effective = typeof result.enabled === "boolean" ? result.enabled : next;
       setEnabled(effective);
-      if (!effective) setItems([]);
-      setNotice(effective ? "云剪贴板已开启" : "云剪贴板已关闭");
+      if (!effective) {
+        setItems([]);
+        setE2e(null);
+        setDevices(null);
+      } else {
+        // 刚开启时本机要先登记，可能直接可用，也可能要等另一台设备允许。
+        try {
+          await load(revision, searchRef.current);
+        } catch {
+          // 刷新失败只影响列表，开关本身已经生效。
+        }
+      }
+      if (revision === refreshRevision.current)
+        setNotice(effective ? "云剪贴板已开启" : "云剪贴板已关闭");
     }, "更新云剪贴板设置失败");
+  }
+
+  function confirm() {
+    const current = confirmation;
+    if (!current) return;
+    if (current.kind === "disable") return toggle(true);
+    setConfirmation(null);
+    if (current.kind === "reset")
+      return deviceAction(
+        { operation: "reset" },
+        "云剪贴板已重置，其他设备需要重新允许",
+        "重置云剪贴板失败",
+      );
+    return deviceAction(
+      { operation: "remove", device_id: current.device.device_id },
+      "已移除设备，其他设备需要重新允许",
+      "移除设备失败",
+    );
+  }
+
+  function toggleDevices() {
+    const next = !showDevices;
+    setShowDevices(next);
+    if (!next) return;
+    return run(async (revision) => {
+      const status = cloudClipboardDeviceStatus(await client.request({ operation: "devices" }));
+      if (revision !== refreshRevision.current) return;
+      setDevices(status);
+      setNotice("设备列表已刷新");
+    }, "无法读取设备列表");
   }
 
   function choose(item: CloudClipboardItem, copyOnly = false) {
@@ -2014,121 +2183,188 @@ export function CloudClipboardPanel({ client }: { client: CloudClipboardPanelCli
     );
   }
 
+  const pending = e2e?.status === "pending";
+  const ready = e2e?.status === "ready";
+  const waiting = devices?.devices.filter((device) => !device.approved && !device.current) ?? null;
+  const waitingCount = waiting ? waiting.length : (e2e?.pending_devices ?? 0);
+  const confirmText = confirmation && cloudClipboardConfirmationText(confirmation);
+
   return (
     <main className={`native-panel ${cloud.clipboardPanel}`} aria-label="云剪贴板">
       <CloudPanelHeader title="水杉云剪贴板" onClose={() => void client.close()} />
       <div className={cloud.clipboardBody}>
-        <p className={cloud.clipboardNote}>只上传你明确选择的文本，不自动读取本地剪贴板。</p>
+        <p className={cloud.clipboardNote}>
+          只上传你明确选择的文本，不自动读取本地剪贴板；内容在设备上加密后才上传，服务器只保存密文。
+        </p>
         <label className={cloud.clipboardToggle}>
           <span>启用云剪贴板</span>
-          <input
-            type="checkbox"
+          <ControlledCheckbox
             checked={enabled}
             onChange={() => void toggle()}
             disabled={busy || !loaded}
           />
         </label>
-        {confirmDisable && (
+        {confirmation && confirmText && (
           <div
             className={cloud.clipboardConfirm}
             role="alertdialog"
-            aria-label="关闭云剪贴板"
+            aria-label={confirmText.label}
             aria-modal="true"
           >
-            <p className="m-0">关闭云剪贴板会删除云端历史，是否继续？</p>
+            <p className="m-0">{confirmText.message}</p>
             <button
               type="button"
               className={cloud.clipboardDelete}
               disabled={busy}
-              onClick={() => void toggle(true)}
+              onClick={() => void confirm()}
             >
-              确认关闭并删除历史
+              {confirmText.action}
             </button>
             <button
               type="button"
               className={cloud.clipboardButton}
-              onClick={() => setConfirmDisable(false)}
+              onClick={() => setConfirmation(null)}
             >
               取消
             </button>
           </div>
         )}
-        <div className={cloud.clipboardSearchRow}>
-          <input
-            className={cloud.clipboardInput}
-            aria-label="搜索云端历史"
-            value={search}
-            onChange={(event) => {
-              setSearch(event.target.value);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void refresh();
-            }}
-            placeholder="搜索云端历史"
+        {pending && e2e ? (
+          <CloudClipboardPendingNotice
+            code={e2e.code}
+            busy={busy}
+            onRefresh={() => void refresh()}
+            onReset={() => setConfirmation({ kind: "reset" })}
           />
-          <button
-            type="button"
-            className={cloud.clipboardButton}
-            onClick={() => void refresh()}
-            disabled={busy}
-          >
-            刷新
-          </button>
-        </div>
-        <div className={cloud.clipboardAddRow}>
-          <textarea
-            className={cloud.clipboardTextArea}
-            aria-label="待上传文本"
-            value={draft}
-            onChange={(event) => {
-              draftRevision.current++;
-              setDraft(event.target.value);
-            }}
-            placeholder="输入要上传的文本"
-            rows={3}
-          />
-          <small className={cloud.clipboardCount(draft.length > 4000)}>{draft.length} / 4000</small>
-          <button
-            type="button"
-            className={cloud.clipboardSubmit}
-            onClick={() => void add()}
-            disabled={!enabled || draft.trim().length === 0 || draft.length > 4000 || busy}
-          >
-            上传明确选择的文本
-          </button>
-        </div>
-        <div className={cloud.clipboardList} aria-label="云端历史">
-          {items.length ? (
-            items.map((item) => (
-              <article className={cloud.clipboardItem} key={item.id}>
-                <button type="button" disabled={busy} onClick={() => void choose(item)}>
-                  {item.text}
-                </button>
-                {client.copyText && (
-                  <button
-                    type="button"
-                    disabled={busy}
-                    aria-label="复制此条云端记录"
-                    onClick={() => void choose(item, true)}
-                  >
-                    复制
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className={cloud.clipboardDelete}
-                  aria-label={`删除 ${item.text}`}
-                  onClick={() => void remove(item.id)}
-                  disabled={busy}
-                >
-                  删除
-                </button>
-              </article>
-            ))
-          ) : (
-            <p className={cloud.clipboardNote}>暂无云端历史</p>
-          )}
-        </div>
+        ) : (
+          <>
+            {ready && waitingCount > 0 && (
+              <CloudClipboardWaitingDevices
+                devices={waiting}
+                count={waitingCount}
+                busy={busy}
+                onApprove={(device) =>
+                  void deviceAction(
+                    { operation: "approve", device_id: device.device_id },
+                    `已允许「${device.name || "未命名设备"}」使用云剪贴板`,
+                    "允许设备失败",
+                  )
+                }
+                onReject={(device) =>
+                  void deviceAction(
+                    { operation: "reject", device_id: device.device_id },
+                    `已拒绝「${device.name || "未命名设备"}」`,
+                    "拒绝设备失败",
+                  )
+                }
+                onShow={() => void refresh()}
+              />
+            )}
+            {ready && (
+              <button
+                type="button"
+                className={cloud.clipboardButton}
+                aria-expanded={showDevices}
+                disabled={busy}
+                onClick={() => void toggleDevices()}
+              >
+                {showDevices ? "收起设备列表" : "管理设备"}
+              </button>
+            )}
+            {ready && showDevices && devices && (
+              <CloudClipboardDeviceList
+                devices={devices.devices}
+                busy={busy}
+                onRemove={(device) => setConfirmation({ kind: "remove", device })}
+                onReset={() => setConfirmation({ kind: "reset" })}
+              />
+            )}
+            <div className={cloud.clipboardSearchRow}>
+              <input
+                className={cloud.clipboardInput}
+                aria-label="搜索云端历史"
+                value={search}
+                onChange={(event) => {
+                  setSearch(event.target.value);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void refresh();
+                }}
+                placeholder="搜索云端历史"
+              />
+              <button
+                type="button"
+                className={cloud.clipboardButton}
+                onClick={() => void refresh()}
+                disabled={busy}
+              >
+                刷新
+              </button>
+            </div>
+            <div className={cloud.clipboardAddRow}>
+              <textarea
+                className={cloud.clipboardTextArea}
+                aria-label="待上传文本"
+                value={draft}
+                onChange={(event) => {
+                  draftRevision.current++;
+                  setDraft(event.target.value);
+                }}
+                placeholder="输入要上传的文本"
+                rows={3}
+              />
+              <small className={cloud.clipboardCount(draft.length > 4000)}>
+                {draft.length} / 4000
+              </small>
+              <button
+                type="button"
+                className={cloud.clipboardSubmit}
+                onClick={() => void add()}
+                disabled={!enabled || draft.trim().length === 0 || draft.length > 4000 || busy}
+              >
+                上传明确选择的文本
+              </button>
+            </div>
+            {e2e && e2e.undecryptable > 0 && (
+              <p className={cloud.clipboardNote} role="note">
+                有 {e2e.undecryptable}{" "}
+                条云端记录无法在本设备解密，已略去。它们可能是用另一把密钥写入的。
+              </p>
+            )}
+            <div className={cloud.clipboardList} aria-label="云端历史">
+              {items.length ? (
+                items.map((item) => (
+                  <article className={cloud.clipboardItem} key={item.id}>
+                    <button type="button" disabled={busy} onClick={() => void choose(item)}>
+                      {item.text}
+                    </button>
+                    {client.copyText && (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        aria-label="复制此条云端记录"
+                        onClick={() => void choose(item, true)}
+                      >
+                        复制
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className={cloud.clipboardDelete}
+                      aria-label={`删除 ${item.text}`}
+                      onClick={() => void remove(item.id)}
+                      disabled={busy}
+                    >
+                      删除
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <p className={cloud.clipboardNote}>暂无云端历史</p>
+              )}
+            </div>
+          </>
+        )}
         <p className={cloud.clipboardNote} role="status">
           {notice}
         </p>
@@ -2500,18 +2736,11 @@ export function CloudDictionaryFilesPanel({ client }: { client: CloudDictionaryP
       }
       const text = cloudResponseText(result);
       if (typeof text !== "string") throw new Error("provider returned no file");
-      const anchor = document.createElement("a");
-      const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
-      anchor.href = url;
-      anchor.download = result.filename || `msime-${kind}-dictionary.tsv`;
-      document.body.appendChild(anchor);
-      try {
-        anchor.click();
-        setNotice("云词库已导出");
-      } finally {
-        anchor.remove();
-        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      }
+      downloadBlob(
+        new Blob([text], { type: "text/plain;charset=utf-8" }),
+        result.filename || `msime-${kind}-dictionary.tsv`,
+      );
+      setNotice("云词库已导出");
     }, "导出失败，请确认 provider 已连接");
   }
 
@@ -2528,20 +2757,11 @@ export function CloudDictionaryFilesPanel({ client }: { client: CloudDictionaryP
       }
       const text = cloudResponseText(result);
       if (typeof text !== "string" || !text) throw new Error("provider returned no snapshot");
-      const anchor = document.createElement("a");
-      const url = URL.createObjectURL(
+      downloadBlob(
         new Blob([text], { type: "application/x-ndjson;charset=utf-8" }),
+        result.filename || "msime-dictionary-snapshot.ndjson",
       );
-      anchor.href = url;
-      anchor.download = result.filename || "msime-dictionary-snapshot.ndjson";
-      document.body.appendChild(anchor);
-      try {
-        anchor.click();
-        setNotice("完整云词库快照已导出");
-      } finally {
-        anchor.remove();
-        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-      }
+      setNotice("完整云词库快照已导出");
     } catch {
       if (mounted.current && lifecycle === lifecycleRevision.current)
         setNotice("导出完整云词库快照失败");
@@ -2811,6 +3031,26 @@ export function CloudDictionaryFilesPanel({ client }: { client: CloudDictionaryP
   );
 }
 
+const PANEL_SNAPSHOT_RETRY_NOTICE =
+  "快照已入列，这次没能马上应用；请保持这个面板打开，稍后会自动重试";
+
+/** 由面板自己处理队列的宿主（`snapshotAppliesInPanel`）按请求状态给出的提示。结束的结果在下一次轮询时被取走、处理结果一节随之消失，所以提示自己说清结局，不指向那一节。 */
+function panelSnapshotNotice(status: CloudDictionarySnapshotRequest["status"] | undefined): string {
+  switch (status) {
+    case "applied":
+      return "云端快照已应用到本机";
+    case "queued":
+    case "preparing":
+      return PANEL_SNAPSHOT_RETRY_NOTICE;
+    case "conflict":
+      return "快照因冲突作废，本机词库未改变";
+    case "cancelled":
+      return "已取消待应用快照";
+    default:
+      return "快照没有应用";
+  }
+}
+
 /** Apply the complete cloud snapshot through the platform's idle-boundary queue. */
 export function CloudDictionaryApplyPanel({ client }: { client: CloudDictionaryPanelClient }) {
   const { confirm, confirmation } = useConfirm();
@@ -2837,7 +3077,13 @@ export function CloudDictionaryApplyPanel({ client }: { client: CloudDictionaryP
       const result = await client.request({ operation: "snapshot_status" });
       if (lifecycle !== lifecycleRevision.current || !isCurrent(revision)) return;
       setLocalVersion(typeof result.localVersion === "string" ? result.localVersion : null);
-      setRequest(cloudResponseRequest<CloudDictionarySnapshotRequest>(result));
+      const current = cloudResponseRequest<CloudDictionarySnapshotRequest>(result);
+      setRequest(current);
+      // 面板重试成功或作废以后，换掉「请保持面板打开」那句，否则结果被取走后它一直留在那里。
+      if (client.snapshotAppliesInPanel && current) {
+        const notice = panelSnapshotNotice(current.status);
+        setNotice((shown) => (shown === PANEL_SNAPSHOT_RETRY_NOTICE ? notice : shown));
+      }
     } catch {
       if (lifecycle === lifecycleRevision.current && isCurrent(revision))
         setNotice("无法读取本机词库状态，请确认键盘已启用");
@@ -2871,7 +3117,9 @@ export function CloudDictionaryApplyPanel({ client }: { client: CloudDictionaryP
     const lifecycle = lifecycleRevision.current;
     const confirmed = await confirm({
       title: "替换本机词库",
-      message: "这份云端快照会替换本机个人词库和学习记录，输入法将在下一次空闲边界应用。",
+      message: client.snapshotAppliesInPanel
+        ? "这份云端快照会替换本机个人词库和学习记录。替换马上进行，期间输入会暂停；请保持这个面板打开，直到状态显示已应用。"
+        : "这份云端快照会替换本机个人词库和学习记录，输入法将在下一次空闲边界应用。",
       confirmLabel: "替换",
       danger: true,
     });
@@ -2881,8 +3129,13 @@ export function CloudDictionaryApplyPanel({ client }: { client: CloudDictionaryP
       if (currentLifecycle !== lifecycleRevision.current || !isCurrent(revision)) return;
       setPreview(null);
       setPreviewToken(null);
-      setRequest(cloudResponseRequest<CloudDictionarySnapshotRequest>(result));
-      setNotice("快照已入列，将在输入法空闲时应用");
+      const queued = cloudResponseRequest<CloudDictionarySnapshotRequest>(result);
+      setRequest(queued);
+      setNotice(
+        client.snapshotAppliesInPanel
+          ? panelSnapshotNotice(queued?.status)
+          : "快照已入列，将在输入法空闲时应用",
+      );
     }, "快照入列失败，本机词库未改变");
   }
 
@@ -2998,6 +3251,12 @@ export function CloudDictionaryApplyPanel({ client }: { client: CloudDictionaryP
             <p className={cloud.dictionaryNote}>
               状态：{request.status} · 云端 revision {request.cloudRevision}
             </p>
+            {client.snapshotAppliesInPanel &&
+              (request.status === "queued" || request.status === "preparing") && (
+                <p className={cloud.dictionaryNote}>
+                  快照只在这个面板开着时应用，关掉面板会停在待应用；之后输入改变了本机词库，这份快照会因冲突作废。
+                </p>
+              )}
             {(request.status === "queued" || request.status === "preparing") && (
               <button type="button" className="secondary" onClick={cancel} disabled={busy}>
                 取消待应用快照
@@ -3548,12 +3807,7 @@ export function CloudCandidatesPanel({ client }: { client: CloudDictionaryPanelC
         {kind === "pinyin" && (
           <div className={cloud.dictionaryActions}>
             <label>
-              <input
-                type="checkbox"
-                checked={jianpin}
-                onChange={(event) => setJianpin(event.target.checked)}
-                disabled={busy}
-              />
+              <ControlledCheckbox checked={jianpin} onChange={setJianpin} disabled={busy} />
               简拼候选
             </label>
             <CloudDictionarySelectField
@@ -3620,12 +3874,7 @@ export function CloudCandidatesPanel({ client }: { client: CloudDictionaryPanelC
               />
             </label>
             <label>
-              <input
-                type="checkbox"
-                checked={forceTop}
-                onChange={(event) => setForceTop(event.target.checked)}
-                disabled={busy}
-              />
+              <ControlledCheckbox checked={forceTop} onChange={setForceTop} disabled={busy} />
               强制置顶
             </label>
             <label>
@@ -3695,7 +3944,7 @@ export function CloudCandidatesPanel({ client }: { client: CloudDictionaryPanelC
                   }
                 >
                   <strong>
-                    {index + 1}. <span className="break-anywhere">{candidate.word}</span>
+                    {index + 1}. <span className="wrap-anywhere">{candidate.word}</span>
                   </strong>
                   <small>
                     {candidate.code} · 权重 {candidate.weight}
@@ -3768,9 +4017,6 @@ const emojiPages: { id: EmojiPage; label: string; icon: string }[] = [
  * thirty rules whose only job was to restate the first thirty. The pairs are named once here and the
  * light half rides along as a `group-data` variant, so a colour that changes changes in one place.
  */
-const panelSurface = "bg-[#202027] group-data-[panel-theme=light]:bg-[#f7f8fa]";
-const panelText = "text-[#f5f5f7] group-data-[panel-theme=light]:text-[#202124]";
-const panelMuted = "text-[#aeb0b7] group-data-[panel-theme=light]:text-[#656a73]";
 const panelDim = "text-[#b8b8c0] group-data-[panel-theme=light]:text-[#656a73]";
 const panelDivider = "border-white/[0.09] group-data-[panel-theme=light]:border-[#d9dce3]";
 /** A raised field: the search box, a clipboard row, the delete button beside one. */
@@ -3791,7 +4037,7 @@ const panelToolbar = `mb-2 flex min-h-[34px] items-center gap-[9px] border-b pb-
  * generates. Interpolating a constant that already holds literals is fine; building `[&>button]:` +
  * a name is not. */
 const panelAction = `${panelTextButton} px-2.5 py-[5px] text-xs`;
-const panelHeading = `m-0 text-sm font-semibold ${panelText}`;
+const panelHeading = `m-0 text-sm font-semibold ${surface.panelText}`;
 const panelContent =
   "min-h-0 flex-1 overflow-y-auto px-6 pt-2 pb-[52px] max-phone:px-3.5 [scrollbar-color:#77747d_transparent]";
 const panelChip = (chosen: boolean) =>
@@ -3800,14 +4046,14 @@ const panelChip = (chosen: boolean) =>
       ? `${panelAccentBorder} ${panelChosen}`
       : `border-transparent bg-transparent ${panelDim} ${panelRaise} focus-visible:bg-[#303038] focus-visible:text-[#f5f5f7] group-data-[panel-theme=light]:focus-visible:bg-[#eceef3] group-data-[panel-theme=light]:focus-visible:text-[#202124]`
   }`;
-const panelEmpty = `m-0 flex min-h-[220px] items-center justify-center text-center text-sm ${panelMuted}`;
+const panelEmpty = `m-0 flex min-h-[220px] items-center justify-center text-center text-sm ${surface.panelMuted}`;
 /*
  * A tile. Grid tiles are uniform squares; flow tiles hold kaomoji and captioned symbols, so they size
  * to their content and wrap their text instead. The `:nth-child(n)` the stylesheet used on the group
  * was only there to win a specificity fight with the grid rule -- a fight utilities do not have.
  */
 const panelTile = (flow: boolean) =>
-  `flex min-w-0 items-center justify-center overflow-hidden rounded-[9px] border border-transparent bg-transparent text-center font-emoji-text leading-[1.2] break-anywhere ${panelText} hover:border-[#555560] hover:bg-[#303038] focus-visible:border-[#555560] focus-visible:bg-[#303038] group-data-[panel-theme=light]:hover:border-[#c8ccd5] group-data-[panel-theme=light]:hover:bg-[#eceef3] group-data-[panel-theme=light]:focus-visible:border-[#c8ccd5] group-data-[panel-theme=light]:focus-visible:bg-[#eceef3] disabled:cursor-wait disabled:opacity-55 ${
+  `flex min-w-0 items-center justify-center overflow-hidden rounded-[9px] border border-transparent bg-transparent text-center font-emoji-text leading-[1.2] wrap-anywhere ${surface.panelText} hover:border-[#555560] hover:bg-[#303038] focus-visible:border-[#555560] focus-visible:bg-[#303038] group-data-[panel-theme=light]:hover:border-[#c8ccd5] group-data-[panel-theme=light]:hover:bg-[#eceef3] group-data-[panel-theme=light]:focus-visible:border-[#c8ccd5] group-data-[panel-theme=light]:focus-visible:bg-[#eceef3] disabled:cursor-wait disabled:opacity-55 ${
     flow
       ? "max-w-full flex-[0_1_auto] min-h-12 px-3 py-2.5 text-xl whitespace-pre-wrap"
       : "min-h-[66px] p-1.5 text-[29px]"
@@ -3830,21 +4076,14 @@ export function EmojiPanel({
   const [query, setQuery] = useState("");
   const [categories, setCategories] = useState({ emoji: "all", symbols: "all" });
   const [recent, setRecent] = useState<EmojiCatalogItem[]>(() => {
-    try {
-      const value: unknown =
-        typeof window === "undefined"
-          ? null
-          : JSON.parse(window.localStorage.getItem("msime.emoji.recent") ?? "null");
-      return Array.isArray(value)
-        ? (value
-            .filter(
-              (item) => item && typeof item.text === "string" && typeof item.keywords === "string",
-            )
-            .slice(0, 28) as EmojiCatalogItem[])
-        : [];
-    } catch {
-      return [];
-    }
+    const value = readOptionalJson("msime.emoji.recent");
+    return Array.isArray(value)
+      ? (value
+          .filter(
+            (item) => item && typeof item.text === "string" && typeof item.keywords === "string",
+          )
+          .slice(0, 28) as EmojiCatalogItem[])
+      : [];
   });
   const [clipboard, setClipboard] = useState<string[]>([]);
   const {
@@ -3901,11 +4140,7 @@ export function EmojiPanel({
   }, [client, invalidate]);
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem("msime.emoji.recent", JSON.stringify(recent.slice(0, 28)));
-    } catch {
-      /* preference is optional */
-    }
+    writeOptionalJson("msime.emoji.recent", recent.slice(0, 28));
   }, [recent]);
 
   useEffect(() => {
@@ -4335,13 +4570,13 @@ export function EmojiPanel({
   return (
     <main
       {...navigation}
-      className={`native-panel group flex min-h-screen flex-col overflow-hidden ${panelSurface} ${panelText}`}
+      className={`native-panel group flex min-h-screen flex-col overflow-hidden ${surface.panelSurface} ${surface.panelText}`}
       data-panel-theme={theme}
       aria-label="表情与符号"
     >
       <NativePanelHeader
         title="Emoji and more"
-        className={`native-panel-header flex-[0_0_38px] border-b ${panelDivider} ${panelSurface} ${panelText} [&>button]:text-[#aeb0b7] group-data-[panel-theme=light]:[&>button]:text-[#656a73]`}
+        className={`native-panel-header flex-[0_0_38px] border-b ${panelDivider} ${surface.panelSurface} ${surface.panelText} [&>button]:text-[#aeb0b7] group-data-[panel-theme=light]:[&>button]:text-[#656a73]`}
         closeDisabled={clipboardBusy}
         onClose={() => void closeEmoji()}
       />
@@ -4749,7 +4984,7 @@ export function EmojiPanel({
         </section>
       )}
       <p
-        className={`m-0 min-h-[30px] flex-[0_0_30px] border-t px-6 py-1.5 text-center text-xs ${panelDivider} ${panelMuted}`}
+        className={`m-0 min-h-[30px] flex-[0_0_30px] border-t px-6 py-1.5 text-center text-xs ${panelDivider} ${surface.panelMuted}`}
         role="status"
       >
         {notice ||

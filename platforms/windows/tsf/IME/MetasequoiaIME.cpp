@@ -203,6 +203,8 @@ void SendCurrentImeStatusSnapshot(CMetasequoiaIME *pIME, bool assertsFocusOwners
         }
     }
 
+    // 焦点换到另一个字段（包括密码框）时这里会被调到：属性随快照一起报，Server 在进入密码框时就停掉背景音乐，不必等一个永远不会到来的按键。
+    pIME->_NoteFieldTraitsForServer();
     CCompositionProcessorEngine *engine = pIME->GetCompositionProcessorEngine();
     SendIMEStatusSnapshotToUIProcessViaNamedPipe(
         engine->GetIMEMode(pIME->_GetThreadMgr(), pIME->_GetClientId()),
@@ -1852,6 +1854,7 @@ void CMetasequoiaIME::IpcWorkerThread(CMetasequoiaIME *pIME)
              buf.msg_type == Global::DataToTsfWorkerThreadMsgType::SmartPunctuationRepeatToChineseChanged ||
              buf.msg_type == Global::DataToTsfWorkerThreadMsgType::PairedPunctuationChanged ||
              buf.msg_type == Global::DataToTsfWorkerThreadMsgType::MicrosoftShuangpinChanged ||
+             buf.msg_type == Global::DataToTsfWorkerThreadMsgType::SecondThirdCandidateChanged ||
              buf.msg_type == Global::DataToTsfWorkerThreadMsgType::CapsLockChanged ||
              buf.msg_type == Global::DataToTsfWorkerThreadMsgType::TsfDiagnosticLogChanged ||
              buf.msg_type == Global::DataToTsfWorkerThreadMsgType::DedicatedEnglishChanged))
@@ -1939,6 +1942,7 @@ void CMetasequoiaIME::IpcWorkerThread(CMetasequoiaIME *pIME)
                 buf.msg_type == Global::DataToTsfWorkerThreadMsgType::SmartPunctuationRepeatToChineseChanged ||
                 buf.msg_type == Global::DataToTsfWorkerThreadMsgType::PairedPunctuationChanged ||
                 buf.msg_type == Global::DataToTsfWorkerThreadMsgType::MicrosoftShuangpinChanged ||
+                buf.msg_type == Global::DataToTsfWorkerThreadMsgType::SecondThirdCandidateChanged ||
                 buf.msg_type == Global::DataToTsfWorkerThreadMsgType::InputModeChanged ||
                 buf.msg_type == Global::DataToTsfWorkerThreadMsgType::CapsLockChanged ||
                 buf.msg_type == Global::DataToTsfWorkerThreadMsgType::TsfDiagnosticLogChanged ||
@@ -2040,6 +2044,10 @@ void CMetasequoiaIME::IpcWorkerThread(CMetasequoiaIME *pIME)
         {
             Global::MicrosoftShuangpinEnabled.store(buf.data[0] == L'1', std::memory_order_relaxed);
         }
+        else if (buf.msg_type == Global::DataToTsfWorkerThreadMsgType::SecondThirdCandidateChanged)
+        {
+            Global::SecondThirdCandidateEnabled.store(buf.data[0] == L'1', std::memory_order_relaxed);
+        }
         else if (buf.msg_type == Global::DataToTsfWorkerThreadMsgType::LocalModeTriggersChanged)
         {
             const auto triggers = Global::ParseLocalModeTriggers(buf.data, std::size(buf.data));
@@ -2056,6 +2064,9 @@ void CMetasequoiaIME::IpcWorkerThread(CMetasequoiaIME *pIME)
             Global::InputModeScheme.store(
                 msime::windows::scheme::mode_scheme(msime::windows::scheme::input_mode_from_code(buf.data[0])),
                 std::memory_order_relaxed);
+            Global::InputModeIndicator.store(msime::windows::scheme::input_mode_code(
+                                                 msime::windows::scheme::input_mode_from_code(buf.data[0])),
+                                             std::memory_order_relaxed);
             const HWND ownerWindow = pIME->_msgWndHandle;
             if (ownerWindow && IsWindow(ownerWindow))
             {
@@ -2449,6 +2460,8 @@ LRESULT CALLBACK CMetasequoiaIME_WindowProc(HWND hWnd, UINT message, WPARAM wPar
         if (Global::g_connected)
         {
             const bool resetPending = pIME->_localSessionResetPending.load(std::memory_order_acquire);
+            // 重连要重发 ClientActivated：先记下此刻的字段属性，让它排在激活前面，Server 激活会话时用的是这一次的属性。
+            pIME->_NoteFieldTraitsForServer();
             const bool activated = !resetPending && EnsureNamedpipeFocusSessionActivated();
             if (activated)
             {
@@ -2545,6 +2558,8 @@ LRESULT CALLBACK CMetasequoiaIME_WindowProc(HWND hWnd, UINT message, WPARAM wPar
                 }
             }
 
+            // 同上：激活之前先记下字段属性。
+            pIME->_NoteFieldTraitsForServer();
             if (EnsureNamedpipeFocusSessionActivated())
             {
                 KillTimer(hWnd, TIMER_CONNECT_ALL_NAMEDPIPE);

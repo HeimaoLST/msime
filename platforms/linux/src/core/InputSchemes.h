@@ -6,11 +6,13 @@
 #include <nlohmann/json.hpp>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 namespace msime::linux_host {
 
@@ -68,6 +70,66 @@ inline bool opened_candidate_list(const nlohmann::json &view) {
   return candidates != view.end() && candidates->is_array() && !candidates->empty();
 }
 
+// 左右键是整句改字的光标键：全拼和双拼的普通组字（不在专用英文和本地模式里）。引擎进不了改字时自己退回字母光标，所以宿主不必看首选是不是整句。IBus 和 Fcitx5 都按这一条决定左右键和 Ctrl+左右发什么命令。
+inline bool edits_sentence(const nlohmann::json &view) {
+  const int scheme = scheme_rules(view);
+  return scheme >= 0 && scheme::EditsSentence(scheme);
+}
+
+// 整句改字时行内显示的文字和光标：`phrase_prefix` 加上改好的整句，光标在焦点字前。`conversion_focus_start`、`conversion_focus_end` 按 Unicode 标量计，这里同时给出字节和标量两种单位（Fcitx5 用字节，IBus 用标量），焦点那一段 `focus_*` 同样两种单位都有。不在改字时 `active` 为假。
+struct ConversionPreedit {
+  bool active = false;
+  std::string text;
+  std::size_t caret_bytes = 0;
+  std::size_t caret_scalars = 0;
+  std::size_t focus_end_bytes = 0;
+  std::size_t focus_end_scalars = 0;
+};
+
+inline ConversionPreedit conversion_preedit(const nlohmann::json &view) {
+  ConversionPreedit result;
+  if (!view.is_object()) return result;
+  const auto conversion = view.find("conversion");
+  if (conversion == view.end() || !conversion->is_string() || conversion->get_ref<const std::string &>().empty()) return result;
+  const auto &sentence = conversion->get_ref<const std::string &>();
+  std::string prefix;
+  const auto phrase = view.find("phrase_prefix");
+  if (phrase != view.end() && phrase->is_string()) prefix = phrase->get<std::string>();
+  // 把标量下标换成字节偏移；超出范围时取末尾。
+  const auto scalar_index = [&](const char *key) -> std::pair<std::size_t, std::size_t> {
+    const auto value = view.find(key);
+    // 解析出来的非负整数是无符号的，宿主自己构造的视图里是有符号的，两种都认；负数和非整数取末尾。
+    std::size_t wanted = static_cast<std::size_t>(-1);
+    if (value != view.end() && value->is_number_unsigned())
+      wanted = value->get<std::size_t>();
+    else if (value != view.end() && value->is_number_integer() && value->get<int64_t>() >= 0)
+      wanted = static_cast<std::size_t>(value->get<int64_t>());
+    std::size_t bytes = 0, scalars = 0;
+    while (bytes < sentence.size() && scalars < wanted) {
+      ++bytes;
+      while (bytes < sentence.size() && (static_cast<unsigned char>(sentence[bytes]) & 0xC0u) == 0x80u) ++bytes;
+      ++scalars;
+    }
+    return {bytes, scalars};
+  };
+  const auto [start_bytes, start_scalars] = scalar_index("conversion_focus_start");
+  auto [end_bytes, end_scalars] = scalar_index("conversion_focus_end");
+  if (end_bytes < start_bytes) {
+    end_bytes = start_bytes;
+    end_scalars = start_scalars;
+  }
+  std::size_t prefix_scalars = 0;
+  for (unsigned char byte : prefix)
+    if ((byte & 0xC0u) != 0x80u) ++prefix_scalars;
+  result.active = true;
+  result.text = prefix + sentence;
+  result.caret_bytes = prefix.size() + start_bytes;
+  result.caret_scalars = prefix_scalars + start_scalars;
+  result.focus_end_bytes = prefix.size() + end_bytes;
+  result.focus_end_scalars = prefix_scalars + end_scalars;
+  return result;
+}
+
 // Down with no modifier while a Zhuyin conversion composes with its list closed: libchewing's key for opening the candidate list. It belongs to the input method whatever the arrow navigation binding says, because with the list closed there is no highlight for that binding to move. Once the list is open Down moves the highlight as in every other list.
 inline bool zhuyin_list_down_key(const nlohmann::json &view) {
   return scheme_rules(view) == scheme::Zhuyin && candidate_list_composition(view) && !opened_candidate_list(view);
@@ -109,6 +171,29 @@ inline std::string effective_input_scheme(std::string_view id, std::string_view 
   if (last >= 0 && scheme::IsChinese(last) && input_scheme_available(last_chinese_scheme, dictionaries))
     return std::string(last_chinese_scheme);
   return std::string(kEditionDefaultScheme);
+}
+
+// Ctrl+Shift+J 在中文方案和日语之间切换只在本版本同时提供日语和至少一个中文方案时有意义（full 版）。拼音、五笔和各语言版不吃这个组合键，交给应用。
+inline bool offers_japanese_toggle() {
+  if (!edition_offers_scheme("japanese")) return false;
+  for (const auto id : kEditionInputSchemes)
+    if (scheme::IsChinese(scheme_number(id))) return true;
+  return false;
+}
+
+// Ctrl+Shift+J 的目标方案，空串表示不切换。`running` 是 effective_input_scheme 的结果：它是中文方案时去日语；是日语、韩文、越南文或藏文时回到 `last_chinese_scheme`，它跑不起来时依次退到版本的默认方案和第一个跑得起来的中文方案，和 Windows 的 `japanese_toggle_target` 一致。调用方离开中文时要把 `running` 记进 `last_chinese_scheme`：菜单换方案只在目标是中文方案时才记它。
+inline std::string japanese_toggle_target(std::string_view running, std::string_view last_chinese_scheme,
+                                          LanguageDictionaryAvailability dictionaries) {
+  if (!offers_japanese_toggle()) return {};
+  if (scheme::IsChinese(scheme_number(running)))
+    return input_scheme_available("japanese", dictionaries) ? std::string("japanese") : std::string();
+  if (scheme::IsChinese(scheme_number(last_chinese_scheme)) && input_scheme_available(last_chinese_scheme, dictionaries))
+    return std::string(last_chinese_scheme);
+  if (scheme::IsChinese(scheme_number(kEditionDefaultScheme)) && input_scheme_available(kEditionDefaultScheme, dictionaries))
+    return std::string(kEditionDefaultScheme);
+  for (const auto id : kInputSchemeIds)
+    if (scheme::IsChinese(scheme_number(id)) && input_scheme_available(id, dictionaries)) return std::string(id);
+  return {};
 }
 
 } // namespace msime::linux_host

@@ -119,8 +119,8 @@ export function withoutRemovedPack(
       phrase_tables: preferences.phrase_tables.filter((table) => table !== id),
     };
   }
-  // 单词本和符号集没有偏好键；单词本的复习进度留在背单词里。
-  if (kind === "wordbook" || kind === "symbol_set") return preferences;
+  // 单词本、符号集和脚本插件没有偏好键；单词本的复习进度留在背单词里，脚本插件的授权条目由宿主在删包时一起去掉。
+  if (kind === "wordbook" || kind === "symbol_set" || kind === "script") return preferences;
   if (kind === "helpcode") {
     return {
       ...preferences,
@@ -154,7 +154,7 @@ export function withoutRemovedPack(
   };
 }
 
-/** 把一个包设为它所属类型的当前选择：按键音效包成为按键、上屏和成就音效的来源，旋律包成为旋律，特效包成为特效，音乐包成为音乐（是否播放不变），指令表和短语表启用在已启用的之后。 */
+/** 把一个包设为它所属类型的当前选择：选用声音或音乐包就同时打开对应的播放开关，声音包还切到能播放所选包的发声方式；特效包成为特效，指令表和短语表启用在已启用的之后。 */
 export function withPackSelected(
   preferences: PluginPreferences,
   pack: {
@@ -166,12 +166,19 @@ export function withPackSelected(
   switch (pack.kind) {
     case "sound":
       return pack.mode === "sequence"
-        ? { ...preferences, melody: { pack: pack.id } }
-        : { ...preferences, key_sound: { ...preferences.key_sound, pack: pack.id } };
+        ? {
+            ...preferences,
+            key_sound: { ...preferences.key_sound, enabled: true, mode: "melody" },
+            melody: { pack: pack.id },
+          }
+        : {
+            ...preferences,
+            key_sound: { ...preferences.key_sound, enabled: true, mode: "keys", pack: pack.id },
+          };
     case "effect":
       return { ...preferences, effect_pack: pack.id };
     case "music":
-      return { ...preferences, music: { ...preferences.music, pack: pack.id } };
+      return { ...preferences, music: { ...preferences.music, enabled: true, pack: pack.id } };
     case "command_table":
       return preferences.command_tables.includes(pack.id)
         ? preferences
@@ -183,6 +190,9 @@ export function withPackSelected(
     // 单词本在背单词里选，符号集装上就显示，都不在偏好里。
     case "wordbook":
     case "symbol_set":
+      return preferences;
+    // 脚本插件的启用记在授权文件里，不在偏好里。
+    case "script":
       return preferences;
     // 辅助码表包可以分别用于全拼和双拼；整体选中时两个方案都用它。
     case "helpcode":

@@ -274,6 +274,31 @@ struct Prefix {
     costs: Vec<(usize, f32)>,
 }
 
+impl Prefix {
+    fn empty() -> Self {
+        Self {
+            letters: Vec::new(),
+            states: Vec::new(),
+            costs: Vec::new(),
+        }
+    }
+}
+
+/// `prune` 跨 beam 轮次复用的临时容器，避免每轮为采样点和前缀重新建嵌套向量。
+struct PruneScratch {
+    at: Vec<Vec<(f32, usize, usize)>>,
+    keep: Vec<Vec<bool>>,
+}
+
+impl PruneScratch {
+    fn new(count: usize) -> Self {
+        Self {
+            at: (0..count).map(|_| Vec::new()).collect(),
+            keep: Vec::new(),
+        }
+    }
+}
+
 struct Decoder {
     /// 把字母 `l` 对齐到采样点 `j` 的代价是 `align[l][j]`；笔画从没靠近的字母为 `None`。
     align: [Option<Vec<f32>>; 26],
@@ -382,6 +407,8 @@ impl Decoder {
         }
         let mut finals: Vec<GlideHypothesis> = Vec::new();
         let mut floors = vec![f32::INFINITY; count];
+        let mut prune_scratch = PruneScratch::new(count);
+        let mut recycled = Vec::new();
         for _ in 1..MAX_GLIDE_LETTERS {
             floors.fill(f32::INFINITY);
             let mut next = Vec::new();
@@ -409,10 +436,11 @@ impl Decoder {
                     } else {
                         LETTER_COST
                     };
+                    let mut candidate = recycled.pop().unwrap_or_else(Prefix::empty);
+                    candidate.costs.clear();
                     // `best` 是所有对齐点 i < j 上 cost[i] - lines[i] 的最小值；i 与 j 之间的采样点再付 lines[j - 1] - lines[i]。
                     let mut best = f32::INFINITY;
                     let mut taken = 0;
-                    let mut costs = Vec::new();
                     for &j in &self.reach[usize::from(letter)] {
                         while taken < prefix.costs.len() && prefix.costs[taken].0 < j {
                             let (i, cost) = prefix.costs[taken];
@@ -425,23 +453,23 @@ impl Decoder {
                         let cost = best + lines[j - 1] + align[j] + step;
                         if cost <= floors[j] + BEAM {
                             floors[j] = floors[j].min(cost);
-                            costs.push((j, cost));
+                            candidate.costs.push((j, cost));
                         }
                     }
-                    if costs.is_empty() {
+                    if candidate.costs.is_empty() {
+                        recycled.push(candidate);
                         continue;
                     }
-                    let mut letters = Vec::with_capacity(prefix.letters.len() + 1);
-                    letters.extend_from_slice(&prefix.letters);
-                    letters.push(letter);
-                    next.push(Prefix {
-                        letters,
-                        states: states.clone(),
-                        costs,
-                    });
+                    candidate.letters.clear();
+                    candidate.letters.extend_from_slice(&prefix.letters);
+                    candidate.letters.push(letter);
+                    candidate.states.clear();
+                    candidate.states.extend_from_slice(&states);
+                    next.push(candidate);
                 }
             }
-            prune(&mut next, count);
+            recycled.append(&mut level);
+            prune(&mut next, &mut prune_scratch, &mut recycled);
             finals.extend(next.iter().filter_map(|prefix| {
                 let &(at, cost) = prefix.costs.last()?;
                 (at == last && prefix.states.contains(&0)).then(|| GlideHypothesis {
@@ -464,7 +492,18 @@ impl Decoder {
                 for prefix in &mut next {
                     prefix.costs.retain(|&(_, cost)| cost < ceiling);
                 }
-                next.retain(|prefix| !prefix.costs.is_empty());
+                let current = std::mem::take(&mut next);
+                next = current
+                    .into_iter()
+                    .filter_map(|prefix| {
+                        if prefix.costs.is_empty() {
+                            recycled.push(prefix);
+                            None
+                        } else {
+                            Some(prefix)
+                        }
+                    })
+                    .collect();
             }
             if next.is_empty() {
                 break;
@@ -482,18 +521,21 @@ impl Decoder {
 }
 
 /// 在每个采样点上只保留 [`TOKENS_PER_SAMPLE`] 个最便宜、且与最便宜者相差不超过 [`BEAM`] 的前缀；哪里都没保留的前缀丢掉。
-fn prune(prefixes: &mut Vec<Prefix>, count: usize) {
-    let mut at: Vec<Vec<(f32, usize, usize)>> = vec![Vec::new(); count];
+fn prune(prefixes: &mut Vec<Prefix>, scratch: &mut PruneScratch, recycled: &mut Vec<Prefix>) {
+    for tokens in &mut scratch.at {
+        tokens.clear();
+    }
     for (p, prefix) in prefixes.iter().enumerate() {
         for (entry, &(j, cost)) in prefix.costs.iter().enumerate() {
-            at[j].push((cost, p, entry));
+            scratch.at[j].push((cost, p, entry));
         }
     }
-    let mut keep: Vec<Vec<bool>> = prefixes
-        .iter()
-        .map(|prefix| vec![false; prefix.costs.len()])
-        .collect();
-    for tokens in &mut at {
+    scratch.keep.resize_with(prefixes.len(), Vec::new);
+    for (prefix, keep) in prefixes.iter().zip(&mut scratch.keep) {
+        keep.clear();
+        keep.resize(prefix.costs.len(), false);
+    }
+    for tokens in &mut scratch.at {
         if tokens.len() > TOKENS_PER_SAMPLE {
             tokens.select_nth_unstable_by(TOKENS_PER_SAMPLE - 1, |a, b| a.0.total_cmp(&b.0));
             tokens.truncate(TOKENS_PER_SAMPLE);
@@ -504,17 +546,25 @@ fn prune(prefixes: &mut Vec<Prefix>, count: usize) {
             .fold(f32::INFINITY, f32::min);
         for &(cost, p, entry) in tokens.iter() {
             if cost <= floor + BEAM {
-                keep[p][entry] = true;
+                scratch.keep[p][entry] = true;
             }
         }
     }
-    for (prefix, keep) in prefixes.iter_mut().zip(&keep) {
+    for (prefix, keep) in prefixes.iter_mut().zip(&scratch.keep) {
         let mut flags = keep.iter();
         prefix
             .costs
             .retain(|_| *flags.next().expect("one flag per entry"));
     }
-    prefixes.retain(|prefix| !prefix.costs.is_empty());
+    let current = std::mem::take(prefixes);
+    *prefixes = Vec::with_capacity(current.len());
+    for prefix in current {
+        if prefix.costs.is_empty() {
+            recycled.push(prefix);
+        } else {
+            prefixes.push(prefix);
+        }
+    }
 }
 
 /// 把 `letters` 切成完整音节的各种切法，至多 `limit` 种。

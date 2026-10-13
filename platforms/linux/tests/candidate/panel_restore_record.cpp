@@ -14,6 +14,7 @@ nlohmann::json read(const std::filesystem::path &file) {
 
 int main() {
   using msime::linux_host::panel_restore_file;
+  using msime::linux_host::panel_restore_values;
   using msime::linux_host::panel_takeover_entry;
   using msime::linux_host::record_panel_takeover;
   using msime::linux_host::read_panel_restore;
@@ -52,6 +53,32 @@ int main() {
   const std::filesystem::path root(directory);
   const auto file = *panel_restore_file((root / "state").c_str(), nullptr);
 
+  // 退出接管时放回的值：记录里的 prior；记录没留下可用的 prior（早先版本没记，或记录丢了）时按该选项替代的自带主题翠底，而不是把水杉自己的主题留在那里。
+  // held 只放当前仍等于水杉写入值的选项，所以用户在 fcitx5-configtool 选的主题从不进这里，也从不被写回。
+  const Json stock = {{"Theme", "default"}, {"DarkTheme", "default-dark"}};
+  const Json owned = {{"fcitx5",
+                      {{"Theme", {{"prior", "Nord-Dark"}, {"written", "msime"}}},
+                       {"DarkTheme", {{"prior", nullptr}, {"written", "msime"}}},
+                       {"Font", {{"prior", "Sans 10"}, {"written", "Noto Sans SC 18px"}}}}},
+                     {"ibus", {{"use-custom-font", {{"prior", nullptr}, {"written", true}}}}}};
+  assert(panel_restore_values(owned, "fcitx5", Json{{"Theme", "msime"}, {"DarkTheme", "msime"}}, stock) ==
+         Json({{"Theme", "Nord-Dark"}, {"DarkTheme", "default-dark"}}));
+  // 只有一项仍是水杉的时候只回一项，另一项（用户改过的）根本不进 held。
+  assert(panel_restore_values(owned, "fcitx5", Json{{"DarkTheme", "msime"}}, stock) ==
+         Json({{"DarkTheme", "default-dark"}}));
+  // 没有记录（旧版本的写入、记录被删）时按自带主题恢复；另一个宿主的记录不参与。
+  assert(panel_restore_values(Json::object(), "fcitx5", Json{{"Theme", "msime"}}, stock) ==
+         Json({{"Theme", "default"}}));
+  assert(panel_restore_values(owned, "other-host", Json{{"Theme", "msime"}}, stock) ==
+         Json({{"Theme", "default"}}));
+  // 记录的 written 与当前值不一致（记录已过期）时不拿它记的 prior 去覆盖，改回自带主题。
+  const Json stale = {{"fcitx5", {{"Theme", {{"prior", "Nord-Dark"}, {"written", "other"}}}}}};
+  assert(panel_restore_values(stale, "fcitx5", Json{{"Theme", "msime"}}, stock) == Json({{"Theme", "default"}}));
+  // 没有仍由水杉持有的项，或 held 不是对象时不返回任何值；Font 这类没有自带值的选项不翠底。
+  assert(panel_restore_values(owned, "fcitx5", Json::object(), stock) == Json::object());
+  assert(panel_restore_values(Json(nullptr), "fcitx5", Json::array(), stock) == Json::object());
+  assert(panel_restore_values(owned, "fcitx5", Json{{"Font", "msime"}}, stock) == Json::object());
+
   // Each host keeps its own section; the directory is created on the first write.
   assert(record_panel_takeover(file, "fcitx5", "Theme", "default", "msime"));
   assert(record_panel_takeover(file, "ibus", "use-custom-font", Json(nullptr), true));
@@ -87,6 +114,29 @@ int main() {
   std::filesystem::create_symlink(outside, file);
   assert(!read_panel_restore(file));
   std::filesystem::remove(file);
+
+  // A planted record hard link must not be read as private restore state.
+  {
+    const auto hardlink_target = root / "outside-record-hardlink.json";
+    std::ofstream(hardlink_target) << R"({"fcitx5":{"Font":{"prior":"attacker","written":"msime"}}})";
+    std::filesystem::create_hard_link(hardlink_target, file);
+    assert(!read_panel_restore(file));
+    assert(std::filesystem::exists(hardlink_target));
+    std::filesystem::remove(file);
+  }
+
+  // A hard-linked lock must not become the panel takeover lock.
+  {
+    const auto hardlink_lock_target = root / "outside-record-lock-hardlink";
+    const auto hardlink_lock = std::filesystem::path(file.string() + ".lock");
+    std::ofstream(hardlink_lock_target) << "keep";
+    std::filesystem::remove(hardlink_lock);
+    std::filesystem::create_hard_link(hardlink_lock_target, hardlink_lock);
+    assert(!record_panel_takeover(file, "fcitx5", "Font", "Sans 10", "Noto Sans SC 18px"));
+    assert(std::filesystem::exists(hardlink_lock_target));
+    std::filesystem::remove(hardlink_lock);
+    std::filesystem::remove(hardlink_lock_target);
+  }
 
   // A planted FIFO must be rejected without blocking the settings writer.
   assert(::mkfifo(file.c_str(), 0600) == 0);

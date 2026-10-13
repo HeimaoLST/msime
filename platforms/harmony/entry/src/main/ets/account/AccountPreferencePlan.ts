@@ -77,7 +77,10 @@ const SHUANGPIN_PROFILES = ["xiaohe", "ziranma", "shoudao", "microsoft"];
 // `input.wubi_schema` 是本地 `wubi_profile` 在云端的名字，只在 `input.schema` 为 `wubi` 时有意义；其它值一律拒绝。
 const WUBI_PROFILES = ["wubi86", "wubi98"];
 const FREQUENCY_MODES = ["disabled", "pin", "halve", "linear", "promote"];
-const LAYOUTS = ["twenty_six_key", "nine_key", "handwriting"];
+// 下载时认得的 `touch_keyboard_layout` 取值；不在这里的取值（更新的版本加的布局）只跳过这个键，不拒绝整份文档。
+const LAYOUTS = ["twenty_six_key", "nine_key", "handwriting", "fourteen_key"];
+// 本版上传的布局。全拼 14 键先不上传：旧版鸿蒙读到 `fourteen_key` 会拒收整份文档，而上传是把本机的键盖在云端快照上，省略这个键等于保留云端原值；写成 `twenty_six_key` 则会把同账号的其他设备切回 26 键。
+const UPLOADED_LAYOUTS = ["twenty_six_key", "nine_key", "handwriting"];
 // The seven global theme ids the shared layer accepts; any other id, a retired skin id included, is refused rather than mapped.
 const GLOBAL_THEMES = ["system", "shuishan", "light", "paper", "night", "ink", "custom"];
 // What a custom theme may be drawn over: the platform tokens or a built-in theme, never `custom` itself.
@@ -86,12 +89,15 @@ const THEMES = ["dark", "light", "system"];
 const HAPTIC_STRENGTHS = ["light", "medium", "strong", "system"];
 // 九键数字层的排列，`touch_number_keypad_order` 的全部取值。
 const NUMBER_KEYPAD_ORDERS = ["phone", "calculator"];
+// 26 键按「123」切到的数字层，`touch_twenty_six_key_number_layout` 的全部取值。
+const TWENTY_SIX_KEY_NUMBER_LAYOUTS = ["row", "nine_key"];
 
 // 账号设置里 `input.schema` 认得的取值，即 client-core `InputScheme` 的全部方案。不在这里的取值不归版本过滤管，留给下面的规则处理。
 const ACCOUNT_SCHEMES = SCHEMES.concat(LOCAL_ONLY_SCHEMES);
-// 随 `input.schema` 一起同步的键：它们和方案一起才决定键盘上的那个入口（全拼加九键是全拼 9 键，加手写是手写），方案不同步时它们也不同步，否则 full 那边选的全拼 9 键会把五笔版的键盘换成九键布局。前两个是 client-core 的规则里列出的 iOS、Android 的键，最后一个是本机的同类键。
+// 随 `input.schema` 一起同步的键：它们和方案一起才决定键盘上的那个入口（全拼加九键是全拼 9 键，加手写是手写），方案不同步时它们也不同步，否则 full 那边选的全拼 9 键会把五笔版的键盘换成九键布局。前三个是 client-core 的规则里列出的 iOS、Android 的键，最后一个是本机的同类键。
 const SCHEME_COMPANION_KEYS = [
   "platform.ios.nine_key",
+  "platform.ios.keyboard_layout",
   "platform.android.keyboard_layout",
   "platform.harmony.keyboard_layout",
 ];
@@ -264,6 +270,21 @@ export function localPreferenceRevision(document: Document): number | null {
     : null;
 }
 
+/**
+ * 把应用后的偏好放回本地快照，交给 `client.savePreferences`。
+ *
+ * 那个接口要的是整份快照 `{format_version, revision, preferences}`，不是只有里面那层偏好：只传偏好会被它当成格式不对的快照拒掉，「下载并应用云端设置」从写出来起就因此一直报存储失败。快照的其余字段原样保留。
+ */
+export function snapshotWithPreferences(
+  local: Record<string, Object>,
+  preferences: Record<string, Object>,
+): string {
+  const snapshot: Record<string, Object> = {};
+  for (const key of Object.keys(local)) snapshot[key] = local[key];
+  snapshot["preferences"] = preferences;
+  return JSON.stringify(snapshot);
+}
+
 /** 本地偏好文档必须带有真正的对象，否则不能交给偏好映射器读取。 */
 export function validLocalPreferenceDocument(value: unknown): value is Document {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -372,11 +393,7 @@ export function localAccountPreferences(
     "input.smart_punctuation": flag(member(preferences, "smart_punctuation"), true),
     "input.paired_punctuation": flag(member(preferences, "paired_punctuation"), true),
     "input.wubi_code_hint": flag(member(preferences, "wubi_code_hint"), true),
-    "platform.harmony.keyboard_layout": enumerated(
-      member(preferences, "touch_keyboard_layout"),
-      LAYOUTS,
-      "twenty_six_key",
-    ),
+    "input.wubi_auto_commit_unique": flag(member(preferences, "wubi_auto_commit_unique"), true),
     "platform.harmony.global_theme": enumerated(
       member(preferences, "global_theme"),
       GLOBAL_THEMES,
@@ -398,6 +415,11 @@ export function localAccountPreferences(
       const value = member(customTheme, "candidate_skin");
       return typeof value === "string" && externalSkinId(value) ? value : "";
     })(),
+    // 深色模式的候选皮肤包，与上面的浅色槽位一样以空字符串表示没设，清掉也能同步。
+    "platform.harmony.custom_candidate_skin_dark": (() => {
+      const value = member(customTheme, "candidate_skin_dark");
+      return typeof value === "string" && externalSkinId(value) ? value : "";
+    })(),
     "platform.harmony.touch_key_spacing_tenths": whole(
       member(preferences, "touch_key_spacing_tenths"),
       60,
@@ -416,6 +438,16 @@ export function localAccountPreferences(
       NUMBER_KEYPAD_ORDERS,
       "phone",
     ),
+    "platform.harmony.twenty_six_key_number_layout": enumerated(
+      member(preferences, "touch_twenty_six_key_number_layout"),
+      TWENTY_SIX_KEY_NUMBER_LAYOUTS,
+      "row",
+    ),
+    // 26 键双拼的键位提示，缺省是开；账号字段表收录这个键之前上传时会被滤掉。
+    "platform.harmony.shuangpin_key_hints": flag(
+      member(preferences, "touch_shuangpin_key_hints"),
+      true,
+    ),
     "platform.harmony.sound_enabled": feedback.soundEnabled,
     "platform.harmony.haptics_enabled": feedback.hapticsEnabled,
     "platform.harmony.haptic_strength": enumerated(
@@ -424,6 +456,13 @@ export function localAccountPreferences(
       "medium",
     ),
   };
+  // 缺少或损坏的布局按默认的 26 键上传；认得却不上传的（14 键）和不认得的布局都省略这个键，保留云端原值。
+  const layout = member(preferences, "touch_keyboard_layout");
+  if (typeof layout !== "string") {
+    settings["platform.harmony.keyboard_layout"] = "twenty_six_key";
+  } else if (UPLOADED_LAYOUTS.includes(layout)) {
+    settings["platform.harmony.keyboard_layout"] = layout;
+  }
   if (!(typeof scheme === "string" && LOCAL_ONLY_SCHEMES.includes(scheme))) {
     // 本机文档里的方案认不出时按本版本的默认方案上传（full 是全拼）。
     const fallback: string = SCHEMES.includes(edition.defaultScheme)
@@ -582,9 +621,12 @@ export function applyAccountPreferences(
   if (pairedPunctuation !== null) preferences.paired_punctuation = pairedPunctuation;
   const wubiCodeHint = reader.boolean("input.wubi_code_hint");
   if (wubiCodeHint !== null) preferences.wubi_code_hint = wubiCodeHint;
+  const wubiAutoCommitUnique = reader.boolean("input.wubi_auto_commit_unique");
+  if (wubiAutoCommitUnique !== null) preferences.wubi_auto_commit_unique = wubiAutoCommitUnique;
 
+  // 不认得的布局（更新的版本加的）只跳过这个键，本机布局不变，其余设置照常生效。
   const layout = reader.text("platform.harmony.keyboard_layout");
-  if (layout !== null) preferences.touch_keyboard_layout = choose(layout, LAYOUTS);
+  if (layout !== null && LAYOUTS.includes(layout)) preferences.touch_keyboard_layout = layout;
   const globalTheme = reader.text("platform.harmony.global_theme");
   if (globalTheme !== null) preferences.global_theme = choose(globalTheme, GLOBAL_THEMES);
   // The custom theme is one nested record; its synced parts are written onto a copy so the ones the account does not carry (the candidate colour pickers) stay as they were.
@@ -626,6 +668,17 @@ export function applyAccountPreferences(
     }
     customThemeTouched = true;
   }
+  // 深色槽位单独读：服务端还没声明它、或者上传的设备还不认识它时，本机的深色槽位保持原样。
+  const candidateSkinDark = reader.text("platform.harmony.custom_candidate_skin_dark");
+  if (candidateSkinDark !== null) {
+    if (candidateSkinDark.length === 0) {
+      delete customTheme.candidate_skin_dark;
+    } else {
+      if (!externalSkinId(candidateSkinDark)) refuse("account_invalid");
+      customTheme.candidate_skin_dark = candidateSkinDark;
+    }
+    customThemeTouched = true;
+  }
   if (customThemeTouched) preferences.custom_theme = customTheme;
   const theme = reader.text("platform.harmony.theme");
   if (theme !== null) preferences.theme = choose(theme, THEMES);
@@ -643,6 +696,15 @@ export function applyAccountPreferences(
   if (keypadOrder !== null) {
     preferences.touch_number_keypad_order = choose(keypadOrder, NUMBER_KEYPAD_ORDERS);
   }
+  const numberLayout = reader.text("platform.harmony.twenty_six_key_number_layout");
+  if (numberLayout !== null) {
+    preferences.touch_twenty_six_key_number_layout = choose(
+      numberLayout,
+      TWENTY_SIX_KEY_NUMBER_LAYOUTS,
+    );
+  }
+  const shuangpinKeyHints = reader.boolean("platform.harmony.shuangpin_key_hints");
+  if (shuangpinKeyHints !== null) preferences.touch_shuangpin_key_hints = shuangpinKeyHints;
 
   const feedbackKeys = [
     "platform.harmony.sound_enabled",

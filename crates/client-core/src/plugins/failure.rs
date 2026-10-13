@@ -51,6 +51,29 @@ impl From<MentionError> for PluginFailure {
     }
 }
 
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+impl From<super::script_grants::ScriptGrantError> for PluginFailure {
+    fn from(value: super::script_grants::ScriptGrantError) -> Self {
+        use super::script_grants::ScriptGrantError;
+        match value {
+            ScriptGrantError::Missing(reason) => Self::with_detail("plugin_script_missing", reason),
+            ScriptGrantError::Changed => Self::code("plugin_script_changed"),
+            ScriptGrantError::Invalid(reason) => {
+                Self::with_detail("plugin_script_grant_invalid", reason)
+            }
+            ScriptGrantError::Limit => Self::code("plugin_script_limit"),
+            ScriptGrantError::Memory => Self::code("plugin_script_memory"),
+            ScriptGrantError::Format => Self::code("plugin_script_grants_format"),
+            ScriptGrantError::Storage => Self::code("plugin_storage"),
+            ScriptGrantError::Io(_) => Self::code("storage"),
+        }
+    }
+}
+
 /// Remove an installed pack named the way the page names it: the kind as `PluginKind::as_str` spells it, and the id. An unknown kind is `invalid`; the rest is `remove`'s.
 pub fn remove_named(root: &Path, kind: &str, id: &str) -> Result<(), PluginFailure> {
     let kind = PluginKind::parse(kind).ok_or(PluginFailure::code("invalid"))?;

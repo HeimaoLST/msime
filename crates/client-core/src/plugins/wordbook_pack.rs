@@ -74,14 +74,19 @@ pub(crate) fn check_identity(id: &str, name: &str) -> Result<(), String> {
 /// 读取并严格解析包目录里的词表。
 pub(crate) fn read(directory: &Path, file: &str) -> Result<WordbookPack, String> {
     let entries = read_entries(directory, file)?;
-    Ok(WordbookPack {
-        file: file.to_owned(),
-        word_count: entries.len(),
-        first_words: entries
+    let word_count = entries.len();
+    // 预览另用小容器，避免 `collect` 原地复用整本词书的预留缓冲。
+    let mut first_words = Vec::with_capacity(word_count.min(PREVIEW_WORDS));
+    first_words.extend(
+        entries
             .into_iter()
             .take(PREVIEW_WORDS)
-            .map(|entry| entry.word)
-            .collect(),
+            .map(|entry| entry.word),
+    );
+    Ok(WordbookPack {
+        file: file.to_owned(),
+        word_count,
+        first_words,
     })
 }
 
@@ -93,16 +98,29 @@ fn read_entries(directory: &Path, file: &str) -> Result<Vec<WordbookEntry>, Stri
 
 /// 词表文本的严格解析，规则见模块文档。
 pub(crate) fn parse_words(bytes: &[u8], name: &str) -> Result<Vec<WordbookEntry>, String> {
-    let mut entries = Vec::with_capacity(wordbook::MAX_ENTRIES);
-    let mut seen = HashSet::with_capacity(wordbook::MAX_ENTRIES);
+    let entries = parse_word_entries(bytes, name)?;
+    if entries.is_empty() {
+        return Err(format!("{name} 里没有任何单词"));
+    }
+    Ok(entries)
+}
+
+fn parse_word_entries(bytes: &[u8], name: &str) -> Result<Vec<WordbookEntry>, String> {
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
     for (number, line) in data_lines(bytes, name)? {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let columns: Vec<&str> = line.split('\t').collect();
-        let (word, phonetic, meaning) = match columns.as_slice() {
-            [word, meaning] => (*word, "", *meaning),
-            [word, phonetic, meaning] => (*word, *phonetic, *meaning),
+        let mut columns = line.split('\t');
+        let (word, phonetic, meaning) = match (
+            columns.next(),
+            columns.next(),
+            columns.next(),
+            columns.next(),
+        ) {
+            (Some(word), Some(meaning), None, None) => (word, "", meaning),
+            (Some(word), Some(phonetic), Some(meaning), None) => (word, phonetic, meaning),
             _ => {
                 return Err(format!(
                     "{name} 第 {number} 行必须是「单词\\t释义」或「单词\\t音标\\t释义」"
@@ -119,16 +137,19 @@ pub(crate) fn parse_words(bytes: &[u8], name: &str) -> Result<Vec<WordbookEntry>
                 "{name} 第 {number} 行的单词或释义为空，或者某一列太长、含有控制字符"
             ));
         }
-        if !seen.insert(entry.word.clone()) {
+        if entries.is_empty() {
+            // 有效双列最短为 `a\tb\n` 四个字节；按输入长度给一次安全上界，避免短词表也保留满额缓冲。
+            let capacity = (bytes.len().saturating_add(1) / 4).min(wordbook::MAX_ENTRIES);
+            entries.reserve_exact(capacity);
+            seen.reserve(capacity);
+        }
+        if !seen.insert(word) {
             return Err(format!("{name} 里「{}」出现了不止一次", entry.word));
         }
         if entries.len() == wordbook::MAX_ENTRIES {
             return Err(format!("{name} 的单词数超过 {}", wordbook::MAX_ENTRIES));
         }
         entries.push(entry);
-    }
-    if entries.is_empty() {
-        return Err(format!("{name} 里没有任何单词"));
     }
     Ok(entries)
 }
@@ -175,4 +196,16 @@ pub fn summaries(root: &Path) -> Vec<crate::vocabulary::library::WordbookSummary
         .collect();
     books.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
     books
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_wordbook_does_not_reserve_entry_capacity() {
+        let entries = parse_word_entries(b"# only a comment\n\n", "words.tsv").unwrap();
+        assert!(entries.is_empty());
+        assert_eq!(entries.capacity(), 0);
+    }
 }

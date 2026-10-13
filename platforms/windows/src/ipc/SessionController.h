@@ -78,16 +78,22 @@ public:
   std::optional<bool> dedicated_english_state(const FocusLease &lease);
   // Exit the Engine's dedicated-English mode for this exact focus lease.
   bool exit_dedicated_english(const FocusLease &lease);
+  // 托盘「英文候选模式」：把这个焦点租约的 Engine 英文模式设成 `enabled`。和退出一样只在外部工作线程上调用，最多等 2 秒；成功才返回 true。
+  bool set_dedicated_english(const FocusLease &lease, bool enabled);
   // Control-thread lease validation, not a best-effort UI snapshot. Waits for
   // an existing focus transaction instead of treating a busy gate as loss.
   bool focus_current(const FocusLease &lease);
   // External I/O thread only, never a window/input callback. Busy is a dropped
   // request, not queued/replayed. Sent means delivery confirmed, not TSF applied.
+  // translation_page 是点击所在那一帧的 CandidatePresentation::translation_page，和 session、generation 一起认定点的是哪一张表。
   SelectionRequestResult request_selection(const FocusLease &lease,
-      uint64_t session, uint64_t generation, size_t index);
+      uint64_t session, uint64_t generation, size_t index,
+      uint64_t translation_page);
+  // 释义页上的行（translation_page 不为 0）没有候选动作，一律拒绝。
   CandidateActionRequestResult request_candidate_action(
       const FocusLease &lease, uint64_t session, uint64_t generation,
-      size_t index, CandidateAction action, uint8_t position = 0);
+      size_t index, uint64_t translation_page, CandidateAction action,
+      uint8_t position = 0);
   CandidatePageRequestResult request_page(const CandidatePage &page);
   // Send a bounded voice snapshot through the authenticated worker endpoint.
   // The caller owns recording/ASR; this method only validates the focus lease
@@ -100,6 +106,8 @@ public:
   // named client really is not focused under that token, because the DLL
   // writes its "OK" on the strength of this answer.
   bool deactivate_terminal(uint64_t client, uint64_t token);
+  // Aux 管道的 KeySound：把 TIP 交给应用的一次按下排进输入队列，不等它执行。按键音晚了就没有意义，队列满或正在停止时直接丢掉，这不是输入，不需要让焦点失效。
+  void passthrough_key(uint64_t client, uint64_t token, uint32_t key_class);
   // Release every Engine session so another process can take the exclusive
   // dictionary lock, and rebuild them afterwards. Called on the Aux listener
   // thread. A quiesce that is never resumed would leave the IME dead, so it

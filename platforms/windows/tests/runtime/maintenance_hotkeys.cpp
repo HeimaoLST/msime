@@ -77,6 +77,19 @@ int main() {
     // And the Alt group still works without Win.
     require(maintenance_hotkey('C', true, true, true, false));
 
+    // 轻点 Caps Lock 切换中英文：真实的一下打开大写锁定，TIP 注入的一下撤回。两下都要计入，报告的状态才回到关。
+    CapsLockTracker caps{false, false};
+    require(caps.press() && caps.on);
+    caps.release();
+    require(caps.press() && !caps.on);
+    caps.release();
+    // 之后的长按照常报告打开，再按一次报告关闭，不会反过来。
+    require(caps.press() && caps.on);
+    // 按着不放的自动重复不再翻转。
+    require(!caps.press() && caps.on);
+    caps.release();
+    require(caps.press() && !caps.on);
+
     std::cout << "Maintenance hotkeys: the documented four are recognised\n";
   } catch (const std::exception &failure) {
     std::cerr << failure.what() << '\n';

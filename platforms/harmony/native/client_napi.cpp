@@ -1,4 +1,5 @@
 #include "msime_client.h"
+#include "../../common/HostApiString.h"
 #include "key_sound_render.h"
 #include <napi/native_api.h>
 #include <zlib.h>
@@ -107,11 +108,11 @@ static intptr_t snapshotNext(void *context, uint8_t *buffer, size_t capacity) no
 
 // The Rust side owns the response buffer until it is handed back, so every exit path frees it.
 static napi_value response(napi_env env, char *value) {
-    if (!value) return nullptr;
-    const size_t length = std::strlen(value);
+    auto owned = msime::host_api::own_string(value);
+    if (!owned) return nullptr;
+    const size_t length = std::strlen(owned.get());
     napi_value output = nullptr;
-    const napi_status status = napi_create_string_utf8(env, value, length, &output);
-    msime_client_string_free(value);
+    const napi_status status = napi_create_string_utf8(env, owned.get(), length, &output);
     return status == napi_ok ? output : nullptr;
 }
 
@@ -259,6 +260,8 @@ TEXT_ENTRY(TypingStatistics, msime_client_typing_statistics)
 TEXT_ENTRY(MobileClipboardHistory, msime_client_mobile_clipboard_history)
 TEXT_ENTRY(PersonalDictionarySync, msime_client_personal_dictionary_sync)
 TEXT_ENTRY(PersonalDictionaryRequest, msime_client_personal_dictionary_request)
+// The keyboard's flush after each personal-dictionary drain: it moves at most one queue batch, so it stays synchronous on the keyboard's own thread like the drain it follows.
+TEXT_ENTRY(DictionaryCollections, msime_client_dictionary_collections)
 TEXT_ENTRY(PrepareHost, msime_client_prepare_host)
 TEXT_ENTRY(SnapshotVersion, msime_client_snapshot_version)
 TEXT_ENTRY(SnapshotInspect, msime_client_snapshot_inspect)
@@ -274,6 +277,8 @@ TEXT_ENTRY(TelemetryEnd, msime_client_telemetry_end)
 TEXT_ENTRY(TelemetryRecordCrash, msime_client_telemetry_record_crash)
 TEXT_ENTRY(TelemetryClear, msime_client_telemetry_clear)
 TEXT_ENTRY(NoticeDismiss, msime_client_notice_dismiss)
+// 云剪贴板端到端加密的 sans-IO 驱动：每一步只做本机密码学运算、不碰网络和磁盘，五十条以内的解密在毫秒级，所以和其他文本入口一样同步调用。
+TEXT_ENTRY(CloudClipboardE2e, msime_client_cloud_clipboard_e2e)
 
 struct SnapshotRestoreWork {
     napi_async_work work = nullptr;
@@ -292,10 +297,10 @@ static void executeSnapshotRestore(napi_env, void *data) {
 
 static void completeSnapshotRestore(napi_env env, napi_status status, void *data) {
     auto *work = static_cast<SnapshotRestoreWork *>(data);
+    auto owned = msime::host_api::own_string(work->result);
     napi_value value = nullptr;
-    bool resolved = status == napi_ok && work->result != nullptr
-        && napi_create_string_utf8(env, work->result, std::strlen(work->result), &value) == napi_ok;
-    if (work->result) msime_client_string_free(work->result);
+    bool resolved = status == napi_ok && owned
+        && napi_create_string_utf8(env, owned.get(), std::strlen(owned.get()), &value) == napi_ok;
     if (resolved) {
         napi_resolve_deferred(env, work->deferred, value);
     } else {
@@ -357,10 +362,10 @@ static void rejectWith(napi_env env, napi_deferred deferred, const char *text) {
 // Settles a voice promise with the Rust response and frees it; a missing response is the only rejection, every refusal arrives as {"ok":false} like the synchronous calls.
 static void settleVoicePromise(napi_env env, napi_status status, napi_deferred deferred, char *result,
                                const char *failure) {
+    auto owned = msime::host_api::own_string(result);
     napi_value value = nullptr;
-    const bool resolved = status == napi_ok && result != nullptr
-        && napi_create_string_utf8(env, result, std::strlen(result), &value) == napi_ok;
-    if (result) msime_client_string_free(result);
+    const bool resolved = status == napi_ok && owned
+        && napi_create_string_utf8(env, owned.get(), std::strlen(owned.get()), &value) == napi_ok;
     if (resolved) {
         napi_resolve_deferred(env, deferred, value);
     } else {
@@ -460,8 +465,7 @@ static napi_value EnsureAnonymousAccount(napi_env env, napi_callback_info info) 
     return promise;
 }
 
-// Slow one-document requests share a worker: telemetry and notices wait on the network, while
-// the custom skin library reads or writes a bounded multi-megabyte file under a lock.
+// 较慢的单文档请求共用一个工作线程：上报、公告和检查更新要等网络，自定义皮肤库要在锁内读写有上限的数 MB 文件。
 using RequestCall = char *(*)(const uint8_t *, size_t);
 
 struct RequestWork {
@@ -519,6 +523,11 @@ static napi_value Notices(napi_env env, napi_callback_info info) {
     return queueRequest(env, info, msime_client_notices, "MSIME notices");
 }
 
+// 「关于」页的检查更新：读取 GitHub 发布列表最多要十秒，所以绝不能在 UI 线程上执行。
+static napi_value UpdateCheck(napi_env env, napi_callback_info info) {
+    return queueRequest(env, info, msime_client_update_check, "MSIME update check");
+}
+
 // A named design can carry a photo, so both reading and mutating the library can parse and
 // serialize megabytes while holding its file lock. The settings page awaits this worker.
 static napi_value CustomSkinLibrary(napi_env env, napi_callback_info info) {
@@ -547,6 +556,17 @@ static napi_value TypingStatisticsAsync(napi_env env, napi_callback_info info) {
 // validation and replacement off the ArkTS thread so a large folder cannot freeze settings.
 static napi_value SkinImport(napi_env env, napi_callback_info info) {
     return queueRequest(env, info, msime_client_skin_import, "MSIME skin import");
+}
+
+// Named dictionaries: an import parses up to 16 MiB of text and every operation rewrites the collection files under their lock, so the settings page runs them on a worker and awaits the promise. The keyboard's small flush uses the synchronous `dictionaryCollections`.
+static napi_value DictionaryCollectionsAsync(napi_env env, napi_callback_info info) {
+    return queueRequest(env, info, msime_client_dictionary_collections,
+        "MSIME dictionary collections");
+}
+
+// The settings page's 修复配置文件: copies the unreadable document aside and rewrites it under the preferences writer lock, so it runs on a worker like every other call that may wait on that lock.
+static napi_value RepairPreferences(napi_env env, napi_callback_info info) {
+    return queueRequest(env, info, msime_client_repair_preferences, "MSIME repair preferences");
 }
 
 // 键盘的常用语存放在一个文件里，设置进程和键盘进程都会在锁下重写它，装上短语包后文档可达数 MB，所以每个操作都在 ArkTS 线程之外运行。
@@ -807,6 +827,7 @@ PAIR_ENTRY(CandidateGlosses, msime_client_candidate_gloss_request)
 PAIR_ENTRY(EnglishCompletions, msime_client_english_completions_request)
 PAIR_ENTRY(TranslationGlossSave, msime_client_translation_gloss_save)
 TEXT_ENTRY(TranslationPlan, msime_client_custom_translation_plan)
+TEXT_ENTRY(GoogleLoopback, msime_client_google_loopback)
 TEXT_ENTRY(TencentTranslationHttpRequest, msime_client_tencent_translation_http_request)
 TEXT_ENTRY(NiuTransTranslationHttpRequest, msime_client_niutrans_translation_http_request)
 TEXT_ENTRY(CustomTranslationHttpRequest, msime_client_custom_translation_http_request)
@@ -897,6 +918,22 @@ static napi_value ApplyOnlineCandidates(napi_env env, napi_callback_info info) {
     return response(env, msime_client_apply_online_candidates(
         handle, reinterpret_cast<const uint8_t *>(query.data()), query.size(),
         reinterpret_cast<const uint8_t *>(candidates.data()), candidates.size(),
+        static_cast<uint8_t>(source)));
+}
+
+// AI 回答为空、失败或被拒：AI 座位上的占位行换成「—」（#6888）。
+static napi_value ResolveOnlineCandidates(napi_env env, napi_callback_info info) {
+    std::vector<napi_value> argv;
+    uint64_t handle = 0;
+    size_t source = 0;
+    std::string query;
+    if (!arguments(env, info, 3, argv) || !argumentHandle(env, argv[0], handle)
+            || !argumentText(env, argv[1], query) || !argumentIndex(env, argv[2], source)
+            || source > 1) {
+        return response(env, msime_client_resolve_online_candidates(0, nullptr, 0, 2));
+    }
+    return response(env, msime_client_resolve_online_candidates(
+        handle, reinterpret_cast<const uint8_t *>(query.data()), query.size(),
         static_cast<uint8_t>(source)));
 }
 
@@ -991,6 +1028,32 @@ static napi_value SetNineKeyFilter(napi_env env, napi_callback_info info) {
     }
     return response(env, msime_client_set_nine_key_filter(handle, single_character,
         reinterpret_cast<const uint8_t *>(strokes.data()), strokes.size()));
+}
+
+// 换引擎的组码网格：0 关，1 九键，2 全拼 14 键。取值由 C ABI 校验，超出 uint8 的数在这里就拒绝，不截断成另一种网格。FLAG_ENTRY 只收布尔，所以单独写。
+static napi_value SetKeyGrid(napi_env env, napi_callback_info info) {
+    std::vector<napi_value> argv;
+    uint64_t handle = 0;
+    int32_t grid = 0;
+    if (!arguments(env, info, 2, argv) || !argumentHandle(env, argv[0], handle)
+            || napi_get_value_int32(env, argv[1], &grid) != napi_ok) {
+        return invalid(env, "Expected a session handle and a key grid");
+    }
+    if (grid < 0 || grid > 255) return invalid(env, "Key grid must fit in one byte");
+    return response(env, msime_client_set_key_grid(handle, static_cast<uint8_t>(grid)));
+}
+
+// 14 键的一键：送这一组的任一小写字母（约定是首字母），引擎归成组码。不属于当前网格时 C ABI 答 handled=false，这里只拒绝不是 ASCII 的值。
+static napi_value GridKey(napi_env env, napi_callback_info info) {
+    std::vector<napi_value> argv;
+    uint64_t handle = 0;
+    int32_t letter = 0;
+    if (!arguments(env, info, 2, argv) || !argumentHandle(env, argv[0], handle)
+            || napi_get_value_int32(env, argv[1], &letter) != napi_ok) {
+        return invalid(env, "Expected a session handle and an ASCII letter");
+    }
+    if (letter < 0 || letter > 127) return invalid(env, "Grid key must be ASCII");
+    return response(env, msime_client_grid_key(handle, static_cast<uint8_t>(letter)));
 }
 
 static napi_value SavePreferences(napi_env env, napi_callback_info info) {
@@ -1438,6 +1501,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         ENTRY("resetCache", ResetCache),
         ENTRY("translationGlossSave", TranslationGlossSave),
         ENTRY("translationPlan", TranslationPlan),
+        ENTRY("googleLoopback", GoogleLoopback),
         ENTRY("tencentTranslationHttpRequest", TencentTranslationHttpRequest),
         ENTRY("niuTransTranslationHttpRequest", NiuTransTranslationHttpRequest),
         ENTRY("customTranslationHttpRequest", CustomTranslationHttpRequest),
@@ -1451,6 +1515,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         ENTRY("plugins", Plugins),
         ENTRY("pluginsAsync", PluginsAsync),
         ENTRY("commonPhrases", CommonPhrases),
+        ENTRY("repairPreferences", RepairPreferences),
         ENTRY("ensureAnonymousAccount", EnsureAnonymousAccount),
         ENTRY("telemetryBegin", TelemetryBegin),
         ENTRY("telemetryEnd", TelemetryEnd),
@@ -1458,15 +1523,20 @@ static napi_value Init(napi_env env, napi_value exports) {
         ENTRY("telemetryFlush", TelemetryFlush),
         ENTRY("telemetryClear", TelemetryClear),
         ENTRY("notices", Notices),
+        ENTRY("updateCheck", UpdateCheck),
         ENTRY("noticeDismiss", NoticeDismiss),
+        ENTRY("cloudClipboardE2e", CloudClipboardE2e),
         ENTRY("keySoundRenderNotes", KeySoundRenderNotes),
         ENTRY("aiRequestForQuery", AiRequestForQuery),
         ENTRY("aiHttpRequest", AiHttpRequest),
         ENTRY("parseAiResponse", ParseAiResponse),
         ENTRY("applyCloudResponse", ApplyCloudResponse),
         ENTRY("applyOnlineCandidates", ApplyOnlineCandidates),
+        ENTRY("resolveOnlineCandidates", ResolveOnlineCandidates),
         ENTRY("personalDictionarySync", PersonalDictionarySync),
         ENTRY("personalDictionaryRequest", PersonalDictionaryRequest),
+        ENTRY("dictionaryCollections", DictionaryCollections),
+        ENTRY("dictionaryCollectionsAsync", DictionaryCollectionsAsync),
         ENTRY("prepareHost", PrepareHost),
         ENTRY("snapshotVersion", SnapshotVersion),
         ENTRY("snapshotInspect", SnapshotInspect),
@@ -1479,10 +1549,12 @@ static napi_value Init(napi_env env, napi_value exports) {
         ENTRY("destroy", Destroy),
         ENTRY("focus", Focus),
         ENTRY("setNineKeyMode", SetNineKeyMode),
+        ENTRY("setKeyGrid", SetKeyGrid),
         ENTRY("setEnglishMode", SetEnglishMode),
         ENTRY("setCharacterWidth", SetCharacterWidth),
         ENTRY("setPrivateSession", SetPrivateSession),
         ENTRY("character", Character),
+        ENTRY("gridKey", GridKey),
         ENTRY("glide", Glide),
         ENTRY("punctuationWithContext", PunctuationWithContext),
         ENTRY("balancePairedPunctuationAfterAutoClose", BalancePairedPunctuationAfterAutoClose),

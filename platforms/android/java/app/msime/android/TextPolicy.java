@@ -11,20 +11,88 @@ import java.util.Locale;
 public final class TextPolicy {
     private TextPolicy() {}
 
+    /** Return whether a code point is one of the 52 ASCII Latin letters. */
+    public static boolean isAsciiLetter(int codePoint) {
+        return (codePoint >= 'A' && codePoint <= 'Z')
+            || (codePoint >= 'a' && codePoint <= 'z');
+    }
+
+    /** Return whether a code point is one of the ten ASCII decimal digits. */
+    public static boolean isAsciiDigit(int codePoint) {
+        return codePoint >= '0' && codePoint <= '9';
+    }
+
+    /** Return whether a code point is an ASCII Latin letter or decimal digit. */
+    public static boolean isAsciiLetterOrDigit(int codePoint) {
+        return isAsciiLetter(codePoint) || isAsciiDigit(codePoint);
+    }
+
+    /** Return whether text is a non-empty ASCII token made of letters, digits, hyphens and underscores. */
+    public static boolean validAsciiToken(String value, int minimumLength, int maximumLength) {
+        if (value == null || value.length() < minimumLength || value.length() > maximumLength) return false;
+        for (int index = 0; index < value.length(); index++) {
+            int codePoint = value.charAt(index);
+            if (!isAsciiLetterOrDigit(codePoint) && codePoint != '-' && codePoint != '_') return false;
+        }
+        return true;
+    }
+
+    /** Return whether text is exactly a fixed number of lower-case hexadecimal digits. */
+    public static boolean isLowerHex(String value, int length) {
+        return value != null && value.length() == length
+            && value.chars().allMatch(codePoint -> codePoint >= '0' && codePoint <= '9'
+                || codePoint >= 'a' && codePoint <= 'f');
+    }
+
+    /** Return whether a code point is Unicode whitespace or a Unicode space character. */
+    public static boolean isSpace(int codePoint) {
+        return Character.isWhitespace(codePoint) || Character.isSpaceChar(codePoint);
+    }
+
+    /** Return whether a code point matches Java's whitespace predicate. */
+    public static boolean isWhitespace(int codePoint) {
+        return Character.isWhitespace(codePoint);
+    }
+
     public static boolean blank(String value) {
         if (value == null || value.isEmpty()) return true;
-        return value.codePoints().allMatch(codePoint -> Character.isWhitespace(codePoint)
-            || Character.isSpaceChar(codePoint));
+        return value.codePoints().allMatch(TextPolicy::isSpace);
     }
 
     public static boolean hasControl(String value) {
         if (value == null) return false;
-        return value.codePoints().anyMatch(Character::isISOControl);
+        return value.codePoints().anyMatch(TextPolicy::isControl);
+    }
+
+    /** Return whether a code point is an ISO control character. */
+    public static boolean isControl(int codePoint) {
+        return Character.isISOControl(codePoint);
+    }
+
+    /** Return whether a code point is a Unicode letter or digit. */
+    public static boolean isLetterOrDigit(int codePoint) {
+        return Character.isLetterOrDigit(codePoint);
+    }
+
+    /** Return whether a code point is a Unicode decimal digit. */
+    public static boolean isDigit(int codePoint) {
+        return Character.isDigit(codePoint);
+    }
+
+    /** Return whether a code point is an uppercase Unicode letter. */
+    public static boolean isUpperCase(int codePoint) {
+        return Character.isUpperCase(codePoint);
     }
 
     public static boolean hasControlExceptWhitespace(String value) {
         return value.codePoints().anyMatch(codePoint -> Character.isISOControl(codePoint)
             && codePoint != '\n' && codePoint != '\r' && codePoint != '\t');
+    }
+
+    /** Return whether text contains an ISO control character other than line feed. */
+    public static boolean hasControlExceptNewline(String value) {
+        return value.codePoints().anyMatch(codePoint -> Character.isISOControl(codePoint)
+            && codePoint != '\n');
     }
 
     /** Replace ISO control characters while preserving all other UTF-16 units. */
@@ -108,6 +176,11 @@ public final class TextPolicy {
         return (value == null ? "" : value).toLowerCase(Locale.ROOT);
     }
 
+    /** 去掉首尾 ASCII 空白后按稳定的根区域规则转成小写，{@code null} 按空文本处理。 */
+    public static String lowercaseTrimmed(String value) {
+        return lowercase(trimmed(value));
+    }
+
     /** Return uppercase text using the stable root locale, treating null as empty. */
     public static String uppercase(String value) {
         return (value == null ? "" : value).toUpperCase(Locale.ROOT);
@@ -118,9 +191,56 @@ public final class TextPolicy {
         return value == null ? "" : value.trim();
     }
 
+    /** Return whether text contains at least one non-whitespace character. */
+    public static boolean hasText(String value) {
+        return !blank(value);
+    }
+
+    /** Return whether text is non-blank, Unicode-valid and within a code-point bound. */
+    public static boolean validBoundedText(String value, int maximumCodePoints) {
+        return hasText(value) && withinCodePoints(value, maximumCodePoints)
+            && !hasControlExceptWhitespace(value) && validUnicode(value);
+    }
+
+    /** Return whether text is non-blank, valid Unicode, control-free and within a UTF-8 byte bound. */
+    public static boolean boundedNonBlank(String value, int maxBytes) {
+        return hasText(value) && utf8Length(value) <= maxBytes
+            && !hasControl(value) && validUnicode(value);
+    }
+
+    /** Return whether text is non-blank, valid Unicode and within a UTF-8 bound, allowing whitespace controls. */
+    public static boolean boundedNonBlankAllowingWhitespaceControls(String value, int maxBytes) {
+        return hasText(value) && utf8Length(value) <= maxBytes
+            && !hasControlExceptWhitespace(value) && validUnicode(value);
+    }
+
+    /** Return whether text is non-empty, Unicode-valid, control-free and within a UTF-8 byte bound. */
+    public static boolean boundedNonEmpty(String value, int maxBytes) {
+        return value != null && !value.isEmpty() && utf8Length(value) <= maxBytes
+            && !hasControl(value) && validUnicode(value);
+    }
+
     /** Return text with Unicode whitespace stripped, treating null as empty. */
     public static String stripped(String value) {
         return value == null ? "" : value.strip();
+    }
+
+    /** Strip Unicode whitespace and space characters at both ends, preserving null. */
+    public static String stripSpaceChars(String value) {
+        if (value == null || value.isEmpty()) return value;
+        int start = 0;
+        while (start < value.length()) {
+            int codePoint = value.codePointAt(start);
+            if (!isSpace(codePoint)) break;
+            start += Character.charCount(codePoint);
+        }
+        int end = value.length();
+        while (end > start) {
+            int codePoint = value.codePointBefore(end);
+            if (!isSpace(codePoint)) break;
+            end -= Character.charCount(codePoint);
+        }
+        return value.substring(start, end);
     }
 
     /** Return text unchanged, treating a missing value as empty text. */
@@ -128,7 +248,17 @@ public final class TextPolicy {
         return value == null ? "" : value;
     }
 
-    /** Return the number of Unicode code points in text, or zero for null. */
+    /** 返回文本的第一个 Unicode 码点；文本为空时返回调用方给出的后备值。 */
+    public static String initial(CharSequence value, String fallback) {
+        if (value == null || value.length() == 0) return fallback;
+        return new String(Character.toChars(Character.codePointAt(value, 0)));
+    }
+
+    /** Trim a name and return its first Unicode code point, or a fallback when empty. */
+    public static String trimmedInitial(CharSequence value, String fallback) {
+        return initial(trimmed(value == null ? null : value.toString()), fallback);
+    }
+
     public static int codePointLength(String value) {
         return value == null ? 0 : value.codePointCount(0, value.length());
     }
@@ -188,6 +318,9 @@ public final class TextPolicy {
     /** Truncate text and append an ellipsis only when the character limit is exceeded. */
     public static String clipWithEllipsis(String value, int maxChars) {
         if (value == null || maxChars <= 0) return "";
-        return value.length() <= maxChars ? value : value.substring(0, maxChars) + "\n…";
+        if (value.length() <= maxChars) return value;
+        int end = maxChars;
+        if (Character.isHighSurrogate(value.charAt(end - 1))) end--;
+        return value.substring(0, end) + "\n…";
     }
 }

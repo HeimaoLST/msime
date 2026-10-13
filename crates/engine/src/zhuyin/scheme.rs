@@ -60,6 +60,19 @@ impl Syllable {
     }
 }
 
+#[derive(Default)]
+struct BestCache {
+    entries: HashMap<String, Option<(String, LanguageEntry)>>,
+    description: String,
+}
+
+impl BestCache {
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.description.clear();
+    }
+}
+
 pub struct ZhuyinScheme {
     dictionary: LanguageDictionary,
     syllables: Vec<Syllable>,
@@ -74,7 +87,7 @@ pub struct ZhuyinScheme {
     /// Text the last key committed, waiting for the session to hand it to the host.
     committed: String,
     /// 组字过程中每段位置描述（各位置允许的读音以 `|` 连接，位置之间用空格）的最重词条及其键。词库只读，所以条目一直有效；九键下每次钉读音都会产生新的描述，缓存在组字结束和每次 auto-shift 时清空。
-    best: HashMap<String, Option<(String, LanguageEntry)>>,
+    best: BestCache,
     /// 注音九键模式：数字键拼音节，`zxcvb` 和空格是声调键。
     nine_key: bool,
     /// 九键模式第一次处理按键时从音节表建出的索引，之后一直保留。
@@ -99,7 +112,7 @@ impl ZhuyinScheme {
             list_open: false,
             list: Vec::new(),
             committed: String::new(),
-            best: HashMap::new(),
+            best: BestCache::default(),
             nine_key: false,
             nine_key_index: None,
             pending_digits: Vec::new(),
@@ -181,9 +194,10 @@ impl ZhuyinScheme {
         if !self.list_open {
             return Ok(false);
         }
-        let Some(candidate) = self.list.get(index).cloned() else {
+        if index >= self.list.len() {
             return Ok(false);
-        };
+        }
+        let candidate = self.list.swap_remove(index);
         let pin = Span {
             start: candidate.start,
             end: self.syllables.len(),
@@ -213,35 +227,37 @@ impl ZhuyinScheme {
 
     /// 打出组字的键，按顺序，供光标锁定的编辑文本使用；九键下是数字串加声调键，例如 `28c39c4`。
     pub fn editing_text(&self) -> String {
-        let mut keys = build_editing_keys(&self.syllables, &self.pending);
+        let mut keys =
+            build_editing_keys(&self.syllables, &self.pending, self.pending_digits.len());
         keys.extend(self.pending_digits.iter().map(|digit| char::from(*digit)));
         keys
     }
 
     fn editing_text_into(&self, keys: &mut String) {
-        append_editing_keys(&self.syllables, &self.pending, keys);
-        keys.reserve(self.pending_digits.len());
+        append_editing_keys(
+            &self.syllables,
+            &self.pending,
+            self.pending_digits.len(),
+            keys,
+        );
         keys.extend(self.pending_digits.iter().map(|digit| char::from(*digit)));
     }
 
     /// 转换后的文字加上还在拼的部分：大千是待定的注音符号，例如 `你好ㄇㄚ`；九键是还没按声调的数字，例如 `你好28`。
     pub fn reading(&self) -> String {
-        let mut reading = build_converted_text(&self.conversion);
-        if let Some(symbol) = self.pending.initial {
-            reading.push(symbol);
-        }
-        if let Some(symbol) = self.pending.medial {
-            reading.push(symbol);
-        }
-        if let Some(symbol) = self.pending.rime {
-            reading.push(symbol);
-        }
-        reading.extend(self.pending_digits.iter().map(|digit| char::from(*digit)));
+        let mut reading = String::new();
+        self.reading_into(&mut reading);
         reading
     }
 
     fn reading_into(&self, reading: &mut String) {
-        append_converted_text(&self.conversion, reading);
+        let pending_capacity = [self.pending.initial, self.pending.medial, self.pending.rime]
+            .into_iter()
+            .flatten()
+            .map(char::len_utf8)
+            .sum::<usize>()
+            + self.pending_digits.len();
+        append_converted_text(&self.conversion, pending_capacity, reading);
         if let Some(symbol) = self.pending.initial {
             reading.push(symbol);
         }
@@ -251,7 +267,6 @@ impl ZhuyinScheme {
         if let Some(symbol) = self.pending.rime {
             reading.push(symbol);
         }
-        reading.reserve(self.pending_digits.len());
         reading.extend(self.pending_digits.iter().map(|digit| char::from(*digit)));
     }
 
@@ -429,8 +444,15 @@ impl ZhuyinScheme {
             }
             return Ok(true);
         }
-        let digits = std::mem::take(&mut self.pending_digits);
-        let Some(readings) = self.nine_key_index()?.readings(&digits, mark) else {
+        let mut digits = std::mem::take(&mut self.pending_digits);
+        let readings = match self.nine_key_index() {
+            Ok(index) => index.readings(&digits, mark),
+            Err(error) => {
+                self.pending_digits = digits;
+                return Err(error);
+            }
+        };
+        let Some(readings) = readings else {
             self.pending_digits = digits;
             return Ok(true);
         };
@@ -439,6 +461,8 @@ impl ZhuyinScheme {
         }
         let mut keys: String = digits.iter().map(|digit| char::from(*digit)).collect();
         keys.push(char::from(byte));
+        digits.clear();
+        self.pending_digits = digits;
         self.syllables.push(Syllable {
             keys,
             readings,
@@ -479,13 +503,12 @@ impl ZhuyinScheme {
         self.list.clear();
         let positions = list_positions(&self.syllables);
         for start in 0..count {
-            let entries = self
+            let mut entries = self
                 .dictionary
                 .lookup_readings(&positions[start..count], usize::MAX)?;
-            self.list.reserve(entries.len());
             // 九键下同一个字可能在同一位置的两个读音下各有一条，只留较重的那条。
-            let mut entries = entries;
             deduplicate_reading_entries(&mut entries);
+            self.list.reserve(entries.len());
             self.list
                 .extend(entries.into_iter().map(|(key, entry)| ListCandidate {
                     text: entry.text,
@@ -526,19 +549,29 @@ impl ZhuyinScheme {
         let mut singles = [0; MAX_SYLLABLES];
         if ambiguous.iter().any(|&ambiguous| ambiguous) {
             for index in 0..positions.len() {
-                singles[index] = cached_best(dictionary, best, &positions[index..=index])?
-                    .map_or(0, |(_, entry)| entry.weight);
+                singles[index] =
+                    cached_best_weight(dictionary, best, &positions[index..=index])?.unwrap_or(0);
             }
         }
         let singles = &singles[..count];
-        self.conversion = conversion::convert(
+        self.conversion = conversion::convert_filtered(
             positions.len(),
             &self.pins,
-            |start, end| {
-                let entry = cached_best(dictionary, best, &positions[start..end])?;
-                Ok(entry.filter(|(_, entry)| {
-                    clears_ambiguous_word_floor(&ambiguous[start..end], singles, start, entry)
-                }))
+            |start, end, can_improve| {
+                cached_best(
+                    dictionary,
+                    best,
+                    &positions[start..end],
+                    |entry| match entry.filter(|(_, entry)| {
+                        clears_ambiguous_word_floor(&ambiguous[start..end], singles, start, entry)
+                    }) {
+                        Some((key, entry)) if can_improve(entry.weight) => {
+                            conversion::Lookup::Found(key.clone(), entry.clone())
+                        }
+                        Some(_) => conversion::Lookup::Rejected,
+                        None => conversion::Lookup::Missing,
+                    },
+                )
             },
             |index| positions[index][0].clone(),
         )?;
@@ -547,9 +580,17 @@ impl ZhuyinScheme {
 
     /// 重算钉读音的目标和它的候选读音。目标是第一个不被任何 pin 覆盖、没有钉住、且有不止一个读音的音节；读音按当前转换用的那个、单字最重词条的权重（从重到轻）、字典序排列。没有目标时为空，大千模式下永远为空。
     fn refresh_spellings(&mut self) -> Result<()> {
-        self.spellings.clear();
+        let result = self.refresh_spelling_choices();
+        if result.is_err() {
+            self.spellings.clear();
+        }
+        result
+    }
+
+    fn refresh_spelling_choices(&mut self) -> Result<()> {
         self.spelling_target = None;
         if !self.nine_key {
+            self.spellings.clear();
             return Ok(());
         }
         let Some(target) = self
@@ -562,25 +603,74 @@ impl ZhuyinScheme {
                     && !self.pins.iter().any(|pin| pin.overlaps(index, index + 1))
             })
         else {
+            self.spellings.clear();
             return Ok(());
         };
         let current = current_spelling(&self.conversion, target);
         let readings = Arc::clone(&self.syllables[target].readings);
-        let mut ranked = Vec::with_capacity(readings.len());
-        for reading in readings.iter() {
-            let weight = cached_best(
-                &self.dictionary,
-                &mut self.best,
-                &[std::slice::from_ref(reading)],
-            )?
-            .map_or(i64::MIN, |(_, entry)| entry.weight);
-            ranked.push((current != Some(reading.as_str()), Reverse(weight), reading));
+        if readings.len() <= SMALL_SPELLING_RANK {
+            let mut ranked = [(false, Reverse(0), 0usize); SMALL_SPELLING_RANK];
+            for (index, reading) in readings.iter().enumerate() {
+                let weight = cached_best_weight(
+                    &self.dictionary,
+                    &mut self.best,
+                    &[std::slice::from_ref(reading)],
+                )?
+                .unwrap_or(i64::MIN);
+                ranked[index] = (current != Some(reading.as_str()), Reverse(weight), index);
+            }
+            ranked[..readings.len()].sort_by(|left, right| {
+                left.0
+                    .cmp(&right.0)
+                    .then_with(|| left.1.cmp(&right.1))
+                    .then_with(|| readings[left.2].cmp(&readings[right.2]))
+            });
+            replace_string_buffer(
+                &mut self.spellings,
+                ranked[..readings.len()]
+                    .iter()
+                    .map(|(_, _, index)| readings[*index].as_str()),
+            );
+        } else {
+            let mut ranked = Vec::with_capacity(readings.len());
+            for reading in readings.iter() {
+                let weight = cached_best_weight(
+                    &self.dictionary,
+                    &mut self.best,
+                    &[std::slice::from_ref(reading)],
+                )?
+                .unwrap_or(i64::MIN);
+                ranked.push((current != Some(reading.as_str()), Reverse(weight), reading));
+            }
+            ranked.sort();
+            replace_string_buffer(
+                &mut self.spellings,
+                ranked.into_iter().map(|(_, _, reading)| reading.as_str()),
+            );
         }
-        ranked.sort();
-        self.spellings
-            .extend(ranked.into_iter().map(|(_, _, reading)| reading.clone()));
         self.spelling_target = Some(target);
         Ok(())
+    }
+}
+
+fn replace_string_buffer<'a>(
+    destination: &mut Vec<String>,
+    mut source: impl Iterator<Item = &'a str>,
+) {
+    let mut kept = 0;
+    loop {
+        let Some(value) = source.next() else {
+            destination.truncate(kept);
+            return;
+        };
+        if let Some(target) = destination.get_mut(kept) {
+            target.clear();
+            target.push_str(value);
+            kept += 1;
+        } else {
+            destination.extend(std::iter::once(value).chain(source).map(str::to_owned));
+            return;
+        }
     }
 }
 
@@ -656,6 +746,9 @@ fn current_spelling(conversion: &[Span], target: usize) -> Option<&str> {
 /// Conversion ranks paths by word length first (libchewing's score), which suits Dachen, where each position has exactly one reading. A nine-key position allows 4 to 23 readings, so the combined reading sets of two or three positions match some obscure word almost everywhere, and length-first alone lets 監聽器 (weight 9) beat 今天 (25469) + 去 (28394). Such a word therefore takes part only when its weight times this factor reaches the smallest single-character weight over its positions. 1000 was chosen against a rebuild of the libchewing-derived dictionary: it drops 監聽器, 趕明兒 and 禮教 from 我們今天去學校, 這個東西很便宜 and 請問你叫什麼名字, and of the sampled counted 2 to 4 syllable words that convert to themselves without the floor all but one still do, while a factor of 300 already loses about one in eight of them.
 const AMBIGUOUS_WORD_FLOOR: i64 = 1000;
 
+/// 九键一个音节的读音通常很短；短列表用栈上的排序状态，避免为临时排名向量分配堆内存。
+const SMALL_SPELLING_RANK: usize = 64;
+
 /// Whether `entry`, the heaviest entry for the span starting at syllable `start` whose positions are flagged in `ambiguous`, may take part in conversion. Single syllables and spans where no position was typed with more than one reading (all of Dachen) always may, so Dachen conversion is unchanged; otherwise see `AMBIGUOUS_WORD_FLOOR`. Ambiguity is how the syllable was typed, not what is left after the user pinned a reading: pinning the reading the conversion already uses must not let a word the floor held back win (是之 turning into 適之). `singles` holds every position's single-character weight over its allowed readings and is empty when no position is ambiguous.
 fn clears_ambiguous_word_floor(
     ambiguous: &[bool],
@@ -674,23 +767,45 @@ fn clears_ambiguous_word_floor(
     entry.weight.saturating_mul(AMBIGUOUS_WORD_FLOOR) >= weakest
 }
 
-/// `positions` 的最重词条及其键，先查缓存。缓存键是各位置允许的读音以 `|` 连接、位置之间用空格；大千下每个位置只有一个读音，所以就是词库键本身。
-fn cached_best(
+/// 只取词频时，单位置单读音的缓存键直接借用读音；未命中或需要组合缓存键时复用完整词条的查询路径。
+fn cached_best_weight(
     dictionary: &LanguageDictionary,
-    best: &mut HashMap<String, Option<(String, LanguageEntry)>>,
+    best: &mut BestCache,
     positions: &[&[String]],
-) -> Result<Option<(String, LanguageEntry)>> {
-    let description = describe(positions);
-    if let Some(entry) = best.get(&description) {
-        return Ok(entry.clone());
+) -> Result<Option<i64>> {
+    if let [[reading]] = positions {
+        if let Some(entry) = best.entries.get(reading.as_str()) {
+            return Ok(entry.as_ref().map(|(_, entry)| entry.weight));
+        }
     }
-    let entry = dictionary.lookup_readings(positions, 1)?.into_iter().next();
-    best.insert(description, entry.clone());
-    Ok(entry)
+    cached_best(dictionary, best, positions, |entry| {
+        entry.map(|(_, entry)| entry.weight)
+    })
 }
 
-/// `cached_best` 的缓存键。
-fn describe(positions: &[&[String]]) -> String {
+/// 在借用期间消费 `positions` 的缓存词条；只在成功插入新键时复制描述，查询缓冲始终保留。
+fn cached_best<T>(
+    dictionary: &LanguageDictionary,
+    best: &mut BestCache,
+    positions: &[&[String]],
+    consume: impl FnOnce(Option<&(String, LanguageEntry)>) -> T,
+) -> Result<T> {
+    describe(positions, &mut best.description);
+    if let Some(entry) = best.entries.get(best.description.as_str()) {
+        return Ok(consume(entry.as_ref()));
+    }
+    let candidate = dictionary.lookup_readings(positions, 1)?.into_iter().next();
+    let description = best.description.clone();
+    Ok(consume(
+        best.entries
+            .entry(description)
+            .or_insert(candidate)
+            .as_ref(),
+    ))
+}
+
+/// `cached_best` 的缓存键：各位置的读音以 `|` 连接，位置之间用空格。
+fn describe(positions: &[&[String]], description: &mut String) {
     let capacity = positions
         .iter()
         .enumerate()
@@ -700,7 +815,8 @@ fn describe(positions: &[&[String]]) -> String {
                 + usize::from(position > 0)
         })
         .sum();
-    let mut description = String::with_capacity(capacity);
+    description.clear();
+    description.reserve(capacity);
     for (position, readings) in positions.iter().enumerate() {
         if position > 0 {
             description.push(' ');
@@ -712,22 +828,30 @@ fn describe(positions: &[&[String]]) -> String {
             description.push_str(value);
         }
     }
-    description
 }
 
-fn build_editing_keys(syllables: &[Syllable], pending: &PendingSyllable) -> String {
+fn build_editing_keys(
+    syllables: &[Syllable],
+    pending: &PendingSyllable,
+    extra_capacity: usize,
+) -> String {
     let mut keys = String::new();
-    append_editing_keys(syllables, pending, &mut keys);
+    append_editing_keys(syllables, pending, extra_capacity, &mut keys);
     keys
 }
 
 fn build_converted_text(spans: &[Span]) -> String {
     let mut text = String::new();
-    append_converted_text(spans, &mut text);
+    append_converted_text(spans, 0, &mut text);
     text
 }
 
-fn append_editing_keys(syllables: &[Syllable], pending: &PendingSyllable, keys: &mut String) {
+fn append_editing_keys(
+    syllables: &[Syllable],
+    pending: &PendingSyllable,
+    extra_capacity: usize,
+    keys: &mut String,
+) {
     let pending_capacity = usize::from(pending.initial.is_some())
         + usize::from(pending.medial.is_some())
         + usize::from(pending.rime.is_some());
@@ -735,23 +859,20 @@ fn append_editing_keys(syllables: &[Syllable], pending: &PendingSyllable, keys: 
         .iter()
         .map(|syllable| syllable.keys.len())
         .sum::<usize>()
-        + pending_capacity;
+        + pending_capacity
+        + extra_capacity;
     keys.clear();
-    if keys.capacity() < capacity {
-        keys.reserve(capacity - keys.capacity());
-    }
+    keys.reserve(capacity);
     for syllable in syllables {
         keys.push_str(&syllable.keys);
     }
     pending.append_keys(keys);
 }
 
-fn append_converted_text(spans: &[Span], text: &mut String) {
-    let capacity = spans.iter().map(|span| span.text.len()).sum::<usize>();
+fn append_converted_text(spans: &[Span], extra_capacity: usize, text: &mut String) {
+    let capacity = spans.iter().map(|span| span.text.len()).sum::<usize>() + extra_capacity;
     text.clear();
-    if text.capacity() < capacity {
-        text.reserve(capacity - text.capacity());
-    }
+    text.reserve(capacity);
     for span in spans {
         text.push_str(&span.text);
     }
@@ -804,7 +925,7 @@ mod tests {
             rime: None,
         };
 
-        assert_eq!(build_editing_keys(&syllables, &pending), "su3lc3a8");
+        assert_eq!(build_editing_keys(&syllables, &pending, 0), "su3lc3a8");
     }
 
     #[test]
@@ -865,6 +986,30 @@ mod tests {
     }
 
     #[test]
+    fn opening_a_list_reserves_only_unique_reading_rows() {
+        let entries = [
+            ("r0", "字", 0),
+            ("r1", "字", 0),
+            ("r2", "字", 0),
+            ("r3", "字", 0),
+            ("r4", "字", 0),
+            ("r5", "字", 0),
+            ("r6", "字", 0),
+            ("r7", "字", 0),
+        ];
+        let (_dir, mut scheme) = scheme_with(&entries);
+        scheme.syllables = vec![syllable(
+            "keys",
+            &["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"],
+        )];
+
+        scheme.open_list().unwrap();
+
+        assert_eq!(scheme.list.len(), 1);
+        assert!(scheme.list.capacity() < entries.len());
+    }
+
+    #[test]
     fn reconversion_buffers_keep_allowed_readings_and_ambiguity_on_the_stack() {
         let syllables = [
             syllable("su3", &["ㄋㄧˇ"]),
@@ -887,11 +1032,15 @@ mod tests {
             syllable("28c", &["ㄋㄧˇ", "ㄌㄧˇ"]),
         ];
         let positions: Vec<&[String]> = syllables.iter().map(Syllable::allowed).collect();
-        assert_eq!(describe(&positions[..2]), "ㄋㄧˇ ㄏㄠˇ");
-        assert_eq!(describe(&positions), "ㄋㄧˇ ㄏㄠˇ ㄋㄧˇ|ㄌㄧˇ");
+        let mut description = String::new();
+        describe(&positions[..2], &mut description);
+        assert_eq!(description, "ㄋㄧˇ ㄏㄠˇ");
+        describe(&positions, &mut description);
+        assert_eq!(description, "ㄋㄧˇ ㄏㄠˇ ㄋㄧˇ|ㄌㄧˇ");
         syllables[2].locked = Some(1);
         let positions: Vec<&[String]> = syllables.iter().map(Syllable::allowed).collect();
-        assert_eq!(describe(&positions[1..]), "ㄏㄠˇ ㄌㄧˇ");
+        describe(&positions[1..], &mut description);
+        assert_eq!(description, "ㄏㄠˇ ㄌㄧˇ");
     }
 
     #[test]
@@ -903,11 +1052,138 @@ mod tests {
         ];
         let positions: Vec<&[String]> = syllables.iter().map(Syllable::allowed).collect();
 
-        let (description, allocations) =
-            crate::ime::personal_rerank::allocations::count(|| describe(&positions));
+        let (description, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            let mut description = String::new();
+            describe(&positions, &mut description);
+            description
+        });
 
         assert_eq!(description, "ㄋㄧˇ ㄏㄠˇ ㄋㄧˇ|ㄌㄧˇ");
         assert_eq!(allocations, 1);
+    }
+
+    #[test]
+    fn reading_pending_suffix_buffer_allocates_once() {
+        let (_dir, mut scheme) = scheme();
+        scheme.conversion = (0..MAX_SYLLABLES)
+            .map(|start| Span {
+                start,
+                end: start + 1,
+                key: "ㄋㄧˇ".to_owned(),
+                text: "合".to_owned(),
+            })
+            .collect();
+        for digits in [false, true] {
+            scheme.pending = if digits {
+                PendingSyllable::default()
+            } else {
+                PendingSyllable {
+                    initial: Some('ㄇ'),
+                    medial: Some('ㄧ'),
+                    rime: Some('ㄢ'),
+                }
+            };
+            scheme.pending_digits = if digits { b"28".to_vec() } else { Vec::new() };
+            let expected = format!(
+                "{}{}",
+                "合".repeat(MAX_SYLLABLES),
+                if digits { "28" } else { "ㄇㄧㄢ" }
+            );
+            let mut reading = String::with_capacity(16);
+            let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+                scheme.reading_into(&mut reading);
+            });
+            assert_eq!(reading, expected);
+            assert_eq!(allocations, 1, "待定符号和数字应纳入一次容量预留");
+            let (reading, allocations) =
+                crate::ime::personal_rerank::allocations::count(|| scheme.reading());
+            assert_eq!(reading, expected);
+            assert_eq!(allocations, 1);
+        }
+    }
+
+    #[test]
+    fn editing_pending_digits_buffer_allocates_once() {
+        let (_dir, mut scheme) = scheme();
+        scheme.syllables = (0..MAX_SYLLABLES)
+            .map(|_| syllable("28c", &["ㄋㄧˇ"]))
+            .collect();
+        scheme.pending_digits.extend_from_slice(b"28");
+        let expected = format!("{}28", "28c".repeat(MAX_SYLLABLES));
+        let mut keys = String::with_capacity(16);
+        let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            scheme.editing_text_into(&mut keys);
+        });
+        assert_eq!(keys, expected);
+        assert_eq!(allocations, 1, "待定数字应纳入一次按键容量预留");
+        let (keys, allocations) =
+            crate::ime::personal_rerank::allocations::count(|| scheme.editing_text());
+        assert_eq!(keys, expected);
+        assert_eq!(allocations, 1);
+    }
+
+    #[test]
+    fn editing_keys_growing_buffer_allocates_once() {
+        let syllables = (0..MAX_SYLLABLES)
+            .map(|_| syllable("su3", &["ㄋㄧˇ"]))
+            .collect::<Vec<_>>();
+        let pending = PendingSyllable {
+            initial: Some('ㄇ'),
+            medial: None,
+            rime: Some('ㄚ'),
+        };
+        let expected = format!("{}a8", "su3".repeat(MAX_SYLLABLES));
+        for capacity in [16, 0, 128] {
+            let mut keys = String::with_capacity(capacity);
+            if capacity > 0 {
+                keys.push_str("舊值");
+            }
+            let old_capacity = keys.capacity();
+            let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+                append_editing_keys(&syllables, &pending, 0, &mut keys);
+            });
+            assert_eq!(keys, expected);
+            assert_eq!(allocations, usize::from(old_capacity < expected.len()));
+            let capacity = keys.capacity();
+            let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+                append_editing_keys(&[], &PendingSyllable::default(), 0, &mut keys);
+            });
+            assert!(keys.is_empty());
+            assert_eq!(allocations, 0);
+            assert_eq!(keys.capacity(), capacity);
+        }
+    }
+
+    #[test]
+    fn converted_text_growing_buffer_allocates_once() {
+        let spans = (0..MAX_SYLLABLES)
+            .map(|start| Span {
+                start,
+                end: start + 1,
+                key: "ㄋㄧˇ".to_owned(),
+                text: "合".to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let expected = "合".repeat(MAX_SYLLABLES);
+        for capacity in [16, 0, 128] {
+            let mut text = String::with_capacity(capacity);
+            if capacity > 0 {
+                text.push_str("舊值");
+            }
+            let old_capacity = text.capacity();
+            let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+                append_converted_text(&spans, 0, &mut text);
+            });
+            assert_eq!(text, expected);
+            assert_eq!(allocations, usize::from(old_capacity < expected.len()));
+            let capacity = text.capacity();
+            let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+                append_converted_text(&[], 0, &mut text);
+            });
+            assert!(text.is_empty());
+            assert_eq!(allocations, 0);
+            assert_eq!(text.capacity(), capacity);
+        }
     }
 
     #[test]
@@ -1148,6 +1424,44 @@ mod tests {
     }
 
     #[test]
+    fn selecting_a_list_row_moves_its_owned_fields_into_the_pin() {
+        let (_dir, mut scheme) = scheme();
+        type_keys(&mut scheme, "su3 ");
+        let candidate = &scheme.list[1];
+        let text = candidate.text.as_ptr();
+        let key = candidate.key.as_ptr();
+
+        assert!(scheme.select(1).unwrap());
+
+        assert!(!scheme.list_open());
+        assert_eq!(scheme.pins.len(), 1);
+        assert_eq!(scheme.pins[0].text.as_ptr(), text);
+        assert_eq!(scheme.pins[0].key.as_ptr(), key);
+        assert_eq!(scheme.take_committed(), "");
+    }
+
+    #[test]
+    fn selecting_a_missing_list_row_keeps_the_list_open() {
+        let (_dir, mut scheme) = scheme();
+        type_keys(&mut scheme, "su3 ");
+        let before = texts(&scheme)
+            .into_iter()
+            .map(|(text, start)| (text.to_owned(), start))
+            .collect::<Vec<_>>();
+
+        assert!(!scheme.select(before.len()).unwrap());
+
+        assert!(scheme.list_open());
+        assert_eq!(
+            texts(&scheme)
+                .into_iter()
+                .map(|(text, start)| (text.to_owned(), start))
+                .collect::<Vec<_>>(),
+            before
+        );
+    }
+
+    #[test]
     fn list_keys_close_or_fall_through() {
         let (_dir, mut scheme) = scheme();
         type_keys(&mut scheme, "su3 ");
@@ -1235,7 +1549,12 @@ mod tests {
         assert_eq!(scheme.converted_text(), format!("{}你", "你好".repeat(9)));
         assert_eq!(scheme.editing_text(), format!("{}su3", "su3cl3".repeat(9)));
         // The lookup cache keeps no key longer than the syllables that are left.
-        let longest = scheme.best.keys().map(|key| key.split(' ').count()).max();
+        let longest = scheme
+            .best
+            .entries
+            .keys()
+            .map(|key| key.split(' ').count())
+            .max();
         assert_eq!(longest, Some(scheme.syllables.len()));
 
         // A pin to the right of the shifted word moves with its syllables.
@@ -1291,6 +1610,276 @@ mod tests {
         assert_eq!(spellings(&scheme), ["ㄋㄧˇ", "ㄌㄧˇ", "ㄉㄧˇ"]);
         assert_eq!(scheme.conversion[0].key, "ㄋㄧˇ ㄏㄠˇ");
         assert_eq!(scheme.take_committed(), "");
+    }
+
+    #[test]
+    fn spelling_refresh_failure_clears_previous_choices() {
+        for count in [3, SMALL_SPELLING_RANK + 1] {
+            let (dir, mut scheme) = nine_key_scheme();
+            type_keys(&mut scheme, "28c");
+            assert!(!scheme.spellings().is_empty());
+            if count > SMALL_SPELLING_RANK {
+                scheme.syllables[0].readings = (0..count)
+                    .map(|index| format!("測試讀音{index:03}"))
+                    .collect::<Vec<_>>()
+                    .into();
+            }
+            scheme.best.clear();
+            Connection::open(dir.path().join("msime-zhuyin.db"))
+                .unwrap()
+                .execute_batch("DROP TABLE entries")
+                .unwrap();
+
+            assert!(scheme.refresh_spellings().is_err());
+            assert!(scheme.spellings().is_empty());
+            assert_eq!(scheme.spelling_target, None);
+        }
+    }
+
+    #[test]
+    fn spelling_refresh_handles_changing_choice_counts() {
+        let (_dir, mut scheme) = nine_key_scheme();
+        type_keys(&mut scheme, "28c");
+        for count in [SMALL_SPELLING_RANK + 1, 2, 4] {
+            let readings = (0..count)
+                .map(|index| format!("測試讀音{index:03}"))
+                .collect::<Vec<_>>();
+            scheme.syllables[0].readings = readings.clone().into();
+            scheme.refresh_spellings().unwrap();
+            assert_eq!(scheme.spellings(), readings);
+            assert_eq!(scheme.spelling_target, Some(0));
+        }
+        scheme.syllables[0].locked = Some(0);
+        scheme.refresh_spellings().unwrap();
+        assert!(scheme.spellings().is_empty());
+        assert_eq!(scheme.spelling_target, None);
+        scheme.syllables[0].locked = None;
+        scheme.refresh_spellings().unwrap();
+        assert_eq!(scheme.spellings(), &*scheme.syllables[0].readings);
+    }
+
+    #[test]
+    fn cached_best_preserves_rows_misses_and_query_errors() {
+        let (dir, scheme) = nine_key_scheme();
+        let mut best = BestCache::default();
+        let readings = ["ㄋㄧˇ".to_owned(), "ㄌㄧˇ".to_owned()];
+        let missing = ["測試缺失讀音".to_owned()];
+        let uncached = ["ㄉㄧˇ".to_owned()];
+        let check = |entry: Option<&(String, LanguageEntry)>| {
+            let (key, entry) = entry.unwrap();
+            assert_eq!(key, "ㄌㄧˇ");
+            assert_eq!(entry.text, "李");
+            assert_eq!(entry.weight, 1200);
+            (key.as_ptr(), entry.text.as_ptr())
+        };
+        let pointers = cached_best(&scheme.dictionary, &mut best, &[&readings], check).unwrap();
+        assert!(
+            cached_best(&scheme.dictionary, &mut best, &[&missing], |entry| entry
+                .is_none())
+            .unwrap()
+        );
+        assert_eq!(best.entries.len(), 2);
+        Connection::open(dir.path().join("msime-zhuyin.db"))
+            .unwrap()
+            .execute_batch("DROP TABLE entries")
+            .unwrap();
+
+        let cached_pointers =
+            cached_best(&scheme.dictionary, &mut best, &[&readings], check).unwrap();
+        assert_eq!(cached_pointers, pointers);
+        assert!(
+            cached_best(&scheme.dictionary, &mut best, &[&missing], |entry| entry
+                .is_none())
+            .unwrap()
+        );
+        for _ in 0..2 {
+            assert!(
+                cached_best(&scheme.dictionary, &mut best, &[&uncached], |_| {
+                    panic!("词库查询失败不应消费词条")
+                })
+                .is_err()
+            );
+        }
+        assert_eq!(best.entries.len(), 2);
+        let capacity = best.description.capacity();
+        best.clear();
+        assert!(best.entries.is_empty());
+        assert!(best.description.is_empty());
+        assert_eq!(best.description.capacity(), capacity);
+        assert!(cached_best(&scheme.dictionary, &mut best, &[&readings], |_| ()).is_err());
+    }
+
+    #[test]
+    fn rejected_cached_single_rows_do_not_become_fallbacks() {
+        let (_dir, mut scheme) = scheme_with(&[
+            ("ㄋㄧˇ", "甲", 0),
+            ("ㄏㄠˇ", "乙", 0),
+            ("ㄇㄚ", "丙", 0),
+            ("ㄊㄞˊ", "丁", -20),
+            ("ㄏㄠˇ ㄇㄚ", "乙丙", 0),
+            ("ㄇㄚ ㄊㄞˊ", "丙丁", -10),
+        ]);
+        scheme.syllables = ["ㄋㄧˇ", "ㄏㄠˇ", "ㄇㄚ", "ㄊㄞˊ"]
+            .into_iter()
+            .map(|reading| syllable("合成按鍵", &[reading]))
+            .collect();
+
+        scheme.reconvert().unwrap();
+
+        assert_eq!(
+            scheme
+                .conversion
+                .iter()
+                .map(|span| span.text.as_str())
+                .collect::<Vec<_>>(),
+            ["甲", "乙", "丙丁"]
+        );
+        assert_eq!(scheme.conversion[2].key, "ㄇㄚ ㄊㄞˊ");
+    }
+
+    #[test]
+    fn warmed_dense_conversion_only_clones_improving_paths() {
+        let entries = (1..=MAX_SYLLABLES)
+            .map(|len| (vec!["ㄋㄧˇ"; len].join(" "), "合".repeat(len), len as i64))
+            .collect::<Vec<_>>();
+        let rows = entries
+            .iter()
+            .map(|(key, text, weight)| (key.as_str(), text.as_str(), *weight))
+            .collect::<Vec<_>>();
+        let (dir, mut scheme) = scheme_with(&rows);
+        scheme.syllables = (0..MAX_SYLLABLES)
+            .map(|_| syllable("su3", &["ㄋㄧˇ"]))
+            .collect();
+        scheme.reconvert().unwrap();
+        Connection::open(dir.path().join("msime-zhuyin.db"))
+            .unwrap()
+            .execute_batch("DROP TABLE entries")
+            .unwrap();
+
+        let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            scheme.reconvert().unwrap();
+        });
+
+        assert_eq!(scheme.conversion.len(), 1);
+        assert_eq!(scheme.conversion[0].key, entries.last().unwrap().0);
+        assert_eq!(scheme.conversion[0].text, entries.last().unwrap().1);
+        assert_eq!(
+            allocations,
+            MAX_SYLLABLES * 2 + 1,
+            "只应复制首次改善路径的二十组词条字符串，并分配返回向量"
+        );
+    }
+
+    #[test]
+    fn warmed_conversion_cache_queries_do_not_allocate_descriptions() {
+        for readings in [
+            vec!["ㄋㄧˇ".to_owned()],
+            vec!["ㄋㄧˇ".to_owned(), "ㄌㄧˇ".to_owned()],
+        ] {
+            let (dir, scheme) = nine_key_scheme();
+            let expected = if readings.len() == 1 {
+                ("ㄋㄧˇ", "你", 1000)
+            } else {
+                ("ㄌㄧˇ", "李", 1200)
+            };
+            let positions = [readings.as_slice(); MAX_SYLLABLES];
+            let mut best = BestCache::default();
+            for _ in 0..2 {
+                for start in 0..positions.len() {
+                    for end in start + 1..=positions.len() {
+                        cached_best(
+                            &scheme.dictionary,
+                            &mut best,
+                            &positions[start..end],
+                            |_| (),
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+            Connection::open(dir.path().join("msime-zhuyin.db"))
+                .unwrap()
+                .execute_batch("DROP TABLE entries")
+                .unwrap();
+
+            let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+                for start in 0..positions.len() {
+                    for end in start + 1..=positions.len() {
+                        cached_best(
+                            &scheme.dictionary,
+                            &mut best,
+                            &positions[start..end],
+                            |entry| {
+                                if end == start + 1 {
+                                    let (key, entry) = entry.unwrap();
+                                    assert_eq!(key, expected.0);
+                                    assert_eq!(entry.text, expected.1);
+                                    assert_eq!(entry.weight, expected.2);
+                                } else {
+                                    assert!(entry.is_none());
+                                }
+                            },
+                        )
+                        .unwrap();
+                    }
+                }
+            });
+            assert_eq!(allocations, 0, "热缓存查询不应分配临时描述键");
+        }
+    }
+
+    #[test]
+    fn cached_single_reading_weights_keep_hits_misses_and_errors() {
+        let (dir, scheme) = nine_key_scheme();
+        let mut best = BestCache::default();
+        let reading = ["ㄌㄧˇ".to_owned()];
+        let missing = ["測試缺失讀音".to_owned()];
+        assert_eq!(
+            cached_best_weight(&scheme.dictionary, &mut best, &[&reading]).unwrap(),
+            Some(1200)
+        );
+        assert_eq!(
+            cached_best_weight(&scheme.dictionary, &mut best, &[&missing]).unwrap(),
+            None
+        );
+        Connection::open(dir.path().join("msime-zhuyin.db"))
+            .unwrap()
+            .execute_batch("DROP TABLE entries")
+            .unwrap();
+
+        let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            assert_eq!(
+                cached_best_weight(&scheme.dictionary, &mut best, &[&reading]).unwrap(),
+                Some(1200)
+            );
+            assert_eq!(
+                cached_best_weight(&scheme.dictionary, &mut best, &[&missing]).unwrap(),
+                None
+            );
+        });
+        assert_eq!(allocations, 0);
+        let readings = ["ㄌㄧˇ".to_owned(), "ㄋㄧˇ".to_owned()];
+        assert!(cached_best_weight(&scheme.dictionary, &mut best, &[&readings]).is_err());
+        assert!(cached_best_weight(&scheme.dictionary, &mut best, &[&reading, &reading]).is_err());
+        assert_eq!(best.entries.len(), 2);
+    }
+
+    #[test]
+    fn refreshing_short_spelling_choices_does_not_allocate_ranking_state() {
+        let (_dir, mut scheme) = nine_key_scheme();
+        type_keys(&mut scheme, "28c");
+        assert_eq!(scheme.spellings.len(), 3);
+        scheme.spellings.reserve(scheme.syllables[0].readings.len());
+
+        let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            scheme.refresh_spellings().unwrap();
+        });
+
+        assert_eq!(
+            allocations, 0,
+            "读取已有单读音词频仍分配了 {allocations} 次"
+        );
+        assert_eq!(spellings(&scheme), ["ㄌㄧˇ", "ㄋㄧˇ", "ㄉㄧˇ"]);
     }
 
     /// 今天 + 去 的读音和冷僻的 監聽器 落在同样的数字串上：ㄐㄧㄣ/ㄐㄧㄢ 都是 480，ㄊㄧㄢ/ㄊㄧㄥ 都是 280，ㄑㄩˋ/ㄑㄧˋ 都是 48ˋ。
@@ -1385,6 +1974,44 @@ mod tests {
         assert_eq!(scheme.pending_digits.as_ptr(), pointer);
         assert_eq!(scheme.pending_digits, b"29");
         assert_eq!(scheme.reading(), "29");
+    }
+
+    #[test]
+    fn nine_key_completed_syllables_reuse_pending_digit_storage() {
+        let (_dir, mut scheme) = nine_key_scheme();
+        type_keys(&mut scheme, "28");
+        let pointer = scheme.pending_digits.as_ptr();
+        let capacity = scheme.pending_digits.capacity();
+        assert!(scheme.handle_key(ZhuyinKey::Char(b'c')).unwrap());
+        assert!(scheme.pending_digits.is_empty());
+
+        let (claimed, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            scheme.handle_key(ZhuyinKey::Char(b'2')).unwrap()
+        });
+        assert!(claimed);
+        assert_eq!(allocations, 0);
+        assert_eq!(scheme.pending_digits.as_ptr(), pointer);
+        assert_eq!(scheme.pending_digits.capacity(), capacity);
+        assert_eq!(scheme.pending_digits, b"2");
+        assert_eq!(scheme.reading(), "李2");
+    }
+
+    #[test]
+    fn nine_key_tone_index_failure_restores_pending_digits() {
+        let (dir, mut scheme) = nine_key_scheme();
+        scheme.pending_digits.extend_from_slice(b"28");
+        let pointer = scheme.pending_digits.as_ptr();
+        Connection::open(dir.path().join("msime-zhuyin.db"))
+            .unwrap()
+            .execute_batch("DROP TABLE syllables")
+            .unwrap();
+
+        assert!(scheme.handle_key(ZhuyinKey::Char(b'c')).is_err());
+        assert_eq!(scheme.pending_digits, b"28");
+        assert_eq!(scheme.pending_digits.as_ptr(), pointer);
+        assert!(scheme.syllables.is_empty());
+        assert!(scheme.is_composing());
+        assert_eq!(scheme.reading(), "28");
     }
 
     #[test]

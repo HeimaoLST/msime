@@ -38,6 +38,9 @@ def check_model_request_user_agent() -> None:
     check(len(sent) == 1, "模型请求没有发出")
     agent = sent[0].get_header("User-agent") or ""
     check(bool(agent) and not agent.startswith("Python-urllib"), f"模型请求用了会被 Cloudflare 拒绝的 User-Agent：{agent!r}")
+    # GPT-5 系列只接受默认 temperature，带了就是 HTTP 400（windows-v0.2.1）。
+    payload = MODULE.json.loads(sent[0].data)
+    check("temperature" not in payload, "模型请求带了 temperature，GPT-5 系列会以 HTTP 400 拒绝")
 
 
 def main() -> int:

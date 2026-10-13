@@ -1,3 +1,6 @@
+import { ControlledCheckbox } from "../core/controlled-checkbox";
+import { rowHeading } from "../core/row-style";
+import { compactPage } from "../core/page-style";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useConfirm } from "../core/confirm";
 import {
@@ -25,6 +28,7 @@ import {
 import { useMountedRef } from "./use-mounted-ref";
 import { useAsyncGeneration } from "./use-async-generation";
 import { MobileStatistics, statisticsCardClass, type StatisticsLook } from "./mobile-statistics";
+import { StatisticsNote } from "./statistics-note";
 import type { TypingSummary } from "./typing-summary";
 export type { TypingBreakdown } from "./typing-speed";
 export type { TypingSummary } from "./typing-summary";
@@ -39,11 +43,7 @@ import {
   statisticsHeatmapWeeks,
   sumStatisticValues,
 } from "./typing-statistics-helpers";
-import {
-  StatisticsMetric,
-  statisticsOverviewDetails,
-  statisticsOverviewMetrics,
-} from "./typing-statistics-overview";
+import { StatisticsMetric, statisticsOverviewMetrics } from "./typing-statistics-overview";
 export {
   addDays,
   currentStreak,
@@ -57,7 +57,7 @@ export {
   type StatisticsOverviewMetric,
 } from "./typing-statistics-overview";
 
-const heading = "m-0 [font-size:var(--p-row-fs)] font-semibold [color:var(--p-text)]";
+const heading = rowHeading;
 // 摘要在标签行上方，切换标签时保持不动，所以压成紧凑的 3 × 2 网格，单位和数字放在同一行；会随标签变化的内容都放在标签下方。
 const metricGrid = "grid grid-cols-3 gap-x-6 gap-y-[18px] max-phone:grid-cols-2 max-phone:gap-x-3";
 const footerNote = "mt-3.5 mb-0 text-xs leading-relaxed [color:var(--p-sub)]";
@@ -76,7 +76,7 @@ const menuItem =
 // The page container. Named because this component returns it from three places -- loading, error and
 // loaded -- and the loading branch was the one that got left behind when the class it used was
 // replaced.
-const page = "flex flex-col gap-3.5 max-phone:gap-2.5";
+const page = compactPage;
 // HarmonyOS 外观下的纵向排列：分段控件、各卡片组和隐私说明之间按设计间隔 22px。
 const summaryPage = "flex flex-col gap-[22px] text-[color:var(--p-text)]";
 const rankChart = "mt-4 mb-[18px] flex flex-col gap-[11px]";
@@ -232,6 +232,7 @@ const characterKinds = [
 const sources = [
   ["quanpin", "全拼 26 键"],
   ["nineKey", "全拼 9 键"],
+  ["fourteenKey", "全拼 14 键"],
   ["shuangpin", "小鹤双拼"],
   ["ziranma", "自然码双拼"],
   ["microsoft", "微软双拼"],
@@ -265,6 +266,7 @@ const characterSymbols: Record<string, string> = {
 const sourceSymbols: Record<string, string> = {
   quanpin: "全",
   nineKey: "9",
+  fourteenKey: "14",
   shuangpin: "鹤",
   ziranma: "自",
   microsoft: "微",
@@ -706,9 +708,7 @@ function KeyboardHeatmap({
         </SettingsEmptyMessage>
       ) : (
         <>
-          <p className="mt-[7px] mb-0 text-xs text-muted">
-            共 {count(model.total)} 次按键，颜色越深按得越多
-          </p>
+          <StatisticsNote>共 {count(model.total)} 次按键，颜色越深按得越多</StatisticsNote>
           <div role="group" aria-label="按键热力图">
             <KeyboardHeatmapRows
               rows={model.rows}
@@ -857,10 +857,10 @@ function SpeedTrend({
     (days.length <= 45 || (speeds[index - 1] == null && speeds[index + 1] == null));
   return (
     <>
-      <p className="mt-[7px] mb-0 text-xs text-muted">
+      <StatisticsNote>
         最快 {count(Math.max(...known))} · 最慢 {count(Math.min(...known))} · 虚线为平均{" "}
         {count(averageSpeed)} 字 / 分钟 · {known.length} 天有测量
-      </p>
+      </StatisticsNote>
       <div
         className="relative mt-3 h-[120px] border-b border-edge text-accent"
         role="img"
@@ -1232,9 +1232,9 @@ function StatisticsHourlyBars({
   const count = (value: number) => formatZhNumber(Math.round(value));
   return (
     <>
-      <p className="mt-[7px] mb-0 text-xs text-muted">
+      <StatisticsNote>
         最高 {count(Math.max(0, ...hours))} 字符 / 小时 · 共 {count(total)} 字符
-      </p>
+      </StatisticsNote>
       {usual && (
         <div className="mt-2 flex items-center gap-4 text-[11px] text-secondary" aria-hidden="true">
           <span className="flex items-center gap-1.5">
@@ -1302,6 +1302,8 @@ function StatisticsHourlyBars({
  *
  * On iOS the keyboard extension cannot reach the shared App Group container without Full Access,
  * so there the prerequisite is named rather than the typing.
+ *
+ * iOS 上统计文件存在也不能说明键盘写过：在 app 里开启记录时 `client-core` 的 `set_enabled` 会无条件写出统计文件，而没有完全访问的键盘什么都不记，计数一直是零。app 读不到键盘是否有完全访问，所以计数为零时也先提醒这一项，再说其他可能。
  */
 export function availabilityNotice(
   statistics: Pick<TypingStatistics, "enabled" | "total">,
@@ -1313,10 +1315,17 @@ export function availabilityNotice(
     return iosPlatform
       ? "键盘从未写入过统计。请在系统设置 → 通用 → 键盘 → 键盘 → 水杉输入法中开启“允许完全访问”，然后用水杉键盘输入几个字再回来刷新。未开启时仍可正常打字，只是不记录统计。"
       : "键盘从未写入过统计。请用水杉键盘成功输入几个字符，再返回此页刷新。";
-  if (statistics.total === 0 && status.lastWrittenMs)
-    return `统计最后写入于 ${new Date(status.lastWrittenMs).toLocaleString("zh-CN")}，当前计数为零；如果刚刚清空过统计，这是正常的。`;
-  if (statistics.total === 0) return "统计文件已建立，但当前还没有输入记录。";
-  return "";
+  if (statistics.total !== 0) return "";
+  const fullAccess = iosPlatform
+    ? "请先确认已在系统设置 → 通用 → 键盘 → 键盘 → 水杉输入法中为水杉键盘开启“允许完全访问”，未开启时键盘不记录统计。"
+    : "";
+  if (status.lastWrittenMs) {
+    const written = new Date(status.lastWrittenMs).toLocaleString("zh-CN");
+    return iosPlatform
+      ? `统计最后写入于 ${written}，当前计数为零。${fullAccess}已开启的话，如果刚刚清空过统计，这是正常的。`
+      : `统计最后写入于 ${written}，当前计数为零；如果刚刚清空过统计，这是正常的。`;
+  }
+  return `统计文件已建立，但当前还没有输入记录。${fullAccess}`;
 }
 
 export function TypingStatisticsPage({
@@ -1535,7 +1544,6 @@ export function TypingStatisticsPage({
   const keyScopeLabel = selectedLabel ?? "累计";
   const maximum = Math.max(1, ...trendDays.map((day) => statistics.days[day.key] ?? 0));
   const activity = activityMetrics(statistics, today.key);
-  const overviewDetails = statisticsOverviewDetails(activity);
   // The reference line is the average of the window's recorded days, the same "日均" the rhythm card uses, so empty days do not drag it down.
   const trendRecorded = trendDays
     .map((day) => statistics.days[day.key] ?? 0)
@@ -1565,6 +1573,7 @@ export function TypingStatisticsPage({
       count: sumStatisticValues(breakdown.sources, [
         "quanpin",
         "nineKey",
+        "fourteenKey",
         "shuangpin",
         "ziranma",
         "microsoft",
@@ -1675,13 +1684,12 @@ export function TypingStatisticsPage({
         <div className={menuPopover} role="menu" aria-label="统计选项">
           <label className={menuItem}>
             <span>记录打字统计</span>
-            <input
+            <ControlledCheckbox
               aria-label="记录打字统计"
               className="toggle"
-              type="checkbox"
               checked={statistics.enabled}
               disabled={busy}
-              onChange={(event) => void update(() => client.setEnabled(event.target.checked))}
+              onChange={(checked) => void update(() => client.setEnabled(checked))}
             />
           </label>
           {retention && client.setRetention && (
@@ -1807,13 +1815,9 @@ export function TypingStatisticsPage({
             <StatisticsMetric key={metric.ariaLabel} metric={metric} />
           ))}
         </div>
-        <div className={`${axis} flex-wrap gap-x-4`}>
-          <span>{overviewDetails.summary}</span>
-          <span>{overviewDetails.best}</span>
-        </div>
-        <p className={footerNote}>
+        <p className="mt-4 mb-0 border-t border-edge pt-3 text-[11px] leading-relaxed [color:var(--p-sub)]">
           {activity.hasActivity
-            ? "速度按连续打字的时间计算，两次上屏间隔超过 10 秒算休息、不计入；只统计汉字与字母，数字和标点不参与。"
+            ? "速度统计汉字与字母；两次上屏间隔超过 10 秒视为休息，不计入活跃时长。"
             : "还没有测量到活跃时长。这项从本次更新后开始记录，之前的输入只有字数。"}
         </p>
       </section>
@@ -1848,14 +1852,14 @@ export function TypingStatisticsPage({
           <h2 className={heading} id="statistics-trend-title">
             每日趋势 · {mobile && trendDays.length >= 360 ? "近一年" : `近 ${trendDays.length} 天`}
           </h2>
-          <p className="mt-[7px] mb-0 text-xs text-muted">
+          <StatisticsNote>
             最高{" "}
             {maximum === 1 && trendDays.every((day) => !statistics.days[day.key])
               ? 0
               : formatZhNumber(maximum)}{" "}
             字符 / 天
             {trendAverage > 0 && ` · 虚线为日均 ${formatZhNumber(Math.round(trendAverage))} 字符`}
-          </p>
+          </StatisticsNote>
           {mobile ? (
             <StatisticsTrendLine
               days={trendDays}
@@ -1950,7 +1954,7 @@ export function TypingStatisticsPage({
           <h2 className={heading} id="statistics-calendar-title">
             日历热力图
           </h2>
-          <p className="mt-[7px] mb-0 text-xs text-muted">近 12 个月，颜色越深输入越多</p>
+          <StatisticsNote>近 12 个月，颜色越深输入越多</StatisticsNote>
           <StatisticsHeatmap
             days={statistics.days}
             selectedDay={selectedDay}
@@ -2074,7 +2078,7 @@ export function TypingStatisticsPage({
         <section className="section m-0">
           <h2 className={heading}>统计没有数据</h2>
           <p className="mt-2 mb-0 leading-relaxed text-secondary">{availabilityMessage}</p>
-          {iosPlatform && status.availability === "neverWritten" && openSystemSettings && (
+          {iosPlatform && openSystemSettings && (
             <ActionButton action={openSystemSettings} label="打开系统键盘设置" />
           )}
         </section>

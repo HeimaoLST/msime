@@ -1,11 +1,17 @@
 package app.msime.android.home;
 
+import app.msime.android.LayoutPolicy;
+
+import app.msime.android.DimensionPolicy;
+
+import app.msime.android.ImageViewPolicy;
+import app.msime.android.DrawablePolicy;
+import app.msime.android.ThemeColorPolicy;
 import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -20,10 +26,10 @@ import android.widget.TextView;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
-import androidx.fragment.app.Fragment;
 import app.msime.android.AppEdition;
 import app.msime.android.BoundsPolicy;
 import app.msime.android.DeviceInfoReport;
+import app.msime.android.FilePolicy;
 import app.msime.android.ListPolicy;
 import app.msime.android.ViewPolicy;
 import app.msime.android.HttpBodyPolicy;
@@ -31,18 +37,13 @@ import app.msime.android.TextPolicy;
 import app.msime.android.R;
 import app.msime.android.ResourcePacks;
 import app.msime.android.UpdateApi;
-import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.LinkOption;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.function.Consumer;
 
 /**
  * 关于：居中的标、应用名与版本、检查更新药丸，更新设置（自动更新、更新通道），设备信息（反馈问题时一键复制，{@link DeviceInfo}），官网、隐私政策、开源许可等链接，页脚一行版权与「输入内容默认只在本机处理」。
@@ -56,12 +57,6 @@ public final class AboutPage extends DetailPage {
     private static final String PRIVACY = "https://msime.app/privacy/";
     private static final String REPOSITORY = "https://github.com/metasequoiaime/msime";
     private static final int MAX_NOTICE_CHARS = 200_000;
-    /** 按需开线程：几十兆的更新下载不能让云剪贴板、反馈这些短请求排在它后面。 */
-    private static final ExecutorService NETWORK = Executors.newCachedThreadPool(runnable -> {
-        Thread thread = new Thread(runnable, "msime-home-network");
-        thread.setDaemon(true);
-        return thread;
-    });
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     /** 检查更新药丸的几种状态。 */
@@ -76,41 +71,15 @@ public final class AboutPage extends DetailPage {
     @Nullable private List<String> notices;
     /** 正在进行的下载；离开页面时取消，不在后台继续下完再把结果丢掉。 */
     @Nullable private Future<?> downloadTask;
+    /** 视图重建后递增，阻止旧下载的进度回调写入新页面。 */
+    private long viewGeneration;
 
     private final ActivityResultLauncher<String> notificationPermission =
         registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {});
 
-    /** 一次后台调用的结果：成功时 `value` 有值，失败时 `error` 有值。 */
-    record Outcome<T>(@Nullable T value, @Nullable Exception error) {}
-
-    /**
-     * 在宿主共用的网络线程上跑一次阻塞调用，回到主线程交结果；页面已经离开时丢掉结果。
-     *
-     * <p>不用 {@link HostTask}：那条线程还要处理共享存储的读写，一次几十兆的下载不能把它们都堵住。返回的 Future 可以用来在离开页面时取消；页面没有视图时不提交，返回 null。
-     */
-    @Nullable
-    static <T> Future<?> network(Fragment fragment, Callable<T> work, Consumer<Outcome<T>> done) {
-        View owner = fragment.getView();
-        if (owner == null) return null;
-        return NETWORK.submit(() -> {
-            Outcome<T> outcome;
-            try {
-                outcome = new Outcome<>(work.call(), null);
-            } catch (Exception error) {
-                outcome = new Outcome<>(null, error);
-            }
-            Outcome<T> result = outcome;
-            MAIN.post(() -> {
-                if (fragment.isAdded() && fragment.getView() == owner) done.accept(result);
-            });
-        });
-    }
-
     /** 用浏览器或别的应用打开一个链接；没有应用接得住时提示一句。 */
     static void openLink(Context context, String url) {
-        try {
-            context.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
-        } catch (RuntimeException unavailable) {
+        if (!LinkActions.open(context, url)) {
             MsToast.show(context, "没有可以打开这个链接的应用");
         }
     }
@@ -146,21 +115,21 @@ public final class AboutPage extends DetailPage {
             links.nav("给我们评分", null, null, () -> openLink(context,
                 "market://details?id=" + context.getPackageName()));
         }
-        if (Ui.tauriAvailable()) {
+        if (ManagementUi.available()) {
             links.nav("在管理界面中查看", "更新日志、致谢与更多信息", null, this::openTauriAbout);
         }
 
-        TextView footer = Ui.styledLabel(context, "© 2026 Metasequoia · 输入内容默认只在本机处理",
-            13, 400, Ui.subText(context));
+        TextView footer = ViewPolicy.styledLabel(context, "© 2026 Metasequoia · 输入内容默认只在本机处理",
+            13, 400, ThemeColorPolicy.subText(context));
         ViewPolicy.setCentered(footer);
-        LinearLayout.LayoutParams footerParams = Ui.matchWidth();
-        footerParams.topMargin = Ui.dp(context, 24);
+        LinearLayout.LayoutParams footerParams = LayoutPolicy.matchWidthWrapParams();
+        footerParams.topMargin = DimensionPolicy.pixels(context, 24);
         column.addView(footer, footerParams);
 
         if (notices == null) {
             AssetManager assets = context.getAssets();
             Context application = context.getApplicationContext();
-            network(this, () -> {
+            NetworkTask.run(this, () -> {
                 List<String> found = new ArrayList<>(listNotices(assets));
                 found.addAll(packNotices(application));
                 return found;
@@ -175,9 +144,17 @@ public final class AboutPage extends DetailPage {
     }
 
     @Override public void onDestroyView() {
+        viewGeneration++;
         if (downloadTask != null) {
             downloadTask.cancel(true);
             downloadTask = null;
+        }
+        // The network result is fenced to this view, so an abandoned check or download cannot
+        // report back after recreation. Reset its transient state or the rebuilt page would show
+        // a permanently disabled busy pill with no task left to finish it.
+        if (state == State.CHECKING || state == State.DOWNLOADING) {
+            state = State.IDLE;
+            downloaded = null;
         }
         pill = null;
         channelRow = null;
@@ -190,38 +167,39 @@ public final class AboutPage extends DetailPage {
 
     /** 居中的标、应用名、版本，以及检查更新药丸（Play 安装时没有）。 */
     private View header(Context context, boolean play) {
-        LinearLayout header = Ui.column(context);
+        LinearLayout header = LayoutPolicy.column(context);
         ViewPolicy.setCenteredHorizontally(header);
-        Ui.setPaddingDp(header, context, 0, 8, 0, 20);
+        ViewPolicy.setPaddingDp(context, header, 0, 8, 0, 20);
 
         FrameLayout disc = new FrameLayout(context);
-        ViewPolicy.setBackground(disc, Ui.pill(Ui.color(context, com.google.android.material.R.attr.colorTertiaryContainer)));
-        ImageView mark = Ui.decorativeIcon(context, R.drawable.splash_mark);
-        int markSize = Ui.dp(context, 60);
-        disc.addView(mark, Ui.squareFrameParamsPx(markSize, Gravity.CENTER));
-        int discSize = Ui.dp(context, 116);
-        header.addView(disc, Ui.squareParamsPx(discSize));
+        ViewPolicy.setBackground(disc, DrawablePolicy.pill(ThemeColorPolicy.color(context, com.google.android.material.R.attr.colorTertiaryContainer)));
+        ImageView mark = ImageViewPolicy.decorative(context, R.drawable.splash_mark);
+        int markSize = DimensionPolicy.pixels(context, 60);
+        disc.addView(mark, LayoutPolicy.squareFrameParamsPx(markSize, Gravity.CENTER));
+        int discSize = DimensionPolicy.pixels(context, 116);
+        header.addView(disc, ViewPolicy.newSquareParamsPx(discSize));
 
-        TextView name = Ui.styledLabel(context, getString(R.string.app_name), 22, 700, Ui.text(context));
+        TextView name = ViewPolicy.styledLabel(context, getString(R.string.app_name), 22, 700, ThemeColorPolicy.text(context));
         ViewPolicy.setCentered(name);
         name.setAccessibilityHeading(true);
-        LinearLayout.LayoutParams nameParams = Ui.wrap();
-        nameParams.topMargin = Ui.dp(context, 18);
+        LinearLayout.LayoutParams nameParams = LayoutPolicy.wrapParams();
+        nameParams.topMargin = DimensionPolicy.pixels(context, 18);
         header.addView(name, nameParams);
 
-        TextView version = Ui.styledLabel(context,
-            "版本 " + UpdateJobService.currentVersion(context) + " · Android", 13, 400, Ui.subText(context));
+        TextView version = ViewPolicy.styledLabel(context,
+            "版本 " + UpdateJobService.currentVersion(context) + " · Android", 13, 400, ThemeColorPolicy.subText(context));
         ViewPolicy.setCentered(version);
-        LinearLayout.LayoutParams versionParams = Ui.wrap();
-        versionParams.topMargin = Ui.dp(context, 6);
+        LinearLayout.LayoutParams versionParams = LayoutPolicy.wrapParams();
+        versionParams.topMargin = DimensionPolicy.pixels(context, 6);
         header.addView(version, versionParams);
 
         if (!play) {
-            TextView button = Ui.pillButton(context, "检查更新", 15, 600, Ui.onAccent(context),
+            TextView button = ViewPolicy.pillButton(context, "检查更新", 15, 600, ThemeColorPolicy.accent(context),
+                ThemeColorPolicy.onAccent(context),
                 20, 0, 36, 96, this::onPill);
             ViewPolicy.setPoliteLiveRegion(button);
-            LinearLayout.LayoutParams pillParams = Ui.wrap();
-            pillParams.topMargin = Ui.dp(context, 14);
+            LinearLayout.LayoutParams pillParams = LayoutPolicy.wrapParams();
+            pillParams.topMargin = DimensionPolicy.pixels(context, 14);
             header.addView(button, pillParams);
             pill = button;
         }
@@ -245,8 +223,8 @@ public final class AboutPage extends DetailPage {
         ViewPolicy.setEnabled(button, !busy);
         // 「已是最新版本」是结果而不是按钮，换成 accentSoft 底、强调色字，再点一次重新检查。
         boolean quiet = state == State.UP_TO_DATE || busy;
-        ViewPolicy.setTextColor(button, quiet ? Ui.accent(context) : Ui.onAccent(context));
-        ViewPolicy.setBackground(button, Ui.pillRipple(context, quiet ? Ui.accentSoft(context) : Ui.accent(context)));
+        ViewPolicy.setTextColor(button, quiet ? ThemeColorPolicy.accent(context) : ThemeColorPolicy.onAccent(context));
+        ViewPolicy.setBackground(button, ViewPolicy.pillRipple(context, quiet ? ThemeColorPolicy.accentSoft(context) : ThemeColorPolicy.accent(context)));
     }
 
     private void onPill() {
@@ -263,7 +241,7 @@ public final class AboutPage extends DetailPage {
         state = State.CHECKING;
         renderPill();
         UpdateApi.Channel channel = UpdateJobService.channel(context);
-        network(this, () -> new UpdateApi().check(channel, AppEdition.current().id(),
+        NetworkTask.run(this, () -> new UpdateApi().check(channel, AppEdition.current().id(),
             UpdateJobService.currentVersion(context)), outcome -> {
             if (outcome.error() != null) {
                 state = State.IDLE;
@@ -280,11 +258,14 @@ public final class AboutPage extends DetailPage {
     private void download() {
         UpdateApi.Update target = update;
         if (target == null) return;
+        View owner = getView();
+        if (owner == null) return;
+        long viewToken = viewGeneration;
         Context context = requireContext().getApplicationContext();
         state = State.DOWNLOADING;
         percent = 0;
         renderPill();
-        downloadTask = network(this, () -> {
+        downloadTask = NetworkTask.run(this, () -> {
             File apk = new UpdateApi().download(target, context.getCacheDir(), (done, total) -> {
                 // 离开页面时 onDestroyView 中断了这条线程：停在这一块，不再下完。
                 if (Thread.currentThread().isInterrupted())
@@ -292,7 +273,8 @@ public final class AboutPage extends DetailPage {
                 if (total <= 0) return;
                 int value = (int) BoundsPolicy.atMost(done * 100 / total, 100L);
                 MAIN.post(() -> {
-                    if (value == percent || state != State.DOWNLOADING) return;
+                    if (getView() != owner || viewGeneration != viewToken
+                            || value == percent || state != State.DOWNLOADING) return;
                     percent = value;
                     renderPill();
                 });
@@ -300,7 +282,7 @@ public final class AboutPage extends DetailPage {
             try {
                 UpdateApi.verifyArchive(context, apk);
             } catch (UpdateApi.Failure rejected) {
-                if (!apk.delete()) apk.deleteOnExit();
+                FilePolicy.deleteQuietly(apk);
                 throw rejected;
             }
             return apk;
@@ -387,7 +369,7 @@ public final class AboutPage extends DetailPage {
             }
         }
         for (String fixed : new String[] {"client-LICENSE.txt", "helpcodes/NOTICE.md", "helpcodes/NOTICE-jiajia.md",
-                "offline-glosses/offline-glosses-NOTICE.txt"}) {
+                "helpcodes/NOTICE-wubi86.md", "offline-glosses/offline-glosses-NOTICE.txt"}) {
             if (exists(assets, fixed)) found.add(fixed);
         }
         String[] languages = assets.list("language-dictionaries");
@@ -453,7 +435,7 @@ public final class AboutPage extends DetailPage {
 
     private void showNotice(String path) {
         AssetManager assets = requireContext().getAssets();
-        network(this, () -> {
+        NetworkTask.run(this, () -> {
             // 绝对路径是已下载资源包里的许可文本，其余是 APK assets 里的。
             try (InputStream in = path.startsWith("/")
                     ? java.nio.file.Files.newInputStream(new File(path).toPath(), LinkOption.NOFOLLOW_LINKS)
@@ -468,20 +450,14 @@ public final class AboutPage extends DetailPage {
                 MsToast.show(requireContext(), "读不出这份许可");
                 return;
             }
-            new MaterialAlertDialogBuilder(requireContext())
-                .setTitle(noticeTitle(path))
-                .setMessage(outcome.value())
-                .setPositiveButton("好", null)
-                .show();
+            MessageDialog.show(requireContext(), noticeTitle(path), outcome.value());
         });
     }
 
     // ---- P21：只在 Tauri 合包下有用的入口 ----
 
     private void openTauriAbout() {
-        Intent intent = new Intent();
-        intent.setClassName(requireContext(), "app.msime.android.MainActivity");
-        intent.putExtra("msime_settings_page", "about");
+        Intent intent = ManagementUi.settingsPage(requireContext(), "about");
         try {
             startActivity(intent);
         } catch (RuntimeException unavailable) {

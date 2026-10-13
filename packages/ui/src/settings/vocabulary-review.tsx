@@ -4,6 +4,8 @@ import { readDictionaryFile } from "../dictionary/dictionary-file";
 import { useMountedRef } from "./use-mounted-ref";
 import { ActionButton } from "./action-button";
 import { SettingsEmptyMessage } from "./settings-empty-message";
+import { compactPage } from "../core/page-style";
+import { compactMutedNote } from "../core/text-style";
 
 // The largest word list the page reads. The shared layer takes at most 8 MiB of decoded text (`vocabulary::session::MAX_IMPORT_BYTES`), well under the dictionary import's bound, so this keeps the 1 MiB the page has always read rather than following that one.
 const WORDBOOK_FILE_BYTES = 1_048_576;
@@ -11,7 +13,7 @@ const WORDBOOK_FILE_BYTES = 1_048_576;
 // Class strings live at the top of the file rather than inline in deep JSX, the way
 // typing-statistics does it: the same handful of utility runs appear in a dozen places, and a
 // change to the card face should be one edit rather than a dozen.
-const page = "flex flex-col gap-3.5 max-phone:gap-2.5";
+const page = compactPage;
 const heading = "m-0 text-[15px] font-semibold text-body";
 const note = "mt-3.5 mb-0 text-xs leading-relaxed text-muted";
 const metricRow = "flex items-baseline gap-5 max-phone:gap-4";
@@ -23,10 +25,10 @@ const metricLabel = "text-xs text-muted";
 const cardFace = (mobile: boolean) =>
   `flex ${mobile ? "min-h-[190px]" : "min-h-[230px]"} w-full cursor-pointer flex-col items-center justify-center gap-3 rounded-[14px] border border-edge bg-raised px-5 py-7 text-center shadow-card`;
 const cardWord = (mobile: boolean) =>
-  `m-0 break-anywhere font-[650] leading-tight text-body ${mobile ? "text-[30px]" : "text-[38px]"}`;
+  `m-0 wrap-anywhere font-[650] leading-tight text-body ${mobile ? "text-[30px]" : "text-[38px]"}`;
 const cardPhonetic = "m-0 text-sm text-secondary";
 const cardMeaning = "m-0 max-w-[46ch] text-[15px] leading-relaxed text-body";
-const cardHint = "m-0 text-xs text-muted";
+const cardHint = compactMutedNote;
 const answerRow = "mt-3.5 grid grid-cols-2 gap-2.5";
 const answerButton =
   "min-h-[44px] rounded-[10px] border border-edge bg-card text-[15px] text-body not-disabled:hover:bg-[var(--button-secondary-hover)]";

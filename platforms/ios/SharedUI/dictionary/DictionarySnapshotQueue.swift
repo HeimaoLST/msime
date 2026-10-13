@@ -58,14 +58,6 @@ final class DictionarySnapshotQueue: @unchecked Sendable {
   private func rejectSymlinkAncestors(_ path: URL) throws {
     guard !SafePath.hasRefusedSymbolicLink(path) else { throw Failure.unavailable }
   }
-  private func rejectSymlinkFile(_ path: URL) throws {
-    var status = stat()
-    if lstat(path.standardizedFileURL.path, &status) == 0 {
-      guard status.st_mode & S_IFMT != S_IFLNK else { throw Failure.unavailable }
-    } else if errno != ENOENT {
-      throw Failure.unavailable
-    }
-  }
   private func root() throws -> URL {
     guard let directory else { throw Failure.unavailable }
     try rejectSymlinkAncestors(directory)
@@ -74,18 +66,16 @@ final class DictionarySnapshotQueue: @unchecked Sendable {
   }
   private func read(_ root: URL) throws -> DictionarySnapshotQueueState {
     let file = root.appendingPathComponent("state.json")
-    try rejectSymlinkFile(file)
+    guard !SafePath.hasRefusedSymbolicLink(file) else { throw Failure.unavailable }
     guard FileManager.default.fileExists(atPath: file.path) else { return .init() }
-    let descriptor = open(file.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
-    guard descriptor >= 0 else { throw Failure.unavailable }
-    var metadata = stat()
-    guard fstat(descriptor, &metadata) == 0, (metadata.st_mode & S_IFMT) == S_IFREG else {
-      close(descriptor)
+    let data: Data
+    do {
+      data = try BoundedFileReader.read(from: file, maximumBytes: 65536)
+    } catch BoundedFileReader.Failure.tooLarge {
+      throw Failure.invalid
+    } catch {
       throw Failure.unavailable
     }
-    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-    defer { try? handle.close() }
-    let data = try handle.read(upToCount: 65537) ?? Data()
     guard data.count <= 65536, let state = try? JSONDecoder().decode(DictionarySnapshotQueueState.self, from: data),
           state.version == 1, state.localVersion.map(Self.validVersion) ?? true else { throw Failure.invalid }
     if let request = state.request {
@@ -95,7 +85,9 @@ final class DictionarySnapshotQueue: @unchecked Sendable {
     return state
   }
   func read() throws -> DictionarySnapshotQueueState { try read(root()) }
-  private func update<T>(_ action: (inout DictionarySnapshotQueueState) throws -> T) throws -> T {
+  /// `persist` 返回 `false` 时不重写状态文件：没有改动的操作不应因写入失败（例如磁盘已满）而失败。
+  private func update<T>(persist: (T) -> Bool = { _ in true },
+                         _ action: (inout DictionarySnapshotQueueState) throws -> T) throws -> T {
     Self.processLock.lock()
     defer { Self.processLock.unlock() }
     let root = try root()
@@ -106,9 +98,10 @@ final class DictionarySnapshotQueue: @unchecked Sendable {
     defer { flock(descriptor, LOCK_UN) }
     var state = try read(root)
     let result = try action(&state)
+    guard persist(result) else { return result }
     let data = try JSONEncoder().encode(state)
     guard data.count <= 65536 else { throw Failure.invalid }
-    try data.write(to: root.appendingPathComponent("state.json"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    try data.write(to: root.appendingPathComponent("state.json"), options: IOSSharedPaths.protectedAtomicWriteOptions)
     return result
   }
   func publishLocalVersion(_ version: String) throws {
@@ -232,12 +225,26 @@ final class DictionarySnapshotQueue: @unchecked Sendable {
     return applied
   }
   func cancel(accountID: String) throws {
-    let cancelled = try update { state -> DictionarySnapshotRequest? in
-      guard state.request?.accountID == accountID, state.request?.status.active == true else { return nil }
-      state.request?.status = .cancelled
-      return state.request
+    for attempt in 0..<40 {
+      do {
+        let cancelled = try update(persist: { $0 != nil }) { state -> DictionarySnapshotRequest? in
+          guard state.request?.accountID == accountID, state.request?.status.active == true else { return nil }
+          state.request?.status = .cancelled
+          return state.request
+        }
+        if let cancelled { try? FileManager.default.removeItem(at: fileURL(for: cancelled)) }
+        return
+      } catch Failure.busy {
+        if attempt == 39 { throw Failure.busy }
+        usleep(25_000)
+      }
     }
-    if let cancelled { try? FileManager.default.removeItem(at: fileURL(for: cancelled)) }
+  }
+
+  /// 账号操作取消旧账号快照的入口。没有 App Group 容器（例如测试宿主）时不存在队列，直接返回。状态文件损坏或版本不符时键盘同样领取不了其中的请求，视为没有可取消的请求，不改动该文件。其余错误（目录不可访问、状态锁一直被占用、写入失败）照常抛出，由调用方决定是否阻止账号操作。
+  func cancelIfPresent(accountID: String) throws {
+    guard directory != nil else { return }
+    do { try cancel(accountID: accountID) } catch Failure.invalid { return }
   }
   func fail(id: UUID) throws {
     let failed = try update { state -> DictionarySnapshotRequest? in

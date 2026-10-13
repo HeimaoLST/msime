@@ -1,4 +1,5 @@
 import app.msime.android.CustomSkinLibrary;
+import app.msime.android.JsonPolicy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.stream.Stream;
@@ -82,12 +83,9 @@ public final class CustomSkinLibrarySmoke {
             String graphemeName = "👩‍👩‍👧‍👦".repeat(32);
             check((Boolean) boundedName.invoke(null, graphemeName));
             check(!(Boolean) boundedName.invoke(null, graphemeName + "x"));
-            java.lang.reflect.Method strictString = CustomSkinLibrary.class
-                .getDeclaredMethod("strictString", Object.class);
-            strictString.setAccessible(true);
-            check("synthetic".equals(strictString.invoke(null, "synthetic")));
-            check(strictString.invoke(null, 42) == null);
-            check(strictString.invoke(null, Boolean.TRUE) == null);
+            check("synthetic".equals(JsonPolicy.strictString("synthetic")));
+            check(JsonPolicy.strictString(42) == null);
+            check(JsonPolicy.strictString(Boolean.TRUE) == null);
 
             Path externalRoot = outside.resolve("preferences");
             Files.createDirectories(externalRoot.resolve("CustomSkins"));

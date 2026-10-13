@@ -122,6 +122,10 @@ fn install_failures_map_to_the_codes_the_settings_page_knows() {
     for (error, code) in [
         (LocalModelError::Cancelled, "local_model_cancelled"),
         (
+            LocalModelError::InstallRunning,
+            "local_model_install_running",
+        ),
+        (
             LocalModelError::Network("fixture".into()),
             "local_model_network",
         ),
@@ -139,6 +143,14 @@ fn install_failures_map_to_the_codes_the_settings_page_knows() {
             "local_model_invalid_archive",
         ),
         (LocalModelError::InvalidMirror, "local_model_invalid_mirror"),
+        (
+            LocalModelError::MissingImportFile("fixture.tar.bz2".into()),
+            "local_model_import_missing",
+        ),
+        (
+            LocalModelError::UnreadableImportFile("fixture.tar.bz2".into()),
+            "local_model_import_unreadable",
+        ),
         (
             LocalModelError::Io(std::io::Error::other("fixture")),
             "local_model_io",

@@ -1,5 +1,8 @@
 package app.msime.android.home;
 
+import app.msime.android.DimensionPolicy;
+
+import app.msime.android.ThemeColorPolicy;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
@@ -69,22 +72,22 @@ public final class HeatmapView extends View {
     }
 
     private float cellSize(float width) {
-        return (width - Ui.dp(getContext(), GAP) * (COLUMNS - 1)) / COLUMNS;
+        return (width - DimensionPolicy.pixels(getContext(), GAP) * (COLUMNS - 1)) / COLUMNS;
     }
 
     @Override protected void onMeasure(int widthSpec, int heightSpec) {
         int width = MeasureSpec.getSize(widthSpec);
         float size = cellSize(width);
-        float gap = Ui.dp(getContext(), GAP);
-        int height = Math.round(size * ROWS + gap * (ROWS - 1) + Ui.dp(getContext(), LEGEND_HEIGHT));
+        float gap = DimensionPolicy.pixels(getContext(), GAP);
+        int height = Math.round(size * ROWS + gap * (ROWS - 1) + DimensionPolicy.pixels(getContext(), LEGEND_HEIGHT));
         setMeasuredDimension(width, resolveSize(height, heightSpec));
     }
 
     @Override protected void onDraw(Canvas canvas) {
         Context context = getContext();
-        float gap = Ui.dp(context, GAP);
+        float gap = DimensionPolicy.pixels(context, GAP);
         float size = cellSize(getWidth());
-        float radius = Ui.dp(context, 4);
+        float radius = DimensionPolicy.pixels(context, 4);
         int total = COLUMNS * ROWS;
         // 不足 84 天时前面补空格，让今天始终落在右下角。
         List<DayCount> shown = days.subList(BoundsPolicy.nonNegative(days.size() - total), days.size());
@@ -94,29 +97,29 @@ public final class HeatmapView extends View {
             int row = index % ROWS;
             int source = index - offset;
             long count = source >= 0 ? shown.get(source).count() : 0;
-            cell.setColor(Ui.color(context, HEAT[level(count, peak)]));
+            cell.setColor(ThemeColorPolicy.color(context, HEAT[level(count, peak)]));
             float left = column * (size + gap);
             float top = row * (size + gap);
             box.set(left, top, left + size, top + size);
             canvas.drawRoundRect(box, radius, radius, cell);
         }
         // 图例：少 □□□□□ 多，靠右。
-        float legend = Ui.dp(context, LEGEND_CELL);
-        float legendGap = Ui.dp(context, 3);
-        float baseline = ROWS * (size + gap) - gap + Ui.dp(context, LEGEND_HEIGHT) - Ui.dp(context, 7);
-        label.setColor(Ui.subText(context));
+        float legend = DimensionPolicy.pixels(context, LEGEND_CELL);
+        float legendGap = DimensionPolicy.pixels(context, 3);
+        float baseline = ROWS * (size + gap) - gap + DimensionPolicy.pixels(context, LEGEND_HEIGHT) - DimensionPolicy.pixels(context, 7);
+        label.setColor(ThemeColorPolicy.subText(context));
         float right = getWidth();
         float more = label.measureText("多");
         canvas.drawText("多", right - more, baseline, label);
-        float x = right - more - Ui.dp(context, 4) - legend;
-        float cellTop = baseline - legend + Ui.dp(context, 1);
+        float x = right - more - DimensionPolicy.pixels(context, 4) - legend;
+        float cellTop = baseline - legend + DimensionPolicy.pixels(context, 1);
         for (int level = HEAT.length - 1; level >= 0; level--) {
-            cell.setColor(Ui.color(context, HEAT[level]));
+            cell.setColor(ThemeColorPolicy.color(context, HEAT[level]));
             box.set(x, cellTop, x + legend, cellTop + legend);
-            canvas.drawRoundRect(box, Ui.dp(context, 2), Ui.dp(context, 2), cell);
+            canvas.drawRoundRect(box, DimensionPolicy.pixels(context, 2), DimensionPolicy.pixels(context, 2), cell);
             x -= legend + legendGap;
         }
         float less = label.measureText("少");
-        canvas.drawText("少", x + legend + legendGap - Ui.dp(context, 4) - less, baseline, label);
+        canvas.drawText("少", x + legend + legendGap - DimensionPolicy.pixels(context, 4) - less, baseline, label);
     }
 }

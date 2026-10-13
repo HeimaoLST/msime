@@ -17,13 +17,15 @@ final class OnlineCandidateProvider {
   private let session: MetasequoiaInputSessionBridge
   private let transport: any OnlineCandidateTransport
   private var signature: String?
+  /// 问过 AI 却没有结果、占位行已换成「—」的那次请求的签名：同一组字不再向 AI 发请求，只在本地把占位行再换成「—」；组字一变就清掉（#6888）。
+  private var aiResolvedSignature: String?
   private var epoch: UInt64 = 0
   private var debounce: Timer?
   private var task: Task<Void, Never>?
 
-  static func shouldRetryAfterFetch(cloudRequested: Bool, cloudApplied: Bool,
-                                    aiRequested: Bool, aiApplied: Bool) -> Bool {
-    (cloudRequested && !cloudApplied) || (aiRequested && !aiApplied)
+  /// 只有云候选失败才释放签名、在下一次渲染时重试。AI 没有结果时占位行已经换成「—」，同一组字不再问（#6888）；重试时也不再问 AI，见 `aiResolvedSignature`。
+  static func shouldRetryAfterFetch(cloudRequested: Bool, cloudApplied: Bool) -> Bool {
+    cloudRequested && !cloudApplied
   }
 
   init(session: MetasequoiaInputSessionBridge,
@@ -35,17 +37,28 @@ final class OnlineCandidateProvider {
   /// Ask again once the composition holds still, if it is one a provider could answer. `allowed` is the host's own gate: Full Access, a composition, no local mode; which schemes qualify is the Engine's call.
   func refresh(allowed: Bool) {
     guard allowed, let document = session.onlineQuery(), let query = Self.object(document),
-          Self.requestsCloud(query) || Self.requestsAI(query) else { cancel(); return }
+          Self.requestsCloud(query) || Self.requestsAI(query) else {
+      cancel()
+      // 组字变到一个问不了的状态（例如拼音没打完）：回到原来的组字时重新问 AI。
+      aiResolvedSignature = nil
+      // 宿主不让问（没有完全访问权限等）而组字本可以问 AI：AI 座位上的占位行直接换成「—」，不会一直等下去（#6888）。
+      if !allowed, let document = session.onlineQuery(), let query = Self.object(document),
+         Self.requestsAI(query) {
+        _ = apply { try self.session.resolveOnlineCandidates(query: document, source: 1) }
+      }
+      return
+    }
     let signature = Self.signature(query)
     guard signature != self.signature else { return }
     cancel()
     self.signature = signature
+    if aiResolvedSignature != signature { aiResolvedSignature = nil }
     let target = epoch
     let timer = Timer(timeInterval: Self.quietInterval, repeats: false) { [weak self] _ in
       MainActor.assumeIsolated {
         guard let self, self.epoch == target else { return }
         self.debounce = nil
-        self.task = Task { [weak self] in await self?.fetch(document: document, epoch: target) }
+        self.task = Task { [weak self] in await self?.fetch(document: document, epoch: target, signature: signature) }
       }
     }
     RunLoop.main.add(timer, forMode: .common)
@@ -61,16 +74,14 @@ final class OnlineCandidateProvider {
     epoch &+= 1
   }
 
-  private func fetch(document: Data, epoch target: UInt64) async {
+  private func fetch(document: Data, epoch target: UInt64, signature requestSignature: String) async {
     let initialQuery = Self.object(document)
     let cloudRequested = initialQuery.map(Self.requestsCloud) ?? false
     var cloudApplied = false
-    var aiRequested = false
     var aiApplied = false
     defer {
-      // 云候选成功不代表后续 AI 也成功；只要当前代次还有失败的请求，就释放签名允许重试。
-      if Self.shouldRetryAfterFetch(cloudRequested: cloudRequested, cloudApplied: cloudApplied,
-                                    aiRequested: aiRequested, aiApplied: aiApplied),
+      // 云候选失败时释放签名，下一次渲染重试；AI 没有结果时占位行已换成「—」，不为它重试。
+      if Self.shouldRetryAfterFetch(cloudRequested: cloudRequested, cloudApplied: cloudApplied),
          target == epoch { signature = nil }
     }
     var aiDocument = document
@@ -82,11 +93,19 @@ final class OnlineCandidateProvider {
       cloudApplied = true
       aiDocument = refreshed
     }
-    guard target == epoch, let query = Self.object(aiDocument), Self.requestsAI(query),
+    guard target == epoch, let query = Self.object(aiDocument), Self.requestsAI(query) else { return }
+    defer {
+      // 向 AI 发问了却没有采用任何回答（请求发不出去、失败、空回答、被拒）：AI 座位上的占位行换成「—」，后面的候选不挪位，同一组字不再问（#6888）。
+      if !aiApplied, target == epoch {
+        _ = apply { try self.session.resolveOnlineCandidates(query: aiDocument, source: 1) }
+        aiResolvedSignature = requestSignature
+      }
+    }
+    // 这个组字问过 AI 而没有结果（云候选失败触发的重试走到这里）：不再发请求，上面的 defer 只把占位行换成「—」。
+    guard aiResolvedSignature != requestSignature,
           let limit = Self.aiCandidateLimit(query),
           let descriptor = session.aiRequest(query: aiDocument),
           let request = Self.aiRequest(descriptor) else { return }
-    aiRequested = true
     guard let body = await transport.fetch(request), target == epoch else { return }
     let candidates = MetasequoiaInputSessionBridge.parseAIResponse(body, limit: limit)
     guard !candidates.isEmpty else { return }
@@ -115,7 +134,7 @@ final class OnlineCandidateProvider {
 
   /// The assistant's candidate limit, or nil when it is outside what the shared parser accepts.
   static func aiCandidateLimit(_ query: [String: Any]) -> Int? {
-    let limit = integer((query["ai_assistant"] as? [String: Any])?["candidate_limit"]) ?? 0
+    let limit = SharedNumber.strictInt((query["ai_assistant"] as? [String: Any])?["candidate_limit"]) ?? 0
     return (1...10).contains(limit) ? limit : nil
   }
 
@@ -127,7 +146,7 @@ final class OnlineCandidateProvider {
       assistant = String(decoding: data, as: UTF8.self)
     }
     let session = (query["session_id"] as? NSNumber)?.stringValue ?? "0"
-    return "session=\(session)|cache=\(field(query["cache_key"] as? String))|identity=\(field(query["identity"] as? String))|cloud=\(query["cloud_candidates"] as? Bool == true)|assistant=\(field(assistant))"
+    return "session=\(session)|cache=\(field(query["cache_key"] as? String))|identity=\(field(query["identity"] as? String))|cloud=\(query["cloud_candidates"] as? Bool == true)|cloud_eligible=\(query["cloud_eligible"] as? Bool == true)|ai_eligible=\(query["ai_eligible"] as? Bool == true)|assistant=\(field(assistant))"
   }
 
   private static func field(_ value: String?) -> String {
@@ -159,7 +178,7 @@ final class OnlineCandidateProvider {
     if descriptor["max_response_bytes"] == nil {
       maxBytes = maxAIResponseBytes
     } else {
-      guard let value = integer(descriptor["max_response_bytes"]), value > 0 else { return nil }
+      guard let value = SharedNumber.strictInt(descriptor["max_response_bytes"]), value > 0 else { return nil }
       maxBytes = min(maxAIResponseBytes, value)
     }
     guard let connectTimeout = seconds(descriptor["connect_timeout_ms"], fallback: 2500),
@@ -173,17 +192,9 @@ final class OnlineCandidateProvider {
 
   /// Milliseconds from the descriptor, held to the 1-10 s the Android host allows.
   private static func seconds(_ value: Any?, fallback: Int) -> TimeInterval? {
-    let milliseconds = value == nil ? fallback : integer(value)
+    let milliseconds = value == nil ? fallback : SharedNumber.strictInt(value)
     guard let milliseconds, milliseconds > 0 else { return nil }
-    return TimeInterval(min(10_000, max(1_000, milliseconds))) / 1000
-  }
-
-  private static func integer(_ value: Any?) -> Int? {
-    guard let number = value as? NSNumber,
-          CFGetTypeID(number) != CFBooleanGetTypeID(),
-          let integer = Int(number.stringValue),
-          NSNumber(value: integer).compare(number) == .orderedSame else { return nil }
-    return integer
+    return OnlineRequestPolicy.timeout(milliseconds: milliseconds)
   }
 
   private static func object(_ document: Data) -> [String: Any]? {

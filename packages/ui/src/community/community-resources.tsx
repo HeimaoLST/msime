@@ -23,7 +23,7 @@ import * as style from "./community-style";
 import { CommunityCardAuthor } from "./community-card-author";
 import { CommunityCard } from "./community-card";
 import { CommunityMetrics } from "./community-metrics";
-import { CommunitySearchForm } from "./community-search-form";
+import { CommunityGalleryHeader } from "./community-gallery-header";
 import { CommunityDialogActions, CommunityDialogFrame } from "./community-dialog";
 import { CommunityDetailHeader } from "./community-detail-header";
 import { CommunityRatingMetrics } from "./community-rating-metrics";
@@ -49,7 +49,6 @@ import { CommunityGalleryFeedback } from "./community-gallery-feedback";
 import { ActionButton } from "../core/action-button";
 import { CommunityModerationSection } from "./community-moderation-section";
 import { CommunityActionNotice } from "./community-action-notice";
-import { CommunityGalleryHeading } from "./community-gallery-heading";
 import { CommunityGalleryGrid } from "./community-gallery-grid";
 import { CommunityPageShell } from "./community-page-shell";
 import { communityPublishFields } from "./community-publish-validation";
@@ -95,6 +94,8 @@ export type CommunityLocalDictionaryClient = {
     text: string,
     requestId: string,
   ): Promise<{ applied: number }>;
+  /** 宿主有命名词库时，把共享词库装成一个独立的词库（之后可以在「词库」里停用或删除），代替逐条导入本机词库。 */
+  installCollection?(resource: CommunityResource): Promise<void>;
 };
 
 export interface CommunityResourceClient {
@@ -117,8 +118,9 @@ export interface CommunityResourceClient {
   save(id: string, saved: boolean): Promise<void>;
   rate(id: string, stars: number): Promise<void>;
   unpublish(id: string): Promise<void>;
-  storeReply(item: CommunityResource): Promise<void>;
-  removeReply(id: string): Promise<void>;
+  /** 把回复模板存进本机「高情商回复」键盘、从中移除。只有移动端有这个键盘；桌面宿主不提供这两个，页面就不显示对应的按钮，回复模板只能收藏、评分、举报和发布。 */
+  storeReply?(item: CommunityResource): Promise<void>;
+  removeReply?(id: string): Promise<void>;
   /** Reports another user's dictionary or reply template to the moderators. */
   report?(
     kind: CommunityResourceKind,
@@ -128,18 +130,45 @@ export interface CommunityResourceClient {
   ): Promise<void>;
 }
 
-/** 宿主能否把词条导入本机词库。 */
+/** 宿主能否把共享词库装到本机：装成命名词库，或导入本机词库。 */
 function importsLocally(
   dictionary: CommunityLocalDictionaryClient | undefined,
-): dictionary is Required<CommunityLocalDictionaryClient> {
-  return Boolean(dictionary?.import);
+): dictionary is CommunityLocalDictionaryClient {
+  return Boolean(dictionary?.installCollection || dictionary?.import);
 }
 
-/**
- * 把共享词库的词条导入本机词库，每种词条类型发一次请求，返回实际应用的词条数。详情页的「导入这版词库到本机」和 HarmonyOS 行上的「添加」都走这里。
- */
+/** 把共享词库装到本机，返回要提示的话：有命名词库时装成一个词库，否则把词条导入本机词库。详情页的「导入这版词库到本机」和 HarmonyOS 行上的「添加」都走这里。 */
+async function installCommunityDictionaryLocally(
+  dictionary: CommunityLocalDictionaryClient,
+  item: CommunityResource,
+): Promise<string> {
+  if (dictionary.installCollection) {
+    await dictionary.installCollection(item);
+    return `已添加「${item.name}」，可以在「词库」里停用或删除`;
+  }
+  if (!dictionary.import) return "";
+  const applied = await importCommunityDictionary(
+    { import: dictionary.import.bind(dictionary) },
+    item.content.entries ?? [],
+  );
+  return `已添加「${item.name}」，本机词库应用 ${applied} 个词条`;
+}
+
+/** 回复模板的「添加」：收藏它，再把重新读到的最新一版存进本机「高情商回复」键盘，返回要提示的话。没有这个键盘的宿主只收藏。社区图库行上的「添加」和「AI 辅助」页「回复模板」一组的「添加」都走这里。 */
+export async function addCommunityReply(
+  client: CommunityResourceClient,
+  item: CommunityResource,
+): Promise<string> {
+  await client.save(item.id, true);
+  const latest = await client.detail(item.id);
+  if (!client.storeReply) return `已收藏「${item.name}」`;
+  await client.storeReply(latest);
+  return `已添加「${item.name}」到高情商回复键盘`;
+}
+
+/** 把共享词库的词条导入本机词库，每种词条类型发一次请求，返回实际应用的词条数。 */
 async function importCommunityDictionary(
-  dictionary: Required<CommunityLocalDictionaryClient>,
+  dictionary: Required<Pick<CommunityLocalDictionaryClient, "import">>,
   entries: readonly CommunitySharedWord[],
 ): Promise<number> {
   const groups = new Map<CommunitySharedWord["kind"], CommunitySharedWord[]>();
@@ -451,13 +480,23 @@ function ResourceDetail({
     });
   const applyLocal = () =>
     void run(async (generation) => {
-      if (!importsLocally(localDictionary)) return;
-      const applied = await importCommunityDictionary(localDictionary, item.content.entries ?? []);
+      if (localDictionary?.installCollection) {
+        await localDictionary.installCollection(item);
+        if (!mounted.current || generation !== clientGeneration.current) return;
+        setNotice(`已添加为词库「${item.name}」，可以在「词库」里停用或删除。`);
+        return;
+      }
+      if (!localDictionary?.import) return;
+      const applied = await importCommunityDictionary(
+        { import: localDictionary.import.bind(localDictionary) },
+        item.content.entries ?? [],
+      );
       if (!mounted.current || generation !== clientGeneration.current) return;
       setNotice(`已导入本机词库，应用 ${applied} 个词条。`);
     });
   const storeReply = () =>
     void run(async (generation) => {
+      if (!client.storeReply) return;
       await client.save(item.id, true);
       if (!mounted.current || generation !== clientGeneration.current) return;
       const latest = await client.detail(item.id);
@@ -478,6 +517,7 @@ function ResourceDetail({
     });
   const removeReply = () =>
     void run(async (generation) => {
+      if (!client.removeReply) return;
       await client.removeReply(item.id);
       if (!mounted.current || generation !== clientGeneration.current) return;
       setNotice("已从本机高情商回复键盘移除，社区收藏保留。");
@@ -548,18 +588,22 @@ function ResourceDetail({
         <>
           <h3>提示词预览</h3>
           <pre className={style.promptPreview}>{item.content.prompt}</pre>
-          <ActionButton
-            action={storeReply}
-            className={`primary ${style.action}`}
-            disabled={busy}
-            label="添加到高情商回复键盘"
-          />
-          <ActionButton
-            action={removeReply}
-            className={`secondary ${style.action}`}
-            disabled={busy}
-            label="从本机高情商回复键盘移除"
-          />
+          {client.storeReply && (
+            <ActionButton
+              action={storeReply}
+              className={`primary ${style.action}`}
+              disabled={busy}
+              label="添加到高情商回复键盘"
+            />
+          )}
+          {client.removeReply && (
+            <ActionButton
+              action={removeReply}
+              className={`secondary ${style.action}`}
+              disabled={busy}
+              label="从本机高情商回复键盘移除"
+            />
+          )}
         </>
       )}
       {notice && <CommunityActionNotice>{notice}</CommunityActionNotice>}
@@ -680,14 +724,17 @@ export function CommunityResourcesPage({
   localDictionary,
   mobile = false,
   look,
+  historyPage = "community",
 }: {
   client: CommunityResourceClient;
   kind: CommunityResourceKind;
   initialScope?: CommunityResourceScope;
   localDictionary?: CommunityLocalDictionaryClient;
   mobile?: boolean;
-  /** HarmonyOS 手机的「社区」页：胶囊搜索框、范围筛选 chip，以及一张由多行组成、每行带「添加」胶囊按钮的分组卡片。其他宿主不设置。 */
+  /** HarmonyOS 手机上的图库：胶囊搜索框、范围筛选 chip，以及一张由多行组成、每行带「添加」胶囊按钮的分组卡片。其他宿主不设置。 */
   look?: "harmony";
+  /** 手机上打开详情时压入的历史记录所属的设置页。触屏宿主在「词库」或「AI 辅助」页里打开这个图库，记录要留在那一页，返回手势才会先关详情、再关图库；缺省是桌面的「社区」页。 */
+  historyPage?: string;
 }) {
   const [scope, setScope] = useState<CommunityResourceScope>(initialScope);
   const [search, setSearch] = useState("");
@@ -726,7 +773,7 @@ export function CommunityResourcesPage({
   }, [client, kind, scope]);
   const openDetail = (item: CommunityResource) => {
     if (mobile && typeof window !== "undefined") {
-      pushMobileSettingsState({ page: "community", communityDetail: { kind, id: item.id } });
+      pushMobileSettingsState({ page: historyPage, communityDetail: { kind, id: item.id } });
     }
     setSelected(item);
   };
@@ -762,20 +809,13 @@ export function CommunityResourcesPage({
         // 列表里的副本可能比服务器将导入的版本旧，所以词条取自重新获取的详情，与详情页的做法相同。
         const latest = await client.detail(item.id);
         if (importsLocally(localDictionary)) {
-          const applied = await importCommunityDictionary(
-            localDictionary,
-            latest.content.entries ?? [],
-          );
-          toast(`已添加「${item.name}」，本机词库应用 ${applied} 个词条`);
+          toast(await installCommunityDictionaryLocally(localDictionary, latest));
         } else {
           const result = await client.apply(latest.id, latest.revision);
           toast(`已添加「${item.name}」，云端词库新增或更新 ${result.imported} 个词条`);
         }
       } else {
-        await client.save(item.id, true);
-        const latest = await client.detail(item.id);
-        await client.storeReply(latest);
-        toast(`已添加「${item.name}」到高情商回复键盘`);
+        toast(await addCommunityReply(client, item));
       }
       setAdded((current) => new Set(current).add(item.id));
     } catch (failure) {
@@ -881,13 +921,11 @@ export function CommunityResourcesPage({
   }
   return (
     <CommunityPageShell>
-      <CommunitySearchForm
-        label={`搜索${resourceKindTitle(kind)}`}
-        value={search}
-        onChange={setSearch}
-        onSubmit={() => void load(false, search)}
-      />
-      <CommunityGalleryHeading
+      <CommunityGalleryHeader
+        searchLabel={`搜索${resourceKindTitle(kind)}`}
+        search={search}
+        onSearchChange={setSearch}
+        onSearchSubmit={() => void load(false, search)}
         title={
           scope === "mine"
             ? `我的${resourceKindTitle(kind)}作品`
@@ -909,7 +947,7 @@ export function CommunityResourcesPage({
           onScopeChange={setScope}
         />
         <ActionButton action={() => setEditing(true)} className="primary" label="发布作品" />
-      </CommunityGalleryHeading>
+      </CommunityGalleryHeader>
       <CommunityGalleryFeedback
         error={error}
         empty={
@@ -960,7 +998,8 @@ export function CommunityHomePage({
   onApplyPreferences,
   onSkinApplied,
 }: {
-  skins: CommunitySkinClient;
+  /** 键盘皮肤画廊。Windows 没有（它的候选窗口皮肤社区在主题页），这时只有「词库」和「回复模板」两个分类。 */
+  skins?: CommunitySkinClient;
   resources: CommunityResourceClient;
   theme: "light" | "dark";
   initialMine?: boolean;
@@ -982,11 +1021,13 @@ export function CommunityHomePage({
   onApplyPreferences?: (next: Preferences) => void | Promise<void>;
   onSkinApplied?: (id: string) => void;
 }) {
-  const [category, setCategory] = useState<"skin" | CommunityResourceKind>(initialCategory);
+  const [category, setCategory] = useState<"skin" | CommunityResourceKind>(
+    skins || initialCategory !== "skin" ? initialCategory : "dictionary",
+  );
   const harmony = look === "harmony";
   // 设计稿把第三段命名为「短语」。本宿主没有接入短语包，所以在 HarmonyOS 上这一段放的是回复模板，使用它们自己的分区标题。
   const tabs: { category: "skin" | CommunityResourceKind; label: string }[] = [
-    { category: "skin", label: "皮肤" },
+    ...(skins ? [{ category: "skin" as const, label: "皮肤" }] : []),
     { category: "dictionary", label: "词库" },
     { category: "reply", label: harmony ? "短语" : "回复模板" },
   ];
@@ -1009,7 +1050,7 @@ export function CommunityHomePage({
           </button>
         ))}
       </div>
-      {category === "skin" ? (
+      {category === "skin" && skins ? (
         <CommunitySkinsPage
           client={skins}
           theme={theme}
@@ -1025,7 +1066,7 @@ export function CommunityHomePage({
       ) : (
         <CommunityResourcesPage
           client={resources}
-          kind={category}
+          kind={category === "skin" ? "dictionary" : category}
           initialScope={initialScope}
           localDictionary={localDictionary}
           mobile={mobile}

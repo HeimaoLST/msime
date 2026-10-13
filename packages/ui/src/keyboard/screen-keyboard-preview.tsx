@@ -1,78 +1,17 @@
-import { useId } from "react";
-import { themeEntry, type GlobalTheme } from "../theme/global-theme";
+import { createContext, useContext, useId } from "react";
+import type { GlobalTheme } from "../theme/global-theme";
 import { clamp } from "../core/number";
+import { skinColor, type TouchKeyboardSkinDesign } from "./touch-keyboard-skin-design";
+import { resolveKeyboardSkinLook } from "./keyboard-skin-look";
 import {
-  readableSkinText,
-  skinColor,
-  type TouchKeyboardSkinDesign,
-} from "./touch-keyboard-skin-design";
-import { actionKeyboardLabels, desktopKeyboardRows, touchKeyboardRows } from "./keyboard-layouts";
+  actionKeyboardLabels,
+  desktopKeyboardRows,
+  touchKeyboardRows,
+  type PreviewKey,
+} from "./keyboard-layouts";
 import { keyboardKeyPath } from "./keyboard-shape";
 import { msimeFramePath, msimeStrokePath } from "../core/brand-logo";
-
-type Palette = {
-  background: string;
-  key: string;
-  foreground: string;
-  accent: string;
-  action: string;
-  actionForeground: string;
-};
-/** How a global theme draws a touch keyboard when no custom design applies. */
-export type KeyboardThemeLook = {
-  palette: Palette;
-  cornerRadius: number;
-  borderWidth: number;
-  shadowOpacity: number;
-  shadowRadius: number;
-  shadowOffset: number;
-  monospaced: boolean;
-  pattern: 0 | 1 | 2 | 3;
-};
-
-// `system` is the platform's own keyboard, which the page cannot read; it previews the design's iOS system keyboard tokens (dc.html `kbBg` / `keyBg` / `keySpec` / `keyFg` and the brand accent).
-const systemKeyboard: Record<"dark" | "light", Palette> = {
-  light: {
-    background: "#D1D4DB",
-    key: "#FFFFFF",
-    foreground: "#000000",
-    accent: "#2C7A4B",
-    action: "#ABB0BB",
-    actionForeground: "#000000",
-  },
-  dark: {
-    background: "#2B2B2D",
-    key: "#6B6B6E",
-    foreground: "#FFFFFF",
-    accent: "#5FBF84",
-    action: "#464648",
-    actionForeground: "#FFFFFF",
-  },
-};
-
-/** The keyboard look of a global theme: its catalog palette (function keys draw in `function_key`), or the system preview for `system`, `custom` without a design and unknown ids. */
-export function keyboardThemeLook(skin: string, theme: "dark" | "light"): KeyboardThemeLook {
-  const keyboard = themeEntry(skin).keyboard;
-  return {
-    palette: keyboard
-      ? {
-          background: keyboard.background,
-          key: keyboard.key,
-          foreground: keyboard.text,
-          accent: keyboard.accent,
-          action: keyboard.function_key,
-          actionForeground: keyboard.text,
-        }
-      : systemKeyboard[theme],
-    cornerRadius: 8,
-    borderWidth: 0,
-    shadowOpacity: 0,
-    shadowRadius: 3,
-    shadowOffset: 2,
-    monospaced: false,
-    pattern: 0,
-  };
-}
+import { readableKeyboardText } from "./keyboard-colors";
 
 // Layout source: MSIME-Windows@04a8df56f86312474a069f4335a1b58da7afaa9e,
 // server/src/keyboard-panel/KeyboardPanel.cpp (GPL-3.0). This preview has no input actions.
@@ -129,6 +68,8 @@ const thumbnailWidth = 390;
 const thumbnailHeight = 292;
 const thumbnailToolbarHeight = 50;
 const thumbnailInset = 3;
+/** 手机预览里一排键在默认键盘高度下的高度，单位约等于 vp。 */
+const phoneKeyHeight = 44;
 // 键盘工具栏上水杉标志之后的图标，以绘制它们的 24 单位方框为坐标：表情、常用语、剪贴板、皮肤和键盘，最后是收起箭头。
 const thumbnailToolbarGlyphs = [
   "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01",
@@ -139,7 +80,7 @@ const thumbnailToolbarGlyphs = [
   "m6 9 6 6 6-6",
 ];
 
-/** 缩略图的工具栏条：水杉标志用皮肤的强调色，其后的工具栏图标用它的按键文字色，每个占一个等宽列。 */
+/** 缩略图的工具栏条：水杉标志用皮肤的强调色，笔画按强调色取黑或白（强调色是白色时标志不至于变成一块白方块），其后的工具栏图标用它的按键文字色，每个占一个等宽列。 */
 function ThumbnailToolbar({ accent, foreground }: { accent: string; foreground: string }) {
   const column = (thumbnailWidth - thumbnailInset * 2) / (thumbnailToolbarGlyphs.length + 1);
   const centre = (index: number) => thumbnailInset + column * (index + 0.5);
@@ -151,7 +92,7 @@ function ThumbnailToolbar({ accent, foreground }: { accent: string; foreground: 
         <path
           d={msimeStrokePath}
           fill="none"
-          stroke="#FFFFFF"
+          stroke={readableKeyboardText(accent)}
           strokeWidth="9"
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -173,8 +114,20 @@ function ThumbnailToolbar({ accent, foreground }: { accent: string; foreground: 
   );
 }
 
+/** 宿主自己的屏幕键盘画成哪种：Android、iOS 和 HarmonyOS 的输入法在任何形态下都是触屏键盘（三排字母加一排功能键），桌面宿主是 Windows 式的屏幕键盘。设置页在根部按宿主提供（`screenKeyboardLayoutFor`），没写 `layout` 的预览就画这一种，手机上因此不会出现 Win、Alt、Caps Lock。 */
+export const ScreenKeyboardLayoutContext = createContext<"desktop" | "touch">("desktop");
+
+/** `platform` 宿主的屏幕键盘布局，供 `ScreenKeyboardLayoutContext` 使用。 */
+export function screenKeyboardLayoutFor(platform: string | undefined): "desktop" | "touch" {
+  return platform === "android" || platform === "ios" || platform === "harmony"
+    ? "touch"
+    : "desktop";
+}
+
 /**
  * 用皮肤配色画的键盘。`compact` 是小型装饰卡片的插图；`thumbnail` 是手机皮肤网格的卡片插图，即带工具栏的触屏键盘，画在设计的 390 × 292 画布上，填满容器宽度（圆角和描边由容器负责）。两者都对辅助技术隐藏，因为外面的卡片已带有名称。
+ *
+ * `phone` 是手机设置页「尺寸」卡片里的预览：和缩略图一样的外观（工具栏图标、圆角键、同样大小的字，画布 390 宽，约等于手机的 vp 宽度），但键距、行距按设置的 dp 画，键盘高度按「键盘高度」增减，拖动和滑块改的就是看到的样子。
  */
 export function ScreenKeyboardPreview({
   theme,
@@ -185,7 +138,9 @@ export function ScreenKeyboardPreview({
   keySpacingTenths = 60,
   rowSpacingTenths = 70,
   heightAdjustment = 0,
-  layout = "desktop",
+  layout,
+  touchRows,
+  phone = false,
 }: {
   theme: "dark" | "light";
   skin?: GlobalTheme;
@@ -195,33 +150,34 @@ export function ScreenKeyboardPreview({
   keySpacingTenths?: number;
   rowSpacingTenths?: number;
   heightAdjustment?: number;
+  /** 省略时取 `ScreenKeyboardLayoutContext`，即宿主自己的键盘。 */
   layout?: "desktop" | "touch";
+  /** 触屏键盘画哪几排键。省略时是通用的 26 键；HarmonyOS 的「尺寸」预览按当前的中文键盘传入（`harmonyTouchKeyboardRows`），切到 9 键或 14 键时预览跟着变。 */
+  touchRows?: PreviewKey[][];
+  /** 按手机键盘的比例和外观画，几何跟随设置，见上。 */
+  phone?: boolean;
 }) {
-  const touch = thumbnail || layout === "touch";
+  const hostLayout = useContext(ScreenKeyboardLayoutContext);
+  const touch = thumbnail || phone || (layout ?? hostLayout) === "touch";
+  // 缩略图和手机预览共用手机键盘的外观：工具栏图标、按键字号、390 宽的画布。
+  const phoneLook = thumbnail || phone;
   const decorative = compact || thumbnail;
-  const layoutRows = touch ? touchKeyboardRows : desktopKeyboardRows;
-  const custom = skin === "custom" && customDesign ? customDesign : undefined;
-  const option = keyboardThemeLook(skin, theme);
-  const palette = custom
-    ? {
-        background: skinColor(custom.background),
-        key: skinColor(custom.keyBackground),
-        foreground: skinColor(custom.keyForeground),
-        accent: skinColor(custom.accent),
-        action: skinColor(custom.actionBackground),
-        actionForeground: skinColor(readableSkinText(custom.actionBackground)),
-      }
-    : option.palette;
-  const cornerRadius = custom?.cornerRadius ?? (thumbnail ? 5 : option.cornerRadius);
-  const borderWidth = custom?.borderWidth ?? option.borderWidth;
-  const shadowOpacity = custom?.shadow ?? option.shadowOpacity;
-  const shadowRadius = custom ? 2 : option.shadowRadius;
-  const shadowOffset = custom ? 1 : option.shadowOffset;
-  const monospaced = custom?.monospaced ?? option.monospaced;
-  const pattern = custom?.pattern ?? option.pattern;
-  const keyShape = custom?.keyShape ?? "rounded";
-  const keyMaterial = custom?.keyMaterial ?? "flat";
-  const keyOpacity = custom?.keyOpacity ?? 1;
+  const layoutRows = touch ? (touchRows ?? touchKeyboardRows) : desktopKeyboardRows;
+  const look = resolveKeyboardSkinLook(theme, skin, customDesign);
+  const {
+    custom,
+    palette,
+    borderWidth,
+    shadowOpacity,
+    shadowRadius,
+    shadowOffset,
+    monospaced,
+    pattern,
+    keyShape,
+    keyMaterial,
+    keyOpacity,
+  } = look;
+  const cornerRadius = !custom && phoneLook ? 5 : look.cornerRadius;
   const unique = useId().replaceAll(":", "");
   const patternId = `touch-skin-pattern-${unique}`;
   const shadowId = `touch-skin-shadow-${unique}`;
@@ -230,21 +186,31 @@ export function ScreenKeyboardPreview({
   const actionMaterialId = `touch-skin-action-material-${unique}`;
   const keySpacing = clamp(keySpacingTenths / 10, 3, 6);
   const rowSpacing = clamp(rowSpacingTenths / 10, 4, 10);
-  const canvasWidth = thumbnail ? thumbnailWidth : 1100;
-  const canvasHeight = thumbnail ? thumbnailHeight : 400 + clamp(heightAdjustment, -12, 48);
-  const inset = thumbnail ? thumbnailInset : 7;
-  const rowsTop = thumbnail ? thumbnailToolbarHeight + 8 : 28;
-  // 默认插图保持逐字节等价，非默认的几何则明显跟随 iOS 键盘设置里的滑块。缩略图保留设计的固定几何，因为它展示的是皮肤而不是用户的键距。
-  const keyGap = thumbnail ? 6 : 4 + keySpacing - 6;
-  const rowGap = thumbnail ? 11 : 4 + rowSpacing - 7;
+  // 触屏键盘按手机竖屏的比例画：桌面画布 1100 宽时，每排十个键被拉成又扁又宽的长条，不像手机上的键盘；700 宽时单键约为宽 3 高 4 的竖长方形，与手机上的键接近。桌面键盘仍是 1100。
+  const canvasWidth = phoneLook ? thumbnailWidth : touch ? 700 : 1100;
+  const inset = phoneLook ? thumbnailInset : 7;
+  const rowsTop = phoneLook ? thumbnailToolbarHeight + 8 : 28;
+  // 默认插图保持逐字节等价，非默认的几何则明显跟随 iOS 键盘设置里的滑块。缩略图保留设计的固定几何，因为它展示的是皮肤而不是用户的键距。手机预览的画布约等于手机的 vp 宽度，键距和行距直接按 dp 画。
+  const keyGap = thumbnail ? 6 : phone ? keySpacing : 4 + keySpacing - 6;
+  const rowGap = thumbnail ? 11 : phone ? rowSpacing : 4 + rowSpacing - 7;
+  // 手机预览：每排键 44 高，「键盘高度」的增减摊到各排，底下留 8。
+  const phoneHeight =
+    rowsTop + layoutRows.length * phoneKeyHeight + rowGap * (layoutRows.length - 1) + 8;
+  const canvasHeight = thumbnail
+    ? thumbnailHeight
+    : phone
+      ? phoneHeight + clamp(heightAdjustment, -12, 48)
+      : 400 + clamp(heightAdjustment, -12, 48);
   const height = thumbnail
     ? 43
-    : (canvasHeight - 28 - 7 - rowGap * (layoutRows.length - 1)) / layoutRows.length;
-  const backgroundRadius = thumbnail ? 0 : 8;
+    : phone
+      ? (canvasHeight - rowsTop - 8 - rowGap * (layoutRows.length - 1)) / layoutRows.length
+      : (canvasHeight - 28 - 7 - rowGap * (layoutRows.length - 1)) / layoutRows.length;
+  const backgroundRadius = thumbnail ? 0 : phone ? 14 : 8;
   return (
     <svg
       className={
-        thumbnail ? "block h-auto w-full" : `screen-keyboard-artwork${compact ? " compact" : ""}`
+        phoneLook ? "block h-auto w-full" : `screen-keyboard-artwork${compact ? " compact" : ""}`
       }
       data-preview-theme={theme}
       data-preview-skin={skin}
@@ -341,7 +307,7 @@ export function ScreenKeyboardPreview({
           fill={`url(#${patternId})`}
         />
       )}
-      {thumbnail ? (
+      {phoneLook ? (
         <ThumbnailToolbar accent={palette.accent} foreground={palette.foreground} />
       ) : (
         <text x="10" y="14" dominantBaseline="middle" fontSize="12" fill={palette.accent}>
@@ -436,7 +402,7 @@ export function ScreenKeyboardPreview({
                     y={y + height / 2}
                     textAnchor="middle"
                     dominantBaseline="middle"
-                    fontSize={item.label.length === 1 ? (thumbnail ? 22 : 15) : thumbnail ? 15 : 12}
+                    fontSize={item.label.length === 1 ? (phoneLook ? 22 : 15) : phoneLook ? 15 : 12}
                     fill={action ? palette.actionForeground : palette.foreground}
                   >
                     {item.label}

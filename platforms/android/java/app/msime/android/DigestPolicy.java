@@ -15,6 +15,9 @@ public final class DigestPolicy {
 
     /** Return a file's SHA-256 digest as lowercase hexadecimal. */
     public static String sha256Hex(Path file) throws IOException {
+        if (file == null || !Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)
+                || !SafePaths.isSingleLink(file))
+            throw new IOException("digest input is not a private regular file");
         MessageDigest digest;
         try {
             digest = MessageDigest.getInstance("SHA-256");

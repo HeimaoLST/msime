@@ -19,7 +19,7 @@ public final class GlideTrailView extends View {
         paint.setStrokeJoin(Paint.Join.ROUND);
         setClickable(false);
         setFocusable(false);
-        setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+        ViewPolicy.setImportantForAccessibility(this, IMPORTANT_FOR_ACCESSIBILITY_NO);
     }
 
     /** 开始一条新轨迹，(x, y) 是这个视图自己的坐标。 */

@@ -11,6 +11,7 @@ final class MacSnapshotModel: ObservableObject {
   @Published var message: String?
   private var expectedRevision: Int64?
   private let accountID: String
+  private var sessionID: UUID?
   private let client: BackendAccountClient
   private let account: BackendAccountSession
   private var pending: Task<Void, Never>?
@@ -20,17 +21,27 @@ final class MacSnapshotModel: ObservableObject {
     self.accountID = accountID; self.client = client; self.account = account
   }
   private func authorize() async throws -> String {
-    let identity = try await account.credentials(matchingUserID: accountID)
+    let identity = try await account.credentials(matchingUserID: accountID, matchingSessionID: sessionID)
     try Task.checkCancellation()
     guard !closed, identity.userID == accountID else { throw CancellationError() }
+    sessionID = identity.sessionID
     return identity.token
   }
-  private func run(_ action: @escaping @MainActor (String) async throws -> Void) {
+  private func run(_ action: @escaping @MainActor @Sendable (String) async throws -> Void) {
     guard !busy, !closed else { return }
     busy = true; message = nil
     pending = Task {
       defer { busy = false }
-      do { try await action(try await authorize()) }
+      do {
+        let identity = try await account.credentials(matchingUserID: accountID, matchingSessionID: sessionID)
+        try Task.checkCancellation()
+        guard !closed else { throw CancellationError() }
+        sessionID = identity.sessionID
+        _ = try await account.authenticated(matchingUserID: identity.userID,
+                                            matchingSessionID: identity.sessionID) { token in
+          try await action(token)
+        }.value
+      }
       catch is CancellationError { discard() }
       catch { if !Task.isCancelled { message = error.localizedDescription } }
     }

@@ -59,11 +59,12 @@ pub trait AccountApi: Send + Sync + 'static {
         Err(AccountError::Unavailable)
     }
 
-    fn clipboard(
+    /// 发出云剪贴板驱动要求的一个请求（`docs/cloud-clipboard-e2e.md` 的「客户端驱动」），带上登录凭据。服务端的任何响应，包括非 2xx，都原样交回状态码和正文，由驱动解读；只有没拿到响应（断网、超时、超长）才是错误。
+    fn clipboard_e2e(
         &self,
-        _search: &str,
+        _request: &crate::cloud::clipboard_e2e::HttpRequest,
         _access_token: &str,
-    ) -> Result<AccountClipboardPage, AccountError> {
+    ) -> Result<crate::cloud::clipboard_e2e::HttpResponse, AccountError> {
         Err(AccountError::Unavailable)
     }
 
@@ -72,14 +73,6 @@ pub trait AccountApi: Send + Sync + 'static {
         _enabled: bool,
         _access_token: &str,
     ) -> Result<(), AccountError> {
-        Err(AccountError::Unavailable)
-    }
-
-    fn add_clipboard(
-        &self,
-        _text: &str,
-        _access_token: &str,
-    ) -> Result<AccountClipboardItem, AccountError> {
         Err(AccountError::Unavailable)
     }
 
@@ -267,6 +260,16 @@ pub trait AccountSessionStorage: Send + Sync + 'static {
     fn load(&self) -> Result<Option<SavedAccountSession>, AccountError>;
     fn save(&self, session: &SavedAccountSession) -> Result<(), AccountError>;
     fn clear(&self) -> Result<(), AccountError>;
+
+    /// 本机保存的云剪贴板密钥串（`cloud::clipboard_e2e::Keystore` 的编码，对宿主不透明），还没有时为 `None`。每台设备只有一份，与会话放在同一个安全存储里，[`Self::clear`] 时一起删除；位置见 `docs/cloud-clipboard-e2e.md` 的「密钥串的存放位置」。不提供它的存储用不了云剪贴板。
+    fn load_clipboard_keystore(&self) -> Result<Option<String>, AccountError> {
+        Err(AccountError::Storage)
+    }
+
+    /// 原子替换本机的云剪贴板密钥串。驱动每交回一个变化了的值就调用一次，在发出下一个请求之前。
+    fn save_clipboard_keystore(&self, _value: &str) -> Result<(), AccountError> {
+        Err(AccountError::Storage)
+    }
 
     /// Whether other processes read and write this store. The backend rotates the refresh token on every refresh and revokes the whole session when a used one is presented again, so a session that holds a shared store in memory would refresh from a token another process already spent. A shared store is therefore read on every access, and refreshed only under [`Self::with_refresh_lock`].
     fn shared_across_processes(&self) -> bool {

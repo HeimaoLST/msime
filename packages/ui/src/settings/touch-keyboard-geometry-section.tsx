@@ -1,12 +1,13 @@
 import type { ReactNode } from "react";
 import { SettingsGroupNote } from "./settings-group-note";
-import { Checks, GroupList, Row, Select, type SegmentedOption } from "../core/platform-controls";
+import { Checks, GroupList } from "../core/platform-controls";
 import { SliderRow } from "./slider-row";
 import { SwitchRow } from "./switch-row";
 import { ActionRow } from "./action-row";
 import { SettingsGroupBlock } from "./settings-group-block";
 import type { SwipeSymbolsDirection } from "./mobile-keyboard-feedback-section";
-import { SegmentedRow } from "./segmented-row";
+import { SelectRow } from "./select-row";
+import * as settings from "./settings-style";
 
 export type TouchToolbarPreferences = {
   layout: boolean;
@@ -61,8 +62,8 @@ export interface TouchKeyboardGeometrySectionProps {
   /** 「滑动输入符号」开关及其方向，在宿主键盘实现了它们时传入；不传则两行都不绘制。 */
   swipeSymbols?: boolean;
   swipeSymbolsDirection?: SwipeSymbolsDirection;
-  /** 宿主有触屏九宫格数字层时给出它的排列；没有时不画这一行。 */
-  numberKeypadOrder?: "phone" | "calculator";
+  /** 宿主的触屏 26 键双拼会在字母键底部画键位提示时给出这个开关；没有时不画这一行。 */
+  shuangpinKeyHints?: boolean;
   /** 键盘本机设置正在保存时为 true，「数字行与 Tab 键」「横屏分离式键盘」和「滑行输入」都暂不可点。 */
   tabletFullKeysBusy: boolean;
   onHeightAdjustmentChange: (value: number) => void;
@@ -75,18 +76,18 @@ export interface TouchKeyboardGeometrySectionProps {
   onGlideTypingChange: (enabled: boolean) => void;
   onSwipeSymbolsChange?: (enabled: boolean) => void;
   onSwipeSymbolsDirectionChange?: (direction: SwipeSymbolsDirection) => void;
-  onNumberKeypadOrderChange?: (value: "phone" | "calculator") => void;
+  onShuangpinKeyHintsChange?: (enabled: boolean) => void;
   onReset: () => void;
-  /** HarmonyOS 手机：放在尺寸组开头的行，此时该组按手机设计稿命名为「布局」。 */
+  /** HarmonyOS 手机：「布局」组开头的行。给出时按手机的排法：「布局」只放键盘的选择，「尺寸」把预览、三个滑块和「恢复默认」放进同一张卡片，各行不带长说明。 */
   layoutRows?: ReactNode;
-  /** HarmonyOS 手机：键盘预览，紧接尺寸组之后绘制，而不是像其他地方那样画在它上方。 */
+  /** HarmonyOS 手机：「尺寸」卡片顶部的键盘预览（不带分组），在它上面拖动调的就是下面的间距。 */
   preview?: ReactNode;
 }
 
-const NUMBER_KEYPAD_ORDERS: readonly SegmentedOption<"phone" | "calculator">[] = [
-  { value: "phone", label: "电话" },
-  { value: "calculator", label: "计算器" },
-];
+/** 间距以十分之一 dp 存，手机上显示成不带单位的数：6、6.5。 */
+const spacingText = (tenths: number) => String(tenths / 10);
+/** 高度调整以 dp 存，手机上 0 显示成「标准」，其余带正负号。 */
+const heightText = (value: number) => (value === 0 ? "标准" : `${value > 0 ? "+" : ""}${value}`);
 
 /** 「屏幕键盘」页共用的触屏键盘控件，即预览之后的各组：「尺寸」（高度、间距和重置）、「工具栏」，宿主有 iPad 数字行和 Tab 键或横屏分离式键盘时的「布局」，以及宿主有滑行输入时的「手势」。 */
 export function TouchKeyboardGeometrySection({
@@ -102,7 +103,7 @@ export function TouchKeyboardGeometrySection({
   glideTyping,
   swipeSymbols,
   swipeSymbolsDirection = "down",
-  numberKeypadOrder,
+  shuangpinKeyHints,
   tabletFullKeysBusy,
   onHeightAdjustmentChange,
   onKeySpacingChange,
@@ -114,74 +115,123 @@ export function TouchKeyboardGeometrySection({
   onGlideTypingChange,
   onSwipeSymbolsChange,
   onSwipeSymbolsDirectionChange,
-  onNumberKeypadOrderChange,
+  onShuangpinKeyHintsChange,
   onReset,
   layoutRows,
   preview,
 }: TouchKeyboardGeometrySectionProps) {
   const toolbarValues = { ...defaultTouchToolbar, ...toolbar };
   const showVoiceShortcut = voiceShortcutKind !== "hidden";
-  const numberKeypadRow = numberKeypadOrder !== undefined && (
-    <SegmentedRow
-      title="数字键盘顺序"
-      description="九宫格切到数字时的排列：电话把 1 2 3 放在最上面，计算器把 7 8 9 放在最上面。"
-      options={NUMBER_KEYPAD_ORDERS}
-      value={numberKeypadOrder}
-      onChange={(value) => onNumberKeypadOrderChange?.(value)}
+  // HarmonyOS 手机一屏只有约 360px 宽，每行挂两三行说明会把页面撑得又长又乱，所以那里的行只留标题和取值。
+  const phone = Boolean(layoutRows);
+  const shuangpinKeyHintsRow = shuangpinKeyHints !== undefined && (
+    <SwitchRow
+      title="双拼键位提示"
+      description={
+        phone
+          ? undefined
+          : "双拼方案的 26 键键盘在字母键底部显示这个键代表的声母和韵母；关闭后键面只留字母。"
+      }
+      checked={shuangpinKeyHints}
+      onChange={(enabled) => onShuangpinKeyHintsChange?.(enabled)}
     />
   );
-  // HarmonyOS 手机的尺寸组本身就叫「布局」，数字键盘顺序跟 Android 一样紧跟在「中文键盘」之后，不再另起一个同名分组。
-  const numberKeypadInLayoutRows = Boolean(layoutRows) && numberKeypadRow;
+  const resetDescription = showVoiceShortcut
+    ? "高度、间距、顶部语音入口和工具栏按钮回到默认"
+    : "高度、间距和工具栏按钮回到默认";
 
   return (
     <>
-      <GroupList title={layoutRows ? "布局" : "尺寸"}>
-        {layoutRows}
-        {numberKeypadInLayoutRows}
-        <SettingsGroupNote>
-          {layoutRows
-            ? `高度和间距只改变触屏键位的外观；也可以直接在${preview ? "下方" : "上方"}预览上左右拖动调节键距、上下拖动调节行距。`
-            : `只改变触屏键位的外观，不改变输入方案；也可以直接在${preview ? "下方" : "上方"}预览上左右拖动调节键距、上下拖动调节行距。`}
-        </SettingsGroupNote>
-        <SliderRow
-          title="键盘高度"
-          description={`${heightAdjustment > 0 ? "+" : ""}${heightAdjustment} dp`}
-          min={-12}
-          max={48}
-          value={heightAdjustment}
-          onChange={onHeightAdjustmentChange}
-        />
-        <SliderRow
-          title="按键间距"
-          description={`${(keySpacingTenths / 10).toFixed(1)} dp`}
-          min={30}
-          max={60}
-          value={keySpacingTenths}
-          onChange={onKeySpacingChange}
-        />
-        <SliderRow
-          title="行间距"
-          description={`${(rowSpacingTenths / 10).toFixed(1)} dp`}
-          min={40}
-          max={100}
-          value={rowSpacingTenths}
-          onChange={onRowSpacingChange}
-        />
-        {/* 重置一如既往也覆盖下面的「工具栏」组；它放在这里，也就是它所重置的第一组的末尾。 */}
-        <ActionRow
-          title="恢复默认"
-          description={
-            showVoiceShortcut
-              ? "高度、间距、顶部语音入口和工具栏按钮回到默认"
-              : "高度、间距和工具栏按钮回到默认"
-          }
-          action={onReset}
-          className="danger-text"
-          ariaLabel="恢复屏幕键盘默认设置"
-          label="恢复默认"
-        />
-      </GroupList>
-      {preview}
+      {phone ? (
+        <>
+          {/* 双拼键位提示跟 Android 一样紧跟在「中文键盘」之后。 */}
+          <GroupList title="布局">
+            {layoutRows}
+            {shuangpinKeyHintsRow}
+          </GroupList>
+          {/* 预览和它调的三个滑块在同一张卡片里；「恢复默认」是卡片末尾的一行文字按钮，它也照旧重置工具栏按钮。 */}
+          <GroupList title="尺寸">
+            {preview}
+            <SliderRow
+              title="键盘高度"
+              wide
+              displayValue={heightText(heightAdjustment)}
+              valueText={`${heightAdjustment} dp`}
+              min={-12}
+              max={48}
+              value={heightAdjustment}
+              onChange={onHeightAdjustmentChange}
+            />
+            <SliderRow
+              title="按键间距"
+              wide
+              displayValue={spacingText(keySpacingTenths)}
+              valueText={`${spacingText(keySpacingTenths)} dp`}
+              min={30}
+              max={60}
+              value={keySpacingTenths}
+              onChange={onKeySpacingChange}
+            />
+            <SliderRow
+              title="行间距"
+              wide
+              displayValue={spacingText(rowSpacingTenths)}
+              valueText={`${spacingText(rowSpacingTenths)} dp`}
+              min={40}
+              max={100}
+              value={rowSpacingTenths}
+              onChange={onRowSpacingChange}
+            />
+            <button
+              type="button"
+              className={settings.centeredDangerRow}
+              aria-label="恢复屏幕键盘默认设置"
+              onClick={() => void onReset()}
+            >
+              恢复默认
+            </button>
+          </GroupList>
+        </>
+      ) : (
+        <GroupList title="尺寸">
+          <SettingsGroupNote>
+            只改变触屏键位的外观，不改变输入方案；也可以直接在上方预览上左右拖动调节键距、上下拖动调节行距。
+          </SettingsGroupNote>
+          <SliderRow
+            title="键盘高度"
+            description={`${heightAdjustment > 0 ? "+" : ""}${heightAdjustment} dp`}
+            min={-12}
+            max={48}
+            value={heightAdjustment}
+            onChange={onHeightAdjustmentChange}
+          />
+          <SliderRow
+            title="按键间距"
+            description={`${(keySpacingTenths / 10).toFixed(1)} dp`}
+            min={30}
+            max={60}
+            value={keySpacingTenths}
+            onChange={onKeySpacingChange}
+          />
+          <SliderRow
+            title="行间距"
+            description={`${(rowSpacingTenths / 10).toFixed(1)} dp`}
+            min={40}
+            max={100}
+            value={rowSpacingTenths}
+            onChange={onRowSpacingChange}
+          />
+          {/* 重置一如既往也覆盖下面的「工具栏」组；它放在这里，也就是它所重置的第一组的末尾。 */}
+          <ActionRow
+            title="恢复默认"
+            description={resetDescription}
+            action={onReset}
+            className="danger-text"
+            ariaLabel="恢复屏幕键盘默认设置"
+            label="恢复默认"
+          />
+        </GroupList>
+      )}
       {(showVoiceShortcut || toolbarComponents) && (
         <GroupList title="工具栏">
           {showVoiceShortcut && (
@@ -220,9 +270,9 @@ export function TouchKeyboardGeometrySection({
       )}
       {(tabletFullKeys !== undefined ||
         tabletSplitKeyboard !== undefined ||
-        (numberKeypadOrder !== undefined && !layoutRows)) && (
+        (shuangpinKeyHints !== undefined && !phone)) && (
         <GroupList title="布局">
-          {!layoutRows && numberKeypadRow}
+          {!phone && shuangpinKeyHintsRow}
           {tabletFullKeys !== undefined && (
             <SwitchRow
               title="数字行与 Tab 键"
@@ -249,29 +299,36 @@ export function TouchKeyboardGeometrySection({
             <>
               <SwitchRow
                 title="滑动输入符号"
-                description="在字母键上滑动，输入角标符号；长按字母键始终可以输入"
+                description={
+                  phone
+                    ? "在字母键上滑动输入角标符号"
+                    : "在字母键上滑动，输入角标符号；长按字母键始终可以输入"
+                }
                 disabled={tabletFullKeysBusy}
                 checked={swipeSymbols}
                 onChange={(enabled) => onSwipeSymbolsChange?.(enabled)}
               />
-              <Row title="滑动方向">
-                <Select
-                  disabled={tabletFullKeysBusy || !swipeSymbols}
-                  value={swipeSymbolsDirection}
-                  onChange={(event) =>
-                    onSwipeSymbolsDirectionChange?.(event.target.value as SwipeSymbolsDirection)
-                  }
-                >
-                  <option value="down">下滑</option>
-                  <option value="up">上滑</option>
-                </Select>
-              </Row>
+              <SelectRow
+                title="滑动方向"
+                disabled={tabletFullKeysBusy || !swipeSymbols}
+                value={swipeSymbolsDirection}
+                onChange={(event) =>
+                  onSwipeSymbolsDirectionChange?.(event.target.value as SwipeSymbolsDirection)
+                }
+              >
+                <option value="down">下滑</option>
+                <option value="up">上滑</option>
+              </SelectRow>
             </>
           )}
           {glideTyping !== undefined && (
             <SwitchRow
               title="滑行输入"
-              description="在字母键上连续滑动输入拼音，停留可确认经过的键；只在全拼 26 键的字母面生效。"
+              description={
+                phone
+                  ? "只在全拼 26 键生效"
+                  : "在字母键上连续滑动输入拼音，停留可确认经过的键；只在全拼 26 键的字母面生效。"
+              }
               disabled={tabletFullKeysBusy}
               checked={glideTyping}
               onChange={onGlideTypingChange}

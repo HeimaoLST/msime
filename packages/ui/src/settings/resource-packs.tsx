@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorCode } from "../core/error-code";
+import { trackAsyncSubscription } from "../core/async-subscription";
 import { useAsyncGeneration } from "./use-async-generation";
 import { useMountedRef } from "./use-mounted-ref";
 import { ActionRow } from "./action-row";
@@ -124,6 +125,7 @@ export function useResourcePacks(
   activeClient.current = client;
   const statusesRef = useRef(statuses);
   statusesRef.current = statuses;
+  const refreshRequest = useRef(0);
   // 本页发起、尚未结束的下载；进度事件可能晚到，所以不能只看 progress 判断。
   const running = useRef(new Set<string>());
   const runningKey = (generation: number, id: ResourcePackId) => `${generation}:${id}`;
@@ -134,9 +136,10 @@ export function useResourcePacks(
     mounted.current && activeClient.current === expected && clientGeneration.current === generation;
 
   const refresh = useCallback(async (expected: ResourcePackClient, generation: number) => {
+    const request = ++refreshRequest.current;
     try {
       const next = await expected.list();
-      if (current(expected, generation)) setStatuses(next);
+      if (current(expected, generation) && request === refreshRequest.current) setStatuses(next);
     } catch {
       // 读不到列表时不提供下载入口，输入法照常按缺少资源降级。
     }
@@ -159,9 +162,8 @@ export function useResourcePacks(
     setErrors({});
     if (!client) return;
     void refresh(client, generation);
-    let unlisten: (() => void) | undefined;
-    void client
-      .onProgress((event) => {
+    return trackAsyncSubscription(
+      client.onProgress((event) => {
         if (!current(client, generation)) return;
         const id = event.id as ResourcePackId;
         // 启动时自动补齐的下载也会发进度；它结束时页面靠 done 事件重新读列表。
@@ -171,15 +173,9 @@ export function useResourcePacks(
           return;
         }
         setProgress((existing) => ({ ...existing, [id]: event }));
-      })
-      .then((stop) => {
-        if (generation !== clientGeneration.current) stop();
-        else unlisten = stop;
-      })
-      .catch(() => undefined);
-    return () => {
-      unlisten?.();
-    };
+      }),
+      () => generation === clientGeneration.current,
+    );
   }, [client, clientGeneration, refresh]);
 
   const install = (id: ResourcePackId) => {

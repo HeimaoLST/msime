@@ -1,6 +1,6 @@
 //! `EngineOptions` and its mapping onto `SessionOptions` (api-contract §2, bridge.cpp:306-407, 698-734).
 
-use std::fs::OpenOptions;
+use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,8 @@ use crate::types::{
     autocorrect_type, fuzzy_rule, CommandTableEntry, EnglishInputOptions, FrequencyAdjustmentMode,
     FrequencyAdjustmentOptions, FuzzyPinyinOptions, LocalModeOptions, MentionEntry,
     MixedExpressiveOptions, QuickPhraseEntry, SchemeSet, SchemeType, SentenceAssociationOptions,
-    ShuangpinProfileKind, WubiInputOptions, WubiProfileKind,
+    ShuangpinCustomTable, ShuangpinProfileKind, WubiInputOptions, WubiProfileKind,
+    DEFAULT_FIRST_PAGE_ROWS,
 };
 use crate::user_dictionary::generation::prepare_runtime_paths_for;
 use crate::vietnamese::{InputMethod as VietnameseInputMethod, ToneStyle as VietnameseToneStyle};
@@ -22,30 +23,30 @@ use crate::vietnamese::{InputMethod as VietnameseInputMethod, ToneStyle as Vietn
 const MAX_TRANSLATION_SIDECAR_BYTES: u64 = 1024 * 1024;
 
 pub(crate) fn write_private_file_no_follow(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut options = OpenOptions::new();
-    options.write(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    msime_path_trust::reject_symlinked_components(parent)?;
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            let file = crate::paths::open_file_no_follow(path)?;
+            if !crate::paths::has_single_link(&file)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "translation sidecar is not a single-link regular file",
+                ));
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    let mut file = options.open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || !crate::paths::has_single_link(&file)? {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "translation sidecar is not a single-link regular file",
-        ));
-    }
-    file.set_len(0)?;
-    file.write_all(bytes)?;
-    file.sync_all()
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".custom-translations-")
+        .tempfile_in(parent)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(path)
+        .map(|_| ())
+        .map_err(|error| error.error)
 }
 
 /// Every field is listed at every construction site; there is deliberately no `Default`.
@@ -59,8 +60,10 @@ pub struct EngineOptions {
     pub scheme: u8,
     /// 会话允许运行的方案，`prepare_options` 填 [`SchemeSet::ALL`]，`prepare_options_for` 填调用方给的集合。宿主按产品版本收窄它：`scheme` 不在其中时建会话失败（`INPUT_SCHEME_NOT_ENABLED`），不在其中的方案不构造 provider。
     pub enabled_schemes: SchemeSet,
-    /// 0 xiaohe, 1 ziranma, 2 shoudao, 3 microsoft. 双拼不在 `enabled_schemes` 里时不校验，不合法的值按小鹤处理。
+    /// 0 xiaohe, 1 ziranma, 2 shoudao, 3 microsoft, 4 custom（表在 `shuangpin_custom_profile`）。双拼不在 `enabled_schemes` 里时不校验，不合法的值按小鹤处理。
     pub shuangpin_profile: u8,
+    /// `shuangpin_profile` 为 4 时的键位表（`SessionOptions::shuangpin_custom_profile`）。双拼在 `enabled_schemes` 里时缺表或表不合法，建会话失败（`INVALID_CUSTOM_SHUANGPIN_PROFILE`）；宿主应先用 `validate_shuangpin_custom_profile` 校验，不合法就不要传 4。
+    pub shuangpin_custom_profile: Option<ShuangpinCustomTable>,
     pub shuangpin_preedit_uses_raw: bool,
     pub learning: bool,
     pub autocorrect_transposition: bool,
@@ -86,6 +89,8 @@ pub struct EngineOptions {
     pub english_minimum_prefix: u8,
     pub mixed_emoji: bool,
     pub mixed_kaomoji: bool,
+    /// 日文混输（实验，`SessionOptions::japanese_mixing`）。宿主只在会话带日文、日文模型在场时打开它。
+    pub mixed_japanese: bool,
     pub local_unicode: bool,
     pub local_date_time: bool,
     pub local_quick_phrase: bool,
@@ -100,6 +105,12 @@ pub struct EngineOptions {
     pub local_command: bool,
     /// `@`: `mention_entries`.
     pub local_mention: bool,
+    /// `C`：拆字反查。默认关；host-api 按宿主形态决定偏好缺省时的值。
+    pub local_chaizi: bool,
+    /// Shift+字母进入快捷模式的总开关（`LocalModeOptions::shift_letter_entry`）。
+    pub local_shift_letter_entry: bool,
+    /// 宿主会把候选转成繁体输出（`SessionOptions::chaizi_traditional_output`）。
+    pub chaizi_traditional_output: bool,
     /// The `/` mode's commands beyond the built-in ones. Rows the engine cannot use are dropped, and at most `local::command::TABLE_LIMIT` are kept.
     pub command_table: Vec<CommandTableEntry>,
     /// The `@` mode's names and places, the user's own list. Entries the engine cannot use are dropped, and at most `local::mention::LIST_LIMIT` are kept.
@@ -110,6 +121,8 @@ pub struct EngineOptions {
     pub rescoring_context: String,
     /// Ask for every whole-sentence reading; the runtime reorders and crops them.
     pub sentence_alternatives: bool,
+    /// 宿主的每页候选数（`SessionOptions::first_page_rows`）：全长组的精确同音词够这么多行就不再并入补全词。0 到请求里会归一成 1。
+    pub first_page_rows: usize,
     /// 只出单字（`SessionOptions::single_character_only`）。
     pub single_character_only: bool,
     /// 0 Telex, 1 VNI (`vietnamese::InputMethod`).
@@ -161,6 +174,7 @@ pub fn prepare_options_for(
         scheme: SchemeType::Quanpin as u8,
         enabled_schemes,
         shuangpin_profile: ShuangpinProfileKind::Xiaohe as u8,
+        shuangpin_custom_profile: None,
         shuangpin_preedit_uses_raw: true,
         single_character_only: false,
         learning: false,
@@ -183,6 +197,7 @@ pub fn prepare_options_for(
         english_minimum_prefix: 5,
         mixed_emoji: false,
         mixed_kaomoji: false,
+        mixed_japanese: false,
         local_unicode: true,
         local_date_time: true,
         local_quick_phrase: true,
@@ -194,12 +209,16 @@ pub fn prepare_options_for(
         local_expression: false,
         local_command: false,
         local_mention: false,
+        local_chaizi: false,
+        local_shift_letter_entry: true,
+        chaizi_traditional_output: false,
         command_table: Vec::new(),
         mention_entries: Vec::new(),
         quick_phrase_table: Vec::new(),
         sentence_association: SentenceAssociationOptions::default(),
         rescoring_context: String::new(),
         sentence_alternatives: false,
+        first_page_rows: DEFAULT_FIRST_PAGE_ROWS,
         vietnamese_input_method: VietnameseInputMethod::Telex as u8,
         vietnamese_tone_style: VietnameseToneStyle::Modern as u8,
         cantonese_dictionary: String::new(),
@@ -238,6 +257,7 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
     session.scheme = scheme;
     session.enabled_schemes = options.enabled_schemes;
     session.shuangpin_profile = shuangpin_profile;
+    session.shuangpin_custom_profile = options.shuangpin_custom_profile.clone();
     session.shuangpin_preedit_uses_raw = options.shuangpin_preedit_uses_raw;
     session.single_character_only = options.single_character_only;
     session.vietnamese_input_method = vietnamese_input_method;
@@ -274,6 +294,7 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
         emoji_candidates: options.mixed_emoji,
         kaomoji_candidates: options.mixed_kaomoji,
     };
+    session.japanese_mixing = options.mixed_japanese;
     session.local_modes = LocalModeOptions {
         unicode: options.local_unicode,
         date_time: options.local_date_time,
@@ -286,12 +307,16 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
         expression: options.local_expression,
         command: options.local_command,
         mention: options.local_mention,
+        chaizi: options.local_chaizi,
+        shift_letter_entry: options.local_shift_letter_entry,
     };
+    session.chaizi_traditional_output = options.chaizi_traditional_output;
     session.command_table = options.command_table.clone();
     session.mention_entries = options.mention_entries.clone();
     session.quick_phrase_table = options.quick_phrase_table.clone();
     session.sentence_alternatives = options.sentence_alternatives;
     session.sentence_association = options.sentence_association;
+    session.first_page_rows = options.first_page_rows;
     session.rescoring_context = options.rescoring_context.clone();
     // `personal_context` keeps its default: the bridge never exposed it (api-contract §1a).
     Ok(session)

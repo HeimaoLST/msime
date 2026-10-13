@@ -1,6 +1,10 @@
 package app.msime.android.home;
 
+import app.msime.android.ThemeColorPolicy;
+import app.msime.android.DimensionPolicy;
+
 import app.msime.android.KeyboardGeometry;
+import app.msime.android.DrawablePolicy;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -10,6 +14,7 @@ import android.util.AttributeSet;
 import android.view.View;
 import androidx.annotation.Nullable;
 import app.msime.android.BoundsPolicy;
+import app.msime.android.ColorPolicy;
 import app.msime.android.KeyboardSkin;
 import app.msime.android.ViewPolicy;
 
@@ -31,14 +36,14 @@ public final class KeyboardPreview extends View {
         {"，", "@#", "ABC", "DEF", "⌫"},
         {"。", "GHI", "JKL", "MNO", "重输"},
         {"？", "PQRS", "TUV", "WXYZ", "0"},
-        {"123", "中", "，", "空格", "。", "↵"},
+        {"123", "，", "空格", "。", "中", "↵"},
     };
-    /** 设计的全键盘：中文模式小写字母，底行 `123 | 中 | ， | 空格 | 。 | ↵`。 */
+    /** 设计的全键盘：中文模式小写字母，底行 `123 | ， | 空格 | 。 | 中 | ↵`。 */
     private static final String[][] FULL_ROWS = {
         {"q", "w", "e", "r", "t", "y", "u", "i", "o", "p"},
         {"a", "s", "d", "f", "g", "h", "j", "k", "l"},
         {"⇧", "z", "x", "c", "v", "b", "n", "m", "⌫"},
-        {"123", "中", "，", "空格", "。", "↵"},
+        {"123", "，", "空格", "。", "中", "↵"},
     };
     /** 画成功能键底色的键面。 */
     private static final java.util.Set<String> FUNCTION_KEYS = java.util.Set.of(
@@ -100,16 +105,16 @@ public final class KeyboardPreview extends View {
     }
 
     private void applyBackground() {
-        int radius = Ui.dp(getContext(), cornerRadiusDp);
-        int base = skin == null ? Ui.card(getContext()) : Ui.parseColor(skin.background(), Ui.card(getContext()));
-        android.graphics.drawable.GradientDrawable surface = Ui.rounded(base, radius);
+        int radius = DimensionPolicy.pixels(getContext(), cornerRadiusDp);
+        int base = skin == null ? ThemeColorPolicy.card(getContext()) : ColorPolicy.parse(skin.background(), ThemeColorPolicy.card(getContext()));
+        android.graphics.drawable.GradientDrawable surface = DrawablePolicy.rounded(base, radius);
         // 设计皮肤的底是一道渐变，和键盘本身一样画出来；只画纯色时，深色设计上的功能键和回车显得格外跳。
         String end = skin != null && skin.designed() ? skin.gradientEnd() : null;
         if (end != null && !end.isEmpty()) {
             surface.setOrientation(skin.gradientHorizontal()
                 ? android.graphics.drawable.GradientDrawable.Orientation.LEFT_RIGHT
                 : android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM);
-            surface.setColors(new int[] {base, Ui.parseColor(end, base)});
+            surface.setColors(new int[] {base, ColorPolicy.parse(end, base)});
         }
         setBackground(surface);
         setClipToOutline(true);
@@ -118,8 +123,7 @@ public final class KeyboardPreview extends View {
     /** 设计皮肤的字母键与功能键按其键帽不透明度叠在背景上，与键盘的 KeyboardSkinKeyDrawable 一致；回车不透明。 */
     private int withKeyOpacity(int colour) {
         if (skin == null || !skin.designed()) return colour;
-        float opacity = (float) KeyboardGeometry.bounded(skin.keyOpacity(), 0, 1);
-        return Ui.withAlpha(colour, opacity);
+        return ColorPolicy.withAlpha(colour, skin.keyOpacity());
     }
 
     private int ink() {
@@ -156,19 +160,19 @@ public final class KeyboardPreview extends View {
         if (colorsValid) return;
         Context context = getContext();
         if (skin == null) {
-            inkColor = Ui.text(context);
-            letterCapColor = Ui.page(context);
-            functionCapColor = Ui.accentSoft(context);
-            returnCapColor = Ui.accent(context);
-            returnLabelColor = Ui.onAccent(context);
-            secondaryColor = Ui.subText(context);
+            inkColor = ThemeColorPolicy.text(context);
+            letterCapColor = ThemeColorPolicy.page(context);
+            functionCapColor = ThemeColorPolicy.accentSoft(context);
+            returnCapColor = ThemeColorPolicy.accent(context);
+            returnLabelColor = ThemeColorPolicy.onAccent(context);
+            secondaryColor = ThemeColorPolicy.subText(context);
         } else {
-            letterCapColor = Ui.parseColor(skin.keyBackground(), Color.WHITE);
-            inkColor = Ui.parseColor(skin.keyForeground(), Ui.text(context));
-            functionCapColor = Ui.parseColor(skin.functionBackground(), letterCapColor);
-            returnCapColor = Ui.parseColor(skin.returnBackground(), Ui.accent(context));
-            returnLabelColor = Ui.parseColor(skin.returnForeground(), Color.WHITE);
-            secondaryColor = Ui.parseColor(skin.secondary(), Ui.subText(context));
+            letterCapColor = ColorPolicy.parse(skin.keyBackground(), Color.WHITE);
+            inkColor = ColorPolicy.parse(skin.keyForeground(), ThemeColorPolicy.text(context));
+            functionCapColor = ColorPolicy.parse(skin.functionBackground(), letterCapColor);
+            returnCapColor = ColorPolicy.parse(skin.returnBackground(), ThemeColorPolicy.accent(context));
+            returnLabelColor = ColorPolicy.parse(skin.returnForeground(), Color.WHITE);
+            secondaryColor = ColorPolicy.parse(skin.secondary(), ThemeColorPolicy.subText(context));
         }
         colorsValid = true;
     }
@@ -202,46 +206,48 @@ public final class KeyboardPreview extends View {
      * 边距、键距、候选条和字号是按设置首页那张整宽预览定的；社区皮肤卡上的缩略图只有约 170×106 dp，原样套用这些固定值时每行只剩几 dp 高，键面缩成细条而 13 dp 的字溢出到键外。以参考键盘为基准整体缩小；整宽预览不小于参考尺寸，系数为 1，外观不变。
      */
     private float scale() {
-        return BoundsPolicy.atMost(KeyboardGeometry.shorterSide(
-            getWidth() / Ui.dpFloat(getContext(), REFERENCE_WIDTH_DP),
-            getHeight() / Ui.dpFloat(getContext(), REFERENCE_HEIGHT_DP)), 1f);
+        return BoundsPolicy.atMost(DimensionPolicy.shorterSide(
+            getWidth() / DimensionPolicy.floatPixels(getContext(), REFERENCE_WIDTH_DP),
+            getHeight() / DimensionPolicy.floatPixels(getContext(), REFERENCE_HEIGHT_DP)), 1f);
     }
 
     /** 字号取设计值与键面能容下的较小者，保证标签不出键。 */
     private void fitText(String label, float designSize, RectF bounds) {
         float size = BoundsPolicy.atMost(designSize, bounds.height() * 0.62f);
-        paint.setTextSize(size);
+        ViewPolicy.setTextSize(paint, size);
         float limit = bounds.width() * 0.86f;
         float measured = paint.measureText(label);
-        if (measured > limit && measured > 0f) paint.setTextSize(size * limit / measured);
+        if (measured > limit && measured > 0f) {
+            ViewPolicy.setTextSize(paint, size * limit / measured);
+        }
     }
 
     @Override protected void onDraw(Canvas canvas) {
         if (getWidth() <= 0 || getHeight() <= 0) return;
         float s = scale();
         // 缩小时按参考键盘的宽高比等比画，居中放进视图，空出的边露出皮肤底色；只缩不拉，键面不会被卡片的扁长比例压扁。整宽预览（s 为 1）仍铺满视图。
-        float w = s < 1f ? Ui.dpFloat(getContext(), REFERENCE_WIDTH_DP) * s : getWidth();
-        float h = s < 1f ? Ui.dpFloat(getContext(), REFERENCE_HEIGHT_DP) * s : getHeight();
+        float w = s < 1f ? DimensionPolicy.floatPixels(getContext(), REFERENCE_WIDTH_DP) * s : getWidth();
+        float h = s < 1f ? DimensionPolicy.floatPixels(getContext(), REFERENCE_HEIGHT_DP) * s : getHeight();
         int saved = canvas.save();
         canvas.translate((getWidth() - w) / 2f, (getHeight() - h) / 2f);
-        float pad = Ui.dpFloat(getContext(), 6) * s;
-        float gap = Ui.dpFloat(getContext(), 5) * s;
-        float stripHeight = Ui.dpFloat(getContext(), 24) * s;
-        float radius = (skin == null ? Ui.dpFloat(getContext(), 6)
-            : BoundsPolicy.atMost(Ui.dpFloat(getContext(), (float) skin.cornerRadius()),
-                Ui.dpFloat(getContext(), 12))) * s;
+        float pad = DimensionPolicy.floatPixels(getContext(), 6) * s;
+        float gap = DimensionPolicy.floatPixels(getContext(), 5) * s;
+        float stripHeight = DimensionPolicy.floatPixels(getContext(), 24) * s;
+        float radius = (skin == null ? DimensionPolicy.floatPixels(getContext(), 6)
+            : BoundsPolicy.atMost(DimensionPolicy.floatPixels(getContext(), (float) skin.cornerRadius()),
+                DimensionPolicy.floatPixels(getContext(), 12))) * s;
 
         // 候选条：一个拼音和两枚候选，首选用强调色。
         float baseline = pad + stripHeight * 0.68f;
         paint.setTextAlign(Paint.Align.LEFT);
         ViewPolicy.setTextSizeSp(paint, getContext(), 12 * s);
         paint.setColor(secondary());
-        canvas.drawText("ni hao", pad + Ui.dpFloat(getContext(), 6) * s, baseline, paint);
+        canvas.drawText("ni hao", pad + DimensionPolicy.floatPixels(getContext(), 6) * s, baseline, paint);
         ViewPolicy.setTextSizeSp(paint, getContext(), 13 * s);
         paint.setColor(returnCap());
-        canvas.drawText("你好", pad + Ui.dpFloat(getContext(), 52) * s, baseline, paint);
+        canvas.drawText("你好", pad + DimensionPolicy.floatPixels(getContext(), 52) * s, baseline, paint);
         paint.setColor(ink());
-        canvas.drawText("拟好", pad + Ui.dpFloat(getContext(), 90) * s, baseline, paint);
+        canvas.drawText("拟好", pad + DimensionPolicy.floatPixels(getContext(), 90) * s, baseline, paint);
 
         float top = pad + stripHeight;
         float available = h - top - pad;
@@ -275,7 +281,7 @@ public final class KeyboardPreview extends View {
                 String label = "空格".equals(face) ? caption : face;
                 if (!label.isEmpty()) {
                     paint.setColor(action ? returnLabel() : "空格".equals(face) ? secondary() : ink());
-                    fitText(label, Ui.dpFloat(getContext(), label.length() > 2 ? 10 : 13) * s, key);
+                    fitText(label, DimensionPolicy.floatPixels(getContext(), label.length() > 2 ? 10 : 13) * s, key);
                     Paint.FontMetrics metrics = paint.getFontMetrics();
                     canvas.drawText(label, key.centerX(), key.centerY() - (metrics.ascent + metrics.descent) / 2f, paint);
                 }

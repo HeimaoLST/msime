@@ -13,6 +13,6 @@ public final class StrokeInputPolicy {
 
     /** Whether the Engine's stroke editor takes the keys and its reading is what the editor marks: the Stroke scheme outside dedicated English. Stroke has no local modes. */
     public static boolean active(int scheme, boolean dedicatedEnglish) {
-        return scheme == STROKE_SCHEME && !dedicatedEnglish;
+        return InputSchemeTraits.active(scheme, STROKE_SCHEME, dedicatedEnglish);
     }
 }

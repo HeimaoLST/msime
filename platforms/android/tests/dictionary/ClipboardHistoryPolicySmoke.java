@@ -1,5 +1,5 @@
 import app.msime.android.ClipboardHistoryPolicy;
-import app.msime.android.ClipboardHistoryStore;
+import app.msime.android.JsonPolicy;
 
 public final class ClipboardHistoryPolicySmoke {
     static void check(boolean condition, String message) {
@@ -7,17 +7,6 @@ public final class ClipboardHistoryPolicySmoke {
     }
 
     public static void main(String[] args) {
-        try {
-            java.lang.reflect.Method strictBoolean = ClipboardHistoryStore.class.getDeclaredMethod(
-                "strictBoolean", Object.class);
-            strictBoolean.setAccessible(true);
-            check(Boolean.TRUE.equals(strictBoolean.invoke(null, Boolean.TRUE)),
-                "clipboard responses accept JSON booleans");
-            check(strictBoolean.invoke(null, "true") == null,
-                "clipboard responses reject boolean strings instead of coercing them");
-        } catch (ReflectiveOperationException error) {
-            throw new AssertionError("clipboard response type policy missing", error);
-        }
         // This file used to assert that MAX_CHARS and MAX_BYTES matched the shared crate's numbers,
         // and they did. The divergence was in the unit: the shared store counts graphemes and this
         // host counted UTF-16 code units, so six thousand emoji were refused here and accepted
@@ -60,18 +49,59 @@ public final class ClipboardHistoryPolicySmoke {
             "boolean timestamp is rejected");
         check(ClipboardHistoryPolicy.timestampValue(Long.valueOf(-1)) == 0,
             "negative timestamp is rejected");
-        check("synthetic".equals(ClipboardHistoryPolicy.strictString("synthetic")),
+        check("synthetic".equals(JsonPolicy.strictString("synthetic")),
             "clipboard text accepts JSON strings");
-        check(ClipboardHistoryPolicy.strictString(Integer.valueOf(7)) == null,
+        check(JsonPolicy.strictString(Integer.valueOf(7)) == null,
             "clipboard text rejects numbers instead of coercing them");
-        check(Boolean.TRUE.equals(ClipboardHistoryPolicy.strictBoolean(Boolean.TRUE)),
+        check(Boolean.TRUE.equals(JsonPolicy.strictBoolean(Boolean.TRUE)),
             "clipboard pinning accepts JSON booleans");
-        check(ClipboardHistoryPolicy.strictBoolean("true") == null,
+        check(JsonPolicy.strictBoolean("true") == null,
             "clipboard pinning rejects strings instead of coercing them");
         try {
             ClipboardHistoryPolicy.message(null);
             throw new AssertionError("there is no message for \"accepted\"");
         } catch (IllegalArgumentException expected) { /* expected */ }
+
+        // #5971：在应用里编辑一条历史。
+        check(ClipboardHistoryPolicy.editRejection("not_found") == ClipboardHistoryPolicy.EditResult.NOT_FOUND,
+            "an entry removed elsewhere is reported as gone");
+        check(ClipboardHistoryPolicy.editRejection("invalid") == ClipboardHistoryPolicy.EditResult.INVALID,
+            "invalid new text is reported as unsavable");
+        check(ClipboardHistoryPolicy.editRejection("") == ClipboardHistoryPolicy.EditResult.INVALID,
+            "an unknown refusal is still a refusal the user can act on");
+        check("已保存".equals(ClipboardHistoryPolicy.editMessage(ClipboardHistoryPolicy.EditResult.SAVED)), "a saved edit");
+        check(ClipboardHistoryPolicy.editMessage(ClipboardHistoryPolicy.EditResult.MERGED).contains("合并"),
+            "a merge is named, so the missing entry is not a surprise");
+        check(ClipboardHistoryPolicy.editMessage(ClipboardHistoryPolicy.EditResult.NOT_FOUND).contains("不在"),
+            "a vanished entry is named rather than failing silently");
+        check(ClipboardHistoryPolicy.editMessage(ClipboardHistoryPolicy.EditResult.INVALID)
+                .equals(ClipboardHistoryPolicy.message(ClipboardHistoryPolicy.Rejection.TOO_LONG)),
+            "unsavable text uses the capture wording");
+        try {
+            ClipboardHistoryPolicy.editMessage(null);
+            throw new AssertionError("there is no message for no result");
+        } catch (IllegalArgumentException expected) { /* expected */ }
+        String key = ClipboardHistoryPolicy.editKey(1_760_000_000_000L, "synthetic entry");
+        check(key.equals(ClipboardHistoryPolicy.editKey(1_760_000_000_000L, "synthetic entry")), "the key is stable");
+        check(!key.contains("synthetic"), "the key carries no text");
+        check(!key.equals(ClipboardHistoryPolicy.editKey(1_760_000_000_001L, "synthetic entry")), "the timestamp counts");
+        check(!key.equals(ClipboardHistoryPolicy.editKey(1_760_000_000_000L, "synthetic entry.")), "the text counts");
+        String longest = ClipboardHistoryPolicy.editKey(Long.MAX_VALUE, "家".repeat(10_000));
+        check(longest.length() <= app.msime.android.HostDeepLink.MAX_STRING_ARG,
+            "the key fits a deep link argument however long the entry is");
+        check(app.msime.android.HostDeepLink.isAllowedArgKey(ClipboardHistoryPolicy.EDIT_ENTRY_ARG),
+            "the argument name survives the deep link filter");
+        check(app.msime.android.HostDeepLink.isAllowedArgKey(ClipboardHistoryPolicy.RETURN_TO_CALLER_ARG),
+            "the return argument survives the deep link filter");
+        // #5973：在别的应用的输入框里打开就回到那个应用；在水杉自己的输入框里打开时不能把水杉送到后台。
+        check(ClipboardHistoryPolicy.returnsToCaller("com.example.synthetic", "app.msime.android"),
+            "another app's field returns to that app");
+        check(!ClipboardHistoryPolicy.returnsToCaller("app.msime.android", "app.msime.android"),
+            "the app's own field stays in the app");
+        check(ClipboardHistoryPolicy.returnsToCaller(null, "app.msime.android"),
+            "an unknown field keeps the old return");
+        check(ClipboardHistoryPolicy.EDIT_PAGE.equals(app.msime.android.HostDeepLink.pageName(ClipboardHistoryPolicy.EDIT_PAGE)),
+            "the page name survives the deep link filter");
         System.out.println("Android clipboard history: policy, dedupe, pinning, removal and bounds passed");
     }
 }

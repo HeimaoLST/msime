@@ -42,13 +42,9 @@ struct KeyboardSettingsView: View {
 
 /// 输入页：语言与方案、中文选项、辅助码、候选翻译和其余输入开关，对应 Android 的 `TypingPage`。
 ///
-/// 除了五笔的几个开关和「沿用上次的中英文」由键盘从 App Group 读取，这里其余各项都以共享偏好文档为准。每个控件都写这份文档，页面每次写完都重新读回，免得显示一个键盘其实没有的设置。
+/// 各项都以共享偏好文档为准，页面每次写完都重新读回，免得显示一个键盘其实没有的设置。只有「沿用上次的中英文」是例外，它由键盘从 App Group 的 `ImeModeMemoryPreference` 读取。
 struct InputSettingsView: View {
-  @Environment(\.scenePhase) private var scenePhase
-  @AppStorage(WubiMixedPinyinPreference.enabledKey, store: WubiMixedPinyinPreference.defaults)
-  private var wubiMixedPinyin = MSIMEAppEdition.wubiMixedPinyinDefault
-  @AppStorage(WubiCodeHintPreference.enabledKey, store: WubiCodeHintPreference.defaults)
-  private var wubiCodeHint = true
+  @ObservedObject private var resourcePacks = IOSResourcePackStore.shared
   /// 最近一次读到的共享文档；拼音纠错和辅助码两行直接读它。
   @State private var document: [String: Any]?
   @State private var inputScheme = InputSchemePreference.scheme
@@ -59,6 +55,11 @@ struct InputSettingsView: View {
   @State private var habits = InputHabitPreference.mirrored
   @State private var startsInEnglish = false
   @State private var remembersImeMode = false
+  @State private var wubiAutoCommitUnique = true
+  @State private var wubiMixedPinyin = MSIMEAppEdition.wubiMixedPinyinDefault
+  @State private var wubiCodeHint = true
+  /// 用户导入的辅助码表（#7176），列在「辅助码方案」的内置方案之后。
+  @State private var helpcodePacks: [HelpcodeChoicePolicy.Pack] = []
   @State private var addingLanguage = false
   @State private var failedGroup: PageGroup?
 
@@ -71,11 +72,10 @@ struct InputSettingsView: View {
     case remove
   }
 
-  private static let saveFailure = "设置没有保存，键盘可能正在写入同一份设置，请再试一次。"
 
-  /// 页面可以提供的方案：本版本的全部条目，键盘扩展没带粤拼、注音、笔画的词库时去掉这几项，因为键盘那边也会把它们藏起来。
+  /// 设置始终提供本版本的方案；缺失词库在用户添加时下载，键盘只显示已可用的方案。
   private static let availableSchemes = ChineseInputScheme.allCases.filter(\.isOfferedByEdition)
-    .filter { !$0.needsLanguageDictionary || InputLanguage.installedDictionarySchemes.contains($0) }
+
 
   var body: some View {
     ScrollView {
@@ -90,17 +90,39 @@ struct InputSettingsView: View {
       .padding(.top, 16)
       .padding(.bottom, 32)
     }
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .navigationTitle("输入")
     .navigationBarTitleDisplayMode(.inline)
-    .onAppear(perform: reloadPreferences)
-    .onChange(of: scenePhase) { _, phase in
-      if phase == .active { reloadPreferences() }
+    .reloadOnAppearAndActive({
+      resourcePacks.reload()
+      reloadPreferences()
+      reloadHelpcodePacks()
+    }, onAppear: {
+      // 真机下载验收期间仅保持当前设置页面亮屏。
+      if ProcessInfo.processInfo.arguments.contains("--resource-pack-ui-test") { UIApplication.shared.isIdleTimerDisabled = true }
+    })
+    .onDisappear {
+      if ProcessInfo.processInfo.arguments.contains("--resource-pack-ui-test") { UIApplication.shared.isIdleTimerDisabled = false }
+    }
+    .alert("下载词库", isPresented: Binding(
+      get: { resourcePacks.meteredRequest != nil },
+      set: { if !$0 { resourcePacks.meteredRequest = nil } }), presenting: resourcePacks.meteredRequest) { id in
+        Button("下载") { resourcePacks.start(id) }
+        Button("取消", role: .cancel) { resourcePacks.meteredRequest = nil }
+      } message: { id in
+        Text("当前网络按流量计费或开启了低数据模式，词库大小约 \(resourcePacks.size(id))。是否继续？")
+      }
+  }
+
+  /// 已导入的辅助码表只在页面出现时重读：目录会校验每个包的码表，不跟着每次写设置重读。从「更多辅助码设置」导入或删除后回到本页时会再出现一次。
+  private func reloadHelpcodePacks() {
+    Task { @MainActor in
+      helpcodePacks = await Task.detached(priority: .userInitiated) { HelpcodeSettingsView.installedPacks() }.value
     }
   }
 
   private func footer(_ group: PageGroup) -> String? {
-    failedGroup == group ? Self.saveFailure : nil
+    failedGroup == group ? SettingsSaveFailure.message : nil
   }
 
   // MARK: - 语言与方案
@@ -138,13 +160,21 @@ struct InputSettingsView: View {
     ForEach(Array(languages.enumerated()), id: \.element) { index, language in
       if index > 0 { DesignDivider(leading: 58) }
       let shown = shownScheme(language)
-      InputLanguageRow(language: language, value: shown?.shortLabel, options: options(for: language),
+      let pack = shown.flatMap(IOSResourcePacks.requiredPack)
+      InputLanguageRow(language: language, value: pack.map { resourcePacks.available($0) ? (shown?.shortLabel ?? "") : resourcePacks.describe($0) } ?? shown?.shortLabel, options: options(for: language),
                        selected: selectedChoice(in: language)) { choose($0, in: language) }
+      if language == .mandarin && available(language).contains(where: \.needsLanguageDictionary) && !resourcePacks.available("language-dictionaries") {
+        packDownloadRow("language-dictionaries", title: "粤拼、注音和笔画词库")
+      } else if let pack, !resourcePacks.available(pack) {
+        packDownloadRow(pack, title: "\(language.name)词库")
+      }
     }
     if addingLanguage {
       ForEach(addable) { language in
         DesignDivider(leading: 0)
-        AddableLanguageRow(language: language) { add(language) }
+        AddableLanguageRow(language: language, detail: available(language).first.flatMap(IOSResourcePacks.requiredPack).map {
+          resourcePacks.available($0) ? "添加" : "添加并下载 \(resourcePacks.size($0))"
+        } ?? "添加") { add(language) }
       }
     }
     if !addable.isEmpty {
@@ -232,7 +262,13 @@ struct InputSettingsView: View {
     switch choice {
     case .scheme(let scheme):
       // 方案尚未启用时，`select` 在同一次写入里顺带启用它。
-      record(InputSchemePreference.select(scheme), .languages)
+      if let pack = IOSResourcePacks.requiredPack(for: scheme), !resourcePacks.available(pack) {
+        let saved = InputSchemePreference.setEnabled(scheme, true)
+        record(saved, .languages)
+        if saved { resourcePacks.request(pack) }
+      } else {
+        record(InputSchemePreference.select(scheme), .languages)
+      }
     case .wubi(let profile):
       record(WubiProfilePreference.save(profile) && InputSchemePreference.select(.wubi), .languages)
     case .remove:
@@ -246,7 +282,9 @@ struct InputSettingsView: View {
     var refused = false
     let written = InputSchemePreference.update { selection in
       let remaining = selection.enabled.filter { !language.schemes.contains($0) }
-      let runnable = remaining.filter(Self.availableSchemes.contains)
+      let runnable = remaining.filter { scheme in
+        Self.availableSchemes.contains(scheme) && (IOSResourcePacks.requiredPack(for: scheme).map(resourcePacks.available) ?? true)
+      }
       guard let fallback = runnable.contains(.quanpin) ? ChineseInputScheme.quanpin : runnable.first else {
         refused = true
         return
@@ -266,8 +304,31 @@ struct InputSettingsView: View {
     guard let first = available(language).first else { return }
     let saved = InputSchemePreference.setEnabled(first, true)
     record(saved, .languages)
-    if saved { ToastCenter.shared.show("已添加\(language.name)") }
+    if saved {
+      if let pack = IOSResourcePacks.requiredPack(for: first), !resourcePacks.available(pack) { resourcePacks.request(pack) }
+      else { ToastCenter.shared.show("已添加\(language.name)") }
+    }
     reloadPreferences()
+  }
+
+  private func packDownloadRow(_ id: String, title: String) -> some View {
+    Button {
+      if resourcePacks.statuses[id]?.running == true { resourcePacks.cancel(id) }
+      else { resourcePacks.request(id) }
+    } label: {
+      HStack {
+        VStack(alignment: .leading, spacing: 4) {
+          Text(title).foregroundStyle(.primary)
+          Text(resourcePacks.describe(id)).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+        }
+        Spacer()
+        Text(resourcePacks.statuses[id]?.running == true ? "取消" : "下载").foregroundStyle(MetasequoiaTheme.accent)
+      }
+      .padding(.horizontal, 16).frame(maxWidth: .infinity, minHeight: 52)
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(PressFillButtonStyle())
+    .accessibilityIdentifier("downloadResourcePack_\(id)")
   }
 
   // MARK: - 中文
@@ -324,15 +385,20 @@ struct InputSettingsView: View {
   private var helpcodeGroup: some View {
     let family = HelpcodeSettingsView.family(of: inputScheme)
     let schema = HelpcodeSettingsView.schema(of: family, in: document)
+    let pack = HelpcodeChoicePolicy.selectedPack(of: family, in: document)
+    let selected = HelpcodeChoicePolicy.selectedValue(schema: schema, selectedPack: pack)
     var options = HelpcodeSettingsView.schemas.map { DesignOption(title: $0.1, value: $0.0) }
     // 引擎认识但这份列表里没有的用户码表，仍按它的 id 显示。
     if !options.contains(where: { $0.value == schema }) { options.append(DesignOption(title: schema, value: schema)) }
+    // 导入的码表排在内置方案之后，选中的包不在了时显示「未找到」，规则与「更多辅助码设置」相同。
+    options += HelpcodeChoicePolicy.packOptions(helpcodePacks, selectedPack: pack)
+      .map { DesignOption(title: $0.label, value: $0.value) }
     return DesignGroup(title: "辅助码", footer: footer(.helpcode)) {
       DesignSelectRow(title: "辅助码方案", subtitle: family.label, options: options,
-                      selection: Binding(get: { schema }, set: { value in
-                        guard value != schema else { return }
+                      selection: Binding(get: { selected }, set: { value in
+                        guard value != selected else { return }
                         record(MetasequoiaInputSessionBridge.updateSharedPreferences {
-                          HelpcodeSettingsView.merge("schema", value, into: family, document: &$0)
+                          HelpcodeChoicePolicy.choose(value, for: family, document: &$0)
                         }, .helpcode)
                         reloadPreferences()
                       }),
@@ -393,11 +459,41 @@ struct InputSettingsView: View {
   private var moreGroup: some View {
     DesignGroup(title: "更多", footer: footer(.more)) {
       if enabledSchemes.contains(.wubi) {
-        DesignToggleRow(title: "编码打不出时用拼音候选", subtitle: "五笔词库答不上时用同一串字母查全拼", isOn: $wubiMixedPinyin)
+        DesignToggleRow(title: "五笔拼音混输", subtitle: "五笔候选之后接着列出同一串字母的全拼候选，五笔编码打不出时直接出拼音候选",
+                        isOn: Binding(get: { wubiMixedPinyin }, set: { enabled in
+                          wubiMixedPinyin = enabled
+                          record(MetasequoiaInputSessionBridge.updateSharedPreferences {
+                            $0["wubi_mixed_pinyin"] = enabled
+                          }, .more)
+                          reloadPreferences()
+                        }))
           .accessibilityIdentifier("wubiMixedPinyin")
         DesignDivider()
-        DesignToggleRow(title: "候选显示剩余编码", subtitle: "在候选后标出还要输入的字母", isOn: $wubiCodeHint)
+        DesignToggleRow(title: "候选显示剩余编码", subtitle: "在候选后标出还要输入的字母",
+                        isOn: Binding(get: { wubiCodeHint }, set: { enabled in
+                          wubiCodeHint = enabled
+                          record(MetasequoiaInputSessionBridge.updateSharedPreferences {
+                            $0["wubi_code_hint"] = enabled
+                          }, .more)
+                          reloadPreferences()
+                        }))
           .accessibilityIdentifier("wubiCodeHint")
+        DesignDivider()
+        DesignToggleRow(title: "四码唯一候选自动上屏",
+                        subtitle: "五笔四码且只有一个候选时自动上屏，关闭后用空格或数字键选它",
+                        isOn: Binding(get: { wubiAutoCommitUnique }, set: { enabled in
+                          wubiAutoCommitUnique = enabled
+                          record(MetasequoiaInputSessionBridge.updateSharedPreferences {
+                            $0["wubi_auto_commit_unique"] = enabled
+                          }, .more)
+                          reloadPreferences()
+                        }))
+          .accessibilityIdentifier("wubiAutoCommitUnique")
+        DesignDivider()
+        // 五笔查码（#6789）：与三个五笔开关一样，只在启用了五笔时列出。
+        navRow("五笔查码", subtitle: "查汉字的 86、98 五笔编码", identifier: "wubiCodeLookupLink") {
+          WubiCodeLookupView(profile: wubiProfile)
+        }
         DesignDivider()
       }
       DesignSelectRow(title: "默认中英文", subtitle: "新打开的键盘从这里开始",
@@ -450,6 +546,9 @@ struct InputSettingsView: View {
     usesTraditionalOutput = ChineseOutputPreference.usesTraditional
     if let document { WubiProfilePreference.mirror(document) }
     wubiProfile = WubiProfilePreference.profile
+    wubiAutoCommitUnique = document?["wubi_auto_commit_unique"] as? Bool ?? true
+    wubiMixedPinyin = WubiMixedPinyinPreference.isEnabled(in: document)
+    wubiCodeHint = WubiCodeHintPreference.isEnabled(in: document)
     fuzzy = FuzzyPinyinPreference.settings(in: document) ?? .pristine
     habits = InputHabitPreference.settings(in: document)
     startsInEnglish = document?["default_ime_mode"] as? String == "english"
@@ -482,9 +581,7 @@ private struct InputLanguageRow<Choice: Hashable>: View {
         if let value {
           Text(value).font(.system(size: 15)).foregroundStyle(MetasequoiaTheme.sub).lineLimit(1)
         }
-        Image(systemName: "chevron.right").font(.system(size: 14, weight: .semibold))
-          .foregroundStyle(MetasequoiaTheme.sub.opacity(0.55))
-          .accessibilityHidden(true)
+        DesignChevron(fontSize: 14)
       }
       .padding(.horizontal, 16)
       .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
@@ -502,6 +599,7 @@ private struct InputLanguageRow<Choice: Hashable>: View {
 /// 添加语言里可添加的一个语言：描边图块、次要色的语言名和强调色的「添加」。点整行即可添加。
 private struct AddableLanguageRow: View {
   let language: InputLanguage
+  var detail: String = "添加"
   let add: () -> Void
 
   var body: some View {
@@ -516,7 +614,7 @@ private struct AddableLanguageRow: View {
           .accessibilityHidden(true)
         Text(language.name).font(.system(size: 17)).foregroundStyle(MetasequoiaTheme.sub)
         Spacer(minLength: 8)
-        Text("添加").font(.system(size: 15)).foregroundStyle(MetasequoiaTheme.accent)
+        Text(detail).font(.system(size: 15)).foregroundStyle(MetasequoiaTheme.accent)
       }
       .padding(.horizontal, 16)
       .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)

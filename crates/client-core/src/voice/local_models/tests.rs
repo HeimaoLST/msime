@@ -3,7 +3,7 @@ use super::*;
 #[cfg(unix)]
 #[test]
 fn interrupted_adoption_rejects_a_source_below_a_symlinked_ancestor() {
-    use std::os::unix::fs::symlink;
+    use msime_path_trust::untrusted_symlink as symlink;
 
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
@@ -125,9 +125,9 @@ fn staging_cleanup_does_not_follow_a_replaced_root() {
     fs::create_dir(&root).unwrap();
     fs::create_dir(&outside).unwrap();
     let staging_path = root.join(".staging-pack-dead");
-    fs::create_dir(&staging_path).unwrap();
+    let staging = Staging::new(staging_path.clone()).unwrap();
+    staging.create().unwrap();
     fs::write(staging_path.join("fixture.bin"), b"synthetic").unwrap();
-    let staging = Staging::new(staging_path).unwrap();
     let moved = state.path().join("models-moved");
     fs::rename(&root, &moved).unwrap();
     symlink(&outside, &root).unwrap();
@@ -162,6 +162,129 @@ fn staging_creation_stays_in_an_open_parent_after_root_replacement() {
 
 #[cfg(unix)]
 #[test]
+fn partial_directory_creation_stays_in_an_open_root_after_replacement() {
+    use std::os::unix::fs::symlink;
+
+    let state = tempfile::tempdir().unwrap();
+    let root = state.path().join("models");
+    let outside = state.path().join("outside");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&outside).unwrap();
+    let root_directory = crate::storage::open_private_directory(&root).unwrap();
+    let moved = state.path().join("models-moved");
+    fs::rename(&root, &moved).unwrap();
+    symlink(&outside, &root).unwrap();
+
+    partial_directory_at(&root, &root_directory, "pack").unwrap();
+
+    assert!(moved.join(".partial-pack").is_dir());
+    assert!(!outside.join(".partial-pack").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn partial_file_writes_stay_in_the_open_directory_after_root_replacement() {
+    use std::os::unix::fs::symlink;
+
+    let state = tempfile::tempdir().unwrap();
+    let root = state.path().join("models");
+    let outside = state.path().join("outside");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&outside).unwrap();
+    let partials = partial_directory(&root, "pack").unwrap();
+    let moved = state.path().join("models-moved");
+    fs::rename(&root, &moved).unwrap();
+    symlink(&outside, &root).unwrap();
+
+    let file = pack_files()[0].clone();
+    let partial = partial_path(partials.path(), &file).unwrap();
+    let name = partial.file_name().unwrap();
+    let fetcher = pack_fetcher("", PACK_B);
+    download_from_sources(
+        &fetcher,
+        &[],
+        &file,
+        &partials,
+        name,
+        &AtomicBool::new(false),
+        &mut |_| {},
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read(moved.join(".partial-pack").join(name)).unwrap(),
+        PACK_A
+    );
+    assert!(!outside.join(".partial-pack").join(name).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn partial_file_reads_stay_in_the_open_directory_after_root_replacement() {
+    use std::os::unix::fs::symlink;
+
+    let state = tempfile::tempdir().unwrap();
+    let root = state.path().join("models");
+    let outside = state.path().join("outside");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&outside).unwrap();
+    let partials = partial_directory(&root, "pack").unwrap();
+    let name = OsStr::new("partial-a");
+    fs::write(partials.path().join(name), b"synthetic partial").unwrap();
+    fs::create_dir_all(outside.join(".partial-pack")).unwrap();
+    fs::write(outside.join(".partial-pack").join(name), b"outside partial").unwrap();
+    let moved = state.path().join("models-moved");
+    fs::rename(&root, &moved).unwrap();
+    symlink(&outside, &root).unwrap();
+
+    let mut input = partials.open_read(name).unwrap();
+    let mut bytes = Vec::new();
+    input.read_to_end(&mut bytes).unwrap();
+
+    assert_eq!(bytes, b"synthetic partial");
+}
+
+#[cfg(unix)]
+#[test]
+fn partial_publish_rename_stays_in_open_directories_after_root_replacement() {
+    use std::os::unix::fs::symlink;
+
+    let state = tempfile::tempdir().unwrap();
+    let root = state.path().join("models");
+    let outside = state.path().join("outside");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&outside).unwrap();
+    let partials = partial_directory(&root, "pack").unwrap();
+    let staging = Staging::new(root.join(".staging-pack-new")).unwrap();
+    staging.create().unwrap();
+    staging.create_child(OsStr::new("model")).unwrap();
+    let pack_dir = staging.path.join("model");
+    let pack_directory = staging.open_child(OsStr::new("model")).unwrap();
+    let name = OsStr::new("a.dat");
+    let partial_name = OsStr::new("partial-a");
+    fs::write(partials.path().join(partial_name), b"synthetic").unwrap();
+    let moved = state.path().join("models-moved");
+    fs::rename(&root, &moved).unwrap();
+    symlink(&outside, &root).unwrap();
+
+    move_partial_into_pack(
+        &partials,
+        partial_name,
+        &pack_dir,
+        name.to_str().unwrap(),
+        Some(&pack_directory),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read(moved.join(".staging-pack-new/model/a.dat")).unwrap(),
+        b"synthetic"
+    );
+    assert!(!outside.join(".staging-pack-new/model/a.dat").exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn model_directory_creation_stays_in_the_open_staging_directory() {
     use std::os::unix::fs::symlink;
 
@@ -176,7 +299,7 @@ fn model_directory_creation_stays_in_the_open_staging_directory() {
     fs::rename(&root, &moved).unwrap();
     symlink(&outside, &root).unwrap();
 
-    staging.create_model_directory().unwrap();
+    staging.create_child(OsStr::new("model")).unwrap();
 
     assert!(moved.join(".staging-pack-new/model").is_dir());
     assert!(!outside.join(".staging-pack-new").exists());
@@ -184,8 +307,138 @@ fn model_directory_creation_stays_in_the_open_staging_directory() {
 
 #[cfg(unix)]
 #[test]
-fn leftover_file_cleanup_rejects_a_symlinked_parent() {
+fn archive_member_creation_stays_in_the_open_model_directory() {
     use std::os::unix::fs::symlink;
+
+    let state = tempfile::tempdir().unwrap();
+    let root = state.path().join("models");
+    let outside = state.path().join("outside");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&outside).unwrap();
+    let staging = Staging::new(root.join(".staging-pack-new")).unwrap();
+    staging.create().unwrap();
+    staging.create_child(OsStr::new("model")).unwrap();
+    let pack_directory = staging.open_child(OsStr::new("model")).unwrap();
+    fs::create_dir_all(outside.join(".staging-pack-new/model")).unwrap();
+    let moved = state.path().join("models-moved");
+    fs::rename(&root, &moved).unwrap();
+    symlink(&outside, &root).unwrap();
+
+    crate::storage::write_private_file_at_with(
+        &pack_directory,
+        OsStr::new("libfixture.so"),
+        |mut output| {
+            output.write_all(b"synthetic library")?;
+            Ok::<(File, ()), io::Error>((output, ()))
+        },
+    )
+    .unwrap();
+    write_manifest_at(&pack_directory, &serde_json::json!({"synthetic": true})).unwrap();
+
+    assert_eq!(
+        fs::read(moved.join(".staging-pack-new/model/libfixture.so")).unwrap(),
+        b"synthetic library"
+    );
+    assert_eq!(
+        fs::read(moved.join(".staging-pack-new/model").join(MANIFEST_FILE)).unwrap(),
+        serde_json::to_vec_pretty(&serde_json::json!({"synthetic": true})).unwrap()
+    );
+    assert!(!outside
+        .join(".staging-pack-new/model/libfixture.so")
+        .exists());
+    assert!(!outside
+        .join(".staging-pack-new/model")
+        .join(MANIFEST_FILE)
+        .exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn adoption_rename_stays_in_open_source_and_model_directories() {
+    use std::os::unix::fs::symlink;
+
+    let state = tempfile::tempdir().unwrap();
+    let root = state.path().join("models");
+    let source = state.path().join("resources");
+    let outside_root = state.path().join("outside-root");
+    let outside_source = state.path().join("outside-source");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&outside_root).unwrap();
+    fs::create_dir(&outside_source).unwrap();
+    fs::write(source.join("a.dat"), PACK_A).unwrap();
+    fs::create_dir_all(outside_source.join("a.dat")).unwrap();
+
+    let source_directory = crate::storage::open_private_directory(&source).unwrap();
+    let staging = Staging::new(root.join(".staging-pack-new")).unwrap();
+    staging.create().unwrap();
+    staging.create_child(OsStr::new("model")).unwrap();
+    let pack_directory = staging.open_child(OsStr::new("model")).unwrap();
+    let moved_root = state.path().join("models-moved");
+    let moved_source = state.path().join("resources-moved");
+    fs::rename(&root, &moved_root).unwrap();
+    fs::rename(&source, &moved_source).unwrap();
+    symlink(&outside_root, &root).unwrap();
+    symlink(&outside_source, &source).unwrap();
+
+    move_adopted_file_at(&source_directory, &pack_directory, OsStr::new("a.dat")).unwrap();
+
+    assert_eq!(
+        fs::read(moved_root.join(".staging-pack-new/model/a.dat")).unwrap(),
+        PACK_A
+    );
+    assert!(!outside_root.join(".staging-pack-new/model/a.dat").exists());
+    assert!(outside_source.join("a.dat").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn tar_extraction_stays_in_the_open_model_directory() {
+    use std::os::unix::fs::symlink;
+
+    let archive = good_archive();
+    let state = tempfile::tempdir().unwrap();
+    let root = state.path().join("models");
+    let outside = state.path().join("outside");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&outside).unwrap();
+    let staging = Staging::new(root.join(".staging-fixture-new")).unwrap();
+    staging.create().unwrap();
+    staging.create_child(OsStr::new("model")).unwrap();
+    let model_dir = staging.path.join("model");
+    let model_directory = staging.open_child(OsStr::new("model")).unwrap();
+    let archive_path = state.path().join("fixture.tar.bz2");
+    fs::write(&archive_path, &archive).unwrap();
+    let moved = state.path().join("models-moved");
+    fs::rename(&root, &moved).unwrap();
+    symlink(&outside, &root).unwrap();
+
+    let model = fixture_model(&archive);
+    extract(
+        &archive_path,
+        &model,
+        &[],
+        &model_dir,
+        Some(&model_directory),
+        None,
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read(moved.join(".staging-fixture-new/model/encoder.onnx")).unwrap(),
+        b"encoder"
+    );
+    assert!(!outside
+        .join(".staging-fixture-new/model/encoder.onnx")
+        .exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn leftover_file_cleanup_rejects_a_symlinked_parent() {
+    use msime_path_trust::untrusted_symlink as symlink;
 
     let state = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
@@ -461,7 +714,7 @@ fn run(
     let result = install_model(
         root,
         model,
-        mirror,
+        &[mirror],
         fetcher,
         &mut |event| events.push(event),
         cancel,
@@ -519,6 +772,68 @@ fn memory_estimates_are_read_as_bytes() {
     assert_eq!(memory_bytes("约 1.5 GB"), 1_500_000_000);
     assert_eq!(memory_bytes("300 MB"), 300_000_000);
     assert_eq!(memory_bytes("unknown"), 0);
+}
+
+#[test]
+fn a_mirror_without_the_file_falls_back_to_the_original_address() {
+    let root = tempfile::tempdir().unwrap();
+    let archive = good_archive();
+    let model = fixture_model(&archive);
+    // Only the original addresses are served, as when the mirror has not cached a model and cannot reach it.
+    let fetcher = fetcher_for(&archive, "");
+    let (result, _) = run(
+        root.path(),
+        &model,
+        "https://mirror.example.test/",
+        &fetcher,
+        &AtomicBool::new(false),
+    );
+    result.unwrap();
+    assert_eq!(
+        *fetcher.requested.lock().unwrap(),
+        vec![
+            format!("https://mirror.example.test/{ARCHIVE_URL}"),
+            ARCHIVE_URL.to_owned(),
+            format!("https://mirror.example.test/{EXTRA_URL}"),
+            EXTRA_URL.to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn a_mirror_copy_with_the_wrong_digest_is_replaced_from_the_original_address() {
+    let root = tempfile::tempdir().unwrap();
+    let archive = good_archive();
+    let model = fixture_model(&archive);
+    let mirror = "https://mirror.example.test/";
+    let mut stale = archive.clone();
+    let last = stale.len() - 1;
+    stale[last] ^= 0xff;
+    let fetcher = MapFetcher::new([
+        (mirrored(mirror, ARCHIVE_URL), stale),
+        (ARCHIVE_URL.to_owned(), archive.clone()),
+        (mirrored(mirror, EXTRA_URL), EXTRA.to_vec()),
+    ]);
+    let (result, _) = run(
+        root.path(),
+        &model,
+        mirror,
+        &fetcher,
+        &AtomicBool::new(false),
+    );
+    let installed = result.unwrap();
+    assert_eq!(
+        fs::read(installed.join("encoder.onnx")).unwrap(),
+        b"encoder"
+    );
+    assert_eq!(
+        *fetcher.requested.lock().unwrap(),
+        vec![
+            format!("https://mirror.example.test/{ARCHIVE_URL}"),
+            ARCHIVE_URL.to_owned(),
+            format!("https://mirror.example.test/{EXTRA_URL}"),
+        ]
+    );
 }
 
 #[test]
@@ -889,6 +1204,33 @@ fn removing_a_stray_file_model_slot_succeeds_and_cleans_it() {
     assert!(root_entries(root.path()).is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn removing_while_a_different_process_installs_reports_busy() {
+    let state = tempfile::tempdir().unwrap();
+    let root = state.path().join("models");
+    fs::create_dir(&root).unwrap();
+    let held = acquire_model_lock(&root).unwrap();
+    let remove_root = root.clone();
+    let (result_tx, result_rx) = mpsc::channel();
+    let removal = thread::spawn(move || {
+        result_tx
+            .send(remove(&remove_root, default_model_id()))
+            .unwrap();
+    });
+
+    // A lock held by another host process must make removal fail immediately. Waiting for the
+    // install and deleting the newly published model would violate the host API contract.
+    let first = result_rx.recv_timeout(Duration::from_millis(100));
+    drop(held);
+    let result = first.unwrap_or_else(|_| result_rx.recv().unwrap());
+    removal.join().unwrap();
+    assert!(
+        result.is_err(),
+        "removal unexpectedly waited and succeeded: {result:?}"
+    );
+}
+
 #[test]
 fn listing_reports_installed_models_and_removal_accepts_catalog_ids_only() {
     let root = tempfile::tempdir().unwrap();
@@ -922,6 +1264,250 @@ fn listing_reports_installed_models_and_removal_accepts_catalog_ids_only() {
     assert!(root_entries(root.path()).is_empty());
     // Removing what is not installed is not an error.
     remove(root.path(), id).unwrap();
+}
+
+#[test]
+fn listing_names_the_files_an_offline_install_needs() {
+    let root = tempfile::tempdir().unwrap();
+    let models = list(root.path());
+    let files = |id: &str| {
+        models
+            .iter()
+            .find(|model| model.id == id)
+            .unwrap()
+            .import_files
+            .clone()
+    };
+    // 内嵌的 bpe.vocab 不用下载，所以默认模型只要压缩包。
+    let default = catalog()
+        .models
+        .iter()
+        .find(|model| model.id == default_model_id())
+        .unwrap();
+    assert_eq!(
+        files(default_model_id()),
+        vec![LocalModelImportFile {
+            name: default.archive.name.clone(),
+            url: default.archive.url.clone(),
+            size: default.archive.size,
+        }]
+    );
+    let sense_voice = files("sense-voice-small");
+    assert_eq!(sense_voice.len(), 2);
+    assert_eq!(sense_voice[1].name, "silero_vad.onnx");
+    assert!(sense_voice
+        .iter()
+        .all(|file| file.url.starts_with("https://github.com/") && file.size > 0));
+}
+
+/// 把 `contents` 以给定的文件名写进 `directory`，返回绝对路径。
+fn picked(directory: &Path, name: &str, contents: &[u8]) -> PathBuf {
+    let path = directory.join(name);
+    fs::write(&path, contents).unwrap();
+    path
+}
+
+fn run_import(
+    root: &Path,
+    model: &CatalogModel,
+    files: &[PathBuf],
+    cancel: &AtomicBool,
+) -> (Result<PathBuf, LocalModelError>, Vec<InstallProgress>) {
+    let mut events = Vec::new();
+    let result = import_model(root, model, files, &mut |event| events.push(event), cancel);
+    (result, events)
+}
+
+#[test]
+fn importing_renamed_local_files_installs_the_model() {
+    let root = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let archive = good_archive();
+    let model = fixture_model(&archive);
+    // 下载工具改了名，还多选了一个无关文件。
+    let files = vec![
+        picked(downloads.path(), "unrelated.txt", b"not a model file"),
+        picked(downloads.path(), "vad (1).bin", EXTRA),
+        picked(downloads.path(), "download.tmp", &archive),
+    ];
+
+    let (result, events) = run_import(root.path(), &model, &files, &AtomicBool::new(false));
+
+    let installed = result.unwrap();
+    assert_eq!(installed, root.path().join("fixture"));
+    assert_eq!(
+        fs::read(installed.join("encoder.onnx")).unwrap(),
+        b"encoder"
+    );
+    assert_eq!(fs::read(installed.join("vad.onnx")).unwrap(), EXTRA);
+    assert!(installed.join("bpe.vocab").is_file());
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(installed.join(MANIFEST_FILE)).unwrap()).unwrap();
+    assert_eq!(manifest, model.manifest);
+    assert_eq!(root_entries(root.path()), vec!["fixture"]);
+    // 用户的文件原样留着。
+    assert_eq!(fs::read(&files[2]).unwrap(), archive);
+    let stages: Vec<_> = events.iter().map(|event| event.stage).collect();
+    assert_eq!(stages.first(), Some(&"import"));
+    assert_eq!(stages.last(), Some(&"done"));
+    assert!(!stages.contains(&"download"));
+}
+
+#[test]
+fn importing_without_a_needed_file_names_it_and_installs_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let archive = good_archive();
+    let model = fixture_model(&archive);
+    let files = vec![
+        picked(downloads.path(), "model.tar.bz2", &archive),
+        // 不是绝对路径的条目不算数。
+        PathBuf::from("vad.onnx"),
+    ];
+
+    let (result, _) = run_import(root.path(), &model, &files, &AtomicBool::new(false));
+
+    assert!(
+        matches!(&result, Err(LocalModelError::MissingImportFile(name)) if name == "vad.onnx"),
+        "{result:?}"
+    );
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "local_model_import_missing: vad.onnx"
+    );
+    assert!(!root.path().join("fixture").exists());
+}
+
+#[test]
+fn importing_a_tampered_file_fails_the_checksum_and_installs_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let archive = good_archive();
+    let model = fixture_model(&archive);
+    let mut tampered = archive.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0xff;
+    let files = vec![
+        picked(downloads.path(), "model.tar.bz2", &tampered),
+        picked(downloads.path(), "vad.onnx", EXTRA),
+    ];
+
+    let (result, _) = run_import(root.path(), &model, &files, &AtomicBool::new(false));
+
+    assert!(
+        matches!(result, Err(LocalModelError::ChecksumMismatch(_))),
+        "{result:?}"
+    );
+    assert!(root_entries(root.path()).is_empty());
+}
+
+#[test]
+fn importing_picks_the_right_file_among_same_sized_ones_by_checksum() {
+    let root = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let archive = good_archive();
+    let model = fixture_model(&archive);
+    let mut decoy = archive.clone();
+    decoy[0] ^= 0xff;
+    let files = vec![
+        picked(downloads.path(), "a.tar.bz2", &decoy),
+        picked(downloads.path(), "b.tar.bz2", &archive),
+        picked(downloads.path(), "vad.onnx", EXTRA),
+    ];
+
+    let (result, _) = run_import(root.path(), &model, &files, &AtomicBool::new(false));
+    assert!(result.unwrap().join(MANIFEST_FILE).is_file());
+
+    // 长度相同的几个都不对时报校验失败，而不是缺文件。
+    let root = tempfile::tempdir().unwrap();
+    let files = vec![
+        picked(downloads.path(), "c.tar.bz2", &decoy),
+        files[0].clone(),
+        files[2].clone(),
+    ];
+    let (result, _) = run_import(root.path(), &model, &files, &AtomicBool::new(false));
+    assert!(
+        matches!(result, Err(LocalModelError::ChecksumMismatch(_))),
+        "{result:?}"
+    );
+    assert!(!root.path().join("fixture").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn importing_an_unreadable_file_says_so_and_installs_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let archive = good_archive();
+    let model = fixture_model(&archive);
+    let files = vec![
+        picked(downloads.path(), "model.tar.bz2", &archive),
+        picked(downloads.path(), "vad.onnx", EXTRA),
+    ];
+    fs::set_permissions(&files[0], fs::Permissions::from_mode(0o000)).unwrap();
+    // 以 root 运行时权限拦不住读取，这个场景造不出来。
+    if File::open(&files[0]).is_ok() {
+        return;
+    }
+
+    let (result, _) = run_import(root.path(), &model, &files, &AtomicBool::new(false));
+
+    assert!(
+        matches!(&result, Err(LocalModelError::UnreadableImportFile(_))),
+        "{result:?}"
+    );
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .starts_with("local_model_import_unreadable"));
+    assert!(root_entries(root.path()).is_empty());
+}
+
+#[test]
+fn cancelling_an_import_leaves_nothing_behind() {
+    let root = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let archive = good_archive();
+    let model = fixture_model(&archive);
+    let files = vec![
+        picked(downloads.path(), "model.tar.bz2", &archive),
+        picked(downloads.path(), "vad.onnx", EXTRA),
+    ];
+
+    let (result, _) = run_import(root.path(), &model, &files, &AtomicBool::new(true));
+
+    assert!(matches!(result, Err(LocalModelError::Cancelled)));
+    assert!(root_entries(root.path()).is_empty());
+}
+
+#[test]
+fn importing_accepts_catalog_ids_only() {
+    let root = tempfile::tempdir().unwrap();
+    for rejected in ["../outside", "", "unknown"] {
+        assert!(matches!(
+            import(
+                root.path(),
+                rejected,
+                &[],
+                &mut |_| {},
+                &AtomicBool::new(false)
+            ),
+            Err(LocalModelError::UnknownModel)
+        ));
+    }
+    assert!(matches!(
+        import(
+            root.path(),
+            default_model_id(),
+            &[],
+            &mut |_| {},
+            &AtomicBool::new(false)
+        ),
+        Err(LocalModelError::MissingImportFile(_))
+    ));
+    assert!(root_entries(root.path()).is_empty());
 }
 
 #[cfg(unix)]
@@ -1061,7 +1647,7 @@ fn installing_files_publishes_them_with_the_manifest_and_reports_progress() {
 }
 
 #[test]
-fn removal_waits_for_an_install_before_cleaning_its_staging_directory() {
+fn removal_refuses_while_an_install_holds_the_model_lock() {
     let root = tempfile::tempdir().unwrap();
     let files = pack_files();
     let id = default_model_id().to_owned();
@@ -1100,17 +1686,17 @@ fn removal_waits_for_an_install_before_cleaning_its_staging_directory() {
         removed_tx.send(result).unwrap();
     });
 
-    // Without serialization, remove_leftovers deletes the install's staging directory and
-    // returns while the installer is paused before publishing it.
-    assert!(removed_rx.recv_timeout(Duration::from_millis(100)).is_err());
+    let remove_result = removed_rx
+        .recv_timeout(Duration::from_millis(100))
+        .expect("removal should report the busy install without waiting")
+        .expect_err("removal must refuse an install in another process");
     release_tx.send(()).unwrap();
 
     let (install_result, _events) = install.join().unwrap();
     assert!(install_result.is_ok(), "install failed: {install_result:?}");
-    let remove_result = removed_rx.recv().unwrap();
     removal.join().unwrap();
-    assert!(remove_result.is_ok(), "remove failed: {remove_result:?}");
-    assert!(!root.path().join(id).exists());
+    assert!(matches!(remove_result, LocalModelError::InstallRunning));
+    assert!(root.path().join(id).exists());
 }
 
 /// 摘要不符的文件不留下，也不发布任何东西；同一包里已经校验过的文件留在续传目录，下次不用再下。

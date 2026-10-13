@@ -22,7 +22,7 @@ pub unsafe extern "C" fn msime_client_create(options: *const u8, length: usize) 
             return Err("unsupported host API version".into());
         }
         options.preferences.validate().map_err(|e| e.to_string())?;
-        let page_size = options.preferences.candidate_page_size;
+        let page_size = host_page_size(options.preferences.candidate_page_size);
         let applied = options.preferences.clone();
         let ai_provider_cache = {
             let ai = &applied.ai_assistant;
@@ -77,17 +77,18 @@ pub unsafe extern "C" fn msime_client_create(options: *const u8, length: usize) 
         .ok_or_else(|| "dictionary maintenance busy".to_owned())?;
         let mut engine = Session::new(&options).map_err(|e| e.to_string())?;
         // Gate on the scheme actually run, as `apply_pending` does, so a preferred scheme that fell back to Quanpin starts in the same mode a rebuild would give it.
-        let default_nine_key =
-            layout_starts_nine_key(SchemeType::from_u8(options.scheme), &applied);
-        if default_nine_key {
+        let default_key_grid = layout_key_grid(SchemeType::from_u8(options.scheme), &applied);
+        if default_key_grid.is_some() {
             engine
-                .set_nine_key_enabled(true)
+                .set_key_grid(default_key_grid)
                 .map_err(|e| e.to_string())?;
         }
         // Places in `@` mode start off in every engine, so the session carries the preference over itself, as `apply_pending` does on a rebuild.
         engine
             .set_mention_places(applied.local_modes.mention_places)
             .map_err(|e| e.to_string())?;
+        // AI 请求发得出去时，可以问 AI 的组字先在 AI 座位上放占位行，回答到达时不挪动其他候选（#6888）。会话密钥要等 `msime_client_set_ai_credential` 才到，到时再重算。
+        engine.set_ai_seat(ai_seat_ready(&applied.ai_assistant, None));
         // 默认输入状态 says which state a new focus session starts in, and the
         // host applies it as its own English passthrough - letters go straight
         // to the document, with no session involved. It is not the Engine's
@@ -102,6 +103,7 @@ pub unsafe extern "C" fn msime_client_create(options: *const u8, length: usize) 
             Runtime::new_with_touch_layout(engine, page_size, applied.touch_keyboard_layout)
                 .map_err(|e| e.to_string())?;
         runtime.set_phrase_preedit(phrase_preedit);
+        runtime.set_wubi_auto_commit_unique(applied.wubi_auto_commit_unique);
         runtime.set_reranker(keyboard_reranker(&options, sentence_model_path.as_deref()));
 
         // The settled model is optional and independent: a resource set that ships only the small
@@ -139,8 +141,9 @@ pub unsafe extern "C" fn msime_client_create(options: *const u8, length: usize) 
                     paired_punctuation_override: None,
                     punctuation_lock_override: None,
                     english_mode: false,
+                    caps_lock: false,
                     page_size_override: None,
-                    nine_key_override: None,
+                    key_grid_override: None,
                     statistics_private: false,
                     ai_credential: None,
                     ai_provider_cache,
@@ -158,6 +161,7 @@ pub unsafe extern "C" fn msime_client_create(options: *const u8, length: usize) 
                     recorded_settled_model,
                     settled_model,
                     settled_model_loading: None,
+                    lifecycle: None,
                     _dictionary_access: dictionary_access,
                 },
             )
@@ -170,19 +174,28 @@ pub unsafe extern "C" fn msime_client_create(options: *const u8, length: usize) 
 pub extern "C" fn msime_client_focus(handle: u64, focused: bool) -> *mut c_char {
     response(|| {
         with_session(handle, |session| {
+            // 在换插件表之前采样：换表会刷新打开着的 `/` 列表，这也算这次 focus 的变化。
+            let pending = session.lifecycle_begin(lifecycle::Call::Focus(focused));
             // Focus-out is where a host's field ends, so selections counted in it are written here rather than waiting for a batch to fill. The same goes for the engine's delayed context learning: the iOS keyboard extension and the Android IME process can be killed without ever destroying their sessions, and the engine no longer writes that queue at process exit.
             if !focused {
                 session.flush_selections();
                 msime_engine::flush_personal_learning();
             } else {
-                session.refresh_plugin_tables()?;
+                session.refresh_plugin_tables();
+                // 脚本插件：在本次 focus 的任何事件之前丢弃上一个字段的实例，授权文件或包变了就重读。
+                session.lifecycle_focus_in();
                 // 设置应用可能刚下载好日文、粤拼、注音、笔画的资源包或落定重排模型；Engine 重建和模型加载在随后的 `complete_transition` 里空闲时进行。
                 session.refresh_resource_packs();
                 // The settings page may have imported the pack in use again, or removed it, since this session last looked.
                 session.sound.restamp();
             }
-            let result = session.runtime.focus(focused).map_err(|e| e.to_string())?;
-            let result = session.complete_transition(result);
+            let result = session.runtime.focus(focused).map_err(|e| e.to_string());
+            // 失焦先取消组字再刷新，刷新失败时组字已经没了：照样发 end、hidden 和 focus_out。
+            let result = session.lifecycle_on_error(pending, result)?;
+            let facts = session.runtime.facts();
+            let mut result = session.complete_transition(result);
+            // 失焦上屏不可改写、也不出声；focus_in/focus_out 排在组字结束之后，所以 focus_in 也在上面的重读之后。focus 的回复不带 `feedback`。
+            session.lifecycle_after(pending, facts, &mut result);
             serde_json::to_value(result).map_err(|e| e.to_string())
         })
     })
@@ -191,6 +204,13 @@ pub extern "C" fn msime_client_focus(handle: u64, focused: bool) -> *mut c_char 
 #[no_mangle]
 pub extern "C" fn msime_client_reset_cache(handle: u64) -> *mut c_char {
     dispatch(handle, Action::ResetCache)
+}
+
+/// Releases process-level model caches without requiring a live session handle. This is for host
+/// memory-pressure callbacks after an input session has already been destroyed.
+#[no_mangle]
+pub extern "C" fn msime_client_release_process_cache() {
+    release_japanese_dictionary_cache();
 }
 
 #[no_mangle]
@@ -230,6 +250,24 @@ pub extern "C" fn msime_client_voice_capture(milliseconds: u32) -> *mut c_char {
         Ok(
             json!({ "sample_rate": crate::voice_capture::SAMPLE_RATE, "channels": 1, "samples": samples }),
         )
+    })
+}
+
+/// The microphones the settings page offers under 「可用录音设备」, the listing the Tauri settings shell's `list_voice_capture_devices` gives on Windows: value `[{backend:"windows", id, label}]`, `id` being `wasapi:` and the WASAPI endpoint id as four lowercase hex digits per UTF-16 unit, at most 128 entries, `[]` when no capture endpoint is available. Other targets fail with "voice capture devices unavailable": their hosts list devices their own way. Enumerates through COM: call off the UI thread. Ids and labels may identify the user's hardware: never log them.
+#[no_mangle]
+pub extern "C" fn msime_client_voice_capture_devices() -> *mut c_char {
+    response(|| {
+        #[cfg(target_os = "windows")]
+        {
+            Ok(Value::Array(crate::voice_capture_device_values(
+                "windows",
+                crate::voice_capture::capture_devices(),
+            )))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Err("voice capture devices unavailable".into())
+        }
     })
 }
 

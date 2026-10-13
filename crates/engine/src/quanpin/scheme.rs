@@ -60,14 +60,28 @@ impl QuanpinScheme {
 
     /// 将全拼请求写入已有存储，避免逐键刷新重复分配按键和切分字符串。
     pub fn build_request_into(&self, request: &mut QueryRequest) {
+        Self::build_request_from_raw_into(&self.raw, &self.raw, request);
+    }
+
+    /// 从原文直接写入查询请求，光标前缀查询不必创建临时方案。
+    pub fn build_request_from_raw_into(
+        raw: &str,
+        raw_with_cases: &str,
+        request: &mut QueryRequest,
+    ) {
         request.scheme = SchemeType::Quanpin;
         request.raw_input.clear();
         request.raw_input.extend(
-            self.raw
-                .bytes()
+            raw.bytes()
                 .map(|byte| char::from(byte.to_ascii_lowercase())),
         );
-        request.raw_input_with_cases.clone_from(&self.raw);
+        let raw_with_cases = if raw_with_cases.is_empty() {
+            raw
+        } else {
+            raw_with_cases
+        };
+        request.raw_input_with_cases.clear();
+        request.raw_input_with_cases.push_str(raw_with_cases);
         Self::apply_segmentation(request, CutMode::Correction);
     }
 
@@ -90,11 +104,17 @@ impl QuanpinScheme {
 
     /// Fill a request's segmentation fields from its raw input with the given cut (QS:82-139): active helpcodes stripped, cases re-applied, trailing `'` and helpcode letters re-appended.
     pub fn apply_segmentation(request: &mut QueryRequest, mode: CutMode) {
-        // The helpcode letters are stripped whatever the request's helpcode switch says; the engine gates on the switch when it queries (QE:47-50), and the preedit keeps showing them apart either way.
-        let helpcode_length =
-            detect_active_helpcode_length(&request.raw_input, &request.raw_input_with_cases);
-        let normalized_source =
-            strip_active_helpcodes(&request.raw_input, &request.raw_input_with_cases);
+        // 关闭辅助码时，大写字母仍属于拼音原文，不能从切分中剥离。
+        let helpcode_length = if request.enable_quanpin_helpcode {
+            detect_active_helpcode_length(&request.raw_input, &request.raw_input_with_cases)
+        } else {
+            0
+        };
+        let normalized_source = if helpcode_length > 0 {
+            strip_active_helpcodes(&request.raw_input, &request.raw_input_with_cases)
+        } else {
+            request.raw_input.clone()
+        };
 
         let normalized_input = remove_manual_delimiters(&normalized_source);
         let normalized_input_is_empty = normalized_input.is_empty();
@@ -231,7 +251,11 @@ mod tests {
 
     #[test]
     fn active_helpcode_letters_are_split_off() {
-        let request = typed("nihaoAB").build_request();
+        let mut request = QueryRequest {
+            enable_quanpin_helpcode: true,
+            ..QueryRequest::default()
+        };
+        typed("nihaoAB").build_request_into(&mut request);
         assert_eq!(request.normalized_input, "nihao");
         assert_eq!(
             request.normalized_input.capacity(),
@@ -239,6 +263,14 @@ mod tests {
         );
         assert_eq!(request.segmentation, "ni'hao");
         assert_eq!(request.raw_segmentation, "ni'hao'AB");
+    }
+
+    #[test]
+    fn disabled_helpcode_keeps_uppercase_letters_in_pinyin_segmentation() {
+        let request = typed("maO").build_request();
+        assert_eq!(request.raw_input, "mao");
+        assert_eq!(request.normalized_input, "mao");
+        assert_eq!(request.raw_segmentation, "maO");
     }
 
     #[test]

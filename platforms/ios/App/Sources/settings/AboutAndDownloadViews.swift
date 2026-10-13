@@ -1,62 +1,6 @@
 import SwiftUI
 import UIKit
 
-/// 这几个页面共用的胶囊按钮和标签：胶囊里的 13pt 半粗体文字。
-private struct PagePill: View {
-  enum Style { case filled, tonal, neutral }
-
-  let title: String
-  var style: Style = .tonal
-
-  var body: some View {
-    Text(title)
-      .font(.system(size: 13, weight: .semibold))
-      .foregroundStyle(foreground)
-      .lineLimit(1)
-      .padding(.horizontal, 14).padding(.vertical, 6)
-      .background(background, in: Capsule())
-  }
-
-  private var foreground: Color {
-    switch style {
-    case .filled: MetasequoiaTheme.onAccent
-    case .tonal: MetasequoiaTheme.accent
-    case .neutral: MetasequoiaTheme.sub
-    }
-  }
-
-  private var background: Color {
-    switch style {
-    case .filled: MetasequoiaTheme.accent
-    case .tonal: MetasequoiaTheme.accentSoft
-    case .neutral: MetasequoiaTheme.segBg
-    }
-  }
-}
-
-/// 「我的」子页面的行：16pt 标签、可选的 15pt 值（sub 色）和箭头，最小高度 50pt，左右内边距 16pt。
-private struct AboutRowLabel: View {
-  let title: String
-  var value: String? = nil
-
-  var body: some View {
-    HStack(spacing: 8) {
-      Text(title).font(.system(size: 16)).foregroundStyle(.primary)
-      Spacer(minLength: 12)
-      if let value {
-        Text(value).font(.system(size: 15)).foregroundStyle(MetasequoiaTheme.sub).lineLimit(1)
-      }
-      Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
-        .foregroundStyle(MetasequoiaTheme.sub.opacity(0.55))
-        .accessibilityHidden(true)
-    }
-    .padding(.horizontal, 16)
-    .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
-    .contentShape(Rectangle())
-    .accessibilityElement(children: .combine)
-  }
-}
-
 // MARK: - 其他平台下载
 
 /// 「其他平台下载」里的一个平台行。`release` 是下载页接受的平台键。
@@ -113,7 +57,7 @@ struct DesktopDownloadView: View {
       .frame(maxWidth: 760)
       .frame(maxWidth: .infinity)
     }
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .navigationTitle("其他平台下载").navigationBarTitleDisplayMode(.inline)
   }
 
@@ -127,7 +71,7 @@ struct DesktopDownloadView: View {
         .accessibilityHidden(true)
       VStack(alignment: .leading, spacing: 2) {
         Text("在电脑上打开").font(.system(size: 16, weight: .semibold)).foregroundStyle(.primary)
-        Text(Self.downloadLabel).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+        Text(Self.downloadLabel).designSubtext()
       }
       .accessibilityElement(children: .combine)
       Spacer(minLength: 8)
@@ -136,7 +80,7 @@ struct DesktopDownloadView: View {
         copied = true
         ToastCenter.shared.show("已复制下载链接")
       } label: {
-        PagePill(title: copied ? "已复制" : "复制链接", style: .filled)
+        DesignPillLabel(title: copied ? "已复制" : "复制链接", style: .filled, size: .page)
       }
       .buttonStyle(.plain)
       .accessibilityLabel(copied ? "已复制下载页链接" : "复制下载页链接")
@@ -168,10 +112,10 @@ struct DesktopDownloadView: View {
       .accessibilityElement(children: .combine)
       Spacer(minLength: 8)
       if platform.isCurrentDevice {
-        PagePill(title: "当前设备", style: .neutral)
+        DesignPillLabel(title: "当前设备", style: .neutral, size: .page)
       } else {
         Button { openURL(Self.releaseURL(platform.release)) } label: {
-          PagePill(title: "获取")
+          DesignPillLabel(title: "获取", size: .page)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("获取，\(platform.name)")
@@ -237,6 +181,8 @@ struct AboutView: View {
   @Environment(\.openURL) private var openURL
   @State private var update = UpdateState.idle
   @State private var listing: AppStoreListing?
+  @State private var requestState = AboutUpdateRequestState()
+  @State private var updateTask: Task<Void, Never>?
   /// lookup 返回商店在本地区没有这个应用的条目，TestFlight 构建就是这样，它的更新走 TestFlight。此时「检查更新」没有可比较的对象，所以和「给我们评分」一样隐藏。
   @State private var unlisted = false
   private let noticeCount = LicenseNotice.bundled.count
@@ -255,31 +201,31 @@ struct AboutView: View {
         hero
         DesignCard(radius: MetasequoiaTheme.tabCardRadius) {
           Link(destination: URL(string: "https://msime.app/")!) {
-            AboutRowLabel(title: "官网", value: "msime.app")
+            SettingsNavigationLabel(title: "官网", value: "msime.app")
           }
           .buttonStyle(PressFillButtonStyle())
           DesignDivider()
           Link(destination: URL(string: "https://msime.app/privacy/")!) {
-            AboutRowLabel(title: "隐私政策")
+              SettingsNavigationLabel(title: "隐私政策")
           }
           .buttonStyle(PressFillButtonStyle())
           if noticeCount > 0 {
             DesignDivider()
             NavigationLink(destination: LicensesView()) {
-              AboutRowLabel(title: "开源许可", value: "\(noticeCount) 个组件")
+              SettingsNavigationLabel(title: "开源许可", value: "\(noticeCount) 个组件")
             }
             .buttonStyle(PressFillButtonStyle())
             .accessibilityIdentifier("aboutLicensesLink")
           }
           DesignDivider()
           Link(destination: URL(string: "https://github.com/metasequoiaime/msime")!) {
-            AboutRowLabel(title: "源代码", value: "GitHub")
+              SettingsNavigationLabel(title: "源代码", value: "GitHub")
           }
           .buttonStyle(PressFillButtonStyle())
           if let review = listing?.reviewURL {
             DesignDivider()
             Link(destination: review) {
-              AboutRowLabel(title: "给我们评分")
+              SettingsNavigationLabel(title: "给我们评分")
             }
             .buttonStyle(PressFillButtonStyle())
           }
@@ -292,13 +238,15 @@ struct AboutView: View {
       .frame(maxWidth: 760)
       .frame(maxWidth: .infinity)
     }
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .navigationTitle("关于").navigationBarTitleDisplayMode(.inline)
     .task {
       // 「给我们评分」要用的商店 id，以及到底有没有条目；lookup 失败时只是不显示这一行，并保留「检查更新」以便重试。
       guard listing == nil else { return }
+      let id = requestState.currentID
       do {
         let found = try await AppStoreListing.fetch()
+        guard !Task.isCancelled, requestState.isCurrent(id) else { return }
         listing = found
         unlisted = found == nil
       } catch {
@@ -306,13 +254,18 @@ struct AboutView: View {
         return
       }
     }
+    .onDisappear {
+      requestState.invalidate()
+      ViewRequestTask.cancel(task: $updateTask)
+      if update == .checking { update = .idle }
+    }
   }
 
   private var hero: some View {
     VStack(spacing: 0) {
       AppMarkDisc(diameter: 116, markSize: 64)
       Text("水杉输入法").font(.system(size: 22, weight: .bold)).padding(.top, 16)
-      Text(version).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+      Text(version).designSubtext()
         .padding(.top, 6)
         .accessibilityIdentifier("aboutAppVersion")
       if !unlisted {
@@ -329,12 +282,12 @@ struct AboutView: View {
 
   @ViewBuilder private var updatePill: some View {
     switch update {
-    case .idle: PagePill(title: "检查更新", style: .filled)
-    case .checking: PagePill(title: "正在检查…", style: .filled).opacity(0.7)
+    case .idle: DesignPillLabel(title: "检查更新", style: .filled, size: .page)
+    case .checking: DesignPillLabel(title: "正在检查…", style: .filled, size: .page).opacity(0.7)
     case .latest:
       Text("✓ 已是最新版本").font(.system(size: 13, weight: .semibold)).foregroundStyle(MetasequoiaTheme.accent)
         .padding(.vertical, 6)
-    case .available: PagePill(title: "有新版本 ›", style: .filled)
+    case .available: DesignPillLabel(title: "有新版本 ›", style: .filled, size: .page)
     }
   }
 
@@ -343,11 +296,14 @@ struct AboutView: View {
       openURL(page)
       return
     }
-    guard update == .idle else { return }
+    guard update == .idle, let id = requestState.begin() else { return }
     update = .checking
-    Task {
+    updateTask = Task { @MainActor in
+      defer { if requestState.isCurrent(id) { updateTask = nil } }
       do {
-        guard let found = try await AppStoreListing.fetch() else {
+        let found = try await AppStoreListing.fetch()
+        guard !Task.isCancelled, requestState.finish(id) else { return }
+        guard let found else {
           // 这不是失败：商店里没有可比较的条目，所以胶囊按钮直接消失，而不是每次点按都失败。
           update = .idle
           unlisted = true
@@ -357,6 +313,7 @@ struct AboutView: View {
         let installed = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
         update = found.version.compare(installed, options: .numeric) == .orderedDescending ? .available(found.page) : .latest
       } catch {
+        guard !Task.isCancelled, requestState.finish(id) else { return }
         update = .idle
         ToastCenter.shared.show("暂时无法检查更新")
       }
@@ -386,7 +343,9 @@ private struct LicenseNotice: Identifiable {
     LicenseNotice(file: "libchewing-data-LGPL-2.1", title: "libchewing-data", detail: "注音 · LGPL-2.1"),
     LicenseNotice(file: "rime-stroke-LGPL-3.0", title: "rime-stroke", detail: "笔画 · LGPL-3.0"),
     LicenseNotice(file: "vi-MIT", title: "vi", detail: "越南文 · MIT"),
-    LicenseNotice(file: "ewts-MIT", title: "ewts", detail: "藏文 · MIT")
+    LicenseNotice(file: "ewts-MIT", title: "ewts", detail: "藏文 · MIT"),
+    LicenseNotice(file: "kfcd-chaizi-CC-BY-3.0", title: "開放詞典 拆字表", detail: "拆字 · CC BY 3.0"),
+    LicenseNotice(file: "Unicode-License-V3", title: "Unicode 汉字数据库", detail: "拆字读音 · Unicode License V3")
   ]
 
   /// 本次构建的 bundle 里实际存在的声明文件。
@@ -407,9 +366,7 @@ struct LicensesView: View {
                   Text(notice.detail).font(.system(size: 12)).foregroundStyle(MetasequoiaTheme.sub)
                 }
                 Spacer(minLength: 8)
-                Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
-                  .foregroundStyle(MetasequoiaTheme.sub.opacity(0.55))
-                  .accessibilityHidden(true)
+                DesignChevron()
               }
               .padding(.horizontal, 16).padding(.vertical, 8)
               .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
@@ -420,7 +377,7 @@ struct LicensesView: View {
           }
         }
         Text("水杉输入法本身以开源许可发布，源代码见关于页的 GitHub。")
-          .font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+          .designSubtext()
           .fixedSize(horizontal: false, vertical: true)
           .padding(.horizontal, 16)
       }
@@ -428,7 +385,7 @@ struct LicensesView: View {
       .frame(maxWidth: 760)
       .frame(maxWidth: .infinity)
     }
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .navigationTitle("开源许可").navigationBarTitleDisplayMode(.inline)
   }
 }
@@ -446,7 +403,7 @@ private struct LicenseTextView: View {
         ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
       }
     }
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .navigationTitle(notice.title).navigationBarTitleDisplayMode(.inline)
     .task {
       guard text == nil, let url = notice.url else { return }

@@ -7,11 +7,20 @@ use crate::assets;
 use crate::error::Result;
 use crate::local::catalog::{self, EmojiCatalogItem, EmojiCatalogSlice, EmojiSymbolGroup};
 use crate::shuangpin::hints::ShuangpinKeyHint;
+use crate::wubi::lookup::WubiCodeLookup;
 
 /// Over the generation's working `msime-pinyin.db`.
 pub fn hanzi_to_pinyin(options: &EngineOptions, text: &str) -> String {
     crate::dictionary::hanzi::hanzi_to_pinyin(
         &runtime_paths(options).dictionary(assets::MAIN_DICTIONARY),
+        text,
+    )
+}
+
+/// 五笔查码：`text` 里每个不同汉字（以及整段作为一个词）在 86 和 98 码表里的编码，读会话所用的同一份五笔码表（`wubi_database` 选出的文件，含用户加的五笔词）。
+pub fn wubi_code_lookup(options: &EngineOptions, text: &str) -> WubiCodeLookup {
+    crate::wubi::lookup::lookup_codes(
+        &crate::ime::registry::wubi_database(&runtime_paths(options)),
         text,
     )
 }

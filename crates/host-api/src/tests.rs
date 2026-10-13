@@ -6,6 +6,22 @@ use super::*;
 use msime_client_core::host_surface::compiled_input_schemes;
 use sha2::{Digest, Sha256};
 
+// Keep relative-path fixtures on the checkout's volume while allowing /source to be read-only in the Linux container.
+fn relative_fixture_dir(prefix: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let current = std::env::current_dir().unwrap();
+    for (parents, ancestor) in current.ancestors().enumerate() {
+        if let Ok(directory) = tempfile::Builder::new().prefix(prefix).tempdir_in(ancestor) {
+            let mut relative = std::path::PathBuf::from(".");
+            for _ in 0..parents {
+                relative.push("..");
+            }
+            relative.push(directory.path().file_name().unwrap());
+            return (directory, relative);
+        }
+    }
+    panic!("no writable ancestor for a relative-path fixture");
+}
+
 #[test]
 fn selection_statistics_use_the_candidate_id_absolute_index() {
     let action = Action::Select(CandidateId {
@@ -141,9 +157,11 @@ fn local_mode_resource_gates_preserve_unrelated_modes() {
         user_data: root.path().to_string_lossy().into_owned(),
         cache: root.path().to_string_lossy().into_owned(),
         dictionaries: root.path().to_string_lossy().into_owned(),
+        first_page_rows: 6,
         scheme: 0,
         enabled_schemes: msime_engine::SchemeSet::ALL,
         shuangpin_profile: 0,
+        shuangpin_custom_profile: None,
         shuangpin_preedit_uses_raw: true,
         single_character_only: false,
         learning: false,
@@ -165,6 +183,7 @@ fn local_mode_resource_gates_preserve_unrelated_modes() {
         english_minimum_prefix: 2,
         mixed_emoji: false,
         mixed_kaomoji: false,
+        mixed_japanese: true,
         local_unicode: true,
         local_date_time: true,
         local_quick_phrase: true,
@@ -176,6 +195,9 @@ fn local_mode_resource_gates_preserve_unrelated_modes() {
         local_expression: false,
         local_command: false,
         local_mention: false,
+        local_chaizi: false,
+        local_shift_letter_entry: true,
+        chaizi_traditional_output: false,
         command_table: Vec::new(),
         mention_entries: Vec::new(),
         quick_phrase_table: Vec::new(),
@@ -203,6 +225,7 @@ fn local_mode_resource_gates_preserve_unrelated_modes() {
     assert!(options.local_kaomoji);
     assert!(options.local_temporary_english);
     assert!(options.local_temporary_japanese);
+    assert!(options.mixed_japanese);
 
     std::fs::remove_file(root.path().join("msime-others.db")).unwrap();
     std::fs::remove_file(root.path().join("msime-japanese.dat")).unwrap();
@@ -210,6 +233,7 @@ fn local_mode_resource_gates_preserve_unrelated_modes() {
     assert!(!options.local_emoji);
     assert!(!options.local_kaomoji);
     assert!(!options.local_temporary_japanese);
+    assert!(!options.mixed_japanese);
     assert!(options.local_temporary_english);
     assert!(options.local_unicode);
     assert!(options.local_date_time);
@@ -604,16 +628,25 @@ fn host_capability_boundary_describes_each_platform() {
     assert_eq!(linux["value"]["candidate_corner_radius"], true);
     assert_eq!(linux["value"]["candidate_window_scale"], false);
     assert_eq!(linux["value"]["candidate_window_opacity"], false);
+    // 菜单栏状态项是 macOS 独有的：Linux 由 Fcitx5/IBus 面板显示模式。
+    assert_eq!(linux["value"]["input_mode_status_item"], false);
 
     let windows = capabilities("windows");
     assert_eq!(windows["value"]["restart_input_method"], true);
     assert_eq!(windows["value"]["panel_windows"], true);
     // Typing statistics used to be gated on an Android user-agent match.
     assert_eq!(windows["value"]["typing_statistics"], true);
+    // Windows 有托盘语言栏，不提供菜单栏状态项。
+    assert_eq!(windows["value"]["input_mode_status_item"], false);
 
     let macos = capabilities("macos");
     assert_eq!(macos["value"]["restart_input_method"], true);
     assert_eq!(macos["value"]["candidate_follow_cursor"], true);
+    assert_eq!(macos["value"]["input_mode_status_item"], true);
+    // 「展开候选」网格目前只有 macOS 实现。
+    assert_eq!(macos["value"]["expand_candidates"], true);
+    assert_eq!(windows["value"]["expand_candidates"], false);
+    assert_eq!(linux["value"]["expand_candidates"], false);
 
     let android = capabilities("android");
     assert_eq!(android["value"]["panel_windows"], false);
@@ -623,6 +656,31 @@ fn host_capability_boundary_describes_each_platform() {
     assert_eq!(capabilities("")["ok"], false);
     assert_eq!(
         read(unsafe { msime_client_host_capabilities(std::ptr::null(), 5) })["ok"],
+        false
+    );
+}
+
+#[test]
+fn cloud_clipboard_e2e_boundary_starts_with_a_key_request() {
+    let call = |bytes: &[u8]| {
+        // SAFETY: the slice outlives the call.
+        read(unsafe { msime_client_cloud_clipboard_e2e(bytes.as_ptr(), bytes.len()) })
+    };
+    let started = call(br#"{"start":{"op":"list"},"keystore":null,"device_name":"Test"}"#);
+    assert_eq!(started["ok"], true);
+    let value = &started["value"];
+    assert_eq!(value["request"]["method"], "GET");
+    assert!(value["request"]["path"]
+        .as_str()
+        .unwrap()
+        .starts_with("/v1/users/me/clipboard/keys?device_id="));
+    assert!(value["keystore"].as_str().unwrap().starts_with("v1."));
+    assert!(value["state"].is_object());
+
+    assert_eq!(call(b"{}")["ok"], false);
+    assert_eq!(
+        // SAFETY: a null pointer is rejected before it is read.
+        read(unsafe { msime_client_cloud_clipboard_e2e(std::ptr::null(), 0) })["ok"],
         false
     );
 }
@@ -657,6 +715,32 @@ fn traditional_conversion_boundary_returns_text_or_null() {
         unsafe { msime_client_simplified_to_traditional(fixture.as_ptr(), (1 << 20) + 1) }
             .is_null()
     );
+}
+
+#[test]
+fn font_catalog_boundary_lists_sorted_bounded_families() {
+    let result = read(msime_client_list_font_families());
+    if !system_fonts::supported() {
+        assert_eq!(result, json!({ "ok": false, "error": "unsupported" }));
+        return;
+    }
+    #[cfg(windows)]
+    assert_eq!(result["ok"], true, "Windows 始终具备系统字体集合");
+    // A Linux machine without fontconfig cannot list anything; that is a failure response, never a panic or a partial list.
+    if result["ok"] == false {
+        assert!(matches!(
+            result["error"].as_str(),
+            Some("font_catalog" | "font_catalog_limit")
+        ));
+        return;
+    }
+    let names: Vec<String> = serde_json::from_value(result["value"].clone()).unwrap();
+    assert!(!names.is_empty());
+    assert!(names.len() <= 16_384);
+    assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(names
+        .iter()
+        .all(|name| !name.is_empty() && msime_client_core::is_bounded_text(name, 128)));
 }
 
 #[test]
@@ -728,6 +812,247 @@ fn native_preference_save_clears_history_only_after_successful_disable() {
 }
 
 #[test]
+fn desktop_clipboard_history_lists_pins_removes_and_clears_the_shared_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().to_str().unwrap();
+    let call = |action: serde_json::Value| {
+        let body = serde_json::to_vec(&json!({ "directory": path, "action": action })).unwrap();
+        read(unsafe { msime_client_desktop_clipboard_history(body.as_ptr(), body.len()) })
+    };
+    let store = PreferencesStore::new(directory.path());
+    store
+        .save(
+            0,
+            Preferences {
+                clipboard_history: true,
+                ..Preferences::default()
+            },
+        )
+        .unwrap();
+    for text in ["synthetic first", "synthetic second"] {
+        assert!(store.capture_clipboard_text(text.into()).unwrap());
+    }
+    let listed = call(json!({ "operation": "list" }));
+    assert_eq!(listed["value"]["enabled"], true);
+    let entries = listed["value"]["entries"].as_array().unwrap();
+    assert_eq!(entries[0]["text"], "synthetic second");
+    assert_eq!(entries[1]["text"], "synthetic first");
+    assert!(entries[0]["timestampMs"].as_u64().unwrap() > 0);
+    assert_eq!(entries[0]["pinned"], false);
+
+    // A pinned entry sorts first and the answer is the history after the change.
+    let pinned =
+        call(json!({ "operation": "set_pinned", "text": "synthetic first", "pinned": true }));
+    assert_eq!(pinned["value"]["entries"][0]["text"], "synthetic first");
+    assert_eq!(pinned["value"]["entries"][0]["pinned"], true);
+    let removed = call(json!({ "operation": "remove", "text": "synthetic second" }));
+    assert_eq!(removed["value"]["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        call(json!({ "operation": "remove", "text": "" }))["error"],
+        "clipboard_history_invalid"
+    );
+    assert_eq!(
+        call(json!({ "operation": "unknown" }))["error"],
+        "clipboard_history_invalid"
+    );
+    let cleared = call(json!({ "operation": "clear" }));
+    assert_eq!(cleared["value"]["entries"], json!([]));
+    assert!(!directory.path().join("clipboard_history.json").exists());
+
+    // Switched off: the list is empty and sync is refused before the clipboard is read.
+    assert!(store
+        .capture_clipboard_text("synthetic third".into())
+        .unwrap());
+    let mut disabled = store.load().unwrap();
+    disabled.preferences.clipboard_history = false;
+    store.save(disabled.revision, disabled.preferences).unwrap();
+    let listed = call(json!({ "operation": "list" }));
+    assert_eq!(listed["value"]["enabled"], false);
+    assert_eq!(listed["value"]["entries"], json!([]));
+    assert_eq!(
+        call(json!({ "operation": "sync" }))["error"],
+        "clipboard_history_disabled"
+    );
+    let relative = br#"{"directory":"relative","action":{"operation":"list"}}"#;
+    assert_eq!(
+        read(unsafe { msime_client_desktop_clipboard_history(relative.as_ptr(), relative.len()) })
+            ["error"],
+        "clipboard_history_invalid"
+    );
+}
+
+#[test]
+fn account_cloud_clipboard_refuses_without_a_signed_in_session_or_a_valid_action() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().to_str().unwrap();
+    let call = |action: serde_json::Value| {
+        let body = serde_json::to_vec(&json!({ "directory": path, "action": action })).unwrap();
+        read(unsafe { msime_client_account_cloud_clipboard(body.as_ptr(), body.len()) })
+    };
+    // No account-session.json: every action stops at the session, before the network.
+    for action in [
+        json!({ "operation": "list", "search": "" }),
+        json!({ "operation": "add", "text": "synthetic upload" }),
+    ] {
+        let result = call(action);
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["error"], "account_unauthorized");
+    }
+    for action in [
+        json!({ "operation": "add", "text": "" }),
+        json!({ "operation": "add", "text": "界".repeat(4001) }),
+        json!({ "operation": "clear" }),
+        json!({}),
+    ] {
+        assert_eq!(call(action)["error"], "invalid_cloud_clipboard");
+    }
+    assert!(!directory.path().join("account-session.json").exists());
+}
+
+#[test]
+fn relay_cloud_clipboard_checks_its_input_and_the_configured_relay_before_the_network() {
+    let preferences = tempfile::tempdir().unwrap();
+    let keystore = tempfile::tempdir().unwrap();
+    let preferences_path = preferences.path().to_str().unwrap().to_owned();
+    let keystore_path = keystore.path().to_str().unwrap().to_owned();
+    let source = || {
+        let bytes = preferences_path.as_bytes();
+        read(unsafe { msime_client_cloud_clipboard_source(bytes.as_ptr(), bytes.len()) })
+    };
+    let call = |body: serde_json::Value| {
+        let body = serde_json::to_vec(&body).unwrap();
+        read(unsafe { msime_client_relay_cloud_clipboard(body.as_ptr(), body.len()) })
+    };
+    let request = |action: serde_json::Value| {
+        json!({
+            "preferences_directory": preferences_path,
+            "directory": keystore_path,
+            "device_name": "合成设备",
+            "action": action,
+        })
+    };
+
+    // 没配置中继：走账号，中继入口直接答 relay_not_configured。
+    assert_eq!(source()["value"]["source"], "account");
+    assert_eq!(
+        call(request(json!({ "operation": "list", "search": "" })))["error"],
+        "relay_not_configured"
+    );
+    let relative = b"relative";
+    assert_eq!(
+        read(unsafe { msime_client_cloud_clipboard_source(relative.as_ptr(), relative.len()) })
+            ["ok"],
+        false
+    );
+    assert_eq!(
+        read(unsafe { msime_client_cloud_clipboard_source(std::ptr::null(), 0) })["ok"],
+        false
+    );
+    assert_eq!(
+        read(unsafe { msime_client_relay_cloud_clipboard(std::ptr::null(), 0) })["error"],
+        "invalid_cloud_clipboard"
+    );
+
+    let store = PreferencesStore::new(preferences.path());
+    let mut configured = store.load().unwrap().preferences;
+    // 端口 9 上没有服务，真发出去的请求答 relay_unavailable。
+    configured.cloud_clipboard_relay.url = "http://127.0.0.1:9".into();
+    configured.cloud_clipboard_relay.token = "synthetic-relay-token".into();
+    store.save(0, configured).unwrap();
+    assert_eq!(source()["value"]["source"], "relay");
+
+    for body in [
+        request(json!({ "operation": "set_retention", "days": 3 })),
+        request(json!({ "operation": "pin", "id": "entry-1", "pinned": true })),
+        request(json!({})),
+        json!({ "preferences_directory": "relative", "directory": keystore_path, "action": { "operation": "clear" } }),
+        json!({ "preferences_directory": preferences_path, "directory": "relative", "action": { "operation": "clear" } }),
+        json!({ "preferences_directory": preferences_path, "directory": keystore_path, "action": { "operation": "clear" }, "extra": true }),
+    ] {
+        assert_eq!(
+            call(body.clone())["error"],
+            "invalid_cloud_clipboard",
+            "{body}"
+        );
+    }
+    assert_eq!(
+        call(request(json!({ "operation": "clear" })))["error"],
+        "relay_unavailable"
+    );
+    // 中继的三个新动作只在中继入口里有，账号入口照旧拒绝。
+    let account = serde_json::to_vec(&json!({
+        "directory": keystore_path,
+        "action": { "operation": "set_retention", "days": 7 },
+    }))
+    .unwrap();
+    assert_eq!(
+        read(unsafe { msime_client_account_cloud_clipboard(account.as_ptr(), account.len()) })
+            ["error"],
+        "invalid_cloud_clipboard"
+    );
+}
+
+#[test]
+fn relay_exchange_checks_the_relay_and_the_request_before_the_network() {
+    let call = |body: serde_json::Value| {
+        let body = serde_json::to_vec(&body).unwrap();
+        read(unsafe { msime_client_relay_cloud_clipboard_exchange(body.as_ptr(), body.len()) })
+    };
+    // 端口 9 上没有服务，真发出去的请求答 relay_unavailable。
+    let request = |url: &str, method: &str, path: &str| {
+        json!({
+            "url": url,
+            "token": "synthetic-relay-token",
+            "method": method,
+            "path": path,
+            "body": "{}",
+        })
+    };
+    let loopback = "http://127.0.0.1:9/msime";
+    assert_eq!(
+        call(request(
+            loopback,
+            "GET",
+            "/v1/users/me/clipboard/keys?device_id=0"
+        ))["error"],
+        "relay_unavailable"
+    );
+    // 地址和令牌按偏好的规则校验：不是 HTTPS 的远端地址、太短的令牌都不发。
+    assert_eq!(
+        call(request(
+            "http://relay.example.test",
+            "GET",
+            "/v1/users/me/clipboard"
+        ))["error"],
+        "relay_not_configured"
+    );
+    let mut short = request(loopback, "GET", "/v1/users/me/clipboard");
+    short["token"] = json!("short");
+    assert_eq!(call(short)["error"], "relay_not_configured");
+    // 驱动之外的接口、认不出的方法、多余的字段：不发出去。
+    for body in [
+        request(loopback, "GET", "/v1/users/me/profile"),
+        request(loopback, "GET", "/v1/users/me/clipboard/../profile"),
+        request(loopback, "PATCH", "/v1/users/me/clipboard"),
+        json!({ "url": loopback, "token": "synthetic-relay-token", "method": "GET" }),
+        json!({ "url": loopback, "token": "synthetic-relay-token", "method": "GET", "path": "/v1/users/me/clipboard", "directory": "/tmp" }),
+    ] {
+        assert_eq!(
+            call(body.clone())["error"],
+            "invalid_cloud_clipboard",
+            "{body}"
+        );
+    }
+    let mut large = request(loopback, "PUT", "/v1/users/me/clipboard/settings");
+    large["body"] = json!("x".repeat(70 * 1024));
+    assert_eq!(call(large)["error"], "invalid_cloud_clipboard");
+    assert_eq!(
+        read(unsafe { msime_client_relay_cloud_clipboard_exchange(std::ptr::null(), 0) })["error"],
+        "invalid_cloud_clipboard"
+    );
+}
+
+#[test]
 fn mixed_input_changes_defer_until_composition_ends() {
     use msime_client_core::preferences::MixedInputPreferences;
     let dir = tempfile::tempdir().unwrap();
@@ -735,6 +1060,9 @@ fn mixed_input_changes_defer_until_composition_ends() {
     let mut initial = chinese_preferences();
     initial.mixed_input.emoji = false;
     initial.mixed_input.kaomoji = false;
+    // 日文混输要有日文模型才交给 Engine，资源目录里先放一份。
+    std::fs::create_dir_all(dir.path().join("resources")).unwrap();
+    std::fs::write(dir.path().join("resources/msime-japanese.dat"), b"fixture").unwrap();
     let handle = test_host_preferences(dir.path(), initial);
     read(msime_client_focus(handle, true));
     read(msime_client_character(handle, b'U', true));
@@ -745,6 +1073,7 @@ fn mixed_input_changes_defer_until_composition_ends() {
             minimum_prefix: 8,
             emoji: true,
             kaomoji: true,
+            japanese: true,
         },
         ..Preferences::default()
     };
@@ -756,6 +1085,7 @@ fn mixed_input_changes_defer_until_composition_ends() {
         assert!(options.mixed_english);
         assert!(!options.mixed_emoji);
         assert!(!options.mixed_kaomoji);
+        assert!(!options.mixed_japanese);
     });
     read(msime_client_command(handle, 3));
     SESSIONS.with(|sessions| {
@@ -764,6 +1094,7 @@ fn mixed_input_changes_defer_until_composition_ends() {
         assert!(!options.mixed_english);
         assert_eq!(options.english_minimum_prefix, 8);
         assert!(options.mixed_emoji && options.mixed_kaomoji);
+        assert!(options.mixed_japanese);
     });
     preferences.mixed_input.minimum_prefix = 9;
     assert_eq!(update(handle, 2, &preferences)["ok"], false);
@@ -903,6 +1234,36 @@ fn single_character_only_reaches_engine_after_composition() {
 }
 
 #[test]
+fn wubi_auto_commit_unique_reaches_the_runtime_without_waiting_for_the_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = test_host(dir.path());
+    read(msime_client_focus(handle, true));
+    SESSIONS.with(|sessions| {
+        assert!(sessions.borrow()[&handle].runtime.wubi_auto_commit_unique());
+    });
+
+    // 组字进行中也立刻生效：它是宿主状态，不等 Engine 重建。
+    read(msime_client_character(handle, b'a', false));
+    let mut preferences = Preferences {
+        scheme: InputScheme::Wubi,
+        wubi_auto_commit_unique: false,
+        ..Preferences::default()
+    };
+    let queued = update(handle, 1, &preferences);
+    assert_eq!(queued["value"]["deferred"], true);
+    SESSIONS.with(|sessions| {
+        assert!(!sessions.borrow()[&handle].runtime.wubi_auto_commit_unique());
+    });
+
+    preferences.wubi_auto_commit_unique = true;
+    update(handle, 2, &preferences);
+    SESSIONS.with(|sessions| {
+        assert!(sessions.borrow()[&handle].runtime.wubi_auto_commit_unique());
+    });
+    read(msime_client_destroy(handle));
+}
+
+#[test]
 fn wubi_profile_reaches_engine_options() {
     use msime_client_core::preferences::WubiProfile;
     let dir = tempfile::tempdir().unwrap();
@@ -922,6 +1283,369 @@ fn wubi_profile_reaches_engine_options() {
         assert_eq!(session.applied.wubi_profile, WubiProfile::Wubi98);
     });
     read(msime_client_destroy(handle));
+}
+
+/// 小鹤的键位，只把 ing 从 k 挪到 `;`。
+fn custom_shuangpin_table() -> msime_client_core::preferences::ShuangpinCustomProfile {
+    serde_json::from_value(json!({
+        "initials": { "zh": "v", "ch": "i", "sh": "u" },
+        "finals": {
+            "iu": "q", "ei": "w", "e": "e", "uan": "r", "ue": "t", "ve": "t", "un": "y",
+            "u": "u", "i": "i", "uo": "o", "o": "o", "ie": "p", "a": "a", "ong": "s",
+            "iong": "s", "ai": "d", "en": "f", "eng": "g", "ang": "h", "an": "j", "uai": "k",
+            "ing": ";", "uang": "l", "iang": "l", "ou": "z", "ua": "x", "ia": "x", "ao": "c",
+            "ui": "v", "v": "v", "in": "b", "iao": "n", "ian": "m"
+        },
+        "zero_initials": {
+            "a": "aa", "ai": "ai", "an": "an", "ang": "ah", "ao": "ao", "e": "ee", "ei": "ei",
+            "en": "en", "eng": "eg", "er": "er", "o": "oo", "ou": "ou"
+        }
+    }))
+    .unwrap()
+}
+
+#[test]
+fn custom_shuangpin_profile_reaches_engine_options_or_falls_back_to_xiaohe() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = test_host(dir.path());
+    read(msime_client_focus(handle, true));
+    // 选了自定义方案却没有表：按小鹤运行，诊断里写明原因。
+    let mut preferences = Preferences {
+        scheme: InputScheme::Shuangpin,
+        shuangpin_profile: ShuangpinProfile::Custom,
+        ..chinese_preferences()
+    };
+    let response = update(handle, 1, &preferences);
+    let diagnostic = response["value"]["diagnostic"].as_str().unwrap_or_default();
+    assert!(
+        diagnostic.starts_with(
+            "Custom shuangpin profile unusable because initials unit \"zh\" has no key"
+        ),
+        "{response}"
+    );
+    assert_eq!(response["value"]["view"]["shuangpin_profile"], "xiaohe");
+    SESSIONS.with(|sessions| {
+        let session = &sessions.borrow()[&handle];
+        assert_eq!(session.options.shuangpin_profile, 0);
+        assert_eq!(session.options.shuangpin_custom_profile, None);
+    });
+
+    preferences.shuangpin_custom_profile = custom_shuangpin_table();
+    let response = update(handle, 2, &preferences);
+    assert!(response["value"].get("diagnostic").is_none(), "{response}");
+    assert_eq!(response["value"]["view"]["shuangpin_profile"], "custom");
+    assert_eq!(response["value"]["view"]["microsoft_shuangpin"], true);
+    SESSIONS.with(|sessions| {
+        let session = &sessions.borrow()[&handle];
+        assert_eq!(session.options.shuangpin_profile, 4);
+        assert_eq!(
+            session.options.shuangpin_custom_profile,
+            Some(engine_shuangpin_custom_table(&custom_shuangpin_table()))
+        );
+    });
+    read(msime_client_character(handle, b'x', false));
+    let typed = read(msime_client_character(handle, b';', false));
+    assert_eq!(typed["value"]["view"]["editing_text"], "x;", "{typed}");
+
+    // 换回内置方案时不再把表交给 Engine，但偏好里的表留着。
+    read(msime_client_command(handle, 3));
+    preferences.shuangpin_profile = ShuangpinProfile::Ziranma;
+    update(handle, 3, &preferences);
+    SESSIONS.with(|sessions| {
+        let session = &sessions.borrow()[&handle];
+        assert_eq!(session.options.shuangpin_profile, 1);
+        assert_eq!(session.options.shuangpin_custom_profile, None);
+        assert!(!session.applied.shuangpin_custom_profile.is_empty());
+    });
+    read(msime_client_destroy(handle));
+}
+
+/// 九键双拼的布局让全拼会话以九键双拼开始：数字两位一个音节，`View.key_grid` 说出网格而 `nine_key` 为假；换了表就换网格；自定义表不能用时按米旮旯 3 运行并报告原因；别的方案没有它。
+#[test]
+fn a_nine_key_shuangpin_layout_starts_the_grid_with_the_chosen_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut preferences = Preferences {
+        touch_keyboard_layout: TouchKeyboardLayout::NineKeyShuangpin,
+        ..chinese_preferences()
+    };
+    let handle = test_host_with_pinyin_fixture(dir.path(), preferences.clone());
+    read(msime_client_focus(handle, true));
+    let view = read(msime_client_view(handle));
+    assert_eq!(view["value"]["key_grid"], "nine_key_shuangpin");
+    assert_eq!(view["value"]["nine_key"], false);
+    // 米旮旯 3：ni 是 64，hao 是 47。
+    let mut typed = Value::Null;
+    for &digit in b"6447" {
+        typed = read(msime_client_character(handle, digit, false));
+        assert_eq!(typed["value"]["handled"], true, "{typed}");
+    }
+    let view = &typed["value"]["view"];
+    assert_eq!(view["candidates"][0]["text"], "本地", "{view}");
+    assert_eq!(view["nine_key_reading"], "ni'hao", "{view}");
+    // 数字是组码，不是选词键：米旮旯 3 不用 1 以外的键时也一样，1 在这里是 ong、ou、ing。
+    let one = read(msime_client_character(handle, b'1', false));
+    assert_eq!(one["value"]["view"]["editing_text"], "64471", "{one}");
+    read(msime_client_command(handle, 3));
+
+    // 米旮旯 2 的 ao 在 2：同一个词是 64 42。
+    preferences.nine_key_shuangpin_profile = NineKeyShuangpinProfile::Migala2;
+    assert_eq!(
+        update(handle, 1, &preferences)["value"]["view"]["key_grid"],
+        "nine_key_shuangpin"
+    );
+    for &digit in b"644" {
+        read(msime_client_character(handle, digit, false));
+    }
+    typed = read(msime_client_character(handle, b'2', false));
+    assert_eq!(
+        typed["value"]["view"]["candidates"][0]["text"], "本地",
+        "{typed}"
+    );
+    // 米旮旯 2 不用 0 键：0 不进九宫格，组字照旧。
+    let zero = read(msime_client_character(handle, b'0', false));
+    assert_eq!(zero["value"]["view"]["editing_text"], "6442", "{zero}");
+    read(msime_client_command(handle, 3));
+
+    // 自定义表不能用：按米旮旯 3 运行，诊断里写明原因。
+    preferences.nine_key_shuangpin_profile = NineKeyShuangpinProfile::Custom;
+    let response = update(handle, 2, &preferences);
+    let diagnostic = response["value"]["diagnostic"].as_str().unwrap_or_default();
+    assert!(
+        diagnostic.starts_with(
+            "Nine-key shuangpin table unusable because initials unit \"b\" has no key"
+        ),
+        "{response}"
+    );
+    assert!(diagnostic.ends_with("using migala3."), "{response}");
+    assert_eq!(response["value"]["view"]["key_grid"], "nine_key_shuangpin");
+    for &digit in b"6447" {
+        typed = read(msime_client_character(handle, digit, false));
+    }
+    assert_eq!(
+        typed["value"]["view"]["candidates"][0]["text"], "本地",
+        "{typed}"
+    );
+    read(msime_client_command(handle, 3));
+    // 能用的自定义表（辜氏 2 低重码的表）照用，不再报告。
+    preferences.nine_key_shuangpin_custom_profile =
+        builtin_nine_key_shuangpin_custom_profile(NineKeyShuangpinProfile::Gushi2Low).unwrap();
+    let response = update(handle, 3, &preferences);
+    assert!(response["value"].get("diagnostic").is_none(), "{response}");
+
+    // 宿主可以关掉网格再用 3 打开，表仍按偏好；别的方案没有九键双拼。
+    assert_eq!(
+        read(msime_client_set_key_grid(handle, 0))["value"]["key_grid"],
+        "none"
+    );
+    assert_eq!(
+        read(msime_client_set_key_grid(handle, 3))["value"]["key_grid"],
+        "nine_key_shuangpin"
+    );
+    preferences.scheme = InputScheme::Shuangpin;
+    let shuangpin = update(handle, 4, &preferences);
+    assert_eq!(
+        shuangpin["value"]["view"]["key_grid"], "none",
+        "{shuangpin}"
+    );
+    assert_eq!(read(msime_client_set_key_grid(handle, 3))["ok"], false);
+    read(msime_client_destroy(handle));
+}
+
+fn nine_key_shuangpin_layout(request: Value) -> Value {
+    let request = request.to_string();
+    read(unsafe { msime_client_nine_key_shuangpin_layout(request.as_ptr(), request.len()) })
+}
+
+/// 键面和编辑器从同一个接口取表：内置方案给出它的表和键面；自定义表给出问题的位置，不能用时键面是回退到的米旮旯 3；不认识的方案名报错。
+#[test]
+fn nine_key_shuangpin_layouts_give_tables_problems_and_key_faces() {
+    let migala3 = nine_key_shuangpin_layout(json!({ "profile": "migala3" }));
+    assert_eq!(migala3["ok"], true, "{migala3}");
+    let value = &migala3["value"];
+    assert_eq!(value["effective"], "migala3");
+    assert_eq!(value["problem"], Value::Null);
+    assert_eq!(value["table"]["initials"]["zh"], "8");
+    assert_eq!(value["table"]["zero_initials"]["an"], "25");
+    let keys = value["keys"].as_array().unwrap();
+    let faces: Vec<&str> = keys
+        .iter()
+        .map(|key| key["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(faces, ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]);
+    assert_eq!(keys[1]["initials"], json!(["b", "c"]));
+    assert_eq!(keys[1]["finals"], json!(["a", "ai", "iang"]));
+    assert_eq!(keys[1]["zero_initial"], true);
+    assert_eq!(keys[9]["finals"], json!(["u", "ü", "ei"]));
+
+    let mut table =
+        builtin_nine_key_shuangpin_custom_profile(NineKeyShuangpinProfile::Migala2).unwrap();
+    table.finals.insert("ang".into(), "x".into());
+    let broken = nine_key_shuangpin_layout(json!({ "profile": "custom", "table": table }));
+    let value = &broken["value"];
+    assert_eq!(value["effective"], "migala3", "{broken}");
+    assert_eq!(
+        value["problem"],
+        json!({ "kind": "invalid_key", "part": "finals", "unit": "ang", "key": "x" })
+    );
+    assert_eq!(value["keys"].as_array().unwrap().len(), 10);
+
+    table.finals.insert("ang".into(), "5".into());
+    let custom = nine_key_shuangpin_layout(json!({ "profile": "custom", "table": table }));
+    let value = &custom["value"];
+    assert_eq!(value["effective"], "custom", "{custom}");
+    assert_eq!(value["problem"], Value::Null);
+    // 米旮旯 2 不用 0 键。
+    assert_eq!(value["keys"].as_array().unwrap().len(), 9);
+
+    assert_eq!(
+        nine_key_shuangpin_layout(json!({ "profile": "gushi2" }))["ok"],
+        false
+    );
+    assert_eq!(
+        nine_key_shuangpin_layout(json!({ "profile": "migala3", "extra": 1 }))["ok"],
+        false
+    );
+}
+
+#[test]
+fn builtin_nine_key_shuangpin_tables_are_valid_custom_profiles() {
+    for profile in [
+        NineKeyShuangpinProfile::Migala2,
+        NineKeyShuangpinProfile::Migala3,
+        NineKeyShuangpinProfile::Gushi2Low,
+    ] {
+        let table = builtin_nine_key_shuangpin_custom_profile(profile).unwrap();
+        assert_eq!(
+            (
+                table.initials.len(),
+                table.finals.len(),
+                table.zero_initials.len()
+            ),
+            (23, 33, 12),
+            "{profile:?}"
+        );
+        assert_eq!(nine_key_shuangpin_custom_profile_problem(&table), None);
+        assert_eq!(validate_nine_key_shuangpin_custom_profile(&table), Ok(()));
+    }
+    assert_eq!(
+        builtin_nine_key_shuangpin_custom_profile(NineKeyShuangpinProfile::Custom),
+        None
+    );
+    let mut table =
+        builtin_nine_key_shuangpin_custom_profile(NineKeyShuangpinProfile::Migala3).unwrap();
+    table.zero_initials.remove("er");
+    let problem = nine_key_shuangpin_custom_profile_problem(&table).unwrap();
+    assert_eq!(problem.kind, ShuangpinCustomProblemKind::MissingUnit);
+    assert_eq!(problem.part, Some("zero_initials"));
+    assert_eq!(problem.unit.as_deref(), Some("er"));
+    assert!(validate_nine_key_shuangpin_custom_profile(&table)
+        .unwrap_err()
+        .contains("zero_initials unit \"er\" has no key"));
+}
+
+#[test]
+fn builtin_shuangpin_tables_are_valid_custom_profiles() {
+    for profile in [
+        ShuangpinProfile::Xiaohe,
+        ShuangpinProfile::Ziranma,
+        ShuangpinProfile::Shoudao,
+        ShuangpinProfile::Microsoft,
+    ] {
+        let table = builtin_shuangpin_custom_profile(profile).unwrap();
+        assert_eq!(
+            (
+                table.initials.len(),
+                table.finals.len(),
+                table.zero_initials.len()
+            ),
+            (3, 33, 12),
+            "{profile:?}"
+        );
+        assert_eq!(
+            custom_shuangpin_profile_problem(&table),
+            None,
+            "{profile:?}"
+        );
+        assert_eq!(
+            validate_custom_shuangpin_profile(&table),
+            Ok(()),
+            "{profile:?}"
+        );
+    }
+    assert_eq!(
+        builtin_shuangpin_custom_profile(ShuangpinProfile::Xiaohe)
+            .unwrap()
+            .finals["ing"],
+        "k"
+    );
+    assert_eq!(
+        builtin_shuangpin_custom_profile(ShuangpinProfile::Microsoft)
+            .unwrap()
+            .finals["ing"],
+        ";"
+    );
+    assert_eq!(
+        builtin_shuangpin_custom_profile(ShuangpinProfile::Custom),
+        None
+    );
+}
+
+/// 设置页拿到的问题逐项对应 Engine 的错误，JSON 里只有这种错误用得到的字段。
+#[test]
+fn custom_shuangpin_problems_name_the_unit_key_and_code() {
+    let edited = |edit: &dyn Fn(&mut msime_client_core::preferences::ShuangpinCustomProfile)| {
+        let mut table = custom_shuangpin_table();
+        edit(&mut table);
+        let problem = custom_shuangpin_profile_problem(&table);
+        // 不留存的检查与 MCP 保存前用的校验结论相同。
+        assert_eq!(
+            problem.is_none(),
+            validate_custom_shuangpin_profile(&table).is_ok()
+        );
+        problem.map(|problem| serde_json::to_value(problem).unwrap())
+    };
+    assert_eq!(edited(&|_| {}), None);
+    assert_eq!(
+        edited(&|table| {
+            table.initials.insert("b".into(), "b".into());
+        }),
+        Some(json!({ "kind": "unknown_unit", "part": "initials", "unit": "b" }))
+    );
+    assert_eq!(
+        edited(&|table| {
+            table.finals.remove("iong");
+        }),
+        Some(json!({ "kind": "missing_unit", "part": "finals", "unit": "iong" }))
+    );
+    assert_eq!(
+        edited(&|table| {
+            table.zero_initials.insert("a".into(), ";A".into());
+        }),
+        Some(json!({ "kind": "invalid_key", "part": "zero_initials", "unit": "a", "key": ";a" }))
+    );
+    assert_eq!(
+        edited(&|table| {
+            table.initials.insert("sh".into(), "s".into());
+        }),
+        Some(json!({ "kind": "initial_key_taken", "part": "initials", "unit": "sh", "key": "s" }))
+    );
+    assert_eq!(
+        edited(&|table| {
+            table.zero_initials.insert("a".into(), "ua".into());
+        }),
+        Some(json!({ "kind": "ambiguous_code", "code": "ua", "first": "sha", "second": "a" }))
+    );
+    // 偏好里的表是对象，同一个单位写不出两次；这一种只可能从 Engine 的表来，照样逐项对应。
+    assert_eq!(
+        serde_json::to_value(ShuangpinCustomProblem::from(
+            ShuangpinCustomProfileError::DuplicateUnit {
+                part: ShuangpinCustomTablePart::Finals,
+                unit: "iu".into(),
+            }
+        ))
+        .unwrap(),
+        json!({ "kind": "duplicate_unit", "part": "finals", "unit": "iu" })
+    );
 }
 
 #[test]
@@ -1162,6 +1886,140 @@ fn url_commits_stay_half_width_in_full_width_mode() {
     assert_eq!(read(msime_client_destroy(handle))["ok"], true);
 }
 
+/// 把一次合成的上屏交给 `complete_transition`，返回宿主拿到的上屏文本。`scheme` 和 `local_mode` 是上屏前记下的 `commit_context`。
+fn completed_commit(
+    handle: u64,
+    commit: &str,
+    scheme: u8,
+    local_mode: &str,
+    full_width: bool,
+) -> Option<String> {
+    SESSIONS.with(|sessions| {
+        let mut sessions = sessions.borrow_mut();
+        let session = sessions.get_mut(&handle).unwrap();
+        let mut view = session.runtime.view();
+        if full_width {
+            view.character_width = CharacterWidth::Fullwidth;
+        }
+        session
+            .complete_transition(Transition {
+                handled: true,
+                commit: Some(commit.to_owned()),
+                commit_context: Some(msime_input_runtime::OutputContext {
+                    scheme,
+                    local_mode: local_mode.to_owned(),
+                    script_conversion: true,
+                    typing_statistics: true,
+                }),
+                diagnostic: None,
+                view,
+            })
+            .commit
+    })
+}
+
+// 「中英文之间加空格」只在开关打开、中文方案、普通组字或快捷短语、超级简拼的上屏里加；网址、日期等快捷模式和非中文方案原样。关着时上屏一字不改。
+#[test]
+fn chinese_english_spacing_follows_the_switch_and_the_commit_mode() {
+    let directory = tempfile::tempdir().unwrap();
+    let handle = test_host(directory.path());
+    assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+    let text = "用Rust写插件";
+    assert_eq!(
+        completed_commit(handle, text, 0, "none", false).as_deref(),
+        Some(text)
+    );
+
+    let preferences = Preferences {
+        chinese_english_spacing: true,
+        ..chinese_preferences()
+    };
+    assert_eq!(update(handle, 1, &preferences)["ok"], true);
+    for local_mode in ["none", "quick_phrase", "super_jianpin"] {
+        assert_eq!(
+            completed_commit(handle, text, 0, local_mode, false).as_deref(),
+            Some("用 Rust 写插件"),
+            "{local_mode}"
+        );
+    }
+    // 五笔和粤拼同样是中文方案。
+    for scheme in [2, 5] {
+        assert_eq!(
+            completed_commit(handle, "800人", scheme, "none", false).as_deref(),
+            Some("800 人"),
+            "{scheme}"
+        );
+    }
+    for local_mode in [
+        "url",
+        "date_time",
+        "command",
+        "expression",
+        "mention",
+        "unicode",
+        "temporary_english",
+        "temporary_japanese",
+    ] {
+        assert_eq!(
+            completed_commit(handle, text, 0, local_mode, false).as_deref(),
+            Some(text),
+            "{local_mode}"
+        );
+    }
+    // 日文、韩文方案不加。
+    for scheme in [3, 4] {
+        assert_eq!(
+            completed_commit(handle, text, scheme, "none", false).as_deref(),
+            Some(text),
+            "{scheme}"
+        );
+    }
+    // 全角在前：字母已是全角，不加空格，也就不会出现 U+3000。
+    let wide = completed_commit(handle, text, 0, "none", true).unwrap();
+    assert_eq!(wide, "用Ｒｕｓｔ写插件");
+    assert!(!wide.contains('\u{3000}'));
+
+    let off = Preferences {
+        chinese_english_spacing: false,
+        ..preferences
+    };
+    assert_eq!(update(handle, 2, &off)["ok"], true);
+    assert_eq!(
+        completed_commit(handle, text, 0, "none", false).as_deref(),
+        Some(text)
+    );
+    assert_eq!(read(msime_client_destroy(handle))["ok"], true);
+}
+
+// 端到端：K 模式快捷短语「用Rust写」经完整的派发链路上屏为「用 Rust 写」。
+#[test]
+fn chinese_english_spacing_reaches_a_quick_phrase_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    install_phrase_table(dir.path(), "spacing", &[("yrx", "用Rust写")]);
+    let mut preferences = chinese_preferences();
+    preferences.plugins.phrase_tables = vec!["spacing".into()];
+    preferences.chinese_english_spacing = true;
+    let handle = plugin_host(dir.path(), preferences.clone());
+    assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+    let commit_phrase = || {
+        let entered = read(msime_client_character(handle, b'K', true));
+        assert_eq!(entered["ok"], true, "{entered}");
+        for key in b"yrx" {
+            let typed = read(msime_client_character(handle, *key, false));
+            assert_eq!(typed["ok"], true, "{typed}");
+        }
+        read(msime_client_command(handle, 1))["value"].clone()
+    };
+    let committed = commit_phrase();
+    assert_eq!(committed["commit_context"]["local_mode"], "quick_phrase");
+    assert_eq!(committed["commit"], "用 Rust 写");
+
+    preferences.chinese_english_spacing = false;
+    assert_eq!(update(handle, 1, &preferences)["ok"], true);
+    assert_eq!(commit_phrase()["commit"], "用Rust写");
+    assert_eq!(read(msime_client_destroy(handle))["ok"], true);
+}
+
 #[test]
 fn korean_scheme_crosses_the_host_boundary() {
     let dir = tempfile::tempdir().unwrap();
@@ -1310,9 +2168,12 @@ fn korean_hanja_conversion_crosses_the_host_boundary() {
     assert!(refused["value"]["commit"].is_null());
     assert_eq!(refused["value"]["view"]["preedit"], "ㄱ");
 
-    // 16 is the last command before the navigation block; the next number is still unknown.
+    // 17 和 18 是整句改字的光标键，韩文里进不了改字，与字母光标键一样写出音节；19 是宿主自己上屏后的取消（MSIME_CANCEL_AFTER_HOST_COMMIT），20 是宿主替失焦结束组字（MSIME_FINISH_ON_FOCUS_LOSS），是导航命令前的最后一个，下一个编号仍未定义。
+    let left = read(msime_client_command(handle, 17));
+    assert_eq!(left["value"]["handled"], false);
+    assert_eq!(left["value"]["commit"], "ㄱ");
     assert_eq!(
-        read(msime_client_command(handle, 17))["error"],
+        read(msime_client_command(handle, 21))["error"],
         "unknown input command"
     );
     read(msime_client_destroy(handle));
@@ -1547,6 +2408,188 @@ fn nine_key_mode_and_spelling_identity_cross_the_host_boundary() {
         true
     );
     read(msime_client_destroy(persisted));
+}
+
+/// 14 键经宿主接口开关：`View.key_grid` 说出网格，`nine_key` 只表示九键。组码只从 `msime_client_grid_key` 进来，硬件字母照常走全拼；选拼写不被当成过期请求。
+#[test]
+fn fourteen_key_grid_crosses_the_host_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = test_host(dir.path());
+    read(msime_client_focus(handle, true));
+    assert_eq!(read(msime_client_view(handle))["value"]["key_grid"], "none");
+    assert_eq!(read(msime_client_set_key_grid(handle, 4))["ok"], false);
+    assert_eq!(read(msime_client_view(handle))["value"]["key_grid"], "none");
+    let enabled = read(msime_client_set_key_grid(handle, 2));
+    assert_eq!(enabled["value"]["key_grid"], "fourteen_key");
+    assert_eq!(enabled["value"]["nine_key"], false);
+
+    let hardware = read(msime_client_character(handle, b'q', false));
+    assert_eq!(hardware["value"]["handled"], true);
+    assert_eq!(hardware["value"]["view"]["preedit"], "q");
+    assert_eq!(
+        read(msime_client_grid_key(handle, b'n'))["value"]["handled"],
+        false
+    );
+    read(msime_client_command(handle, 3));
+
+    let typed = read(msime_client_grid_key(handle, b'n'));
+    assert_eq!(typed["value"]["handled"], true, "{typed}");
+    let view = &typed["value"]["view"];
+    assert!(!view["nine_key_spellings"].as_array().unwrap().is_empty());
+    let generation = view["generation"].as_u64().unwrap();
+    let selected = read(msime_client_choose_nine_key_spelling(handle, generation, 0));
+    assert_eq!(selected["value"]["handled"], true, "{selected}");
+    assert_eq!(read(msime_client_set_key_grid(handle, 0))["ok"], false);
+    read(msime_client_command(handle, 3));
+    assert_eq!(
+        read(msime_client_set_key_grid(handle, 0))["value"]["key_grid"],
+        "none"
+    );
+
+    let nine_key = read(msime_client_set_nine_key_mode(handle, true));
+    assert_eq!(nine_key["value"]["key_grid"], "nine_key");
+    assert_eq!(
+        read(msime_client_grid_key(handle, b'n'))["value"]["handled"],
+        false
+    );
+    read(msime_client_set_key_grid(handle, 2));
+    assert_eq!(
+        read(msime_client_set_nine_key_mode(handle, false))["value"]["key_grid"],
+        "none"
+    );
+    read(msime_client_destroy(handle));
+}
+
+/// 三端宿主都开着 `phrase_preedit`。14 键里选了只覆盖前一段的词，退格到只剩一个组码再退格，收回这次选词：组码要回到 14 键网格里，而不是变成全拼 26 键的 `bu`，之后的 14 键照样能打。
+#[test]
+fn retreating_a_fourteen_key_selection_keeps_composing_on_the_grid() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name| {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    };
+    let resources = path("resources");
+    let dictionaries = path("dictionaries");
+    let fixture = "CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                   INSERT INTO tbl_1_n VALUES('ni','n','你',100);
+                   CREATE TABLE tbl_1_b(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                   INSERT INTO tbl_1_b VALUES('bu','b','不',90);
+                   CREATE TABLE tbl_1_g(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                   INSERT INTO tbl_1_g VALUES('gao','g','高',80);
+                   CREATE TABLE tbl_1_h(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                   INSERT INTO tbl_1_h VALUES('hao','h','好',100);
+                   CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                   INSERT INTO tbl_2_n VALUES('ni''hao','nh','你好',1000);
+                   CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);
+                   CREATE TABLE quick_parases(key TEXT,value TEXT,weight INTEGER);
+                   CREATE INDEX idx_quick_parases_key_weight ON quick_parases(key,weight DESC);";
+    for directory in [&resources, &dictionaries] {
+        rusqlite::Connection::open(directory.join("msime-pinyin.db"))
+            .unwrap()
+            .execute_batch(fixture)
+            .unwrap();
+    }
+    let preferences = Preferences {
+        touch_keyboard_layout: TouchKeyboardLayout::FourteenKey,
+        ..chinese_preferences()
+    };
+    let options = json!({ "api_version": 1, "resources": resources, "user_data": path("user"), "cache": path("cache"), "dictionaries": dictionaries, "preferences": preferences, "phrase_preedit": true }).to_string();
+    let created = read(unsafe { msime_client_create(options.as_ptr(), options.len()) });
+    assert_eq!(created["ok"], true, "{created}");
+    let handle = created["value"]["session"].as_u64().unwrap();
+    read(msime_client_focus(handle, true));
+
+    // 你好：BN UI GH AS OP。
+    let mut view = Value::Null;
+    for &letter in b"bugao" {
+        let typed = read(msime_client_grid_key(handle, letter));
+        assert_eq!(typed["value"]["handled"], true, "{typed}");
+        view = typed["value"]["view"].clone();
+    }
+    assert_eq!(view["editing_text"], "bugao");
+    let ni = view["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|candidate| candidate["text"] == "你")
+        .unwrap_or_else(|| panic!("{view}"));
+    let generation = view["generation"].as_u64().unwrap();
+    let held = read(msime_client_select(handle, generation, ni));
+    assert_eq!(held["value"]["view"]["phrase_prefix"], "你", "{held}");
+    assert_eq!(held["value"]["view"]["editing_text"], "gao", "{held}");
+    for _ in 0..2 {
+        read(msime_client_command(handle, 0));
+    }
+    assert_eq!(
+        read(msime_client_view(handle))["value"]["editing_text"],
+        "g"
+    );
+
+    let restored = read(msime_client_command(handle, 0));
+    let view = &restored["value"]["view"];
+    assert_eq!(view["key_grid"], "fourteen_key", "{restored}");
+    assert_eq!(view["editing_text"], "bu", "{restored}");
+    assert!(
+        view["phrase_prefix"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "{restored}"
+    );
+    assert!(
+        !view["nine_key_spellings"].as_array().unwrap().is_empty(),
+        "{restored}"
+    );
+    let next = read(msime_client_grid_key(handle, b'g'));
+    assert_eq!(next["value"]["handled"], true, "{next}");
+    assert_eq!(next["value"]["view"]["editing_text"], "bug", "{next}");
+    read(msime_client_destroy(handle));
+}
+
+/// 偏好里的 14 键布局让全拼会话以 14 键开始，重建后不变；宿主的覆盖只到布局或方案改变为止；别的方案没有 14 键。
+#[test]
+fn a_fourteen_key_layout_starts_and_keeps_the_fourteen_key_grid() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut preferences = Preferences {
+        touch_keyboard_layout: TouchKeyboardLayout::FourteenKey,
+        ..chinese_preferences()
+    };
+    let handle = test_host_preferences(dir.path(), preferences.clone());
+    let view = read(msime_client_view(handle));
+    assert_eq!(view["value"]["key_grid"], "fourteen_key");
+    assert_eq!(view["value"]["nine_key"], false);
+    assert_eq!(view["value"]["touch_keyboard_layout"], "fourteen_key");
+    preferences.learning = !preferences.learning;
+    assert_eq!(
+        update(handle, 1, &preferences)["value"]["view"]["key_grid"],
+        "fourteen_key"
+    );
+    // 宿主关掉网格（比如密码框画 26 键），同一布局下重建也不会再打开。
+    read(msime_client_set_key_grid(handle, 0));
+    preferences.learning = !preferences.learning;
+    assert_eq!(
+        update(handle, 2, &preferences)["value"]["view"]["key_grid"],
+        "none"
+    );
+    preferences.touch_keyboard_layout = TouchKeyboardLayout::NineKey;
+    assert_eq!(
+        update(handle, 3, &preferences)["value"]["view"]["key_grid"],
+        "nine_key"
+    );
+    preferences.touch_keyboard_layout = TouchKeyboardLayout::FourteenKey;
+    assert_eq!(
+        update(handle, 4, &preferences)["value"]["view"]["key_grid"],
+        "fourteen_key"
+    );
+    preferences.scheme = InputScheme::Shuangpin;
+    let shuangpin = update(handle, 5, &preferences);
+    assert_eq!(
+        shuangpin["value"]["view"]["key_grid"], "none",
+        "{shuangpin}"
+    );
+    assert_eq!(read(msime_client_set_key_grid(handle, 2))["ok"], false);
+    read(msime_client_destroy(handle));
 }
 
 #[test]
@@ -1889,6 +2932,7 @@ fn nine_key_digits_offer_ranked_english_across_the_host_boundary() {
                 minimum_prefix: 2,
                 emoji: false,
                 kaomoji: false,
+                japanese: false,
             },
             ..chinese_preferences()
         },
@@ -2236,10 +3280,12 @@ fn theme_catalog_lists_every_theme_in_picker_order() {
         .iter()
         .map(|theme| theme["id"].as_str().unwrap().to_owned())
         .collect();
+    // 测试在桌面平台上编译运行，目录里没有只在 iOS 提供的 `native`。
     assert_eq!(
         ids,
         ["system", "shuishan", "light", "paper", "night", "ink", "custom"]
     );
+    assert_eq!(catalog["value"]["themes"][0]["platforms"], Value::Null);
     let night = &catalog["value"]["themes"][4];
     assert_eq!(night["title"], "夜青");
     assert_eq!(night["appearance"], "dark");
@@ -2364,6 +3410,67 @@ fn restoring_default_preferences_is_a_locked_compare_and_swap() {
 }
 
 #[test]
+fn exported_settings_import_as_a_compare_and_swap_that_keeps_local_services() {
+    let source = tempfile::tempdir().unwrap();
+    let source_store = PreferencesStore::new(source.path());
+    let mut exported = Preferences {
+        candidate_page_size: 8,
+        ..Preferences::default()
+    };
+    exported.voice_input.asr_token = "fixture-exported-token".into();
+    source_store.save(0, exported).unwrap();
+    let source_path = source.path().to_str().unwrap();
+    let document =
+        read(unsafe { msime_client_export_settings(source_path.as_ptr(), source_path.len()) });
+    assert_eq!(document["ok"], true, "{document}");
+    let text = document["value"].as_str().unwrap().to_owned();
+    assert!(!text.contains("fixture-exported-token"));
+
+    let target = tempfile::tempdir().unwrap();
+    let target_store = PreferencesStore::new(target.path());
+    let mut local = Preferences::default();
+    local.voice_input.asr_token = "fixture-local-token".into();
+    // 本机开着剪贴板历史、存着记录；导出的文件里剪贴板历史是默认的关闭，导入后本机仍开着，记录也还在。
+    local.clipboard_history = true;
+    let saved = target_store.save(0, local).unwrap();
+    assert!(target_store
+        .capture_clipboard_text("synthetic local history".into())
+        .unwrap());
+    let history = target.path().join("clipboard_history.json");
+    let original_history = std::fs::read(&history).unwrap();
+    let target_path = target.path().to_str().unwrap();
+    let import = |revision: u64, bytes: &[u8]| {
+        read(unsafe {
+            msime_client_import_settings(
+                target_path.as_ptr(),
+                target_path.len(),
+                revision,
+                bytes.as_ptr(),
+                bytes.len(),
+            )
+        })
+    };
+    let stale = import(saved.revision + 3, text.as_bytes());
+    assert_eq!(stale["error"], "settings_conflict");
+    assert_eq!(target_store.load().unwrap(), saved);
+    assert_eq!(
+        import(saved.revision, b"{\"format\":\"elsewhere\"}")["error"],
+        "settings_document_invalid"
+    );
+    let imported = import(saved.revision, text.as_bytes());
+    assert_eq!(imported["ok"], true, "{imported}");
+    assert_eq!(imported["value"]["revision"], saved.revision + 1);
+    let loaded = target_store.load().unwrap();
+    assert_eq!(loaded.preferences.candidate_page_size, 8);
+    assert_eq!(
+        loaded.preferences.voice_input.asr_token,
+        "fixture-local-token"
+    );
+    assert!(loaded.preferences.clipboard_history);
+    assert_eq!(std::fs::read(&history).unwrap(), original_history);
+}
+
+#[test]
 #[cfg(not(target_os = "android"))]
 fn resolve_theme_reads_the_package_from_either_source() {
     let directory = tempfile::tempdir().unwrap();
@@ -2402,7 +3509,7 @@ fn resolve_theme_reads_the_package_from_either_source() {
     let entry = msime_client_core::skin::catalog::host_candidate_catalog(
         &msime_client_core::skin::catalog::scan(&root),
         &root,
-        "sakura",
+        &["sakura"],
     )["packages"][0]
         .clone();
     let from_entry = call(json!({
@@ -2410,11 +3517,13 @@ fn resolve_theme_reads_the_package_from_either_source() {
     }));
     assert_eq!(from_entry["value"], from_root["value"]);
 
-    // Paper fixes the light mode, so a dark host still draws the package's light palette.
+    // paper 底的皮肤是浅色皮肤，只画在浅色模式：深色宿主没设深色槽位时不画它，自定义主题落回底和取色器。
     let dark = call(json!({
         "global_theme": "custom", "custom_theme": custom, "dark": true, "layout": "vertical", "skins_directory": root,
     }));
-    assert_eq!(dark["value"], from_root["value"]);
+    assert_eq!(dark["ok"], true, "{dark}");
+    assert_eq!(dark["value"]["candidate_skin"], Value::Null);
+    assert_eq!(dark["value"]["candidate"]["text"], "#010203");
 
     // A missing package leaves the theme to resolve over the platform tokens.
     let missing = call(json!({
@@ -3099,6 +4208,54 @@ fn recover_preferences_backs_up_malformed_documents_only() {
 
 #[test]
 #[cfg(not(target_os = "android"))]
+fn repair_preferences_keeps_what_an_older_build_knows_of_a_newer_document() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().to_str().unwrap();
+    let repair = || read(unsafe { msime_client_repair_preferences(path.as_ptr(), path.len()) });
+    let document = directory.path().join("preferences.json");
+
+    // Missing: nothing is written.
+    assert_eq!(repair()["value"]["recovered"], false);
+    assert!(!document.exists());
+
+    // A newer build added a setting this one does not know. Loading refuses the whole document, and the malformed-only recovery leaves it alone; the explicit repair backs it up verbatim and keeps the settings this schema accepts.
+    let newer = json!({
+        "format_version": 1,
+        "revision": 7,
+        "preferences": {"learning": false, "a_setting_from_a_newer_build": true},
+    })
+    .to_string();
+    std::fs::write(&document, &newer).unwrap();
+    assert_eq!(
+        read(unsafe { msime_client_load_preferences(path.as_ptr(), path.len()) })["ok"],
+        false
+    );
+    assert_eq!(
+        read(unsafe { msime_client_recover_preferences(path.as_ptr(), path.len()) })["ok"],
+        false
+    );
+    let repaired = repair();
+    assert_eq!(repaired["ok"], true, "{repaired}");
+    let value = &repaired["value"];
+    assert_eq!(value["recovered"], true);
+    assert_eq!(value["salvaged"], true);
+    assert_eq!(value["snapshot"]["preferences"]["learning"], false);
+    let backup = std::path::PathBuf::from(value["backup_path"].as_str().unwrap());
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), newer);
+    let loaded = read(unsafe { msime_client_load_preferences(path.as_ptr(), path.len()) });
+    assert_eq!(loaded["value"], value["snapshot"]);
+
+    // Readable now: a second call is a no-op.
+    assert_eq!(repair()["value"]["recovered"], false);
+
+    assert_eq!(
+        read(unsafe { msime_client_repair_preferences(std::ptr::null(), 0) })["ok"],
+        false
+    );
+}
+
+#[test]
+#[cfg(not(target_os = "android"))]
 fn save_preferences_uses_compare_and_swap_and_rejects_invalid_snapshots() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().to_string_lossy().into_owned();
@@ -3292,6 +4449,52 @@ fn typing_statistics_boundary_persists_only_aggregate_counts() {
     assert_eq!(
         read(unsafe { msime_client_typing_statistics(std::ptr::null(), 0) })["ok"],
         false
+    );
+}
+#[test]
+fn typing_statistics_boundary_answers_the_settings_status() {
+    let directory = tempfile::tempdir().unwrap();
+    let call = |action: Value, status: bool| {
+        let request = serde_json::to_vec(&json!({
+            "directory": directory.path(),
+            "action": action,
+            "status": status,
+        }))
+        .unwrap();
+        read(unsafe { msime_client_typing_statistics(request.as_ptr(), request.len()) })
+    };
+    let fresh = call(json!({"operation": "load"}), true);
+    assert_eq!(fresh["value"]["availability"], "neverWritten");
+    assert_eq!(fresh["value"]["lastWrittenMs"], Value::Null);
+    assert_eq!(fresh["value"]["statistics"]["enabled"], false);
+    let enabled = call(json!({"operation": "set_enabled", "enabled": true}), true);
+    assert_eq!(enabled["value"]["availability"], "ready");
+    assert!(enabled["value"]["lastWrittenMs"]
+        .as_u64()
+        .is_some_and(|ms| ms > 0));
+    assert_eq!(enabled["value"]["statistics"]["enabled"], true);
+    let retention = call(
+        json!({"operation": "set_retention", "retention": "30d", "day": "2026-10-11"}),
+        true,
+    );
+    assert_eq!(retention["value"]["statistics"]["retention"], "30d");
+    let reset = call(json!({"operation": "reset"}), true);
+    assert_eq!(reset["value"]["statistics"]["total"], 0);
+    assert_eq!(reset["value"]["availability"], "ready");
+    // 不带 status 时回答与以前一样，只有统计本身。
+    assert_eq!(
+        call(json!({"operation": "load"}), false)["value"]["enabled"],
+        true
+    );
+    // 记录类操作没有状态可答，整个请求被拒绝，也不写入。
+    let rejected = call(
+        json!({"operation": "record_keys", "day": "2026-10-11", "keys": {"KeyA": 1}}),
+        true,
+    );
+    assert_eq!(rejected["ok"], false);
+    assert_eq!(
+        call(json!({"operation": "load"}), false)["value"]["dailyKeys"],
+        json!({})
     );
 }
 #[test]
@@ -3569,6 +4772,78 @@ fn generated_mode_selections_stay_out_of_selection_statistics() {
     assert_eq!(selections.total(), 1);
     read(msime_client_destroy(handle));
 }
+/// 拆字反查的开关：偏好里没有这个键时按宿主形态决定（触屏开、桌面关），用户明确打开后 Shift+C 进入；繁体输出开着时，转成同一个繁体字形的行只留一行。
+#[test]
+fn chaizi_follows_the_host_form_until_the_user_flips_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let preferences = chinese_preferences();
+    assert_eq!(preferences.local_modes.chaizi, None);
+    let handle = test_host_with_pinyin_fixture(&dir.path().join("unset"), preferences);
+    assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+    let entered = read(msime_client_character(handle, b'C', true));
+    let expected = if TOUCH_KEYBOARD_HOST {
+        "chaizi"
+    } else {
+        "none"
+    };
+    assert_eq!(entered["value"]["view"]["local_mode"], expected);
+    read(msime_client_destroy(handle));
+
+    let mut preferences = chinese_preferences();
+    preferences.local_modes.chaizi = Some(true);
+    preferences.traditional_chinese_output = true;
+    let handle = test_host_with_pinyin_fixture(&dir.path().join("on"), preferences);
+    assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+    let entered = read(msime_client_character(handle, b'C', true));
+    assert_eq!(entered["value"]["view"]["local_mode"], "chaizi");
+    let mut view = Value::Null;
+    for byte in b"yanyi" {
+        view = read(msime_client_character(handle, *byte, false))["value"]["view"].clone();
+    }
+    let texts: Vec<&str> = view["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|candidate| candidate["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(texts.first(), Some(&"议"), "{texts:?}");
+    assert!(!texts.contains(&"議"), "{texts:?}");
+    read(msime_client_destroy(handle));
+
+    let mut preferences = chinese_preferences();
+    preferences.local_modes.chaizi = Some(false);
+    let handle = test_host_with_pinyin_fixture(&dir.path().join("off"), preferences);
+    assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+    let entered = read(msime_client_character(handle, b'C', true));
+    assert_eq!(entered["value"]["view"]["local_mode"], "none");
+    read(msime_client_destroy(handle));
+}
+
+/// 拆字表的繁体字形列是生成器按 OpenCC s2t 规则算的；宿主上屏时用的是 client-core 的同一套转换。两边对每个字都必须得出同一个字形，Engine 按这一列去重才和宿主看到的一致。
+#[test]
+fn chaizi_traditional_forms_match_the_shared_conversion() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../engine/src/local/chaizi-chars.tsv");
+    let table = std::fs::read_to_string(&path).unwrap();
+    let mut rows = 0;
+    for line in table.lines() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(fields.len(), 4, "{line}");
+        let expected = if fields[3].is_empty() {
+            fields[0]
+        } else {
+            fields[3]
+        };
+        assert_eq!(
+            msime_client_core::chinese_conversion::simplified_to_traditional(fields[0]),
+            expected,
+            "{line}"
+        );
+        rows += 1;
+    }
+    assert!(rows > 20_000, "{rows}");
+}
+
 #[test]
 fn selection_statistics_reach_the_store_when_the_session_is_destroyed() {
     let dir = tempfile::tempdir().unwrap();
@@ -3772,6 +5047,94 @@ fn mobile_clipboard_uses_structured_actions() {
             ["ok"],
         false
     );
+}
+
+#[test]
+fn mobile_clipboard_replace_edits_in_place_and_reports_why_it_did_not() {
+    let directory = tempfile::tempdir().unwrap();
+    let call = |action: Value| {
+        let request = serde_json::to_vec(&json!({
+            "directory": directory.path(),
+            "action": action,
+        }))
+        .unwrap();
+        read(unsafe { msime_client_mobile_clipboard_history(request.as_ptr(), request.len()) })
+    };
+    for text in ["synthetic older", "synthetic current"] {
+        assert_eq!(
+            call(json!({"operation": "capture", "text": text}))["value"]["captured"],
+            true
+        );
+    }
+    let older_timestamp =
+        call(json!({"operation": "load"}))["value"]["entries"][1]["timestampMs"].clone();
+
+    // 原地改字：仍排在原来的位置，时间戳不变。
+    let replaced = call(json!({
+        "operation": "replace",
+        "text": "synthetic older",
+        "replacement": "synthetic older, trimmed"
+    }));
+    assert_eq!(replaced["ok"], true);
+    assert_eq!(replaced["value"]["replaced"], true);
+    assert_eq!(replaced["value"]["merged"], false);
+    assert!(replaced["value"]["reason"].is_null());
+    assert_eq!(
+        replaced["value"]["entries"][1]["text"],
+        "synthetic older, trimmed"
+    );
+    assert_eq!(
+        replaced["value"]["entries"][1]["timestampMs"],
+        older_timestamp
+    );
+
+    // 改成另一条已有的文字：两条合并成一条。
+    let merged = call(json!({
+        "operation": "replace",
+        "text": "synthetic older, trimmed",
+        "replacement": "synthetic current"
+    }));
+    assert_eq!(merged["value"]["replaced"], true);
+    assert_eq!(merged["value"]["merged"], true);
+    assert_eq!(
+        merged["value"]["entries"],
+        call(json!({"operation": "load"}))["value"]["entries"]
+    );
+    assert_eq!(merged["value"]["entries"].as_array().unwrap().len(), 1);
+
+    // 旧条目已经不在了、新文字不合规：不改，说明原因。
+    let missing = call(json!({
+        "operation": "replace",
+        "text": "synthetic absent",
+        "replacement": "synthetic replacement"
+    }));
+    assert_eq!(missing["value"]["replaced"], false);
+    assert_eq!(missing["value"]["reason"], "not_found");
+    let invalid = call(json!({
+        "operation": "replace",
+        "text": "synthetic current",
+        "replacement": " \n\t"
+    }));
+    assert_eq!(invalid["value"]["replaced"], false);
+    assert_eq!(invalid["value"]["reason"], "invalid");
+    assert_eq!(
+        call(json!({"operation": "load"}))["value"]["entries"][0]["text"],
+        "synthetic current"
+    );
+
+    // 请求本身不合规的拒收：缺字段、多字段、空的原文。
+    for action in [
+        json!({"operation": "replace", "text": "synthetic current"}),
+        json!({
+            "operation": "replace",
+            "text": "synthetic current",
+            "replacement": "synthetic next",
+            "pinned": true
+        }),
+        json!({"operation": "replace", "text": "", "replacement": "synthetic next"}),
+    ] {
+        assert_eq!(call(action)["ok"], false);
+    }
 }
 
 #[test]
@@ -4100,9 +5463,19 @@ fn translation_queries_use_latest_preferences_without_resetting_composition() {
     preferences.tencent_tmt.secret_key = "synthetic".into();
     let changed = update(handle, 1, &preferences);
     assert_eq!(changed["value"]["deferred"], true);
-    assert_eq!(changed["value"]["view"]["generation"], view["generation"]);
+    assert_eq!(
+        changed["value"]["view"]["editing_text"],
+        view["editing_text"]
+    );
+    assert!(
+        changed["value"]["view"]["generation"].as_u64().unwrap()
+            > view["generation"].as_u64().unwrap()
+    );
     let query = read(msime_client_translation_query(handle));
-    assert_eq!(query["value"]["generation"], view["generation"]);
+    assert_eq!(
+        query["value"]["generation"],
+        changed["value"]["view"]["generation"]
+    );
     assert_eq!(query["value"]["target_language"], "fr");
     assert_eq!(query["value"]["target_languages"], json!(["fr", "ja"]));
     assert!(query["value"]["user_data"].is_null());
@@ -4115,7 +5488,10 @@ fn translation_queries_use_latest_preferences_without_resetting_composition() {
     preferences.custom_translation.enabled = false;
     update(handle, 2, &preferences);
     let tencent_query = read(msime_client_translation_query(handle));
-    assert_eq!(tencent_query["value"]["generation"], view["generation"]);
+    assert!(
+        tencent_query["value"]["generation"].as_u64().unwrap()
+            > query["value"]["generation"].as_u64().unwrap()
+    );
     assert_eq!(
         tencent_query["value"]["tencent_tmt"]["region"],
         "ap-guangzhou"
@@ -4146,7 +5522,10 @@ fn translation_queries_use_latest_preferences_without_resetting_composition() {
         msime_client_core::preferences::TranslationTargetLanguage::En;
     update(handle, 6, &preferences);
     let gloss = read(msime_client_translation_query(handle));
-    assert_eq!(gloss["value"]["generation"], view["generation"]);
+    assert!(
+        gloss["value"]["generation"].as_u64().unwrap()
+            > tencent_query["value"]["generation"].as_u64().unwrap()
+    );
     assert_eq!(gloss["value"]["english_gloss"], true);
     assert_eq!(gloss["value"]["target_language"], "en");
     // The dictionary paths ride along only because the lookup needs them.
@@ -4181,9 +5560,7 @@ fn translation_queries_use_latest_preferences_without_resetting_composition() {
     );
     assert_eq!(secondary_gloss["value"]["english_gloss"], true);
 
-    // With the gloss off, only the user path needed to persist successful
-    // English-target provider results is carried. Packaged resources stay
-    // private to offline lookup.
+    // 离线英文释义关着、只开候选翻译时：用户目录照旧带上，存成功的英文翻译；英文目标下整句候选仍要逐词拆解（和 macOS currentGlossRequest 一样不要求离线释义开着），所以带 gloss_breakdown 和拆解表所在的资源目录。
     preferences.candidate_english_gloss = false;
     preferences.translation_target_language =
         msime_client_core::preferences::TranslationTargetLanguage::En;
@@ -4192,8 +5569,18 @@ fn translation_queries_use_latest_preferences_without_resetting_composition() {
     update(handle, 9, &preferences);
     let online = read(msime_client_translation_query(handle));
     assert_eq!(online["value"]["english_gloss"], false);
-    assert!(online["value"]["resources"].is_null());
+    assert_eq!(online["value"]["gloss_breakdown"], true);
+    assert!(online["value"]["resources"].is_string());
     assert!(online["value"]["user_data"].is_string());
+
+    // 目标语言里没有英文时没有拆解，资源目录也不带。
+    preferences.translation_target_language =
+        msime_client_core::preferences::TranslationTargetLanguage::Ja;
+    preferences.translation_secondary_language = None;
+    update(handle, 10, &preferences);
+    let japanese = read(msime_client_translation_query(handle));
+    assert!(japanese["value"].get("gloss_breakdown").is_none());
+    assert!(japanese["value"]["resources"].is_null());
     read(msime_client_destroy(handle));
 }
 
@@ -4341,10 +5728,18 @@ fn translation_query_carries_the_pronunciation_switch_only_when_on() {
     let on = read(msime_client_translation_query(handle));
     assert_eq!(on["value"]["candidate_pronunciation"], true);
 
+    // 只开在线翻译时也带资源目录，宿主才能给在线翻出来的英文释义标音标。
+    preferences.candidate_english_gloss = false;
+    preferences.candidate_translations = true;
+    update(handle, 2, &preferences);
+    let online = read(msime_client_translation_query(handle));
+    assert_eq!(online["value"]["english_gloss"], false);
+    assert!(online["value"]["resources"].is_string());
+
     // Pronunciation annotates a gloss; with every gloss source off there is nothing to annotate.
     preferences.candidate_english_gloss = false;
     preferences.candidate_translations = false;
-    update(handle, 2, &preferences);
+    update(handle, 3, &preferences);
     assert_eq!(
         read(msime_client_translation_query(handle))["value"],
         Value::Null
@@ -4678,6 +6073,105 @@ fn translation_query_names_the_selected_service_through_the_provider_socket() {
 }
 
 #[test]
+fn translation_preference_changes_remove_gloss_and_reject_inflight_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let preferences = Preferences {
+        candidate_translations: true,
+        ..Preferences::default()
+    };
+    let handle = test_host_preferences(dir.path(), preferences.clone());
+    read(msime_client_focus(handle, true));
+    let mut view = Value::Null;
+    for byte in b"U4e2d" {
+        view = read(msime_client_character(
+            handle,
+            *byte,
+            byte.is_ascii_uppercase(),
+        ))["value"]["view"]
+            .clone();
+    }
+    let query = read(msime_client_translation_query(handle))["value"].clone();
+    let generation = query["generation"].as_u64().unwrap();
+    let candidate = view["candidates"][0]["text"].as_str().unwrap();
+    let payload = serde_json::to_vec(&json!([{
+        "text": candidate,
+        "translation": "合成释义"
+    }]))
+    .unwrap();
+    let apply = |generation| {
+        read(unsafe {
+            msime_client_apply_translations(handle, generation, payload.as_ptr(), payload.len())
+        })
+    };
+    assert_eq!(apply(generation)["value"]["applied"], true);
+
+    let disabled = Preferences {
+        candidate_translations: false,
+        ..preferences.clone()
+    };
+    let disabled_view = update(handle, 1, &disabled);
+    assert_eq!(disabled_view["ok"], true);
+    assert_ne!(
+        disabled_view["value"]["view"]["candidates"][0]["translation"],
+        "合成释义"
+    );
+    assert!(read(msime_client_translation_query(handle))["value"].is_null());
+    assert_eq!(apply(generation)["value"]["applied"], false);
+
+    assert_eq!(update(handle, 2, &preferences)["ok"], true);
+    assert_eq!(apply(generation)["value"]["applied"], false);
+    let current_generation = read(msime_client_translation_query(handle))["value"]["generation"]
+        .as_u64()
+        .unwrap();
+    assert!(current_generation > generation);
+    assert_eq!(apply(current_generation)["value"]["applied"], true);
+    read(msime_client_destroy(handle));
+}
+
+#[test]
+fn translation_target_change_rejects_old_language_gloss() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut preferences = Preferences {
+        candidate_translations: true,
+        ..Preferences::default()
+    };
+    let handle = test_host_preferences(dir.path(), preferences.clone());
+    read(msime_client_focus(handle, true));
+    let mut view = Value::Null;
+    for byte in b"U4e2d" {
+        view = read(msime_client_character(
+            handle,
+            *byte,
+            byte.is_ascii_uppercase(),
+        ))["value"]["view"]
+            .clone();
+    }
+    let old_generation = read(msime_client_translation_query(handle))["value"]["generation"]
+        .as_u64()
+        .unwrap();
+    let candidate = view["candidates"][0]["text"].as_str().unwrap();
+    let payload = serde_json::to_vec(&json!([{
+        "text": candidate,
+        "translation": "合成旧语言释义"
+    }]))
+    .unwrap();
+
+    preferences.translation_target_language =
+        msime_client_core::preferences::TranslationTargetLanguage::Ja;
+    let updated = update(handle, 1, &preferences);
+    assert_eq!(updated["ok"], true);
+    assert_eq!(
+        updated["value"]["view"]["editing_text"],
+        view["editing_text"]
+    );
+    let late = read(unsafe {
+        msime_client_apply_translations(handle, old_generation, payload.as_ptr(), payload.len())
+    });
+    assert_eq!(late["value"]["applied"], false);
+    read(msime_client_destroy(handle));
+}
+
+#[test]
 fn translation_results_reject_control_characters_atomically() {
     let dir = tempfile::tempdir().unwrap();
     let handle = test_host(dir.path());
@@ -4912,6 +6406,80 @@ fn chinese_punctuation_lock_holds_in_english_mode() {
     );
     read(msime_client_focus(handle, true));
     read(msime_client_set_english_mode(handle, true));
+    assert_eq!(
+        read(msime_client_punctuation_with_context(handle, b',', 0))["value"]["commit"],
+        "，"
+    );
+    read(msime_client_destroy(handle));
+}
+
+/// 「大写锁定时使用英文标点」（#6370）：宿主报告大写锁定后，三个标点入口在没有组字时都把键留给宿主按 ASCII 输出；组字中和固定中文标点时照旧，开关关着或大写锁定关掉时也照旧。
+#[test]
+fn caps_lock_sends_idle_punctuation_to_ascii_when_the_switch_is_on() {
+    let left_to_host = |value: Value| {
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["value"]["handled"], false);
+        assert!(value["value"]["commit"].is_null());
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let handle = test_host_preferences(
+        dir.path(),
+        Preferences {
+            caps_lock_ascii_punctuation: true,
+            ..chinese_preferences()
+        },
+    );
+    read(msime_client_focus(handle, true));
+    assert_eq!(
+        read(msime_client_character(handle, b',', false))["value"]["commit"],
+        "，"
+    );
+
+    assert_eq!(
+        read(msime_client_set_caps_lock(handle, true))["value"],
+        true
+    );
+    left_to_host(read(msime_client_character(handle, b',', false)));
+    left_to_host(read(msime_client_character(handle, b'?', true)));
+    left_to_host(read(msime_client_punctuation(handle, b';')));
+    left_to_host(read(msime_client_punctuation_with_context(
+        handle,
+        b'.',
+        u32::from('中'),
+    )));
+
+    // 组字中 Engine 照旧决定：候选连同中文标点一起上屏。
+    read(msime_client_character(handle, b'n', false));
+    read(msime_client_character(handle, b'i', false));
+    let composed = read(msime_client_character(handle, b',', false));
+    assert!(composed["value"]["commit"]
+        .as_str()
+        .is_some_and(|value| value.ends_with('，')));
+
+    // 固定中文标点优先于大写锁定。
+    read(msime_client_set_punctuation_lock(handle, 1));
+    assert_eq!(
+        read(msime_client_character(handle, b',', false))["value"]["commit"],
+        "，"
+    );
+    read(msime_client_set_punctuation_lock(handle, 0));
+
+    read(msime_client_set_caps_lock(handle, false));
+    assert_eq!(
+        read(msime_client_character(handle, b',', false))["value"]["commit"],
+        "，"
+    );
+    read(msime_client_destroy(handle));
+
+    // 开关关着（默认）时，大写锁定不改变标点。
+    let dir = tempfile::tempdir().unwrap();
+    let handle = test_host(dir.path());
+    read(msime_client_focus(handle, true));
+    read(msime_client_set_caps_lock(handle, true));
+    assert_eq!(
+        read(msime_client_character(handle, b',', false))["value"]["commit"],
+        "，"
+    );
     assert_eq!(
         read(msime_client_punctuation_with_context(handle, b',', 0))["value"]["commit"],
         "，"
@@ -5702,6 +7270,7 @@ fn direct_cloud_callbacks_follow_a_pending_disable() {
             ..preferences
         };
         assert_eq!(update(handle, 1, &disabled)["value"]["deferred"], true);
+        let after_disable = read(msime_client_view(handle))["value"].clone();
 
         let query = old_query.to_string();
         let result = if batch {
@@ -5730,9 +7299,66 @@ fn direct_cloud_callbacks_follow_a_pending_disable() {
             })
         };
         assert_eq!(result["value"]["applied"], false, "batch={batch}: {result}");
-        assert_eq!(result["value"]["view"], before, "batch={batch}: {result}");
+        assert_eq!(
+            result["value"]["view"], after_disable,
+            "batch={batch}: {result}"
+        );
         read(msime_client_destroy(handle));
     }
+}
+
+#[test]
+fn cloud_disable_removes_visible_row_and_invalidates_old_query_after_reenable() {
+    let dir = tempfile::tempdir().unwrap();
+    let preferences = Preferences {
+        scheme: InputScheme::Quanpin,
+        cloud_candidates: true,
+        ..chinese_preferences()
+    };
+    let handle = test_host_with_pinyin_fixture(dir.path(), preferences.clone());
+    read(msime_client_focus(handle, true));
+    for byte in b"nihao" {
+        read(msime_client_character(handle, *byte, false));
+    }
+    let old_query = read(msime_client_online_query(handle))["value"].to_string();
+    let candidates = serde_json::to_vec(&json!(["云候选"])).unwrap();
+    let apply = |query: &str| {
+        read(unsafe {
+            msime_client_apply_online_candidates(
+                handle,
+                query.as_ptr(),
+                query.len(),
+                candidates.as_ptr(),
+                candidates.len(),
+                0,
+            )
+        })
+    };
+    assert_eq!(apply(&old_query)["value"]["applied"], true);
+    let visible = read(msime_client_view(handle))["value"].clone();
+    assert!(visible["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate["text"] == "云候选"));
+
+    let disabled = Preferences {
+        cloud_candidates: false,
+        ..preferences.clone()
+    };
+    assert_eq!(update(handle, 1, &disabled)["value"]["deferred"], true);
+    let after_disable = read(msime_client_view(handle))["value"].clone();
+    assert!(!after_disable["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate["text"] == "云候选"));
+
+    assert_eq!(update(handle, 2, &preferences)["ok"], true);
+    assert_eq!(apply(&old_query)["value"]["applied"], false);
+    let current_query = read(msime_client_online_query(handle))["value"].to_string();
+    assert_eq!(apply(&current_query)["value"]["applied"], true);
+    read(msime_client_destroy(handle));
 }
 
 #[test]
@@ -5821,6 +7447,80 @@ fn clearing_online_source_removes_its_rows_without_empty_batch_protocol() {
     read(msime_client_destroy(handle));
 }
 
+/// #6888：开着 AI 时组字先在 AI 座位上放占位行（来源 12）；AI 失败时宿主调用 resolve，占位行换成「—」，别的候选不挪位；关掉 AI 后占位行立刻消失。
+#[test]
+fn an_ai_seat_waits_with_a_placeholder_and_a_failed_answer_leaves_a_dash() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut preferences = Preferences {
+        scheme: InputScheme::Quanpin,
+        ..chinese_preferences()
+    };
+    preferences.ai_assistant.enabled = true;
+    preferences.ai_assistant.provider = "deepseek".into();
+    preferences.ai_assistant.endpoint = "https://api.deepseek.com/chat/completions".into();
+    preferences.ai_assistant.model = "synthetic-model".into();
+    let handle = test_host_with_pinyin_fixture(dir.path(), preferences.clone());
+    read(msime_client_focus(handle, true));
+    for byte in b"nihao" {
+        read(msime_client_character(handle, *byte, false));
+    }
+    let has_placeholder = |view: &Value| {
+        view["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["source"] == 12)
+    };
+    // 开着 AI 却没有密钥（macOS、Windows 的出厂状态）时请求发不出去，不留座位。
+    assert!(!has_placeholder(&read(msime_client_view(handle))["value"]));
+    // 只放进会话内存的密钥（iOS 钥匙串）一到，座位就留出来。
+    let token = "synthetic-session-key";
+    assert_eq!(
+        read(unsafe { msime_client_set_ai_credential(handle, token.as_ptr(), token.len()) })
+            ["value"],
+        true
+    );
+    let texts = |view: &Value| -> Vec<String> {
+        view["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|candidate| candidate["text"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let before = read(msime_client_view(handle))["value"].clone();
+    let seat = before["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|candidate| candidate["source"] == 12)
+        .expect("an AI placeholder");
+    assert_eq!(before["candidates"][seat]["text"], "…");
+
+    let query = read(msime_client_online_query(handle))["value"].to_string();
+    let resolve = |source: u8| {
+        read(unsafe {
+            msime_client_resolve_online_candidates(handle, query.as_ptr(), query.len(), source)
+        })
+    };
+    let refused = resolve(0);
+    assert_eq!(refused["value"]["applied"], false, "{refused}");
+    let resolved = resolve(1);
+    assert_eq!(resolved["value"]["applied"], true, "{resolved}");
+    let mut expected = texts(&before);
+    expected[seat] = "—".to_owned();
+    assert_eq!(texts(&resolved["value"]["view"]), expected);
+    assert_eq!(resolved["value"]["view"]["candidates"][seat]["source"], 12);
+
+    preferences.ai_assistant.enabled = false;
+    let disabled = update(handle, 1, &preferences);
+    assert!(
+        !has_placeholder(&read(msime_client_view(handle))["value"]),
+        "{disabled}"
+    );
+    read(msime_client_destroy(handle));
+}
+
 #[test]
 fn an_ai_credential_handed_over_in_memory_signs_requests_without_being_stored() {
     let dir = tempfile::tempdir().unwrap();
@@ -5861,6 +7561,198 @@ fn an_ai_credential_handed_over_in_memory_signs_requests_without_being_stored() 
     assert_eq!(set("bad\ntoken")["ok"], false);
     assert_eq!(set("")["ok"], true);
     assert_ne!(request(handle)["ok"], true, "cleared");
+    read(msime_client_destroy(handle));
+}
+
+#[test]
+fn rotating_ai_credential_clears_old_candidates_and_rejects_old_query() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut preferences = Preferences {
+        scheme: InputScheme::Quanpin,
+        ..chinese_preferences()
+    };
+    preferences.ai_assistant.enabled = true;
+    preferences.ai_assistant.provider = "deepseek".into();
+    preferences.ai_assistant.model = "synthetic-model".into();
+    preferences.ai_assistant.endpoint = "https://api.deepseek.com/chat/completions".into();
+    let handle = test_host_with_pinyin_fixture(dir.path(), preferences);
+    read(msime_client_focus(handle, true));
+    let set_credential = |token: &str| {
+        read(unsafe { msime_client_set_ai_credential(handle, token.as_ptr(), token.len()) })
+    };
+    assert_eq!(set_credential("synthetic-first")["ok"], true);
+    for byte in b"nihao" {
+        read(msime_client_character(handle, *byte, false));
+    }
+    let apply = |query: &Value, text: &str| {
+        let query = query.to_string();
+        let candidates = serde_json::to_vec(&json!([text])).unwrap();
+        read(unsafe {
+            msime_client_apply_online_candidates(
+                handle,
+                query.as_ptr(),
+                query.len(),
+                candidates.as_ptr(),
+                candidates.len(),
+                1,
+            )
+        })
+    };
+    let first_query = read(msime_client_online_query(handle))["value"].clone();
+    assert_eq!(apply(&first_query, "合成旧候选")["value"]["applied"], true);
+    let old_query = read(msime_client_online_query(handle))["value"].clone();
+    let old_view = read(msime_client_view(handle))["value"].clone();
+    assert!(old_view["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["text"] == "合成旧候选"));
+
+    assert_eq!(set_credential("synthetic-second")["ok"], true);
+    let new_view = read(msime_client_view(handle))["value"].clone();
+    assert!(new_view["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["text"] != "合成旧候选"));
+    let new_query = read(msime_client_online_query(handle))["value"].clone();
+    assert_ne!(new_query["generation"], old_query["generation"]);
+    assert_eq!(apply(&old_query, "迟到旧候选")["value"]["applied"], false);
+    assert_eq!(apply(&new_query, "合成新候选")["value"]["applied"], true);
+    let stable_view = read(msime_client_view(handle))["value"].clone();
+    assert_eq!(set_credential("synthetic-second")["ok"], true);
+    assert_eq!(read(msime_client_view(handle))["value"], stable_view);
+    read(msime_client_destroy(handle));
+}
+
+#[test]
+fn updating_ai_preferences_clears_old_candidates_when_only_token_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut preferences = Preferences {
+        scheme: InputScheme::Quanpin,
+        ..chinese_preferences()
+    };
+    preferences.ai_assistant.enabled = true;
+    preferences.ai_assistant.provider = "deepseek".into();
+    preferences.ai_assistant.model = "synthetic-model".into();
+    preferences.ai_assistant.endpoint = "https://api.deepseek.com/chat/completions".into();
+    preferences.ai_assistant.token = "synthetic-first".into();
+    let handle = test_host_with_pinyin_fixture(dir.path(), preferences.clone());
+    read(msime_client_focus(handle, true));
+    for byte in b"nihao" {
+        read(msime_client_character(handle, *byte, false));
+    }
+    let apply = |query: &Value, text: &str| {
+        let query = query.to_string();
+        let candidates = serde_json::to_vec(&json!([text])).unwrap();
+        read(unsafe {
+            msime_client_apply_online_candidates(
+                handle,
+                query.as_ptr(),
+                query.len(),
+                candidates.as_ptr(),
+                candidates.len(),
+                1,
+            )
+        })
+    };
+    let first_query = read(msime_client_online_query(handle))["value"].clone();
+    assert_eq!(apply(&first_query, "合成旧候选")["value"]["applied"], true);
+    let old_query = read(msime_client_online_query(handle))["value"].clone();
+
+    preferences.ai_assistant.token = "synthetic-second".into();
+    assert_eq!(update(handle, 1, &preferences)["value"]["deferred"], true);
+    let new_view = read(msime_client_view(handle))["value"].clone();
+    assert!(new_view["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["text"] != "合成旧候选"));
+    let new_query = read(msime_client_online_query(handle))["value"].clone();
+    assert_ne!(new_query["generation"], old_query["generation"]);
+    assert_eq!(apply(&old_query, "迟到旧候选")["value"]["applied"], false);
+    assert_eq!(apply(&new_query, "合成新候选")["value"]["applied"], true);
+    read(msime_client_destroy(handle));
+}
+
+#[test]
+fn an_in_memory_ai_credential_overrides_a_stored_origin_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut preferences = Preferences {
+        scheme: InputScheme::Quanpin,
+        ..chinese_preferences()
+    };
+    preferences.ai_assistant.enabled = true;
+    preferences.ai_assistant.provider = "deepseek".into();
+    preferences.ai_assistant.model = "synthetic-model".into();
+    preferences.ai_assistant.endpoint = "https://api.deepseek.com/chat/completions".into();
+    preferences.ai_assistant.tokens.insert(
+        "https://api.deepseek.com:443".into(),
+        "synthetic-stored".into(),
+    );
+    let handle = test_host_preferences(dir.path(), preferences);
+    read(msime_client_focus(handle, true));
+    for byte in b"nihao" {
+        read(msime_client_character(handle, *byte, false));
+    }
+    let query = read(msime_client_online_query(handle))["value"].to_string();
+    let token = b"synthetic-keychain";
+    assert_eq!(
+        read(unsafe { msime_client_set_ai_credential(handle, token.as_ptr(), token.len()) })["ok"],
+        true
+    );
+    let descriptor =
+        read(unsafe { msime_client_ai_request_for_query(handle, query.as_ptr(), query.len()) });
+    assert_eq!(descriptor["ok"], true);
+    assert_eq!(
+        descriptor["value"]["headers"]["Authorization"],
+        "Bearer synthetic-keychain"
+    );
+    assert_eq!(
+        read(unsafe { msime_client_set_ai_credential(handle, std::ptr::null(), 0) })["ok"],
+        true
+    );
+    let restored =
+        read(unsafe { msime_client_ai_request_for_query(handle, query.as_ptr(), query.len()) });
+    assert_eq!(
+        restored["value"]["headers"]["Authorization"],
+        "Bearer synthetic-stored"
+    );
+    read(msime_client_destroy(handle));
+}
+
+#[test]
+fn an_in_memory_ai_credential_stays_bound_to_its_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut preferences = Preferences {
+        scheme: InputScheme::Quanpin,
+        ..chinese_preferences()
+    };
+    preferences.ai_assistant.enabled = true;
+    preferences.ai_assistant.provider = "deepseek".into();
+    preferences.ai_assistant.model = "synthetic-model".into();
+    preferences.ai_assistant.endpoint = "https://api.deepseek.com/chat/completions".into();
+    let handle = test_host_preferences(dir.path(), preferences.clone());
+    read(msime_client_focus(handle, true));
+    for byte in b"nihao" {
+        read(msime_client_character(handle, *byte, false));
+    }
+    let token = b"synthetic-deepseek-keychain";
+    assert_eq!(
+        read(unsafe { msime_client_set_ai_credential(handle, token.as_ptr(), token.len()) })["ok"],
+        true
+    );
+
+    preferences.ai_assistant.provider = "openai".into();
+    preferences.ai_assistant.endpoint = "https://api.openai.com/v1/chat/completions".into();
+    assert_eq!(update(handle, 1, &preferences)["ok"], true);
+    let query = read(msime_client_online_query(handle))["value"].to_string();
+    let descriptor =
+        read(unsafe { msime_client_ai_request_for_query(handle, query.as_ptr(), query.len()) });
+    assert_ne!(
+        descriptor["ok"], true,
+        "old keychain token reached a new endpoint"
+    );
     read(msime_client_destroy(handle));
 }
 
@@ -5943,7 +7835,7 @@ fn ai_queries_and_delivery_follow_pending_preferences() {
             true
         );
         let current = read(msime_client_online_query(handle))["value"].clone();
-        assert_eq!(current["generation"], original["generation"]);
+        assert!(current["generation"].as_u64().unwrap() > old["generation"].as_u64().unwrap());
         assert_eq!(current["query_text"], original["query_text"]);
         assert_eq!(
             current["ai_assistant"].is_null(),
@@ -6006,7 +7898,7 @@ fn custom_translation_plan_preserves_direction_and_filters_visible_sources() {
     }
     for request in [
         json!({"target_language":"unknown","candidates":[]}),
-        json!({"target_language":"en","candidates":vec![json!({"text":"hello","source":0}); 10]}),
+        json!({"target_language":"en","candidates":vec![json!({"text":"hello","source":0}); 11]}),
         json!({"target_language":"en","candidates":[{"text":"hello","source":true}]}),
     ] {
         assert_eq!(plan(request)["ok"], false);
@@ -6116,7 +8008,7 @@ fn tencent_translation_buffers_are_bounded() {
         read(unsafe { msime_client_tencent_translation_http_request(b"x".as_ptr(), 65537) })["ok"],
         false
     );
-    for (length, expected) in [(1048577, 1), (1, 0), (1, 10)] {
+    for (length, expected) in [(1048577, 1), (1, 0), (1, 11)] {
         assert_eq!(
             read(unsafe {
                 msime_client_parse_tencent_translation_response(b"x".as_ptr(), length, expected)
@@ -6223,6 +8115,59 @@ fn custom_translation_http_bridge_is_bounded_and_pure() {
             ["ok"],
         false
     );
+}
+
+/// 官方 DeepL 地址在描述器里换成 DeepL 的鉴权和正文；Windows、macOS、iOS 和鸿蒙的键盘都直接发这个描述器。
+#[test]
+fn custom_translation_http_bridge_speaks_deepl_to_official_endpoints() {
+    let build = |endpoint: &str, key: &str| {
+        let request = json!({"config":{"enabled":true,"endpoint":endpoint,"api_key":key},
+            "text":"测试","source_language":"zh","target_language":"en"});
+        let bytes = serde_json::to_vec(&request).unwrap();
+        read(unsafe { msime_client_custom_translation_http_request(bytes.as_ptr(), bytes.len()) })
+    };
+    let value = build(" https://api.deepl.com/v2/translate ", " synthetic-key:fx ");
+    assert_eq!(value["ok"], true);
+    assert_eq!(
+        value["value"]["url"],
+        "https://api-free.deepl.com/v2/translate"
+    );
+    assert_eq!(
+        value["value"]["headers"],
+        json!({"Content-Type":"application/json","Authorization":"DeepL-Auth-Key synthetic-key:fx"})
+    );
+    assert_eq!(
+        value["value"]["body"],
+        json!({"text":["测试"],"source_lang":"ZH","target_lang":"EN-US"})
+    );
+    assert_eq!(value["value"]["timeout_ms"], 2500);
+    assert_eq!(value["value"]["max_response_bytes"], 1048576);
+    assert_eq!(
+        build("https://api-free.deepl.com/v2/translate", "")["error"],
+        "invalid custom translation parameters"
+    );
+    // 最长的密钥加上 `DeepL-Auth-Key ` 前缀是 4111 字节，macOS 的描述器校验按这个上限放行。
+    let longest = build("https://api.deepl.com/v2/translate", &"k".repeat(4096));
+    assert_eq!(
+        longest["value"]["headers"]["Authorization"]
+            .as_str()
+            .unwrap()
+            .len(),
+        4111
+    );
+    let parse = |body: &[u8]| {
+        read(unsafe { msime_client_parse_custom_translation_response(body.as_ptr(), body.len()) })
+    };
+    let reply = br#"{"translations":[{"detected_source_language":"ZH","text":"Test"}]}"#;
+    assert_eq!(parse(reply)["value"], "Test");
+    assert!(!unsafe { msime_client_custom_translation_reply_failed(reply.as_ptr(), reply.len()) });
+    for body in [
+        br#"{"message":"Forbidden"}"#.as_slice(),
+        br#"{"message":"Quota Exceeded"}"#,
+    ] {
+        assert!(parse(body)["value"].is_null());
+        assert!(unsafe { msime_client_custom_translation_reply_failed(body.as_ptr(), body.len()) });
+    }
 }
 
 #[test]
@@ -7865,11 +9810,14 @@ fn the_wubi_lock_accepts_resources_without_japanese_and_gates_temporary_japanese
     std::fs::write(&downloaded, b"japanese").unwrap();
     options.japanese_dictionary = downloaded.to_str().unwrap().to_owned();
     options.local_temporary_japanese = true;
+    options.mixed_japanese = true;
     let mut full_options = options.clone();
     apply_local_mode_resource_gates(&mut options, wubi);
     assert!(!options.local_temporary_japanese);
+    assert!(!options.mixed_japanese);
     apply_local_mode_resource_gates(&mut full_options, Edition::full());
     assert!(full_options.local_temporary_japanese);
+    assert!(full_options.mixed_japanese);
 
     // 五笔版不带键盘神经联想的模型，偏好打开了也不交给 Engine；full 照旧。
     options.sentence_association.neural_keyboard = true;
@@ -8441,6 +10389,70 @@ fn translation_queries_only_clear_chinese_candidates_for_the_network() {
             "candidate {text:?} was cleared for the online gloss endpoint incorrectly"
         );
     }
+}
+
+/// 一个只有一条词条、连接矩阵为 1×1 的 MSJPDT1 日文模型，布局同 `msime_engine` 里 `japanese::decoder::test_model::bytes`（那个只在 engine 自己的测试里可见）。
+pub(crate) fn single_lemma_japanese_model(reading: &str, surface: &str, cost: i32) -> Vec<u8> {
+    let strings = [reading.as_bytes(), surface.as_bytes()].concat();
+    let mut token = Vec::new();
+    token.extend_from_slice(&0u32.to_le_bytes());
+    token.extend_from_slice(&(reading.len() as u16).to_le_bytes());
+    token.extend_from_slice(&(reading.len() as u32).to_le_bytes());
+    token.extend_from_slice(&(surface.len() as u16).to_le_bytes());
+    token.extend_from_slice(&0u16.to_le_bytes());
+    token.extend_from_slice(&0u16.to_le_bytes());
+    token.extend_from_slice(&cost.to_le_bytes());
+    let token_offset = 56u64;
+    let connection_offset = token_offset + token.len() as u64;
+    let string_offset = connection_offset + 2;
+    let mut file = b"MSJPDT1\0".to_vec();
+    for value in [1u32, 1, 1, 0] {
+        file.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [
+        token_offset,
+        connection_offset,
+        string_offset,
+        strings.len() as u64,
+    ] {
+        file.extend_from_slice(&value.to_le_bytes());
+    }
+    file.extend_from_slice(&token);
+    file.extend_from_slice(&0i16.to_le_bytes());
+    file.extend_from_slice(&strings);
+    file
+}
+
+/// 日文混输行（来源 13）的汉字是日文：不能当中文请求在线释义，否则「私」下面会写出中文意思，还花掉额度。
+#[test]
+fn translation_queries_never_clear_a_mixed_japanese_row_for_the_network() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("resources")).unwrap();
+    std::fs::write(
+        dir.path().join("resources/msime-japanese.dat"),
+        single_lemma_japanese_model("わたし", "私", 500),
+    )
+    .unwrap();
+    let mut preferences = Preferences {
+        candidate_translations: true,
+        ..chinese_preferences()
+    };
+    preferences.mixed_input.japanese = true;
+    let handle = test_host_with_pinyin_fixture(dir.path(), preferences);
+    read(msime_client_focus(handle, true));
+    let mut view = Value::Null;
+    for byte in b"watashi" {
+        view = read(msime_client_character(handle, *byte, false))["value"]["view"].clone();
+    }
+    assert_eq!(view["candidates"][0]["text"], "私", "{view}");
+    assert_eq!(view["candidates"][0]["source"], 13, "{view}");
+    let query = read(msime_client_translation_query(handle));
+    assert_eq!(
+        query["value"]["candidates"][0],
+        json!({ "text": "私", "online_gloss": false }),
+        "{query}"
+    );
+    read(msime_client_destroy(handle));
 }
 
 /// Every entry point the C header promises is actually exported, and the other way round.
@@ -9389,6 +11401,48 @@ fn refresh_leaves_a_symlinked_options_file_alone() {
 
 #[cfg(unix)]
 #[test]
+fn refresh_publish_stays_in_the_open_options_parent() {
+    use std::ffi::OsStr;
+    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let original = root.path().join("state");
+    let outside = root.path().join("outside");
+    std::fs::create_dir(&original).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    let options = original.join("runtime-options.json");
+    std::fs::write(&options, b"{} ").unwrap();
+    std::fs::set_permissions(&options, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let metadata = std::fs::metadata(&options).unwrap();
+    let directory = msime_client_core::file_lock::open_private_directory(&original).unwrap();
+
+    let moved = root.path().join("moved");
+    std::fs::rename(&original, &moved).unwrap();
+    symlink(&outside, &original).unwrap();
+
+    super::replace_options_file(
+        &directory,
+        OsStr::new("runtime-options.json"),
+        &metadata,
+        &json!({"synthetic": true}),
+    )
+    .unwrap();
+
+    assert!(moved.join("runtime-options.json").is_file());
+    assert!(!outside.join("runtime-options.json").exists());
+    assert_eq!(
+        std::fs::metadata(moved.join("runtime-options.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o640
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn refresh_rejects_a_symlinked_options_parent() {
     use msime_path_trust::untrusted_symlink as symlink;
 
@@ -9801,6 +11855,118 @@ fn voice_local_models_list_install_cancel_and_remove_validate_their_requests() {
 }
 
 #[test]
+fn voice_model_setting_check_answers_what_the_preferences_store_accepts() {
+    let check = |request: Value| {
+        let body = request.to_string();
+        read(unsafe { msime_client_voice_model_setting_check(body.as_ptr(), body.len()) })
+    };
+    for (mirror, accepted) in [
+        ("", true),
+        ("https://mirror.example.test/gh/", true),
+        ("https://", false),
+        ("http://mirror.example.test", false),
+        ("https://user:pass@mirror.example.test", false),
+        ("https://mirror.example.test?query", false),
+        ("https://mirror example.test", false),
+    ] {
+        assert_eq!(
+            check(json!({ "asr_model_mirror": mirror })),
+            json!({"ok": true, "value": {"asr_model_mirror": accepted}}),
+            "{mirror:?}"
+        );
+    }
+    for (path, accepted) in [
+        ("", true),
+        (r"C:\Users\someone\voice-models\model", true),
+        (r"\\server\share\model", true),
+        ("/home/someone/model", true),
+        ("voice-models/model", false),
+        ("C:\\models\u{7}", false),
+    ] {
+        assert_eq!(
+            check(json!({ "asr_model_path": path })),
+            json!({"ok": true, "value": {"asr_model_path": accepted}}),
+            "{path:?}"
+        );
+    }
+    assert_eq!(
+        check(json!({ "asr_model_path": format!("/{}", "a".repeat(4096)) }))["value"]
+            ["asr_model_path"],
+        false
+    );
+    // 两项一起问时各自回答；什么都没问时是空对象。
+    assert_eq!(
+        check(json!({ "asr_model_mirror": "https://m.example.test", "asr_model_path": "rel" })),
+        json!({"ok": true, "value": {"asr_model_mirror": true, "asr_model_path": false}})
+    );
+    assert_eq!(check(json!({})), json!({"ok": true, "value": {}}));
+    assert_eq!(
+        read(unsafe { msime_client_voice_model_setting_check(std::ptr::null(), 0) })["ok"],
+        false
+    );
+    let not_json = b"{";
+    assert_eq!(
+        read(unsafe { msime_client_voice_model_setting_check(not_json.as_ptr(), not_json.len()) })
+            ["ok"],
+        false
+    );
+}
+
+#[test]
+fn voice_local_model_install_from_files_validates_the_paths_and_names_what_is_missing() {
+    let root = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let unrelated = downloads.path().join("unrelated.bin");
+    std::fs::write(&unrelated, b"synthetic, matches no catalog file").unwrap();
+    let listed = read(unsafe {
+        let request = json!({ "root": root.path() }).to_string();
+        msime_client_voice_local_models(request.as_ptr(), request.len())
+    });
+    // 不用默认模型：别的测试会并行地对默认模型发起安装，同一个 id 的登记是进程内共享的。
+    let id = "sense-voice-small";
+    let model = listed["value"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == id)
+        .unwrap()
+        .clone();
+    let archive_name = model["import_files"][0]["name"].as_str().unwrap();
+    assert!(model["import_files"][0]["url"]
+        .as_str()
+        .unwrap()
+        .starts_with("https://"));
+
+    let install = |request: serde_json::Value| {
+        let request = request.to_string();
+        read(unsafe {
+            msime_client_voice_local_model_install(
+                request.as_ptr(),
+                request.len(),
+                None,
+                std::ptr::null_mut(),
+            )
+        })
+    };
+    let missing = install(json!({ "root": root.path(), "id": id, "files": [unrelated] }));
+    assert_eq!(missing["ok"], false, "{missing}");
+    assert_eq!(
+        missing["error"],
+        format!("local_model_import_missing: {archive_name}")
+    );
+    for files in [
+        json!(["relative/model.tar.bz2"]),
+        json!(vec![unrelated.to_str().unwrap(); 17]),
+    ] {
+        let refused = install(json!({ "root": root.path(), "id": id, "files": files }));
+        assert_eq!(refused["error"], "invalid local model import", "{refused}");
+    }
+    let unknown = install(json!({ "root": root.path(), "id": "no-such-model", "files": [] }));
+    assert_eq!(unknown["error"], "local_model_unknown", "{unknown}");
+    assert!(!root.path().join(id).exists());
+}
+
+#[test]
 fn mcp_status_and_install_check_their_requests_before_touching_a_file() {
     let status =
         |request: &[u8]| read(unsafe { msime_client_mcp_status(request.as_ptr(), request.len()) });
@@ -9963,6 +12129,54 @@ fn command_tables_and_mentions_reach_the_engine_from_the_plugins_directory() {
     assert_eq!(read(msime_client_destroy(handle))["ok"], true);
 }
 
+/// 设置页重新导入同 id 的指令表时整个包目录被换掉。新清单与旧清单长度相同、修改时间又落在同一个计时粒度里（秒级或两秒级时间戳的文件系统）时，只比修改时间和长度看不出变化；获得焦点时仍要换上新表。
+#[cfg(unix)]
+#[test]
+fn a_reimported_table_of_the_same_length_and_time_is_picked_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugins = dir.path().join("state/plugins");
+    let import = |name: &str, template: &str| {
+        let source = dir.path().join(name);
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("plugin.toml"),
+            format!("schema_version = 1\nkind = \"command_table\"\nid = \"work\"\nname = \"work\"\nversion = \"1\"\nlicense = \"CC0-1.0\"\n[[commands]]\ntrigger = \"sig\"\ntitle = \"签名\"\ntemplate = \"{template}\"\n"),
+        )
+        .unwrap();
+        msime_client_core::plugins::import(&source, &plugins).unwrap();
+    };
+    import("first", "张三敬上");
+    let mut preferences = chinese_preferences();
+    preferences.local_modes.command = true;
+    preferences.plugins.command_tables = vec!["work".into()];
+    let handle = plugin_host(dir.path(), preferences);
+    assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+    assert!(local_mode_candidates(handle, b"/sig").contains(&"张三敬上".to_owned()));
+
+    let manifest = plugins.join("command_table/work/plugin.toml");
+    let before = std::fs::metadata(&manifest).unwrap();
+    import("second", "李四敬上");
+    let after = std::fs::metadata(&manifest).unwrap();
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "the test needs a same-length table"
+    );
+    // 模拟粗粒度时间戳：把新清单的修改时间设成与旧清单相同。
+    std::fs::File::options()
+        .write(true)
+        .open(&manifest)
+        .unwrap()
+        .set_modified(before.modified().unwrap())
+        .unwrap();
+    assert_eq!(read(msime_client_focus(handle, false))["ok"], true);
+    assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+    let commands = local_mode_candidates(handle, b"/sig");
+    assert!(commands.contains(&"李四敬上".to_owned()), "{commands:?}");
+    assert!(!commands.contains(&"张三敬上".to_owned()), "{commands:?}");
+    assert_eq!(read(msime_client_destroy(handle))["ok"], true);
+}
+
 fn install_phrase_table(root: &std::path::Path, id: &str, phrases: &[(&str, &str)]) {
     let pack = root.join("state/plugins/phrase_table").join(id);
     std::fs::create_dir_all(&pack).unwrap();
@@ -10035,6 +12249,42 @@ fn phrase_tables_reach_the_quick_phrase_mode_from_the_plugins_directory() {
             .quick_phrase_table
             .is_empty());
     });
+    assert_eq!(read(msime_client_destroy(handle))["ok"], true);
+}
+
+/// K 模式开着、数据库短语又查不了（这里没有主词库文件 `msime-pinyin.db`，查询返回 `QUICK_PHRASE_UNAVAILABLE`）时设置页换了短语表：Engine 已换上新表，只是刷新打开的列表时返回了诊断。聚焦不因此失败，会话记下的戳就是磁盘上的现状，之后的聚焦看不到变动、不会再换一次表；新表照常生效，偏好更新重建 Engine 后仍是新表。
+#[test]
+fn a_phrase_table_that_cannot_refresh_the_open_list_does_not_fail_focus() {
+    let dir = tempfile::tempdir().unwrap();
+    install_phrase_table(dir.path(), "office", &[("dh", "电话号码")]);
+    let mut preferences = chinese_preferences();
+    preferences.plugins.phrase_tables = vec!["office".into()];
+    let handle = plugin_host(dir.path(), preferences.clone());
+    assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+    // 停在 K 模式里，宿主没有先失焦就再次聚焦。
+    for (key, shift) in [(b'K', true), (b'd', false), (b'h', false)] {
+        let typed = read(msime_client_character(handle, key, shift));
+        assert_eq!(typed["ok"], true, "{typed}");
+    }
+    install_phrase_table(dir.path(), "office", &[("dh", "办公室电话")]);
+    let focused = read(msime_client_focus(handle, true));
+    assert_eq!(focused["ok"], true, "{focused}");
+    // 换表报错后戳照常更新：若戳停在旧表，这里重新盖的戳会与会话记下的不同，之后每次聚焦都会再换一次表、再报一次。
+    SESSIONS.with(|sessions| {
+        let sessions = sessions.borrow();
+        let session = &sessions[&handle];
+        let current = plugin_tables::PluginTables::stamp(
+            session.plugin_roots.installed.as_deref(),
+            &session.options,
+            &session.applied.plugins,
+        );
+        assert_eq!(current, session.plugin_tables);
+    });
+    read(msime_client_command(handle, 3));
+    assert_eq!(quick_phrase_candidates(handle, b"dh"), ["办公室电话"]);
+    preferences.local_modes.unicode = !preferences.local_modes.unicode;
+    assert_eq!(update(handle, 1, &preferences)["value"]["deferred"], false);
+    assert_eq!(quick_phrase_candidates(handle, b"dh"), ["办公室电话"]);
     assert_eq!(read(msime_client_destroy(handle))["ok"], true);
 }
 
@@ -10138,6 +12388,66 @@ fn a_broken_helpcode_pack_with_a_missing_fallback_never_fails_the_session() {
     assert_eq!(session_helpcode(handle).as_deref(), Some(""));
     assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
     assert_eq!(read(msime_client_destroy(handle))["ok"], true);
+}
+
+/// 插件载入失败（这里是选中的辅助码表包不在）经宿主注册的诊断回调报出来，而不是只写 stderr：macOS 输入法的 stderr 指向 /dev/null，原先这些失败在哪儿都留不下痕迹。清掉回调后回到 stderr。
+///
+/// The sink is process-wide, so this is the only test that registers one; reports from tests running alongside land in it too, which is why the assertions look for this test's own pack id.
+#[test]
+fn plugin_failures_reach_the_registered_diagnostic_sink() {
+    static LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    unsafe extern "C" fn sink(line: *const c_char) {
+        let line = unsafe { std::ffi::CStr::from_ptr(line) };
+        LINES
+            .lock()
+            .unwrap()
+            .push(line.to_string_lossy().into_owned());
+    }
+    let captured = |needle: &str| -> Vec<String> {
+        LINES
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.contains(needle))
+            .cloned()
+            .collect()
+    };
+
+    msime_client_set_diagnostic_sink(Some(sink));
+    let dir = tempfile::tempdir().unwrap();
+    let mut preferences = chinese_preferences();
+    preferences.scheme = msime_client_core::preferences::InputScheme::Quanpin;
+    preferences.plugins.helpcode_pack_quanpin = "diagnostic-sink-probe".into();
+    let handle = plugin_host(dir.path(), preferences);
+    let reported = captured("diagnostic-sink-probe");
+    assert!(
+        reported.iter().any(|line| line.starts_with(
+            "helpcode pack unavailable, falling back to the scheme's schema: diagnostic-sink-probe -> "
+        )),
+        "{reported:?}"
+    );
+    assert!(reported.iter().all(|line| !line.starts_with("msime: ")));
+    // 第一个冒号之前只有固定的类别：macOS 的诊断日志只记这一段，包名、路径和错误原文都在它后面。
+    for line in &reported {
+        let (category, _) = line.split_once(": ").expect("a category before a colon");
+        assert!(!category.contains("diagnostic-sink-probe"), "{line}");
+        assert!(!category.contains('/'), "{line}");
+    }
+    assert_eq!(read(msime_client_destroy(handle))["ok"], true);
+
+    // 原因里带 NUL 也不会截断或出错。
+    diagnostics::report("diagnostic sink probe", "diagnostic-sink-probe nul\0after");
+    assert_eq!(
+        captured("diagnostic-sink-probe nul"),
+        ["diagnostic sink probe: diagnostic-sink-probe nul?after"]
+    );
+
+    msime_client_set_diagnostic_sink(None);
+    diagnostics::report(
+        "diagnostic sink probe",
+        "diagnostic-sink-probe after clearing",
+    );
+    assert!(captured("after clearing").is_empty());
 }
 
 /// Switching the `/` mode on, or enabling another table, goes through the ordinary preference update and reads the tables then.
@@ -10474,12 +12784,35 @@ fn plugins_boundary_lists_imports_removes_and_keeps_the_name_list() {
         "plugin_reserved"
     );
     assert_eq!(
+        call(json!({"operation": "remove", "kind": "wasm", "id": "rain"}))["error"],
+        "invalid"
+    );
+    // 移动端没有脚本插件，`script` 不是已知类型；桌面上它是，删一个没装的包照常成功。
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos"))
+    )))]
+    assert_eq!(
         call(json!({"operation": "remove", "kind": "script", "id": "rain"}))["error"],
         "invalid"
+    );
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos"))
+    ))]
+    assert_eq!(
+        call(json!({"operation": "remove", "kind": "script", "id": "rain"})),
+        json!({"ok": true, "value": null})
     );
     let removed = call(json!({"operation": "remove", "kind": "music", "id": "rain"}));
     assert_eq!(removed, json!({"ok": true, "value": null}));
     assert_eq!(ids(&call(json!({"operation": "catalog"}))), builtins(&[]));
+    // 脚本插件在授权页落地之前不出现在设置页的目录里，坏掉的脚本文件夹也不报。
+    std::fs::create_dir_all(state.path().join("plugins/script/hidden")).unwrap();
+    let catalog = call(json!({"operation": "catalog"}));
+    assert_eq!(catalog["value"]["issues"], json!([]), "{catalog}");
 
     assert_eq!(
         call(json!({"operation": "load_mentions"}))["value"],
@@ -10519,6 +12852,65 @@ fn plugins_boundary_lists_imports_removes_and_keeps_the_name_list() {
     );
     assert_eq!(
         read(unsafe { msime_client_plugins(std::ptr::null(), 4) })["error"],
+        "invalid"
+    );
+}
+
+/// 移动端导入单个码表：`import_helpcode_table` 把正文装成辅助码表包，选中后会话里「你」的码换成表里的；坏表以 `plugin_invalid` 和带行号的中文原因被拒。
+#[test]
+fn plugins_boundary_imports_a_helpcode_table_the_session_then_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let call = |action: Value| {
+        let request = serde_json::to_vec(
+            &json!({"state_root": state, "sound_packs": null, "action": action}),
+        )
+        .unwrap();
+        read(unsafe { msime_client_plugins(request.as_ptr(), request.len()) })
+    };
+    let imported = call(json!({
+        "operation": "import_helpcode_table",
+        "file_name": "我的码.txt",
+        "text": "\u{FEFF}# name: 我的辅助码\r\n你=zz\r\n",
+    }));
+    assert_eq!(imported["ok"], true, "{imported}");
+    assert_eq!(imported["value"]["kind"], "helpcode");
+    assert_eq!(imported["value"]["name"], "我的辅助码");
+    assert_eq!(imported["value"]["entries"], 1);
+    let id = imported["value"]["id"].as_str().unwrap().to_owned();
+    assert!(id.starts_with("custom-"), "{id}");
+    let catalog = call(json!({"operation": "catalog"}));
+    assert!(
+        catalog["value"]["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|pack| pack["id"] == id.as_str() && pack["kind"] == "helpcode"),
+        "{catalog}"
+    );
+
+    let mut preferences = chinese_preferences();
+    preferences.scheme = msime_client_core::preferences::InputScheme::Shuangpin;
+    preferences.plugins.helpcode_pack_shuangpin = id.clone();
+    let handle = plugin_host(dir.path(), preferences);
+    assert_eq!(session_helpcode(handle).as_deref(), Some("zz"));
+    assert_eq!(read(msime_client_destroy(handle))["ok"], true);
+
+    let refused = call(json!({
+        "operation": "import_helpcode_table",
+        "file_name": "mine.txt",
+        "text": "你=ab\n你=cd\n",
+    }));
+    assert_eq!(
+        refused,
+        json!({
+            "ok": false,
+            "error": "plugin_invalid",
+            "detail": "mine.txt 里「你」出现了不止一次（第 1 行和第 2 行）",
+        })
+    );
+    assert_eq!(
+        call(json!({"operation": "import_helpcode_table", "file_name": "mine.txt"}))["error"],
         "invalid"
     );
 }
@@ -10828,9 +13220,9 @@ fn gloss_breakdown_request_lines_sentences_up_with_english_words() {
             )
         })
     };
-    // Nothing installed: an empty answer.
+    // Nothing installed: an empty answer, even for a sentence the learner phrases alone would half gloss (别 and 问 are listed, 我 is not).
     assert_eq!(
-        call(json!(["我喜欢你"]))["value"],
+        call(json!(["我喜欢你", "别问我"]))["value"],
         json!({"generation": 3, "breakdowns": []})
     );
 
@@ -11047,6 +13439,24 @@ fn notice_abi_serves_the_cached_feed_with_rendered_html_and_dismissals() {
     // SAFETY: the buffer outlives the call and its length is exact.
     let html = read(unsafe { msime_client_markdown_to_html(markdown.as_ptr(), markdown.len()) });
     assert_eq!(html["value"], "<p>x <em>y</em></p>\n");
+}
+
+#[test]
+fn update_check_abi_refuses_a_bad_request_before_reaching_the_network() {
+    use crate::ffi::reporting::*;
+    // 这些请求都会在读取或校验阶段被拒绝，所以测试不会访问 GitHub。
+    for request in [
+        json!({"platform": "windows", "current_version": "unknown"}),
+        json!({"platform": "", "current_version": "1.0.0"}),
+        json!({"platform": "windows"}),
+        json!({"platform": "windows", "current_version": "1.0.0", "url": "https://example.com"}),
+    ] {
+        let refused = reporting_call(msime_client_update_check, request.clone());
+        assert_eq!(refused["ok"], false, "{request} -> {refused}");
+    }
+    // SAFETY: 空指针属于文档写明的拒绝契约。
+    let null = read(unsafe { msime_client_update_check(std::ptr::null(), 0) });
+    assert_eq!(null["ok"], false);
 }
 
 #[test]
@@ -11272,11 +13682,7 @@ fn downloaded_language_dictionaries_win_over_the_recorded_directory() {
 
 #[test]
 fn a_relative_recorded_language_dictionary_directory_is_ignored() {
-    let relative_root = tempfile::Builder::new()
-        .prefix("synthetic-language-dictionaries-")
-        .tempdir_in(".")
-        .unwrap();
-    let relative = std::path::Path::new(".").join(relative_root.path().file_name().unwrap());
+    let (_relative_root, relative) = relative_fixture_dir("synthetic-language-dictionaries-");
     for name in ["msime-cantonese.db", "msime-zhuyin.db", "msime-stroke.db"] {
         std::fs::write(relative.join(name), b"synthetic dictionary").unwrap();
     }
@@ -11312,6 +13718,7 @@ fn a_downloaded_japanese_pack_keeps_temporary_japanese_available() {
     let state = root.path().join("state");
     let mut preferences = Preferences::default();
     preferences.local_modes.temporary_japanese = true;
+    preferences.mixed_input.japanese = true;
     let options = || {
         let document = json!({ "api_version": 1, "resources": resources, "user_data": "/u", "cache": "/c", "dictionaries": "/d", "preferences": preferences, "preferences_directory": state });
         serde_json::from_value::<HostOptions>(document)
@@ -11323,6 +13730,7 @@ fn a_downloaded_japanese_pack_keeps_temporary_japanese_available() {
     let without = options();
     assert_eq!(without.japanese_dictionary, "");
     assert!(!without.local_temporary_japanese);
+    assert!(!without.mixed_japanese);
 
     // 只在暂存目录里：仍然不算。
     let staging = resource_packs::root(&state)
@@ -11348,6 +13756,7 @@ fn a_downloaded_japanese_pack_keeps_temporary_japanese_available() {
         pack.join("msime-japanese.dat").to_str().unwrap()
     );
     assert!(with.local_temporary_japanese);
+    assert!(with.mixed_japanese);
 
     // 资源目录内置的那份照旧可用，字段为空时 Engine 读它。
     std::fs::remove_dir_all(resource_packs::root(&state)).unwrap();
@@ -11355,6 +13764,7 @@ fn a_downloaded_japanese_pack_keeps_temporary_japanese_available() {
     let bundled = options();
     assert_eq!(bundled.japanese_dictionary, "");
     assert!(bundled.local_temporary_japanese);
+    assert!(bundled.mixed_japanese);
 }
 
 #[test]
@@ -11610,13 +14020,8 @@ fn a_relative_recorded_settled_model_is_ignored() {
 
     // HostOptions promises an absolute path. A relative path must not be resolved
     // against whichever directory happened to launch the input method.
-    let relative_root = tempfile::Builder::new()
-        .prefix("synthetic-settled-model-")
-        .tempdir_in(".")
-        .unwrap();
-    let relative = std::path::Path::new(".")
-        .join(relative_root.path().file_name().unwrap())
-        .join("synthetic-model.safetensors");
+    let (_relative_root, relative_root) = relative_fixture_dir("synthetic-settled-model-");
+    let relative = relative_root.join("synthetic-model.safetensors");
     std::fs::write(&relative, b"synthetic model").unwrap();
     assert!(!relative.is_absolute());
     assert_eq!(
@@ -12134,3 +14539,346 @@ fn account_settings_export_and_apply_round_trip_without_credentials() {
     );
     assert!(saved.preferences.voice_input.asr_token.is_empty());
 }
+
+// Only configurations the check answers before sending anything, so the test never reaches the network.
+#[test]
+fn credential_test_export_answers_incomplete_configurations_offline() {
+    let call = |request: Value| {
+        let bytes = request.to_string();
+        read(unsafe { msime_client_test_api_credential(bytes.as_ptr(), bytes.len()) })
+    };
+    for service in [
+        "translation.tencent",
+        "translation.niutrans",
+        "translation.custom",
+    ] {
+        let reply = call(json!({"service": service, "config": {}}));
+        assert_eq!(reply["ok"], true, "{service}");
+        assert_eq!(reply["value"]["ok"], false, "{service}");
+        assert_eq!(
+            reply["value"]["message"],
+            "请填写有效的翻译服务凭据和接口地址。"
+        );
+    }
+    let remote_http = call(json!({
+        "service": "translation.custom",
+        "config": {"endpoint": "http://translate.example/api", "api_key": "synthetic"},
+    }));
+    assert_eq!(remote_http["value"]["ok"], false);
+    let unknown = call(json!({"service": "unknown", "config": {}}));
+    assert_eq!(unknown["value"]["message"], "此配置测试类型尚未接入。");
+    // The voice page's checks: Doubao goes to its WebSocket check, other services to the upload one, polishing to the chat one.
+    let voice = |service: &str, config: Value| {
+        let reply = call(json!({"service": service, "config": config}));
+        assert_eq!(reply["ok"], true, "{service}");
+        assert_eq!(reply["value"]["ok"], false, "{service}");
+        reply["value"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert_eq!(
+        voice(
+            "voice.asr",
+            json!({"provider": "doubao", "auth_mode": "api_key", "endpoint": "https://doubao.example/asr", "token": "synthetic", "resource_id": "volc.bigasr.sauc.duration"}),
+        ),
+        "请填写有效的 WSS 接口、资源 ID 及对应鉴权方式的凭据。"
+    );
+    assert_eq!(
+        voice("voice.asr", json!({"provider": "openai", "token": ""})),
+        "请先填写有效的 API Key。"
+    );
+    assert_eq!(
+        voice(
+            "voice.asr",
+            json!({"provider": "openai", "token": "synthetic", "endpoint": "http://asr.example/v1", "model": "whisper-1"}),
+        ),
+        "请填写有效的 HTTPS 转写接口地址和模型名。"
+    );
+    assert_eq!(
+        voice("voice.asr", json!({"provider": "local"})),
+        "此识别服务的凭据测试尚未接入。"
+    );
+    // The AI page's check accepts local-network http, so only a missing token or model stops it offline.
+    assert_eq!(
+        voice(
+            "ai.assistant",
+            json!({"token": "", "endpoint": "https://ai.example/v1", "model": "m"})
+        ),
+        "请先填写有效的 API Key。"
+    );
+    assert_eq!(
+        voice(
+            "ai.assistant",
+            json!({"token": "synthetic", "endpoint": "http://ai.example/v1", "model": "m"}),
+        ),
+        "请填写有效的接口地址（https://，或本机、局域网的 http://）和模型名。"
+    );
+    assert_eq!(
+        voice(
+            "voice.polish",
+            json!({"token": "synthetic", "endpoint": "http://polish.example/v1", "model": "m"}),
+        ),
+        "请填写有效的 HTTPS 接口地址和模型名。"
+    );
+    for invalid in [
+        json!({"config": {}}),
+        json!({"service": "translation.custom"}),
+        json!({"service": "translation.custom", "config": "endpoint"}),
+    ] {
+        assert_eq!(call(invalid)["ok"], false);
+    }
+    assert_eq!(
+        read(unsafe { msime_client_test_api_credential(std::ptr::null(), 0) })["ok"],
+        false
+    );
+    let oversized = "x".repeat(64 * 1024 + 1);
+    assert_eq!(
+        read(unsafe { msime_client_test_api_credential(oversized.as_ptr(), oversized.len()) })
+            ["ok"],
+        false
+    );
+}
+
+// Resolved from stored preferences, and only configurations answered before anything is sent.
+#[test]
+fn voice_credential_test_resolves_preferences_and_answers_offline() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let save = |edit: &dyn Fn(&mut msime_client_core::preferences::Preferences)| {
+        let snapshot = store.load().unwrap();
+        let mut preferences = snapshot.preferences;
+        edit(&mut preferences);
+        store.save(snapshot.revision, preferences).unwrap();
+    };
+    let call = |service: &str| {
+        let bytes = json!({
+            "preferences_directory": directory.path().to_str().unwrap(),
+            "service": service,
+        })
+        .to_string();
+        read(unsafe { msime_client_test_voice_credential(bytes.as_ptr(), bytes.len()) })
+    };
+    save(&|preferences| {
+        preferences.voice_input.asr_provider = "openai".into();
+        preferences.voice_input.asr_endpoint.clear();
+        preferences.voice_input.asr_token.clear();
+        preferences.voice_input.polish_provider = "openai".into();
+        preferences.voice_input.polish_token.clear();
+    });
+    for service in ["voice.asr", "voice.polish"] {
+        let reply = call(service);
+        assert_eq!(reply["ok"], true, "{service}");
+        assert_eq!(reply["value"]["ok"], false, "{service}");
+        assert_eq!(
+            reply["value"]["message"], "请先填写有效的 API Key。",
+            "{service}"
+        );
+    }
+    // A stored plaintext endpoint is what the keyboard would use, so the check refuses it before sending.
+    save(&|preferences| {
+        preferences.voice_input.asr_token = "synthetic".into();
+        preferences.voice_input.asr_endpoint = "http://asr.example/v1".into();
+    });
+    assert_eq!(
+        call("voice.asr")["value"]["message"],
+        "请填写有效的 HTTPS 转写接口地址和模型名。"
+    );
+    save(&|preferences| preferences.voice_input.asr_provider = "system".into());
+    assert_eq!(
+        call("voice.asr")["value"]["message"],
+        "当前服务不需要测试。"
+    );
+    for invalid in [
+        json!({"service": "voice.asr"}),
+        json!({"service": "voice.asr", "preferences_directory": "relative"}),
+        json!({"service": "translation.custom", "preferences_directory": "/tmp"}),
+    ] {
+        let bytes = invalid.to_string();
+        assert_eq!(
+            read(unsafe { msime_client_test_voice_credential(bytes.as_ptr(), bytes.len()) })["ok"],
+            false
+        );
+    }
+}
+
+// Only requests the checks reject before building a client, so nothing reaches the network.
+#[test]
+fn ai_settings_exports_reject_invalid_requests_offline() {
+    let models =
+        |request: &str| read(unsafe { msime_client_ai_models(request.as_ptr(), request.len()) });
+    let polish =
+        |request: &str| read(unsafe { msime_client_ai_test(request.as_ptr(), request.len()) });
+    for request in [
+        json!({"endpoint": "http://ai.example/v1/chat/completions", "token": "synthetic"}),
+        json!({"endpoint": "https://ai.example/v1/chat/completions", "token": ""}),
+        json!({"endpoint": "https://ai.example/v1/chat/completions"}),
+        json!({"endpoint": "https://ai.example/v1/chat/completions", "token": 7}),
+    ] {
+        let reply = models(&request.to_string());
+        assert_eq!(reply["ok"], false, "{request}");
+        assert_eq!(reply["error"], "ai_invalid", "{request}");
+    }
+    let valid = json!({
+        "endpoint": "https://ai.example/v1/chat/completions",
+        "model": "m",
+        "prompt": "",
+        "token": "synthetic",
+        "text": "文字",
+    });
+    for (field, value) in [
+        ("endpoint", json!("https://user:secret@ai.example/v1")),
+        ("model", json!("")),
+        ("prompt", json!("bad\0prompt")),
+        ("token", json!("")),
+        ("text", json!("")),
+        ("text", Value::Null),
+    ] {
+        let mut request = valid.clone();
+        request[field] = value;
+        let reply = polish(&request.to_string());
+        assert_eq!(reply["ok"], false, "{field}");
+        assert_eq!(reply["error"], "ai_invalid", "{field}");
+    }
+    for call in [models as fn(&str) -> Value, polish] {
+        assert_eq!(call("not json")["error"], "ai_invalid");
+        let oversized = "x".repeat(256 * 1024 + 1);
+        assert_eq!(call(&oversized)["error"], "ai_invalid");
+    }
+    assert_eq!(
+        read(unsafe { msime_client_ai_models(std::ptr::null(), 0) })["ok"],
+        false
+    );
+    assert_eq!(
+        read(unsafe { msime_client_ai_test(std::ptr::null(), 0) })["ok"],
+        false
+    );
+}
+
+#[test]
+fn ai_endpoint_check_export_reports_the_origin_problem_and_hint() {
+    let check = |endpoint: &str| {
+        read(unsafe { msime_client_ai_endpoint_check(endpoint.as_ptr(), endpoint.len()) })["value"]
+            .clone()
+    };
+    assert_eq!(
+        check("https://API.example.test/v1/chat/completions"),
+        json!({"origin": "https://api.example.test:443", "problem": null, "hint": ""})
+    );
+    assert_eq!(
+        check("http://192.168.1.20:1234/v1")["origin"],
+        "http://192.168.1.20:1234"
+    );
+    let public = check("http://api.example.test/v1");
+    assert_eq!(public["origin"], Value::Null);
+    assert_eq!(public["problem"], "cleartext_public");
+    assert_eq!(
+        public["hint"],
+        "http:// 只能用于本机或局域网地址（如 localhost、127.0.0.1、192.168.x.x、10.x.x.x、*.local）；公网服务请使用 https://，以免 API Token 明文经过互联网。"
+    );
+    let empty = check("");
+    assert_eq!(empty["problem"], "invalid");
+    assert_eq!(
+        empty["hint"],
+        "请填写完整的接口地址：https://，或本机、局域网的 http://，且不能包含用户名、密码或 # 片段。"
+    );
+    assert_eq!(
+        read(unsafe { msime_client_ai_endpoint_check(std::ptr::null(), 0) })["ok"],
+        false
+    );
+    let invalid_utf8 = [0xff_u8];
+    assert_eq!(
+        read(unsafe { msime_client_ai_endpoint_check(invalid_utf8.as_ptr(), 1) })["ok"],
+        false
+    );
+}
+
+#[test]
+fn translation_endpoint_issue_export_reports_the_hint_and_what_the_store_saves() {
+    let check = |endpoint: &str| {
+        read(unsafe { msime_client_translation_endpoint_issue(endpoint.as_ptr(), endpoint.len()) })
+            ["value"]
+            .clone()
+    };
+    assert_eq!(
+        check(""),
+        json!({"issue": "请填写完整的接口地址。", "accepted": true})
+    );
+    assert_eq!(
+        check("https://translate.example/api"),
+        json!({"issue": "", "accepted": true})
+    );
+    assert_eq!(
+        check("http://translate.example/api"),
+        json!({
+            "issue": "远程翻译服务必须使用 HTTPS；HTTP 仅支持本机回环地址。",
+            "accepted": false,
+        })
+    );
+    // The page's parser takes `https:///api` as host `api`; the store still refuses it.
+    assert_eq!(
+        check("https:///api"),
+        json!({"issue": "", "accepted": false})
+    );
+    let invalid_utf8 = [0xff_u8];
+    assert_eq!(
+        read(unsafe {
+            msime_client_translation_endpoint_issue(invalid_utf8.as_ptr(), invalid_utf8.len())
+        })["ok"],
+        false
+    );
+    assert_eq!(
+        read(unsafe { msime_client_translation_endpoint_issue(std::ptr::null(), 0) })["ok"],
+        false
+    );
+}
+
+#[test]
+fn voice_capture_device_values_keep_the_listing_order_and_backend() {
+    assert_eq!(
+        voice_capture_device_values(
+            "windows",
+            vec![
+                ("wasapi:0061".to_owned(), "麦克风".to_owned()),
+                ("wasapi:0062".to_owned(), "耳机".to_owned()),
+            ],
+        ),
+        vec![
+            json!({"backend": "windows", "id": "wasapi:0061", "label": "麦克风"}),
+            json!({"backend": "windows", "id": "wasapi:0062", "label": "耳机"}),
+        ]
+    );
+    assert!(voice_capture_device_values("windows", Vec::new()).is_empty());
+}
+
+// Lists whatever capture endpoints this machine has (none on a headless runner); it never opens one.
+#[test]
+fn voice_capture_device_export_lists_wasapi_endpoints_on_windows_only() {
+    let reply = read(msime_client_voice_capture_devices());
+    if cfg!(target_os = "windows") {
+        assert_eq!(reply["ok"], true);
+        let devices = reply["value"].as_array().expect("device array");
+        assert!(devices.len() <= 128);
+        for device in devices {
+            assert_eq!(device["backend"], "windows");
+            let id = device["id"].as_str().expect("id");
+            let digits = id.strip_prefix("wasapi:").expect("wasapi id");
+            assert!(!digits.is_empty() && digits.len() % 4 == 0);
+            assert!(digits
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+            assert!(!device["label"].as_str().unwrap_or_default().is_empty());
+        }
+    } else {
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["error"], "voice capture devices unavailable");
+    }
+}
+
+mod lifecycle_traces;
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+mod script_plugins;

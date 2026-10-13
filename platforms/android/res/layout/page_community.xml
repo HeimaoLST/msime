@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The 社区 tab in the design's Android form: large title, the outlined 皮肤/词库/短语 segmented control (accentSoft under the selected segment), a pill search field, the skin category chips, then the listing. Skins lay out as a two-column grid of preview cards; dictionaries and phrase packs as rows in one grouped card, with the 「AI 回复模板」 section under the phrase packs (see CommunityAdapter). The list is inset 10dp so the 6dp margins around each card land its outer edge on the 16dp page margin with a 12dp gutter between columns. -->
+<!-- 一类社区作品的完整列表（CommunityFragment），从皮肤、词库、表达、AI 润色与回复几个功能页的「浏览更多…」压进来：左上角返回和这一类的大标题、胶囊搜索框、皮肤的分类筛选条，然后是列表。皮肤排成两列预览卡，词库、短语包和回复模板是一张分组卡片里的行（见 CommunityAdapter）。列表左右各缩进 10dp，每张卡片四周 6dp 的外边距让卡片外缘落在 16dp 的页边距上，两列之间留 12dp。 -->
 <LinearLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -8,28 +8,37 @@
     android:background="?android:attr/colorBackground"
     android:orientation="vertical">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:accessibilityHeading="true"
-        android:paddingStart="@dimen/ms_large_title_padding_horizontal"
-        android:paddingTop="22dp"
-        android:paddingEnd="@dimen/ms_large_title_padding_horizontal"
-        android:paddingBottom="10dp"
-        android:text="@string/tab_community"
-        android:textColor="?attr/colorOnSurface"
-        android:textSize="@dimen/ms_text_page_title" />
-
-    <com.google.android.material.button.MaterialButtonToggleGroup
-        android:id="@+id/community_kinds"
-        style="@style/Widget.MSIME.SegmentGroup"
+    <!-- 和详情页（ms_w1_a2_detail_page）一样的 64dp 标题行：40dp 返回按钮，标题从 56dp 处开始。 -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginStart="@dimen/ms_large_title_padding_horizontal"
-        android:layout_marginTop="6dp"
-        android:layout_marginEnd="@dimen/ms_large_title_padding_horizontal"
-        app:selectionRequired="true"
-        app:singleSelection="true" />
+        android:gravity="center_vertical"
+        android:minHeight="64dp"
+        android:orientation="horizontal"
+        android:paddingEnd="@dimen/ms_large_title_padding_horizontal">
+
+        <ImageButton
+            android:id="@+id/community_back"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="6dp"
+            android:layout_marginEnd="10dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:scaleType="center"
+            android:src="@drawable/ms_w1_a2_arrow_back"
+            app:tint="?attr/colorOnSurface" />
+
+        <TextView
+            android:id="@+id/community_title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:accessibilityHeading="true"
+            android:ellipsize="end"
+            android:maxLines="2"
+            android:textColor="?attr/colorOnSurface"
+            android:textSize="28sp" />
+    </LinearLayout>
 
     <com.google.android.material.textfield.TextInputLayout
         android:id="@+id/community_search_field"

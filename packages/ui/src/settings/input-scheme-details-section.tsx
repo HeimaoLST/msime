@@ -1,4 +1,4 @@
-import { Row } from "../core/platform-controls";
+import { LinkRow } from "../core/platform-controls";
 import type { InputScheme, VietnamesePreferences } from "../index";
 import {
   cantoneseInputSchemeOptions,
@@ -15,17 +15,26 @@ import { SwitchRow } from "./switch-row";
 import { SegmentedRow } from "./segmented-row";
 
 export type InputSchemeDetailsScheme = InputScheme;
-export type ShuangpinProfile = "xiaohe" | "ziranma" | "shoudao" | "microsoft";
+export type ShuangpinProfile = "xiaohe" | "ziranma" | "shoudao" | "microsoft" | "custom";
 export type WubiProfile = "wubi86" | "wubi98";
 
-/** 双拼方案的选项。这里和下面的五笔方案都写成返回 Fragment 的普通函数，鸿蒙手机的 `SelectRow` 才能从中读出面板选项。 */
-function shuangpinProfileOptions() {
+/**
+ * 双拼方案的选项。这里和下面的五笔方案都写成返回 Fragment 的普通函数，鸿蒙手机的 `SelectRow` 才能从中读出面板选项。
+ *
+ * 「自定义双拼」在宿主能编辑它（`editable`）时列出；文档里已经是它而宿主编辑不了时也列出，但不能选，否则受控的选择框找不到这一项，会把第一项显示成当前方案。
+ */
+function shuangpinProfileOptions(editable: boolean, current: ShuangpinProfile) {
   return (
     <>
       <option value="xiaohe">小鹤双拼</option>
       <option value="ziranma">自然码双拼</option>
       <option value="shoudao">首道双拼</option>
       <option value="microsoft">微软双拼</option>
+      {(editable || current === "custom") && (
+        <option value="custom" disabled={!editable}>
+          自定义双拼
+        </option>
+      )}
     </>
   );
 }
@@ -48,10 +57,13 @@ export interface InputSchemeDetailsSectionProps {
   hasTouchKeyboardSchemes: boolean;
   /** 触屏宿主启用了五笔键盘：触屏只有一个五笔键盘，86 还是 98 仍在这里选。 */
   touchKeyboardHasWubi?: boolean;
-  macosShuangpinKeymap?: boolean;
+  /** 「输入时显示双拼键位提示」的当前值；宿主不画双拼键位图时不传，这一行不出现。 */
+  shuangpinKeymapHint?: boolean;
   onShuangpinProfileChange: (profile: ShuangpinProfile) => void;
+  /** 宿主能校验自定义双拼表时传入，打开自定义双拼的编辑页。有它时方案里多一项「自定义双拼」：选它先打开编辑页，在那里保存一张能用的表才切过去，与 MCP 不让选一张不能用的表相同；已经是自定义双拼时下面多一行「编辑自定义键位」。 */
+  onEditCustomShuangpin?: () => void;
   onWubiProfileChange?: (profile: WubiProfile) => void;
-  onMacosShuangpinKeymapChange?: (enabled: boolean) => void;
+  onShuangpinKeymapHintChange?: (enabled: boolean) => void;
   /** The document's Vietnamese options; absent means the defaults, Telex with modern tone placement. */
   vietnamese?: VietnamesePreferences;
   onVietnameseChange?: (vietnamese: VietnamesePreferences) => void;
@@ -75,10 +87,11 @@ export function InputSchemeDetailsSection({
   macos,
   hasTouchKeyboardSchemes,
   touchKeyboardHasWubi = false,
-  macosShuangpinKeymap,
+  shuangpinKeymapHint,
   onShuangpinProfileChange,
+  onEditCustomShuangpin,
   onWubiProfileChange,
-  onMacosShuangpinKeymapChange,
+  onShuangpinKeymapHintChange,
   vietnamese,
   onVietnameseChange,
 }: InputSchemeDetailsSectionProps) {
@@ -104,17 +117,30 @@ export function InputSchemeDetailsSection({
         hidden={hideChineseSchemeOptions}
         disabled={macos && scheme !== "shuangpin"}
         value={shuangpinProfile}
-        onChange={(event) => onShuangpinProfileChange(event.target.value as ShuangpinProfile)}
+        onChange={(event) => {
+          const profile = event.target.value as ShuangpinProfile;
+          if (profile === "custom" && onEditCustomShuangpin) onEditCustomShuangpin();
+          else onShuangpinProfileChange(profile);
+        }}
       >
-        {shuangpinProfileOptions()}
+        {shuangpinProfileOptions(Boolean(onEditCustomShuangpin), shuangpinProfile)}
       </SelectRow>
-      {macosShuangpinKeymap !== undefined && (
+      {onEditCustomShuangpin && shuangpinProfile === "custom" && (
+        <div hidden={hideChineseSchemeOptions}>
+          <LinkRow
+            title="编辑自定义键位"
+            description="改键、导入或导出这张双拼表。"
+            onClick={onEditCustomShuangpin}
+          />
+        </div>
+      )}
+      {shuangpinKeymapHint !== undefined && (
         <SwitchRow
           title="输入时显示双拼键位提示"
           description="双拼输入时显示当前方案的键位图，完成上屏后自动隐藏。"
           hidden={hasTouchKeyboardSchemes || scheme !== "shuangpin"}
-          checked={macosShuangpinKeymap}
-          onChange={onMacosShuangpinKeymapChange ?? (() => {})}
+          checked={shuangpinKeymapHint}
+          onChange={onShuangpinKeymapHintChange ?? (() => {})}
         />
       )}
       {/* 五笔方案在 86 与 98 码表之间切换，个人词条和学习记录按版本分开存；触屏宿主没有方案选择器，启用了五笔键盘时也在这里选。 */}

@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if (-not $Installers.ContainsKey('full') -or $Installers.Count -lt 2) { throw 'Provide the full installer and at least one other edition' }
-$table = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../../../../shared/contracts/editions.json') -Raw | ConvertFrom-Json
+$table = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../../../../shared/contracts/editions.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $logs = Join-Path $env:RUNNER_TEMP 'msime-coexistence-smoke'
 New-Item -ItemType Directory -Force -Path $logs | Out-Null
 $failures = [Collections.Generic.List[string]]::new()
@@ -45,7 +45,7 @@ function Check-Installed([string]$Edition, [string]$When) {
     # 所有权标记的文件名接版本的名字后缀（edition_windows.py 的 data_dir_marker，full 是 .metasequoiaime-data.full）：一个版本的安装器认不出别的版本的标记，不会接管它们的数据目录。
     Check (Test-Path -LiteralPath (Join-Path $app.DataDir ('.metasequoiaime-data' + $identity.name_suffix)) -PathType Leaf) "${When}: $Edition DataDir still owned ($($app.DataDir))"
     $declaration = Join-Path $pf64 'server\edition.json'
-    Check ((Test-Path -LiteralPath $declaration) -and (Get-Content -LiteralPath $declaration -Raw | ConvertFrom-Json).edition -eq $Edition) "${When}: $Edition declares itself"
+    Check ((Test-Path -LiteralPath $declaration) -and (Get-Content -LiteralPath $declaration -Raw -Encoding UTF8 | ConvertFrom-Json).edition -eq $Edition) "${When}: $Edition declares itself"
 }
 function Check-Removed([string]$Edition, [string]$When) {
     $identity = Identity $Edition
@@ -57,7 +57,8 @@ function Check-Removed([string]$Edition, [string]$When) {
 }
 function Uninstall([string]$Edition) {
     $uninstaller = Join-Path (Join-Path $env:ProgramFiles (Identity $Edition).install_dir) 'unins000.exe'
-    Start-Process -FilePath $uninstaller -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$logs\uninstall-$Edition.log`"" -Wait
+    # 卸载默认保留数据目录；这里带 /REMOVEDATA，核对删掉自己的数据目录时不会碰到别的版本和 msime-windows 的。
+    Start-Process -FilePath $uninstaller -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/REMOVEDATA', "/LOG=`"$logs\uninstall-$Edition.log`"" -Wait
     # 卸载程序会把自己复制到临时目录再运行并立即返回，所以等程序目录消失，而不是等进程。
     $deadline = (Get-Date).AddMinutes(3)
     while ((Test-Path -LiteralPath $uninstaller) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }

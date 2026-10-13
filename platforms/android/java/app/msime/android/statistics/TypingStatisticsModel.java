@@ -47,7 +47,7 @@ public final class TypingStatisticsModel {
     private static final Map<String, String> CHARACTER_KINDS = kinds();
     private static final Map<String, String> SOURCES = sources();
     private static final List<String> CHINESE_SOURCES = List.of(
-        "quanpin", "nineKey", "shuangpin", "ziranma", "microsoft", "shoudao", "wubi",
+        "quanpin", "nineKey", "fourteenKey", "shuangpin", "ziranma", "microsoft", "shoudao", "wubi",
         "cantonese", "zhuyin", "stroke");
 
     private final boolean enabled;
@@ -128,7 +128,7 @@ public final class TypingStatisticsModel {
      */
     public int[] trend(String today, int length) {
         if (length <= 0) return new int[0];
-        int bounded = KeyboardGeometry.bounded(length, 0, MAX_TREND_DAYS);
+        int bounded = BoundsPolicy.bounded(length, 0, MAX_TREND_DAYS);
         LocalDate end = day(today);
         int[] series = new int[bounded];
         if (end == null) return series;
@@ -141,7 +141,7 @@ public final class TypingStatisticsModel {
 
     /** The day key each cell of {@link #trend} was taken from, in the same order. */
     public List<String> trendDays(String today, int length) {
-        int bounded = KeyboardGeometry.bounded(length, 0, MAX_TREND_DAYS);
+        int bounded = BoundsPolicy.bounded(length, 0, MAX_TREND_DAYS);
         LocalDate end = day(today);
         if (end == null || bounded == 0) return List.of();
         List<String> result = new ArrayList<>(bounded);
@@ -295,9 +295,10 @@ public final class TypingStatisticsModel {
     }
 
     private static Map<String, String> sources() {
-        Map<String, String> titles = new LinkedHashMap<>(21);
+        Map<String, String> titles = new LinkedHashMap<>(22);
         titles.put("quanpin", "全拼 26 键");
         titles.put("nineKey", "全拼 9 键");
+        titles.put("fourteenKey", "全拼 14 键");
         titles.put("shuangpin", "小鹤双拼");
         titles.put("ziranma", "自然码双拼");
         titles.put("microsoft", "微软双拼");

@@ -3,7 +3,8 @@ import {
   doubaoStreamEndpointId,
   findDoubaoStreamEndpoint,
 } from "../voice/voice-providers";
-import { Row } from "../core/platform-controls";
+import { ControlledSelect } from "../core/controlled-select";
+import { SelectRow } from "./select-row";
 
 export interface DoubaoStreamEndpointSectionProps {
   endpoint: string;
@@ -15,7 +16,8 @@ export interface DoubaoStreamEndpointSelectProps {
   onChange: (endpoint: string) => void;
 }
 
-function DoubaoStreamEndpointOptions() {
+/** 一个返回 Fragment 的普通函数而不是组件：`SelectRow` 在 HarmonyOS 上只认直接的 `<option>` 和 Fragment 子元素。 */
+function doubaoStreamEndpointOptions() {
   return (
     <>
       {DOUBAO_STREAM_ENDPOINTS.map((option) => (
@@ -40,13 +42,13 @@ export function DoubaoStreamEndpointSelect({
 }: DoubaoStreamEndpointSelectProps) {
   const selected = doubaoStreamEndpointId(endpoint);
   return (
-    <select
+    <ControlledSelect
       aria-label="流式接口"
       value={selected}
-      onChange={(event) => updateDoubaoStreamEndpoint(event.target.value, onChange)}
+      onChange={(value) => updateDoubaoStreamEndpoint(value, onChange)}
     >
-      <DoubaoStreamEndpointOptions />
-    </select>
+      {doubaoStreamEndpointOptions()}
+    </ControlledSelect>
   );
 }
 
@@ -56,11 +58,14 @@ export function DoubaoStreamEndpointSection({
   onChange,
 }: DoubaoStreamEndpointSectionProps) {
   return (
-    <Row
+    <SelectRow
       title="流式接口"
       description="整句流式边录边传、说完返回整句，服务方称准确率更高并推荐用于输入法；双向流式返回增量结果，流式预编辑刷新更频繁。选择后写入下方接口地址。"
+      aria-label="流式接口"
+      value={doubaoStreamEndpointId(endpoint)}
+      onChange={(event) => updateDoubaoStreamEndpoint(event.target.value, onChange)}
     >
-      <DoubaoStreamEndpointSelect endpoint={endpoint} onChange={onChange} />
-    </Row>
+      {doubaoStreamEndpointOptions()}
+    </SelectRow>
   );
 }

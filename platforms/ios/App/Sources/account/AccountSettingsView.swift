@@ -1,17 +1,8 @@
 import SwiftUI
 
-/// 任务取消不是错误。切换标签页会让 `.task` 连同它已经发出的请求一起取消,而 URLSession 抛回来的是 `URLError.cancelled` —— 它的 `localizedDescription` 就是 "cancelled"。把它当错误弹出来,结果就是每次切到「我的」都跳一个写着 cancelled 的框。
-///
-/// 只判 `CancellationError` 不够:那是 Swift 结构化并发自己抛的那一种,而这里真正会抛的是网络层那一种,两者没有继承关系。
-private func isCancellation(_ error: Error) -> Bool {
-  if error is CancellationError { return true }
-  if let error = error as? URLError { return error.code == .cancelled }
-  return false
-}
-
 /// 「我的」页，对应 Android 的 `AccountFragment`：先是资料卡，然后是「我的内容」「同步」「通用」三组，以及一组不带标题的下载、帮助、关于和两个重播入口，铺在季节页面底色上。
 ///
-/// 页面先读本地会话并立即绘制，再去取需要联网的内容（资料和云剪贴板条数）；没拿到数字的行就不显示数字。iOS 上没有自动同步，所以资料卡从不显示「已同步」，「云同步」也是一页手动操作而不是一个开关。
+/// 页面先读本地会话并立即绘制，再去取需要联网的内容（资料和云剪贴板条数）；没拿到数字的行就不显示数字。「云同步」和 Android 一样是一个开关，副标题是同步状态（`CloudSync.statusLine`）；手动上传下载设置、管理云词库在它下面的「手动同步」里。
 struct AccountSettingsView: View {
   @EnvironmentObject private var router: SettingsRouter
   @Environment(\.horizontalSizeClass) private var widthClass
@@ -28,6 +19,12 @@ struct AccountSettingsView: View {
   @State private var showsLogin = false
   @State private var showsAppTheme = false
   @State private var replay: Replay?
+  @State private var pending: Task<Void, Never>?
+  @State private var operation: Task<Void, Never>?
+  @State private var request = ViewRequestGeneration()
+  @State private var syncTask: Task<Void, Never>?
+  @State private var syncGeneration = OperationGeneration()
+  @ObservedObject private var cloudSync = CloudSync.shared
   private let api = SkinCommunityAPI.shared
 
   /// What 我的 can play again. Both cover the whole window, so neither slides up as a sheet over the tab bar.
@@ -100,12 +97,12 @@ struct AccountSettingsView: View {
       .frame(maxWidth: isRegular ? 760 : .infinity)
       .frame(maxWidth: .infinity)
     }
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .navigationTitle("我的")
     .navigationBarTitleDisplayMode(.large)
     .tint(MetasequoiaTheme.accent)
-    .task { await reload() }
-    .sheet(isPresented: $showsLogin, onDismiss: { Task { await reload() } }) { AccountLoginSheet() }
+    .task { request.appear(); startReload() }
+    .sheet(isPresented: $showsLogin, onDismiss: { startReload() }) { AccountLoginSheet() }
     .designOptionSheet(isPresented: $showsAppTheme, title: "应用主题", message: "四季会随季节自动更换配色",
                        options: appThemeOptions, selected: AppThemePalette.selectedID) { id in
       AppThemePalette.select(id)
@@ -137,6 +134,11 @@ struct AccountSettingsView: View {
         SplashView { dismissReplay() }
       }
     }
+    .onDisappear {
+      ViewRequestTask.disappear(request: $request, pending: $pending)
+      ViewRequestTask.cancel(generation: $syncGeneration, task: $syncTask)
+      busy = false
+    }
   }
 
   // MARK: - 资料卡
@@ -161,10 +163,11 @@ struct AccountSettingsView: View {
       }
       if needsRecovery && !signedIn {
         Button("清除失效登录状态") {
-          run {
+          run { id in
             try await api.clearExpiredLogin()
+            try request.checkCurrent(id)
             needsRecovery = false
-            await reload()
+            await reload(id: id)
           }
         }
         .font(.system(size: 13))
@@ -190,13 +193,11 @@ struct AccountSettingsView: View {
           .font(.system(size: 18, weight: .bold)).foregroundStyle(.primary)
           .lineLimit(1)
         Text(signedIn ? signedInSubtitle : "登录后同步词库、皮肤和设置")
-          .font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+          .designSubtext()
           .lineLimit(1)
       }
       Spacer(minLength: 8)
-      Image(systemName: "chevron.right").font(.system(size: 20))
-        .foregroundStyle(MetasequoiaTheme.sub.opacity(0.55))
-        .accessibilityHidden(true)
+      DesignChevron(fontSize: 20)
     }
     .padding(16)
     .frame(maxWidth: .infinity, alignment: .leading)
@@ -251,14 +252,57 @@ struct AccountSettingsView: View {
 
   private var syncGroup: some View {
     MeGroup(title: "同步") {
+      // 与 Android 的同步行相同：整行是开关，副标题是一行状态。打开时马上比对一次，之后每次回到前台按节流自动同步。
+      Toggle(isOn: Binding(get: { signedIn && cloudSync.record.enabled }, set: setCloudSync)) {
+        HStack(spacing: 12) {
+          Image(systemName: "arrow.triangle.2.circlepath.circle.fill").font(.system(size: 18))
+            .foregroundStyle(MetasequoiaTheme.accent)
+            .frame(width: 28, height: 28)
+            .accessibilityHidden(true)
+          VStack(alignment: .leading, spacing: 1) {
+            Text("云同步").font(.system(size: 16)).foregroundStyle(.primary)
+            Text(signedIn ? CloudSync.statusLine(cloudSync.record) : "登录后可用")
+              .font(.system(size: 12)).foregroundStyle(MetasequoiaTheme.sub)
+              .fixedSize(horizontal: false, vertical: true)
+          }
+        }
+      }
+      .toggleStyle(.switch)
+      .tint(MetasequoiaTheme.switchOn)
+      .padding(.vertical, 8)
+      .padding(.horizontal, 14)
+      .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+      .disabled(!signedIn)
+      .opacity(signedIn ? 1 : 0.38)
+      .accessibilityIdentifier("accountCloudSync")
+      MeDivider()
       NavigationLink { AccountCloudSyncView() } label: {
-        MeRow(symbol: "arrow.triangle.2.circlepath.circle.fill", title: "云同步",
-              subtitle: signedIn ? "词库、自造词和设置在设备间同步" : "登录后可用")
+        MeRow(symbol: "arrow.up.arrow.down.circle.fill", title: "手动同步",
+              subtitle: signedIn ? "上传或下载设置，管理云词库；词库不自动同步" : "登录后可用")
       }
       .buttonStyle(PressFillButtonStyle())
       .disabled(!signedIn)
       .opacity(signedIn ? 1 : 0.38)
-      .accessibilityIdentifier("accountCloudSync")
+      .accessibilityIdentifier("accountManualSync")
+    }
+  }
+
+  /// 打开或关闭云同步，与 Android 的 `setSync` 相同：结果用一条提示说明，打开后马上比对一次（首次的「合并 / 使用云端」选择也当场弹出）。
+  @MainActor private func setCloudSync(_ enabled: Bool) {
+    guard request.isVisible else { return }
+    let id = syncGeneration.begin()
+    ViewRequestTask.cancel(task: $syncTask)
+    syncTask = Task { @MainActor in
+      defer { if syncGeneration.isCurrent(id) { syncTask = nil } }
+      do {
+        try await cloudSync.setEnabled(enabled)
+        guard request.isVisible, syncGeneration.isCurrent(id), !Task.isCancelled else { return }
+        ToastCenter.shared.show(enabled ? "云同步已开启" : "云同步已关闭")
+      } catch is CancellationError { }
+      catch {
+        guard request.isVisible, syncGeneration.isCurrent(id), !Task.isCancelled else { return }
+        ToastCenter.shared.show(error is CloudSyncState.Failure ? "登录后才能打开云同步" : "云同步设置没有保存，请重试")
+      }
     }
   }
 
@@ -325,15 +369,30 @@ struct AccountSettingsView: View {
   // MARK: - 加载
 
   /// 先读本地会话，已登录时再取资料和云剪贴板条数。会话读不出来时弹出提示，并提供「清除失效登录状态」。
-  @MainActor private func reload() async {
+  @MainActor private func startReload() {
+    guard !busy else { return }
+    ViewRequestTask.startLoad(request: $request, pending: $pending) { id in await reload(id: id) }
+  }
+
+  @MainActor private func reload(id: UUID) async {
+    guard request.isCurrent(id) else { return }
     do {
-      user = try await api.currentUser()
-      signedIn = user != nil
+      let currentUser = try await api.currentUser()
+      try request.checkCurrent(id)
+      user = currentUser
+      signedIn = currentUser != nil
       needsRecovery = false
+    } catch is CancellationError {
+      return
     } catch {
-      if !isCancellation(error) { needsRecovery = true; report(error) }
+      if request.isCurrent(id), !AccountRequestPolicy.isCancellation(error) {
+        needsRecovery = true; report(error)
+      }
       return
     }
+    // 与当前登录对齐：换了账号或已经退出时，这一步关掉开关、清空同步进度。
+    await cloudSync.refresh()
+    guard (try? request.checkCurrent(id)) != nil else { return }
     guard signedIn else {
       profile = nil
       clipboardValue = nil
@@ -341,21 +400,26 @@ struct AccountSettingsView: View {
     }
     // 每次从推入的页面返回都会重新加载，所以资料取不到时资料卡只停在「已登录」；原因由资料页自己说明。
     if let result = try? await api.profile() {
+      guard (try? request.checkCurrent(id)) != nil else { return }
       profile = result
       user = result.user
     }
-    await loadClipboardCount()
+    await loadClipboardCount(id: id)
   }
 
-  /// 「云剪贴板」行尾的条数。取不到时这一行不显示值，不为一个数字弹出提示。
-  @MainActor private func loadClipboardCount() async {
+  /// 「云剪贴板」行尾的条数；本机等待批准、或有其他设备等待本机批准时显示这件事。取不到时这一行不显示值，不为一个数字弹出提示。
+  @MainActor private func loadClipboardCount(id: UUID) async {
     do {
-      let identity = try await BackendAccountSession.shared.credentials()
-      let page = try await BackendAccountClient().clipboard(token: identity.token)
-      try Task.checkCancellation()
-      clipboardValue = page.enabled ? "\(page.items.count) 条" : "已关闭"
-    } catch {
-      if !isCancellation(error) { clipboardValue = nil }
+      let page = try await BackendAccountClient().clipboard(e2e: IOSCloudClipboardDriver.e2e, session: .shared)
+      try request.checkCurrent(id)
+      let waiting = page.e2e?.pending_devices ?? 0
+      if !page.enabled { clipboardValue = "已关闭" }
+      else if page.isPending { clipboardValue = "等待批准" }
+      else if waiting > 0 { clipboardValue = "\(waiting) 台设备待批准" }
+      else { clipboardValue = "\(page.items.count) 条" }
+    } catch is CancellationError { }
+    catch {
+      if request.isCurrent(id), !AccountRequestPolicy.isCancellation(error) { clipboardValue = nil }
     }
   }
 
@@ -365,22 +429,30 @@ struct AccountSettingsView: View {
     user = nil
     profile = nil
     clipboardValue = nil
+    startCloudRefresh()
+  }
+
+  @MainActor private func startCloudRefresh() {
+    guard request.isVisible else { return }
+    let id = syncGeneration.begin()
+    ViewRequestTask.cancel(task: $syncTask)
+    syncTask = Task { @MainActor in
+      defer { if syncGeneration.isCurrent(id) { syncTask = nil } }
+      await cloudSync.refresh()
+      guard request.isVisible, syncGeneration.isCurrent(id), !Task.isCancelled else { return }
+    }
   }
 
   /// 取消不写进 message,别的都写。alert 绑在 message 上,写进去就是弹出来。
   private func report(_ error: Error) {
-    guard !isCancellation(error) else { return }
+    guard !AccountRequestPolicy.isCancellation(error) else { return }
     message = error.localizedDescription
   }
 
-  private func run(_ action: @escaping @MainActor () async throws -> Void) {
-    guard !busy else { return }
-    busy = true
-    Task {
-      defer { busy = false }
-      do { try await action() }
-      catch { report(error) }
-    }
+  @MainActor private func run(_ action: @escaping @MainActor (UUID) async throws -> Void) {
+    ViewRequestTask.run(request: $request, busy: $busy, message: $message, pending: $operation,
+                        canceling: $pending, clearMessage: false,
+                        isCancellation: AccountRequestPolicy.isCancellation, action: action)
   }
 
   /// 这些全屏层出现和消失时不带上滑动画：启动页和 iPad 卡片各自绘制入场动画，滑动的遮罩看起来像浮层，而不像重播。
@@ -406,13 +478,20 @@ struct AppleAccountSection: View {
   @State private var needsRecovery = false
   @State private var busy = false
   @State private var message: String?
+  @State private var pending: Task<Void, Never>?
+  @State private var request = ViewRequestGeneration()
 
   var body: some View {
     Section {
       AccountLoginOptions(model: model) { _ in signedIn = true }
         .listRowInsets(EdgeInsets(top: 12, leading: 16, bottom: 12, trailing: 16))
         // task 挂在这一行上，不挂在 Section 上：Form 会把 Section 上的修饰符分给每一行，出现「清除失效登录状态」那一行时会再读一次登录状态。
-        .task { await checkSession() }
+        .task { request.appear(); startCheckSession() }
+        .onDisappear {
+          ViewRequestTask.disappear(request: $request, pending: $pending)
+          busy = false
+          model.invalidate()
+        }
       if needsRecovery {
         Button("清除失效登录状态") { clearExpiredLogin() }
           .disabled(busy)
@@ -424,31 +503,38 @@ struct AppleAccountSection: View {
   }
 
   /// 读一次本机的登录状态：读不出来（不是取消）就提供清除。
-  @MainActor private func checkSession() async {
+  @MainActor private func startCheckSession() {
+    ViewRequestTask.startLoad(request: $request, pending: $pending) { id in await checkSession(id: id) }
+  }
+
+  @MainActor private func checkSession(id: UUID) async {
+    guard request.isCurrent(id) else { return }
     do {
       _ = try await SkinCommunityAPI.shared.currentUser()
+      try request.checkCurrent(id)
       needsRecovery = false
+    } catch is CancellationError {
     } catch {
-      if !isCancellation(error) {
+      if request.isCurrent(id), !AccountRequestPolicy.isCancellation(error) {
         needsRecovery = true
         message = error.localizedDescription
       }
     }
   }
 
-  private func clearExpiredLogin() {
-    guard !busy else { return }
-    busy = true
-    Task { @MainActor in
-      defer { busy = false }
-      do {
-        try await SkinCommunityAPI.shared.clearExpiredLogin()
-        needsRecovery = false
-        message = nil
-      } catch {
-        if !isCancellation(error) { message = error.localizedDescription }
-      }
+  @MainActor private func clearExpiredLogin() {
+    run { id in
+      try await SkinCommunityAPI.shared.clearExpiredLogin()
+      try request.checkCurrent(id)
+      needsRecovery = false
+      message = nil
     }
+  }
+
+  @MainActor private func run(_ action: @escaping @MainActor (UUID) async throws -> Void) {
+    ViewRequestTask.run(request: $request, busy: $busy, message: $message, pending: $pending,
+                        canceling: $pending, clearMessage: false,
+                        isCancellation: AccountRequestPolicy.isCancellation, action: action)
   }
 }
 
@@ -479,9 +565,7 @@ struct MeRow: View {
       if let value {
         Text(value).font(.system(size: 14)).foregroundStyle(MetasequoiaTheme.sub).lineLimit(1)
       }
-      Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
-        .foregroundStyle(MetasequoiaTheme.sub.opacity(0.55))
-        .accessibilityHidden(true)
+      DesignChevron()
     }
     .padding(.vertical, 8)
     .padding(.horizontal, 14)
@@ -503,9 +587,7 @@ private struct MeGroup<Content: View>: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 7) {
       if let title {
-        Text(title).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.groupTitle)
-          .padding(.horizontal, 4)
-          .accessibilityAddTraits(.isHeader)
+        SettingsGroupHeader(title: title).padding(.horizontal, 4)
       }
       DesignCard(radius: MetasequoiaTheme.tabCardRadius) { content }
     }
@@ -531,7 +613,7 @@ private struct AccountCardButtonStyle: ButtonStyle {
 
 // MARK: - 子页面
 
-/// 「云同步」：iOS 只能手动同步，所以这一页汇集手动上传、下载设置和云词库，而不是放一个开关。
+/// 「手动同步」：自动同步之外，在这台设备上立刻上传或下载设置；个人词库不在自动同步里（键盘里的 Engine 持有它，应用进程导不出来），云词库的上传下载也在这里。
 private struct AccountCloudSyncView: View {
   var body: some View {
     ScrollView {
@@ -549,18 +631,13 @@ private struct AccountCloudSyncView: View {
           .buttonStyle(PressFillButtonStyle())
           .accessibilityIdentifier("accountCloudDictionary")
         }
-        Text("在这台设备上手动上传或下载，不会在后台自动同步。")
-          .font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
-          .fixedSize(horizontal: false, vertical: true)
-          .frame(maxWidth: .infinity, alignment: .leading)
-          .padding(.horizontal, 4)
       }
       .padding(.horizontal, 16)
       .padding(.top, 16)
       .padding(.bottom, 24)
     }
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
-    .navigationTitle("云同步").navigationBarTitleDisplayMode(.inline)
+    .designCanvasBackground()
+    .navigationTitle("手动同步").navigationBarTitleDisplayMode(.inline)
   }
 }
 
@@ -603,7 +680,7 @@ private struct AccountPublishedContentView: View {
       .padding(.top, 16)
       .padding(.bottom, 24)
     }
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .navigationTitle("我的发布与收藏").navigationBarTitleDisplayMode(.inline)
   }
 }

@@ -1,7 +1,6 @@
 package app.msime.android;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -126,33 +125,31 @@ public final class TypingStatisticsSummary {
             badges.add(new Achievement(badge.optString("id", ""), badge.optString("glyph", ""),
                 badge.optString("title", ""), badge.optString("description", ""),
                 badge.optString("group", "volume"), text(badge, "unlocked_day"),
-                count(badge.opt("current")), count(badge.opt("target"))));
+                strictCount(badge.opt("current")), strictCount(badge.opt("target"))));
         }
         return new TypingStatisticsSummary(
-            new Overview(count(overview.opt("week_total")), count(overview.opt("previous_week_total")),
+            new Overview(strictCount(overview.opt("week_total")),
+                strictCount(overview.opt("previous_week_total")),
                 days(overview.optJSONArray("last7")), number(overview, "average_speed"),
                 number(overview, "previous_average_speed"), rate(overview, "first_candidate_rate"),
-                rate(overview, "keystrokes_saved_rate"), count(overview.opt("current_streak")),
-                count(overview.opt("longest_streak"))),
+                rate(overview, "keystrokes_saved_rate"),
+                strictCount(overview.opt("current_streak")),
+                strictCount(overview.opt("longest_streak"))),
             new Habits(days(habits.optJSONArray("weeks12")), hours(habits.optJSONArray("hours24")),
-                peak == null ? null : new PeakWindow((int) count(peak.opt("start")),
-                    (int) count(peak.opt("end"))),
-                count(habits.opt("active_days")),
+                peak == null ? null : new PeakWindow((int) strictCount(peak.opt("start")),
+                    (int) strictCount(peak.opt("end"))),
+                strictCount(habits.opt("active_days")),
                 MapPolicy.copyOrEmpty(breakdown == null ? null : counts(breakdown.optJSONObject("characters"))),
                 MapPolicy.copyOrEmpty(breakdown == null ? null : counts(breakdown.optJSONObject("sources")))),
             new Keys(number(keys, "per_character_keys"), number(keys, "previous_per_character_keys"),
                 rate(keys, "backspace_rate"), rate(keys, "prediction_rate"),
-                run == null ? null : new Run(count(run.opt("characters")), run.optString("day", "")),
+                run == null ? null : new Run(
+                    strictCount(run.opt("characters")), run.optString("day", "")),
                 positions(keys.optJSONArray("positions"))),
             badges);
     }
 
     // ---- 文案 ----
-
-    /** 千分位：`12,846`。 */
-    public static String grouped(long value) {
-        return NumberPolicy.grouped(value);
-    }
 
     /** 英雄卡下的周环比；上周没有记录时不写（没有可比的基数），返回 null。 */
     public static String weekDelta(long current, long previous) {
@@ -253,20 +250,22 @@ public final class TypingStatisticsSummary {
         return shares(groups);
     }
 
-    /** 输入方式：26 键、9 键、语音、手写；AI 润色、回复和未分类不算输入方式，不计入。 */
+    /** 输入方式：26 键（九宫格和 14 键以外的所有键盘方案）、14 键、9 键、语音、手写；AI 润色、回复和未分类不算输入方式，不计入。与共享 UI 的 `summaryMethods` 一致。 */
     public static List<Share> methods(Map<String, Long> sources) {
         long nine = value(sources, "nineKey");
+        long fourteen = value(sources, "fourteenKey");
         long voice = value(sources, "voice");
         long handwriting = value(sources, "handwriting");
         long full = 0;
         for (Map.Entry<String, Long> entry : sources.entrySet()) {
             switch (entry.getKey()) {
-                case "nineKey", "voice", "handwriting", "unknown", "ai", "reply" -> { }
+                case "nineKey", "fourteenKey", "voice", "handwriting", "unknown", "ai", "reply" -> { }
                 default -> full += BoundsPolicy.nonNegative(entry.getValue());
             }
         }
-        Map<String, Long> groups = new LinkedHashMap<>(4);
+        Map<String, Long> groups = new LinkedHashMap<>(5);
         groups.put("26 键", full);
+        groups.put("14 键", fourteen);
         groups.put("9 键", nine);
         groups.put("语音", voice);
         groups.put("手写", handwriting);
@@ -349,17 +348,14 @@ public final class TypingStatisticsSummary {
 
     private static Double number(JSONObject object, String key) {
         if (object.isNull(key)) return null;
-        Object value = object.opt(key);
-        if (!(value instanceof Number number)) return null;
-        double result = number.doubleValue();
+        double result = NumberPolicy.strictDouble(object.opt(key), Double.NaN);
         return Double.isFinite(result) ? result : null;
     }
 
     /** 统计比例字段必须是 0–1 的有限 JSON 数字；越界值按缺省的无数据处理。 */
     public static Double strictRate(Object value) {
-        if (!(value instanceof Number number) || value instanceof Boolean) return null;
-        double rate = number.doubleValue();
-        return Double.isFinite(rate) && rate >= 0d && rate <= 1d ? rate : null;
+        double rate = NumberPolicy.strictRate(value, Double.NaN);
+        return Double.isFinite(rate) ? rate : null;
     }
 
     private static Double rate(JSONObject object, String key) {
@@ -369,13 +365,7 @@ public final class TypingStatisticsSummary {
 
     /** Statistics counters are JSON unsigned integers; reject fractional and negative values. */
     public static long strictCount(Object value) {
-        if (value instanceof Integer integer) return integer < 0 ? 0L : integer.longValue();
-        if (value instanceof Long longValue) return longValue < 0L ? 0L : longValue;
-        return 0L;
-    }
-
-    private static long count(Object value) {
-        return strictCount(value);
+        return JsonPolicy.nonNegativeLong(value, 0L);
     }
 
     private static List<DayCount> days(JSONArray array) {
@@ -384,7 +374,8 @@ public final class TypingStatisticsSummary {
         for (int index = 0; index < array.length(); index++) {
             JSONObject entry = array.optJSONObject(index);
             if (entry == null) continue;
-            result.add(new DayCount(entry.optString("day", ""), count(entry.opt("count"))));
+            result.add(new DayCount(
+                entry.optString("day", ""), strictCount(entry.opt("count"))));
         }
         return List.copyOf(result);
     }
@@ -392,16 +383,15 @@ public final class TypingStatisticsSummary {
     private static List<Long> hours(JSONArray array) {
         List<Long> result = new ArrayList<>(HOURS_PER_DAY);
         for (int hour = 0; hour < HOURS_PER_DAY; hour++) {
-            result.add(array == null || hour >= array.length() ? 0L : count(array.opt(hour)));
+            result.add(array == null || hour >= array.length()
+                ? 0L : strictCount(array.opt(hour)));
         }
         return List.copyOf(result);
     }
 
     /** Candidate position buckets are JSON proportions in the closed 0–1 range. */
     public static double strictPositionRate(Object value) {
-        if (!(value instanceof Number number) || value instanceof Boolean) return 0d;
-        double rate = number.doubleValue();
-        return Double.isFinite(rate) && rate >= 0d && rate <= 1d ? rate : 0d;
+        return NumberPolicy.strictRate(value, 0d);
     }
 
     private static List<Double> positions(JSONArray array) {
@@ -419,8 +409,8 @@ public final class TypingStatisticsSummary {
         Iterator<String> keys = object.keys();
         while (keys.hasNext()) {
             String key = keys.next();
-            result.put(key, count(object.opt(key)));
+            result.put(key, strictCount(object.opt(key)));
         }
-        return Collections.unmodifiableMap(result);
+        return MapPolicy.copyOrEmpty(result);
     }
 }

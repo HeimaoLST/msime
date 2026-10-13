@@ -1,5 +1,8 @@
 package app.msime.android.home;
 
+import app.msime.android.DimensionPolicy;
+
+import app.msime.android.ThemeColorPolicy;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
@@ -58,7 +61,7 @@ public final class TrendChart extends View {
     @Override protected void onMeasure(int widthSpec, int heightSpec) {
         Context context = getContext();
         // 星期标签按 sp 画，高度也按它实际的字号和下沉量算；按 dp 估算时系统字体一调大，标签下半截就落到控件外被裁掉。
-        int height = Math.round(Ui.dp(context, BAR_MAX + LABEL_GAP + 2) + label.getTextSize()
+        int height = Math.round(DimensionPolicy.pixels(context, BAR_MAX + LABEL_GAP + 2) + label.getTextSize()
             + label.getFontMetrics().descent);
         setMeasuredDimension(MeasureSpec.getSize(widthSpec), resolveSize(height, heightSpec));
     }
@@ -66,18 +69,18 @@ public final class TrendChart extends View {
     @Override protected void onDraw(Canvas canvas) {
         if (days.isEmpty()) return;
         Context context = getContext();
-        float gap = Ui.dp(context, BAR_GAP);
+        float gap = DimensionPolicy.pixels(context, BAR_GAP);
         float width = (getWidth() - gap * (days.size() - 1)) / days.size();
-        float max = Ui.dp(context, BAR_MAX);
-        float min = Ui.dp(context, BAR_MIN);
-        float radius = Ui.dp(context, 6);
+        float max = DimensionPolicy.pixels(context, BAR_MAX);
+        float min = DimensionPolicy.pixels(context, BAR_MIN);
+        float radius = DimensionPolicy.pixels(context, 6);
         long peak = 1;
         for (DayCount day : days) peak = BoundsPolicy.atLeast(peak, day.count());
-        int accent = Ui.accent(context);
-        int rest = Ui.color(context, R.attr.msStatBar);
-        int text = Ui.text(context);
-        int sub = Ui.subText(context);
-        float labelBaseline = max + Ui.dp(context, LABEL_GAP) + label.getTextSize();
+        int accent = ThemeColorPolicy.accent(context);
+        int rest = ThemeColorPolicy.color(context, R.attr.msStatBar);
+        int text = ThemeColorPolicy.text(context);
+        int sub = ThemeColorPolicy.subText(context);
+        float labelBaseline = max + DimensionPolicy.pixels(context, LABEL_GAP) + label.getTextSize();
         for (int index = 0; index < days.size(); index++) {
             boolean today = index == days.size() - 1;
             float height = BoundsPolicy.atLeast(min, max * days.get(index).count() / (float) peak);

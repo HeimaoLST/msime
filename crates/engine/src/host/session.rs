@@ -5,17 +5,19 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use super::options::{runtime_paths, session_options, shuangpin_profile, EngineOptions};
+use super::options::{runtime_paths, session_options, EngineOptions};
 use crate::assets;
 use crate::diagnostics;
 use crate::error::{EngineError, Result};
 use crate::helpcode::{compute_helpcodes, load_helpcode_keymap, HelpcodeKeymap, SharedKeymap};
+use crate::japanese::romaji::romaji_display_reading_into;
 use crate::local::database::LocalDatabaseLease;
+use crate::nine_key::KeyGrid;
 use crate::pinyin::glide::{GlideKeyboard, GlidePoint};
 use crate::pinyin::segment::is_complete_pinyin_input;
 use crate::types::{
-    CandidateEdge, CandidateSource, CommandTableEntry, CommandTranslationQuery, KeyResult,
-    LocalInputMode, MentionEntry, OnlineQuery, QuickPhraseEntry, SchemeType, ShuangpinProfileKind,
+    CandidateEdge, CandidateSource, CommandTableEntry, CommandTranslationQuery, FirstPageRows,
+    KeyResult, LocalInputMode, MentionEntry, OnlineQuery, QuickPhraseEntry, SchemeType,
 };
 use crate::user_dictionary::ngram_store::flush_journal;
 use crate::user_dictionary::removal::learn_entered_english_word;
@@ -30,7 +32,7 @@ fn temporary_japanese_word(commit: &str) -> String {
     word
 }
 
-/// The host's command numbering. `CommitRawWithoutLearning` has no engine counterpart, and took 11 before the engine's `ConvertHanja` existed, so that one is 12 here and mapped by name rather than by ordinal.
+/// The host's command numbering. `CommitRawWithoutLearning` has no engine counterpart, and took 11 before the engine's `ConvertHanja` existed, so that one is 12 here and mapped by name rather than by ordinal. 整句改字的两条命令同样按名字映射，宿主编号比引擎多一。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Command {
@@ -49,6 +51,10 @@ pub enum Command {
     CommitRawWithoutLearning = 11,
     /// Open or close the active scheme's candidate list (the Korean Hanja list, the Zhuyin conversion list); unhandled in a scheme without one. Hosts may call it `MSIME_OPEN_CANDIDATE_LIST`.
     ConvertHanja = 12,
+    /// 整句改字的光标左移一个字（`crate::types::Command::ConversionLeft`）。
+    ConversionLeft = 13,
+    /// 整句改字的光标右移一个字（`crate::types::Command::ConversionRight`）。
+    ConversionRight = 14,
 }
 
 /// Every `candidate_*` vector has `candidates.len()` elements; the runtime's reorderings require it.
@@ -58,8 +64,10 @@ pub struct EngineSnapshot {
     /// The non-letter characters `character` takes in this state (`SessionSnapshot::spelling_symbols`): send one of these as a character, never as punctuation.
     pub spelling_symbols: String,
     pub dedicated_english: bool,
-    /// Mirrors `set_nine_key_enabled`; the engine snapshot has no such flag.
+    /// 九键组码网格开着（`set_key_grid` 设成九键，或 `set_nine_key_enabled(true)`）；14 键下为假。引擎快照里没有这个标志，由这里转述。
     pub nine_key: bool,
+    /// `set_key_grid` 设下的组码网格，`None` 是不用网格。九键和 14 键共用 `nine_key_*` 那几项。
+    pub key_grid: Option<KeyGrid>,
     pub nine_key_spellings: Vec<String>,
     /// `SessionSnapshot::nine_key_reading`.
     pub nine_key_reading: String,
@@ -67,11 +75,16 @@ pub struct EngineSnapshot {
     pub nine_key_single_character: bool,
     /// `SessionSnapshot::nine_key_strokes`.
     pub nine_key_strokes: String,
+    /// 这次组字是在九宫格（九键或 14 键）里打的，见 [`crate::Session::grid_composing`]。`key_grid` 开着时硬件键盘的字母照样走全拼 26 键，这一项分得清两者。
+    pub grid_composing: bool,
+    /// 当前方案是双拼，且韵母或零声母编码用 `;` 作第二键：宿主把 `;` 当作字母键送给 Engine。字段名沿用微软双拼，是宿主已经在读的契约。
     pub microsoft_shuangpin: bool,
     pub shuangpin_profile: String,
     pub preedit: String,
     /// The kana reading in Japanese, the composed Hangul in Korean, the converted text plus the pending bopomofo in Zhuyin, the stroke glyphs (一丨丿丶乛＊) in Stroke, else empty. In Stroke each glyph stands for one ASCII letter of `editing_text`, so `caret_position` also counts glyphs.
     pub reading: String,
+    /// 宿主在行内画的读音：日文罗马字组字（非本地模式、非英文）时末尾单个 `n` 还没定成ん，按微软、Google 日文输入法的样子留作字母（`kan` 画成 `かn`，`kann` 才是 `かん`）；其余情况与 `reading` 相同。`reading` 仍是确定（`CommitReading`）上屏的读音，宿主不经引擎结束组字区、且编辑器仍报告着组字区时，应把它换成 `reading` 再结束；确认不了组字区还在时只结束组字（规则见 `msime_client.h` 的 `View.display_reading`）。
+    pub display_reading: String,
     pub editing_text: String,
     pub caret_position: usize,
     pub segment_raw_boundaries: Vec<u64>,
@@ -87,6 +100,12 @@ pub struct EngineSnapshot {
     pub candidate_answers_key: Vec<bool>,
     /// The scheme's openable candidate list is showing (the Korean Hanja list, the Zhuyin conversion list); candidates are its rows while it is.
     pub candidate_list_open: bool,
+    /// 整句改字时改好的整句，否则为空（`SessionSnapshot::conversion`）。
+    pub conversion: String,
+    /// 整句改字的光标在第几个字之前，按 `conversion` 的 Unicode 标量计。
+    pub conversion_focus_start: usize,
+    /// 光标处那一段（候选所替换的字）的结尾，同样按标量计；光标在句末时等于 `conversion_focus_start`。
+    pub conversion_focus_end: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -115,7 +134,7 @@ pub struct OnlineQuerySnapshot {
 pub struct Session {
     inner: crate::session::Session,
     options: EngineOptions,
-    nine_key: bool,
+    key_grid: Option<KeyGrid>,
     microsoft_shuangpin: bool,
     shuangpin_profile: String,
     helpcode_keymap: Option<SharedKeymap>,
@@ -130,7 +149,7 @@ impl Session {
     pub fn new(options: &EngineOptions) -> Result<Session> {
         // The C++ ran `options_for` a second time only to read the profile name back (bridge.cpp:430); that rerun recopied the same sidecar, so one mapping is enough.
         let inner = crate::session::Session::new(session_options(options)?)?;
-        let profile = shuangpin_profile(options)?;
+        let profile = inner.shuangpin_layout();
         // The engine loads its own copy for filtering; this one only annotates, and exists only while helpcode is on (bridge.cpp:431-435).
         let helpcode_keymap = if options.helpcode {
             match &options.helpcode_table {
@@ -146,10 +165,10 @@ impl Session {
         Ok(Session {
             inner,
             options: options.clone(),
-            nine_key: false,
+            key_grid: None,
             microsoft_shuangpin: options.scheme == SchemeType::Shuangpin as u8
-                && profile == ShuangpinProfileKind::Microsoft,
-            shuangpin_profile: profile.name().to_owned(),
+                && profile.uses_semicolon_key(),
+            shuangpin_profile: profile.kind.name().to_owned(),
             helpcode_keymap,
             helpcode_enabled: options.helpcode,
             show_helpcode: options.show_helpcode,
@@ -166,23 +185,38 @@ impl Session {
         let value = self.inner.snapshot();
         let helpcode_scheme = value.scheme.helpcode();
         let uppercase_all = value.scheme == SchemeType::Quanpin;
-        // Rows the engine generated in the expression, command and mention modes are not spelled by pinyin; their annotations are the engine's own.
+        // Rows the engine generated in the expression, command and mention modes are not spelled by pinyin; their annotations are the engine's own. 拆字行的注释是字的读音，没有读音的字也不补辅助码。
         let keymap = self.helpcode_keymap.as_deref().filter(|_| {
-            self.helpcode_enabled && helpcode_scheme && !value.local_mode.generates_text()
+            self.helpcode_enabled && helpcode_scheme && !value.local_mode.annotates_rows()
         });
         let count = value.candidates.len();
+        let display_reading = if !value.scheme.draws_reading() {
+            String::new()
+        } else if value.scheme == SchemeType::JapaneseRomaji
+            && value.local_mode == LocalInputMode::None
+            && !value.dedicated_english
+        {
+            let mut reading = String::new();
+            romaji_display_reading_into(&value.raw_segmentation, &mut reading);
+            reading
+        } else {
+            value.normalized_segmentation.clone()
+        };
         let mut output = EngineSnapshot {
             local_mode: value.local_mode.name().to_owned(),
             spelling_symbols: value.spelling_symbols,
             dedicated_english: value.dedicated_english,
-            nine_key: self.nine_key,
+            nine_key: self.key_grid == Some(KeyGrid::NineKey),
+            key_grid: self.key_grid,
             nine_key_spellings: value.nine_key_spellings,
             nine_key_reading: value.nine_key_reading,
             nine_key_single_character: value.nine_key_single_character,
             nine_key_strokes: value.nine_key_strokes,
+            grid_composing: self.inner.grid_composing(),
             microsoft_shuangpin: self.microsoft_shuangpin,
             shuangpin_profile: self.shuangpin_profile.clone(),
             preedit: value.preedit,
+            display_reading,
             reading: if value.scheme.draws_reading() {
                 value.normalized_segmentation
             } else {
@@ -207,6 +241,9 @@ impl Session {
             candidate_corrected: Vec::with_capacity(count),
             candidate_answers_key: Vec::with_capacity(count),
             candidate_list_open: value.candidate_list_open,
+            conversion: value.conversion,
+            conversion_focus_start: value.conversion_focus.0,
+            conversion_focus_end: value.conversion_focus.1,
         };
         for (index, candidate) in value.candidates.into_iter().enumerate() {
             let mut annotation = value
@@ -300,6 +337,23 @@ impl Session {
         Ok(())
     }
 
+    /// 宿主为这个会话打开或关掉 AI 候选（`crate::session::Session::set_ai_seat`）；返回开关是否变了。
+    pub fn set_ai_seat(&mut self, enabled: bool) -> bool {
+        self.inner.set_ai_seat(enabled)
+    }
+
+    /// AI 回答为空或失败（宿主来源 1）：当前查询的占位行换成「—」。返回显示的列表是否变了；过期查询和其他来源返回 false。
+    pub fn resolve_online_candidates(
+        &mut self,
+        query: &OnlineQuerySnapshot,
+        source: u8,
+    ) -> Result<bool> {
+        let Some((request, source)) = online_request(query, source) else {
+            return Ok(false);
+        };
+        Ok(self.inner.resolve_online_candidates(&request, source))
+    }
+
     pub fn set_caret(&mut self, caret: Option<usize>) {
         self.inner.set_caret(caret);
     }
@@ -381,6 +435,11 @@ impl Session {
         self.inner.set_rescoring_context(context);
     }
 
+    /// Live update of the first page size without a rebuild; it only moves the longer-phrase gate.
+    pub fn set_first_page_rows(&mut self, rows: usize) {
+        self.inner.set_first_page_rows(FirstPageRows::new(rows));
+    }
+
     /// Whether an apostrophe now is input (`3jin'g`, `/fyhello'world`) rather than punctuation that ends the composition.
     pub fn takes_local_separator(&self) -> bool {
         self.inner.takes_local_separator()
@@ -440,9 +499,19 @@ impl Session {
     }
 
     pub fn set_nine_key_enabled(&mut self, enabled: bool) -> Result<()> {
-        self.inner.set_nine_key_enabled(enabled);
-        self.nine_key = enabled;
+        self.set_key_grid(enabled.then_some(KeyGrid::NineKey))
+    }
+
+    /// 见 [`crate::Session::set_key_grid`]。快照的 `nine_key` 只在九键下为真。
+    pub fn set_key_grid(&mut self, grid: Option<KeyGrid>) -> Result<()> {
+        self.inner.set_key_grid(grid);
+        self.key_grid = grid;
         Ok(())
+    }
+
+    /// 14 键的一键，见 [`crate::Session::grid_key`]；不是当前网格的字母时不处理，状态不变。
+    pub fn grid_key(&mut self, letter: u8) -> Result<EngineResult> {
+        Ok(result_for(self.inner.grid_key(letter)))
     }
 
     /// 滑行的一笔，见 [`crate::Session::glide`]。
@@ -478,6 +547,12 @@ impl Session {
             Command::ConvertHanja => Ok(result_for(
                 self.inner.command(crate::types::Command::ConvertHanja),
             )),
+            Command::ConversionLeft => Ok(result_for(
+                self.inner.command(crate::types::Command::ConversionLeft),
+            )),
+            Command::ConversionRight => Ok(result_for(
+                self.inner.command(crate::types::Command::ConversionRight),
+            )),
             _ => {
                 // The other host codes are the engine's ordinals one for one (bridge.cpp:1302-1319).
                 let engine = crate::types::Command::from_u8(command as u8)
@@ -485,6 +560,11 @@ impl Session {
                 Ok(result_for(self.inner.command(engine)))
             }
         }
+    }
+
+    /// 整句改字的左移，进入改字时从第 `index` 个候选开始（`crate::session::Session::conversion_left_from`）。
+    pub fn conversion_left_from(&mut self, index: usize) -> Result<EngineResult> {
+        Ok(result_for(self.inner.conversion_left_from(index)))
     }
 
     pub fn select(&mut self, index: usize) -> Result<EngineResult> {
@@ -573,8 +653,9 @@ impl Session {
         result_for(KeyResult::committed(raw))
     }
 
-    /// Windows learns an entered word only on Enter: letters committed raw in dedicated English, a local mode, or pinyin that is not a complete syllable sequence are learned as an English word (bridge.cpp:1332-1359).
+    /// Windows 只在回车时学词：专用英文、本地模式里原样上屏的字母，以及不是完整音节序列的拼音，学成英文词（bridge.cpp:1332-1359）。九宫格（九键、14 键）组字时上屏的不是用户逐个打出的字母：九键是数字，14 键是结束组字后的首选，都不学成英文词。
     fn commit_raw_with_policy(&mut self) -> EngineResult {
+        let grid_composing = self.inner.grid_composing();
         let before = self.inner.snapshot();
         let chinese_scheme = before.scheme.learns_english_words();
         let complete_pure_pinyin = chinese_scheme && {
@@ -586,7 +667,10 @@ impl Session {
             !segmentation.is_empty() && is_complete_pinyin_input(segmentation)
         };
         // 计算、指令和名单模式里是算式、触发词或键，网址也不是英文单词，都不是用户拼出的词，不进英文词库。
-        let should_learn = !before.local_mode.generates_text()
+        // 整句改字时回车上屏的是改好的汉字，不是拼出来的字母。
+        let should_learn = before.conversion.is_empty()
+            && !grid_composing
+            && !before.local_mode.generates_text()
             && before.local_mode != LocalInputMode::Url
             && (before.dedicated_english
                 || before.local_mode != LocalInputMode::None

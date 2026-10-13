@@ -8,15 +8,23 @@ final class KeyboardChatModel: ObservableObject {
     let text: String
   }
   @Published var messages: [Message] = []
-  @Published var models: [BackendAccountClient.ChatModels.Model] = []
-  @Published var selectedModel = ""
   @Published var sending = false
-  @Published var loadingModels = false
+  @Published var loadingAccount = false
   @Published var error: String?
   @Published var loginNeeded = false
+  /// 已确认的账号；为 nil 时还不能发送。用哪个模型由后端决定，这里不加载模型目录，也不让用户选。
+  @Published private(set) var accountID: String?
   private var request: Task<Void, Never>?
   private let api = BackendAccountClient()
-  private var generation = 0
+  private var generation = OperationGeneration()
+  private var accountSessionID: UUID?
+
+  private func switchAccount(to userID: String?, sessionID: UUID? = nil) {
+    guard accountID != userID || accountSessionID != sessionID else { return }
+    clear()
+    accountID = userID
+    accountSessionID = sessionID
+  }
 
   private var isFixture: Bool {
     #if DEBUG && targetEnvironment(simulator)
@@ -26,22 +34,18 @@ final class KeyboardChatModel: ObservableObject {
     #endif
   }
 
-  func loadModels() async {
-    if isFixture {
-      models = [.init(id: "fixture-chat"), .init(id: "fixture-fast")]
-      selectedModel = "fixture-chat"
-      return
-    }
-    guard !loadingModels else { return }
-    loadingModels = true
-    defer { loadingModels = false }
+  func loadAccount() async {
+    if isFixture { switchAccount(to: "fixture-chat-account"); return }
+    guard !loadingAccount else { return }
+    loadingAccount = true
+    defer { loadingAccount = false }
     do {
-      guard try await BackendAccountSession.shared.user() != nil else { loginNeeded = true; return }
-      let token = try await BackendAccountSession.shared.accessToken()
-      let catalog = try await api.chatModels(token: token)
+      guard let userID = try await BackendAccountSession.shared.user()?.id else {
+        switchAccount(to: nil); loginNeeded = true; return
+      }
+      let identity = try await BackendAccountSession.shared.credentials(matchingUserID: userID)
       try Task.checkCancellation()
-      models = catalog.data
-      if !models.contains(where: { $0.id == selectedModel }) { selectedModel = catalog.default_model }
+      switchAccount(to: identity.userID, sessionID: identity.sessionID)
       loginNeeded = false
       error = nil
     } catch is CancellationError { }
@@ -49,52 +53,49 @@ final class KeyboardChatModel: ObservableObject {
   }
 
   func send(_ text: String) {
-    guard !sending, !selectedModel.isEmpty else { return }
+    guard !sending, accountID != nil else { return }
     messages.append(Message(role: "user", text: text))
     submit()
   }
   func retry() { guard !sending, messages.last?.role == "user" else { return }; submit() }
   private func submit() {
+    guard let userID = accountID else { loginNeeded = true; return }
+    let sessionID = accountSessionID
     error = nil; sending = true
-    generation += 1
-    let version = generation, model = selectedModel
-    // Bound context to the service contract while retaining the newest complete messages.
-    let context = KeyboardChatHistoryPolicy.bounded(messages.map { (role: $0.role, text: $0.text) })
+    let version = generation.begin()
+    // The system prompt first, then the newest complete messages that still fit the service contract.
+    let context = KeyboardChatHistoryPolicy.request(messages.map { (role: $0.role, text: $0.text) })
       .map { BackendAccountClient.ChatMessage(role: $0.role, content: $0.text) }
     let history = context
     request = Task { [weak self] in
       guard let self else { return }
-      defer { if generation == version { sending = false; request = nil } }
+      defer { if generation.isCurrent(version) { sending = false; request = nil } }
       do {
         if isFixture {
           try await Task.sleep(nanoseconds: 150_000_000)
-          guard generation == version else { return }
+          guard generation.isCurrent(version) else { return }
           messages.append(Message(role: "assistant", text: "已收到：" + (history.last?.content ?? "")))
           return
         }
-        var token = try await BackendAccountSession.shared.accessToken()
-        let reply: String
-        do { reply = try await api.chat(messages: history, model: model, token: token) }
-        catch let failure as BackendAccountClient.Failure where failure.status == 401 {
-          token = try await BackendAccountSession.shared.accessToken(retrying: token)
-          reply = try await api.chat(messages: history, model: model, token: token)
-        }
+        let reply = try await api.chat(messages: history,
+                                       session: .shared, matchingUserID: userID,
+                                       matchingSessionID: sessionID)
         try Task.checkCancellation()
-        guard generation == version else { return }
+        guard generation.isCurrent(version) else { return }
         messages.append(Message(role: "assistant", text: reply))
       } catch is CancellationError { }
-      catch { if !Task.isCancelled && generation == version { show(error) } }
+      catch { if !Task.isCancelled && generation.isCurrent(version) { show(error) } }
     }
   }
-  func cancel() { generation += 1; request?.cancel(); request = nil; sending = false }
+  func cancel() { generation.cancel(task: &request); sending = false }
   func clear() { cancel(); messages = []; error = nil }
   private func show(_ failure: Error) {
     if let failure = failure as? BackendAccountClient.Failure {
       loginNeeded = failure.status == 401
       switch failure.status {
       case 401: error = "登录后即可与 AI 对话，输入框仍可试用键盘。"
-      case 404: error = "聊天服务正在更新，请稍后重新加载模型。"
-      case 400: error = "模型或消息暂不受支持，请刷新模型列表后重试。"
+      case 404: error = "聊天服务正在更新，请稍后重试。"
+      case 400: error = "这条消息暂不受支持，请修改后重试。"
       default: error = failure.localizedDescription
       }
     } else { error = "连接失败，请检查网络后重试。" }
@@ -102,7 +103,12 @@ final class KeyboardChatModel: ObservableObject {
 }
 
 struct KeyboardTryoutView: View {
+  /// 「对话」标签页上叫「对话」；引导页和皮肤试用里仍叫「试用键盘」。
+  var title = "试用键盘"
   var focusOnAppear = false
+  /// `AppNavigation.chatFocusRequest`：与上次出现时不同，说明是从「试用键盘」过来的，出现时把焦点放进输入框。
+  var focusRequest = 0
+  @State private var handledFocusRequest = 0
   @StateObject private var chat = KeyboardChatModel()
   @State private var draft = ""
   @State private var showAccount = false
@@ -115,16 +121,12 @@ struct KeyboardTryoutView: View {
         Image("EveryAPI").resizable().scaledToFit().frame(width: 22, height: 22)
         Text("EveryAPI").font(.subheadline.weight(.semibold))
         Spacer()
-        if chat.loadingModels { ProgressView() }
-        else if chat.models.isEmpty {
-          Button(chat.loginNeeded ? "登录使用 AI" : "加载模型") {
+        if chat.loadingAccount { ProgressView() }
+        else if chat.loginNeeded || chat.accountID == nil {
+          Button(chat.loginNeeded ? "登录使用 AI" : "重新连接") {
             if chat.loginNeeded { showAccount = true }
-            else { Task { await chat.loadModels() } }
-          }.font(.caption)
-        } else {
-          Picker("模型", selection: $chat.selectedModel) {
-            ForEach(chat.models) { Text($0.id).tag($0.id) }
-          }.pickerStyle(.menu).disabled(chat.sending).accessibilityIdentifier("keyboardChatModelPicker")
+            else { Task { await chat.loadAccount() } }
+          }.font(.caption).accessibilityIdentifier("keyboardChatAccountButton")
         }
       }.padding(.horizontal, 16).padding(.vertical, 10)
       Divider()
@@ -179,20 +181,33 @@ struct KeyboardTryoutView: View {
             guard !text.isEmpty else { return }
             chat.send(text); draft = ""
           } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }
-          .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (!chat.loginNeeded && chat.selectedModel.isEmpty))
+          .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (!chat.loginNeeded && chat.accountID == nil))
           .accessibilityLabel("发送消息").accessibilityIdentifier("keyboardChatSend")
         }
       }.padding(12)
-    }.navigationTitle("试用键盘").navigationBarTitleDisplayMode(.inline)
+    }.navigationTitle(title).navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .navigationBarTrailing) {
           if focused { Button("收起键盘") { focused = false }.accessibilityIdentifier("dismissKeyboardButton") }
           else { Button { clearConfirmation = true } label: { Image(systemName: "square.and.pencil") }.accessibilityLabel("新对话").disabled(chat.messages.isEmpty) }
         }
       }
-      .task { focused = focusOnAppear; await chat.loadModels() }
-      .onDisappear { chat.cancel(); focused = false }
-      .sheet(isPresented: $showAccount, onDismiss: { Task { await chat.loadModels() } }) {
+      .task {
+        // 真机连续点按验收期间保持本编辑器亮屏，不更改手机的自动锁屏设置。
+        if ProcessInfo.processInfo.arguments.contains("--keyboard-toolbar-ui-test") {
+          UIApplication.shared.isIdleTimerDisabled = true
+        }
+        if focusOnAppear || focusRequest != handledFocusRequest { focused = true }
+        handledFocusRequest = focusRequest
+        await chat.loadAccount()
+      }
+      .onDisappear {
+        chat.cancel(); focused = false
+        if ProcessInfo.processInfo.arguments.contains("--keyboard-toolbar-ui-test") {
+          UIApplication.shared.isIdleTimerDisabled = false
+        }
+      }
+      .sheet(isPresented: $showAccount, onDismiss: { Task { await chat.loadAccount() } }) {
         AccountLoginSheet()
       }
       .confirmationDialog("开始新对话？当前消息将被清空。", isPresented: $clearConfirmation, titleVisibility: .visible) {

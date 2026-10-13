@@ -1,5 +1,57 @@
 import XCTest
 
+private final class CandidateSessionStorage: BackendSessionStorage, @unchecked Sendable {
+  private let lock = NSLock()
+  private var value: BackendSavedSession?
+
+  init(_ value: BackendSavedSession?) { self.value = value }
+  func load() throws -> BackendSavedSession? { lock.lock(); defer { lock.unlock() }; return value }
+  func save(_ session: BackendSavedSession) throws { lock.lock(); defer { lock.unlock() }; value = session }
+  func clear() throws { lock.lock(); defer { lock.unlock() }; value = nil }
+}
+
+private final class CandidateAccountTranslationProtocol: URLProtocol {
+  static let accountToken = String(repeating: "a", count: 64)
+  private static let lock = NSLock()
+  private static var authorizations: [String] = []
+
+  static var recordedAuthorizations: [String] {
+    lock.lock(); defer { lock.unlock() }
+    return authorizations
+  }
+
+  static func reset() {
+    lock.lock(); defer { lock.unlock() }
+    authorizations = []
+  }
+
+  override class func canInit(with request: URLRequest) -> Bool { true }
+  override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+  override func startLoading() {
+    let authorization = request.value(forHTTPHeaderField: "Authorization") ?? ""
+    Self.lock.lock()
+    Self.authorizations.append(authorization)
+    Self.lock.unlock()
+    let response: HTTPURLResponse
+    let body: String
+    if request.url?.path == "/v1/translate" {
+      response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+                                 headerFields: ["Content-Type": "application/json"])!
+      body = #"{"code":200,"data":["hello"]}"#
+    } else {
+      response = HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil,
+                                 headerFields: ["Content-Type": "application/json"])!
+      body = #"{"error":{"code":"not_found"}}"#
+    }
+    client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+    client?.urlProtocol(self, didLoad: Data(body.utf8))
+    client?.urlProtocolDidFinishLoading(self)
+  }
+
+  override func stopLoading() {}
+}
+
 private final class RecordingTransport: OnlineCandidateTransport, @unchecked Sendable {
   private let lock = NSLock()
   private var recorded: [URLRequest] = []
@@ -40,6 +92,19 @@ final class TranslationProviderTests: XCTestCase {
     ]
     XCTAssertEqual(TranslationProviderPreference.route(in: niutrans), .none)
     XCTAssertEqual(TranslationProviderPreference.route(in: ["custom_translation": ["enabled": true, "endpoint": "  "]]), .none)
+  }
+
+  /// 自定义服务是否可用由共享请求构造决定：DeepL 官方地址没有密钥时不构造请求，所以不算可用，设置页显示「凭据不完整」；DeepLX 地址不需要密钥。
+  func testACustomEndpointIsUsableOnlyWhenTheSharedBuilderAcceptsIt() {
+    func route(_ endpoint: String, _ apiKey: String) -> TranslationRoute {
+      TranslationProviderPreference.route(in: ["custom_translation": ["enabled": true, "endpoint": endpoint, "api_key": apiKey]])
+    }
+    XCTAssertEqual(route("https://api-free.deepl.com/v2/translate", ""), .none)
+    XCTAssertEqual(route("https://api.deepl.com/v2/translate", "  "), .none)
+    XCTAssertEqual(route("https://api-free.deepl.com/v2/translate", "synthetic-key:fx"),
+                   .custom(endpoint: "https://api-free.deepl.com/v2/translate", apiKey: "synthetic-key:fx"))
+    XCTAssertEqual(route("https://deeplx.example/translate", ""), .custom(endpoint: "https://deeplx.example/translate", apiKey: ""))
+    XCTAssertEqual(route("http://example.com/t", ""), .none, "the shared builder refuses remote cleartext, so the keyboard would send nothing")
   }
 
   func testSelectKeepsOnlyOneProviderEnabledAndRoundTrips() {
@@ -120,6 +185,28 @@ final class TranslationProviderTests: XCTestCase {
     XCTAssertNotEqual(a, TranslationRoute.niutrans(appID: "app", apiKey: "two").cacheScope)
     XCTAssertNotEqual(a, TranslationRoute.account.cacheScope)
     XCTAssertFalse(a.contains("one"), "the scope never carries a secret in clear")
+  }
+
+  func testAccountTranslationUsesSignedInAccountBeforeAnonymousSession() async throws {
+    CandidateAccountTranslationProtocol.reset()
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [CandidateAccountTranslationProtocol.self]
+    let client = BackendAccountClient(configuration: configuration)
+    let accountTokens = BackendAccountClient.Tokens(
+      access_token: CandidateAccountTranslationProtocol.accountToken,
+      refresh_token: String(repeating: "b", count: 64), token_type: "Bearer", expires_in: 900,
+      user: .init(id: "signed-in-user", display_name: "示例", created_at: "2026-09-08"))
+    let account = BackendAccountSession(
+      api: client, storage: CandidateSessionStorage(try BackendSavedSession.forTokens(accountTokens)),
+      refreshLock: BackendProcessRefreshLock())
+    let anonymous = BackendAccountSession(
+      api: client, storage: CandidateSessionStorage(nil), refreshLock: BackendProcessRefreshLock())
+
+    let service = BackendCandidateTranslationService(client: client, account: account, anonymous: anonymous)
+    let result = try await service.translate(words: ["你好"], target: "en")
+    XCTAssertEqual(result, ["hello"])
+    XCTAssertEqual(CandidateAccountTranslationProtocol.recordedAuthorizations,
+                   ["Bearer \(CandidateAccountTranslationProtocol.accountToken)"])
   }
 
   func testURLRequestDefaultsAbsentTransportLimits() throws {

@@ -1,4 +1,5 @@
 import type { InputHTMLAttributes, ReactNode } from "react";
+import { LabeledInputField } from "../core/labeled-input-field";
 import * as account from "./account-style";
 
 export interface AccountInputFieldProps extends Omit<
@@ -22,15 +23,14 @@ export function AccountInputField({
   ...inputProps
 }: AccountInputFieldProps) {
   return (
-    <label className={account.field}>
-      {label}
-      <input
-        {...inputProps}
-        className={className}
-        aria-label={ariaLabel ?? String(label)}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    </label>
+    <LabeledInputField
+      {...inputProps}
+      label={label}
+      ariaLabel={ariaLabel ?? String(label)}
+      value={value}
+      className={className}
+      labelClassName={account.field}
+      onChange={onChange}
+    />
   );
 }

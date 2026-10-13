@@ -5,6 +5,28 @@
 use super::*;
 use std::sync::Arc;
 
+#[cfg(unix)]
+#[test]
+fn statistics_writes_stay_bound_to_the_locked_directory_after_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("statistics");
+    fs::create_dir(&directory).unwrap();
+    let store = TypingStatisticsStore::new(&directory);
+    let lock = store.lock().unwrap();
+
+    let moved = root.path().join("statistics-moved");
+    fs::rename(&directory, &moved).unwrap();
+    fs::create_dir(&directory).unwrap();
+
+    store
+        .write_locked(&lock, &TypingStatistics::default())
+        .unwrap();
+
+    assert!(moved.join("typing-statistics.json").exists());
+    assert!(!directory.join("typing-statistics.json").exists());
+    fs::remove_dir_all(moved).unwrap();
+}
+
 #[test]
 fn oversized_document_is_rejected_before_loading() {
     let directory = tempfile::tempdir().unwrap();
@@ -91,6 +113,21 @@ fn cantonese_zhuyin_vietnamese_and_stroke_commits_count_under_their_own_sources(
     assert_eq!(value.detail.sources["zhuyin"], 2);
     assert_eq!(value.detail.sources["vietnamese"], 4);
     assert_eq!(value.detail.sources["stroke"], 1);
+}
+
+/// 全拼 14 键按自己的来源 `fourteenKey` 计数，不并进全拼或 9 键。
+#[test]
+fn fourteen_key_commits_count_under_their_own_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = TypingStatisticsStore::new(directory.path());
+    store.set_enabled(true).unwrap();
+    let source: TypingSource = serde_json::from_str("\"fourteenKey\"").unwrap();
+    assert_eq!(source, TypingSource::FourteenKey);
+    store.record("你好", source, "2026-10-10", Some(9)).unwrap();
+    let value = store.load().unwrap();
+    assert_eq!(value.detail.sources["fourteenKey"], 2);
+    assert!(!value.detail.sources.contains_key("nineKey"));
+    assert!(!value.detail.sources.contains_key("quanpin"));
 }
 
 // 藏文按自己的来源计数，不算中文；藏文字母归为 otherLetter，音节点和垂符归为标点。
@@ -728,4 +765,25 @@ fn last_written_rejects_a_symlinked_statistics_parent() {
         TypingStatisticsStore::new(linked_root).last_written(),
         Err(TypingStatisticsError::Io(_))
     ));
+}
+
+#[test]
+fn status_reports_whether_the_statistics_file_was_ever_written() {
+    let root = tempfile::tempdir().unwrap();
+    let store = TypingStatisticsStore::new(root.path());
+    let fresh = store.status(store.load().unwrap()).unwrap();
+    assert_eq!(fresh.availability, "neverWritten");
+    assert_eq!(fresh.last_written_ms, None);
+    assert_eq!(fresh.statistics, TypingStatistics::default());
+
+    let enabled = store.set_enabled(true).unwrap();
+    let written = store.status(enabled.clone()).unwrap();
+    assert_eq!(written.availability, "ready");
+    assert!(written.last_written_ms.is_some_and(|ms| ms > 0));
+    assert_eq!(written.statistics, enabled);
+    // 字段名与共享设置页读的 `TypingStatisticsStatus` 相同。
+    let value = serde_json::to_value(&written).unwrap();
+    assert_eq!(value["availability"], "ready");
+    assert!(value["lastWrittenMs"].is_u64());
+    assert_eq!(value["statistics"]["enabled"], true);
 }

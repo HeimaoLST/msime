@@ -4,6 +4,7 @@
 #include "../core/RuntimeOptionsRefresh.h"
 #include "../core/RuntimeOptionsFile.h"
 #include "../system/SystemTheme.h"
+#include "msime_client.h"
 #include <array>
 #include <fstream>
 #include <iostream>
@@ -130,6 +131,8 @@ int main(int argc, char **argv) {
                            preferences_directory.empty() || preferences_directory.front() != '/'
                                ? std::filesystem::path()
                                : std::filesystem::path(preferences_directory)});
+  // 脚本插件在 IBus 引擎进程里运行，在第一个会话之前打开；release 构建里这一行什么都不做（msime_client.h）。
+  msime_client_scripts_enable(true);
   ibus_init();
   auto bus = ibus_bus_new();
   if (!ibus_bus_is_connected(bus)) {

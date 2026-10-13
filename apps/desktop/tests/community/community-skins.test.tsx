@@ -211,6 +211,30 @@ test("mobile skin details join the WebView history stack and system back restore
   expect(await screen.findByRole("button", { name: `查看皮肤 ${original.name}` })).not.toBeNull();
 });
 
+test("a skin gallery opened inside another settings page keeps its detail history on that page", async () => {
+  const gallery = { category: "skin", scope: "", initialMine: false };
+  window.history.replaceState({ msimeSettings: true, page: "skin", communityGallery: gallery }, "");
+  const original = skin("10000000-0000-4000-8000-000000000062", "皮肤页里的皮肤");
+  render(
+    <CommunitySkinsPage
+      client={client({
+        list: vi.fn().mockResolvedValue({ skins: [original], has_more: false }),
+        detail: vi.fn().mockResolvedValue(original),
+      })}
+      theme="light"
+      mobile
+      historyPage="skin"
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: `查看皮肤 ${original.name}` }));
+  // 详情记录留在「皮肤」页，并保留图库的标记：返回时先回到图库，再回到皮肤页。
+  expect(window.history.state).toMatchObject({
+    page: "skin",
+    communityGallery: gallery,
+    communityDetail: { kind: "skin", id: original.id },
+  });
+});
+
 test("community failures use stable messages and never expose backend details", async () => {
   const communitySkins = client({
     list: vi

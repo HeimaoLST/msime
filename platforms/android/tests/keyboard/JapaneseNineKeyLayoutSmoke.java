@@ -41,12 +41,39 @@ public final class JapaneseNineKeyLayoutSmoke {
         check(JapaneseNineKeyLayout.toggleStep(ya, 4, 1) == 0);
         check(JapaneseNineKeyLayout.toggleStep(ya, 0, -1) == 4);
         check(JapaneseNineKeyLayout.toggleStep(ya, 1, 1) == 0);
+        // 按下时提示中间格写的、松手轻点打出的，是同一个假名：时间窗内是循环里的下一个，边界和轻点的判断一致（恰好 1000 ms 仍算连点）。
+        JapaneseNineKeyLayout.Key a = keys.get(0);
+        check(JapaneseNineKeyLayout.withinToggleWindow(JapaneseNineKeyLayout.TOGGLE_WINDOW_MS));
+        check(!JapaneseNineKeyLayout.withinToggleWindow(JapaneseNineKeyLayout.TOGGLE_WINDOW_MS + 1));
+        check(JapaneseNineKeyLayout.tapDirection(a, false, a, 0, 500) == 1);
+        check(JapaneseNineKeyLayout.tapDirection(a, false, a, 4, 500) == 0);
+        check(JapaneseNineKeyLayout.tapDirection(a, false, a, 0, 1000) == 1);
+        check(JapaneseNineKeyLayout.tapDirection(a, false, a, 0, 1001) == 0);
+        check(JapaneseNineKeyLayout.tapDirection(a, false, null, 0, 0) == 0);
+        check(JapaneseNineKeyLayout.tapDirection(a, false, keys.get(1), 0, 0) == 0);
+        check(JapaneseNineKeyLayout.tapDirection(a, true, a, 0, 0) == 0);
+        // や、わ 的循环跳过「」〜 这类直接上屏的方向，、 键只在标点之间循环。
+        JapaneseNineKeyLayout.Key yaKey = keys.get(7);
+        check(JapaneseNineKeyLayout.tapDirection(yaKey, false, yaKey, 0, 0) == 2);
+        check(JapaneseNineKeyLayout.tapDirection(yaKey, false, yaKey, 2, 0) == 4);
+        check(JapaneseNineKeyLayout.tapDirection(yaKey, false, yaKey, 4, 0) == 0);
+        JapaneseNineKeyLayout.Key wa = keys.get(9);
+        check(JapaneseNineKeyLayout.tapDirection(wa, false, wa, 3, 0) == 0);
+        JapaneseNineKeyLayout.Key comma = keys.get(10);
+        check(JapaneseNineKeyLayout.tapDirection(comma, false, comma, 0, 0) == 1);
+        check(JapaneseNineKeyLayout.toggleRemainingMillis(a, false, a, 300) == 700);
+        check(JapaneseNineKeyLayout.toggleRemainingMillis(a, false, a, 1000) == 0);
+        check(JapaneseNineKeyLayout.toggleRemainingMillis(a, false, a, 1001) == -1);
+        check(JapaneseNineKeyLayout.toggleRemainingMillis(a, false, null, 0) == -1);
+        check(JapaneseNineKeyLayout.toggleRemainingMillis(a, false, keys.get(1), 0) == -1);
+        check(JapaneseNineKeyLayout.toggleRemainingMillis(a, true, a, 0) == -1);
         check(!JapaneseNineKeyLayout.endsWithPendingRomaji(""));
         check(!JapaneseNineKeyLayout.endsWithPendingRomaji(null));
         check(!JapaneseNineKeyLayout.endsWithPendingRomaji("こんち"));
         check(!JapaneseNineKeyLayout.endsWithPendingRomaji("こー"));
         check(JapaneseNineKeyLayout.endsWithPendingRomaji("こんch"));
         check(JapaneseNineKeyLayout.endsWithPendingRomaji("こn'"));
+        check(JapaneseNineKeyLayout.endsWithPendingRomaji("こn"));
         check(JapaneseNineKeyLayout.endsWithPendingRomaji("c"));
         check(keys.stream().flatMap(key -> key.strokes().stream())
             .allMatch(stroke -> stroke.length() <= JapaneseNineKeyLayout.LONGEST_STROKE));

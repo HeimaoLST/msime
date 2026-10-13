@@ -1,5 +1,7 @@
+import { useTemporaryFlag } from "../core/use-temporary-flag";
 import { useCallback, useEffect, useState } from "react";
 import { useConfirm } from "../core/confirm";
+import { readOptionalJson, writeOptionalJson } from "../core/optional-storage";
 import { errorCode } from "../core/error-code";
 import { SettingsServiceRow } from "./settings-service-row";
 import { GroupList, Segmented, Switch } from "../core/platform-controls";
@@ -77,21 +79,13 @@ const allFlags: McpFlag[] = permissionFlags.map((permission) => permission.flag)
 const flagsStorageKey = "msime.mcp.flags";
 
 function savedFlags(): McpFlag[] {
-  try {
-    const value: unknown = JSON.parse(window.localStorage.getItem(flagsStorageKey) ?? "null");
-    if (Array.isArray(value)) return allFlags.filter((flag) => value.includes(flag));
-  } catch {
-    /* 受限的 webview 可能拒绝访问存储，这时按默认值 */
-  }
+  const value = readOptionalJson(flagsStorageKey);
+  if (Array.isArray(value)) return allFlags.filter((flag) => value.includes(flag));
   return allFlags;
 }
 
 function saveFlags(flags: readonly McpFlag[]) {
-  try {
-    window.localStorage.setItem(flagsStorageKey, JSON.stringify(flags));
-  } catch {
-    /* 记不住只影响下次打开时的默认值 */
-  }
+  writeOptionalJson(flagsStorageKey, flags);
 }
 
 function sameFlags(a: readonly McpFlag[], b: readonly McpFlag[]): boolean {
@@ -235,6 +229,7 @@ export function McpConnectSection({
   const [busyClient, setBusyClient] = useState<McpClientId>();
   const [result, setResult] = useState<string>();
   const [copied, setCopied] = useState<string>();
+  const [copyFeedbackVisible, showCopyFeedback] = useTemporaryFlag(1600);
   const [tab, setTab] = useState<McpTab>("claude_code");
   // 用户想要的权限，复制的命令和配置、未连接的助手都按它来。
   const [preferred, setPreferred] = useState<McpFlag[]>(savedFlags);
@@ -332,10 +327,7 @@ export function McpConnectSection({
     void copyText(text).then(() => {
       if (!mounted.current || generation !== clientGeneration.current) return;
       setCopied(key);
-      window.setTimeout(() => {
-        if (mounted.current && generation === clientGeneration.current)
-          setCopied((current) => (current === key ? undefined : current));
-      }, 1600);
+      showCopyFeedback();
     });
   }
 
@@ -367,7 +359,10 @@ export function McpConnectSection({
     const text = tokensText(tokens);
     return (
       <SettingsManagerActions>
-        <ActionButton action={() => copy(key, text)} label={copied === key ? "已复制" : label} />
+        <ActionButton
+          action={() => copy(key, text)}
+          label={copyFeedbackVisible && copied === key ? "已复制" : label}
+        />
       </SettingsManagerActions>
     );
   }

@@ -36,22 +36,6 @@ const DIGIT_ROWS: NineKey[][] = [
   [key("7", "7", "7"), key("8", "8", "8"), key("9", "9", "9")],
 ];
 
-// 计算器顺序（`touch_number_keypad_order` 为 `calculator`）：7 8 9 在上、1 2 3 在下，与计算器和电脑小键盘一致。只有数字层换顺序，字母层的 ABC…WXYZ 不动。
-const CALCULATOR_DIGIT_ROWS: NineKey[][] = [DIGIT_ROWS[2], DIGIT_ROWS[1], DIGIT_ROWS[0]];
-
-/** 数字层的两种排列，取值与共享偏好 `touch_number_keypad_order` 相同。 */
-export class NumberKeypadOrder {
-  static readonly PHONE: string = "phone";
-  static readonly CALCULATOR: string = "calculator";
-
-  /** 文档里的值归一：缺省、旧文档没有这个键或认不出的值都按电话顺序。 */
-  static normalized(value: string | null | undefined): string {
-    return value === NumberKeypadOrder.CALCULATOR
-      ? NumberKeypadOrder.CALCULATOR
-      : NumberKeypadOrder.PHONE;
-  }
-}
-
 // ASCII, as the twenty-six key face sends: the Engine decides whether a comma arrives as , or as ，,
 // and it is the only thing that knows, since the answer depends on the composing language and on the
 // punctuation lock. iOS hard-codes the Chinese forms here because its grid only ever spells Chinese.
@@ -70,11 +54,9 @@ export class NineKeyLayout {
     return ROWS;
   }
 
-  /** The grid as digits. `digits` rather than a boolean on `rows` so the caller reads as a face. 按 `order` 排成电话顺序（1 2 3 在上）或计算器顺序（7 8 9 在上）。 */
-  static digits(order: string = NumberKeypadOrder.PHONE): NineKey[][] {
-    return NumberKeypadOrder.normalized(order) === NumberKeypadOrder.CALCULATOR
-      ? CALCULATOR_DIGIT_ROWS
-      : DIGIT_ROWS;
+  /** 网格的数字层，按电话拨号盘排列，1 2 3 在上。单独叫 `digits` 而不是给 `rows` 加一个布尔参数，调用处读起来就是一个键面。 */
+  static digits(): NineKey[][] {
+    return DIGIT_ROWS;
   }
 
   static punctuation(): string[] {
@@ -106,8 +88,9 @@ export class NineKeyLayout {
     return CLOSING_MARK;
   }
 
-  /** 印在字母格角落的数字，也就是点击它所拼出的数字；不发送数字的格子（分隔符、@#）为空。 */
+  /** 字母层印出长按可输入的数字；符号入口也保留 1，分词和数字层不重复印。 */
   static digitHint(key: NineKey): string {
+    if (NineKeyLayout.opensSymbols(key)) return "1";
     return NineKeyLayout.holdOptions(key).length > 0 ? key.input : "";
   }
 
@@ -115,8 +98,9 @@ export class NineKeyLayout {
     return DIGIT_SIDEBAR;
   }
 
-  /** Literal choices behind a letter key: its printed digit, then each printed letter. */
+  /** 长按选项：符号入口提供 1，字母键提供数字和各个小写字母。 */
   static holdOptions(key: NineKey): string[] {
+    if (NineKeyLayout.opensSymbols(key)) return ["1"];
     if (key.input < "2" || key.input > "9" || !/^[A-Z]{3,4}$/.test(key.label)) {
       return [];
     }

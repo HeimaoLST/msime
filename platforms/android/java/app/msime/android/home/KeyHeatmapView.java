@@ -1,5 +1,8 @@
 package app.msime.android.home;
 
+import app.msime.android.DimensionPolicy;
+
+import app.msime.android.ThemeColorPolicy;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
@@ -9,6 +12,7 @@ import android.util.AttributeSet;
 import android.view.View;
 import androidx.annotation.Nullable;
 import app.msime.android.BoundsPolicy;
+import app.msime.android.ColorPolicy;
 import app.msime.android.KeyPressIds;
 import app.msime.android.MapPolicy;
 import app.msime.android.R;
@@ -33,8 +37,8 @@ public final class KeyHeatmapView extends View {
             k("KeyH"), k("KeyJ"), k("KeyK"), k("KeyL"), new Key(null, .5f, "")),
         List.of(new Key("ShiftLeft", 1.5f, "⇧"), k("KeyZ"), k("KeyX"), k("KeyC"), k("KeyV"),
             k("KeyB"), k("KeyN"), k("KeyM"), new Key("Backspace", 1.5f, "⌫")),
-        List.of(new Key("SoftLayer", 1.25f, "123"), new Key("SoftLanguage", 1f, "中"),
-            new Key("Comma", 1f, "，"), new Key("Space", 4.25f, "空格"), new Key("Period", 1f, "。"),
+        List.of(new Key("SoftLayer", 1.25f, "123"), new Key("Comma", 1f, "，"),
+            new Key("Space", 4.25f, "空格"), new Key("Period", 1f, "。"), new Key("SoftLanguage", 1f, "中"),
             new Key("Enter", 1.5f, "↵")));
 
     private static final List<List<Key>> NINE = List.of(
@@ -44,8 +48,8 @@ public final class KeyHeatmapView extends View {
             new Key("Nine6", 1.4f, "MNO"), new Key("SoftSymbol", 1f, "符")),
         List.of(new Key("SoftPunctuation", 1f, "标点"), new Key("Nine7", 1.4f, "PQRS"),
             new Key("Nine8", 1.4f, "TUV"), new Key("Nine9", 1.4f, "WXYZ"), new Key("Nine0", 1f, "0")),
-        List.of(new Key("SoftLayer", 1f, "123"), new Key("SoftLanguage", 1f, "中"),
-            new Key("Space", 2.8f, "空格"), new Key("Enter", 1.4f, "↵")));
+        List.of(new Key("SoftLayer", 1f, "123"), new Key("Space", 2.8f, "空格"),
+            new Key("SoftLanguage", 1f, "中"), new Key("Enter", 1.4f, "↵")));
 
     private static final int[] HEAT = {R.attr.msHeat0, R.attr.msHeat1, R.attr.msHeat2, R.attr.msHeat3,
         R.attr.msHeat4};
@@ -69,7 +73,7 @@ public final class KeyHeatmapView extends View {
     public KeyHeatmapView(Context context, @Nullable AttributeSet attributes) {
         super(context, attributes);
         face.setTextAlign(Paint.Align.CENTER);
-        face.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+        ViewPolicy.setTypeface(face, Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
         ViewPolicy.setTextSizeSp(face, context, 14);
         share.setTextAlign(Paint.Align.CENTER);
         ViewPolicy.setTextSizeSp(share, context, 9);
@@ -149,23 +153,23 @@ public final class KeyHeatmapView extends View {
         int rows = layout().size();
         float height = rows * KEY_HEIGHT + (rows - 1) * GAP + FOOTER;
         setMeasuredDimension(MeasureSpec.getSize(widthSpec),
-            resolveSize(Ui.dp(context, height), heightSpec));
+            resolveSize(DimensionPolicy.pixels(context, height), heightSpec));
     }
 
     @Override protected void onDraw(Canvas canvas) {
         Context context = getContext();
-        float gap = Ui.dp(context, GAP);
-        float height = Ui.dp(context, KEY_HEIGHT);
-        float radius = Ui.dp(context, 6);
+        float gap = DimensionPolicy.pixels(context, GAP);
+        float height = DimensionPolicy.pixels(context, KEY_HEIGHT);
+        float radius = DimensionPolicy.pixels(context, 6);
         long peak = 0;
         for (List<Key> row : layout()) {
             for (Key key : row) {
                 if (key.id() != null) peak = BoundsPolicy.atLeast(peak, counts.getOrDefault(key.id(), 0L));
             }
         }
-        int text = Ui.text(context);
-        int sub = Ui.subText(context);
-        int onAccent = Ui.onAccent(context);
+        int text = ThemeColorPolicy.text(context);
+        int sub = ThemeColorPolicy.subText(context);
+        int onAccent = ThemeColorPolicy.onAccent(context);
         float width = getWidth();
         List<List<Key>> rows = layout();
         for (int r = 0; r < rows.size(); r++) {
@@ -190,39 +194,39 @@ public final class KeyHeatmapView extends View {
                 drawn = true;
                 long value = counts.getOrDefault(key.id(), 0L);
                 int level = HeatmapView.level(value, peak);
-                fill.setColor(Ui.color(context, HEAT[level]));
+                fill.setColor(ThemeColorPolicy.color(context, HEAT[level]));
                 box.set(x, top, x + keyWidth, top + height);
                 canvas.drawRoundRect(box, radius, radius, fill);
                 int ink = level >= 3 ? onAccent : text;
                 face.setColor(ink);
-                share.setColor(level >= 3 ? Ui.withAlpha(onAccent, .85f) : sub);
+                share.setColor(level >= 3 ? ColorPolicy.withAlpha(onAccent, .85f) : sub);
                 float centre = x + keyWidth / 2;
-                canvas.drawText(key.face(), centre, top + height / 2 + Ui.dp(context, 1), face);
+                canvas.drawText(key.face(), centre, top + height / 2 + DimensionPolicy.pixels(context, 1), face);
                 if (total > 0) {
                     String percent = TypingStatisticsSummary.percentTenths(value / (double) total) + "%";
-                    canvas.drawText(percent, centre, top + height - Ui.dp(context, 6), share);
+                    canvas.drawText(percent, centre, top + height - DimensionPolicy.pixels(context, 6), share);
                 }
                 x += keyWidth;
             }
         }
         // 图下：左边最常按，右边图例。
-        float baseline = rows.size() * (height + gap) - gap + Ui.dp(context, FOOTER) - Ui.dp(context, 9);
+        float baseline = rows.size() * (height + gap) - gap + DimensionPolicy.pixels(context, FOOTER) - DimensionPolicy.pixels(context, 9);
         caption.setColor(text);
         canvas.drawText(headline(), 0, baseline, caption);
         caption.setColor(sub);
         float more = caption.measureText("多");
         canvas.drawText("多", width - more, baseline, caption);
-        float cell = Ui.dp(context, 10);
-        float cellGap = Ui.dp(context, 3);
-        float cellTop = baseline - cell + Ui.dp(context, 1);
-        float cx = width - more - Ui.dp(context, 4) - cell;
+        float cell = DimensionPolicy.pixels(context, 10);
+        float cellGap = DimensionPolicy.pixels(context, 3);
+        float cellTop = baseline - cell + DimensionPolicy.pixels(context, 1);
+        float cx = width - more - DimensionPolicy.pixels(context, 4) - cell;
         for (int level = HEAT.length - 1; level >= 0; level--) {
-            fill.setColor(Ui.color(context, HEAT[level]));
+            fill.setColor(ThemeColorPolicy.color(context, HEAT[level]));
             box.set(cx, cellTop, cx + cell, cellTop + cell);
-            canvas.drawRoundRect(box, Ui.dp(context, 2), Ui.dp(context, 2), fill);
+            canvas.drawRoundRect(box, DimensionPolicy.pixels(context, 2), DimensionPolicy.pixels(context, 2), fill);
             cx -= cell + cellGap;
         }
         float less = caption.measureText("少");
-        canvas.drawText("少", cx + cell + cellGap - Ui.dp(context, 4) - less, baseline, caption);
+        canvas.drawText("少", cx + cell + cellGap - DimensionPolicy.pixels(context, 4) - less, baseline, caption);
     }
 }

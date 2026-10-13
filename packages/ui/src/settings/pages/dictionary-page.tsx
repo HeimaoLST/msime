@@ -23,6 +23,7 @@ import { ErrorAlert } from "../../core/error-alert";
 import { SettingsInputDescription } from "../settings-input-description";
 import { SettingsManagerActions } from "../settings-manager-actions";
 import { SettingsEmptyMessage } from "../settings-empty-message";
+import { HarmonyPhoneDictionary } from "../harmony-phone-dictionary";
 
 export { dictionaryKindKeyHint } from "../../dictionary/dictionary-messages";
 
@@ -61,7 +62,18 @@ export function DictionarySettingsPage() {
     exportAllPhrases,
     resetLearnedData,
     openPanel,
+    harmonyPlatform,
+    mobilePlatform,
+    openCommunityGallery,
   } = useSettingsForm();
+  // HarmonyOS 手机按 Android 的词库页布局：按词库列出，点进去编辑，而不是这张按种类查词条的桌面表单。它在打开时读词库和社区列表，所以只在本页可见时挂载。
+  if (harmonyPlatform && mobilePlatform) {
+    return (
+      <SettingsPageFieldset disabled={busy} hidden={page !== "dictionary"} ariaLabel="词库">
+        {page === "dictionary" && <HarmonyPhoneDictionary />}
+      </SettingsPageFieldset>
+    );
+  }
   return (
     <SettingsPageFieldset disabled={busy} hidden={page !== "dictionary"} ariaLabel="词库">
       {/* 先是词库本身（查、看、加），再是成批的导入导出和云词库，然后是只读的词库信息和别的入口，清除学习数据这种危险操作放在页末。 */}
@@ -231,6 +243,19 @@ export function DictionarySettingsPage() {
             description="管理同步到账号的词条和备份"
             action={() => openPanel(client.openCloudDictionary)}
             label="打开云词库"
+          />
+        </GroupList>
+      )}
+      {/* 触屏宿主没有「社区」页，社区词库从这里进入，完整图库在本页上打开。 */}
+      {mobilePlatform && client.communityResources && (
+        <GroupList title="社区词库">
+          <ActionRow
+            title="社区词库"
+            description="看看别人分享的词库，可以添加到本机"
+            action={() =>
+              openCommunityGallery({ category: "dictionary", scope: "", initialMine: false })
+            }
+            label="浏览更多词库"
           />
         </GroupList>
       )}

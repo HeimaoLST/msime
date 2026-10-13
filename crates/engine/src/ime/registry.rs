@@ -12,17 +12,18 @@ use crate::cantonese::{CantoneseCandidate, CantoneseDictionary, CantoneseScheme,
 use crate::diagnostics;
 use crate::error::{EngineError, Result};
 use crate::helpcode::SharedKeymap;
+use crate::japanese::matrix::BestPath;
+use crate::japanese::provider::WholeReadingLemma;
 use crate::japanese::JapaneseProvider;
 use crate::korean::hanja;
 use crate::language_dictionary::{self, LanguageDictionary};
 use crate::paths::RuntimePaths;
 use crate::quanpin::QuanpinEngine;
-use crate::shuangpin::profile::profile;
-use crate::shuangpin::ShuangpinEngine;
-use crate::stroke::StrokeScheme;
+use crate::shuangpin::{ShuangpinEngine, ShuangpinProfile};
+use crate::stroke::scheme::StrokeQueryBuffer;
+use crate::stroke::{StrokeCandidate, StrokeScheme};
 use crate::types::{
-    CandidateSource, QueryRequest, SchemeSet, SchemeType, ShuangpinProfileKind, WordItem,
-    WubiProfileKind,
+    CandidateSource, QueryRequest, SchemeSet, SchemeType, WordItem, WubiProfileKind,
 };
 use crate::wubi::provider::WubiProvider;
 
@@ -50,6 +51,9 @@ pub struct ProviderRegistry {
     stroke_path: PathBuf,
     /// `msime-stroke.db` opened by `activate`; `None` before that.
     stroke: Option<LanguageDictionary>,
+    stroke_scheme: StrokeScheme,
+    stroke_buffer: StrokeQueryBuffer,
+    stroke_candidates: Vec<StrokeCandidate>,
 }
 
 /// 五笔码表所在的数据库。准备代次时单独发布的 `msime-wubi.db` 已并回工作主词库，学习、删词与个人词典也写那里，所以优先读代次的 `msime-pinyin.db`，读写落在同一个文件上。代次目录就是资源目录（只读布局）时读其中的 `msime-wubi.db`；没有代次工作副本时退回资源目录，先找拆分后的 `msime-wubi.db`，再找旧的合并发布。
@@ -68,7 +72,7 @@ impl ProviderRegistry {
     /// 五笔读 `wubi_database` 选出的文件，通常是代次里的 `msime-pinyin.db`； the Japanese model is the immutable resource (provider_registry.cpp:4-10). `japanese_path` 非空时改读这个位置（例如按需下载的那份），为空时读资源目录里的 `msime-japanese.dat`。`enabled` 为 [`SchemeSet::ALL`] 时四个 provider 都构造，与收窄之前相同；否则只构造 `enabled` 用得到的那些，查询不在其中的方案一律答空。
     pub fn new(
         enabled: SchemeSet,
-        profile_kind: ShuangpinProfileKind,
+        profile: &'static ShuangpinProfile,
         paths: &RuntimePaths,
         cantonese_path: PathBuf,
         zhuyin_path: PathBuf,
@@ -87,7 +91,7 @@ impl ProviderRegistry {
             quanpin: quanpin_needed.then(|| QuanpinEngine::new(paths)),
             shuangpin: enabled
                 .contains(SchemeType::Shuangpin)
-                .then(|| ShuangpinEngine::new(profile(profile_kind), paths)),
+                .then(|| ShuangpinEngine::new(profile, paths)),
             wubi: enabled
                 .contains(SchemeType::Wubi)
                 .then(|| WubiProvider::new(&wubi_database(paths))),
@@ -104,10 +108,13 @@ impl ProviderRegistry {
             zhuyin: None,
             stroke_path,
             stroke: None,
+            stroke_scheme: StrokeScheme::new(),
+            stroke_buffer: StrokeQueryBuffer::default(),
+            stroke_candidates: Vec::new(),
         }
     }
 
-    /// Opens what `scheme` reads before it becomes active, once per session: `msime-cantonese.db` for Cantonese, `msime-zhuyin.db` for Zhuyin and `msime-stroke.db` for Stroke, failing as `language_dictionary::open_read_only` does when the file is missing or of an unknown version. Nothing for the other schemes. The caller does not activate Zhuyin while a Zhuyin scheme holds the connection, which would open the file again. 不在 `enabled` 里的方案报 `INPUT_SCHEME_NOT_ENABLED`，什么也不打开。
+    /// Opens what `scheme` reads before it becomes active, once per session: `msime-cantonese.db` for Cantonese, `msime-zhuyin.db` for Zhuyin and `msime-stroke.db` for Stroke, failing as `language_dictionary::open_read_only` does when the file is missing or of an unknown version. 日文不打开任何东西，只在后台预热 `msime-japanese.dat`，读不到也不报错（与第一个查询读不到时一样只出假名行）。Nothing for the other schemes. The caller does not activate Zhuyin while a Zhuyin scheme holds the connection, which would open the file again. 不在 `enabled` 里的方案报 `INPUT_SCHEME_NOT_ENABLED`，什么也不打开。
     pub fn activate(&mut self, scheme: SchemeType) -> Result<()> {
         if !self.enabled.contains(scheme) {
             return Err(EngineError::invalid(diagnostics::INPUT_SCHEME_NOT_ENABLED));
@@ -122,6 +129,12 @@ impl ProviderRegistry {
         }
         if scheme == SchemeType::Stroke && self.stroke.is_none() {
             self.stroke = Some(language_dictionary::open_read_only(&self.stroke_path)?);
+        }
+        // 日文模型在后台读，不在这里等：激活发生在建会话和切方案的调用里，Android 上就是主线程。只在真切到日文时预热，构造 provider 时不读，完整版的每个用户都有这个 provider。
+        if scheme == SchemeType::JapaneseRomaji {
+            if let Some(japanese) = &self.japanese {
+                japanese.warm_up_in_background();
+            }
         }
         Ok(())
     }
@@ -414,6 +427,29 @@ impl ProviderRegistry {
         }
     }
 
+    /// 日文混输：整段罗马字读音有没有完全相同读音的词条，读音有几拍。会话不带日文（`enabled` 里没有 `JapaneseRomaji`）时没有 provider，答 `None`；其余见 `JapaneseProvider::whole_reading_lemma`。
+    pub(super) fn japanese_whole_reading_lemma(
+        &mut self,
+        request: &QueryRequest,
+    ) -> Option<WholeReadingLemma> {
+        self.japanese.as_mut()?.whole_reading_lemma(request)
+    }
+
+    /// 日文混输：整段罗马字读音的最佳整句。没有 provider 时答 `None`；其余见 `JapaneseProvider::whole_reading_best_path`。
+    pub(super) fn japanese_whole_reading_best_path(
+        &mut self,
+        request: &QueryRequest,
+    ) -> Option<BestPath> {
+        self.japanese.as_mut()?.whole_reading_best_path(request)
+    }
+
+    /// 日文混输开着时由会话构造调用：在后台把日文模型读进进程级缓存，拼音组字的第一个键不必在按键线程上等这个 66 MB 的文件。没有 provider 时什么也不做。
+    pub(super) fn warm_up_japanese(&self) {
+        if let Some(japanese) = &self.japanese {
+            japanese.warm_up_in_background();
+        }
+    }
+
     pub(super) fn query_korean_hanja_into(
         &mut self,
         request: &QueryRequest,
@@ -433,14 +469,14 @@ impl ProviderRegistry {
     }
 
     /// `msime-stroke.db` 对请求笔画的单字候选，顺序同 `StrokeScheme::candidates`。每行以键入的笔画为 `pinyin`、以该字的完整笔画码为 `canonical_pinyin`；笔画不学习，这两个键只用于显示，从不写回任何词典。读失败时不给候选，与粤拼一样。
-    fn stroke_candidates(&self, request: &QueryRequest) -> Vec<WordItem> {
+    fn stroke_candidates(&mut self, request: &QueryRequest) -> Vec<WordItem> {
         let mut destination = Vec::new();
         self.query_stroke_into(request, &mut destination);
         destination
     }
 
     pub(super) fn query_stroke_into(
-        &self,
+        &mut self,
         request: &QueryRequest,
         destination: &mut Vec<WordItem>,
     ) {
@@ -448,13 +484,21 @@ impl ProviderRegistry {
             destination.clear();
             return;
         };
-        let mut scheme = StrokeScheme::new();
-        scheme.set_raw_input(&request.raw_input);
-        let Ok(candidates) = scheme.candidates(dictionary) else {
+        self.stroke_scheme.set_raw_input(&request.raw_input);
+        if self
+            .stroke_scheme
+            .candidates_into(
+                dictionary,
+                &mut self.stroke_buffer,
+                &mut self.stroke_candidates,
+            )
+            .is_err()
+        {
             destination.clear();
             return;
-        };
-        let input = scheme.input();
+        }
+        let candidates = &self.stroke_candidates;
+        let input = self.stroke_scheme.input();
         let common = candidates.len().min(destination.len());
         for (target, candidate) in destination.iter_mut().take(common).zip(candidates.iter()) {
             target.pinyin.clear();
@@ -473,6 +517,7 @@ impl ProviderRegistry {
         if destination.len() > candidates.len() {
             destination.truncate(candidates.len());
         } else {
+            destination.reserve_exact(candidates.len() - destination.len());
             destination.extend(candidates[common..].iter().map(|candidate| {
                 let mut item = WordItem::new(
                     input,
@@ -523,6 +568,7 @@ fn fill_cantonese_candidates(
     if destination.len() > source.len() {
         destination.truncate(source.len());
     } else {
+        destination.reserve_exact(source.len() - destination.len());
         destination.extend(source[common..].iter().map(|candidate| {
             let mut item = WordItem::new(
                 &input[..candidate.end],
@@ -540,6 +586,282 @@ fn fill_cantonese_candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dense_stroke_registry() -> (tempfile::TempDir, ProviderRegistry) {
+        use crate::language_dictionary::{FORMAT_VERSION, METADATA_FORMAT_VERSION, SCHEMA};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("msime-stroke.db");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch(SCHEMA).unwrap();
+        connection
+            .execute(
+                "INSERT INTO metadata VALUES (?1, ?2)",
+                (METADATA_FORMAT_VERSION, FORMAT_VERSION.to_string()),
+            )
+            .unwrap();
+        for index in 0..200 {
+            connection
+                .execute(
+                    "INSERT INTO entries VALUES (?1, ?2, ?3)",
+                    ("h", format!("字{index:03}"), index),
+                )
+                .unwrap();
+        }
+        for index in 0..100 {
+            connection
+                .execute(
+                    "INSERT INTO entries VALUES (?1, ?2, ?3)",
+                    ("hs", format!("補{index:03}"), index + 1000),
+                )
+                .unwrap();
+        }
+        drop(connection);
+        let mut registry = registry(SchemeSet::of(&[SchemeType::Stroke]));
+        registry.stroke_path = path;
+        registry.activate(SchemeType::Stroke).unwrap();
+        (directory, registry)
+    }
+
+    fn assert_dense_stroke_query_reuses_rows(raw: &str) {
+        let (_directory, mut registry) = dense_stroke_registry();
+        let request = QueryRequest {
+            scheme: SchemeType::Stroke,
+            raw_input: raw.to_owned(),
+            valid: true,
+            ..QueryRequest::default()
+        };
+        let mut destination = Vec::new();
+        registry.query_stroke_into(&request, &mut destination);
+        assert_eq!(destination.len(), 300);
+        assert_eq!(destination[0].word, "字199");
+        assert_eq!(destination[199].word, "補099");
+        assert_eq!(destination.last().unwrap().word, "字000");
+        let expected = destination.clone();
+        let pointer = destination.as_ptr();
+        for row in &mut destination {
+            row.fixed_position = 9;
+            row.source = CandidateSource::CloudSuggestion;
+            row.fuzzy = true;
+            row.corrected_from.push_str("synthetic");
+            row.sentence_association = true;
+            row.sentence_words.push("synthetic".to_owned());
+            row.scheme = SchemeType::Cantonese;
+        }
+        let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            registry.query_stroke_into(&request, &mut destination);
+        });
+        assert_eq!(destination, expected);
+        assert_eq!(destination.as_ptr(), pointer);
+        eprintln!("密集笔画 {raw} 热查询分配：{allocations}");
+        assert!(
+            allocations <= 16,
+            "密集笔画热查询应复用中间行：{allocations}"
+        );
+    }
+
+    #[test]
+    fn dense_stroke_owned_query_moves_dictionary_strings() {
+        let (_directory, registry) = dense_stroke_registry();
+        let dictionary = registry.stroke.as_ref().unwrap();
+        for raw in ["h", "x"] {
+            let mut scheme = StrokeScheme::new();
+            scheme.set_raw_input(raw);
+            let expected = scheme.candidates(dictionary).unwrap();
+            let (candidates, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+                scheme.candidates(dictionary).unwrap()
+            });
+            assert_eq!(candidates, expected);
+            assert_eq!(candidates.len(), 300);
+            eprintln!("拥有型笔画 {raw} 冷查询分配：{allocations}");
+            assert!(
+                allocations <= 630,
+                "拥有型查询应移动字典字符串：{allocations}"
+            );
+        }
+    }
+
+    #[test]
+    fn dense_stroke_exact_query_reuses_intermediate_rows() {
+        assert_dense_stroke_query_reuses_rows("h");
+    }
+
+    #[test]
+    fn dense_stroke_wildcard_query_reuses_intermediate_rows() {
+        assert_dense_stroke_query_reuses_rows("x");
+    }
+
+    fn assert_stroke_mixed_key_lengths_reuse_ordered_slots(raw: &str) {
+        let (_directory, mut registry) = dense_stroke_registry();
+        let connection = rusqlite::Connection::open(&registry.stroke_path).unwrap();
+        connection
+            .execute("DELETE FROM entries WHERE key = 'hs'", [])
+            .unwrap();
+        for index in 0..100 {
+            let suffix = format!("{index:07b}").replace('0', "h").replace('1', "s");
+            let prefix = if index % 2 == 0 {
+                String::new()
+            } else {
+                "p".repeat(48)
+            };
+            connection
+                .execute(
+                    "INSERT INTO entries VALUES (?1, ?2, ?3)",
+                    (
+                        format!("h{prefix}{suffix}"),
+                        format!("補{index:03}"),
+                        index + 1000,
+                    ),
+                )
+                .unwrap();
+        }
+        drop(connection);
+        let request = QueryRequest {
+            scheme: SchemeType::Stroke,
+            raw_input: raw.to_owned(),
+            valid: true,
+            ..QueryRequest::default()
+        };
+        let mut destination = Vec::new();
+        registry.query_stroke_into(&request, &mut destination);
+        assert_eq!(destination.len(), 300);
+        assert_eq!(destination[0].word, "字199");
+        assert_eq!(destination[199].word, "補099");
+        assert_eq!(destination.last().unwrap().word, "字000");
+        let expected = destination.clone();
+        let pointer = destination.as_ptr();
+        for _ in 0..3 {
+            let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+                registry.query_stroke_into(&request, &mut destination);
+            });
+            assert_eq!(destination, expected);
+            assert_eq!(destination.as_ptr(), pointer);
+            eprintln!("长短键笔画 {raw} 热查询分配：{allocations}");
+            assert!(
+                allocations <= 16,
+                "长短键热查询应复用最终顺序槽位：{allocations}"
+            );
+        }
+        let mut scheme = StrokeScheme::new();
+        scheme.set_raw_input(raw);
+        assert_eq!(
+            scheme
+                .candidates(registry.stroke.as_ref().unwrap())
+                .unwrap(),
+            expected
+                .iter()
+                .map(|row| StrokeCandidate {
+                    text: row.word.clone(),
+                    key: row.canonical_pinyin.clone(),
+                    weight: row.weight,
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn stroke_exact_mixed_key_lengths_reuse_ordered_slots() {
+        assert_stroke_mixed_key_lengths_reuse_ordered_slots("h");
+    }
+
+    #[test]
+    fn stroke_wildcard_mixed_key_lengths_reuse_ordered_slots() {
+        assert_stroke_mixed_key_lengths_reuse_ordered_slots("x");
+    }
+
+    #[test]
+    fn dense_stroke_duplicate_completions_reuse_intermediate_rows() {
+        let (_directory, mut registry) = dense_stroke_registry();
+        let connection = rusqlite::Connection::open(&registry.stroke_path).unwrap();
+        connection
+            .execute("DELETE FROM entries WHERE key = 'hs'", [])
+            .unwrap();
+        for index in 0..100 {
+            let key = format!("h{:07b}", index)
+                .replace('0', "h")
+                .replace('1', "s");
+            connection
+                .execute(
+                    "INSERT INTO entries VALUES (?1, ?2, ?3)",
+                    (key, "字199", index + 1000),
+                )
+                .unwrap();
+        }
+        drop(connection);
+        for raw in ["h", "x"] {
+            let request = QueryRequest {
+                scheme: SchemeType::Stroke,
+                raw_input: raw.to_owned(),
+                valid: true,
+                ..QueryRequest::default()
+            };
+            let mut destination = Vec::new();
+            registry.query_stroke_into(&request, &mut destination);
+            assert_eq!(destination.len(), 200);
+            assert_eq!(destination[0].word, "字199");
+            assert_eq!(destination[0].weight, 199);
+            assert_eq!(destination[0].canonical_pinyin, "h");
+            let expected = destination.clone();
+            let mut scheme = StrokeScheme::new();
+            scheme.set_raw_input(raw);
+            let (owned, owned_allocations) =
+                crate::ime::personal_rerank::allocations::count(|| {
+                    scheme
+                        .candidates(registry.stroke.as_ref().unwrap())
+                        .unwrap()
+                });
+            assert_eq!(
+                owned,
+                expected
+                    .iter()
+                    .map(|row| StrokeCandidate {
+                        text: row.word.clone(),
+                        key: row.canonical_pinyin.clone(),
+                        weight: row.weight,
+                    })
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                owned_allocations <= 630,
+                "重复补全拥有型查询应移动字符串：{owned_allocations}"
+            );
+            let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+                registry.query_stroke_into(&request, &mut destination);
+            });
+            assert_eq!(destination, expected);
+            eprintln!("重复补全 {raw} 热查询分配：{allocations}");
+            assert!(
+                allocations <= 16,
+                "重复补全热查询应复用中间行：{allocations}"
+            );
+        }
+    }
+
+    #[test]
+    fn stroke_query_clears_failed_results_and_recovers_after_dictionary_repair() {
+        let (_directory, mut registry) = dense_stroke_registry();
+        let connection = rusqlite::Connection::open(&registry.stroke_path).unwrap();
+        let mut destination = Vec::new();
+        for raw in ["h", "x"] {
+            let request = QueryRequest {
+                scheme: SchemeType::Stroke,
+                raw_input: raw.to_owned(),
+                valid: true,
+                ..QueryRequest::default()
+            };
+            registry.query_stroke_into(&request, &mut destination);
+            assert!(!destination.is_empty());
+            connection.execute_batch("DROP TABLE entries").unwrap();
+            registry.query_stroke_into(&request, &mut destination);
+            assert!(destination.is_empty());
+            assert!(registry.stroke_candidates.is_empty());
+            connection.execute_batch("CREATE TABLE entries(key TEXT NOT NULL, text TEXT NOT NULL, weight INTEGER NOT NULL, PRIMARY KEY(key, text)) WITHOUT ROWID; INSERT INTO entries VALUES ('h', '合成恢復', 9)").unwrap();
+            registry.query_stroke_into(&request, &mut destination);
+            assert_eq!(destination.len(), 1);
+            assert_eq!(destination[0].word, "合成恢復");
+            assert_eq!(destination[0].canonical_pinyin, "h");
+        }
+    }
 
     #[test]
     fn active_cantonese_query_matches_requests_without_copying_input() {
@@ -576,6 +898,9 @@ mod tests {
             registry.query_cantonese_scheme_into(&scheme, &mut direct);
             registry.query_cantonese_into(&request, &mut requested);
             assert_eq!(direct, requested, "输入：{raw}");
+            if raw == "nei" {
+                assert_eq!(requested.capacity(), requested.len());
+            }
         }
 
         // 预热字典及候选缓冲；请求路径的备用方案仍需复制一次输入。
@@ -599,13 +924,48 @@ mod tests {
     fn registry(enabled: SchemeSet) -> ProviderRegistry {
         ProviderRegistry::new(
             enabled,
-            ShuangpinProfileKind::Xiaohe,
+            crate::shuangpin::profile::default_profile(),
             &RuntimePaths::default(),
             PathBuf::new(),
             PathBuf::new(),
             PathBuf::new(),
             PathBuf::new(),
         )
+    }
+
+    fn japanese_registry(enabled: SchemeSet, model: PathBuf) -> ProviderRegistry {
+        ProviderRegistry::new(
+            enabled,
+            crate::shuangpin::profile::default_profile(),
+            &RuntimePaths::default(),
+            PathBuf::new(),
+            PathBuf::new(),
+            PathBuf::new(),
+            model,
+        )
+    }
+
+    /// 切到日文时模型在后台读进进程级缓存；完整版构造 registry、激活别的方案都不碰模型文件。
+    #[test]
+    fn activating_japanese_warms_the_model_and_other_schemes_do_not() {
+        use crate::japanese::decoder::{test_model, JapaneseDictionary, SHARED_CACHE_TEST_LOCK};
+
+        let _serial = SHARED_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = tempfile::tempdir().unwrap();
+        let model = directory.path().join("msime-japanese.dat");
+        std::fs::write(&model, test_model::single("甲")).unwrap();
+
+        let mut registry = japanese_registry(SchemeSet::ALL, model.clone());
+        assert!(registry.japanese.is_some());
+        registry.activate(SchemeType::Quanpin).unwrap();
+        JapaneseDictionary::wait_until_warmed(&model);
+        assert!(!JapaneseDictionary::is_shared(&model));
+
+        registry.activate(SchemeType::JapaneseRomaji).unwrap();
+        JapaneseDictionary::wait_until_warmed(&model);
+        assert!(JapaneseDictionary::is_shared(&model));
     }
 
     /// 全部方案时四个 provider 都在；只有五笔时只有五笔和混拼要用的全拼，双拼和日文都不构造；只有全拼时没有五笔。
@@ -656,5 +1016,27 @@ mod tests {
         }
         registry.activate(SchemeType::Wubi).unwrap();
         registry.set_helpcode_keymap(None);
+    }
+
+    #[test]
+    fn stroke_query_reserves_exact_capacity_when_a_batch_grows_a_short_buffer() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("msime-stroke.db");
+        crate::stroke::fixture::build(&path);
+        let mut registry = registry(SchemeSet::of(&[SchemeType::Stroke]));
+        registry.stroke_path = path;
+        registry.activate(SchemeType::Stroke).unwrap();
+        let request = QueryRequest {
+            scheme: SchemeType::Stroke,
+            raw_input: "hs".to_owned(),
+            raw_input_with_cases: "hs".to_owned(),
+            valid: true,
+            ..QueryRequest::default()
+        };
+        let mut destination = Vec::with_capacity(1);
+        destination.push(WordItem::new("", "seed", 0, CandidateSource::Database, ""));
+        registry.query_stroke_into(&request, &mut destination);
+        assert_eq!(destination.len(), 2);
+        assert_eq!(destination.capacity(), destination.len());
     }
 }

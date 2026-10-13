@@ -282,6 +282,108 @@ int main(void)
         MSIMECandidateButton *verticalHanja = CandidateButton(panel.contentView, 0);
         assert(verticalHanja.itemLayout.translation.width > 0 && !verticalHanja.itemLayout.translation.below && !verticalHanja.translationBelow);
         assert(verticalHanja.annotation.length == 0 && [verticalHanja.glossReading isEqual:reading]);
+
+        // 脚本插件的注释收拾成一行再画：换行、U+2028、双向控制符和零宽字符连成的一段变成一个空格，首尾空白去掉，不是字符串时为空，超过 32 个 UTF-16 码元时在完整字符处截断补「…」，不拆开代理对。
+        assert([MSIMECandidateScriptAnnotationRun(@"甲\n乙\u2028丙\u202E丁\u200B戊\u2029") isEqual:@"甲 乙 丙 丁 戊"]);
+        assert([MSIMECandidateScriptAnnotationRun(@"\r\n 常用 \t") isEqual:@"常用"]);
+        assert(MSIMECandidateScriptAnnotationRun(@42).length == 0 && MSIMECandidateScriptAnnotationRun(nil).length == 0);
+        assert(MSIMECandidateScriptAnnotationRun(@"\u202E \u200B").length == 0);
+        NSString *thirtyTwo = [@"" stringByPaddingToLength:32 withString:@"水" startingAtIndex:0];
+        assert([MSIMECandidateScriptAnnotationRun(thirtyTwo) isEqual:thirtyTwo]);
+        NSString *cutCJK = MSIMECandidateScriptAnnotationRun([thirtyTwo stringByAppendingString:@"杉杉"]);
+        assert(cutCJK.length == 32 && [cutCJK hasSuffix:@"…"] && [cutCJK hasPrefix:[thirtyTwo substringToIndex:31]]);
+        NSString *emoji = [@"" stringByPaddingToLength:40 withString:@"😀" startingAtIndex:0];
+        NSString *cutEmoji = MSIMECandidateScriptAnnotationRun(emoji);
+        assert(cutEmoji.length == 31 && [cutEmoji isEqual:[[emoji substringToIndex:30] stringByAppendingString:@"…"]]);
+
+        // 横排：插件注释是释义行的最后一行，排在译文之后；它不进引擎辅助码那一段，也不是按列上屏的 `translation`。悬停提示带着它，读屏标签说明它是插件注释；没有注释的行什么都不多。
+        appearance.vertical = NO;
+        appearance.candidateTranslations = YES;
+        NSDictionary *scriptBase = @{@"focused": @YES, @"editing_text": @"hanyu", @"page": @0, @"page_count": @1};
+        NSMutableDictionary *scriptView = [scriptBase mutableCopy];
+        scriptView[@"candidates"] = @[@{@"text": @"汉语", @"annotation": @"(aB)", @"translation": @"Chinese", @"script_annotation": @"常用词", @"highlighted": @YES},
+                                      @{@"text": @"韩语", @"annotation": @"(aB)", @"translation": @"Korean"}];
+        [controller setValue:[scriptView copy] forKey:@"view"];
+        [controller renderCandidates];
+        MSIMECandidateButton *scripted = CandidateButton(panel.contentView, 0);
+        MSIMECandidateButton *unscripted = CandidateButton(panel.contentView, 1);
+        assert(scripted && unscripted);
+        assert([scripted.title isEqual:@"1  汉语"] && [scripted.annotation isEqual:@"(aB)"] && [scripted.translation isEqual:@"Chinese"]);
+        assert([scripted.scriptAnnotation isEqual:@"常用词"] && unscripted.scriptAnnotation.length == 0);
+        assert(scripted.itemLayout.translation.below && scripted.translationBelow);
+        assert(scripted.itemLayout.translation.height > unscripted.itemLayout.translation.height + glossLine * 0.5);
+        assert([scripted.toolTip isEqual:@"汉语(aB)\nChinese\n常用词"] && [unscripted.toolTip isEqual:@"韩语(aB)\nKorean"]);
+        assert([scripted.accessibilityLabel isEqual:@"1  汉语(aB)，插件注释：常用词"]);
+        assert([unscripted.accessibilityLabel isEqual:@"2  韩语(aB)"]);
+        bitmap = [scripted bitmapImageRepForCachingDisplayInRect:scripted.bounds];
+        [scripted cacheDisplayInRect:scripted.bounds toBitmapImageRep:bitmap];
+
+        // 没有译文时插件注释自己占释义行；插件写进去的换行和零宽字符画不出第二行。
+        appearance.candidateTranslations = NO;
+        scriptView[@"candidates"] = @[@{@"text": @"汉语", @"script_annotation": @"第一行\n\u200B第二行", @"highlighted": @YES}];
+        [controller setValue:[scriptView copy] forKey:@"view"];
+        [controller renderCandidates];
+        MSIMECandidateButton *alone = CandidateButton(panel.contentView, 0);
+        assert([alone.scriptAnnotation isEqual:@"第一行 第二行"] && alone.translation.length == 0);
+        assert(alone.itemLayout.translation.width > 0 && alone.itemLayout.translation.below);
+        assert(alone.itemLayout.translation.height < glossLine * 1.5);
+        assert([alone.toolTip isEqual:@"汉语\n第一行 第二行"]);
+
+        // 只有注释变了的视图不走只重画译文的捷径，按钮换成新的注释。
+        scriptView[@"candidates"] = @[@{@"text": @"汉语", @"script_annotation": @"别的注释", @"highlighted": @YES}];
+        [controller setValue:[scriptView copy] forKey:@"view"];
+        [controller renderCandidates];
+        assert([CandidateButton(panel.contentView, 0).scriptAnnotation isEqual:@"别的注释"]);
+
+        // 竖排：注释放得下时和释义一样留在候选那一行；比整列还长时在列内折行，不撑出卡片。
+        appearance.vertical = YES;
+        [controller renderCandidates];
+        MSIMECandidateButton *verticalScripted = CandidateButton(panel.contentView, 0);
+        assert(!verticalScripted.itemLayout.translation.below && !verticalScripted.translationBelow);
+        NSString *wideAnnotation = [@"" stringByPaddingToLength:32 withString:@"﷽" startingAtIndex:0];
+        scriptView[@"candidates"] = @[@{@"text": @"汉语", @"script_annotation": wideAnnotation, @"highlighted": @YES}];
+        [controller setValue:[scriptView copy] forKey:@"view"];
+        [controller renderCandidates];
+        MSIMECandidateButton *wideScripted = CandidateButton(panel.contentView, 0);
+        assert([wideScripted.scriptAnnotation isEqual:wideAnnotation]);
+        assert(panel.frame.size.width <= halfScreen + 0.5 && NSMaxX(wideScripted.frame) <= panel.frame.size.width + 0.5);
+        assert(wideScripted.itemLayout.translation.x + wideScripted.itemLayout.translation.width <= NSWidth(wideScripted.frame) + 0.5);
+        assert(NSHeight(wideScripted.frame) >= wideScripted.itemLayout.height - 0.5);
+        bitmap = [wideScripted bitmapImageRepForCachingDisplayInRect:wideScripted.bounds];
+        [wideScripted cacheDisplayInRect:wideScripted.bounds toBitmapImageRep:bitmap];
+
+        // 读屏：高亮的那一行报告自己被选中，别的行和翻页按钮都不报告；每画一页就请求朗读高亮的那一行。AI 座位上的占位行读成它的意思，不读省略号或破折号。
+        appearance.vertical = NO;
+        NSDictionary *accessibleBase = @{@"focused": @YES, @"editing_text": @"ceshi", @"page": @0, @"page_count": @2};
+        NSArray<NSDictionary *> *(^accessibleRows)(NSUInteger, NSString *) = ^NSArray<NSDictionary *> *(NSUInteger highlighted, NSString *placeholder) {
+            NSArray<NSDictionary *> *rows = @[@{@"text": @"测试"}, @{@"text": @"侧室"}, @{@"text": placeholder, @"source": @12}];
+            NSMutableArray<NSDictionary *> *marked = [NSMutableArray array];
+            for (NSUInteger index = 0; index < rows.count; ++index) {
+                NSMutableDictionary *row = [rows[index] mutableCopy];
+                row[@"highlighted"] = @(index == highlighted);
+                [marked addObject:row];
+            }
+            return marked;
+        };
+        void (^renderAccessible)(NSUInteger, NSString *) = ^(NSUInteger highlighted, NSString *placeholder) {
+            NSMutableDictionary *view = [accessibleBase mutableCopy];
+            view[@"candidates"] = accessibleRows(highlighted, placeholder);
+            [controller setValue:[view copy] forKey:@"view"];
+            [controller renderCandidates];
+            for (NSInteger tag = 0; tag < 3; ++tag)
+                assert(CandidateButton(panel.contentView, tag).isAccessibilitySelected == (tag == (NSInteger)highlighted));
+            for (NSInteger tag : {-1, -2})
+                if (MSIMECandidateButton *arrow = CandidateButton(panel.contentView, tag)) assert(!arrow.isAccessibilitySelected);
+        };
+        renderAccessible(0, @"…");
+        assert([[controller valueForKey:@"announcedCandidate"] isEqual:@"1  测试"]);
+        assert([CandidateButton(panel.contentView, 2).accessibilityLabel isEqual:@"3  AI 候选等待中"]);
+        renderAccessible(1, @"…");
+        assert([[controller valueForKey:@"announcedCandidate"] isEqual:@"2  侧室"]);
+        renderAccessible(2, @"…");
+        assert([[controller valueForKey:@"announcedCandidate"] isEqual:@"3  AI 候选等待中"]);
+        renderAccessible(2, @"—");
+        assert([[controller valueForKey:@"announcedCandidate"] isEqual:@"3  AI 候选没有结果"]);
         MSIMERemoveTestPreferenceSuite(defaults, suite);
     }
     return 0;

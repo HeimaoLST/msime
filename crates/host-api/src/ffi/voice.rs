@@ -244,6 +244,39 @@ pub unsafe extern "C" fn msime_client_voice_provider_stream_feedback(
     level_callback: Option<unsafe extern "C" fn(f32, *mut c_void)>,
     context: *mut c_void,
 ) -> *mut c_char {
+    unsafe {
+        msime_client_voice_provider_stream_feedback_cancelled(
+            query,
+            query_length,
+            socket_path,
+            socket_length,
+            callback,
+            status_callback,
+            level_callback,
+            None,
+            context,
+        )
+    }
+}
+
+/// Stream voice text, phases and levels while polling a host-owned cancellation callback.
+///
+/// # Safety
+/// Buffers and callbacks must remain valid for the duration of this synchronous call. Callbacks
+/// must not unwind; the cancellation callback must be safe to call from the stream worker.
+#[cfg(unix)]
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_voice_provider_stream_feedback_cancelled(
+    query: *const u8,
+    query_length: usize,
+    socket_path: *const u8,
+    socket_length: usize,
+    callback: Option<unsafe extern "C" fn(*const u8, usize, bool, *mut c_void)>,
+    status_callback: Option<unsafe extern "C" fn(u8, *mut c_void)>,
+    level_callback: Option<unsafe extern "C" fn(f32, *mut c_void)>,
+    cancellation_callback: Option<unsafe extern "C" fn(*mut c_void) -> bool>,
+    context: *mut c_void,
+) -> *mut c_char {
     response(|| {
         if query.is_null() || socket_path.is_null() || query_length > 16_384 || socket_length > 4096
         {
@@ -290,23 +323,26 @@ pub unsafe extern "C" fn msime_client_voice_provider_stream_feedback(
                 }
             }
         };
-        let value = UnixSocketProvider::new(path).voice_stream_with_options_diagnosed(
-            &query.language,
-            query.generation,
-            &query.options,
-            None,
-            &mut update,
-            if status_callback.is_some() {
-                Some(&mut status)
-            } else {
-                None
-            },
-            if level_callback.is_some() {
-                Some(&mut level)
-            } else {
-                None
-            },
-        );
+        let mut cancellation =
+            || cancellation_callback.is_some_and(|callback| unsafe { callback(context) });
+        let value = UnixSocketProvider::new(path)
+            .voice_stream_with_options_diagnosed_with_callback(
+                &query.language,
+                query.generation,
+                &query.options,
+                cancellation_callback.map(|_| &mut cancellation as &mut dyn FnMut() -> bool),
+                &mut update,
+                if status_callback.is_some() {
+                    Some(&mut status)
+                } else {
+                    None
+                },
+                if level_callback.is_some() {
+                    Some(&mut level)
+                } else {
+                    None
+                },
+            );
         match value {
             Ok(text) => Ok(json!({"text": text})),
             // A named missing dependency is the one provider failure reported as an error, so hosts can show what to install; older callers see it as any other failed call.
@@ -395,6 +431,9 @@ fn local_model_root(root: &str) -> Result<&Path, String> {
     }
     Ok(path)
 }
+
+/// 一次「从本地文件安装」最多带几个文件。目录里的模型最多要两个（压缩包和一个附加文件），留出用户多选几个无关文件的余地。
+const MAX_LOCAL_MODEL_IMPORT_FILES: usize = 16;
 
 /// Cancellation flags of the installs running in this process, by model id.
 fn local_model_installs() -> &'static Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>> {
@@ -526,6 +565,8 @@ pub unsafe extern "C" fn msime_client_voice_local_models(
 ///
 /// Request `{"root": "<absolute dir>", "id": "<catalog id>", "mirror": ""}`; response `{"path": "<root>/<id>"}`. `progress` (may be null) is called on the calling thread with `{"id","stage","downloaded","total"}` JSON, stage one of download, verify, extract, done; the buffer is only valid during the call. `msime_client_voice_local_model_cancel` stops it from any thread, and the call then fails with "local_model_cancelled". One install per id at a time; a second fails with "local_model_install_running". Other failures are "local_model_*" codes (network, http_status, size_mismatch, checksum_mismatch, unsafe_archive, missing_file, io, invalid_mirror, unknown).
 ///
+/// 请求带 `"files": ["<absolute path>", ...]`（至多 16 个）时不联网，改用用户自己下载好的这些文件安装（`msime_client_core::voice::local_models::import`）：按长度和 SHA-256 认文件，不看文件名，`mirror` 不用；进度里原来的 download 阶段报成 import；缺文件时失败为 "local_model_import_missing: <上游文件名>"，所选文件打不开或读出错时为 "local_model_import_unreadable: <说明>"。和下载共用同一个按 id 的登记，所以取消、互斥和删除时的拒绝都一样。
+///
 /// # Safety
 /// `request` must point to `length` readable bytes. `progress` must stay valid for the call, must copy the buffer before returning and must not unwind.
 #[no_mangle]
@@ -542,9 +583,24 @@ pub unsafe extern "C" fn msime_client_voice_local_model_install(
             id: String,
             #[serde(default)]
             mirror: String,
+            #[serde(default)]
+            files: Option<Vec<String>>,
         }
         let request: InstallRequest = local_voice_request(request, length, 16_384)?;
         let root = local_model_root(&request.root)?;
+        let files = match &request.files {
+            Some(files) => {
+                if files.len() > MAX_LOCAL_MODEL_IMPORT_FILES
+                    || files
+                        .iter()
+                        .any(|file| !is_bounded_text(file, 4096) || !Path::new(file).is_absolute())
+                {
+                    return Err("invalid local model import".into());
+                }
+                Some(files.iter().map(PathBuf::from).collect::<Vec<_>>())
+            }
+            None => None,
+        };
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
             let mut installs = local_model_installs()
@@ -578,13 +634,22 @@ pub unsafe extern "C" fn msime_client_voice_local_model_install(
                 }
             }
         };
-        let path = msime_client_core::voice::local_models::install(
-            root,
-            &request.id,
-            &request.mirror,
-            &mut report,
-            &cancel,
-        )
+        let path = match &files {
+            Some(files) => msime_client_core::voice::local_models::import(
+                root,
+                &request.id,
+                files,
+                &mut report,
+                &cancel,
+            ),
+            None => msime_client_core::voice::local_models::install(
+                root,
+                &request.id,
+                &request.mirror,
+                &mut report,
+                &cancel,
+            ),
+        }
         .map_err(|error| error.to_string())?;
         Ok(json!({ "path": path.to_string_lossy() }))
     })
@@ -653,5 +718,42 @@ pub unsafe extern "C" fn msime_client_voice_local_model_remove(
         drop(installs);
         removed.map_err(|error| error.to_string())?;
         Ok(Value::Null)
+    })
+}
+
+/// 偏好库会不会接受本地识别的两个字段，与 `Preferences::validate` 的判断相同：`asr_model_mirror` 按 [`msime_client_core::preferences::valid_model_mirror`]，`asr_model_path` 按 [`msime_client_core::preferences::valid_model_path`]。原生设置窗口边输入边保存，只把这里认可的值写进设置，免得一个半截的镜像地址让整份偏好保存失败。
+///
+/// Request `{"asr_model_mirror"?: string, "asr_model_path"?: string}`（至多 64 KiB）；value 只含请求里给出的键，各为一个布尔值。纯函数，不读任何状态。
+///
+/// # Safety
+/// `request` must point to `length` readable bytes. Null is rejected.
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_voice_model_setting_check(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        #[derive(Deserialize)]
+        struct CheckRequest {
+            #[serde(default)]
+            asr_model_mirror: Option<String>,
+            #[serde(default)]
+            asr_model_path: Option<String>,
+        }
+        let request: CheckRequest = local_voice_request(request, length, 64 * 1024)?;
+        let mut value = serde_json::Map::new();
+        if let Some(mirror) = &request.asr_model_mirror {
+            value.insert(
+                "asr_model_mirror".into(),
+                Value::Bool(msime_client_core::preferences::valid_model_mirror(mirror)),
+            );
+        }
+        if let Some(path) = &request.asr_model_path {
+            value.insert(
+                "asr_model_path".into(),
+                Value::Bool(msime_client_core::preferences::valid_model_path(path)),
+            );
+        }
+        Ok(Value::Object(value))
     })
 }

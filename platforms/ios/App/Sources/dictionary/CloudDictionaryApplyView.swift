@@ -2,7 +2,7 @@ import SwiftUI
 
 struct CloudDictionaryApplyView: View {
   let accountID: String
-  let authorize: () async throws -> String
+  let session: BackendAccountSession
   @State private var state = DictionarySnapshotQueueState()
   @State private var preview: BackendPreparedSnapshot?
   @State private var expectedVersion: String?
@@ -11,6 +11,8 @@ struct CloudDictionaryApplyView: View {
   @State private var message: String?
   @State private var probe = ""
   @State private var pending: Task<Void, Never>?
+  @State private var sessionID: UUID?
+  @State private var request = ViewRequestGeneration()
   private let queue = DictionarySnapshotQueue()
   private let client = BackendAccountClient()
 
@@ -78,7 +80,12 @@ struct CloudDictionaryApplyView: View {
         do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { return }
       }
     }
-    .onDisappear { pending?.cancel(); preview = nil; expectedVersion = nil; probe = "" }
+    .onAppear { request.appear() }
+    .onDisappear {
+      ViewRequestTask.disappear(request: $request, pending: $pending)
+      busy = false
+      preview = nil; expectedVersion = nil; probe = ""
+    }
     .alert("替换本机词库？", isPresented: $confirming) {
       Button("取消", role: .cancel) { }
       Button("确认替换", role: .destructive) { enqueue() }
@@ -99,44 +106,42 @@ struct CloudDictionaryApplyView: View {
     catch { message = error.localizedDescription }
   }
   @MainActor private func download() {
-    guard !busy, let version = state.localVersion else { return }
-    busy = true; message = nil; preview = nil
-    pending = Task {
-      defer { busy = false }
-      do {
-        guard try PersonalDictionaryStore().read().pendingCount == 0 else { throw DictionarySnapshotQueue.Failure.busy }
-        let token = try await authorize()
-        let file = try await client.dictionarySnapshot(token: token)
-        defer { try? FileManager.default.removeItem(at: file.url.deletingLastPathComponent()) }
-        let prepared = try await BackendPreparedSnapshot.prepareDocument(file.url)
-        _ = try await authorize(); try Task.checkCancellation()
-        preview = prepared; expectedVersion = version
-      } catch is CancellationError { }
-      catch { message = error.localizedDescription }
+    guard request.isVisible, !busy, let version = state.localVersion else { return }
+    preview = nil
+    ViewRequestTask.run(request: $request, busy: $busy, message: $message, pending: $pending) { id in
+      guard try PersonalDictionaryStore().read().pendingCount == 0 else { throw DictionarySnapshotQueue.Failure.busy }
+      let identity = try await session.credentials(matchingUserID: accountID, matchingSessionID: sessionID)
+      try request.checkCurrent(id)
+      sessionID = identity.sessionID
+      let file = try await client.dictionarySnapshot(session: session, matchingUserID: accountID,
+                                                     matchingSessionID: identity.sessionID)
+      defer { try? FileManager.default.removeItem(at: file.url.deletingLastPathComponent()) }
+      let prepared = try await BackendPreparedSnapshot.prepareDocument(file.url)
+      try request.checkCurrent(id)
+      preview = prepared; expectedVersion = version
     }
   }
   @MainActor private func enqueue() {
-    guard !busy, let preview, let version = expectedVersion else { return }
-    busy = true; message = nil
-    pending = Task {
-      defer { busy = false }
-      do {
-        let token = try await authorize()
-        let changes = try await client.dictionaryChanges(after: preview.envelope.revision, limit: 1, token: token)
-        _ = try await authorize(); try Task.checkCancellation()
-        guard changes.changes.isEmpty else {
-          self.preview = nil; expectedVersion = nil
-          message = "预览后云词库已变化，请重新下载并确认。"
-          return
-        }
-        let copy = Task.detached(priority: .utility) {
-          try queue.enqueue(file: preview.url, accountID: accountID, cloudRevision: preview.envelope.revision,
-            expectedLocalVersion: version, fileSHA256: preview.fileSHA256)
-        }
-        _ = try await withTaskCancellationHandler(operation: { try await copy.value }, onCancel: { copy.cancel() })
-        self.preview = nil; expectedVersion = nil; refresh()
-      } catch is CancellationError { }
-      catch { message = error.localizedDescription }
+    guard request.isVisible, !busy, let preview, let version = expectedVersion else { return }
+    ViewRequestTask.run(request: $request, busy: $busy, message: $message, pending: $pending) { id in
+      let identity = try await session.credentials(matchingUserID: accountID, matchingSessionID: sessionID)
+      try request.checkCurrent(id)
+      sessionID = identity.sessionID
+      let changes = try await client.dictionaryChanges(after: preview.envelope.revision, limit: 1,
+        session: session, matchingUserID: accountID, matchingSessionID: identity.sessionID)
+      try request.checkCurrent(id)
+      guard changes.changes.isEmpty else {
+        self.preview = nil; expectedVersion = nil
+        message = "预览后云词库已变化，请重新下载并确认。"
+        return
+      }
+      let copy = Task.detached(priority: .utility) {
+        try queue.enqueue(file: preview.url, accountID: accountID, cloudRevision: preview.envelope.revision,
+          expectedLocalVersion: version, fileSHA256: preview.fileSHA256)
+      }
+      _ = try await withTaskCancellationHandler(operation: { try await copy.value }, onCancel: { copy.cancel() })
+      try request.checkCurrent(id)
+      self.preview = nil; expectedVersion = nil; refresh()
     }
   }
 }

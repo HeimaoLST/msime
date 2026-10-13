@@ -33,8 +33,9 @@ NSArray<NSDictionary<NSString *, NSString *> *> *ProviderSpecs()
             @{@"id" : @"openai", @"title" : @"OpenAI", @"endpoint" : @"https://api.openai.com/v1/audio/transcriptions", @"model" : @"whisper-1"},
             @{@"id" : @"siliconflow", @"title" : @"SiliconFlow", @"endpoint" : @"https://api.siliconflow.cn/v1/audio/transcriptions", @"model" : @"FunAudioLLM/SenseVoiceSmall"},
             @{@"id" : @"groq", @"title" : @"Groq", @"endpoint" : @"https://api.groq.com/openai/v1/audio/transcriptions", @"model" : @"whisper-large-v3-turbo"},
-            @{@"id" : @"everyapi", @"title" : @"EveryAPI", @"endpoint" : @"https://api.everyapi.ai/v1/audio/transcriptions", @"model" : @"openai/whisper-large-v3-turbo"},
+            @{@"id" : @"everyapi", @"title" : @"EveryAPI", @"endpoint" : @"https://api.everyapi.ai/v1/audio/transcriptions", @"model" : @"volc.seedasr.sauc.duration"},
             @{@"id" : @"mistral", @"title" : @"Mistral · Voxtral", @"endpoint" : @"https://api.mistral.ai/v1/audio/transcriptions", @"model" : @"voxtral-mini-latest"},
+            @{@"id" : @"bailian", @"title" : @"阿里云百炼 · 千问", @"endpoint" : @"https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", @"model" : @"qwen3-asr-flash"},
             @{@"id" : @"system", @"title" : @"macOS 系统识别", @"endpoint" : @"", @"model" : @""},
             @{@"id" : @"local", @"title" : @"本地模型", @"endpoint" : @"", @"model" : @""}
         ];

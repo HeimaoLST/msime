@@ -1,6 +1,6 @@
 # msime-pack-tool
 
-`msime-pack` checks extension packs (sound, music, command table, effect) by exactly the rules the input method imports them by, for pack authors and for the CI of the community pack repository [metasequoiaime/msime-plugins](https://github.com/metasequoiaime/msime-plugins).
+`msime-pack` checks extension packs of every kind by exactly the rules the input method imports them by, so a pack author can check a pack before importing it or publishing it to the in-app community library.
 
 ```sh
 cargo build -p msime-pack-tool --bin msime-pack
@@ -18,4 +18,12 @@ error <path>: <code>: <reason>
 
 `<code>` is the failure code the settings page decodes (`plugin_invalid`, `plugin_archive`, `plugin_unsupported_source`, `plugin_reserved`, `plugin_io`) and `<reason>` the broken rule in Chinese. The exit status is 0 when every pack is valid, 1 when any is not, and 2 for a command line it does not understand.
 
-The author guide, with every field and limit, is [docs/plugins.md](../../docs/plugins.md); [docs/plugin-template](../../docs/plugin-template) is a minimal sound pack that validates.
+## Running a script plugin (desktop only)
+
+```sh
+target/debug/msime-pack run <pack folder or .zip> --events <fixture.jsonl> [--grant all|<capability>,...]
+```
+
+`run` checks the pack by the `validate` rules, then runs the script plugin against the events in the fixture on the same sandboxed runtime the input method uses (`msime-script-runtime`), and prints one JSON line per event: `seq`, `event`, `status`, `fuel`, `actions` and `log`, plus `init_fuel` when the event instantiated the plugin or tried to (on `init:*` and `deferred` lines it is the fuel the failed or cut-off attempt used). The exit status is 0 when no event failed, 1 when any did or the pack is invalid, and 2 for a command line, `--grant` or fixture it does not understand. The fixture format, the status values and where `run` differs from the input method are in the 「用 msime-pack run 试运行」 part of [docs/plugins.md](../../docs/plugins.md).
+
+The author guide, with every field and limit, is [docs/plugins.md](../../docs/plugins.md); [docs/plugin-template](../../docs/plugin-template) is a minimal sound pack that validates, and [docs/script-plugin-template](../../docs/script-plugin-template) a script plugin with the C header and Rust binding.

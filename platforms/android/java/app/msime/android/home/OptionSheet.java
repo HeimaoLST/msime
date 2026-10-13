@@ -1,13 +1,15 @@
 package app.msime.android.home;
 
+import app.msime.android.ThemeColorPolicy;
+import app.msime.android.LayoutPolicy;
+
 import android.content.Context;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.LinearLayout;
-import android.widget.TextView;
 import androidx.annotation.Nullable;
 import androidx.core.widget.NestedScrollView;
-import app.msime.android.ViewPolicy;
+import app.msime.android.KeyboardGeometry;
 import com.google.android.material.bottomsheet.BottomSheetDialog;
 import java.util.function.Supplier;
 
@@ -27,53 +29,43 @@ public final class OptionSheet {
     public OptionSheet(Context context, CharSequence title, @Nullable CharSequence subtitle) {
         this.context = context;
         dialog = new BottomSheetDialog(context);
-        LinearLayout root = Ui.column(context);
-        root.addView(Ui.sheetDragHandle(context));
+        LinearLayout root = LayoutPolicy.column(context);
+        root.addView(LayoutPolicy.sheetDragHandle(context));
 
-        LinearLayout header = Ui.column(context);
-        ViewPolicy.setCenteredHorizontally(header);
-        Ui.setSheetHeaderPadding(header, context);
-        TextView heading = Ui.sheetHeading(context, title);
-        header.addView(heading);
-        if (subtitle != null && subtitle.length() > 0) {
-            TextView note = Ui.sheetSubtitle(context, subtitle);
-            LinearLayout.LayoutParams params = Ui.wrap();
-            params.topMargin = Ui.dp(context, 2);
-            header.addView(note, params);
-        }
+        LinearLayout header = SheetHeaderView.create(context, title, subtitle);
         root.addView(header);
 
-        options = Ui.column(context);
+        options = LayoutPolicy.column(context);
         NestedScrollView scroll = new NestedScrollView(context);
         scroll.addView(options, new ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         // 选项多到一屏放不下时，这一段滚动，标题和「取消」留在原处。
-        root.addView(scroll, Ui.weightedWidth(1f));
+        root.addView(scroll, LayoutPolicy.weightedWidthParams(1f));
 
         // 「取消」与选项之间一条页面底色的带子，代替设计里分开的两块卡片。
-        root.addView(Ui.sheetSeparator(context));
-        root.addView(SheetOptionView.create(context, "取消", false, false, Ui.accent(context), true,
+        root.addView(LayoutPolicy.colorBand(context, ThemeColorPolicy.page(context), 8));
+        root.addView(SheetOptionView.create(context, "取消", false, false, ThemeColorPolicy.accent(context), true,
             dialog::cancel));
         dialog.setContentView(root);
     }
 
     /** 一个普通选项；`selected` 为真时加粗并打 ✓。 */
     public OptionSheet option(CharSequence label, boolean selected, Runnable action) {
-        addOption(SheetOptionView.create(context, label, selected, false, Ui.accent(context), selected,
+        addOption(SheetOptionView.create(context, label, selected, false, ThemeColorPolicy.accent(context), selected,
             then(action)));
         return this;
     }
 
     /** 一个带下一级的选项：文字后面跟 ›，点了关掉本面板并打开 `next` 给出的面板。 */
     public OptionSheet submenu(CharSequence label, boolean selected, Supplier<OptionSheet> next) {
-        addOption(SheetOptionView.create(context, label, selected, true, Ui.accent(context), selected,
+        addOption(SheetOptionView.create(context, label, selected, true, ThemeColorPolicy.accent(context), selected,
             then(() -> next.get().show())));
         return this;
     }
 
     /** 一个破坏性选项，红色。 */
     public OptionSheet destructive(CharSequence label, Runnable action) {
-        addOption(SheetOptionView.create(context, label, false, false, Ui.danger(context), false,
+        addOption(SheetOptionView.create(context, label, false, false, ThemeColorPolicy.danger(context), false,
             then(action)));
         return this;
     }
@@ -91,7 +83,7 @@ public final class OptionSheet {
 
     private void addOption(View view) {
         if (count > 0) {
-            options.addView(Ui.divider(context, true));
+            options.addView(LayoutPolicy.divider(context, ThemeColorPolicy.hairline(context), true));
         }
         options.addView(view);
         count++;

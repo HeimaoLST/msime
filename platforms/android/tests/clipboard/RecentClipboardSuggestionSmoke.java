@@ -1,8 +1,9 @@
 import app.msime.android.AndroidLocalSettings;
 import app.msime.android.ClipboardCapturePolicy;
+import app.msime.android.ClipboardImagePolicy;
 import app.msime.android.RecentClipboardSuggestion;
 
-/** #5692：工具栏上的「最近复制」显示多久、什么时候不再出现，以及它的预览文字。 */
+/** #5692：工具栏上的「最近复制」显示多久、什么时候不再出现，以及它的预览文字；#6781：复制的是图片时的同一套状态。 */
 public final class RecentClipboardSuggestionSmoke {
     private static void check(boolean condition, String message) {
         if (!condition) throw new AssertionError(message);
@@ -35,6 +36,34 @@ public final class RecentClipboardSuggestionSmoke {
         check("another synthetic copy".equals(recent.text(later + 1)), "a new copy is offered again");
         recent.offer(ClipboardCapturePolicy.identity(later, "   "), "   ", later);
         check("another synthetic copy".equals(recent.text(later + 1)), "blank text is never offered");
+
+        // #6781：复制的是图片时只记身份和类型；文字和图片同一时刻至多一条，后到的替换先到的。
+        long imageAt = later + 20_000;
+        String imageIdentity = ClipboardCapturePolicy.identity(imageAt,
+            ClipboardImagePolicy.identityText("content://synthetic.provider/image/1", "image/png"));
+        recent.offerImage(imageIdentity, "image/png", imageAt);
+        check("image/png".equals(recent.imageMimeType(imageAt + 1)), "a fresh image copy is offered");
+        check(recent.text(imageAt + 1) == null, "an image copy replaces the text copy");
+        check(imageIdentity.equals(recent.identity(imageAt + 1)), "the service can check the image is still on the clipboard");
+        check(recent.remainingMs(imageAt + 1_000) == RecentClipboardSuggestion.WINDOW_MS - 1_000,
+            "an image copy expires like a text copy");
+        check(recent.imageMimeType(imageAt + RecentClipboardSuggestion.WINDOW_MS + 1) == null
+                && recent.identity(imageAt + RecentClipboardSuggestion.WINDOW_MS + 1) == null,
+            "the image goes away after the window");
+        recent.dismiss();
+        check(recent.imageMimeType(imageAt + 1) == null, "a sent or dismissed image is gone");
+        recent.offerImage(imageIdentity, "image/png", imageAt);
+        check(recent.imageMimeType(imageAt + 1) == null, "the same image is not offered again once dismissed");
+        long textAfterImage = imageAt + 5_000;
+        recent.offerImage(ClipboardCapturePolicy.identity(textAfterImage,
+            ClipboardImagePolicy.identityText("content://synthetic.provider/image/2", "image/jpeg")), "image/jpeg", textAfterImage);
+        recent.offer(ClipboardCapturePolicy.identity(textAfterImage + 1, "synthetic text after image"),
+            "synthetic text after image", textAfterImage + 1);
+        check(recent.imageMimeType(textAfterImage + 2) == null
+                && "synthetic text after image".equals(recent.text(textAfterImage + 2)),
+            "a text copy replaces the image copy");
+        recent.offerImage("synthetic-identity", " ", textAfterImage);
+        check("synthetic text after image".equals(recent.text(textAfterImage + 2)), "an image without a type is never offered");
 
         check(RecentClipboardSuggestion.fresh(copiedAt, copiedAt + 59_000), "a minute-old copy is fresh");
         check(!RecentClipboardSuggestion.fresh(copiedAt, copiedAt + 61_000), "an older copy is not");

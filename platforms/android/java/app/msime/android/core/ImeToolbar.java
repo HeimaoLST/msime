@@ -1,5 +1,7 @@
 package app.msime.android;
 
+import app.msime.android.LayoutPolicy;
+
 import android.graphics.Color;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -14,8 +16,10 @@ import android.widget.TextView;
  * 键盘顶部一行（设计 50 dp）：空闲时是工具栏（品牌、表情、常用语、剪贴板、皮肤、输入方式、收起），组词时是候选条（读音 + 候选 chip + 分隔线 + 展开键），调整键盘高度时是内联高度条。状态仍在服务里。
  */
 final class ImeToolbar {
-    /** 组词时读音那一行的设计高度：12 sp 的读音加一点留白；与候选行合计 56 dp，空闲时的工具栏取同一高度，打字时键盘不变高。系统字体放大或厂商字体更高时按读音实际高度加高，见 ReadingRowPolicy。 */
+    /** 组词时读音那一行的最小高度（设计稿按 12 sp 的读音排的 14 dp）。读音字号跟设置「预编辑字号」（`candidate_preedit_font_size`）按比例缩放（ReadingRowPolicy.textSizeSp，默认仍是 12 sp），字号变大、系统字体放大或厂商字体更高时按读音实际高度加上 {@link #READING_GAP_DP} 加高，见 ReadingRowPolicy；空闲时的工具栏取读音行加候选行的同一高度，打字时键盘不变高。 */
     static final int READING_ROW_DP = 14;
+    /** 读音和下面候选行之间固定留的间距（#6107），是读音行的下内边距，计入读音行高度，所以键盘总高随之多出这几 dp。 */
+    static final int READING_GAP_DP = 3;
     /** 候选 chip 那一行的高度：候选字加一行 0.62 倍的释义和选中 chip 的上下留白。设计是 34 dp，实测 34、36 dp 时选中的 chip 和释义都会伸出候选行压到下面的键，所以取 42 dp。 */
     static final int CANDIDATE_LINE_DP = 42;
     /** 多出一行释义时每行加的高度。 */
@@ -43,14 +47,16 @@ final class ImeToolbar {
         this.s = s;
     }
 
-    /** 空闲工具栏：品牌、表情、常用语、剪贴板、皮肤、输入方式、浮动键盘、收起，等分整行宽度；哪些显示由 render 按 `touch_toolbar` 与本地设置决定。数字键面上有算式结果时，品牌键右边多一个结果胶囊（{@link ImeCalculator}）。 */
+    /** 空闲工具栏：品牌、表情、常用语、剪贴板、皮肤、输入方式、浮动键盘、文本编辑、收起，等分整行宽度；哪些显示由 render 按 `touch_toolbar` 与本地设置决定。数字键面上有算式结果时，品牌键右边多一个结果胶囊（{@link ImeCalculator}）。 */
     void installShortcutBar(Button dismissButton) {
         s.shortcutBar.removeAllViews();
         s.dismissShortcutButton = dismissButton;
         Button[] buttons = {s.moreButton, s.emojiShortcutButton, s.phraseShortcutButton,
-            s.clipboardShortcutButton, s.skinButton, s.schemeButton, s.floatingShortcutButton, dismissButton};
+            s.clipboardShortcutButton, s.skinButton, s.schemeButton, s.floatingShortcutButton,
+            s.textEditShortcutButton, dismissButton};
         shortcutButtons = new Button[] {s.emojiShortcutButton, s.phraseShortcutButton,
-            s.clipboardShortcutButton, s.skinButton, s.schemeButton, s.floatingShortcutButton};
+            s.clipboardShortcutButton, s.skinButton, s.schemeButton, s.floatingShortcutButton,
+            s.textEditShortcutButton};
         for (Button button : buttons) {
             if (button.getParent() instanceof LinearLayout parent) parent.removeView(button);
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
@@ -76,9 +82,9 @@ final class ImeToolbar {
 
     /** 读音行（读音、提示、页码、漢、退出本地模式）与工具栏的滚动容器；读音行只在组词或有提示时显示。 */
     void buildCandidateHeader(LinearLayout candidateRegion) {
-        LinearLayout candidateHeader = KeyboardGeometry.row(s);
+        LinearLayout candidateHeader = LayoutPolicy.row(s);
         ViewPolicy.setCenteredVertically(candidateHeader);
-        KeyboardGeometry.setPaddingDp(candidateHeader, s, 10, 0, 6, 0);
+        LayoutPolicy.setPaddingDp(candidateHeader, s, 10, 0, 6, READING_GAP_DP);
         s.candidateHeader = candidateHeader;
         s.preedit = toolbarText(12);
         ViewPolicy.setMaxLinesEllipsized(s.preedit, 1);
@@ -100,26 +106,26 @@ final class ImeToolbar {
             s.imeKeyFeedback.playFeedback(s.preedit);
             s.movePreeditCaret(s.preedit.getOffsetForPosition(preeditTouchX, preeditTouchY));
         });
-        s.preedit.setClickable(false);
-        LinearLayout preeditFrame = KeyboardGeometry.row(s);
+        ViewPolicy.setClickable(s.preedit, false);
+        LinearLayout preeditFrame = LayoutPolicy.row(s);
         ViewPolicy.setStartCenteredVertically(preeditFrame);
         preeditFrame.addView(s.preedit, new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-        candidateHeader.addView(preeditFrame, KeyboardGeometry.weightedWrapParams(1));
+        candidateHeader.addView(preeditFrame, LayoutPolicy.weightedWrapParams(1));
         // 宿主提示通道：正常为空，只有准备中、失败或提示时才有文字。
         s.status = toolbarText(10);
         ViewPolicy.setMaxLinesEllipsized(s.status, 1);
         ViewPolicy.setEndCenteredVertically(s.status);
-        KeyboardGeometry.setPaddingDp(s.status, s, 6, 0, 2, 0);
+        LayoutPolicy.setPaddingDp(s.status, s, 6, 0, 2, 0);
         candidateHeader.addView(s.status, new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         s.candidatePage = toolbarText(10);
         candidateHeader.addView(s.candidatePage, new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-        s.shortcutBar = KeyboardGeometry.row(s);
+        s.shortcutBar = LayoutPolicy.row(s);
         ViewPolicy.setCenteredVertically(s.shortcutBar);
         s.shortcutBar.setContentDescription("键盘快捷栏");
-        KeyboardGeometry.setPaddingDp(s.shortcutBar, s, 2, 0, 2, 0);
+        LayoutPolicy.setPaddingDp(s.shortcutBar, s, 2, 0, 2, 0);
         s.shortcutScroll = new HorizontalScrollView(s);
         s.shortcutScroll.setHorizontalScrollBarEnabled(false);
         s.shortcutScroll.setFillViewport(true);
@@ -144,6 +150,11 @@ final class ImeToolbar {
         s.floatingShortcutButton = s.shortcutButton(s.shortcutBar, "浮动键盘",
             KeyboardShortcutIconPolicy.Icon.FLOATING, s::toggleFloatingKeyboard);
         s.floatingShortcutButton.setContentDescription("浮动键盘");
+        // 文本编辑按钮同样默认不在工具栏上（#6351），点按开关文本编辑面板，与功能面板里的「文本编辑」是同一个面板。
+        s.textEditShortcutButton = s.shortcutButton(s.shortcutBar, "文本编辑",
+            KeyboardShortcutIconPolicy.Icon.TEXT_EDIT,
+            panelToggle(() -> s.textEditPanel, s.imeTextEditPanel::show));
+        s.textEditShortcutButton.setContentDescription("文本编辑");
         s.voiceShortcutButton = s.shortcutButton(s.shortcutBar, "语音",
             KeyboardShortcutIconPolicy.Icon.VOICE, s::showVoiceResult);
         s.voiceShortcutButton.setContentDescription("打开语音结果");
@@ -159,19 +170,19 @@ final class ImeToolbar {
         s.hanjaButton = hanja;
         ViewPolicy.setAllCapsFalse(s.hanjaButton);
         s.hanjaButton.setText("漢");
-        KeyboardGeometry.setKeyTextSize(s.hanjaButton, 12);
+        KeyboardTypographyPolicy.setKeyTextSize(s.hanjaButton, 12);
         s.hanjaButton.setContentDescription("转换为汉字");
         ViewPolicy.hide(s.hanjaButton);
         bindToolbarAction(s.hanjaButton,
             () -> s.command(KoreanInputPolicy.CONVERT_HANJA_COMMAND));
-        KeyboardGeometry.setHorizontalPaddingDp(s.hanjaButton, s, 8);
+        LayoutPolicy.setHorizontalPaddingDp(s.hanjaButton, s, 8);
         ViewPolicy.clearMinimumHeight(s.hanjaButton);
         candidateHeader.addView(s.hanjaButton, new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.MATCH_PARENT));
         s.exitLocalModeButton = new KeyboardBorderlessButton(s);
         ViewPolicy.setAllCapsFalse(s.exitLocalModeButton);
         s.exitLocalModeButton.setText("×");
-        KeyboardGeometry.setKeyTextSize(s.exitLocalModeButton, 14);
+        KeyboardTypographyPolicy.setKeyTextSize(s.exitLocalModeButton, 14);
         s.exitLocalModeButton.setContentDescription("退出本地模式");
         ViewPolicy.clearPadding(s.exitLocalModeButton);
         s.imeStyler.styleButton(s.exitLocalModeButton, true);
@@ -179,7 +190,7 @@ final class ImeToolbar {
         ViewPolicy.clearMinimumHeight(s.exitLocalModeButton);
         candidateHeader.addView(s.exitLocalModeButton, new LinearLayout.LayoutParams(
             s.pixels(32), LinearLayout.LayoutParams.MATCH_PARENT));
-        candidateRegion.addView(candidateHeader, KeyboardGeometry.matchWidthHeightPx(
+        candidateRegion.addView(candidateHeader, LayoutPolicy.matchWidthHeightPx(
             s.pixels(READING_ROW_DP)));
     }
 
@@ -192,7 +203,7 @@ final class ImeToolbar {
 
     private TextView toolbarText(float sizeSp) {
         TextView text = ViewPolicy.textLabel(s, null, sizeSp);
-        KeyboardGeometry.setKeyTextSize(text, sizeSp);
+        KeyboardTypographyPolicy.setKeyTextSize(text, sizeSp);
         ViewPolicy.clearFontPadding(text);
         return text;
     }
@@ -200,9 +211,9 @@ final class ImeToolbar {
 
     /** 候选那一行：候选滚动区占满剩余宽度，右端是分隔线加展开键。 */
     void addCandidateLine(LinearLayout candidateRegion, FrameLayout viewport, int height) {
-        LinearLayout line = KeyboardGeometry.row(s);
+        LinearLayout line = LayoutPolicy.row(s);
         ViewPolicy.setCenteredVertically(line);
-        line.addView(viewport, KeyboardGeometry.weightedMatchParentParams(1));
+        line.addView(viewport, LayoutPolicy.weightedMatchParentParams(1));
         CandidateChevronButton expand = new CandidateChevronButton(s);
         s.expandCandidates = expand;
         expand.setContentDescription("展开候选");
@@ -213,7 +224,7 @@ final class ImeToolbar {
             s.render();
         });
         ViewPolicy.hide(expand);
-        line.addView(expand, KeyboardGeometry.linearParamsPx(
+        line.addView(expand, LayoutPolicy.linearParamsPx(
             s.pixels(CandidateChevronButton.WIDTH_DP), s.pixels(CandidateChevronButton.BUTTON_DP)));
         s.candidateLine = line;
         ViewPolicy.hide(line);
@@ -225,7 +236,7 @@ final class ImeToolbar {
     Runnable panelToggle(java.util.function.Supplier<View> panel, Runnable show) {
         return () -> {
             View current = panel.get();
-            boolean open = current != null && current.getVisibility() == View.VISIBLE;
+            boolean open = ViewPolicy.isVisible(current);
             s.closeToolbarPanels();
             if (!open) show.run();
             s.render();
@@ -238,66 +249,66 @@ final class ImeToolbar {
      * <p>剪贴板入口和收起键是工具栏上那两个按钮的同款：只放文字和 × 时，复制之后的一分钟里要打开剪贴板历史或收起键盘，都得先点 × 把这一条永久关掉。
      */
     void addRecentClipRow(LinearLayout candidateRegion) {
-        LinearLayout row = KeyboardGeometry.row(s);
+        LinearLayout row = LayoutPolicy.row(s);
         ViewPolicy.setCenteredVertically(row);
-        KeyboardGeometry.setPaddingDp(row, s, 2, 4, 2, 4);
+        LayoutPolicy.setPaddingDp(row, s, 2, 4, 2, 4);
         row.setContentDescription("最近复制");
         Button history = s.shortcutButton(row, "剪贴板", KeyboardShortcutIconPolicy.Icon.CLIPBOARD,
             panelToggle(() -> s.clipboardScroll, s.imePanels::showClipboardHistory));
         history.setContentDescription("剪贴板");
-        history.setLayoutParams(KeyboardGeometry.linearParamsPx(s.pixels(44), LinearLayout.LayoutParams.MATCH_PARENT));
+        history.setLayoutParams(LayoutPolicy.linearParamsPx(s.pixels(44), LinearLayout.LayoutParams.MATCH_PARENT));
         recentClipHistoryButton = history;
         KeyboardPressButton paste = ViewPolicy.newPressButton(s);
         paste.setKeyboardRole(KeyboardKeyRole.KEY);
         ViewPolicy.setAllCapsFalse(paste);
         ViewPolicy.setStartCenteredTextSizeSp(paste, 15);
         ViewPolicy.setMaxLinesEllipsized(paste, 1);
-        KeyboardGeometry.setSymmetricPaddingDp(paste, s, 12, 0);
+        LayoutPolicy.setSymmetricPaddingDp(paste, s, 12, 0);
         ViewPolicy.clearMinimumSize(paste);
         ViewPolicy.clearStateListAnimator(paste);
         bindToolbarAction(paste, s::pasteRecentClip);
-        row.addView(paste, KeyboardGeometry.weightedMatchParentParams(1));
+        row.addView(paste, LayoutPolicy.weightedMatchParentParams(1));
         KeyboardPressButton dismiss = ViewPolicy.newPressButton(s);
         dismiss.setKeyboardRole(KeyboardKeyRole.GLYPH);
         ViewPolicy.setAllCapsFalse(dismiss);
         dismiss.setText("×");
-        KeyboardGeometry.setKeyTextSize(dismiss, 18);
+        KeyboardTypographyPolicy.setKeyTextSize(dismiss, 18);
         ViewPolicy.clearMinimumSize(dismiss);
         ViewPolicy.clearPadding(dismiss);
         dismiss.setContentDescription("不再显示这条复制的内容");
         bindToolbarAction(dismiss, s::dismissRecentClip);
-        row.addView(dismiss, KeyboardGeometry.linearParamsPx(s.pixels(44), LinearLayout.LayoutParams.MATCH_PARENT));
+        row.addView(dismiss, LayoutPolicy.linearParamsPx(s.pixels(44), LinearLayout.LayoutParams.MATCH_PARENT));
         // 这一行只在没有工具栏面板开着时显示，收起键在这里只有收起键盘这一个意思。
         Button collapse = s.shortcutButton(row, "收起", KeyboardShortcutIconPolicy.Icon.DISMISS,
             () -> s.requestHideSelf(0));
         collapse.setContentDescription("收起键盘");
-        collapse.setLayoutParams(KeyboardGeometry.linearParamsPx(s.pixels(44), LinearLayout.LayoutParams.MATCH_PARENT));
+        collapse.setLayoutParams(LayoutPolicy.linearParamsPx(s.pixels(44), LinearLayout.LayoutParams.MATCH_PARENT));
         recentClipCollapseButton = collapse;
         ViewPolicy.hide(row);
         s.recentClipRow = row;
         s.recentClipButton = paste;
-        candidateRegion.addView(row, KeyboardGeometry.matchWidthHeightPx(
+        candidateRegion.addView(row, LayoutPolicy.matchWidthHeightPx(
             s.pixels(KeyboardGeometry.DESIGN_TOOLBAR_ROW_HEIGHT_DP)));
     }
 
-    /** 有内容时显示「最近复制」并换上它的预览，没有时藏起来。 */
-    void updateRecentClipRow(String text) {
+    /** 有内容时显示「最近复制」并换上它的预览，没有时藏起来。`image` 为真时这一条是能发到当前输入框的图片（#6781），按钮写「发送复制的图片」，不显示缩略图：键盘在用户点发送之前不打开图片。 */
+    void updateRecentClipRow(String text, boolean image) {
         if (s.recentClipRow == null || s.recentClipButton == null) return;
-        boolean visible = text != null;
+        boolean visible = text != null || image;
         ViewPolicy.setVisible(s.recentClipRow, visible);
         if (!visible) return;
-        String preview = RecentClipboardSuggestion.preview(text);
+        String preview = image ? ClipboardImagePolicy.LABEL : RecentClipboardSuggestion.preview(text);
         if (!preview.contentEquals(s.recentClipButton.getText())) s.recentClipButton.setText(preview);
-        s.recentClipButton.setContentDescription("粘贴最近复制的内容：" + preview);
+        s.recentClipButton.setContentDescription(image ? "发送最近复制的图片" : "粘贴最近复制的内容：" + preview);
     }
 
     /** 内联键盘高度条：调整时替换整行工具栏。 */
     void addInlineHeightBar(LinearLayout candidateRegion) {
         InlineHeightBar bar = new InlineHeightBar(s);
         ViewPolicy.hide(bar);
-        bar.setBasePixels(s.pixels(KeyboardGeometry.HEIGHT_PERCENT_BASE_DP));
+        bar.setBasePixels(s.pixels(KeyboardHeightPolicy.HEIGHT_PERCENT_BASE_DP));
         s.inlineHeightBar = bar;
-        candidateRegion.addView(bar, KeyboardGeometry.matchWidthHeightPx(
+        candidateRegion.addView(bar, LayoutPolicy.matchWidthHeightPx(
             s.pixels(KeyboardGeometry.DESIGN_TOOLBAR_ROW_HEIGHT_DP)));
     }
 
@@ -347,20 +358,16 @@ final class ImeToolbar {
         s.imeBottomBar.style(iconColor, activeIconColor, activeBackgroundColor);
         if (s.preedit != null) {
             ViewPolicy.setTextColor(s.preedit, hintColor);
-            KeyboardGeometry.setKeyTextSize(s.preedit, 12);
+            // 读音的字号只归 ImeStyler.applySkin 管（设置「预编辑字号」按比例缩放，见 ReadingRowPolicy.textSizeSp）。这里原来又写死成 12sp，排在 applySkin 之后，设置怎么改读音都是 12sp（#6107）。
             ViewPolicy.clearBackground(s.preedit);
             ViewPolicy.clearPadding(s.preedit);
-            // 读音的最终字号和内边距在这里才定下来（系统字体放大时 12sp 最多放大到 1.15 倍，厂商字体的度量也各不相同），读音行的高度要按这一份重新量，见 ReadingRowPolicy。
+            // 读音的最终字号和内边距在这里才定下来（字号按系统字体缩放，最多放大到 1.15 倍，厂商字体的度量也各不相同），读音行的高度要按这一份重新量，见 ReadingRowPolicy。
             s.updateCandidateViewportHeight();
         }
     }
 
     /** `amount` 份 `color` 混进 `base`（设计的 `mix(color amount, base)`）。 */
     static int mix(int color, int base, float amount) {
-        float t = KeyboardGeometry.bounded(amount, 0f, 1f);
-        return Color.rgb(
-            Math.round(Color.red(color) * t + Color.red(base) * (1 - t)),
-            Math.round(Color.green(color) * t + Color.green(base) * (1 - t)),
-            Math.round(Color.blue(color) * t + Color.blue(base) * (1 - t)));
+        return ColorPolicy.blendOpaque(base, color, amount);
     }
 }

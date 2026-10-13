@@ -1,5 +1,7 @@
 package app.msime.android.core;
 
+import app.msime.android.NumberPolicy;
+
 import app.msime.android.KeyboardGeometry;
 import app.msime.android.JsonPolicy;
 import org.json.JSONObject;
@@ -17,15 +19,7 @@ public final class InputViewValuePolicy {
     }
 
     public static int integer(JSONObject object, String key, int fallback) {
-        return KeyboardGeometry.strictInt(object == null ? null : object.opt(key), fallback);
-    }
-
-    public static int integer(Object raw, int fallback) {
-        return KeyboardGeometry.strictInt(raw, fallback);
-    }
-
-    public static int schemeValue(Object raw, int fallback) {
-        return KeyboardGeometry.strictInt(raw, fallback);
+        return NumberPolicy.strictInt(object == null ? null : object.opt(key), fallback);
     }
 
     /** Read a JSON boolean without org.json's implicit string coercion. */
@@ -49,7 +43,7 @@ public final class InputViewValuePolicy {
 
     /** Read a JSON string or use the supplied fallback for missing or invalid values. */
     public static String textOr(Object raw, String fallback) {
-        return raw instanceof String ? (String) raw : fallback;
+        return JsonPolicy.strictString(raw, fallback);
     }
 
     public static String textOr(JSONObject object, String key, String fallback) {

@@ -21,7 +21,6 @@ import {
   CloudDictionaryFilesPanel,
   CloudDictionaryPanel,
   EmojiPanel,
-  HandwritingPanel,
   VoicePanel,
   completeOnboardingPreferences,
   usePreferencesSnapshot,
@@ -57,6 +56,7 @@ import {
   type Preferences,
   type PreferencesRecovery,
   type AppNotice,
+  type UpdateCheckResult,
   type SettingsClient,
   type Snapshot,
   type DictionaryClient,
@@ -74,6 +74,7 @@ import {
   type McpFlag,
   type McpInstallOutcome,
   type McpServerStatus,
+  type LocalVoiceModelClient,
   type LocalVoiceModelList,
   type LocalVoiceModelProgress,
   type MentionEntry,
@@ -82,6 +83,8 @@ import {
   type PluginCatalogResult,
   type PluginClient,
   type PluginPackage,
+  type ScriptGrantsResult,
+  type WubiCodeLookup,
   UNBATCHED_DICTIONARY_FILE_BYTES,
   StatusMessage,
 } from "@msime/ui";
@@ -89,13 +92,16 @@ import "@msime/ui/styles.css";
 import { subscribeWindowState } from "./input/window-state";
 import { discoverFontReader } from "./candidate/system-font-client";
 import { DesktopKeyboard, useHostPlatform } from "./input/desktop-keyboard";
+import { DesktopHandwriting } from "./input/desktop-handwriting";
 import { DesktopCloudDictionary } from "./dictionary/desktop-cloud-dictionary";
 import { testDesktopApiCredential } from "./account/credential-test-client";
 import { cloudDictionaryCapabilities, isMobileHost } from "./input/mobile-host-capabilities";
 import { createMobileHostServices } from "./core/mobile-host-services";
 import {
   createDesktopCandidateSkinCommunity,
+  createDesktopCommunityResources,
   createDesktopPluginCommunity,
+  createDesktopSettingsSync,
 } from "./core/desktop-host-services";
 
 const dictionary: DictionaryClient = {
@@ -135,6 +141,9 @@ const dictionary: DictionaryClient = {
     invoke("dictionary_request", { action: { operation: "dismiss_failure", request_id } }).then(
       () => undefined,
     ),
+  // 只读码表。Android 的 `dictionary_request` 把它交给个人词库入口，那里直接回答、不进队列；手机端经 `mobileDictionary` 一并带上。
+  wubiCodes: (text: string) =>
+    invoke<WubiCodeLookup>("dictionary_request", { action: { operation: "wubi_codes", text } }),
 };
 const mobileDictionary: DictionaryClient = {
   ...dictionary,
@@ -183,6 +192,11 @@ const plugins: PluginClient = {
   remove: (kind, id) => invoke<void>("remove_plugin_pack", { kind, id }),
   loadMentions: () => invoke<MentionEntry[]>("load_plugin_mentions"),
   saveMentions: (entries) => invoke<void>("save_plugin_mentions", { entries }),
+  // 脚本插件的授权：设置应用经 client-core 的 `script_grants` 写入。页面只在宿主声明了 `script_plugins` 时调用。
+  scriptGrants: () => invoke<ScriptGrantsResult>("script_grants"),
+  setScriptGrant: (id, hash, enabled, granted) =>
+    invoke<ScriptGrantsResult>("set_script_grant", { id, hash, enabled, granted }),
+  reorderScripts: (ids) => invoke<ScriptGrantsResult>("reorder_scripts", { ids }),
 };
 const typingStatistics: TypingStatisticsClient = {
   load: () => invoke("load_typing_statistics"),
@@ -225,12 +239,27 @@ const resourcePacks: ResourcePackClient = {
 const macosInstallClient: MacosInstallClient = {
   install: () => invoke("run_first_input_source_install"),
 };
+const localVoiceModels: LocalVoiceModelClient = {
+  list: () => invoke<LocalVoiceModelList>("voice_local_models"),
+  install: (id) => invoke<string>("voice_local_model_install", { id }),
+  cancel: (id) => invoke<boolean>("voice_local_model_cancel", { id }),
+  remove: (id) => invoke<void>("voice_local_model_remove", { id }),
+  onProgress: (listener) =>
+    listen<LocalVoiceModelProgress>("voice-local-model-progress", (event) =>
+      listener(event.payload),
+    ),
+};
+
 const client: SettingsClient = {
   readAppVersion: getVersion,
   resolveFontFamilies: (names) => invoke("resolve_font_families", { names }),
   scanSkinCatalog: () => invoke("scan_skin_catalog"),
   listHelpcodeSchemas: () => invoke<CustomHelpcodeSchema[]>("list_helpcode_schemas"),
   resolveTheme: (request) => invoke("resolve_theme", { request }),
+  // 两个都是无副作用的计算（host-api 不留存的校验和内置方案的表），桌面宿主都注册了，输入页据此提供自定义双拼的编辑、导入和导出。
+  validateShuangpinCustomProfile: (profile) =>
+    invoke("validate_shuangpin_custom_profile", { profile }),
+  builtinShuangpinTable: (name) => invoke("builtin_shuangpin_table", { name }),
   readSkinToolbarCss: (id, relative) =>
     relative
       ? invoke("read_skin_stylesheet", { id, relative })
@@ -253,12 +282,10 @@ const client: SettingsClient = {
     list: () => invoke<AppNotice[]>("notices_list"),
     dismiss: (id) => invoke<void>("notice_dismiss", { id }),
   },
+  // 与其他宿主一样，发布列表由 Rust（`msime_client_core::update_check`）读取和比较。
+  checkUpdate: (request) => invoke<UpdateCheckResult>("update_check", request),
   openThirdPartyLicenses: () => invoke("open_third_party_licenses"),
   loadMacosShuangpinKeymap: () => invoke<boolean>("load_macos_shuangpin_keymap"),
-  saveMacosShuangpinKeymap: (enabled) => invoke("save_macos_shuangpin_keymap", { enabled }),
-  loadMacosWubiAutoCommitUnique: () => invoke<boolean>("load_macos_wubi_auto_commit_unique"),
-  saveMacosWubiAutoCommitUnique: (enabled) =>
-    invoke("save_macos_wubi_auto_commit_unique", { enabled }),
   copyText: (text) => invoke("copy_text", { text }),
   openScreenKeyboard: () => invoke("open_keyboard_panel"),
   openHandwriting: () => invoke("open_handwriting_panel"),
@@ -283,16 +310,9 @@ const client: SettingsClient = {
     move: () => invoke("move_data_directory"),
   },
   pickVoiceModelPath: () => invoke("pick_voice_model_path"),
-  localVoiceModels: {
-    list: () => invoke<LocalVoiceModelList>("voice_local_models"),
-    install: (id) => invoke<string>("voice_local_model_install", { id }),
-    cancel: (id) => invoke<boolean>("voice_local_model_cancel", { id }),
-    remove: (id) => invoke<void>("voice_local_model_remove", { id }),
-    onProgress: (listener) =>
-      listen<LocalVoiceModelProgress>("voice-local-model-progress", (event) =>
-        listener(event.payload),
-      ),
-  },
+  pickApplication: () => invoke("pick_application"),
+  applicationNames: (ids) => invoke("application_names", { ids }),
+  localVoiceModels,
   windowControl: async (action) => {
     const window = getCurrentWindow();
     if (action === "minimize") return window.minimize();
@@ -440,10 +460,10 @@ const desktopHandwritingClient: PanelClient = {
   resourcePacks,
   modelMirror: savedModelMirror(client),
 };
-function DesktopHandwriting({ theme }: { theme: "dark" | "light" }) {
+function DesktopHandwritingSurface({ theme }: { theme: "dark" | "light" }) {
   const platform = useHostPlatform(client.host);
   return (
-    <HandwritingPanel
+    <DesktopHandwriting
       client={
         platform === "macos" || platform === "windows" || platform === "linux"
           ? desktopHandwritingClient
@@ -662,10 +682,8 @@ function DesktopSettings() {
             ...client,
             host,
             dictionary: isMobileHost(host.platform) ? mobileDictionary : dictionary,
-            // Windows and macOS resolve the offline gloss in their native
-            // candidate controllers, so the setting is real on both hosts.
-            // Only macOS draws readings after the gloss so far; other hosts keep the value untouched.
-            candidatePronunciation: host.platform === "macos",
+            // Windows 和 macOS 在各自的原生候选控制器里查离线释义，所以释义设置在两边都生效。读音也是这两个宿主画在释义后面（日文罗马音在 macOS 来自系统分词器，在 Windows 来自系统的微软日语输入法）；其他宿主不动这个值。
+            candidatePronunciation: host.platform === "macos" || host.platform === "windows",
             candidateEnglishGloss:
               host.platform === "linux" ||
               host.platform === "android" ||
@@ -719,6 +737,18 @@ function DesktopSettings() {
                     ),
                 }
               : {}),
+            // 「从文件导入」要用宿主的打开对话框选文件，只有三个桌面宿主注册了对话框插件。
+            ...(host.platform === "macos" ||
+            host.platform === "linux" ||
+            host.platform === "windows"
+              ? {
+                  localVoiceModels: {
+                    ...localVoiceModels,
+                    import: (id: string) =>
+                      invoke<string | null>("voice_local_model_import", { id }),
+                  },
+                }
+              : {}),
             // msime-mcp is packaged beside the settings app on the three desktop hosts only.
             ...(host.platform === "macos" ||
             host.platform === "linux" ||
@@ -765,6 +795,8 @@ function DesktopSettings() {
               : {}),
             ...(host.platform === "linux"
               ? {
+                  // 云剪贴板可以改走自建中继：Linux 的设置页和云剪贴板面板都在这个 Tauri 进程里，按偏好选路（`cloud_clipboard_request`）。macOS 的输入法菜单在没登录时仍退回原生窗口、Windows 的设置窗口是原生 WinUI，这两处接上之前不显示这一组。
+                  cloudClipboardRelay: true,
                   customTouchKeyboardSkins: true,
                   customSkinLibrary: {
                     load: () => invoke("load_custom_skin_library"),
@@ -853,9 +885,17 @@ function DesktopSettings() {
                     logout: (all: boolean) => invoke("account_logout", { all }),
                     deleteAccount: () => invoke("account_delete"),
                     clearExpired: () => invoke("account_forget"),
+                    // 设置同步只在 Windows 接到账号会话上；macOS 由输入法自己的账号窗口同步它的原生设置，Linux 还没有接入。
+                    ...(host.platform === "windows"
+                      ? { settingsSync: createDesktopSettingsSync(invoke) }
+                      : {}),
                   } satisfies AccountClient,
                   communityCandidateSkins: createDesktopCandidateSkinCommunity(invoke),
                   communityPlugins: createDesktopPluginCommunity(invoke),
+                  // 社区词包与回复模板同理，只在 Windows 的设置应用里提供。
+                  ...(host.platform === "windows"
+                    ? { communityResources: createDesktopCommunityResources(invoke) }
+                    : {}),
                 }
               : {}),
             ...(host.platform === "ios"
@@ -973,7 +1013,10 @@ function DesktopSettings() {
     );
   const cloudDictionary = {
     ...panelClients.cloudDictionary,
-    ...cloudDictionaryCapabilities(settingsClient.host?.platform),
+    ...cloudDictionaryCapabilities(
+      settingsClient.host?.platform,
+      panelClients.cloudDictionary.request,
+    ),
     ...(isMobileHost(settingsClient.host?.platform)
       ? {
           downloadToLocal: (entry: CloudDictionaryEntry) =>
@@ -1089,7 +1132,10 @@ function DesktopCloudDictionarySurface() {
     };
   }, []);
   if (host === undefined) return <StatusMessage role="status">正在连接云词库…</StatusMessage>;
-  const capabilities = cloudDictionaryCapabilities(host?.platform);
+  const capabilities = cloudDictionaryCapabilities(
+    host?.platform,
+    panelClients.cloudDictionary.request,
+  );
   const cloudDictionary = {
     ...panelClients.cloudDictionary,
     ...capabilities,
@@ -1155,7 +1201,7 @@ const content =
     <DesktopKeyboard client={panelClients.keyboard} preferences={client} />
   ) : panel === "handwriting" ? (
     <DesktopPanelTheme preferences={client} surface="handwriting">
-      {(theme) => <DesktopHandwriting theme={theme} />}
+      {(theme) => <DesktopHandwritingSurface theme={theme} />}
     </DesktopPanelTheme>
   ) : panel === "voice" ? (
     <DesktopPanelTheme preferences={client} surface="voice">

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { ControlledSelect } from "../core/controlled-select";
 
 export interface CloudDictionarySelectFieldProps {
   label: ReactNode;
@@ -25,15 +26,15 @@ export function CloudDictionarySelectField({
   return (
     <label className={labelClassName}>
       {label}
-      <select
+      <ControlledSelect
         className={selectClassName}
         aria-label={ariaLabel}
         value={value}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={onChange}
         disabled={disabled}
       >
         {children}
-      </select>
+      </ControlledSelect>
     </label>
   );
 }

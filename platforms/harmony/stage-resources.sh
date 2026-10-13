@@ -18,13 +18,14 @@ staged="$repo_root/platforms/harmony/entry/src/main/resources/resfile/engine"
 rm -rf "$staged"
 mkdir -p "$staged"
 while IFS= read -r artifact; do cp "$resource_dir/$artifact" "$staged/"; done <<< "$artifacts"
-# Helpcode tables are not part of the dictionary release; the repository carries them in resources/helpcodes, and the Engine reads them from helpcodes/ under the resource directory (crates/engine/src/assets.rs names the six files). The shared verification lets a real helpcodes/ directory through, and StagedResources copies it out with the rest.
+# 辅助码表不在词库发布里，由仓库自带在 resources/helpcodes，Engine 从资源目录下的 helpcodes/ 读它们（crates/engine/src/assets.rs 列出七个文件）。共享校验放行真实的 helpcodes/ 目录，StagedResources 把它和其余文件一起复制出去。
 mkdir -p "$staged/helpcodes"
-for table in helpcode.txt zrm_helpcode_big_unique.txt shouyou2_0_helpcode.txt shouyouplus_helpcode.txt xiaohe_helpcode.txt jiajia_helpcode.txt; do
+for table in helpcode.txt zrm_helpcode_big_unique.txt shouyou2_0_helpcode.txt shouyouplus_helpcode.txt xiaohe_helpcode.txt jiajia_helpcode.txt wubi86_helpcode.txt; do
   cp "resources/helpcodes/$table" "$staged/helpcodes/$table"
 done
 cp resources/helpcodes/ENGINE-NOTICE.md "$staged/helpcodes/NOTICE.md"
 cp resources/helpcodes/NOTICE.md "$staged/helpcodes/NOTICE-jiajia.md"
+cp resources/helpcodes/NOTICE-wubi86.md "$staged/helpcodes/NOTICE-wubi86.md"
 cargo run --quiet -p msime-client-core --example verify_resources --locked -- "$staged" >/dev/null
 echo "Staged for the HAP: $staged"
 
@@ -36,6 +37,10 @@ cp resources/licenses/libhangul-hanja-BSD-3-Clause.txt "$licenses_staged/"
 cp resources/licenses/rime-cantonese-CC-BY-4.0.txt resources/licenses/libchewing-data-LGPL-2.1.txt resources/licenses/rime-stroke-LGPL-3.0.txt "$licenses_staged/"
 # 越南文和藏文方案编入原生库的 vi crate（MIT）和 ewts crate（MIT OR Apache-2.0，按 MIT 使用）的许可证全文。
 cp resources/licenses/vi-MIT.txt resources/licenses/ewts-MIT.txt "$licenses_staged/"
+# 拆字反查的部件拼音表由 kfcd/chaizi《漢語拆字字典》（CC BY 3.0）改编后编进原生库，第 4(b) 条要求随改编作品署名并说明改动，许可证文件里写着这些和法律文本全文。
+cp resources/licenses/kfcd-chaizi-CC-BY-3.0.txt "$licenses_staged/"
+# 同一张拆字表里每个字的读音、名次和繁体字形取自 Unicode 汉字数据库（Unihan 17.0.0），Unicode License V3 要求随数据附上它的版权与许可声明。
+cp resources/licenses/Unicode-License-V3.txt "$licenses_staged/"
 echo "Licences staged for the HAP: $licenses_staged"
 
 # The built-in sound packs, synthesized by scripts/generate_sound_packs.py. Beside the engine directory rather than in it, which the lock check above would reject; resfile extracts them to context.resourceDir/sound-packs, the built-in pack root the keyboard names to client-core.

@@ -57,7 +57,9 @@ pub unsafe extern "C" fn msime_client_custom_translation_plan(
                 },
             )?
         };
-        if request.candidates.len() > 9
+        // 一次翻译一页候选，上限与每页候选数相同。
+        if request.candidates.len()
+            > usize::from(msime_client_core::preferences::MAX_CANDIDATE_PAGE_SIZE)
             || request.target_language == "zh"
             || !msime_client_core::translation::is_supported_translation_language(
                 &request.target_language,
@@ -222,7 +224,11 @@ pub unsafe extern "C" fn msime_client_parse_tencent_translation_response(
     expected: usize,
 ) -> *mut c_char {
     response(|| {
-        if body.is_null() || length > 1048576 || !(1..=9).contains(&expected) {
+        if body.is_null()
+            || length > 1048576
+            || !(1..=usize::from(msime_client_core::preferences::MAX_CANDIDATE_PAGE_SIZE))
+                .contains(&expected)
+        {
             return Err("invalid Tencent response buffer".into());
         }
         Ok(tencent_translation::parse(
@@ -274,7 +280,7 @@ pub unsafe extern "C" fn msime_client_format_translation_gloss(
     })
 }
 
-/// Build a DeepLX-compatible request for a host-owned HTTP transport. No I/O.
+/// 为宿主自己的 HTTP 传输构造自定义翻译请求：DeepL 官方 API 地址用 DeepL 的格式，其他地址用 DeepLX 兼容格式。不做 I/O。
 /// # Safety
 /// `request` must reference `length` readable bytes for this call.
 #[no_mangle]
@@ -325,16 +331,25 @@ pub unsafe extern "C" fn msime_client_custom_translation_http_request(
         {
             return Err("invalid custom translation parameters".into());
         }
-        let mut headers = json!({"Content-Type": "application/json"});
-        if !config.api_key.is_empty() {
-            headers["Authorization"] = Value::String(format!("Bearer {}", config.api_key));
-        }
+        // DeepL 官方地址与 DeepLX 兼容服务的请求格式不同，由共享构造函数决定；设置页的连接测试用的也是它。
+        let request = msime_client_core::translation::custom_translation_request(
+            &config.endpoint,
+            &config.api_key,
+            &text,
+            &source_language,
+            &target_language,
+        )
+        .ok_or("invalid custom translation parameters")?;
+        let headers: serde_json::Map<String, Value> = request
+            .headers
+            .into_iter()
+            .map(|(name, value)| (name, Value::String(value)))
+            .collect();
         Ok(json!({
-            "url": config.endpoint,
+            "url": request.url,
             "method": "POST",
             "headers": headers,
-            "body": {"text": text, "source_lang": source_language.to_ascii_uppercase(),
-                "target_lang": target_language.to_ascii_uppercase()},
+            "body": request.body,
             "timeout_ms": 2500,
             "max_response_bytes": 1048576,
         }))
@@ -394,8 +409,8 @@ pub unsafe extern "C" fn msime_client_niutrans_translation_reply_failed(
     niutrans_translation::failed(unsafe { std::slice::from_raw_parts(body, length) })
 }
 
-/// Apply asynchronous candidate translations for an exact candidate generation.
-/// The buffer is a JSON array of `{text, translation}` objects and is not retained.
+/// 同代次非空候选释义合并，空数组主动清空；宿主异步无结果时跳过调用。
+/// 缓冲区为 `{text, translation}` 数组，本接口不保留它。
 ///
 /// # Safety
 /// `translations` must point to a readable UTF-8 buffer of `length` bytes and
@@ -428,11 +443,14 @@ pub unsafe extern "C" fn msime_client_apply_translations(
             return Err("translation entries exceed limits".into());
         }
         with_session(handle, |session| {
+            let pending = session.lifecycle_begin(lifecycle::Call::SideChannel);
             let applied = session.runtime.apply_translations(
                 generation,
                 values.into_iter().map(|item| (item.text, item.translation)),
             );
-            Ok(json!({"applied": applied, "view": session.runtime.view()}))
+            let view = session.runtime.view();
+            session.lifecycle_view(pending, &view);
+            Ok(json!({"applied": applied, "view": view}))
         })
     })
 }
@@ -472,7 +490,8 @@ pub unsafe extern "C" fn msime_client_translation_gloss_save(
         {
             return Err("user data requires an existing absolute directory".into());
         }
-        if request.translations.len() > 9
+        if request.translations.len()
+            > usize::from(msime_client_core::preferences::MAX_CANDIDATE_PAGE_SIZE)
             || request
                 .translations
                 .iter()
@@ -824,15 +843,19 @@ pub unsafe extern "C" fn msime_client_gloss_breakdown_request(
             .into_iter()
             .filter(|text| crate::word_breakdown::eligible(text))
             .collect::<Vec<_>>();
-        let known = crate::word_breakdown::known_pieces(std::path::Path::new(resources), &texts);
-        let breakdowns = texts
-            .iter()
-            .filter_map(|text| {
-                let pieces = crate::word_breakdown::segment(text, &known);
-                crate::word_breakdown::render(&pieces)
-                    .map(|breakdown| json!({"text": text, "breakdown": breakdown}))
-            })
-            .collect::<Vec<_>>();
+        let breakdowns =
+            crate::word_breakdown::known_pieces(std::path::Path::new(resources), &texts)
+                .map(|known| {
+                    texts
+                        .iter()
+                        .filter_map(|text| {
+                            let pieces = crate::word_breakdown::segment(text, &known);
+                            crate::word_breakdown::render(&pieces)
+                                .map(|breakdown| json!({"text": text, "breakdown": breakdown}))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
         Ok(json!({"generation": request.generation, "breakdowns": breakdowns}))
     })
 }

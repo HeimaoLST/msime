@@ -10,9 +10,11 @@ fn import_engine_options() -> msime_engine::host::EngineOptions {
         user_data: String::new(),
         cache: String::new(),
         dictionaries: String::new(),
+        first_page_rows: 6,
         scheme: 0,
         enabled_schemes: msime_engine::SchemeSet::ALL,
         shuangpin_profile: 0,
+        shuangpin_custom_profile: None,
         shuangpin_preedit_uses_raw: true,
         single_character_only: false,
         learning: false,
@@ -34,6 +36,7 @@ fn import_engine_options() -> msime_engine::host::EngineOptions {
         english_minimum_prefix: 2,
         mixed_emoji: false,
         mixed_kaomoji: false,
+        mixed_japanese: false,
         local_unicode: true,
         local_date_time: true,
         local_quick_phrase: true,
@@ -45,6 +48,9 @@ fn import_engine_options() -> msime_engine::host::EngineOptions {
         local_expression: false,
         local_command: false,
         local_mention: false,
+        local_chaizi: false,
+        local_shift_letter_entry: true,
+        chaizi_traditional_output: false,
         command_table: Vec::new(),
         mention_entries: Vec::new(),
         quick_phrase_table: Vec::new(),
@@ -493,6 +499,58 @@ fn a_lookup_names_where_each_candidate_came_from_and_leaves_the_user_data_alone(
     assert!(lookup_candidates(&options, None, "ceshi", 0).is_err());
     assert!(lookup_candidates(&options, None, "ceshi", MAX_LOOKUP_CANDIDATES + 1).is_err());
     assert_eq!(tree(&directory.path().join("user")), before);
+}
+
+/// 日文混输开着时，查询会话照用户的设置混进日文转换，来源报成 `Japanese`；关着时没有这一行。
+#[test]
+#[cfg(not(target_os = "android"))]
+fn a_lookup_keeps_the_users_japanese_mixing() {
+    let directory = tempfile::tempdir().unwrap();
+    let plain = word_fixture(
+        directory.path(),
+        "INSERT INTO tbl_2_c VALUES('ce''shi','cs','测试',100);",
+    );
+    std::fs::write(
+        directory.path().join("resources/msime-japanese.dat"),
+        crate::tests::single_lemma_japanese_model("おはよう", "おはよう", 500),
+    )
+    .unwrap();
+    let root = directory.path().to_str().unwrap();
+    let mut preferences = msime_client_core::preferences::Preferences::default();
+    preferences.mixed_input.japanese = true;
+    let mixing = DictionaryOptions::from_host_document(json!({
+        "api_version": 1,
+        "resources": format!("{root}/resources"),
+        "user_data": format!("{root}/user"),
+        "cache": format!("{root}/cache"),
+        "dictionaries": format!("{root}/dictionaries"),
+        "preferences": preferences,
+        "preferences_directory": root,
+    }))
+    .unwrap();
+
+    let candidates = lookup_candidates(&mixing, None, "ohayou", 10).unwrap();
+    assert_eq!(
+        candidates.first(),
+        Some(&LookupCandidate {
+            text: "おはよう".into(),
+            code: "ohayou".into(),
+            origin: CandidateOrigin::Japanese,
+            weight: None,
+        }),
+        "{candidates:?}"
+    );
+    assert_eq!(
+        candidates
+            .iter()
+            .filter(|candidate| candidate.origin == CandidateOrigin::Japanese)
+            .count(),
+        1
+    );
+    assert!(lookup_candidates(&plain, None, "ohayou", 10)
+        .unwrap()
+        .iter()
+        .all(|candidate| candidate.origin != CandidateOrigin::Japanese));
 }
 
 /// 五笔四码唯一的词在第四键就自动上屏了，查询仍要把它报告成这串编码的唯一候选，而不是空列表。
@@ -1056,4 +1114,209 @@ fn an_unusable_envelope_is_still_rejected_outright() {
     assert!(parse_import(&Kind::Pinyin, "standard", "# only comments\n", None).is_err());
     // Every row unusable means nothing to import.
     assert!(parse_import(&Kind::Wubi, "windows", "abcde\t你好", None).is_err());
+}
+
+/// 五笔查码的请求文档：数据根里的工作词库带 86 和 98 两张五笔表。
+fn wubi_codes_request(directory: &Path, text: &str) -> Vec<u8> {
+    let root = directory.to_str().unwrap();
+    for name in ["user", "resources", "dictionaries"] {
+        std::fs::create_dir_all(directory.join(name)).unwrap();
+    }
+    for name in ["resources", "dictionaries"] {
+        let path = directory.join(name).join("msime-pinyin.db");
+        if path.exists() {
+            continue;
+        }
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);
+                 INSERT INTO wubi86 VALUES('wq','你',200),('wqiy','你',100),('vbg','好',100),('wqvb','你好',300);
+                 CREATE TABLE wubi98(key TEXT,value TEXT,weight INTEGER);
+                 INSERT INTO wubi98 VALUES('wqiy','你',100),('vbg','好',100);",
+            )
+            .unwrap();
+    }
+    serde_json::to_vec(&json!({
+        "options": {
+            "api_version": 1,
+            "resources": format!("{root}/resources"),
+            "user_data": format!("{root}/user"),
+            "cache": format!("{root}/cache"),
+            "dictionaries": format!("{root}/dictionaries"),
+            "preferences": msime_client_core::preferences::Preferences::default(),
+            "preferences_directory": root,
+        },
+        "action": { "operation": "wubi_codes", "text": text },
+    }))
+    .unwrap()
+}
+
+#[test]
+fn wubi_codes_list_each_character_in_both_profiles_and_the_whole_word() {
+    let directory = tempfile::tempdir().unwrap();
+    let request = wubi_codes_request(directory.path(), "你好");
+    let before = tree(&directory.path().join("user"));
+    let expected = json!({
+        "phrase": { "text": "你好", "wubi86": ["wqvb"], "wubi98": [] },
+        "characters": [
+            { "text": "你", "wubi86": ["wq", "wqiy"], "wubi98": ["wqiy"] },
+            { "text": "好", "wubi86": ["vbg"], "wubi98": ["vbg"] },
+        ],
+        "truncated": false,
+    });
+    assert_eq!(dictionary_request_json(&request).unwrap(), expected);
+    // Android 的设置页把所有词库操作都送进个人词库队列的入口；查码在那里得到同一个回答，而且不排队。
+    assert_eq!(
+        personal_dictionary_request_json(&request).unwrap(),
+        expected
+    );
+    assert!(!directory.path().join("PersonalDictionary").exists());
+    assert_eq!(tree(&directory.path().join("user")), before);
+}
+
+#[test]
+fn wubi_codes_refuse_oversized_text_and_skip_what_is_not_han() {
+    let directory = tempfile::tempdir().unwrap();
+    let reply = dictionary_request_json(&wubi_codes_request(directory.path(), "a，你 b")).unwrap();
+    assert_eq!(reply["phrase"], serde_json::Value::Null);
+    assert_eq!(reply["characters"].as_array().unwrap().len(), 1);
+    assert_eq!(reply["characters"][0]["text"], "你");
+
+    let oversized = "你".repeat(MAX_WUBI_LOOKUP_TEXT / 3 + 1);
+    let request = wubi_codes_request(directory.path(), &oversized);
+    assert_eq!(
+        dictionary_request_json(&request).unwrap_err(),
+        "invalid wubi lookup"
+    );
+    assert_eq!(
+        personal_dictionary_request_json(&request).unwrap_err(),
+        "invalid wubi lookup"
+    );
+}
+
+#[test]
+fn journal_export_pages_only_the_requested_kind() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    for name in ["user", "resources", "dictionaries", "cache"] {
+        std::fs::create_dir(root.join(name)).unwrap();
+    }
+    let mut connection = rusqlite::Connection::open(root.join("user/msime_user.db")).unwrap();
+    connection.execute_batch(
+        "CREATE TABLE user_dictionary_operations(dictionary TEXT NOT NULL,key TEXT NOT NULL,value TEXT NOT NULL,operation TEXT NOT NULL,weight INTEGER NOT NULL,user_inserted INTEGER NOT NULL,PRIMARY KEY(dictionary,key,value));
+         INSERT INTO user_dictionary_operations VALUES
+         ('english','alpha','first','upsert',11,1),
+         ('english','alpha','second','upsert',12,1),
+         ('english','beta','third','upsert',13,1);",
+    ).unwrap();
+    let transaction = connection.transaction().unwrap();
+    for index in 0..1100 {
+        transaction
+            .execute(
+                "INSERT INTO user_dictionary_operations VALUES('quick',?1,?2,'upsert',1,1)",
+                rusqlite::params![format!("q{index:04}"), format!("合成短语{index:04}")],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+    drop(connection);
+    let options = json!({
+        "api_version": 1,
+        "resources": root.join("resources"),
+        "user_data": root.join("user"),
+        "cache": root.join("cache"),
+        "dictionaries": root.join("dictionaries"),
+        "preferences": msime_client_core::preferences::Preferences::default(),
+    });
+    let export = |kind: &str, format: &str, offset: usize, limit: usize| {
+        dictionary_request_json(&serde_json::to_vec(&json!({
+            "options": options,
+            "action": {"operation": "export", "kind": kind, "format": format, "offset": offset, "limit": limit},
+        })).unwrap())
+    };
+    assert_eq!(
+        export("english", "standard", 0, 1).unwrap(),
+        json!({"text": "first\talpha\t11\n", "has_more": true})
+    );
+    assert_eq!(
+        export("english", "windows", 1, 1).unwrap(),
+        json!({"text": "alpha\tsecond\t12\n", "has_more": true})
+    );
+    assert_eq!(
+        export("english", "standard", 2, 1).unwrap(),
+        json!({"text": "third\tbeta\t13\n", "has_more": false})
+    );
+    assert_eq!(
+        export("english", "standard", 3, 1).unwrap(),
+        json!({"text": "", "has_more": false})
+    );
+    assert_eq!(
+        export("quick_phrase", "windows", 1099, 1).unwrap(),
+        json!({"text": "q1099\t合成短语1099\t1\n", "has_more": false})
+    );
+    assert_eq!(
+        export("wubi98", "standard", 0, 1000).unwrap(),
+        json!({"text": "", "has_more": false})
+    );
+    for (format, offset, limit) in [
+        ("bad", 0, 1),
+        ("standard", 1_000_001, 1),
+        ("standard", 0, 0),
+        ("standard", 0, 1001),
+    ] {
+        assert_eq!(
+            export("english", format, offset, limit).unwrap_err(),
+            "invalid dictionary export"
+        );
+    }
+}
+
+#[test]
+fn journal_list_kind_does_not_truncate_after_other_dictionaries() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    for name in ["user", "resources", "dictionaries", "cache"] {
+        std::fs::create_dir(root.join(name)).unwrap();
+    }
+    let connection = rusqlite::Connection::open(root.join("user/msime_user.db")).unwrap();
+    connection.execute_batch(
+        "CREATE TABLE user_dictionary_operations(dictionary TEXT NOT NULL,key TEXT NOT NULL,value TEXT NOT NULL,operation TEXT NOT NULL,weight INTEGER NOT NULL,user_inserted INTEGER NOT NULL,PRIMARY KEY(dictionary,key,value));",
+    ).unwrap();
+    let transaction = connection.unchecked_transaction().unwrap();
+    for index in 0..20_001 {
+        transaction
+            .execute(
+                "INSERT INTO user_dictionary_operations VALUES('english',?1,?2,'upsert',1,1)",
+                rusqlite::params![format!("english{index:05}"), format!("合成英文{index:05}")],
+            )
+            .unwrap();
+    }
+    transaction
+        .execute(
+            "INSERT INTO user_dictionary_operations VALUES('wubi','aaaa','合成五笔','upsert',7,1)",
+            [],
+        )
+        .unwrap();
+    transaction.commit().unwrap();
+    drop(connection);
+    let options = json!({
+        "api_version": 1,
+        "resources": root.join("resources"),
+        "user_data": root.join("user"),
+        "cache": root.join("cache"),
+        "dictionaries": root.join("dictionaries"),
+        "preferences": msime_client_core::preferences::Preferences::default(),
+    });
+    let response = dictionary_request_json(&serde_json::to_vec(&json!({
+        "options": options,
+        "action": {"operation": "list", "offset": 0, "limit": 1000, "kind": "wubi", "user_only": false},
+    })).unwrap()).unwrap();
+    assert_eq!(
+        response,
+        json!({
+            "entries": [{"kind": "wubi", "key": "aaaa", "value": "合成五笔", "weight": 7, "source": "user"}],
+            "has_more": false,
+        })
+    );
 }

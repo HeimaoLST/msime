@@ -18,8 +18,6 @@ public final class SyncApiSmoke {
         check(!SyncApi.conflict(new CloudApi.Failure(412, "revision_conflict", "", 0)), "other status");
         check(!SyncApi.conflict(null), "null failure");
         check(SyncApi.preferenceRevision(42L) == 42L, "integer preference revision");
-        check(SyncApi.phraseRevision(42L) == 42L, "integer phrase revision");
-        check(SyncApi.snapshotRevisionValue(42L) == 42L, "integer snapshot revision");
         check(SyncApi.changesRevision(42L, 7L) == 42L, "integer dictionary revision");
         check(!SyncApi.changePageChanged(false, 7L, 7L), "stationary empty change page");
         check(SyncApi.changePageChanged(true, 8L, 7L), "non-empty change page");
@@ -66,24 +64,6 @@ public final class SyncApiSmoke {
         }
         for (Number invalid : new Number[] {1.5d, -1L}) {
             try {
-                SyncApi.snapshotRevisionValue(invalid);
-                throw new AssertionError("invalid snapshot revision must be refused: " + invalid);
-            } catch (CloudApi.Failure expected) {
-                check(expected.status == 500 && "invalid_response".equals(expected.code),
-                    "invalid snapshot revision failure");
-            }
-        }
-        for (Number invalid : new Number[] {2.5d, -2L}) {
-            try {
-                SyncApi.phraseRevision(invalid);
-                throw new AssertionError("invalid phrase revision must be refused: " + invalid);
-            } catch (CloudApi.Failure expected) {
-                check(expected.status == 500 && "invalid_response".equals(expected.code),
-                    "invalid phrase revision failure");
-            }
-        }
-        for (Number invalid : new Number[] {1.5d, -1L}) {
-            try {
                 SyncApi.changesRevision(invalid, 0L);
                 throw new AssertionError("invalid dictionary revision must be refused: " + invalid);
             } catch (CloudApi.Failure expected) {
@@ -119,6 +99,63 @@ public final class SyncApiSmoke {
             return new SyncApi.Exchange(fresh.equals(token) ? 200 : 401, null, new byte[0]);
         });
         check(ok.status() == 200 && tokens.equals(List.of(stale, fresh)), "refreshed once: " + tokens);
+        java.util.concurrent.atomic.AtomicReference<String> login =
+            new java.util.concurrent.atomic.AtomicReference<>("synthetic-login-a");
+        CloudApi.Tokens changing = new CloudApi.Tokens() {
+            @Override public String token(String rejected) {
+                return "synthetic-login-a".equals(login.get()) ? stale : fresh;
+            }
+            @Override public String sessionId() { return login.get(); }
+        };
+        java.util.concurrent.atomic.AtomicInteger oldCalls = new java.util.concurrent.atomic.AtomicInteger();
+        try {
+            new SyncApi(null, changing, null).streamed(token -> {
+                oldCalls.incrementAndGet();
+                login.set("synthetic-login-b");
+                return new SyncApi.Exchange(401, null, new byte[0]);
+            });
+            throw new AssertionError("old stream must not retry after a new login");
+        } catch (CloudApi.Failure failure) {
+            check("session_changed".equals(failure.code), "new login cancels rejected old stream");
+            check(oldCalls.get() == 1, "new login receives no old stream retry");
+        }
+        login.set("synthetic-login-a");
+        try {
+            new SyncApi(null, changing, null).streamed(token -> {
+                login.set("synthetic-login-b");
+                return new SyncApi.Exchange(200, null, new byte[0]);
+            });
+            throw new AssertionError("old stream response must not survive a new login");
+        } catch (CloudApi.Failure failure) {
+            check("session_changed".equals(failure.code), "new login discards successful old stream");
+        }
+        java.util.concurrent.atomic.AtomicReference<String> sameTokenLogin =
+            new java.util.concurrent.atomic.AtomicReference<>("synthetic-login-a");
+        CloudApi.Tokens reusedToken = new CloudApi.Tokens() {
+            @Override public String token(String rejected) { return stale; }
+            @Override public String sessionId() { return sameTokenLogin.get(); }
+        };
+        try {
+            new SyncApi(null, reusedToken, null).streamed(token -> {
+                sameTokenLogin.set("synthetic-login-b");
+                return new SyncApi.Exchange(200, null, new byte[0]);
+            });
+            throw new AssertionError("login identity must be checked even when stream tokens match");
+        } catch (CloudApi.Failure failure) {
+            check("session_changed".equals(failure.code), "new login with the same token cancels stream");
+        }
+        java.util.concurrent.atomic.AtomicReference<String> rotatingToken =
+            new java.util.concurrent.atomic.AtomicReference<>(stale);
+        CloudApi.Tokens rotatingLogin = new CloudApi.Tokens() {
+            @Override public String token(String rejected) {
+                if (rejected != null) rotatingToken.set(fresh);
+                return rotatingToken.get();
+            }
+            @Override public String sessionId() { return "synthetic-login-a"; }
+        };
+        SyncApi.Exchange sameLogin = new SyncApi(null, rotatingLogin, null).streamed(token ->
+            new SyncApi.Exchange(fresh.equals(token) ? 200 : 401, null, new byte[0]));
+        check(sameLogin.status() == 200, "same-login token refresh still retries a stream");
         try {
             new SyncApi(null, rejected -> stale, null).streamed(token -> new SyncApi.Exchange(401, null, new byte[0]));
             throw new AssertionError("repeated 401 must fail");
@@ -215,6 +252,38 @@ public final class SyncApiSmoke {
         Files.deleteIfExists(destination);
         Files.deleteIfExists(outside);
         Files.deleteIfExists(root);
+
+        Path hardlinkRoot = Files.createTempDirectory("msime-sync-api-hardlink-");
+        Path hardlinkDestination = hardlinkRoot.resolve("snapshot.ndjson");
+        Path hardlinkOutside = hardlinkRoot.resolve("outside.ndjson");
+        Path hardlinkPartial = hardlinkRoot.resolve("snapshot.ndjson.partial");
+        Files.writeString(hardlinkOutside, "sentinel");
+        Files.createLink(hardlinkPartial, hardlinkOutside);
+        try {
+            download.downloadSnapshot(hardlinkDestination);
+        } catch (Exception expected) { }
+        check("sentinel".equals(Files.readString(hardlinkOutside)),
+            "snapshot download must not follow a partial-file hard link");
+        Files.deleteIfExists(hardlinkDestination);
+        Files.deleteIfExists(hardlinkPartial);
+        Files.deleteIfExists(hardlinkOutside);
+        Files.deleteIfExists(hardlinkRoot);
+
+        Path uploadRoot = Files.createTempDirectory("msime-sync-upload-");
+        try {
+            Path source = uploadRoot.resolve("source.ndjson");
+            Files.writeString(source, "synthetic\n");
+            Path linked = uploadRoot.resolve("upload.ndjson");
+            Files.createLink(linked, source);
+            check(!SyncApi.uploadable(linked), "hard-linked upload is refused");
+        } finally {
+            try (java.util.stream.Stream<Path> paths = Files.walk(uploadRoot)) {
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach(path -> {
+                    try { Files.deleteIfExists(path); }
+                    catch (Exception error) { throw new IllegalStateException(error); }
+                });
+            }
+        }
         System.out.println("Android sync API passed");
     }
 

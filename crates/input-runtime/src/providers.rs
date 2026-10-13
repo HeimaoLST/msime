@@ -65,6 +65,12 @@ fn with_terminator(request: &str) -> String {
 }
 
 #[cfg(unix)]
+fn write_request(stream: &mut UnixStream, request: &str) -> std::io::Result<()> {
+    let line = with_terminator(request);
+    stream.write_all(line.as_bytes())
+}
+
+#[cfg(unix)]
 fn valid_ai_provider_endpoint(provider: &str, endpoint: &str) -> bool {
     !provider.is_empty()
         && msime_client_core::is_bounded_text(provider, 64)
@@ -163,10 +169,10 @@ fn read_voice_provider_line(
     stream: &mut UnixStream,
     pending: &mut Vec<u8>,
     deadline: std::time::Instant,
-    cancelled: Option<&AtomicBool>,
+    mut cancelled: Option<&mut VoiceCancellation<'_>>,
 ) -> Option<String> {
     loop {
-        if cancelled.is_some_and(|value| value.load(Ordering::Relaxed)) {
+        if cancelled.as_mut().is_some_and(|value| value.is_cancelled()) {
             return None;
         }
         let remaining = deadline.checked_duration_since(std::time::Instant::now())?;
@@ -195,6 +201,22 @@ fn read_voice_provider_line(
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) => {}
             Err(_) => return None,
+        }
+    }
+}
+
+#[cfg(unix)]
+enum VoiceCancellation<'a> {
+    Atomic(&'a AtomicBool),
+    Callback(&'a mut dyn FnMut() -> bool),
+}
+
+#[cfg(unix)]
+impl VoiceCancellation<'_> {
+    fn is_cancelled(&mut self) -> bool {
+        match self {
+            Self::Atomic(value) => value.load(Ordering::Relaxed),
+            Self::Callback(callback) => callback(),
         }
     }
 }
@@ -266,11 +288,7 @@ impl UnixSocketProvider {
             .set_write_timeout(Some(std::time::Duration::from_millis(500)))
             .ok()?;
         let request = json!({"version": 1, "kind": "online", "query": query}).to_string();
-        if request.len() > 16384
-            || stream
-                .write_all(with_terminator(&request).as_bytes())
-                .is_err()
-        {
+        if request.len() > 16384 || write_request(&mut stream, &request).is_err() {
             return None;
         }
         // One response deadline: partial writes by the provider must not
@@ -298,7 +316,8 @@ impl UnixSocketProvider {
         let ai_limit = query.ai_candidate_limit();
         let limits = [1, ai_limit];
         let mut source_counts = [0; 2];
-        let mut candidates = Vec::with_capacity(replies.len());
+        let reply_count = replies.len();
+        let mut candidates = Vec::new();
         for reply in replies {
             if reply.text.is_empty()
                 || !msime_client_core::is_bounded_text(&reply.text, 4096)
@@ -321,6 +340,10 @@ impl UnixSocketProvider {
             source_counts[source] += 1;
             if source_counts[source] > limits[source] {
                 return None;
+            }
+            if candidates.is_empty() {
+                // 来源过滤可能丢弃整批响应，命中前不为未使用的候选槽位分配存储。
+                candidates.reserve_exact(reply_count);
             }
             candidates.push((reply.text, reply.source));
         }
@@ -349,11 +372,7 @@ impl UnixSocketProvider {
             .set_write_timeout(Some(std::time::Duration::from_millis(500)))
             .ok()?;
         let request = json!({"version": 1, "kind": "translation", "query": query}).to_string();
-        if request.len() > 16384
-            || stream
-                .write_all(with_terminator(&request).as_bytes())
-                .is_err()
-        {
+        if request.len() > 16384 || write_request(&mut stream, &request).is_err() {
             return None;
         }
         // Leave room for the provider's six-second translation batch budget.
@@ -695,12 +714,61 @@ impl UnixSocketProvider {
         status: Option<&mut dyn FnMut(&str)>,
         level: Option<&mut dyn FnMut(f32)>,
     ) -> Result<String, Option<&'static str>> {
+        self.voice_stream_with_options_diagnosed_cancellation(
+            language,
+            generation,
+            options,
+            cancelled.map(VoiceCancellation::Atomic),
+            update,
+            status,
+            level,
+        )
+    }
+
+    /// Same stream as [`Self::voice_stream_with_options_diagnosed`], with a
+    /// host callback polled while the provider socket is waiting for a frame.
+    /// This lets C hosts cancel a detached worker without sharing Rust atomics.
+    #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn voice_stream_with_options_diagnosed_with_callback(
+        &self,
+        language: &str,
+        generation: u64,
+        options: &Value,
+        cancelled: Option<&mut dyn FnMut() -> bool>,
+        update: &mut dyn FnMut(&str, bool),
+        status: Option<&mut dyn FnMut(&str)>,
+        level: Option<&mut dyn FnMut(f32)>,
+    ) -> Result<String, Option<&'static str>> {
+        self.voice_stream_with_options_diagnosed_cancellation(
+            language,
+            generation,
+            options,
+            cancelled.map(VoiceCancellation::Callback),
+            update,
+            status,
+            level,
+        )
+    }
+
+    #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)]
+    fn voice_stream_with_options_diagnosed_cancellation(
+        &self,
+        language: &str,
+        generation: u64,
+        options: &Value,
+        mut cancelled: Option<VoiceCancellation<'_>>,
+        update: &mut dyn FnMut(&str, bool),
+        status: Option<&mut dyn FnMut(&str)>,
+        level: Option<&mut dyn FnMut(f32)>,
+    ) -> Result<String, Option<&'static str>> {
         let mut missing_dependency = None;
         self.voice_stream_session(
             language,
             generation,
             options,
-            cancelled,
+            &mut cancelled,
             update,
             status,
             level,
@@ -716,7 +784,7 @@ impl UnixSocketProvider {
         language: &str,
         generation: u64,
         options: &Value,
-        cancelled: Option<&AtomicBool>,
+        cancelled: &mut Option<VoiceCancellation<'_>>,
         update: &mut dyn FnMut(&str, bool),
         mut status: Option<&mut dyn FnMut(&str)>,
         mut level: Option<&mut dyn FnMut(f32)>,
@@ -724,7 +792,7 @@ impl UnixSocketProvider {
     ) -> Option<String> {
         if generation == 0
             || !msime_client_core::is_bounded_text(language, 64)
-            || cancelled.is_some_and(|value| value.load(Ordering::Relaxed))
+            || cancelled.as_mut().is_some_and(|value| value.is_cancelled())
         {
             return None;
         }
@@ -753,11 +821,7 @@ impl UnixSocketProvider {
             request["query"]["events"] = json!(events);
         }
         let request = request.to_string();
-        if request.len() > 16_384
-            || stream
-                .write_all(with_terminator(&request).as_bytes())
-                .is_err()
-        {
+        if request.len() > 16_384 || write_request(&mut stream, &request).is_err() {
             return None;
         }
         // Up to ten minutes of capture, two sixty-second ASR attempts and
@@ -765,7 +829,8 @@ impl UnixSocketProvider {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(730);
         let mut pending = Vec::with_capacity(16_384);
         loop {
-            let line = read_voice_provider_line(&mut stream, &mut pending, deadline, cancelled)?;
+            let line =
+                read_voice_provider_line(&mut stream, &mut pending, deadline, cancelled.as_mut())?;
             let value = serde_json::from_str::<Value>(line.trim_end()).ok()?;
             // Every stream event belongs to the request generation.
             if value.get("generation").and_then(Value::as_u64) != Some(generation) {
@@ -855,10 +920,7 @@ impl UnixSocketProvider {
             "query": {"generation": generation}
         })
         .to_string();
-        request.len() <= 4096
-            && stream
-                .write_all(with_terminator(&request).as_bytes())
-                .is_ok()
+        request.len() <= 4096 && write_request(&mut stream, &request).is_ok()
     }
 
     /// Ask a user-owned voice provider to finish the active capture session.
@@ -885,10 +947,7 @@ impl UnixSocketProvider {
             "query": {"generation": generation}
         })
         .to_string();
-        request.len() <= 4096
-            && stream
-                .write_all(with_terminator(&request).as_bytes())
-                .is_ok()
+        request.len() <= 4096 && write_request(&mut stream, &request).is_ok()
     }
 
     /// Forward one validated account-backed dictionary operation to the
@@ -990,11 +1049,10 @@ impl OnlineProviderWorker {
             .name("msime-online-provider".into())
             .spawn(move || {
                 while incoming.recv().is_ok() {
-                    // Windows waits for input to settle instead of querying
-                    // every intermediate text; a submit during the wait just
-                    // replaces the query read when it ends.
+                    // Wait for a full quiet period after the latest submit;
+                    // intermediate text is replaced without querying it.
                     if !debounce.is_zero() {
-                        let deadline = std::time::Instant::now() + debounce;
+                        let mut deadline = std::time::Instant::now() + debounce;
                         loop {
                             let remaining =
                                 deadline.saturating_duration_since(std::time::Instant::now());
@@ -1002,7 +1060,7 @@ impl OnlineProviderWorker {
                                 break;
                             }
                             match incoming.recv_timeout(remaining) {
-                                Ok(()) => {}
+                                Ok(()) => deadline = std::time::Instant::now() + debounce,
                                 Err(mpsc::RecvTimeoutError::Timeout) => break,
                                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
                             }

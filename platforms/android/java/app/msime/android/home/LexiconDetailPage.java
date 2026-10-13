@@ -1,10 +1,14 @@
 package app.msime.android.home;
 
+import app.msime.android.LayoutPolicy;
+
+import app.msime.android.DimensionPolicy;
+
+import app.msime.android.MainThreadPolicy;
 import android.content.Context;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
-import android.os.Looper;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.LinearLayout;
@@ -12,7 +16,7 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
 import app.msime.android.DictionaryCollectionsStore;
-import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import app.msime.android.NumberPolicy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -24,7 +28,7 @@ import java.util.Locale;
  *
  * <p>集合接口没有列出单个集合词条的操作，所以命名词库只显示条数，搜索和导出只对内置词库提供。
  */
-public final class LexiconDetailPage extends DetailPage {
+public final class LexiconDetailPage extends ReloadingDetailPage {
     public static final String ARG_ID = "collection_id";
     public static final String ARG_NAME = "name";
     private static final String BUILTIN_KIND = "pinyin";
@@ -35,10 +39,9 @@ public final class LexiconDetailPage extends DetailPage {
     private record Model(@Nullable DictionaryCollectionsStore.Collection collection, long count,
                          List<DictionaryCollectionsStore.Word> words, String failure) {}
 
-    private final Handler main = new Handler(Looper.getMainLooper());
+    private final Handler main = MainThreadPolicy.mainHandler();
     private final ActivityResultLauncher<String> createDocument =
         registerForActivityResult(new ActivityResultContracts.CreateDocument("text/plain"), this::onExportPicked);
-    @Nullable private LinearLayout column;
     @Nullable private GroupCard entries;
     @Nullable private Model model;
     private List<DictionaryCollectionsStore.Word> shown = new ArrayList<>(PAGE_SIZE);
@@ -51,20 +54,13 @@ public final class LexiconDetailPage extends DetailPage {
         return name == null || name.isEmpty() ? "词库" : name;
     }
 
-    @Override protected void buildContent(LinearLayout column, Bundle args) {
-        this.column = column;
-        reload();
+    @Override protected boolean shouldReloadWhenVisible() {
+        return query.isEmpty();
     }
 
-    @Override protected void onBecameVisible() {
-        if (column != null && query.isEmpty()) reload();
-    }
-
-    @Override public void onDestroyView() {
+    @Override protected void onContentDestroyed() {
         main.removeCallbacksAndMessages(null);
-        column = null;
         entries = null;
-        super.onDestroyView();
     }
 
     private String collectionId() {
@@ -79,7 +75,7 @@ public final class LexiconDetailPage extends DetailPage {
 
     // ---- 数据 ----
 
-    private void reload() {
+    @Override protected void reload() {
         String id = collectionId();
         boolean builtin = builtin();
         HostTask.run(this, context -> read(context, id, builtin), result -> {
@@ -112,7 +108,7 @@ public final class LexiconDetailPage extends DetailPage {
     // ---- 渲染 ----
 
     private void render() {
-        LinearLayout target = column;
+        LinearLayout target = contentColumn();
         Model current = model;
         if (target == null || current == null) return;
         target.removeAllViews();
@@ -125,7 +121,7 @@ public final class LexiconDetailPage extends DetailPage {
         if (collection != null) setTitle(collection.name());
 
         GroupCard header = GroupCard.add(target, null);
-        String count = current.count() < 0 ? null : DictionaryCollectionsStore.countLabel(current.count());
+        String count = current.count() < 0 ? null : NumberPolicy.groupedCount(current.count());
         GroupCard.Row toggle = header.toggle("启用此词库", builtin ? (count == null ? "内置词库始终启用" : count + " · 内置词库始终启用") : count,
             builtin || collection.enabled(), this::setEnabled);
         if (builtin) toggle.setEnabled(false);
@@ -135,8 +131,8 @@ public final class LexiconDetailPage extends DetailPage {
             search.setHint("搜索词条");
             search.field().setText(query);
             search.setOnQueryChange(this::onQuery);
-            LinearLayout.LayoutParams params = Ui.matchWidth();
-            params.topMargin = Ui.dp(requireContext(), Ui.GROUP_GAP);
+            LinearLayout.LayoutParams params = LayoutPolicy.matchWidthWrapParams();
+            params.topMargin = DimensionPolicy.pixels(requireContext(), Ui.GROUP_GAP);
             target.addView(search, params);
         }
 
@@ -170,7 +166,7 @@ public final class LexiconDetailPage extends DetailPage {
         } else {
             DictionaryCollectionsStore.Collection collection = current.collection();
             if (collection != null) {
-                String total = "这个词库有 " + DictionaryCollectionsStore.countLabel(collection.entryCount());
+                String total = "这个词库有 " + NumberPolicy.groupedCount(collection.entryCount());
                 // 待写入的词由键盘在每次收起后自动分批写完（MSIMEInputService 的空闲同步），这里只告诉用户正在进行、不用做什么。
                 card.note(collection.pending() > 0
                     ? total + "，其中 " + collection.pending() + " 条正在写入键盘。每次用完键盘、收起后会自动接着写，不需要手动操作。"
@@ -197,7 +193,7 @@ public final class LexiconDetailPage extends DetailPage {
     /** 拼音按编码前缀问 Engine（连内置词一起）；汉字在当前列表里按包含过滤；清空时回到自己的词。 */
     private void search(int generation, String text) {
         Model current = model;
-        if (current == null || column == null) return;
+        if (current == null || contentColumn() == null) return;
         String code = DictionaryCollectionsStore.normalizePinyin(text).replace("'", "");
         if (text.isEmpty()) {
             shown = new ArrayList<>(current.words());
@@ -282,11 +278,8 @@ public final class LexiconDetailPage extends DetailPage {
         Model current = model;
         if (current == null || current.collection() == null) return;
         DictionaryCollectionsStore.Collection collection = current.collection();
-        new MaterialAlertDialogBuilder(requireContext())
-            .setTitle("删除「" + collection.name() + "」？")
-            .setMessage("词库和它的词条会从本机删除；同时属于其他已启用词库的词会保留。")
-            .setNegativeButton("取消", null)
-            .setPositiveButton("删除", (dialog, which) -> HostTask.run(this,
+        MessageDialog.confirm(requireContext(), "删除「" + collection.name() + "」？",
+            "词库和它的词条会从本机删除；同时属于其他已启用词库的词会保留。", "删除", () -> HostTask.run(this,
                 context -> DictionaryCollectionsStore.delete(context, collection.id()), result -> {
                     if (result == null || !result.ok()) {
                         MsToast.show(requireContext(), result == null ? DictionaryCollectionsStore.failureMessage("") : result.failure());
@@ -294,8 +287,7 @@ public final class LexiconDetailPage extends DetailPage {
                     }
                     MsToast.show(requireContext(), "已删除");
                     requireActivity().getOnBackPressedDispatcher().onBackPressed();
-                }))
-            .show();
+                }));
     }
 
     private void onExportPicked(@Nullable Uri uri) {

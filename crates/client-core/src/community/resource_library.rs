@@ -33,6 +33,11 @@ pub struct CommunityResourceLibraryStore {
     file: PathBuf,
 }
 
+struct LibraryLock {
+    _lock: File,
+    directory: file_lock::PrivateDirectory,
+}
+
 impl CommunityResourceLibraryStore {
     pub fn new(file: impl AsRef<Path>) -> Self {
         Self {
@@ -41,16 +46,25 @@ impl CommunityResourceLibraryStore {
     }
 
     pub fn load(&self) -> Result<Vec<CommunityResource>, CommunityResourceLibraryError> {
-        let _lock = self.lock()?;
-        self.read_locked()
+        let lock = self.lock()?;
+        self.read_locked(&lock)
     }
 
     pub fn save_reply(&self, item: CommunityResource) -> Result<(), CommunityResourceLibraryError> {
+        self.save_reply_with_hook(item, || {})
+    }
+
+    fn save_reply_with_hook(
+        &self,
+        item: CommunityResource,
+        before_read: impl FnOnce(),
+    ) -> Result<(), CommunityResourceLibraryError> {
         if !is_valid_reply(&item) {
             return Err(CommunityResourceLibraryError::Invalid);
         }
-        let _lock = self.lock()?;
-        let mut items = self.read_locked()?;
+        let lock = self.lock()?;
+        before_read();
+        let mut items = self.read_locked(&lock)?;
         if let Some(existing) = items.iter_mut().find(|value| value.id == item.id) {
             *existing = item;
         } else {
@@ -59,38 +73,51 @@ impl CommunityResourceLibraryStore {
             }
             items.push(item);
         }
-        self.write_locked(&items)
+        self.write_locked(&lock, &items)
     }
 
     pub fn remove(&self, id: Uuid) -> Result<(), CommunityResourceLibraryError> {
-        let _lock = self.lock()?;
-        let mut items = self.read_locked()?;
+        let lock = self.lock()?;
+        let mut items = self.read_locked(&lock)?;
         items.retain(|item| item.id != id);
-        self.write_locked(&items)
+        self.write_locked(&lock, &items)
     }
 
-    fn lock(&self) -> Result<File, CommunityResourceLibraryError> {
+    fn lock(&self) -> Result<LibraryLock, CommunityResourceLibraryError> {
         let Some(parent) = self.file.parent() else {
             return Err(CommunityResourceLibraryError::Invalid);
         };
         if !crate::storage::create_directory_and_check(parent)? {
             return Err(CommunityResourceLibraryError::Invalid);
         }
-        let lock_path = self.file.with_extension("json.lock");
-        let lock = file_lock::open_lock_file(lock_path)?;
+        let directory = file_lock::open_private_directory(parent)?;
+        let lock_name = self
+            .file
+            .with_extension("json.lock")
+            .file_name()
+            .ok_or(CommunityResourceLibraryError::Invalid)?
+            .to_owned();
+        let lock = file_lock::open_private_lock_file_at(&directory, &lock_name)?;
         file_lock::exclusive(&lock)?;
-        Ok(lock)
+        Ok(LibraryLock {
+            _lock: lock,
+            directory,
+        })
     }
 
-    fn read_locked(&self) -> Result<Vec<CommunityResource>, CommunityResourceLibraryError> {
-        let file = match crate::storage::open_private_file_in(&self.file) {
+    fn read_locked(
+        &self,
+        lock: &LibraryLock,
+    ) -> Result<Vec<CommunityResource>, CommunityResourceLibraryError> {
+        let name = self
+            .file
+            .file_name()
+            .ok_or(CommunityResourceLibraryError::Invalid)?;
+        let file = match file_lock::open_private_file_at(&lock.directory, name) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(_) => return Err(CommunityResourceLibraryError::Invalid),
         };
-        if file.metadata()?.len() > MAXIMUM_BYTES {
-            return Err(CommunityResourceLibraryError::Invalid);
-        }
         let bytes = crate::bounded_io::read_bounded_file(file, MAXIMUM_BYTES, || {
             CommunityResourceLibraryError::Invalid
         })?;
@@ -107,30 +134,28 @@ impl CommunityResourceLibraryStore {
 
     fn write_locked(
         &self,
+        lock: &LibraryLock,
         items: &[CommunityResource],
     ) -> Result<(), CommunityResourceLibraryError> {
-        let Some(parent) = self.file.parent() else {
-            return Err(CommunityResourceLibraryError::Invalid);
-        };
-        if !crate::storage::create_directory_and_check(parent)? {
-            return Err(CommunityResourceLibraryError::Invalid);
-        }
         let bytes = serde_json::to_vec_pretty(items)?;
         if bytes.len() as u64 > MAXIMUM_BYTES {
             return Err(CommunityResourceLibraryError::Invalid);
         }
         #[cfg(unix)]
         {
-            let directory = crate::storage::open_private_directory(parent)?;
             let name = self
                 .file
                 .file_name()
                 .ok_or(CommunityResourceLibraryError::Invalid)?;
-            crate::storage::write_private_file_at(&directory, name, &bytes)?;
+            file_lock::write_private_file_at(&lock.directory, name, &bytes)?;
             Ok(())
         }
         #[cfg(not(unix))]
         {
+            let _ = lock;
+            let Some(parent) = self.file.parent() else {
+                return Err(CommunityResourceLibraryError::Invalid);
+            };
             let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
             temporary.write_all(&bytes)?;
             temporary.as_file().sync_all()?;
@@ -285,5 +310,35 @@ mod tests {
             store.load(),
             Err(CommunityResourceLibraryError::Invalid) | Err(CommunityResourceLibraryError::Io(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_after_library_directory_replacement_stays_on_the_locked_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("files");
+        let path = directory.join("CommunityLibrary.json");
+        let store = CommunityResourceLibraryStore::new(&path);
+        store.save_reply(reply()).unwrap();
+
+        let moved = root.path().join("files-moved");
+        let replacement = directory.clone();
+        let mut updated = reply();
+        updated.revision = 2;
+        store
+            .save_reply_with_hook(updated, || {
+                std::fs::rename(&replacement, &moved).unwrap();
+                std::fs::create_dir(&replacement).unwrap();
+            })
+            .unwrap();
+
+        assert_eq!(
+            CommunityResourceLibraryStore::new(moved.join("CommunityLibrary.json"))
+                .load()
+                .unwrap()[0]
+                .revision,
+            2
+        );
+        assert!(!replacement.join("CommunityLibrary.json").exists());
     }
 }

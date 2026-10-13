@@ -71,7 +71,7 @@ target_link_libraries(shared-uninstaller-test PRIVATE "-framework Foundation" "-
 add_test(NAME shared-uninstaller COMMAND shared-uninstaller-test)
 add_executable(shared-file-picker-test ../../crates/host-macos/native/file_picker_test.mm ../../crates/host-macos/native/file_picker.mm)
 target_compile_options(shared-file-picker-test PRIVATE -fobjc-arc -UNDEBUG -Wall -Wextra -Werror)
-target_link_libraries(shared-file-picker-test PRIVATE "-framework AppKit")
+target_link_libraries(shared-file-picker-test PRIVATE "-framework AppKit" "-framework UniformTypeIdentifiers")
 add_test(NAME shared-file-picker COMMAND shared-file-picker-test)
 set(MSIME_HOST_LIBRARY "${CMAKE_CURRENT_SOURCE_DIR}/../../target/debug/libmsime_host_api.a" CACHE FILEPATH "Rust host static library for this architecture")
 if(NOT EXISTS "${MSIME_HOST_LIBRARY}")
@@ -102,7 +102,7 @@ target_compile_options(usage-reporting-path-test PRIVATE -fobjc-arc -UNDEBUG -Wa
 target_compile_definitions(usage-reporting-path-test PRIVATE MSIME_USAGE_REPORTING_TEST_SUPPORT="/tmp/msime-usage-reporting-path-test")
 target_link_libraries(usage-reporting-path-test PRIVATE apple-client)
 add_test(NAME usage-reporting-path COMMAND usage-reporting-path-test)
-add_executable(MSIMEClientInputMethod MACOSX_BUNDLE src/cloud/CloudFileTransfer.mm src/input/input_method_main.mm src/cloud/CloudClipboardWindowController.mm src/cloud/CloudClipboardClient.mm src/cloud/CloudURLSession.mm src/core/AccountSessionManager.mm src/core/AccountAuthClient.mm src/core/AccountWindowController.mm src/core/AccountKeychain.mm src/cloud/CloudDictionaryClient.mm src/settings/PreferencesWindowController.mm src/core/SupportWindowController.mm src/voice/VoiceInputService.mm src/voice/VoiceWaveOverlay.mm src/voice/VoiceCuePlayer.mm src/voice/VoiceAudioMuter.mm src/voice/VoiceSettings.mm src/voice/VoiceProviderSettings.mm src/input/InputController.mm src/input/InputModeHUDPanel.mm src/candidate/CandidateSkinAppearance.mm src/settings/AppearancePreferences.mm src/core/DiagnosticLog.cpp src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/core/ChineseTextConversion.mm src/settings/ShuangpinKeymapPanel.mm src/input/InputSourceRegistration.mm src/core/FloatingToolbarPanel.mm src/core/UpdateController.mm src/dictionary/DictionaryWindowController.mm src/core/ClientDictionaryRuntime.mm src/dictionary/DictionaryInstaller.mm ../../crates/host-macos/native/uninstaller.mm)
+add_executable(MSIMEClientInputMethod MACOSX_BUNDLE src/cloud/CloudFileTransfer.mm src/input/input_method_main.mm src/cloud/CloudClipboardWindowController.mm src/cloud/CloudClipboardClient.mm src/cloud/CloudURLSession.mm src/core/AccountSessionManager.mm src/core/AccountAuthClient.mm src/core/AccountWindowController.mm src/core/AccountKeychain.mm src/cloud/CloudDictionaryClient.mm src/settings/PreferencesWindowController.mm src/core/SupportWindowController.mm src/voice/VoiceInputService.mm src/voice/VoiceWaveOverlay.mm src/voice/VoiceCuePlayer.mm src/voice/VoiceAudioMuter.mm src/voice/VoiceSettings.mm src/voice/VoiceProviderSettings.mm src/input/InputController.mm src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm src/candidate/CandidateSkinAppearance.mm src/settings/AppearancePreferences.mm src/core/DiagnosticLog.cpp src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/core/ChineseTextConversion.mm src/settings/ShuangpinKeymapPanel.mm src/input/InputSourceRegistration.mm src/core/FloatingToolbarPanel.mm src/core/UpdateController.mm src/dictionary/DictionaryWindowController.mm src/core/ClientDictionaryRuntime.mm src/dictionary/DictionaryInstaller.mm ../../crates/host-macos/native/uninstaller.mm)
 target_sources(MSIMEClientInputMethod PRIVATE src/core/AISettingsWindow.mm src/core/ScreenKeyboardPanel.mm src/cloud/CloudCandidateRequest.mm src/core/CustomTranslationBatch.mm src/voice/VoicePCMBuffer.mm src/voice/HTTPVoiceRequest.mm)
 target_sources(MSIMEClientInputMethod PRIVATE src/voice/DoubaoVoiceRequest.mm src/voice/LocalVoiceRequest.mm)
 target_sources(MSIMEClientInputMethod PRIVATE src/core/DesktopInputSession.mm)
@@ -135,6 +135,8 @@ target_link_libraries(MSIMEClientInputMethod PRIVATE "${MSIME_SWIFT_BACKEND_OUTP
 target_include_directories(MSIMEClientInputMethod PRIVATE src)
 target_compile_options(MSIMEClientInputMethod PRIVATE -fobjc-arc -Wall -Wextra -Werror)
 target_link_libraries(MSIMEClientInputMethod PRIVATE apple-client msime-voice-providers "-framework AppKit" "-framework InputMethodKit" "-framework Carbon" "-framework AVFoundation" "-framework Speech")
+# 单按 Caps Lock 切换中英文时用 IOKit 的 IOHIDSetModifierLockState 撤回大写锁定（系统框架，不需要额外权限）。
+target_link_libraries(MSIMEClientInputMethod PRIVATE "-framework IOKit")
 # 同一版本内的构建号，与 version.txt 放在一起、随它手工设定：每个新版本从 1 重新开始，同一版本需要和上一次区分的重新构建再往上加。Sparkle 只按 CFBundleVersion 排序，所以配置 SUFeedURL 之后，构建号重新从 1 开始的版本得经由一个先比较短版本号的 feed 提供；在那之前只有「关于」窗口和设置应用读它，设置应用先比短版本号再比构建号。
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/build-number.txt")
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/build-number.txt" MSIME_BUILD_NUMBER LIMIT_COUNT 1)
@@ -191,15 +193,20 @@ set(MSIME_LEGAL_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Licenses")
 file(MAKE_DIRECTORY "${MSIME_LEGAL_DIRECTORY}")
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../LICENSE" "${MSIME_LEGAL_DIRECTORY}/GPL-3.0.txt" COPYONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/resources/Licenses/THIRD_PARTY_NOTICES.txt" "${MSIME_LEGAL_DIRECTORY}/THIRD_PARTY_NOTICES.txt" COPYONLY)
-# The dictionary data in the pinned release, the notices of the helpcode tables stage-resources.sh puts in EngineResources/helpcodes (the five the Engine brought and jiajia), and zinnia, whose recognizer crates/engine/src/handwriting ports and host-api links in. The first and last come from resources/licenses, the copies every platform ships.
+# 固定词库发布里的词库数据、stage-resources.sh 放进 EngineResources/helpcodes 的辅助码表的来源声明（Engine 带来的五套、加加和五笔 86），以及 zinnia（crates/engine/src/handwriting 移植了它的识别器，host-api 链接进来）。第一份和最后一份来自 resources/licenses，是各平台随包的同一份副本。
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/msime-engine-dictionary-NOTICE.md" "${MSIME_LEGAL_DIRECTORY}/msime-engine-dictionary-NOTICE.md" COPYONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/helpcodes/ENGINE-NOTICE.md" "${MSIME_LEGAL_DIRECTORY}/msime-engine-helpcode-NOTICE.md" COPYONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/helpcodes/NOTICE.md" "${MSIME_LEGAL_DIRECTORY}/msime-helpcode-jiajia-NOTICE.md" COPYONLY)
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/helpcodes/NOTICE-wubi86.md" "${MSIME_LEGAL_DIRECTORY}/msime-helpcode-wubi86-NOTICE.md" COPYONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/Zinnia-LICENSE.txt" "${MSIME_LEGAL_DIRECTORY}/Zinnia-LICENSE.txt" COPYONLY)
 # The place names `@` mode offers, compiled into the engine from modood/Administrative-divisions-of-China (WTFPL).
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/Administrative-divisions-of-China-WTFPL.txt" "${MSIME_LEGAL_DIRECTORY}/Administrative-divisions-of-China-WTFPL.txt" COPYONLY)
 # The Korean Hanja table, compiled into the engine from libhangul's data/hanja/hanja.txt (BSD-3-Clause, whose clause 2 requires the notice in binary distributions).
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/libhangul-hanja-BSD-3-Clause.txt" "${MSIME_LEGAL_DIRECTORY}/libhangul-hanja-BSD-3-Clause.txt" COPYONLY)
+# 拆字反查（C 模式）的部件拼音表，从 kfcd/chaizi（開放詞典《漢語拆字字典》，CC BY 3.0）改编后编进引擎；CC BY 3.0 第 4(b) 条要求分发改编作品时附上署名和改动说明，这份文件就是。
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/kfcd-chaizi-CC-BY-3.0.txt" "${MSIME_LEGAL_DIRECTORY}/kfcd-chaizi-CC-BY-3.0.txt" COPYONLY)
+# 同一张拆字表里每个字的读音、名次和繁体字形取自 Unicode 汉字数据库（Unihan 17.0.0），Unicode License V3 要求随数据附上它的版权与许可声明。
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/Unicode-License-V3.txt" "${MSIME_LEGAL_DIRECTORY}/Unicode-License-V3.txt" COPYONLY)
 # The Cantonese and Zhuyin schemes, whose syllables and words come from the dictionaries in language-dictionaries/ (when installed), built from rime-cantonese (CC BY 4.0, which requires attribution) and libchewing-data (LGPL-2.1-or-later, which requires the licence text and a source pointer).
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/rime-cantonese-CC-BY-4.0.txt" "${MSIME_LEGAL_DIRECTORY}/rime-cantonese-CC-BY-4.0.txt" COPYONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/libchewing-data-LGPL-2.1.txt" "${MSIME_LEGAL_DIRECTORY}/libchewing-data-LGPL-2.1.txt" COPYONLY)
@@ -215,6 +222,8 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/MPL-2.0.txt
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../shared/voice/third_party/sherpa-onnx/LICENSE" "${MSIME_LEGAL_DIRECTORY}/sherpa-onnx-Apache-2.0.txt" COPYONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../linux/data/licenses/onnxruntime-MIT.txt" "${MSIME_LEGAL_DIRECTORY}/onnxruntime-MIT.txt" COPYONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../linux/data/licenses/onnxruntime-ThirdPartyNotices.txt" "${MSIME_LEGAL_DIRECTORY}/onnxruntime-ThirdPartyNotices.txt" COPYONLY)
+# cppcodec 编进输入法（shared/voice 的百炼请求用它做 Base64），MIT 要求随副本附带版权与许可声明。
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../shared/voice/third_party/cppcodec/LICENSE" "${MSIME_LEGAL_DIRECTORY}/cppcodec-MIT.txt" COPYONLY)
 file(GLOB MSIME_LEGAL_RESOURCES CONFIGURE_DEPENDS "${MSIME_LEGAL_DIRECTORY}/*")
 target_sources(MSIMEClientInputMethod PRIVATE ${MSIME_LEGAL_RESOURCES})
 set_source_files_properties(${MSIME_LEGAL_RESOURCES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/Licenses")
@@ -303,7 +312,7 @@ if(MSIME_OPTIONS_FILE)
 endif()
 include(ClipboardTests.cmake)
 set(MSIME_DESKTOP_DICTIONARY_PROVIDER_SOURCES
-  ../../shared/backend/account/BackendAccountClient.swift ../../shared/backend/account/BackendAccountSession.swift
+  ../../shared/backend/account/BackendAccountClient.swift ../../shared/backend/account/BackendAccountSession.swift ../../shared/backend/storage/BackendBoundedFileReader.swift
   ../../shared/backend/content/BackendDictionaryClient.swift ../../shared/backend/clients/BackendCandidateClient.swift
   ../../shared/backend/clients/BackendSnapshotClient.swift src/backend/dictionary/BackendCloudDictionaryProvider.swift
   src/backend/dictionary/BackendLocalSnapshot.swift src/backend/dictionary/BackendFileTransfer.swift src/backend/dictionary/BackendDesktopSnapshots.swift
@@ -328,9 +337,9 @@ add_custom_target(secure-file-reader-test-build ALL DEPENDS "${CMAKE_CURRENT_BIN
 add_test(NAME secure-file-reader COMMAND "${CMAKE_CURRENT_BINARY_DIR}/secure-file-reader-test")
 set_tests_properties(secure-file-reader PROPERTIES TIMEOUT 30)
 set(MSIME_DESKTOP_CLOUD_PROVIDER_SOURCES
-  ../../shared/backend/account/BackendAccountClient.swift ../../shared/backend/account/BackendAccountSession.swift
+  ../../shared/backend/account/BackendAccountClient.swift ../../shared/backend/account/BackendAccountSession.swift ../../shared/backend/storage/BackendBoundedFileReader.swift
   ../../shared/backend/clients/BackendClipboardClient.swift src/backend/clipboard/BackendCloudClipboardProvider.swift
-  tests/clipboard/DesktopCloudClipboardProviderTest.swift)
+  src/backend/clipboard/BackendCloudClipboardDriver.swift tests/clipboard/DesktopCloudClipboardProviderTest.swift)
 list(TRANSFORM MSIME_DESKTOP_CLOUD_PROVIDER_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/desktop-cloud-provider-test"
   COMMAND "${MSIME_XCRUN}" swiftc -Onone -parse-as-library
@@ -668,6 +677,10 @@ add_executable(local-mode-preferences-test tests/settings/LocalModePreferencesTe
 target_compile_options(local-mode-preferences-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(local-mode-preferences-test PRIVATE apple-client "-framework AppKit")
 add_test(NAME local-mode-preferences COMMAND local-mode-preferences-test)
+add_executable(wubi-auto-commit-preferences-test tests/settings/WubiAutoCommitPreferencesTest.mm src/settings/AppearancePreferences.mm src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/candidate/CandidateSkinAppearance.mm)
+target_compile_options(wubi-auto-commit-preferences-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(wubi-auto-commit-preferences-test PRIVATE apple-client "-framework AppKit")
+add_test(NAME wubi-auto-commit-preferences COMMAND wubi-auto-commit-preferences-test)
 add_executable(preferences-lifecycle-test tests/settings/PreferencesLifecycleTest.mm src/settings/AppearancePreferences.mm src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/settings/PreferencesWindowController.mm src/candidate/CandidateSkinAppearance.mm src/core/AISettingsWindow.mm)
 target_compile_options(preferences-lifecycle-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(preferences-lifecycle-test PRIVATE "-framework AppKit")
@@ -814,6 +827,8 @@ add_test(NAME voice-session-delivery COMMAND voice-session-delivery-test)
 add_executable(shortcut-test tests/input/ShortcutTest.mm src/core/DiagnosticLog.cpp src/core/BoundedFileReader.mm src/core/UpdateController.mm src/settings/AppearancePreferences.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/core/ChineseTextConversion.mm src/settings/ShuangpinKeymapPanel.mm src/input/InputSourceRegistration.mm src/core/FloatingToolbarPanel.mm src/dictionary/DictionaryWindowController.mm src/core/ClientDictionaryRuntime.mm)
 target_compile_options(shortcut-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(shortcut-test PRIVATE apple-client "-framework AppKit" "-framework InputMethodKit" "-framework Carbon")
+# 控制器撤回大写锁定用的 IOKit；别的控制器测试经 MSIME_CONTROLLER_TEST_LIBS 一并拿到。
+target_link_libraries(shortcut-test PRIVATE "-framework IOKit")
 target_compile_options(shortcut-test PRIVATE "-F${MSIME_SPARKLE_ROOT}")
 target_link_libraries(shortcut-test PRIVATE "${MSIME_SPARKLE_FRAMEWORK}")
 target_sources(shortcut-test PRIVATE src/settings/PreferencesWindowController.mm src/core/SupportWindowController.mm src/candidate/CandidateSkinAppearance.mm src/core/ScreenKeyboardPanel.mm src/voice/VoiceInputService.mm src/voice/VoicePCMBuffer.mm src/voice/VoiceWaveOverlay.mm src/voice/VoiceCuePlayer.mm src/voice/VoiceAudioMuter.mm src/voice/VoiceSettings.mm src/voice/VoiceProviderSettings.mm src/cloud/CloudCandidateRequest.mm src/core/CustomTranslationBatch.mm)
@@ -843,16 +858,16 @@ add_test(NAME voice-hold-shortcut COMMAND voice-hold-shortcut-test)
 get_target_property(MSIME_CONTROLLER_TEST_SOURCES shortcut-test SOURCES)
 list(REMOVE_ITEM MSIME_CONTROLLER_TEST_SOURCES tests/input/ShortcutTest.mm)
 add_executable(http-voice-controller-test tests/voice/HTTPVoiceControllerTest.mm ${MSIME_CONTROLLER_TEST_SOURCES})
-target_sources(http-voice-controller-test PRIVATE src/cloud/TranslationCache.mm src/cloud/TranslationSettingsWindow.mm src/core/AISettingsWindow.mm src/input/InputModeHUDPanel.mm)
+target_sources(http-voice-controller-test PRIVATE src/cloud/TranslationCache.mm src/cloud/TranslationSettingsWindow.mm src/core/AISettingsWindow.mm src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm)
 get_target_property(MSIME_CONTROLLER_TEST_LIBS shortcut-test LINK_LIBRARIES)
 target_link_libraries(http-voice-controller-test PRIVATE ${MSIME_CONTROLLER_TEST_LIBS})
 target_compile_options(http-voice-controller-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG "-F${MSIME_SPARKLE_ROOT}")
 add_test(NAME http-voice-controller COMMAND http-voice-controller-test)
-add_executable(doubao-voice-controller-test tests/voice/DoubaoVoiceControllerTest.mm ${MSIME_CONTROLLER_TEST_SOURCES} src/cloud/TranslationCache.mm src/cloud/TranslationSettingsWindow.mm src/core/AISettingsWindow.mm src/input/InputModeHUDPanel.mm)
+add_executable(doubao-voice-controller-test tests/voice/DoubaoVoiceControllerTest.mm ${MSIME_CONTROLLER_TEST_SOURCES} src/cloud/TranslationCache.mm src/cloud/TranslationSettingsWindow.mm src/core/AISettingsWindow.mm src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm)
 target_link_libraries(doubao-voice-controller-test PRIVATE ${MSIME_CONTROLLER_TEST_LIBS})
 target_compile_options(doubao-voice-controller-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG "-F${MSIME_SPARKLE_ROOT}")
 add_test(NAME doubao-voice-controller COMMAND doubao-voice-controller-test)
-add_executable(live-voice-controller-test tests/voice/LiveVoiceControllerTest.mm ${MSIME_CONTROLLER_TEST_SOURCES} src/cloud/TranslationCache.mm src/cloud/TranslationSettingsWindow.mm src/core/AISettingsWindow.mm src/input/InputModeHUDPanel.mm)
+add_executable(live-voice-controller-test tests/voice/LiveVoiceControllerTest.mm ${MSIME_CONTROLLER_TEST_SOURCES} src/cloud/TranslationCache.mm src/cloud/TranslationSettingsWindow.mm src/core/AISettingsWindow.mm src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm)
 target_link_libraries(live-voice-controller-test PRIVATE ${MSIME_CONTROLLER_TEST_LIBS})
 target_compile_options(live-voice-controller-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG "-F${MSIME_SPARKLE_ROOT}")
 add_test(NAME live-voice-controller COMMAND live-voice-controller-test)
@@ -864,14 +879,14 @@ set_tests_properties(live-voice-socket-route PROPERTIES ENVIRONMENT "MSIME_VOICE
 # the larger shortcut suite.
 add_executable(smart-punctuation-space-test tests/input/SmartPunctuationSpaceTest.mm ${MSIME_CONTROLLER_TEST_SOURCES}
   src/cloud/TranslationCache.mm src/cloud/TranslationSettingsWindow.mm src/core/AISettingsWindow.mm
-  src/input/InputModeHUDPanel.mm)
+  src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm)
 target_link_libraries(smart-punctuation-space-test PRIVATE ${MSIME_CONTROLLER_TEST_LIBS})
 target_compile_options(smart-punctuation-space-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG "-F${MSIME_SPARKLE_ROOT}")
 add_test(NAME smart-punctuation-space COMMAND smart-punctuation-space-test)
 set_tests_properties(smart-punctuation-space PROPERTIES TIMEOUT 30)
 add_executable(smart-punctuation-shadow-test tests/input/SmartPunctuationShadowTest.mm ${MSIME_CONTROLLER_TEST_SOURCES}
   src/cloud/TranslationCache.mm src/cloud/TranslationSettingsWindow.mm src/core/AISettingsWindow.mm
-  src/input/InputModeHUDPanel.mm)
+  src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm)
 target_link_libraries(smart-punctuation-shadow-test PRIVATE ${MSIME_CONTROLLER_TEST_LIBS})
 target_compile_options(smart-punctuation-shadow-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG "-F${MSIME_SPARKLE_ROOT}")
 add_test(NAME smart-punctuation-shadow COMMAND smart-punctuation-shadow-test)
@@ -879,7 +894,7 @@ set_tests_properties(smart-punctuation-shadow PROPERTIES TIMEOUT 30)
 # Dictionary maintenance from the settings window: real sessions let go of the dictionary lock under a live quiesce lease and come back, mode intact, once it is gone.
 add_executable(dictionary-quiesce-controller-test tests/input/DictionaryQuiesceTest.mm ${MSIME_CONTROLLER_TEST_SOURCES}
   src/cloud/TranslationCache.mm src/cloud/TranslationSettingsWindow.mm src/core/AISettingsWindow.mm
-  src/input/InputModeHUDPanel.mm)
+  src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm)
 target_link_libraries(dictionary-quiesce-controller-test PRIVATE ${MSIME_CONTROLLER_TEST_LIBS})
 target_compile_options(dictionary-quiesce-controller-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG "-F${MSIME_SPARKLE_ROOT}")
 add_test(NAME dictionary-quiesce-controller COMMAND dictionary-quiesce-controller-test)
@@ -913,7 +928,7 @@ set_tests_properties(voice-polish-request PROPERTIES TIMEOUT 65)
 add_executable(shared-polish-prompt-test ../../shared/voice/tests/polish_prompt.cpp)
 target_compile_options(shared-polish-prompt-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME shared-polish-prompt COMMAND shared-polish-prompt-test)
-target_sources(shortcut-test PRIVATE src/cloud/TranslationCache.mm src/input/InputModeHUDPanel.mm)
+target_sources(shortcut-test PRIVATE src/cloud/TranslationCache.mm src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm)
 add_executable(shuangpin-keymap-input-test tests/input/ShuangpinKeymapInputTest.mm src/settings/ShuangpinKeymapPanel.mm)
 target_include_directories(shuangpin-keymap-input-test PRIVATE src)
 target_compile_options(shuangpin-keymap-input-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
@@ -921,7 +936,7 @@ target_link_libraries(shuangpin-keymap-input-test PRIVATE apple-client "-framewo
 add_test(NAME shuangpin-keymap-input COMMAND shuangpin-keymap-input-test)
 add_executable(candidate-panel-test tests/candidate/CandidatePanelTests.mm src/candidate/CandidatePanel.mm src/core/DiagnosticLog.cpp src/candidate/CandidateSkinAppearance.mm src/candidate/CandidateSkin.cpp)
 target_compile_options(candidate-panel-test PRIVATE -fobjc-arc -Wall -Wextra -Werror)
-target_link_libraries(candidate-panel-test PRIVATE apple-client "-framework AppKit" "-framework InputMethodKit")
+target_link_libraries(candidate-panel-test PRIVATE apple-client "-framework AppKit" "-framework InputMethodKit" "-framework QuartzCore")
 add_test(NAME candidate-panel COMMAND candidate-panel-test)
 # The shared gloss-sense rule (shared/input/GlossSenses.h) pinned case by case, and the Windows, Linux and macOS forwarders asked the same questions, because a sense that stops being offered on one host looks like a dictionary difference rather than a bug.
 add_executable(translation-senses-agreement-test tests/candidate/TranslationSensesAgreementTest.cpp)
@@ -937,7 +952,7 @@ add_executable(candidate-item-layout-test tests/candidate/CandidateItemLayoutTes
 target_compile_options(candidate-item-layout-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME candidate-item-layout COMMAND candidate-item-layout-test)
 # The candidate page layout rendered through the same controller shortcut-test imports, on its own so its assertions report independently of that suite.
-add_executable(candidate-row-layout-test tests/candidate/CandidateRowLayoutTest.mm ${MSIME_CONTROLLER_TEST_SOURCES} src/cloud/TranslationCache.mm src/cloud/TranslationSettingsWindow.mm src/core/AISettingsWindow.mm src/input/InputModeHUDPanel.mm)
+add_executable(candidate-row-layout-test tests/candidate/CandidateRowLayoutTest.mm ${MSIME_CONTROLLER_TEST_SOURCES} src/cloud/TranslationCache.mm src/cloud/TranslationSettingsWindow.mm src/core/AISettingsWindow.mm src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm)
 target_link_libraries(candidate-row-layout-test PRIVATE ${MSIME_CONTROLLER_TEST_LIBS})
 target_compile_options(candidate-row-layout-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG "-F${MSIME_SPARKLE_ROOT}")
 add_test(NAME candidate-row-layout COMMAND candidate-row-layout-test)
@@ -955,6 +970,11 @@ add_executable(candidate-pagination-test tests/candidate/CandidatePaginationTest
 target_include_directories(candidate-pagination-test PRIVATE src)
 target_compile_options(candidate-pagination-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME candidate-pagination COMMAND candidate-pagination-test)
+# 展开的候选网格（#7307）里光标怎么走、可见的是哪几行。
+add_executable(candidate-expanded-grid-test tests/candidate/CandidateExpandedGridTest.cpp)
+target_include_directories(candidate-expanded-grid-test PRIVATE src)
+target_compile_options(candidate-expanded-grid-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME candidate-expanded-grid COMMAND candidate-expanded-grid-test)
 # src/candidate/CandidatePanel.mm is the panel of the Apple snapshot's direct-engine controller, which is gone; only candidate-panel-test builds it.
 # Installing a dictionary over the one already in place. Every refusal here protects that file, and
 # the install itself must not be able to leave the user without one.
@@ -973,10 +993,10 @@ target_compile_options(skin-preview-test PRIVATE -fobjc-arc -Wall -Wextra -Werro
 target_link_libraries(skin-preview-test PRIVATE "-framework AppKit" "-framework CoreText")
 add_test(NAME skin-preview COMMAND skin-preview-test)
 add_executable(skin-settings-test tests/candidate/SkinSettingsTest.mm src/settings/AppearancePreferences.mm src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/candidate/CandidateSkinAppearance.mm src/core/ChineseTextConversion.mm)
-foreach(translation_settings_consumer MSIMEClientInputMethod toolbar-visibility-preferences-test scheme-round-trip-preferences-test local-mode-preferences-test preferences-lifecycle-test shortcut-test skin-preview-test skin-settings-test)
+foreach(translation_settings_consumer MSIMEClientInputMethod toolbar-visibility-preferences-test scheme-round-trip-preferences-test wubi-auto-commit-preferences-test local-mode-preferences-test preferences-lifecycle-test shortcut-test skin-preview-test skin-settings-test)
   target_sources(${translation_settings_consumer} PRIVATE src/cloud/TranslationSettingsWindow.mm)
 endforeach()
-foreach(ai_settings_consumer toolbar-visibility-preferences-test scheme-round-trip-preferences-test local-mode-preferences-test preferences-lifecycle-test shortcut-test skin-preview-test skin-settings-test)
+foreach(ai_settings_consumer toolbar-visibility-preferences-test scheme-round-trip-preferences-test wubi-auto-commit-preferences-test local-mode-preferences-test preferences-lifecycle-test shortcut-test skin-preview-test skin-settings-test)
   target_sources(${ai_settings_consumer} PRIVATE src/core/AISettingsWindow.mm)
 endforeach()
 foreach(translation_settings_consumer toolbar-visibility-preferences-test scheme-round-trip-preferences-test skin-preview-test skin-settings-test)

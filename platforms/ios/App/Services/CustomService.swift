@@ -82,14 +82,16 @@ enum AIProviderPreset: String, CaseIterable, Codable, Sendable {
   }
 }
 
-// File transcription presets use Engine's multipart file/model codec.
-// Official provider documentation checked 2026-09-07.
+// File transcription presets use Engine's multipart file/model codec; 阿里云百炼（`bailian`）是 Chat Completions 带 input_audio 的 JSON 请求（chat_audio）。
+// Official provider documentation checked 2026-09-07; 百炼按 2026-10-09 的官方文档。
 // `local` and `system` recognize on the phone and carry no endpoint, model or key; their raw values are the shared `voice_input.provider` names.
 enum VoiceProviderPreset: String, CaseIterable, Codable, Sendable {
-  case local, system, everyAPI, doubao, openAI, siliconFlow, groq, mistral, custom
+  case local, system, everyAPI, doubao, openAI, siliconFlow, groq, mistral, bailian, custom
 
   /// Recognized on the phone: no endpoint, model or key, and audio never leaves the device (for `system`, whenever the device can recognize the language by itself).
   var isOnDevice: Bool { self == .local || self == .system }
+  /// 请求格式是 chat_audio（录音作为 Base64 数据 URL 放进 Chat Completions），其余整句服务是 multipart。
+  var usesChatAudio: Bool { self == .bailian }
 
   var title: String {
     switch self {
@@ -101,6 +103,7 @@ enum VoiceProviderPreset: String, CaseIterable, Codable, Sendable {
     case .siliconFlow: "硅基流动 · SenseVoice"
     case .groq: "Groq · Whisper"
     case .mistral: "Mistral · Voxtral"
+    case .bailian: "阿里云百炼 · 千问"
     case .custom: "自定义"
     }
   }
@@ -113,6 +116,7 @@ enum VoiceProviderPreset: String, CaseIterable, Codable, Sendable {
     case .siliconFlow: "https://api.siliconflow.cn/v1/audio/transcriptions"
     case .groq: "https://api.groq.com/openai/v1/audio/transcriptions"
     case .mistral: "https://api.mistral.ai/v1/audio/transcriptions"
+    case .bailian: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
     case .custom: ""
     }
   }
@@ -124,12 +128,13 @@ enum VoiceProviderPreset: String, CaseIterable, Codable, Sendable {
   var models: [String] {
     switch self {
     case .local, .system: []
-    case .everyAPI: ["openai/whisper-large-v3-turbo", "volc.seedasr.sauc.duration"]
+    case .everyAPI: ["volc.seedasr.sauc.duration"]
     case .doubao: ["volc.seedasr.sauc.duration"]
     case .openAI: ["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "whisper-1"]
     case .siliconFlow: ["FunAudioLLM/SenseVoiceSmall"]
     case .groq: ["whisper-large-v3-turbo", "whisper-large-v3"]
     case .mistral: ["voxtral-mini-latest"]
+    case .bailian: ["qwen3-asr-flash", "qwen3-asr-flash-2026-02-10"]
     case .custom: []
     }
   }
@@ -143,6 +148,7 @@ enum VoiceProviderPreset: String, CaseIterable, Codable, Sendable {
     case .siliconFlow: address = "https://siliconflow.readme.io/reference/createaudiotranscriptions"
     case .groq: address = "https://console.groq.com/docs/speech-to-text"
     case .mistral: address = "https://docs.mistral.ai/studio/audio/speech_to_text/offline_transcription"
+    case .bailian: address = "https://help.aliyun.com/zh/model-studio/qwen-speech-recognition"
     case .custom: return nil
     }
     return URL(string: address)
@@ -185,8 +191,17 @@ struct CustomServiceConfiguration: Codable, Sendable, Equatable {
     }
     result.endpoint = defaults.string(forKey: "service.\(kind.rawValue).endpoint") ?? ""
     result.model = defaults.string(forKey: "service.\(kind.rawValue).model") ?? ""
+    if kind == .voice { result.model = currentVoiceModel(result.model, for: result.voiceProvider) }
     result.prompt = defaults.string(forKey: "service.\(kind.rawValue).prompt") ?? result.prompt
     return result
+  }
+
+  /// The EveryAPI preset used to default to `openai/whisper-large-v3-turbo`, a name copied from another service that EveryAPI never routed (it answers 503 `model_not_found`). Configurations saved with that default still name it, so it is read as the preset's current default; any other model the user chose is kept.
+  static let retiredEveryAPIVoiceModel = "openai/whisper-large-v3-turbo"
+
+  static func currentVoiceModel(_ model: String, for provider: VoiceProviderPreset) -> String {
+    guard provider == .everyAPI, model.trimmingCharacters(in: .whitespaces) == retiredEveryAPIVoiceModel else { return model }
+    return provider.models.first ?? ""
   }
 
   static func loadPreset(_ provider: AIProviderPreset, defaults: UserDefaults = .standard) -> Self {
@@ -204,7 +219,7 @@ struct CustomServiceConfiguration: Codable, Sendable, Equatable {
     var result = Self()
     result.voiceProvider = provider
     result.endpoint = defaults.string(forKey: prefix + ".endpoint") ?? provider.endpoint
-    result.model = defaults.string(forKey: prefix + ".model") ?? provider.models.first ?? ""
+    result.model = currentVoiceModel(defaults.string(forKey: prefix + ".model") ?? provider.models.first ?? "", for: provider)
     return result
   }
 
@@ -455,9 +470,14 @@ enum CustomServiceClient {
     }
     if kind == .voice {
       guard let wav else { throw ServiceFailure(message: "请先录音。") }
-      let multipart = try AppServicesBridge.transcriptionBody(wav, model: configuration.model, language: language)
-      request.httpBody = multipart["body"] as? Data
-      request.setValue(multipart["contentType"] as? String, forHTTPHeaderField: "Content-Type")
+      if configuration.voiceProvider.usesChatAudio {
+        request.httpBody = try AppServicesBridge.chatAudioBody(wav, model: configuration.model)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+      } else {
+        let multipart = try AppServicesBridge.transcriptionBody(wav, model: configuration.model, language: language)
+        request.httpBody = multipart["body"] as? Data
+        request.setValue(multipart["contentType"] as? String, forHTTPHeaderField: "Content-Type")
+      }
     } else {
       guard text.count <= 10000 else { throw ServiceFailure(message: "每次最多处理一万字。") }
       request.httpBody = try AppServicesBridge.polishBody(configuration.model, prompt: prompt, text: text)

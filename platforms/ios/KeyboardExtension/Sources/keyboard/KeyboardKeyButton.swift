@@ -12,14 +12,15 @@ final class KeyboardKeyButton: UIButton {
       - insets.leading - insets.trailing
   }
 
-  static func chipContentWidth(titleLine: CGFloat, glossLines: Int, column: CGFloat) -> CGFloat {
-    glossLines > 0 ? max(titleLine, column) : titleLine
+  /// 带释义的词块按内容取宽：候选字和最宽那行释义里更宽的那个，释义最多把词块撑到一栏（`column`，候选栏的三分之一），再长的释义由 `fittedGloss` 缩小或截断。原先带释义的词块一律至少一栏宽，「你好 / hello」这样的短候选也占去三分之一个候选栏。
+  static func chipContentWidth(titleLine: CGFloat, glossLine: CGFloat, glossLines: Int, column: CGFloat) -> CGFloat {
+    glossLines > 0 ? max(titleLine, min(glossLine, column)) : titleLine
   }
 
   static func chipWidth(
-    titleLine: CGFloat, glossLines: Int, column: CGFloat, insets: NSDirectionalEdgeInsets
+    titleLine: CGFloat, glossLine: CGFloat, glossLines: Int, column: CGFloat, insets: NSDirectionalEdgeInsets
   ) -> CGFloat {
-    ceil(chipContentWidth(titleLine: titleLine, glossLines: glossLines, column: column)
+    ceil(chipContentWidth(titleLine: titleLine, glossLine: glossLine, glossLines: glossLines, column: column)
       + insets.leading + insets.trailing)
   }
 

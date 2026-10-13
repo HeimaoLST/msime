@@ -2,9 +2,15 @@
  * Class strings for the platform controls in `platform-controls.tsx`. Every length and colour is a `--p-*` token from the `[data-platform]` layer in `styles.css`, so one markup takes each platform's shape. Values that Tailwind could read either as a colour or as a size (`text-`, `shadow-`, `border-`) are written as arbitrary properties so the property is never inferred.
  */
 
+import { controlRow, rowText as sharedRowText, subtleMeta } from "./row-style";
+
 // ---- groups and rows ----
 
 export const group = "flex min-w-0 flex-col gap-[var(--p-g-title-gap)]";
+/** Shared rounded surface used by mobile groups that do not contain standard setting rows. */
+export const mobileGroupSurface = "overflow-hidden rounded-[20px] bg-[var(--p-group-bg)]";
+export const groupFooter =
+  "m-0 [padding:var(--p-g-title-pad)] text-[13px] leading-[18px] [color:var(--p-sub)]";
 export const groupTitle =
   "m-0 [padding:var(--p-g-title-pad)] [font-size:var(--p-g-title-fs)] [font-weight:var(--p-g-title-w)] [color:var(--p-g-title-fg)]";
 /**
@@ -19,10 +25,13 @@ export const row =
   "flex min-h-[var(--p-row-h)] min-w-0 items-center gap-[var(--p-row-ctl-gap)] rounded-[var(--p-row-r)] bg-[var(--p-row-bg)] [padding:var(--p-row-pad)] [box-shadow:var(--p-row-shadow)]";
 /** Windows leads each card with a glyph; the other platforms set `--p-row-icon: none`. */
 export const rowIcon = "size-5 shrink-0 items-center justify-center [display:var(--p-row-icon)]";
-export const rowText = "flex min-w-0 flex-1 flex-col gap-0.5";
+export const rowText = sharedRowText;
 export const rowTitle = "block [font-size:var(--p-row-fs)] [color:var(--p-text)]";
 export const rowDescription = "block [font-size:var(--p-sub-fs)] [color:var(--p-sub)]";
-export const rowControl = "flex shrink-0 items-center gap-2";
+export const rowControl = controlRow;
+/** 控件要整行宽度的行（文本框、整行滑块）。HarmonyOS 手机只有约 360px 宽，控件放在标题旁边会把说明挤成几个字一行、把地址截断，所以那里控件换到标题下方独占一行，和标题之间只隔 6px；其余平台与 `row` 相同。 */
+export const wideRow = `${row} harmony:flex-wrap harmony:gap-y-1.5`;
+export const wideRowControl = `${rowControl} harmony:w-full harmony:shrink`;
 /** 跳转行：整行是一个按钮，外形与 `row` 相同，悬停时变色。 */
 export const linkRow = `${row} w-full cursor-pointer border-0 text-left hover:bg-[var(--p-hover)]`;
 
@@ -65,6 +74,17 @@ export const segmentInput = "sr-only";
 export const select =
   "min-w-0 rounded-[var(--p-r-ctl)] [background:var(--p-sel-bg)] [border:var(--p-sel-border)] [padding:var(--p-sel-pad)] [font-size:var(--p-sel-fs)] [color:var(--p-sel-fg)] [field-sizing:var(--p-sel-sizing,fixed)]";
 
+// ---- text input ----
+
+/** 设置行里的文本框。桌面平台保持原样；HarmonyOS 手机上画成与词库页搜索框同款的无边框胶囊，底色比所在分组略深一层，占满控件区。 */
+export const textInput =
+  "harmony:box-border harmony:h-10 harmony:min-w-0 harmony:flex-1 harmony:appearance-none harmony:rounded-full harmony:border-0 harmony:bg-[rgba(255,255,255,0.08)] harmony:px-4 harmony:[font-family:inherit] harmony:text-[15px] harmony:text-[var(--p-text)] harmony:placeholder:text-[var(--p-sub)] harmony:light-theme:bg-[rgba(0,0,0,0.05)]";
+/** 带「显示」按钮的密钥框：框占满剩余宽度，按钮是行尾的强调色文字。 */
+export const secretInput =
+  "harmony:flex harmony:w-full harmony:min-w-0 harmony:items-center harmony:gap-2";
+export const secretToggle =
+  "harmony:shrink-0 harmony:border-0 harmony:bg-transparent harmony:px-1 harmony:text-[15px] harmony:text-[var(--p-btn-fg)]";
+
 // ---- checks ----
 
 export const checks = "m-0 flex min-w-0 flex-col gap-2 border-0 p-0";
@@ -83,13 +103,21 @@ export const checkGridItem =
 
 /** HarmonyOS 手机的选择行和分段行：整行是一个按钮，点开选择弹窗，末端显示当前值和一个小箭头。 */
 export const pickerRow = `${row} w-full cursor-pointer border-0 text-left [font-family:inherit] active:bg-[var(--p-press)] disabled:cursor-default disabled:opacity-50`;
+/** 带说明的选择行：标题和当前值在第一行，说明在下面占满整行。说明与当前值都可能很长（流式接口），并排时说明会被挤成几个字一行。 */
+export const pickerRowDescribed =
+  "grid min-h-[var(--p-row-h)] w-full min-w-0 cursor-pointer grid-cols-[auto_minmax(0,1fr)] items-center gap-x-[var(--p-row-ctl-gap)] gap-y-0.5 rounded-[var(--p-row-r)] border-0 bg-[var(--p-row-bg)] text-left [padding:var(--p-row-pad)] [box-shadow:var(--p-row-shadow)] [font-family:inherit] active:bg-[var(--p-press)] disabled:cursor-default disabled:opacity-50";
+export const pickerRowDescription =
+  "col-span-2 block [font-size:var(--p-sub-fs)] [color:var(--p-sub)]";
+/** 带说明的选择行里，当前值占标题右边剩下的宽度，靠末端对齐，放不下时截断。 */
+export const pickerValueDescribed =
+  "flex min-w-0 items-center justify-self-end gap-1.5 text-[16px] [color:var(--p-sub)]";
 export const pickerValue =
   "flex max-w-[55%] min-w-0 shrink-0 items-center gap-1.5 text-[16px] [color:var(--p-sub)]";
 export const pickerValueText = "min-w-0 truncate";
 
 // ---- 导航列表（HarmonyOS 手机的设置首页和「我的」） ----
 
-export const navGroup = "overflow-hidden rounded-[20px] bg-[var(--p-group-bg)]";
+export const navGroup = mobileGroupSurface;
 /** 细线沿第一个可见行之后每个可见行的文字列顶边画出，所以它从标签开始的位置起、到末端内边距处止，最后一行下方没有细线。 */
 export const navGroupRows =
   "[&>:not([hidden])~:not([hidden])_[data-nav-rule]]:[background:linear-gradient(var(--p-hair),var(--p-hair))_left_top/100%_1px_no-repeat]";
@@ -104,18 +132,18 @@ export const navRowBody = {
   root: "flex min-h-[52px] min-w-0 flex-1 items-center gap-3",
   me: "flex min-h-[48px] min-w-0 flex-1 items-center gap-3 py-2",
 } as const;
-export const navRowText = "flex min-w-0 flex-1 flex-col gap-0.5";
+export const navRowText = sharedRowText;
 export const navRowTitle = {
   root: "text-[17px] font-normal",
   me: "text-[16px] font-normal",
 } as const;
-export const navRowDescription = "text-[12px] [color:var(--p-sub)]";
+export const navRowDescription = subtleMeta;
 export const navRowValue = {
   root: "max-w-[55%] min-w-0 shrink-0 truncate text-[16px] [color:var(--p-sub)]",
   me: "max-w-[55%] min-w-0 shrink-0 truncate text-[14px] [color:var(--p-sub)]",
 } as const;
 export const navRowChevron = "-ml-1 shrink-0 self-center opacity-55 [color:var(--p-sub)]";
-export const navRowTrailing = "flex shrink-0 items-center gap-2";
+export const navRowTrailing = controlRow;
 
 // ---- navigation ----
 

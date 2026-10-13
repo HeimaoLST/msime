@@ -13,9 +13,11 @@ enum IOSCloudSettings {
       "platform.ios.haptics_enabled": .boolean(KeyboardFeedbackPreference.hapticsEnabled),
       "platform.ios.dictionary_learning": .boolean(
         InputHabitPreference.settings(in: document).learning),
-      "platform.ios.global_theme": .string(document.map(GlobalThemePreference.theme(in:)) ?? GlobalThemePreference.selected),
       "platform.ios.custom_theme_base": .string(GlobalThemePreference.base(in: document))
     ]
+    // 「原生」先不上传，云端保留原来的主题：加入它之前的版本只认七个主题 id，同一账号下还没升级的设备收到它会拒绝整份文档。
+    let theme = document.map(GlobalThemePreference.theme(in:)) ?? GlobalThemePreference.selected
+    if theme != GlobalThemeCatalog.nativeId { settings["platform.ios.global_theme"] = .string(theme) }
     // 「跟随系统」先不上传，云端保留原来的强度：这一版的 `IOSPreferencePlan` 已经接受 `system`，但更早的版本只认 light、medium、strong，同一账号下还没升级的设备收到它会拒绝整份文档。
     let strength = KeyboardFeedbackPreference.hapticStrength
     if strength != .system { settings["platform.ios.haptic_strength"] = .string(strength.rawValue) }
@@ -26,6 +28,8 @@ enum IOSCloudSettings {
     // A scheme the cloud cannot carry (Cantonese, Zhuyin, Vietnamese, Tibetan, Stroke) leaves the account's scheme as it is: every other device would reject the whole document over an `input.schema` it does not know.
     if let name = scheme.cloudSchema {
       settings["input.schema"] = .string(name)
+      // 键盘布局（26 键、九键、14 键、手写）写进 `platform.ios.keyboard_layout`；还不认识它的旧版本只读 `platform.ios.nine_key`，所以照旧一起上传，14 键在那里落成全拼 26 键。服务端字段表里还没有 `keyboard_layout` 时，`mergedPreferences` 把它留在本机，其余照常上传。
+      settings["platform.ios.keyboard_layout"] = .string(scheme.cloudKeyboardLayout)
       settings["platform.ios.nine_key"] = .boolean(scheme == .nineKey || scheme == .japaneseNineKey)
     }
     if let profile = scheme.shuangpinProfile { settings["input.shuangpin_schema"] = .string(profile) }
@@ -51,7 +55,6 @@ enum IOSCloudSettings {
     if let learning = plan.learning, InputHabitPreference.update({ $0.learning = learning }) == nil {
       throw CocoaError(.fileWriteUnknown)
     }
-    let scheme = plan.scheme.flatMap(ChineseInputScheme.init(rawValue:))
     // 方案在写文档的闭包里按文档当时的启用列表落下，不拿 App Group 镜像里可能过时的列表覆盖文档。
     var writtenScheme: InputSchemePreference.Selection?
     let written = MetasequoiaInputSessionBridge.updateSharedPreferences { document in
@@ -64,7 +67,11 @@ enum IOSCloudSettings {
         if let design { customTheme["keyboard"] = design }
         document["custom_theme"] = customTheme
       }
-      if let scheme { writtenScheme = InputSchemePreference.write({ $0.scheme = scheme }, into: &document) }
+      // 云端有 `platform.ios.keyboard_layout` 时按它切换；没有时云端的全拼、不是九键保留本机的 14 键（`IOSPreferencePlan.scheme(keeping:)`）。
+      let local = InputSchemePreference.current(in: document).scheme
+      if let scheme = plan.scheme(keeping: local.rawValue).flatMap(ChineseInputScheme.init(rawValue:)) {
+        writtenScheme = InputSchemePreference.write({ $0.scheme = scheme }, into: &document)
+      }
       if let profile = plan.wubiProfile { document[WubiProfilePreference.documentKey] = profile }
       if let traditional = plan.traditional { document[ChineseOutputPreference.documentKey] = traditional }
     }

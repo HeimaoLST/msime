@@ -11,6 +11,14 @@ public final class BootstrapMarkerSmoke {
     static void check(boolean condition) { if (!condition) throw new AssertionError(); }
 
     public static void main(String[] args) throws Exception {
+        for (String name : new String[] {"msime-zhuyin.db", "plugin.toml", ".package"})
+            Bootstrap.requireAssetName(name);
+        for (String name : new String[] {null, "", "../outside", "a..b", "a/b", "a\\b", "音.db"}) {
+            boolean rejected = false;
+            try { Bootstrap.requireAssetName(name); }
+            catch (IllegalArgumentException expected) { rejected = true; }
+            check(rejected);
+        }
         Path exact = Files.createTempFile("bootstrap-marker", ".txt");
         Path oversized = Files.createTempFile("bootstrap-marker", ".txt");
         Path markerRoot = Files.createTempDirectory("bootstrap-marker-link");
@@ -39,6 +47,17 @@ public final class BootstrapMarkerSmoke {
                 configurationRejected = true;
             }
             check(configurationRejected);
+            Files.deleteIfExists(configurationLink);
+            Files.writeString(configurationOutside, "synthetic");
+            Files.createLink(configurationLink, configurationOutside);
+            configurationRejected = false;
+            try {
+                Bootstrap.existingConfiguration(configurationLink.toFile());
+            } catch (java.io.IOException expected) {
+                configurationRejected = true;
+            }
+            check(configurationRejected);
+            Files.deleteIfExists(configurationLink);
             Files.deleteIfExists(configurationOutside);
         } finally {
             Files.deleteIfExists(exact);

@@ -39,7 +39,7 @@ if ($TargetVersion -notmatch '^[0-9][0-9A-Za-z.+-]*$') {
     throw "Invalid installer version: $TargetVersion"
 }
 
-$editionTable = Get-Content -LiteralPath (Join-Path $RepoRoot 'shared/contracts/editions.json') -Raw | ConvertFrom-Json
+$editionTable = Get-Content -LiteralPath (Join-Path $RepoRoot 'shared/contracts/editions.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $editionEntry = @($editionTable.editions | Where-Object { $_.id -ceq $Edition -and $null -ne $_.platforms.windows })
 if ($editionEntry.Count -ne 1) {
     throw "版本 $Edition 在 shared/contracts/editions.json 里没有 Windows 标识"
@@ -151,7 +151,9 @@ $helpcodeSource = Join-Path $RepoRoot $HelpCodeDirectory
 # 运行时走 MAKEINTRESOURCE。这里曾经有它们的一份逐字节副本，随包装到用户磁盘、且因为
 # uninsneveruninstall 连卸载都不清除，而没有任何代码从磁盘读图标。
 $appIcon = Join-Path $iconSource 'msime.ico'
-$thirdPartyNotices = Join-Path $RepoRoot (Join-Path $NoticesDirectory 'THIRD_PARTY_NOTICES.txt')
+# Invoke-LocalInstall.ps1 传来的是已经解析好的绝对路径；不判断就接在 RepoRoot 后面，会拼出 E:\repo\D:\... 这样不存在的路径。
+$noticeRoot = if ([IO.Path]::IsPathRooted($NoticesDirectory)) { $NoticesDirectory } else { Join-Path $RepoRoot $NoticesDirectory }
+$thirdPartyNotices = Join-Path $noticeRoot 'THIRD_PARTY_NOTICES.txt'
 $collectedNotices = Join-Path $RepoRoot 'target/windows-notices/THIRD_PARTY_NOTICES.txt'
 if (-not $PSBoundParameters.ContainsKey('NoticesDirectory') -and
     (Test-Path -LiteralPath $collectedNotices -PathType Leaf)) {
@@ -257,7 +259,7 @@ if 'weight' not in names or pk != ['word', 'display']:
         throw "英文词库数据库 schema 检查失败：$englishDb"
     }
     # Validate source content before any existing package staging is removed.
-    $defaultConfig = Get-Content -LiteralPath $factoryConfig -Raw
+    $defaultConfig = Get-Content -LiteralPath $factoryConfig -Raw -Encoding UTF8
     if ($defaultConfig -notmatch '(?m)^schema\s*=\s*"quanpin"\s*$') {
         throw '出厂配置的 input.schema 必须是 quanpin。'
     }
@@ -307,7 +309,7 @@ else {
     Reset-Directory -LiteralPath $targetAppData
     $defaultConfigPath = Join-Path $targetAppData 'config.default.toml'
     # 出厂配置来自本仓库的 default_config，不依赖本机是否已安装输入法。安装脚本用 onlyifdoesntexist 生成用户 config.toml，升级不会覆盖已有方案/主题。
-    Set-Content -LiteralPath $defaultConfigPath -Value $defaultConfig -Encoding utf8NoBOM -NoNewline
+    [IO.File]::WriteAllText($defaultConfigPath, $defaultConfig, [Text.UTF8Encoding]::new($false))
 
     $targetHelpcodes = Join-Path $targetAppData 'helpcodes'
     Reset-Directory -LiteralPath $targetHelpcodes
@@ -380,6 +382,28 @@ if (-not $editionOfflineGlosses) {
         Write-Host "Offline glosses staged: $($glossFiles.Count) languages in $glossesTarget"
     } else {
         Write-Host "No offline glosses with their notice in $glossesSource; candidate glosses stay English only"
+    }
+}
+# 候选释义的英文读音表（scripts/build_pronunciations.py）、单字英文释义（scripts/build_character_glosses.py）和 english.db 没收的词的英文释义（scripts/build_word_glosses.py），和 macOS 的 stage-resources.sh 一样装在 resources 旁边：host-api 的 msime_client_pronunciation_request、msime_client_candidate_gloss_request 和 msime_client_gloss_breakdown_request 到那里找。都是可选的，只随各自的授权声明一起装；没有时英文释义不标音标、单字和长尾词没有英文释义、整句候选没有逐词拆解。单字和词的释义按中文候选查，只给提供中文方案的版本。
+foreach ($table in @(
+        @{ Name = 'pronunciations'; Database = 'en-phonetic.db'; Notice = 'pronunciations-NOTICE.txt'; Chinese = $false },
+        @{ Name = 'character-glosses'; Database = 'zh-en.db'; Notice = 'character-glosses-NOTICE.txt'; Chinese = $true },
+        @{ Name = 'word-glosses'; Database = 'zh-en.db'; Notice = 'word-glosses-NOTICE.txt'; Chinese = $true })) {
+    $tableSource = Join-Path $RepoRoot (Join-Path 'target' $table.Name)
+    $tableTarget = Join-Path $targetServer $table.Name
+    if (Test-Path -LiteralPath $tableTarget) {
+        Remove-Item -LiteralPath $tableTarget -Recurse -Force
+    }
+    if ($Light -or ($table.Chinese -and -not $editionOfflineGlosses)) { continue }
+    $tableDatabase = Join-Path $tableSource $table.Database
+    $tableNotice = Join-Path $tableSource $table.Notice
+    if ((Test-Path -LiteralPath $tableDatabase -PathType Leaf) -and (Test-Path -LiteralPath $tableNotice -PathType Leaf)) {
+        New-Item -ItemType Directory -Path $tableTarget -Force | Out-Null
+        Copy-Item -LiteralPath $tableDatabase -Destination $tableTarget -Force
+        Copy-Item -LiteralPath $tableNotice -Destination $tableTarget -Force
+        Write-Host "$($table.Name) staged in $tableTarget"
+    } else {
+        Write-Host "No $($table.Database) with $($table.Notice) in $tableSource; $($table.Name) not packaged"
     }
 }
 # 粤拼、注音和笔画词库（scripts/fetch_language_dictionaries.py 下载到 target/language-dictionaries，版本由 resources/language-dictionaries.lock.json 固定），和译文一样装在 resources 旁边：host-api 在那里找到 language-dictionaries 并写进运行时配置。可选；缺少词库时对应方案显示为不可用并退回上次的中文方案，越南文和藏文不需要数据。每个词库只随它的授权文本一起分发，授权文本必须跟着数据走。设置 MSIME_REQUIRE_LANGUAGE_DICTIONARIES=1 时，没有带上 resources/language-dictionaries.lock.json 固定的每一个词库的包会失败。
@@ -480,7 +504,7 @@ Copy-Item -LiteralPath $license -Destination (Join-Path $PSScriptRoot 'LICENSE.t
 
 $targetIss = Join-Path $PSScriptRoot 'msime_setup.iss'
 Assert-PathExists -LiteralPath $targetIss -Description '安装脚本'
-$issContent = Get-Content -LiteralPath $targetIss -Raw
+$issContent = Get-Content -LiteralPath $targetIss -Raw -Encoding UTF8
 if ($issContent -notmatch '(?m)^#define\s+MyAppVersion\s+"[^"]+"\s*$') {
     throw '未能在安装脚本中找到 MyAppVersion。'
 }
@@ -490,7 +514,7 @@ $updatedIss = [regex]::Replace(
     "#define MyAppVersion   `"$TargetVersion`""
 )
 $updatedIss = $updatedIss.TrimEnd("`r", "`n") + "`r`n"
-Set-Content -LiteralPath $targetIss -Value $updatedIss -Encoding utf8NoBOM -NoNewline
+[IO.File]::WriteAllText($targetIss, $updatedIss, [Text.UTF8Encoding]::new($false))
 
 $serverBinaryCount = @(Get-ChildItem -LiteralPath $targetServer -Recurse -File -Include '*.exe', '*.dll').Count
 $tsfBinaryCount = @(Get-ChildItem -LiteralPath $targetTsf -Recurse -File -Include '*.exe', '*.dll').Count

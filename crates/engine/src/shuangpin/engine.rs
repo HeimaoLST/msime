@@ -17,7 +17,9 @@ use crate::helpcode::{
 use crate::paths::RuntimePaths;
 use crate::pinyin::segment::{join_segments, split_segments};
 use crate::quanpin::QuanpinDictionary;
-use crate::types::{CandidateSource, FuzzyPinyinOptions, QueryRequest, SchemeType, WordItem};
+use crate::types::{
+    autocorrect_type, CandidateSource, FuzzyPinyinOptions, QueryRequest, SchemeType, WordItem,
+};
 
 // 双拼模糊候选的短合并直接扫描已有词，避免临时哈希表和重复索引分配。
 const SMALL_FUZZY_DEDUP: usize = 64;
@@ -129,6 +131,8 @@ impl ShuangpinEngine {
             .set_sentence_association(request.sentence_association);
         self.dictionary
             .set_rescoring_context(&request.rescoring_context);
+        self.dictionary
+            .set_autocorrect_types(request_autocorrect_types(request));
 
         let raw = &request.raw_input;
         if remove_manual_delimiters(raw).is_empty() {
@@ -138,7 +142,7 @@ impl ShuangpinEngine {
         let empty_keymap = HelpcodeKeymap::default();
         let keymap = keymap.unwrap_or(&empty_keymap);
 
-        if let Some(helpcode) = active_helpcode_query(request, self.profile) {
+        let mut candidates = if let Some(helpcode) = active_helpcode_query(request, self.profile) {
             let exact = self.dictionary.generate_with_helpcodes(
                 &helpcode.base_pure,
                 &helpcode.base_segmentation,
@@ -146,20 +150,22 @@ impl ShuangpinEngine {
                 &helpcode.help_codes,
                 keymap,
             );
-            return self.append_fuzzy(
+            self.append_fuzzy(
                 exact,
                 &helpcode.base_segmentation,
                 request.fuzzy_pinyin,
                 &helpcode.help_codes,
                 keymap,
-            );
-        }
-
-        let segmentation = segment_input(raw, self.profile);
-        let exact =
-            self.dictionary
-                .generate_series(&remove_manual_delimiters(raw), &segmentation, raw);
-        self.append_fuzzy(exact, &segmentation, request.fuzzy_pinyin, "", keymap)
+            )
+        } else {
+            let segmentation = segment_input(raw, self.profile);
+            let exact =
+                self.dictionary
+                    .generate_series(&remove_manual_delimiters(raw), &segmentation, raw);
+            self.append_fuzzy(exact, &segmentation, request.fuzzy_pinyin, "", keymap)
+        };
+        keep_typo_sentence_off_first_seat(&mut candidates);
+        candidates
     }
 
     /// Quanpin fuzzy rows for the decoded segmentation, labelled with the shuangpin keys they cover, filtered or reordered by the helpcodes, appended uniquely by word, and the whole list stable-sorted by typed coverage (engine.cpp:227-258).
@@ -195,11 +201,11 @@ impl ShuangpinEngine {
             _ => fuzzy,
         };
         if fuzzy.is_empty() {
-            exact.sort_by_key(|item| std::cmp::Reverse(item.pinyin.len()));
+            sort_by_coverage(&mut exact);
             return exact;
         }
         append_fuzzy_rows(&mut exact, fuzzy);
-        exact.sort_by_key(|item| std::cmp::Reverse(item.pinyin.len()));
+        sort_by_coverage(&mut exact);
         exact
     }
 
@@ -270,6 +276,37 @@ impl ShuangpinEngine {
     }
 }
 
+/// 会话只有一个「拼音纠错」开关，按当前方案作用：请求里那两个字段名带 quanpin 是历史原因，双拼也读它们。双拼不加漏键和多键，见 `typo_edges::SHUANGPIN_TYPO_TYPES`。
+fn request_autocorrect_types(request: &QueryRequest) -> u32 {
+    let transposition = if request.enable_quanpin_autocorrect_transposition {
+        autocorrect_type::TRANSPOSITION
+    } else {
+        0
+    };
+    let neighbor = if request.enable_quanpin_autocorrect_neighbor {
+        autocorrect_type::NEIGHBOR
+    } else {
+        0
+    };
+    transposition | neighbor
+}
+
+/// 按覆盖的按键长度稳定排序。纠错整句覆盖全部按键，可能因此被排到第一位，由 `keep_typo_sentence_off_first_seat` 在 `query` 返回前挪开。
+fn sort_by_coverage(rows: &mut [WordItem]) {
+    rows.sort_by_key(|item| std::cmp::Reverse(item.pinyin.len()));
+}
+
+/// 纠错整句不抢首选（见 `dictionary::typo_sentence_seat`）。词典放好座位之后还有几道重排会把它挪到第一位：模糊音按覆盖长度排序（整句块为空、全码又没有词条时它是唯一最长的一行），单辅助码把匹配的行提到最前，双辅助码滤掉排在它前面的行。所以不在每道重排里各自守，而在 `query` 返回前统一处理：首位是纠错行时，把第一条非纠错行提到首位，其余行相对顺序不变。整张表只剩纠错行（例如双辅助码只留下了它）时没有可让的位置，和 `typo_sentence_seat` 在表空时不给纠错行一样，整张表清空，免得空格直接上屏一条改正。
+fn keep_typo_sentence_off_first_seat(rows: &mut Vec<WordItem>) {
+    if rows.first().is_none_or(|row| row.corrected_from.is_empty()) {
+        return;
+    }
+    match rows.iter().position(|row| row.corrected_from.is_empty()) {
+        Some(literal) => rows[..=literal].rotate_right(1),
+        None => rows.clear(),
+    }
+}
+
 /// 只需段数时直接统计分隔符，避免为每个模糊候选复制音节字符串。
 fn segment_count(segmentation: &str) -> usize {
     if segmentation.is_empty() {
@@ -313,7 +350,9 @@ fn append_fuzzy_rows(exact: &mut Vec<WordItem>, fuzzy: Vec<WordItem>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_fuzzy_rows, segment_count};
+    use super::{
+        append_fuzzy_rows, keep_typo_sentence_off_first_seat, segment_count, sort_by_coverage,
+    };
     use crate::types::{CandidateSource, WordItem};
 
     fn row(word: &str) -> WordItem {
@@ -373,5 +412,58 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["已有", "模糊"]
         );
+    }
+
+    /// 整句块为空、全码没有词条时，纠错整句是唯一覆盖全部按键的一行，按长度排序后也不能坐第一位。
+    #[test]
+    fn sorting_by_coverage_keeps_the_typo_sentence_off_the_first_seat() {
+        let sort = |rows: &mut Vec<WordItem>| {
+            sort_by_coverage(rows);
+            keep_typo_sentence_off_first_seat(rows);
+        };
+        let prefix =
+            |word: &str| WordItem::new("mwgf", word, 1, CandidateSource::Database, "mei'gen");
+        let mut typo = WordItem::new(
+            "mwgfxi",
+            "没关系",
+            1,
+            CandidateSource::Generated,
+            "mei'guan'xi",
+        );
+        typo.sentence_association = true;
+        typo.corrected_from = "mwgfxi".to_owned();
+        let words = |rows: &[WordItem]| {
+            rows.iter()
+                .map(|item| item.word.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let mut rows = vec![prefix("没跟"), typo.clone(), prefix("没")];
+        sort(&mut rows);
+        assert_eq!(words(&rows), ["没跟", "没关系", "没"]);
+
+        // 有同样覆盖全部按键的字面行时，稳定排序本来就让它留在纠错行前面。
+        let literal = WordItem::new(
+            "mwgfxi",
+            "没跟系",
+            1,
+            CandidateSource::Generated,
+            "mei'gen'xi",
+        );
+        let mut rows = vec![literal, typo.clone(), prefix("没跟")];
+        sort(&mut rows);
+        assert_eq!(words(&rows), ["没跟系", "没关系", "没跟"]);
+
+        // 只有它一行时没有可让的位置，不给纠错行。
+        let mut rows = vec![typo.clone()];
+        sort(&mut rows);
+        assert!(rows.is_empty());
+
+        // 前面有不止一条纠错行时，第一条非纠错行提到首位，其余行相对顺序不变。
+        let mut other_typo = typo.clone();
+        other_typo.word = "美关系".to_owned();
+        let mut rows = vec![typo, other_typo, prefix("没跟"), prefix("没")];
+        keep_typo_sentence_off_first_seat(&mut rows);
+        assert_eq!(words(&rows), ["没跟", "没关系", "美关系", "没"]);
     }
 }

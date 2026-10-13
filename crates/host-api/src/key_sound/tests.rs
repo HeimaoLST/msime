@@ -688,28 +688,95 @@ mod playback {
         );
     }
 
-    #[test]
-    fn a_pack_that_does_not_decode_stays_silent() {
-        let state = tempfile::tempdir().unwrap();
-        let pack = state.path().join("plugins/sound/broken");
+    /// 在 `state` 下装一个名为 `id` 的包，`manifest` 是 `[sounds]` 或 `mode`/`[sequence]` 那几行。
+    fn install_pack(state: &Path, id: &str, manifest: &str) -> PathBuf {
+        let pack = state.join("plugins/sound").join(id);
         std::fs::create_dir_all(&pack).unwrap();
-        // Valid for client-core (the header bytes are right), refused by the decoder (2 s at 8 kHz).
-        wav(&pack.join("key.wav"), 1, 8_000, 16_000);
         std::fs::write(
             pack.join("plugin.toml"),
-            "schema_version = 1\nkind = \"sound\"\nid = \"broken\"\nname = \"Broken\"\nversion = \"1\"\nlicense = \"CC0-1.0\"\n[sounds]\ndefault = \"key.wav\"\n",
+            format!("schema_version = 1\nkind = \"sound\"\nid = \"{id}\"\nname = \"{id}\"\nversion = \"1\"\nlicense = \"CC0-1.0\"\n{manifest}"),
         )
         .unwrap();
+        pack
+    }
+
+    // 解码失败只让用到那个样本的键或声音不响（docs/plugins.md「超出的样本会被跳过，那个键不出声」），同一个包的其他样本和另选的旋律包照常播放；整个包解析不了时仍然全部静音。
+    #[test]
+    fn a_sample_that_does_not_decode_silences_only_its_own_sound() {
+        let state = tempfile::tempdir().unwrap();
+        let broken = install_pack(
+            state.path(),
+            "broken",
+            "[sounds]\ndefault = \"long.wav\"\nspace = \"space.wav\"\ncommit = \"space.wav\"\nachievement = \"long.wav\"\n",
+        );
+        // client-core 导入时能过（文件头正确），解码器拒绝（8 kHz 下 2 秒，超过 1.5 秒上限）。
+        wav(&broken.join("long.wav"), 1, 8_000, 16_000);
+        std::fs::copy(
+            builtin_sounds().join("default/space.wav"),
+            broken.join("space.wav"),
+        )
+        .unwrap();
+        let tune = install_pack(
+            state.path(),
+            "broken-tune",
+            "mode = \"sequence\"\n[sequence]\nsample = \"tone.wav\"\nsemitones = [0, 7]\n",
+        );
+        wav(&tune.join("tone.wav"), 1, 8_000, 16_000);
+
         let (sender, receiver) = sync_channel(8);
         let mut worker = Worker::new(sender);
         let mut settings = keys_settings();
         settings.roots = PluginRoots::new(state.path().to_str(), None, "");
         settings.roots.builtin_sounds = Some(builtin_sounds());
         settings.pack = "broken".into();
+        worker.configure(Arc::new(settings.clone()));
+        settle(&mut worker, &receiver, 1, false);
+        let now = Instant::now();
+        for class in [KeyClass::Default, KeyClass::Enter, KeyClass::Backspace] {
+            assert!(
+                worker.sounds_for(Event::Key(class), now).is_empty(),
+                "{class:?} falls back to the sample that does not decode"
+            );
+        }
+        assert_eq!(
+            frames(&worker.sounds_for(Event::Key(KeyClass::Space), now)),
+            [3_969]
+        );
+        assert_eq!(frames(&worker.sounds_for(Event::Commit, now)), [3_969]);
+        assert!(worker.sounds_for(Event::Achievement, now).is_empty());
+        // 坏样本被三类键和成就音共用，只解码一次、只记一条。
+        let skipped = load(&Selection::of(&settings).unwrap()).unwrap().skipped;
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert!(skipped[0].starts_with("broken: long.wav: "), "{skipped:?}");
+
+        // 按键包里坏掉的样本不连累另选的旋律包。
+        settings.melody = true;
+        worker.configure(Arc::new(settings.clone()));
+        settle(&mut worker, &receiver, 1, false);
+        assert_eq!(
+            frames(&worker.sounds_for(Event::Key(KeyClass::Default), now)),
+            [35_280]
+        );
+        assert_eq!(frames(&worker.sounds_for(Event::Commit, now)), [3_969]);
+
+        // 旋律包的样本解码失败只让旋律不响，按键包的上屏音照常。
+        settings.pack = "default".into();
+        settings.melody_pack = "broken-tune".into();
+        worker.configure(Arc::new(settings.clone()));
+        settle(&mut worker, &receiver, 1, false);
+        assert!(worker
+            .sounds_for(Event::Key(KeyClass::Default), now)
+            .is_empty());
+        assert_eq!(frames(&worker.sounds_for(Event::Commit, now)), [14_112]);
+
+        // 解析不了的包仍然整包静音。
+        settings.melody = false;
+        settings.pack = "missing".into();
         worker.configure(Arc::new(settings));
         settle(&mut worker, &receiver, 1, false);
         assert!(worker
-            .sounds_for(Event::Key(KeyClass::Default), Instant::now())
+            .sounds_for(Event::Key(KeyClass::Space), now)
             .is_empty());
+        assert!(worker.sounds_for(Event::Commit, now).is_empty());
     }
 }

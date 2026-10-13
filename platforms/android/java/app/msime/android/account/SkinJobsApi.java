@@ -72,8 +72,7 @@ public final class SkinJobsApi {
             }
             try {
                 JSONObject root = new JSONObject(response == null ? "" : response);
-                JSONArray plans = JsonPolicy.strictTrue(root.opt("ok"))
-                    ? root.optJSONArray("value") : null;
+                JSONArray plans = JsonPolicy.arrayValue(root);
                 if (plans == null) throw invalid("ai_skin_response");
                 return plans;
             } catch (JSONException error) {
@@ -121,7 +120,7 @@ public final class SkinJobsApi {
 
     /** 服务端今天的生成次数已用完（429 `rate_limit_exceeded`）。 */
     public static boolean quotaExhausted(CloudApi.Failure failure) {
-        return failure.status == 429;
+        return failure.rateLimited();
     }
 
     /** 这个部署没有开 AI 皮肤（任何 503），入口应当隐藏。 */
@@ -172,11 +171,9 @@ public final class SkinJobsApi {
         if (plans == null || !validPlanCount(plans.length())) throw invalid("ai_skin_response");
         check(cancelled);
 
-        ExecutorService pool = Executors.newFixedThreadPool(BoundsPolicy.atMost(plans.length(), MAX_DESIGNS), runnable -> {
-            Thread thread = new Thread(runnable, "msime-ai-skin");
-            thread.setDaemon(true);
-            return thread;
-        });
+        ExecutorService pool = Executors.newFixedThreadPool(
+            BoundsPolicy.atMost(plans.length(), MAX_DESIGNS),
+            ThreadPolicy.namedDaemonFactory("msime-ai-skin"));
         try {
             List<Future<Proposal>> futures = new ArrayList<>(plans.length());
             try {
@@ -207,7 +204,7 @@ public final class SkinJobsApi {
                 }
             }
             if (first != null) throw first;
-            return List.copyOf(proposals);
+            return ListPolicy.copyOrEmpty(proposals);
         } finally {
             pool.shutdownNow();
         }
@@ -245,7 +242,7 @@ public final class SkinJobsApi {
         JSONObject message = first == null ? null : first.optJSONObject("message");
         Object content = message == null ? null : message.opt("content");
         if (message == null || !"assistant".equals(message.opt("role")) || !(content instanceof String text)
-                || TextPolicy.trimmed(text).isEmpty() || TextPolicy.utf8Length(text) > 16 * 1024)
+                || !TextPolicy.hasText(text) || TextPolicy.utf8Length(text) > 16 * 1024)
             throw invalid("ai_skin_response");
         return text;
     }
@@ -370,16 +367,10 @@ public final class SkinJobsApi {
         return null;
     }
 
-    /** Native planner responses must keep status flags as JSON booleans. */
-    static Boolean strictBoolean(Object value) {
-        return JsonPolicy.strictBoolean(value);
-    }
-
     private static JSONObject value(String response) throws CloudApi.Failure {
         try {
             JSONObject root = new JSONObject(response == null ? "" : response);
-            JSONObject value = JsonPolicy.strictTrue(root.opt("ok"))
-                ? root.optJSONObject("value") : null;
+            JSONObject value = JsonPolicy.objectValue(root);
             if (value == null) throw invalid("ai_skin_invalid");
             return value;
         } catch (JSONException error) {

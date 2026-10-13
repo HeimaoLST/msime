@@ -1,11 +1,15 @@
 package app.msime.android.home;
 
+import app.msime.android.LayoutPolicy;
+
+import app.msime.android.ImageViewPolicy;
+import app.msime.android.ThemeColorPolicy;
+import app.msime.android.DimensionPolicy;
+
 import app.msime.android.TextPolicy;
 
 import android.app.Activity;
-import android.content.ActivityNotFoundException;
 import android.content.Context;
-import android.content.Intent;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.ColorFilter;
@@ -16,8 +20,6 @@ import android.graphics.PixelFormat;
 import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
-import android.graphics.drawable.RippleDrawable;
-import android.net.Uri;
 import android.text.InputFilter;
 import android.text.InputType;
 import android.text.SpannableString;
@@ -36,7 +38,10 @@ import androidx.core.widget.NestedScrollView;
 import app.msime.android.BackendAccount;
 import app.msime.android.BoundsPolicy;
 import app.msime.android.CloudApi;
+import app.msime.android.ColorPolicy;
+import app.msime.android.DrawablePolicy;
 import app.msime.android.KeyboardGeometry;
+import app.msime.android.ThreadPolicy;
 import app.msime.android.ViewPolicy;
 import com.google.android.material.bottomsheet.BottomSheetDialog;
 import java.util.function.Consumer;
@@ -82,7 +87,7 @@ final class LoginSheet {
      */
     static void show(Activity activity, String purpose, Consumer<String> finished) {
         Context context = activity.getApplicationContext();
-        new Thread(() -> {
+        ThreadPolicy.startNamedThread("msime-login-sheet", () -> {
             CloudApi.Providers providers = SignIn.providers(context);
             boolean google = SignIn.google(context, providers);
             activity.runOnUiThread(() -> {
@@ -93,7 +98,7 @@ final class LoginSheet {
                 }
                 new LoginSheet(activity, purpose, providers, google, finished).dialog.show();
             });
-        }, "msime-login-sheet").start();
+        });
     }
 
     private LoginSheet(Activity activity, String purpose, CloudApi.Providers providers, boolean google,
@@ -104,56 +109,54 @@ final class LoginSheet {
         dialog = new BottomSheetDialog(activity);
         appleResult = this::finishWith;
 
-        LinearLayout root = Ui.column(activity);
-        Ui.setPaddingDp(root, activity, 24, 0, 24, 20);
-        root.addView(Ui.sheetDragHandle(activity));
+        LinearLayout root = LayoutPolicy.column(activity);
+        ViewPolicy.setPaddingDp(activity, root, 24, 0, 24, 20);
+        root.addView(LayoutPolicy.sheetDragHandle(activity));
 
-        LinearLayout header = Ui.row(activity);
+        LinearLayout header = LayoutPolicy.row(activity);
         ViewPolicy.setCenteredVertically(header);
-        TextView title = Ui.styledLabel(activity, "link".equals(purpose) ? "添加登录方式" : "登录水杉",
-            22, 700, Ui.text(activity));
-        title.setAccessibilityHeading(true);
-        header.addView(title, Ui.weightWrap(1f));
-        ImageView close = Ui.iconButton(activity,
-            new PathIcon(24, new String[] {CLOSE_PATH}, new int[] {Ui.text(activity)}),
-            Ui.text(activity), "关闭", Ui.BACK_BUTTON_SIZE, dialog::cancel);
-        header.addView(close, Ui.squareParams(activity, 40));
+        TextView title = ViewPolicy.headingLabel(activity, "link".equals(purpose) ? "添加登录方式" : "登录水杉",
+            22, 700, ThemeColorPolicy.text(activity));
+        header.addView(title, LayoutPolicy.weightedWrapParams(1f));
+        ImageView close = ImageViewPolicy.iconButton(activity,
+            new PathIcon(24, new String[] {CLOSE_PATH}, new int[] {ThemeColorPolicy.text(activity)}),
+            ThemeColorPolicy.text(activity), "关闭", Ui.BACK_BUTTON_SIZE, dialog::cancel);
+        header.addView(close, LayoutPolicy.squareParams(activity, 40));
         root.addView(header);
 
-        TextView subtitle = Ui.styledLabel(activity, "在手机、平板和电脑之间同步词库、皮肤和云剪贴板",
-            14, 400, Ui.subText(activity));
-        root.addView(subtitle, Ui.matchWidth(activity, 2));
+        TextView subtitle = ViewPolicy.styledLabel(activity, "在手机、平板和电脑之间同步词库、皮肤和云剪贴板",
+            14, 400, ThemeColorPolicy.subText(activity));
+        root.addView(subtitle, LayoutPolicy.matchWidthWrapParams(activity, 2));
 
-        options = Ui.column(activity);
-        boolean night = Ui.isNight(activity);
+        options = LayoutPolicy.column(activity);
+        boolean night = DimensionPolicy.isNight(activity);
         if (providers.appleWeb()) {
             // Apple 的规范按钮：浅色下黑底白字，深色下白底黑字；这是 Apple 的品牌色，不随季节主题变。
             int fill = night ? Color.WHITE : Color.BLACK;
             int ink = night ? Color.BLACK : Color.WHITE;
             options.addView(button(new PathIcon(24, new String[] {APPLE_PATH}, new int[] {ink}),
-                "通过 Apple 登录", fill, ink, 0, this::apple), Ui.matchWidth(activity, 16));
+                "通过 Apple 登录", fill, ink, 0, this::apple), LayoutPolicy.matchWidthWrapParams(activity, 16));
         }
         if (google) {
             options.addView(button(new PathIcon(48, GOOGLE_PATHS, GOOGLE_COLORS), "通过 Google 登录",
-                Color.TRANSPARENT, Ui.text(activity), Ui.outline(activity), this::google), Ui.matchWidth(activity, 12));
+                Color.TRANSPARENT, ThemeColorPolicy.text(activity), ThemeColorPolicy.outline(activity), this::google), LayoutPolicy.matchWidthWrapParams(activity, 12));
         }
-        email = Ui.column(activity);
+        email = LayoutPolicy.column(activity);
         if (providers.email()) {
-            int accent = Ui.accent(activity);
+            int accent = ThemeColorPolicy.accent(activity);
             options.addView(button(new PathIcon(24, new String[] {MAIL_PATH}, new int[] {accent}), "使用邮箱登录",
-                Ui.color(activity, com.google.android.material.R.attr.colorSecondaryContainer), accent, 0,
-                this::expandEmail), Ui.matchWidth(activity, 12));
-            options.addView(email, Ui.matchWidth(activity, 0));
+                ThemeColorPolicy.color(activity, com.google.android.material.R.attr.colorSecondaryContainer), accent, 0,
+                this::expandEmail), LayoutPolicy.matchWidthWrapParams(activity, 12));
+            options.addView(email, LayoutPolicy.matchWidthWrapParams(activity, 0));
         }
-            root.addView(options, Ui.matchWidth(activity, 0));
+            root.addView(options, LayoutPolicy.matchWidthWrapParams(activity, 0));
 
-        status = Ui.styledLabel(activity, "", 13, 400, Ui.subText(activity));
+        status = ViewPolicy.liveStatus(activity, 13, ThemeColorPolicy.subText(activity));
         ViewPolicy.setCenteredHorizontally(status);
-        ViewPolicy.setPoliteLiveRegion(status);
         ViewPolicy.hide(status);
-        root.addView(status, Ui.matchWidth(activity, 12));
+        root.addView(status, LayoutPolicy.matchWidthWrapParams(activity, 12));
 
-        root.addView(agreement(), Ui.matchWidth(activity, 16));
+        root.addView(agreement(), LayoutPolicy.matchWidthWrapParams(activity, 16));
 
         NestedScrollView scroll = new NestedScrollView(activity);
         scroll.addView(root, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
@@ -180,7 +183,7 @@ final class LoginSheet {
 
     private void google() {
         if (!begin("正在登录…")) return;
-        SignIn.startGoogle(activity, this::finishWith);
+        SignIn.startGoogle(activity, purpose, this::finishWith);
     }
 
     private void expandEmail() {
@@ -188,10 +191,10 @@ final class LoginSheet {
         challenge = null;
         EditText field = field("邮箱地址", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS, 254);
         field.setText(emailAddress);
-        email.addView(field, Ui.matchWidth(activity, 12));
-        View send = button(null, "发送验证码", Ui.accent(activity), Ui.onAccent(activity), 0,
+        email.addView(field, LayoutPolicy.matchWidthWrapParams(activity, 12));
+        View send = button(null, "发送验证码", ThemeColorPolicy.accent(activity), ThemeColorPolicy.onAccent(activity), 0,
             () -> sendCode(field.getText().toString()));
-        email.addView(send, Ui.matchWidth(activity, 12));
+        email.addView(send, LayoutPolicy.matchWidthWrapParams(activity, 12));
         field.setOnEditorActionListener((view, action, event) -> {
             if (action != EditorInfo.IME_ACTION_SEND) return false;
             sendCode(field.getText().toString());
@@ -204,7 +207,7 @@ final class LoginSheet {
     private void sendCode(String address) {
         if (!begin("正在发送验证码…")) return;
         Context context = activity.getApplicationContext();
-        new Thread(() -> {
+        ThreadPolicy.startNamedThread("msime-email-code", () -> {
             SignIn.EmailCode result = SignIn.requestEmailCode(context, address, purpose);
             activity.runOnUiThread(() -> {
                 if (done || activity.isFinishing() || activity.isDestroyed()) return;
@@ -218,34 +221,34 @@ final class LoginSheet {
                 challenge = result.challenge();
                 showCodeEntry();
             });
-        }, "msime-email-code").start();
+        });
     }
 
     private void showCodeEntry() {
         email.removeAllViews();
-        TextView sent = Ui.styledLabel(activity, "验证码已发到 " + emailAddress + "，"
+        TextView sent = ViewPolicy.styledLabel(activity, "验证码已发到 " + emailAddress + "，"
             + BoundsPolicy.bounded(challenge.expiresIn() / 60, 1, Integer.MAX_VALUE)
-            + " 分钟内有效", 13, 400, Ui.subText(activity));
-        email.addView(sent, Ui.matchWidth(activity, 12));
+            + " 分钟内有效", 13, 400, ThemeColorPolicy.subText(activity));
+        email.addView(sent, LayoutPolicy.matchWidthWrapParams(activity, 12));
         EditText code = field("6 位验证码", InputType.TYPE_CLASS_NUMBER, 6);
         code.setImeOptions(EditorInfo.IME_ACTION_DONE);
         code.setLetterSpacing(0.3f);
-        email.addView(code, Ui.matchWidth(activity, 8));
-        email.addView(button(null, "登录", Ui.accent(activity), Ui.onAccent(activity), 0,
-            () -> verify(code.getText().toString())), Ui.matchWidth(activity, 12));
+        email.addView(code, LayoutPolicy.matchWidthWrapParams(activity, 8));
+        email.addView(button(null, "登录", ThemeColorPolicy.accent(activity), ThemeColorPolicy.onAccent(activity), 0,
+            () -> verify(code.getText().toString())), LayoutPolicy.matchWidthWrapParams(activity, 12));
         code.setOnEditorActionListener((view, action, event) -> {
             if (action != EditorInfo.IME_ACTION_DONE) return false;
             verify(code.getText().toString());
             return true;
         });
-        TextView again = Ui.textButton(activity, "换个邮箱或重新发送", 14, 500,
-            Ui.accent(activity), Ui.ripple(activity), 40, () -> {
+        TextView again = ViewPolicy.textButton(activity, "换个邮箱或重新发送", 14, 500,
+            ThemeColorPolicy.accent(activity), ViewPolicy.ripple(activity), 40, () -> {
                 if (busy) return;
                 email.removeAllViews();
                 ViewPolicy.hide(status);
                 expandEmail();
             });
-        email.addView(again, Ui.matchWidth(activity, 4));
+        email.addView(again, LayoutPolicy.matchWidthWrapParams(activity, 4));
         ViewPolicy.hide(status);
         code.requestFocus();
     }
@@ -254,10 +257,10 @@ final class LoginSheet {
         BackendAccount.EmailChallenge current = challenge;
         if (current == null || !begin("正在登录…")) return;
         Context context = activity.getApplicationContext();
-        new Thread(() -> {
+        ThreadPolicy.startNamedThread("msime-email-login", () -> {
             String failure = SignIn.verifyEmailCode(context, current, code);
             activity.runOnUiThread(() -> finishWith(failure));
-        }, "msime-email-login").start();
+        });
     }
 
     // ---- 状态 ----
@@ -285,45 +288,33 @@ final class LoginSheet {
     }
 
     private void say(String message) {
-        status.setText(message);
-        Ui.setVisibilityForText(status, message);
+        ViewPolicy.setTextAndVisibility(status, message);
     }
 
     private void setEnabled(boolean enabled) {
-        setEnabled(options, enabled);
-    }
-
-    private static void setEnabled(ViewGroup group, boolean enabled) {
-        for (int index = 0; index < group.getChildCount(); index++) {
-            View child = group.getChildAt(index);
-            if (child instanceof ViewGroup nested && !child.isClickable()) {
-                setEnabled(nested, enabled);
-            } else {
-                ViewPolicy.setEnabledWithAlpha(child, enabled, 0.6f);
-            }
-        }
+        ViewPolicy.setEnabledRecursively(options, enabled, 0.6f);
     }
 
     // ---- 部件 ----
 
     /** 50dp 高、12dp 圆角的整行按钮：可选的 20dp 图标加 16sp 半粗文字，居中。 */
     private View button(Drawable icon, String label, int fill, int ink, int stroke, Runnable action) {
-        LinearLayout button = Ui.row(activity);
+        LinearLayout button = LayoutPolicy.row(activity);
         ViewPolicy.setCentered(button);
-        Ui.setMinimumHeightDp(button, activity, 50);
+        ViewPolicy.setMinimumHeightDp(activity, button, 50);
         GradientDrawable face = stroke == 0
-            ? Ui.rounded(fill, Ui.dp(activity, 12))
-            : Ui.outlined(fill, Ui.dp(activity, 12), Ui.atLeastOnePx(activity, 1), stroke);
-        GradientDrawable mask = Ui.rounded(Color.WHITE, Ui.dp(activity, 12));
-        int pressed = Ui.withAlpha(fill == Color.BLACK ? Color.WHITE : Ui.text(activity), 0.12f);
-        ViewPolicy.setBackground(button, new RippleDrawable(android.content.res.ColorStateList.valueOf(pressed), face, mask));
+            ? DrawablePolicy.rounded(fill, DimensionPolicy.pixels(activity, 12))
+            : DrawablePolicy.outlined(fill, DimensionPolicy.pixels(activity, 12), DimensionPolicy.atLeastOnePixel(activity, 1), stroke);
+        GradientDrawable mask = DrawablePolicy.rounded(Color.WHITE, DimensionPolicy.pixels(activity, 12));
+        int pressed = ColorPolicy.withAlpha(fill == Color.BLACK ? Color.WHITE : ThemeColorPolicy.text(activity), 0.12f);
+        ViewPolicy.setBackground(button, DrawablePolicy.ripple(pressed, face, mask));
         if (icon != null) {
-            ImageView glyph = Ui.decorativeIcon(activity, icon);
-            LinearLayout.LayoutParams params = Ui.squareParams(activity, 20);
-            params.setMarginEnd(Ui.dp(activity, 8));
+            ImageView glyph = ImageViewPolicy.decorative(activity, icon);
+            LinearLayout.LayoutParams params = LayoutPolicy.squareParams(activity, 20);
+            params.setMarginEnd(DimensionPolicy.pixels(activity, 8));
             button.addView(glyph, params);
         }
-        TextView text = Ui.styledLabel(activity, label, 16, 600, ink);
+        TextView text = ViewPolicy.styledLabel(activity, label, 16, 600, ink);
         button.addView(text);
         button.setContentDescription(label);
         ViewPolicy.setInteractive(button, true);
@@ -332,17 +323,17 @@ final class LoginSheet {
     }
 
     private EditText field(String hint, int inputType, int maxLength) {
-        EditText field = Ui.styledInput(activity, 16, 400, Ui.text(activity));
+        EditText field = ViewPolicy.styledInput(activity, 16, 400, ThemeColorPolicy.text(activity));
         field.setHint(hint);
         field.setInputType(inputType);
         ViewPolicy.setSingleLine(field);
         field.setFilters(new InputFilter[] {new InputFilter.LengthFilter(maxLength)});
-        field.setHintTextColor(Ui.subText(activity));
-        GradientDrawable face = Ui.outlined(Ui.rowBackground(activity), Ui.dp(activity, 12),
-            Ui.atLeastOnePx(activity, 1), Ui.hairline(activity));
+        field.setHintTextColor(ThemeColorPolicy.subText(activity));
+        GradientDrawable face = DrawablePolicy.outlined(ThemeColorPolicy.rowBackground(activity), DimensionPolicy.pixels(activity, 12),
+            DimensionPolicy.atLeastOnePixel(activity, 1), ThemeColorPolicy.hairline(activity));
         ViewPolicy.setBackground(field, face);
-        Ui.setHorizontalPaddingDp(field, activity, 14);
-        Ui.setTextMinHeightDp(field, activity, 50);
+        ViewPolicy.setHorizontalPaddingDp(activity, field, 14);
+        ViewPolicy.setTextMinHeightDp(activity, field, 50);
         ViewPolicy.setCenteredVertically(field);
         field.setContentDescription(hint);
         return field;
@@ -354,19 +345,17 @@ final class LoginSheet {
         int start = text.indexOf("《隐私政策》");
         spanned.setSpan(new ClickableSpan() {
             @Override public void onClick(View widget) {
-                try {
-                    activity.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(PRIVACY_URL)));
-                } catch (ActivityNotFoundException absent) {
+                if (!LinkActions.open(activity, PRIVACY_URL)) {
                     say("这台设备上没有可以打开网页的浏览器");
                 }
             }
 
             @Override public void updateDrawState(android.text.TextPaint paint) {
-                paint.setColor(Ui.subText(activity));
+                paint.setColor(ThemeColorPolicy.subText(activity));
                 paint.setUnderlineText(false);
             }
         }, start, start + "《隐私政策》".length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        TextView view = Ui.styledLabel(activity, spanned, 12, 400, Ui.subText(activity));
+        TextView view = ViewPolicy.styledLabel(activity, spanned, 12, 400, ThemeColorPolicy.subText(activity));
         view.setMovementMethod(LinkMovementMethod.getInstance());
         ViewPolicy.setCenteredHorizontally(view);
         return view;
@@ -391,7 +380,7 @@ final class LoginSheet {
 
         @Override public void draw(Canvas canvas) {
             RectF bounds = new RectF(getBounds());
-            float scale = KeyboardGeometry.shorterSide(bounds.width(), bounds.height()) / viewport;
+            float scale = DimensionPolicy.shorterSide(bounds.width(), bounds.height()) / viewport;
             matrix.setScale(scale, scale);
             matrix.postTranslate(bounds.left + (bounds.width() - viewport * scale) / 2f,
                 bounds.top + (bounds.height() - viewport * scale) / 2f);

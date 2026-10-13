@@ -393,7 +393,10 @@ WB_NOTE = "Reference ctest wubi_input_session fails against this build: overlay 
 add("wubi_prefix_codes", WB_SRC + "; cases :100-138", WB, {"scheme": "wubi"},
     [ty("wq"), CANCEL, ty("w"), CANCEL, ty("wqbb"), CANCEL, ty("wx")], note=WB_NOTE, covers=["wubi"])
 add("wubi_select_and_gates", WB_SRC + "; test_input_session.cpp:775-782 gates", WB, {"scheme": "wubi"},
-    [ty("wqbb"), sel(0), ch("z"), ty("wqbb"), ch("b"), ch("'"), CANCEL], covers=["wubi"])
+    [ty("wqbb"), sel(0), ty("wqb"), ch("z"), ch("b"), ch("b"), ch("'"), CANCEL],
+    note="2026-10-11（#6789）起，混输关闭时组字开头的 `z` 打开临时拼音反查，所以 `z` 的拒绝改在五笔码中间检验：`wqb` 之后的 `z` 仍交回宿主，组字不变。",
+    covers=["wubi"])
+WM_LOOKUP_NOTE = "2026-10-11（#6789）起，混输关闭时组字开头的 `z` 打开临时拼音反查，`zi` 记录的是反查组字 `zi`，不再是参考实现里被拒绝的 `z`。"
 WM_NOTE = "Reference ctest wubi_mixed_input_session fails against this build: overlay apply_engine_wubi_mixed_candidates.py appends quanpin rows after wubi rows and recomputes the table answer per keystroke, so a tail after selection can get wubi rows too. The overlay behaviour is the product intent and is what is recorded."
 add("wubi_mixed_unmatched_code", WM_SRC + "; case :106-116", WM, {"scheme": "wubi", "wubi_mixed_pinyin": True},
     [ty("nihao"), cmd("Backspace")], note=WM_NOTE, covers=["wubi"])
@@ -401,7 +404,7 @@ add("wubi_mixed_reference_quanpin", WM_SRC + "; case :106-116 (quanpin reference
     [ty("nihao")], covers=["wubi"])
 add("wubi_mixed_matched_code", WM_SRC + "; cases :121-162", WM, {"scheme": "wubi", "wubi_mixed_pinyin": True},
     [ty("wq"), CANCEL, ty("wqaa"), ch("a"), CANCEL, op("set_wubi_mixed_pinyin", False), ty("zi"), CANCEL,
-     op("set_wubi_mixed_pinyin", True), ty("zi")], note=WM_NOTE, covers=["wubi"])
+     op("set_wubi_mixed_pinyin", True), ty("zi")], note=WM_NOTE + " " + WM_LOOKUP_NOTE, covers=["wubi"])
 add("wubi_mixed_backspace_resets_fallback", WM_SRC + "; case :171-191", WM,
     {"scheme": "wubi", "wubi_mixed_pinyin": True}, [ty("nihao")] + [cmd("Backspace")] * 5 + [ty("wq"), ty("aa")],
     note=WM_NOTE, covers=["wubi", "backspace"])

@@ -13,39 +13,39 @@ final class KeyboardFormFactorTests: XCTestCase {
     XCTAssertEqual(KeyboardFormFactor.resolve(idiom: .phone, horizontalSizeClass: .compact), .phone)
   }
 
-  /// 键盘高度按设计稿的方式由各部分累加：上内边距 6、下内边距 4，顶栏，顶栏下方的间隙（手机 11，iPad 9），以及各排键和排间距。
+  /// 键盘高度按设计稿的方式由各部分累加：上内边距（手机 2，iPad 6）、下内边距 4，顶栏，顶栏下方的间隙（手机 4，iPad 9），以及各排键和排间距。手机的上边距和间隙比设计稿的 6 和 11 小，见 `KeyboardFormFactor.padding`。
   func testHeightsAreBuiltFromTheDesignMetrics() {
     let phone = KeyboardFormFactor.phone, tablet = KeyboardFormFactor.tablet
-    XCTAssertEqual(phone.padding, NSDirectionalEdgeInsets(top: 6, leading: 3, bottom: 4, trailing: 3))
+    XCTAssertEqual(phone.padding, NSDirectionalEdgeInsets(top: 2, leading: 3, bottom: 4, trailing: 3))
     XCTAssertEqual(tablet.padding, NSDirectionalEdgeInsets(top: 6, leading: 8, bottom: 4, trailing: 8))
-    XCTAssertEqual(phone.topRowGap, 11)
+    XCTAssertEqual(phone.topRowGap, 4)
     XCTAssertEqual(tablet.topRowGap, 9)
-    XCTAssertEqual(phone.keyHeight(landscape: false, handwriting: false), 42)
-    XCTAssertEqual(phone.keyHeight(landscape: false, handwriting: true), 42)
+    XCTAssertEqual(phone.keyHeight(landscape: false, handwriting: false), 52)
+    XCTAssertEqual(phone.keyHeight(landscape: false, handwriting: true), 52)
     XCTAssertEqual(phone.keyHeight(landscape: true, handwriting: false), 34)
     XCTAssertEqual(phone.keyHeight(landscape: true, handwriting: true), 40)
     XCTAssertEqual(tablet.keyHeight(landscape: false, handwriting: false), 54)
     XCTAssertGreaterThan(tablet.keyHeight(landscape: true, handwriting: false), 54)
-    // 设计稿的手机键盘：6 + 50 + 11 + 4 × 42 + 3 × 7 + 4。
-    XCTAssertEqual(phone.keyboardHeight(topRow: 50, rowSpacing: 7, landscape: false, handwriting: false), 260)
-    XCTAssertEqual(phone.keyboardHeight(topRow: 50, rowSpacing: 7, landscape: false, handwriting: false, numberRow: true), 260,
+    // 手机键盘：2 + 50 + 4 + 4 × 52 + 3 × 7 + 4。
+    XCTAssertEqual(phone.keyboardHeight(topRow: 50, rowSpacing: 7, landscape: false, handwriting: false), 289)
+    XCTAssertEqual(phone.keyboardHeight(topRow: 50, rowSpacing: 7, landscape: false, handwriting: false, numberRow: true), 289,
                    "a phone has no digit row")
     // 更宽的排间距加在键盘总高上，而不是从键高里扣。
-    XCTAssertEqual(phone.keyboardHeight(topRow: 50, rowSpacing: 10, landscape: false, handwriting: false), 269)
+    XCTAssertEqual(phone.keyboardHeight(topRow: 50, rowSpacing: 10, landscape: false, handwriting: false), 298)
     // 数字行是整整一排键，平板加一排的高度而不是压扁字母。
     let portrait = tablet.keyboardHeight(topRow: 50, rowSpacing: 7, landscape: false, handwriting: false)
     // 6 + 50 + 9 + 4 × 54 + 3 × 7 + 4，再加数字行这第五排 54pt 键及其 7pt 间距。
     XCTAssertEqual(portrait, 306)
     XCTAssertEqual(tablet.keyboardHeight(topRow: 50, rowSpacing: 7, landscape: false, handwriting: false, numberRow: true), 367)
     XCTAssertGreaterThan(tablet.keyboardHeight(topRow: 50, rowSpacing: 7, landscape: true, handwriting: false), portrait)
-    // 「显示方式」为隐藏、顶栏收起时，它下面的间隔也一起去掉：6 + 4 × 42 + 3 × 7 + 4，与键区实际占的高度相同，按键不会被多出的 11pt 拉高。
-    XCTAssertEqual(phone.keyboardHeight(topRow: 0, rowSpacing: 7, landscape: false, handwriting: false), 199)
+    // 「显示方式」为隐藏、顶栏收起时，它下面的间隔也一起去掉：2 + 4 × 52 + 3 × 7 + 4，与键区实际占的高度相同，按键不会被多出的 4pt 拉高。
+    XCTAssertEqual(phone.keyboardHeight(topRow: 0, rowSpacing: 7, landscape: false, handwriting: false), 235)
     XCTAssertEqual(tablet.keyboardHeight(topRow: 0, rowSpacing: 7, landscape: false, handwriting: false), 247)
     XCTAssertTrue(KeyboardFormFactor.tablet.canShowFullKeys)
     XCTAssertFalse(KeyboardFormFactor.phone.canShowFullKeys)
   }
 
-  /// 默认排间距下画出的布局：设计稿的手机 42pt 键和 iPad 54pt 键（dc.html `keyH`），带或不带 iPad 数字行，四周的内边距，以及顶栏下方的间隙。
+  /// 默认排间距下画出的布局：手机 52pt 键和 iPad 54pt 键（dc.html `keyH`），带或不带 iPad 数字行，四周的内边距，以及顶栏下方的间隙。
   @MainActor
   func testDesignKeyHeights() throws {
     enableAllInputSchemes()
@@ -81,9 +81,9 @@ final class KeyboardFormFactorTests: XCTestCase {
     }
     let phone = try layout(tablet: false, width: 393)
     XCTAssertEqual(phone.height, KeyboardViewController.defaultKeyboardHeight)
-    XCTAssertEqual(phone.key.height, 42, accuracy: 0.5)
-    XCTAssertEqual(phone.space.height, 42, accuracy: 0.5)
-    XCTAssertEqual(phone.strip.minY, 6, accuracy: 0.5)
+    XCTAssertEqual(phone.key.height, 52, accuracy: 0.5)
+    XCTAssertEqual(phone.space.height, 52, accuracy: 0.5)
+    XCTAssertEqual(phone.strip.minY, 2, accuracy: 0.5)
     XCTAssertEqual(phone.strip.minX, 3, accuracy: 0.5)
     XCTAssertEqual(phone.strip.maxX, 393 - 3, accuracy: 0.5)
     XCTAssertEqual(phone.space.maxY, phone.height - 4, accuracy: 0.5)
@@ -299,9 +299,9 @@ final class KeyboardFormFactorTests: XCTestCase {
     XCTAssertFalse(KeyboardSplitLayout.isActive(formFactor: .tablet, landscape: false, enabled: { XCTFail("read"); return true }()))
   }
 
-  /// 26 键字母方案分，九键、笔画、假名九键、注音大千和手写不分；英文和本地输入模式画的是字母，照样分。
+  /// 26 键字母方案分，九键、全拼 14 键、笔画、假名九键、注音大千和手写不分；英文和本地输入模式画的是字母，照样分。
   func testOnlyTheLetterLayoutsSplit() {
-    let unsplit: Set<ChineseInputScheme> = [.nineKey, .stroke, .japaneseNineKey, .zhuyin, .handwriting]
+    let unsplit: Set<ChineseInputScheme> = [.nineKey, .fourteenKey, .stroke, .japaneseNineKey, .zhuyin, .handwriting]
     for scheme in ChineseInputScheme.allCases {
       XCTAssertEqual(KeyboardSplitLayout.splitsLayout(scheme: scheme, chinese: true, localMode: false),
                      !unsplit.contains(scheme), scheme.rawValue)
@@ -409,10 +409,10 @@ final class KeyboardFormFactorTests: XCTestCase {
     }
   }
 
-  /// 九键、笔画、手写、注音大千和假名九键横屏也不分。注音和笔画要有各自的语言词库才会出现，没有暂存词库的运行跳过这两个。
+  /// 九键、全拼 14 键、笔画、手写、注音大千和假名九键横屏也不分。注音和笔画要有各自的语言词库才会出现，没有暂存词库的运行跳过这两个。
   @MainActor
   func testNonLetterLayoutsStayWhole() throws {
-    for scheme in [ChineseInputScheme.nineKey, .stroke, .handwriting, .zhuyin, .japaneseNineKey] {
+    for scheme in [ChineseInputScheme.nineKey, .fourteenKey, .stroke, .handwriting, .zhuyin, .japaneseNineKey] {
       try withSplitPreferences(scheme: scheme) {
         guard InputSchemePreference.scheme == scheme else { return }
         KeyboardLayoutPreference.tabletSplit = true

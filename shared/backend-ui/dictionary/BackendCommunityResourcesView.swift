@@ -15,16 +15,15 @@ struct BackendCommunityResourcesView: View {
   @State private var selected: BackendAccountClient.CommunityResource?
   @State private var creating = false
   private let client = BackendAccountClient()
+  private func authorize() async throws -> (userID: String, token: String, sessionID: UUID) {
+    try await BackendAccountSession.shared.credentials(matchingUserID: accountID)
+  }
   private var scopeTitle: String {
     switch scope {
     case .mine: return "我发布的"
     case .saved: return "我收藏的"
     default: return "全部"
     }
-  }
-  private func authorize() async throws -> String {
-    let value = try await BackendAccountSession.shared.credentials(matchingUserID: accountID)
-    try Task.checkCancellation(); return value.token
   }
   var body: some View {
     List {
@@ -89,10 +88,12 @@ struct BackendCommunityResourcesView: View {
     .onChange(of: scope) { _ in load() }
     .onDisappear { pending?.cancel(); items = []; selected = nil; search = "" }
     .sheet(item: $selected, onDismiss: { load() }) { item in
-      CommunityResourceDetailView(initial: item, authorize: authorize).communitySheetSize()
+      CommunityResourceDetailView(initial: item,
+        session: BackendAccountSession.shared, credentials: authorize).communitySheetSize()
     }
     .sheet(isPresented: $creating, onDismiss: { load() }) {
-      BackendCommunityResourceEditor(kind: kind, existing: nil, authorize: authorize).communitySheetSize()
+      BackendCommunityResourceEditor(kind: kind, existing: nil,
+        session: BackendAccountSession.shared, credentials: authorize).communitySheetSize()
     }
   }
   private func load(append: Bool = false) {
@@ -104,8 +105,10 @@ struct BackendCommunityResourcesView: View {
     pending = Task {
       defer { busy = false }
       do {
-        let page = try await client.communityResources(queryKind, scope: queryScope, search: query, offset: offset, token: authorize())
-        _ = try await authorize()
+        let identity = try await authorize()
+        let page = try await client.communityResources(queryKind, scope: queryScope, search: query, offset: offset,
+          session: BackendAccountSession.shared, matchingUserID: identity.userID,
+          matchingSessionID: identity.sessionID)
         guard kind == queryKind, scope == queryScope, search == query else { return }
         if append { let ids = Set(items.map(\.id)); items += page.items.filter { !ids.contains($0.id) } }
         else { items = page.items }
@@ -119,7 +122,8 @@ struct BackendCommunityResourcesView: View {
 @MainActor
 private struct CommunityResourceDetailView: View {
   let initial: BackendAccountClient.CommunityResource
-  let authorize: () async throws -> String
+  let session: BackendAccountSession
+  let credentials: @MainActor () async throws -> (userID: String, token: String, sessionID: UUID)
   @Environment(\.dismiss) private var dismiss
   @State private var current: BackendAccountClient.CommunityResource?
   @State private var busy = false
@@ -150,16 +154,27 @@ private struct CommunityResourceDetailView: View {
         }
         if value.kind == .dictionary {
           CommunityCloudImportButton(resourceID: value.id, resourceRevision: value.revision) {
-            let token = try await authorize()
-            let identity = try await BackendAccountSession.shared.credentials(retrying: nil)
-            guard identity.token == token else { throw CancellationError() }
-            return identity
+            try await credentials()
           }
         }
-        Button(value.saved ? "取消收藏" : "收藏") { run { token in try await client.saveResource(value.id, saved: !value.saved, token: token) } }.disabled(busy)
+        Button(value.saved ? "取消收藏" : "收藏") {
+          run {
+            let identity = try await credentials()
+            try await client.saveResource(value.id, saved: !value.saved, session: session,
+              matchingUserID: identity.userID, matchingSessionID: identity.sessionID)
+          }
+        }.disabled(busy)
         if value.saved && !value.owned {
           Section("评分") {
-            ForEach(1...5, id: \.self) { stars in Button("\(stars) 星\(value.my_rating == stars ? " · 当前评分" : "")") { run { token in try await client.rateResource(value.id, stars: stars, token: token) } }.disabled(busy) }
+            ForEach(1...5, id: \.self) { stars in
+              Button("\(stars) 星\(value.my_rating == stars ? " · 当前评分" : "")") {
+                run {
+                  let identity = try await credentials()
+                  try await client.rateResource(value.id, stars: stars, session: session,
+                    matchingUserID: identity.userID, matchingSessionID: identity.sessionID)
+                }
+              }.disabled(busy)
+            }
           }
         }
         if value.owned {
@@ -173,10 +188,12 @@ private struct CommunityResourceDetailView: View {
             TextField("补充说明（选填，最多 1000 字）", text: $reportDetail)
             Button("举报") {
               let reason = reportReason, detail = reportDetail
-              run(refresh: false) { token in
+              run(refresh: false) {
+                let identity = try await credentials()
                 try await client.reportContent(kind: value.kind == .dictionary ? "dictionaries" : "replies", itemID: value.id,
-                                               reason: reason, detail: detail, token: token)
-                _ = try await authorize(); reportDetail = ""; message = "已收到举报，我们会尽快处理。"
+                                               reason: reason, detail: detail, session: session,
+                                               matchingUserID: identity.userID, matchingSessionID: identity.sessionID)
+                reportDetail = ""; message = "已收到举报，我们会尽快处理。"
               }
             }.disabled(busy || reportDetail.unicodeScalars.count > 1000).accessibilityIdentifier("reportCommunityResource")
           }
@@ -185,23 +202,34 @@ private struct CommunityResourceDetailView: View {
         if let message { Text(message).foregroundStyle(.secondary) }
       }
     }
-    .task { run { _ in } }
+    .task { run { } }
     .onDisappear { pending?.cancel(); current = nil }
-    .sheet(isPresented: $editing, onDismiss: { run { _ in } }) { BackendCommunityResourceEditor(kind: value.kind, existing: value, authorize: authorize).communitySheetSize() }
+    .sheet(isPresented: $editing, onDismiss: { run { } }) {
+      BackendCommunityResourceEditor(kind: value.kind, existing: value,
+        session: session, credentials: credentials).communitySheetSize()
+    }
     .alert("删除此资源？", isPresented: $deleting) {
       Button("取消", role: .cancel) { }
-      Button("删除", role: .destructive) { run(refresh: false) { token in try await client.deleteResource(value.id, token: token); _ = try await authorize(); dismiss() } }
+      Button("删除", role: .destructive) {
+        run(refresh: false) {
+          let identity = try await credentials()
+          try await client.deleteResource(value.id, session: session, matchingUserID: identity.userID,
+                                          matchingSessionID: identity.sessionID)
+          dismiss()
+        }
+      }
     } message: { Text("资源将从社区移除，已被其他用户保存到本机的内容不会删除。") }
   }
-  private func run(refresh: Bool = true, _ action: @escaping (String) async throws -> Void) {
+  private func run(refresh: Bool = true, _ action: @escaping @MainActor () async throws -> Void) {
     guard !busy else { return }; busy = true; message = nil
     pending = Task {
       defer { busy = false }
       do {
-        try await action(try await authorize())
+        try await action()
         if refresh {
-          let item = try await client.communityResource(initial.id, token: authorize())
-          _ = try await authorize(); current = item
+          let identity = try await credentials()
+          current = try await client.communityResource(initial.id, session: session, matchingUserID: identity.userID,
+                                                       matchingSessionID: identity.sessionID)
         }
       } catch is CancellationError { current = nil; dismiss() }
       catch { if !Task.isCancelled { message = error.localizedDescription } }
@@ -213,7 +241,8 @@ private struct CommunityResourceDetailView: View {
 private struct BackendCommunityResourceEditor: View {
   let kind: BackendAccountClient.ResourceKind
   let existing: BackendAccountClient.CommunityResource?
-  let authorize: () async throws -> String
+  let session: BackendAccountSession
+  let credentials: @MainActor () async throws -> (userID: String, token: String, sessionID: UUID)
   @Environment(\.dismiss) private var dismiss
   @State private var id = UUID()
   @State private var name = ""
@@ -272,25 +301,28 @@ private struct BackendCommunityResourceEditor: View {
   }
   private func query(offset: Int) {
     let kind = sourceKind, search = sourceSearch
-    run { token in
-      let page = try await client.dictionary(kind, search: search, offset: offset, token: token)
-      _ = try await authorize()
+    run {
+      let identity = try await credentials()
+      let page = try await client.dictionary(kind, search: search, offset: offset, session: session,
+        matchingUserID: identity.userID, matchingSessionID: identity.sessionID)
       if sourceKind == kind && sourceSearch == search { source = page }
     }
   }
   private func publish() {
     let content = BackendAccountClient.ResourceContent(entries: kind == .dictionary ? entries : nil, prompt: kind == .reply ? prompt : nil)
-    run { token in
+    run {
+      let identity = try await credentials()
       _ = try await client.publishResource(id: id, kind: kind, name: name, description: description,
-        content: content, revision: existing?.revision ?? 0, token: token)
-      _ = try await authorize(); dismiss()
+        content: content, revision: existing?.revision ?? 0, session: session, matchingUserID: identity.userID,
+        matchingSessionID: identity.sessionID)
+      dismiss()
     }
   }
-  private func run(_ action: @escaping (String) async throws -> Void) {
+  private func run(_ action: @escaping @MainActor () async throws -> Void) {
     guard !busy else { return }; busy = true; message = nil
     pending = Task {
       defer { busy = false }
-      do { try await action(try await authorize()) }
+      do { try await action() }
       catch is CancellationError { source = nil; entries = []; prompt = ""; dismiss() }
       catch { if !Task.isCancelled { message = error.localizedDescription } }
     }
@@ -330,7 +362,7 @@ struct CommunityResourcesAccountView: View {
 struct CommunityCloudImportButton: View {
   let resourceID: UUID
   let resourceRevision: Int
-  var credentials: @MainActor () async throws -> (userID: String, token: String) = {
+  var credentials: @MainActor () async throws -> (userID: String, token: String, sessionID: UUID) = {
     try await BackendAccountSession.shared.credentials()
   }
   private struct Preview {
@@ -338,6 +370,7 @@ struct CommunityCloudImportButton: View {
     let resourceRevision: Int
     let dictionaryRevision: Int64
     let accountID: String
+    let sessionID: UUID
   }
   @State private var preview: Preview?
   @State private var confirming = false
@@ -351,9 +384,9 @@ struct CommunityCloudImportButton: View {
       run {
         let identity = try await credentials()
         let catalog = try await client.dictionaryCatalog(.quick, code: "", token: identity.token)
-        _ = try await BackendAccountSession.shared.credentials(matchingUserID: identity.userID)
         try Task.checkCancellation()
-        preview = Preview(resourceID: id, resourceRevision: version, dictionaryRevision: catalog.revision, accountID: identity.userID)
+        preview = Preview(resourceID: id, resourceRevision: version, dictionaryRevision: catalog.revision,
+                          accountID: identity.userID, sessionID: identity.sessionID)
         confirming = true
       }
     }.disabled(busy)
@@ -367,11 +400,13 @@ struct CommunityCloudImportButton: View {
           guard let selected = preview else { return }
           preview = nil
           run {
-            let identity = try await BackendAccountSession.shared.credentials(matchingUserID: selected.accountID)
+            let identity = try await credentials()
+            guard identity.userID == selected.accountID, identity.sessionID == selected.sessionID else {
+              throw BackendAccountClient.Failure(status: 409)
+            }
             try Task.checkCancellation()
             let result = try await client.applyResource(selected.resourceID, resourceRevision: selected.resourceRevision,
               dictionaryRevision: selected.dictionaryRevision, token: identity.token)
-            _ = try await BackendAccountSession.shared.credentials(matchingUserID: selected.accountID)
             try Task.checkCancellation()
             message = "已导入云端词库，新增或更新 \(result.imported) 个词条。请通过词库同步应用到本机。"
           }

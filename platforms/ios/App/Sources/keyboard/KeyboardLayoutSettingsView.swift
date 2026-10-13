@@ -1,11 +1,10 @@
 import SwiftUI
 import UIKit
 
-/// 键盘页，对应 Android 的 `KeyboardOptionsPage`：带高度拖柄的实时预览，然后是布局（中文键盘 26 / 9 键、高度和间距）、按键反馈、手势、iPad 选项、恢复默认和更多（候选栏、键盘工具栏、AI 润色与回复）。
+/// 键盘页，对应 Android 的 `KeyboardOptionsPage`：带高度拖柄的实时预览，然后是布局（中文键盘 26 / 14 / 9 键、双拼键位提示、高度和间距）、按键反馈、手势、iPad 选项、恢复默认和更多（候选栏、键盘工具栏、AI 润色与回复）。
 ///
 /// 设计稿里的按键弹出预览没有做：键盘本身不支持。手势里的滑动输入符号和长按空格语音输入与 Android 一样是本机开关（`KeyboardLayoutPreference.swipeSymbols`、`spaceVoice`），默认开。工具栏语音按钮的开关挪到了语音输入页，由那一页单独写 `touch_voice_shortcut`；这里每次只保存用户刚动的那一项几何尺寸，见 `save(_:)`。
 struct KeyboardLayoutSettingsView: View {
-  @Environment(\.scenePhase) private var scenePhase
   @State private var keySpacing = KeyboardLayoutPreference.keySpacing
   @State private var rowSpacing = KeyboardLayoutPreference.rowSpacing
   @State private var height = KeyboardLayoutPreference.heightAdjustment
@@ -17,7 +16,7 @@ struct KeyboardLayoutSettingsView: View {
   @State private var swipeSymbols = KeyboardLayoutPreference.swipeSymbols
   @State private var spaceVoice = KeyboardLayoutPreference.spaceVoice
   @State private var tabOpensCandidates = true
-  @State private var numberKeypadOrder = KeyboardLayoutPreference.numberKeypadOrder
+  @State private var shuangpinKeyHints = KeyboardLayoutPreference.shuangpinKeyHints
   @State private var dragBase: (height: Double, keySpacing: Double, rowSpacing: Double)?
   @State private var dragAxis: Axis?
   @State private var saveFailed = false
@@ -33,7 +32,6 @@ struct KeyboardLayoutSettingsView: View {
   /// 一次保存只写用户刚动的那一项，见 `save(_:)`。
   private enum Field { case height, keySpacing, rowSpacing }
   private static let spacingDragScale: Double = 18
-  private static let saveFailedNote = "设置没有保存，键盘可能正在写入同一份设置，请再试一次。"
 
   var body: some View {
     VStack(spacing: 0) {
@@ -52,19 +50,18 @@ struct KeyboardLayoutSettingsView: View {
         .padding(.bottom, 32)
       }
     }
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .tint(MetasequoiaTheme.accent)
     .navigationTitle("键盘").navigationBarTitleDisplayMode(.inline)
-    .onAppear { readPreferences() }
     // 这一页停在后台时，用户可能在键盘里改了高度或间距；回到前台重新读一遍文档，页面上才不会留着旧值。
-    .onChange(of: scenePhase) { _, phase in
-      if phase == .active { readPreferences() }
-    }
+    .reloadOnAppearAndActive(readPreferences)
   }
 
   // MARK: - 预览
 
   private var nineKey: Bool { scheme == .nineKey }
+  /// 键盘上有没有 iPad 的数字行：九键和全拼 14 键都不画它。
+  private var drawsNumberRow: Bool { !nineKey && scheme != .fourteenKey }
 
   private var preview: some View {
     VStack(spacing: 6) {
@@ -153,18 +150,17 @@ struct KeyboardLayoutSettingsView: View {
   // MARK: - 分组
 
   private var layoutGroup: some View {
-    DesignGroup(title: "布局", footer: saveFailed ? Self.saveFailedNote : nil) {
+    DesignGroup(title: "布局", footer: saveFailed ? SettingsSaveFailure.message : nil) {
       chineseKeyboardRow
       DesignDivider()
-      // 与 Android 键盘页一样排在中文键盘之后、键盘高度之前。
-      DesignSelectRow(
-        title: "数字键盘顺序", subtitle: "9 键切到数字时的排列",
-        options: KeyboardLayoutPreference.NumberKeypadOrder.allCases.map { DesignOption(title: $0.title, value: $0) },
-        selection: Binding(get: { numberKeypadOrder }, set: { saveNumberKeypadOrder($0) }),
-        sheetTitle: "数字键盘顺序",
-        sheetMessage: "电话顺序 1 2 3 在最上面；计算器顺序 7 8 9 在最上面、1 2 3 在最下面，和计算器、小键盘一样。字母键的排列不变。",
-        identifier: "appNumberKeypadOrderPicker")
-      DesignDivider()
+      // 只有双拼方案的 26 键画键位提示；本版本没有双拼时不列这一行。
+      if ChineseInputScheme.shuangpin.isOfferedByEdition {
+        DesignToggleRow(
+          title: "双拼键位提示", subtitle: "双拼方案的 26 键键盘在字母键底部显示这个键代表的声母和韵母；关闭后键面只留字母",
+          isOn: Binding(get: { shuangpinKeyHints }, set: { saveShuangpinKeyHints($0) }))
+        .accessibilityIdentifier("appShuangpinKeyHintsToggle")
+        DesignDivider()
+      }
       sliderRow("键盘高度", value: $height, range: -12...48, identifier: "appKeyboardHeightSlider",
                 field: .height, format: heightPercent)
       DesignDivider()
@@ -174,16 +170,13 @@ struct KeyboardLayoutSettingsView: View {
     }
   }
 
-  /// 26 / 9 键在当前方案所属的一对触屏方案之间切换。只有一种排列的方案（双拼、五笔、手写等）没有配对；在那里提供全拼会悄悄把小鹤用户切到全拼，所以这一行只显示方案名。
+  /// 在当前方案所属的一组触屏方案之间切换：全拼是 26 键、14 键、9 键三选一，日语是 26 键和 9 键。只有一种排列的方案（双拼、五笔、手写等）没有这一组；在那里提供全拼会悄悄把小鹤用户切到全拼，所以这一行只显示方案名。
   @ViewBuilder
   private var chineseKeyboardRow: some View {
-    if let pair = Self.layoutPair(scheme), pair.twentySix.isOfferedByEdition, pair.nine.isOfferedByEdition {
+    if let layouts = Self.layoutChoices(scheme), layouts.count > 1 {
       DesignSelectRow(
         title: "中文键盘",
-        options: [
-          DesignOption(title: "26 键", value: pair.twentySix, identifier: "chineseKeyboard26Key"),
-          DesignOption(title: "9 键", value: pair.nine, identifier: "chineseKeyboard9Key"),
-        ],
+        options: layouts.map { DesignOption(title: $0.title, value: $0.scheme, identifier: $0.identifier) },
         selection: Binding(get: { scheme }, set: { _ in }),
         sheetTitle: "中文键盘", identifier: "chineseKeyboardPicker",
         onSelect: selectScheme)
@@ -191,8 +184,8 @@ struct KeyboardLayoutSettingsView: View {
       HStack(spacing: 12) {
         VStack(alignment: .leading, spacing: 2) {
           Text("中文键盘").font(.system(size: 17)).foregroundStyle(.primary)
-          Text(Self.layoutPair(scheme) == nil ? "当前方案只有一种键盘，在「输入」里换方案" : "本版本只有一种键盘")
-            .font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+          Text(Self.layoutChoices(scheme) == nil ? "当前方案只有一种键盘，在「输入」里换方案" : "本版本只有一种键盘")
+            .designSubtext()
             .fixedSize(horizontal: false, vertical: true)
         }
         Spacer(minLength: 8)
@@ -210,11 +203,11 @@ struct KeyboardLayoutSettingsView: View {
     DesignGroup(title: "按键反馈", footer: KeyboardFeedbackPreference.hapticsAvailable
       ? "按键音受系统静音设置控制；振动效果取决于设备与系统支持。"
       : "按键音受系统静音设置控制。") {
-      DesignToggleRow(title: "按键音", isOn: $soundEnabled)
+      DesignToggleRow(title: "按键音", isOn: $soundEnabled.markingSettingsChange())
         .accessibilityIdentifier("keyboardSoundToggle")
       if KeyboardFeedbackPreference.hapticsAvailable {
         DesignDivider()
-        DesignToggleRow(title: "按键振动", isOn: $hapticsEnabled)
+        DesignToggleRow(title: "按键振动", isOn: $hapticsEnabled.markingSettingsChange())
           .accessibilityIdentifier("keyboardHapticsToggle")
           .onChange(of: hapticsEnabled) { _, enabled in if enabled { previewHaptics() } }
         if hapticsEnabled {
@@ -222,7 +215,7 @@ struct KeyboardLayoutSettingsView: View {
           DesignSelectRow(
             title: "振动强度",
             options: KeyboardHapticStrength.allCases.map { DesignOption(title: $0.title, value: $0.rawValue) },
-            selection: $hapticStrength, sheetTitle: "振动强度", identifier: "keyboardHapticStrengthPicker",
+            selection: $hapticStrength.markingSettingsChange(), sheetTitle: "振动强度", identifier: "keyboardHapticStrengthPicker",
             onSelect: { _ in previewHaptics() })
           DesignDivider()
           DesignInlineButtonRow(title: "振动预览", buttonTitle: "试一下振动", identifier: "previewKeyboardHaptics",
@@ -258,7 +251,7 @@ struct KeyboardLayoutSettingsView: View {
   }
 
   private var tabletGroup: some View {
-    DesignGroup(title: "iPad", footer: "全尺寸键盘在字母上方多一排数字、Q 左边多一个 Tab 键。组字时数字键选候选，Tab 打开全部候选（桌面端的 Tab 翻页）；没有组字时照常输入。浮动键盘和分屏的窄窗口用 iPhone 布局，不显示这两样。\n\n横屏分离式键盘只在横屏时生效：字母、数字行和 123 符号页从中间分成左右两半，中间留空，方便双手握持时用拇指打字；九键、笔画、手写和注音不分。竖屏、浮动键盘和窄窗口照常显示整块键盘。\n\n外接实体键盘（妙控键盘、蓝牙键盘）时，iOS 不会把实体按键交给任何第三方键盘，实体键盘打出的是系统输入法的结果。要用水杉的拼音、候选和皮肤，请在屏幕键盘上输入。") {
+    DesignGroup(title: "iPad", footer: "全尺寸键盘在字母上方多一排数字、Q 左边多一个 Tab 键。组字时数字键选候选，Tab 打开全部候选（桌面端的 Tab 翻页）；没有组字时照常输入。浮动键盘和分屏的窄窗口用 iPhone 布局，不显示这两样。\n\n横屏分离式键盘只在横屏时生效：字母、数字行和 123 符号页从中间分成左右两半，中间留空，方便双手握持时用拇指打字；九键、14 键、笔画、手写和注音不分。竖屏、浮动键盘和窄窗口照常显示整块键盘。\n\n外接实体键盘（妙控键盘、蓝牙键盘）时，iOS 不会把实体按键交给任何第三方键盘，实体键盘打出的是系统输入法的结果。要用水杉的拼音、候选和皮肤，请在屏幕键盘上输入。") {
       DesignToggleRow(title: "数字行与 Tab 键", isOn: Binding(get: { tabletFullKeys }, set: { enabled in
         tabletFullKeys = enabled
         KeyboardLayoutPreference.tabletFullKeys = enabled
@@ -334,20 +327,26 @@ struct KeyboardLayoutSettingsView: View {
 
   // MARK: - 存储
 
-  /// 当前方案的 26 键和 9 键：全拼对应全拼 9 键，日语对应日语 9 键。其余方案都只有一种排列。
-  private static func layoutPair(_ scheme: ChineseInputScheme) -> (twentySix: ChineseInputScheme, nine: ChineseInputScheme)? {
+  /// 当前方案所属的一组键盘，按 26 键、14 键、9 键排列，只留本版本提供的：全拼有 26 键、14 键和 9 键，日语有 26 键和 9 键。其余方案都只有一种排列，为 nil。
+  static func layoutChoices(_ scheme: ChineseInputScheme) -> [(title: String, scheme: ChineseInputScheme, identifier: String)]? {
+    let choices: [(title: String, scheme: ChineseInputScheme, identifier: String)]
     switch scheme {
-    case .quanpin, .nineKey: (.quanpin, .nineKey)
-    case .japanese, .japaneseNineKey: (.japanese, .japaneseNineKey)
-    default: nil
+    case .quanpin, .fourteenKey, .nineKey:
+      choices = [("26 键", .quanpin, "chineseKeyboard26Key"), ("14 键", .fourteenKey, "chineseKeyboard14Key"),
+                 ("9 键", .nineKey, "chineseKeyboard9Key")]
+    case .japanese, .japaneseNineKey:
+      choices = [("26 键", .japanese, "chineseKeyboard26Key"), ("9 键", .japaneseNineKey, "chineseKeyboard9Key")]
+    default:
+      return nil
     }
+    return choices.filter { $0.scheme.isOfferedByEdition }
   }
 
   /// 把存储的点数调整量换算成键盘自己的键盘高度条在竖屏下显示的百分比：同一个 `KeyboardHeightPercent` 公式，作用于本设备在当前行距下的按键区；数字行与 Tab 键打开且布局带数字行时，按带数字行的全宽 iPad 键盘计算。
   private func heightPercent(_ adjustment: Double) -> String {
     let tablet = UIDevice.current.userInterfaceIdiom == .pad
     let keyBlock = KeyboardHeightPercent.portraitKeyBlockHeight(
-      tablet: tablet, numberRow: tablet && tabletFullKeys && !nineKey, rowSpacing: CGFloat(rowSpacing))
+      tablet: tablet, numberRow: tablet && tabletFullKeys && drawsNumberRow, rowSpacing: CGFloat(rowSpacing))
     return "\(KeyboardHeightPercent.percent(adjustment: CGFloat(adjustment), keyBlock: keyBlock))%"
   }
 
@@ -380,11 +379,11 @@ struct KeyboardLayoutSettingsView: View {
     if saveFailed { readPreferences() }
   }
 
-  private func saveNumberKeypadOrder(_ order: KeyboardLayoutPreference.NumberKeypadOrder) {
-    saveFailed = !KeyboardLayoutPreference.saveNumberKeypadOrder(order)
-    numberKeypadOrder = saveFailed
-      ? KeyboardLayoutPreference.NumberKeypadOrder.shared(in: MetasequoiaInputSessionBridge.loadSharedPreferences())
-      : order
+  private func saveShuangpinKeyHints(_ enabled: Bool) {
+    saveFailed = !KeyboardLayoutPreference.saveShuangpinKeyHints(enabled)
+    shuangpinKeyHints = saveFailed
+      ? KeyboardLayoutPreference.sharedShuangpinKeyHints(in: MetasequoiaInputSessionBridge.loadSharedPreferences())
+      : enabled
   }
 
   private func saveTab(_ enabled: Bool) {
@@ -414,8 +413,8 @@ struct KeyboardLayoutSettingsView: View {
     keySpacing = KeyboardLayoutPreference.keySpacing
     rowSpacing = KeyboardLayoutPreference.rowSpacing
     height = KeyboardLayoutPreference.heightAdjustment
-    numberKeypadOrder = KeyboardLayoutPreference.NumberKeypadOrder.shared(in: preferences)
-    KeyboardLayoutPreference.numberKeypadOrder = numberKeypadOrder
+    shuangpinKeyHints = KeyboardLayoutPreference.sharedShuangpinKeyHints(in: preferences)
+    KeyboardLayoutPreference.shuangpinKeyHints = shuangpinKeyHints
   }
 }
 
@@ -451,7 +450,7 @@ private struct InlineSliderRow: View {
         .frame(width: widthClass == .regular ? 160 : 110)
         .accessibilityValue(format(value))
         .accessibilityIdentifier(identifier)
-        Text(format(value)).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+        Text(format(value)).designSubtext()
           .monospacedDigit().lineLimit(1).minimumScaleFactor(0.8)
           .frame(width: 46, alignment: .trailing)
           .accessibilityHidden(true)

@@ -7,6 +7,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts"))
+from host_api import ResponseDecoder
+
 if os.environ.get("MSIME_ISOLATED_LINUX_TEST") != "1":
     sys.exit("Run only in the dedicated Linux test container")
 
@@ -18,15 +21,11 @@ for name in ("msime_client_prepare_host", "msime_client_create"):
     function.restype = ctypes.c_void_p
 host.msime_client_destroy.argtypes = [ctypes.c_uint64]
 host.msime_client_destroy.restype = ctypes.c_void_p
-host.msime_client_string_free.argtypes = [ctypes.c_void_p]
+responses = ResponseDecoder(host)
 
 
 def decode(pointer):
-    assert pointer, "Missing native response"
-    try:
-        return json.loads(ctypes.string_at(pointer))
-    finally:
-        host.msime_client_string_free(pointer)
+    return responses.decode(pointer)
 
 
 def native(name, document):

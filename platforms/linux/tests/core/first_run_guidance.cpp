@@ -84,6 +84,20 @@ int main() {
   }
   assert(rejected);
 
+  // A hard-linked options document must not be read as private runtime state.
+  const auto options_hardlink_target = root / "options-hardlink-target.json";
+  const auto options_hardlink = root / "options-hardlink.json";
+  std::ofstream(options_hardlink_target) << "{}";
+  std::filesystem::create_hard_link(options_hardlink_target, options_hardlink);
+  rejected = false;
+  try {
+    (void)msime::linux_host::read_runtime_options(options_hardlink);
+  } catch (const std::exception &) {
+    rejected = true;
+  }
+  assert(rejected);
+  assert(std::filesystem::exists(options_hardlink_target));
+
   std::error_code error;
   std::filesystem::remove_all(root, error);
   return 0;

@@ -52,4 +52,20 @@ maintenance_hotkey(uint32_t vk, bool ctrl, bool shift, bool alt,
     return MaintenanceHotkey{MaintenanceAction::Stop, 0};
   return std::nullopt;
 }
+
+// Server 记着的大写锁定状态，语言栏和悬浮工具栏的大写指示以它为准。低级钩子在按键生效之前被调用，读不到这一下之后的锁定状态，只能每按下一次 Caps Lock 翻转一次，所以每一次会改锁定的按下都要计入，注入的也算：TIP 轻点 Caps Lock 切换中英文后用 SendInput 再按一次撤回大写锁定，漏掉那一下，这里就和实际状态一直反着，直到 Server 重启。
+struct CapsLockTracker {
+  bool on = false;
+  // 低级钩子没有自动重复标记：按着不放时一串按下只有第一次翻转。
+  bool down = false;
+  // Caps Lock 按下。返回 true 表示锁定状态变了，需要报告。
+  bool press() {
+    if (down)
+      return false;
+    down = true;
+    on = !on;
+    return true;
+  }
+  void release() { down = false; }
+};
 } // namespace msime::windows

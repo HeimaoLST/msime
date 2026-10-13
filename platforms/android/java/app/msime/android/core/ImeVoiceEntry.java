@@ -1,5 +1,7 @@
 package app.msime.android;
 
+import app.msime.android.LayoutPolicy;
+
 import app.msime.android.policy.HostOptionsPolicy;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -174,16 +176,7 @@ final class ImeVoiceEntry {
                         if (text == null) failure = "语音识别服务未响应，请稍后重试";
                     }
                 } catch (LocalAsrRecognizer.Refused refused) {
-                    failure = switch (refused.failure()) {
-                        case PERMISSION -> "语音识别需要麦克风权限";
-                        case UNAVAILABLE -> "麦克风被其他应用占用";
-                        case MODEL -> "本地语音模型未安装或已损坏，请在设置中重新下载";
-                        case RUNTIME -> refused.runtimeMissing()
-                            ? "本地语音识别组件尚未下载，请在设置中下载后再试"
-                            : "本地语音识别组件无法加载";
-                        case EMPTY -> "没有听到内容";
-                        case CANCELLED -> null;
-                    };
+                    failure = LocalAsrPolicy.failureMessage(refused.failure(), refused.runtimeMissing());
                 } catch (RuntimeException | LinkageError error) {
                     failure = "语音识别服务无法启动";
                 }
@@ -191,7 +184,7 @@ final class ImeVoiceEntry {
                 if (result != null && !result.isEmpty() && polish != null) {
                     String polished = new VoicePolisher().polish(polish.endpoint(), polish.model(), polish.token(),
                         polish.prompt(), result);
-                    if (polished != null && !TextPolicy.trimmed(polished).isEmpty()) {
+                    if (TextPolicy.hasText(polished)) {
                         result = TextPolicy.trimmed(polished);
                     }
                 }
@@ -202,7 +195,10 @@ final class ImeVoiceEntry {
                 s.main.post(() -> delivered(session, finalText, finalFailure, audio, elapsed, language, provider));
             });
         } catch (RejectedExecutionException error) {
-            dismiss();
+            // The recognizer was created before the worker accepted the task. If the service is
+            // shutting down, release that recognizer before handing control back to the window
+            // fallback; otherwise it can keep the microphone open after this path returns false.
+            cancel();
             return false;
         }
         return true;
@@ -339,7 +335,7 @@ final class ImeVoiceEntry {
             worker.execute(() -> {
                 String polished = new VoicePolisher().polish(polish.endpoint(), polish.model(), polish.token(),
                     polish.prompt(), transcript);
-                String finalText = polished != null && !TextPolicy.trimmed(polished).isEmpty()
+                String finalText = TextPolicy.hasText(polished)
                     ? TextPolicy.trimmed(polished) : transcript;
                 s.main.post(() -> delivered(session, finalText, null, null, elapsed, language, PLATFORM_PROVIDER));
             });
@@ -358,7 +354,7 @@ final class ImeVoiceEntry {
             s.launchVoiceActivity();
             return;
         }
-        s.notice(PlatformSpeechPolicy.message(error));
+        s.notice(PlatformSpeechPolicy.message(error, VoiceRecognitionActivity.recognizerLabel(s)));
     }
 
     private void releasePlatform() {
@@ -455,8 +451,12 @@ final class ImeVoiceEntry {
         VoiceContributionApi.Contribution contribution = new VoiceContributionApi.Contribution(language, provider,
             VoiceContributionApi.durationMillis(pcm.length), transcript, version == null ? "" : version, wav);
         if (!VoiceContributionApi.valid(contribution)) return;
+        final long lifecycleGeneration = s.inputLifecycleGeneration();
         try {
             worker.execute(() -> {
+                if (lifecycleGeneration != s.inputLifecycleGeneration()
+                        || !s.imePrivacyGate.contributesVoice()
+                        || !AndroidLocalSettings.load(s).bool(AndroidLocalSettings.VOICE_CONTRIBUTE_AUDIO)) return;
                 try {
                     new VoiceContributionApi(new CloudApi(s)).upload(contribution);
                 } catch (CloudApi.Failure | RuntimeException error) {
@@ -476,7 +476,7 @@ final class ImeVoiceEntry {
         hidden.ensureCapacity(keyArea.getChildCount());
         for (int index = 0; index < keyArea.getChildCount(); index++) {
             View child = keyArea.getChildAt(index);
-            if (child.getVisibility() == View.VISIBLE) {
+            if (ViewPolicy.isVisible(child)) {
                 hidden.add(child);
                 ViewPolicy.setInvisible(child);
             }
@@ -507,7 +507,7 @@ final class ImeVoiceEntry {
         int height = BoundsPolicy.atLeast(keyArea.getHeight(),
             s.pixels(KeyboardGeometry.NINE_KEY_HEIGHT_DP));
         ViewGroup.LayoutParams params = keyArea instanceof LinearLayout
-            ? KeyboardGeometry.matchWidthHeightPx(height)
+            ? LayoutPolicy.matchWidthHeightPx(height)
             : new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height);
         // 盖在原来的键行上：键行仍占着位置（INVISIBLE），面板用负的上外边距叠上去，键盘高度不跳。
         if (params instanceof LinearLayout.LayoutParams linear && keyArea.getHeight() > 0) {

@@ -42,7 +42,7 @@ struct ToolbarMetrics {
   // the shipped geometry, and text drawn from the raw setting would then be
   // sized for a bar that was never built.
   double icon = 24.0;
-  double cell = 48.0;
+  double cell = 34.0;
   // The bar itself, excluding the shadow margin.
   double height = 52.0;
   // The product mark at the far left, before the drag strip. It is decoration,
@@ -58,11 +58,14 @@ struct ToolbarMetrics {
 
 // Derived from the configured icon size.
 //
-// The pitch was three times the icon: a 24 DIP glyph centred in a 72 DIP cell,
-// which is 24 DIP of empty bar between one icon and the next. At that spacing
-// the buttons read as scattered marks rather than a row of controls. Two icon
-// widths puts 12 DIP either side of the glyph - still a comfortable click
-// target, and the hover pill it draws is very close to square.
+// A cell is the glyph plus 10 DIP, the same pitch as the macOS toolbar: there
+// a button is its glyph plus 4 pt a side (kToolbarButtonPadding) and the stack
+// leaves 2 pt between buttons (kToolbarButtonSpacing). The pitch used to be
+// twice the icon, which left 24 DIP of empty bar between two 24 DIP glyphs; the
+// buttons read as scattered marks and the bar covered far more of the text
+// beneath it than its buttons needed. The padding does not grow with the icon,
+// as on macOS: larger glyphs are what make a larger bar, not wider gaps. The
+// hover pill, inset 2 DIP a side, stays close to square at the shipped size.
 //
 // The height is deliberately left alone. It is what the icon sits in
 // vertically and what the bar's rounded corners are cut from; shrinking it
@@ -74,13 +77,21 @@ inline ToolbarMetrics toolbar_metrics(double font_size, bool shadow = true) {
   if (!(font_size >= 8.0) || !(font_size <= 64.0))
     return metrics; // Out of range: keep the shipped geometry.
   metrics.icon = font_size;
-  metrics.cell = font_size * 2.0;
+  metrics.cell = font_size + 10.0;
   metrics.height = font_size * 2.0 + 4.0;
   // The mark is drawn at the icon size, in a slot half again as wide, so it
   // has a gutter either side and is not jammed into the bar's rounded corner.
   metrics.logo = font_size * 1.5;
   metrics.icon_top = metrics.height / 6.5;
   metrics.icon_bottom = metrics.height - metrics.icon_top;
+  return metrics;
+}
+
+// 偏好 `show_app_logo` 关掉时 logo 槽收窄成一条握把：画两列三行小圆点，仍是拖动区的一部分。宽度与 macOS 的 kToolbarGripWidth 同比例（图标 24 时 10），再小也留 8，免得握把细到按不准。
+inline ToolbarMetrics toolbar_metrics(double font_size, bool shadow, bool logo) {
+  auto metrics = toolbar_metrics(font_size, shadow);
+  if (!logo)
+    metrics.logo = (std::max)(8.0, metrics.icon * 10.0 / 24.0);
   return metrics;
 }
 

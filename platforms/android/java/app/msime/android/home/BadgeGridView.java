@@ -1,5 +1,8 @@
 package app.msime.android.home;
 
+import app.msime.android.ThemeColorPolicy;
+import app.msime.android.DimensionPolicy;
+
 import app.msime.android.KeyboardGeometry;
 import android.animation.ValueAnimator;
 import android.content.Context;
@@ -86,15 +89,15 @@ public final class BadgeGridView extends View {
     public BadgeGridView(Context context, @Nullable AttributeSet attributes) {
         super(context, attributes);
         glyph.setTextAlign(Paint.Align.CENTER);
-        glyph.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+        ViewPolicy.setTypeface(glyph, Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
         title.setTextAlign(Paint.Align.CENTER);
-        title.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+        ViewPolicy.setTypeface(title, Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
         ViewPolicy.setTextSizeSp(title, context, 14);
         caption.setTextAlign(Paint.Align.CENTER);
         ViewPolicy.setTextSizeSp(caption, context, 11);
         ring.setStyle(Paint.Style.STROKE);
         ring.setStrokeCap(Paint.Cap.ROUND);
-        ring.setStrokeWidth(Ui.dp(context, RING_STROKE));
+        ring.setStrokeWidth(DimensionPolicy.pixels(context, RING_STROKE));
         ViewPolicy.setInteractive(this, true);
         nodes = new Nodes(this);
         ViewCompat.setAccessibilityDelegate(this, nodes);
@@ -166,13 +169,13 @@ public final class BadgeGridView extends View {
     }
 
     private float tileWidth() {
-        return (getWidth() - Ui.dp(getContext(), GAP) * (COLUMNS - 1)) / COLUMNS;
+        return (getWidth() - DimensionPolicy.pixels(getContext(), GAP) * (COLUMNS - 1)) / COLUMNS;
     }
 
     private void tile(int index, RectF out) {
-        float gap = Ui.dp(getContext(), GAP);
+        float gap = DimensionPolicy.pixels(getContext(), GAP);
         float width = tileWidth();
-        float height = Ui.dp(getContext(), TILE_HEIGHT);
+        float height = DimensionPolicy.pixels(getContext(), TILE_HEIGHT);
         float left = (index % COLUMNS) * (width + gap);
         float top = (index / COLUMNS) * (height + gap);
         out.set(left, top, left + width, top + height);
@@ -190,7 +193,7 @@ public final class BadgeGridView extends View {
         int rows = (badges.size() + COLUMNS - 1) / COLUMNS;
         float height = rows * TILE_HEIGHT + BoundsPolicy.nonNegative(rows - 1) * GAP;
         setMeasuredDimension(MeasureSpec.getSize(widthSpec),
-            resolveSize(Ui.dp(getContext(), height), heightSpec));
+            resolveSize(DimensionPolicy.pixels(getContext(), height), heightSpec));
     }
 
     @Override public boolean onTouchEvent(MotionEvent event) {
@@ -214,7 +217,7 @@ public final class BadgeGridView extends View {
     }
 
     private boolean dark() {
-        return Ui.isNight(getContext());
+        return DimensionPolicy.isNight(getContext());
     }
 
     /** 分组的两种颜色：深色端和浅色端。 */
@@ -228,7 +231,7 @@ public final class BadgeGridView extends View {
     }
 
     private void refreshColours(Context context) {
-        int accent = Ui.accent(context);
+        int accent = ThemeColorPolicy.accent(context);
         if (coloursCached && cachedAccent == accent) return;
         cachedAccent = accent;
         coloursCached = true;
@@ -257,11 +260,11 @@ public final class BadgeGridView extends View {
 
     @Override protected void onDraw(Canvas canvas) {
         Context context = getContext();
-        int card = Ui.card(context);
-        int text = Ui.text(context);
-        int sub = Ui.subText(context);
-        int track = dark() ? Ui.withAlpha(Color.WHITE, .1f) : Ui.withAlpha(Color.BLACK, .07f);
-        float radius = Ui.dp(context, 20);
+        int card = ThemeColorPolicy.card(context);
+        int text = ThemeColorPolicy.text(context);
+        int sub = ThemeColorPolicy.subText(context);
+        int track = dark() ? ColorPolicy.withAlpha(Color.WHITE, .1f) : ColorPolicy.withAlpha(Color.BLACK, .07f);
+        float radius = DimensionPolicy.pixels(context, 20);
         refreshColours(context);
         for (int index = 0; index < badges.size(); index++) {
             Achievement badge = badges.get(index);
@@ -270,7 +273,7 @@ public final class BadgeGridView extends View {
             fill.setColor(card);
             canvas.drawRoundRect(box, radius, radius, fill);
             float centreX = box.centerX();
-            float centreY = box.top + Ui.dp(context, 46);
+            float centreY = box.top + DimensionPolicy.pixels(context, 46);
             float rotate = 0;
             float scale = 1;
             if (index == wiggling) {
@@ -278,7 +281,7 @@ public final class BadgeGridView extends View {
                 scale = frame(WIGGLE, wiggle, 2);
             } else if (popStart >= 0) {
                 long local = popStart - POP_DELAY - POP_STAGGER * index;
-                float t = KeyboardGeometry.bounded(local / (float) POP_MILLIS, 0f, 1f);
+                float t = BoundsPolicy.bounded(local / (float) POP_MILLIS, 0f, 1f);
                 scale = frame(POP, t, 1);
             }
             int[] colours = colours(badge.group());
@@ -289,10 +292,10 @@ public final class BadgeGridView extends View {
             else drawRing(canvas, badge, colours, track, sub, rotate);
             canvas.restore();
             title.setColor(badge.unlocked() ? text : sub);
-            canvas.drawText(badge.title(), centreX, box.top + Ui.dp(context, 104), title);
+            canvas.drawText(badge.title(), centreX, box.top + DimensionPolicy.pixels(context, 104), title);
             caption.setColor(sub);
-            canvas.drawText(ellipsize(TypingStatisticsSummary.caption(badge), box.width() - Ui.dp(context, 12)),
-                centreX, box.top + Ui.dp(context, 123), caption);
+            canvas.drawText(ellipsize(TypingStatisticsSummary.caption(badge), box.width() - DimensionPolicy.pixels(context, 12)),
+                centreX, box.top + DimensionPolicy.pixels(context, 123), caption);
         }
     }
 
@@ -307,7 +310,7 @@ public final class BadgeGridView extends View {
 
     private void drawMedal(Canvas canvas, Achievement badge, int[] colours, float rotate) {
         Context context = getContext();
-        float half = Ui.dp(context, MEDAL) / 2;
+        float half = DimensionPolicy.pixels(context, MEDAL) / 2;
         canvas.save();
         canvas.rotate(45 + rotate);
         medalBox.set(-half, -half, half, half);
@@ -320,7 +323,7 @@ public final class BadgeGridView extends View {
             medalGradientKeys[slot] = key;
         }
         fill.setShader(medalGradients[slot]);
-        float corner = Ui.dp(context, 17);
+        float corner = DimensionPolicy.pixels(context, 17);
         canvas.drawRoundRect(medalBox, corner, corner, fill);
         fill.setShader(null);
         canvas.restore();
@@ -336,7 +339,7 @@ public final class BadgeGridView extends View {
 
     private void drawRing(Canvas canvas, Achievement badge, int[] colours, int track, int sub, float rotate) {
         Context context = getContext();
-        float half = Ui.dp(context, RING) / 2 - Ui.dp(context, RING_STROKE) / 2;
+        float half = DimensionPolicy.pixels(context, RING) / 2 - DimensionPolicy.pixels(context, RING_STROKE) / 2;
         canvas.save();
         canvas.rotate(rotate);
         ringBox.set(-half, -half, half, half);
@@ -350,10 +353,10 @@ public final class BadgeGridView extends View {
         String face = badge.glyph();
         glyph.setColor(sub);
         ViewPolicy.setTextSizeSp(glyph, context, face.length() > 2 ? 12 : 15);
-        canvas.drawText(face, 0, Ui.dp(context, 2), glyph);
+        canvas.drawText(face, 0, DimensionPolicy.pixels(context, 2), glyph);
         glyph.setColor(colours[0]);
         ViewPolicy.setTextSizeSp(glyph, context, 9);
-        canvas.drawText(TypingStatisticsSummary.progressLabel(badge), 0, Ui.dp(context, 14), glyph);
+        canvas.drawText(TypingStatisticsSummary.progressLabel(badge), 0, DimensionPolicy.pixels(context, 14), glyph);
         canvas.restore();
     }
 

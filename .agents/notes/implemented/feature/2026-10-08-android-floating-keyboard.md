@@ -12,7 +12,7 @@ Status: implemented
 - 几何规则在 `keyboard/FloatingKeyboardPolicy`：宽度是窗口的 80%，夹在 240–480 dp 且不超过窗口；千分比与像素的互换、拖动钳制都在这里。拖动条是 `keyboard/FloatingKeyboardBar`。
 - 窗口：浮动时输入法窗口、系统的 `android.R.id.inputArea` 与键盘根视图都改成铺满（LatinIME 的 `updateSoftInputWindowLayoutParameters` 同一做法），根视图与导航栏底色透明；键盘外框（`keyboardSurface`）缩窄、包裹高度、贴在左上角，位置全靠平移，拖动不触发重新布局。`onComputeInsets` 在浮动时把 `contentTopInsets` / `visibleTopInsets` 设为窗口高度，`touchableInsets` 为 `TOUCHABLE_INSETS_REGION`、区域是面板的矩形，所以应用不让出高度，面板外的触摸落到应用上。停靠时把窗口和 inputArea 恢复成第一次浮动前记下的高度；`setInputView`、`updateFullscreenMode` 之后重新套一遍。状态在 `render()` 开头按「是否浮动」比较后才改窗口。
 - 键盘列的系统栏内边距由服务自己的 insets 监听决定：停靠时照旧留出导航栏那一截，浮动时不留，系统栏四边只用来限制面板能拖到哪里（`WindowLayout.systemBars` 抽出了原来 `fitSystemBars` 里的换算）。
-- 浮动时单手模式和横屏分离式键盘不生效（存着的值不变）；外接键盘的候选条模式里不浮动（`FloatingKeyboardPolicy.active`），候选条停在底部。
+- 浮动时单手模式和横屏分离式键盘不生效（存着的值不变）；外接键盘的候选条模式里不浮动（`FloatingKeyboardPolicy.active`），候选条停在底部。同一套铺满窗口的做法也用于[物理键盘时候选栏跟随光标](2026-10-11-android-hardware-caret-candidates.md)，`overlayDrawn()` 涵盖两者。
 
 ## Alternatives considered
 

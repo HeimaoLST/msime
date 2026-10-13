@@ -1,3 +1,4 @@
+import { ControlledSelect } from "../core/controlled-select";
 import * as cloud from "./cloud-panel-style";
 import { cloudDictionaryKinds, type CloudDictionaryKind } from "./cloud-dictionary-kind-tabs";
 
@@ -14,11 +15,11 @@ export function CloudDictionaryKindSelect({
   onChange,
 }: CloudDictionaryKindSelectProps) {
   return (
-    <select
+    <ControlledSelect
       className={cloud.dictionaryInput}
       aria-label="词库类型"
       value={value}
-      onChange={(event) => onChange(event.target.value as CloudDictionaryKind)}
+      onChange={(value) => onChange(value as CloudDictionaryKind)}
       disabled={disabled}
     >
       {cloudDictionaryKinds.map(([kind, label]) => (
@@ -26,6 +27,6 @@ export function CloudDictionaryKindSelect({
           {label}
         </option>
       ))}
-    </select>
+    </ControlledSelect>
   );
 }

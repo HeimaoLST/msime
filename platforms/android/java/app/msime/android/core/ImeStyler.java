@@ -1,5 +1,8 @@
 package app.msime.android;
 
+import app.msime.android.LayoutPolicy;
+
+
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -15,8 +18,6 @@ import java.util.HashMap;
 import java.util.Map;
 import java.time.LocalDate;
 import java.time.ZoneId;
-import org.json.JSONException;
-import org.json.JSONObject;
 
 /** 键盘的着色与几何：按键样式、皮肤套用、键距行距与键盘高度；从 MSIMEInputService 原样搬出。 */
 final class ImeStyler {
@@ -25,6 +26,11 @@ final class ImeStyler {
 
     ImeStyler(MSIMEInputService s) {
         this.s = s;
+    }
+
+    /** 读音行组字光标竖条的颜色：皮肤的强调色（#6110）。 */
+    int caretColor() {
+        return color(s.skin.accent());
     }
 
     /** Skin colours repeat across every key in a render; keep the bounded palette parsed once. */
@@ -51,7 +57,7 @@ final class ImeStyler {
      * 跟随系统皮肤按应用主题取色：`system` 皮肤换成 {@link KeyboardSkin#system(boolean, AppThemePalette.Seed)}，其他皮肤原样返回。SVC 每次按偏好重建 `skin` 时拿到的是 classic 基础色，这里在着色时统一换掉，所以不必改 SVC 的每个赋值点。
      */
     KeyboardSkin themed(KeyboardSkin target) {
-        if (target == null || target.designed() || !"system".equals(target.id())) return target;
+        if (target == null || !target.followsAppTheme()) return target;
         if (target == seededLight || target == seededDark) return target;
         if (seed == null) refreshAppTheme(true);
         if (target.dark()) {
@@ -83,7 +89,7 @@ final class ImeStyler {
         int month = LocalDate.now(ZoneId.systemDefault()).getMonthValue();
         if (seed != null && theme.equals(seedTheme) && month == seedMonth) return false;
         AppThemePalette.Seed next = AppThemePalette.Seed.fromResolved(
-            resolveAppTheme(theme, month, false), resolveAppTheme(theme, month, true));
+            AppThemeResolver.resolve(theme, month, false), AppThemeResolver.resolve(theme, month, true));
         if (next == null) next = AppThemePalette.Seed.AUTUMN;
         boolean changed = seed == null || !seed.id.equals(next.id) || !seed.season.equals(next.season);
         seedTheme = theme;
@@ -103,19 +109,9 @@ final class ImeStyler {
         s.imeDebugOverlay.refreshPreferences();
     }
 
-    private static JSONObject resolveAppTheme(String theme, int month, boolean dark) {
-        try {
-            JSONObject root = new JSONObject(NativeClient.resolveAppTheme(theme, month, dark));
-            return JsonPolicy.strictTrue(root.opt("ok"))
-                ? root.optJSONObject("value") : null;
-        } catch (JSONException | RuntimeException | LinkageError error) {
-            return null;
-        }
-    }
-
-    /** The key spacing the displayed layout draws with: the user's setting, capped on the eleven-column Dachen rows (KeyboardGeometry.layoutKeySpacing). */
+    /** The key spacing the displayed layout draws with: the user's setting, capped on the eleven-column Dachen rows (KeyboardSpacingPolicy.layoutKeySpacing). */
     private int layoutKeySpacingTenths() {
-        return KeyboardGeometry.layoutKeySpacing(s.touchKeySpacingTenths, s.displayedTouchLayout(s.view));
+        return KeyboardSpacingPolicy.layoutKeySpacing(s.touchKeySpacingTenths, s.displayedTouchLayout(s.view));
     }
 
     void applyKeyboardGeometry(View node) {
@@ -140,10 +136,10 @@ final class ImeStyler {
         if (s.keyRows == null) return;
         applyKeyboardGeometry(s.keyRows);
         applyKeyboardHeight(s.keyRows);
-        // The action row is a sibling of the key rows rather than one of them -- its height is fixed
-        // so the height setting cannot squeeze 换行 -- but its caps take the same spacing.
+        // 功能行是键行的兄弟而不是其中一行，按底行角色算高度：和一行键同高，分摊四分之一的键盘高度调整；键帽照样带键距。
         if (s.actionRow != null) {
             applyKeyboardGeometry(s.actionRow);
+            applyKeyboardHeight(s.actionRow);
             s.actionRow.requestLayout();
         }
         // 设计的键区左右外边距 6 dp 量到键的边缘；键自己带半个键距的外边距，所以容器只补差值。
@@ -161,7 +157,7 @@ final class ImeStyler {
     }
 
     void applyKeyboardHeight(View node) {
-        applyKeyboardHeight(node, KeyboardGeometry.windowHeightAdjustment(
+        applyKeyboardHeight(node, KeyboardHeightPolicy.windowHeightAdjustment(
             s.touchKeyboardHeightAdjustment, s.getResources().getConfiguration().screenHeightDp));
     }
 
@@ -170,8 +166,15 @@ final class ImeStyler {
         Object tag = node.getTag();
         if (tag instanceof MSIMEInputService.KeyboardHeightRole) {
             MSIMEInputService.KeyboardHeightRole role = (MSIMEInputService.KeyboardHeightRole) tag;
-            int height = s.pixels(KeyboardGeometry.adjustedRowHeight(role.baseHeight,
-                adjustment, role.rowCount, role.rowIndex));
+            // 调整量由键区四行均分：底行拿它那一份，底行以上的键行和三行高的键块分摊其余部分，连底行一起占四行的整块（日语、注音九键）拿整份，各布局的总高都等于四行键高加整份调整。
+            int heightDp;
+            if (role.bottomRow) {
+                heightDp = role.baseHeight + KeyboardHeightPolicy.bottomRowAdjustment(adjustment);
+            } else {
+                int share = role.withBottomRow ? adjustment : KeyboardHeightPolicy.keyRowsAdjustment(adjustment);
+                heightDp = KeyboardHeightPolicy.adjustedRowHeight(role.baseHeight, share, role.rowCount, role.rowIndex);
+            }
+            int height = s.pixels(heightDp);
             height += s.halfSpacingPixels(s.touchRowSpacingTenths) * 2 * role.rowSpacings;
             if (node.getLayoutParams() != null) {
                 android.view.ViewGroup.LayoutParams params = node.getLayoutParams();
@@ -191,22 +194,21 @@ final class ImeStyler {
     }
 
     /**
-     * 九键、笔画、手写、大千四行的三行键块：与 26 键的三行字母键同高（3 × {@link KeyboardGeometry#KEY_ROW_HEIGHT_DP} + 整份键高调整 + 三份行距）。
+     * 九键、笔画、手写、大千四行的三行键块：与 26 键的三行字母键同高（3 × {@link KeyboardGeometry#KEY_ROW_HEIGHT_DP} + 底行以外的那部分键高调整 + 三份行距）。
      */
     void adjustThreeRowBlockHeight(View view) {
         adjustRowBlockHeight(view, 3);
     }
 
-    /** 占 {@code rows} 行键高的整块（九键网格连同侧栏），按键盘高度偏好缩放，并按行数加上行距。 */
+    /** 占 {@code rows} 行键高的整块（九键网格连同侧栏），分摊底行以外的键盘高度调整，并按行数加上行距。 */
     void adjustRowBlockHeight(View view, int rows) {
         view.setTag(new MSIMEInputService.KeyboardHeightRole(
             KeyboardGeometry.KEY_ROW_HEIGHT_DP * rows, 1, 0, rows));
     }
 
-    /** 连同底栏位置一起占用的整块（日语九键、注音九键没有底栏，四行都在块里）：三行键高加一条底栏高，底栏不带行距，与其他布局总高相同。 */
+    /** 连同底行位置一起占用的整块（日语九键、注音九键没有底行，四行都在块里）：四行键高、四份行距，拿整份键盘高度调整，与其他布局总高相同。 */
     void adjustBottomRowBlockHeight(View view) {
-        view.setTag(new MSIMEInputService.KeyboardHeightRole(
-            KeyboardGeometry.KEY_ROW_HEIGHT_DP * 3 + KeyboardGeometry.STANDARD_ROW_HEIGHT_DP, 1, 0, 3));
+        view.setTag(MSIMEInputService.KeyboardHeightRole.threeRowsWithBottomRow());
     }
 
     void styleButton(Button button, boolean action) { styleButton(button, action, s.skin); }
@@ -231,9 +233,9 @@ final class ImeStyler {
             // The pill is a label on the strip rather than a key, so it keeps a plain rounded face even over a designed skin, inset so the 44dp target stays.
             GradientDrawable pill = DrawablePolicy.rounded(color(target.keyBackground()),
                 s.pixels(14));
-            button.setBackground(new InsetDrawable(pill,
+            ViewPolicy.setBackground(button, new InsetDrawable(pill,
                 s.pixels(2), s.pixels(8), s.pixels(2), s.pixels(8)));
-            button.setTextColor(color(target.keyForeground()));
+            ViewPolicy.setTextColor(button, color(target.keyForeground()));
             applySkinTypeface(button, target);
             ViewPolicy.clearElevation(button);
             return;
@@ -245,7 +247,7 @@ final class ImeStyler {
                 shortcut.setActiveFill(color(target.accentSoft()));
                 if (selected) label = target.accentText();
             }
-            button.setTextColor(color(label));
+            ViewPolicy.setTextColor(button, color(label));
             applySkinTypeface(button, target);
             ViewPolicy.clearElevation(button);
             return;
@@ -261,12 +263,12 @@ final class ImeStyler {
             : tile ? (selected ? target.accentText() : target.keyForeground())
             : selected ? target.onAccent()
             : action ? target.functionForeground() : target.keyForeground();
-        float density = KeyboardGeometry.density(s);
+        float density = DimensionPolicy.density(s);
         KeyboardPressButton press = button instanceof KeyboardPressButton key ? key : null;
         // 键帽完全由皮肤、角色、选中状态和密度决定；这几项都没变就留着现在这块，不再每次 render 换一个一样的新 Drawable 让整块键盘重画。
         if (press == null || !press.keepsFace(target, role, selected, density)) {
             if (target.designed()) {
-                button.setBackground(new KeyboardSkinKeyDrawable(target,
+                ViewPolicy.setBackground(button, new KeyboardSkinKeyDrawable(target,
                     color(background), selected || action || confirm, density));
             } else {
                 GradientDrawable drawable = DrawablePolicy.rounded(color(background),
@@ -274,11 +276,11 @@ final class ImeStyler {
                 int borderWidth = s.pixels(target.borderWidth());
                 if (borderWidth > 0)
                     drawable.setStroke(borderWidth, color(target.borderColor()));
-                button.setBackground(drawable);
+                ViewPolicy.setBackground(button, drawable);
             }
             if (press != null) press.rememberFace(target, role, selected, density);
         }
-        button.setTextColor(color(foreground));
+        ViewPolicy.setTextColor(button, color(foreground));
         if (button instanceof KeyHintButton hintButton) {
             hintButton.setHintColor(color(target.accent()));
             hintButton.setCornerHintColor(color(target.hint()));
@@ -292,7 +294,9 @@ final class ImeStyler {
     }
 
     private void applySkinTypeface(Button button, KeyboardSkin target) {
-        button.setTypeface(target.monospaced() ? Typeface.MONOSPACE : Typeface.DEFAULT);
+        ViewPolicy.setTypeface(button, target.monospaced() ? Typeface.MONOSPACE
+            : button instanceof NineKeyDigitButton ? Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            : Typeface.DEFAULT);
     }
 
     /**
@@ -304,12 +308,12 @@ final class ImeStyler {
             ? KeyboardIconKey.Kind.CAPS_LOCK : KeyboardIconKey.Kind.SHIFT);
         String background = on ? target.keyBackground() : target.functionBackground();
         String foreground = on ? target.accent() : target.functionForeground();
-        float density = KeyboardGeometry.density(s);
+        float density = DimensionPolicy.density(s);
         // 记忆键帽时按「开着」当作 KEY 角色，免得开关切换后沿用旧的那块底图。
         KeyboardKeyRole remembered = on ? KeyboardKeyRole.KEY : KeyboardKeyRole.ACCENT;
         if (!key.keepsFace(target, remembered, false, density)) {
             if (target.designed()) {
-                key.setBackground(new KeyboardSkinKeyDrawable(target,
+                ViewPolicy.setBackground(key, new KeyboardSkinKeyDrawable(target,
                     color(background), !on, density));
             } else {
                 GradientDrawable drawable = DrawablePolicy.rounded(color(background),
@@ -317,11 +321,11 @@ final class ImeStyler {
                 int borderWidth = s.pixels(target.borderWidth());
                 if (borderWidth > 0)
                     drawable.setStroke(borderWidth, color(target.borderColor()));
-                key.setBackground(drawable);
+                ViewPolicy.setBackground(key, drawable);
             }
             key.rememberFace(target, remembered, false, density);
         }
-        key.setTextColor(color(foreground));
+        ViewPolicy.setTextColor(key, color(foreground));
         applyShadow(key, target);
     }
 
@@ -330,7 +334,7 @@ final class ImeStyler {
         int shadowColor = ColorPolicy.withAlpha(Color.BLACK, shadowAlpha);
         view.setOutlineAmbientShadowColor(shadowColor);
         view.setOutlineSpotShadowColor(shadowColor);
-        view.setElevation(target.shadowOpacity() > 0
+        ViewPolicy.setElevation(view, target.shadowOpacity() > 0
             ? s.pixels(BoundsPolicy.bounded(target.shadowRadius() + target.shadowOffset(),
                 1d, Double.MAX_VALUE)) : 0);
     }
@@ -339,19 +343,19 @@ final class ImeStyler {
     static int fade(String color, double opacity) {
         int value = Color.parseColor(color);
         return ColorPolicy.withAlpha(value,
-            (float) KeyboardGeometry.bounded(opacity, 0, 1));
+            (float) BoundsPolicy.bounded(opacity, 0, 1));
     }
 
     /** The outlined badge the keyboard wears while nothing is being composed. */
     GradientDrawable brandPillDrawable() {
-        return DrawablePolicy.outlined(s.pixels(14), KeyboardGeometry.atLeastOnePixel(s, 1),
+        return DrawablePolicy.outlined(s.pixels(14), DimensionPolicy.atLeastOnePixel(s, 1),
             fade(s.skin.accent(), .45));
     }
 
     GradientDrawable candidateDrawable(int color) {
         int border = s.candidateAppearance.border();
         return roundedFace(color, s.pixels(6),
-            Color.alpha(border) > 0 ? KeyboardGeometry.atLeastOnePixel(s, 1) : 0, border);
+            Color.alpha(border) > 0 ? DimensionPolicy.atLeastOnePixel(s, 1) : 0, border);
     }
 
     private static GradientDrawable roundedFace(int color, float radius, int borderWidth,
@@ -395,11 +399,12 @@ final class ImeStyler {
             else if (role != null) styleButton((Button) node, role, target);
             else styleButton((Button) node, !key, target);
             if (description != null && "恢复默认".contentEquals(description))
-                ((Button) node).setTextColor(Color.RED);
+                ViewPolicy.setTextColor((Button) node, Color.RED);
         } else if (node instanceof TextView) {
             TextView text = (TextView) node;
-            text.setTextColor(candidate ? s.candidateAppearance.text() : color(target.keyForeground()));
-            text.setTypeface(candidate ? candidateTypeface()
+            ViewPolicy.setTextColor(text,
+                candidate ? s.candidateAppearance.text() : color(target.keyForeground()));
+            ViewPolicy.setTypeface(text, candidate ? candidateTypeface()
                 : target.monospaced() ? Typeface.MONOSPACE : Typeface.DEFAULT);
         }
         if (node instanceof android.view.ViewGroup) {
@@ -415,8 +420,8 @@ final class ImeStyler {
         s.skin = themed(s.skin);
         s.emojiSkin = themed(s.emojiSkin);
         s.handwritingSkin = themed(s.handwritingSkin);
-        // 浮动时根视图铺满屏幕，底色透明才看得见下面的应用；导航栏也不再画成键盘底色的一条。
-        boolean floating = s.floatingDrawn();
+        // 浮动（以及候选栏跟随光标）时根视图铺满屏幕，底色透明才看得见下面的应用；导航栏也不再画成键盘底色的一条。
+        boolean floating = s.overlayDrawn();
         int rootColor = floating ? Color.TRANSPARENT : color(s.skin.background());
         ViewPolicy.setBackgroundColor(s.keyboardRoot, rootColor);
         s.imeFrame.applyNavigationBar(rootColor, s.skin.dark());
@@ -462,20 +467,22 @@ final class ImeStyler {
         s.imeNineKeyPanel.applySkin();
         if (s.preedit != null) {
             // Idle, this is the brand badge the shared design draws as an outlined pill; composing, it is the reading itself, set in the strip's typeface and its secondary colour above the candidates.
-            s.preedit.setTextColor(s.brandPillVisible
+            ViewPolicy.setTextColor(s.preedit, s.brandPillVisible
                 ? color(s.skin.accent()) : s.candidateAppearance.number());
-            s.preedit.setTypeface(candidateTypeface());
-            KeyboardGeometry.setKeyTextSize(s.preedit, s.brandPillVisible ? 12 : s.candidatePreeditFontSize);
-            s.preedit.setBackground(s.brandPillVisible ? brandPillDrawable() : null);
+            ViewPolicy.setTypeface(s.preedit, candidateTypeface());
+            KeyboardTypographyPolicy.setKeyTextSize(s.preedit, s.brandPillVisible ? 12 : ReadingRowPolicy.textSizeSp(s.candidatePreeditFontSize));
+            ViewPolicy.setBackground(s.preedit, s.brandPillVisible ? brandPillDrawable() : null);
             ViewPolicy.setPadding(s.preedit, s.pixels(s.brandPillVisible ? 12 : 2),
                 s.pixels(s.brandPillVisible ? 4 : 0), s.pixels(s.brandPillVisible ? 12 : 2),
                 s.pixels(s.brandPillVisible ? 4 : 0));
+            // 组字光标竖条（#6110）跟着皮肤的强调色走。
+            CompositionCaretSpan.recolor(s.preedit, caretColor());
         }
         if (s.candidateBrandMark != null) s.candidateBrandMark.invalidate();
-        if (s.status != null) s.status.setTextColor(fade(s.skin.accent(), .55));
+        if (s.status != null) ViewPolicy.setTextColor(s.status, fade(s.skin.accent(), .55));
         if (s.candidatePage != null) {
-            s.candidatePage.setTextColor(s.candidateAppearance.accent());
-            s.candidatePage.setTypeface(candidateTypeface());
+            ViewPolicy.setTextColor(s.candidatePage, s.candidateAppearance.accent());
+            ViewPolicy.setTypeface(s.candidatePage, candidateTypeface());
         }
         if (s.layoutAdjustView != null) s.layoutAdjustView.updateSkin(s.skin);
         s.imeFrame.applyOneHanded();
@@ -485,11 +492,11 @@ final class ImeStyler {
 
     void applySkinBackground(View node, KeyboardSkin target) {
         target = themed(target);
-        float density = KeyboardGeometry.density(s);
+        float density = DimensionPolicy.density(s);
         // 同一个皮肤对象画出的底图完全一样；已经是它就不再换新的，免得每按一个键都让整块键盘底图重画（照片皮肤还要重新上传位图）。
         if (node.getBackground() instanceof KeyboardSkinBackgroundDrawable current
                 && current.draws(target, density)) return;
-        node.setBackground(new KeyboardSkinBackgroundDrawable(target, density));
+        ViewPolicy.setBackground(node, new KeyboardSkinBackgroundDrawable(target, density));
     }
 
     /** 浮动面板的圆角轮廓；阴影与裁剪都按它来。 */
@@ -504,12 +511,12 @@ final class ImeStyler {
     void applyKeyboardSurfaceGeometry() {
         if (s.keyboardSurface == null) return;
         Configuration configuration = s.getResources().getConfiguration();
-        if (s.floatingDrawn()) {
-            // 浮动：缩窄成圆角面板贴在根视图左上角，位置由 MSIMEInputService.positionFloatingKeyboard 用平移决定；高度包裹内容，不能是 MATCH_PARENT，否则键盘列会被撑到整屏高。
-            s.keyboardSurface.setLayoutParams(KeyboardGeometry.frameParamsPx(
+        if (s.overlayDrawn()) {
+            // 浮动：缩窄成圆角面板贴在根视图左上角，位置由 MSIMEInputService.positionKeyboardSurface 用平移决定（浮动键盘按拖到的位置，跟随光标的候选栏按光标）；高度包裹内容，不能是 MATCH_PARENT，否则键盘列会被撑到整屏高。
+            s.keyboardSurface.setLayoutParams(LayoutPolicy.frameParamsPx(
                 s.pixels(FloatingKeyboardPolicy.widthDp(configuration.screenWidthDp)),
                 FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.LEFT));
-            s.keyboardSurface.setElevation(s.pixels(10));
+            ViewPolicy.setElevation(s.keyboardSurface, s.pixels(10));
             s.keyboardSurface.setOutlineProvider(floatingOutline);
             s.keyboardSurface.setClipToOutline(true);
             return;
@@ -519,9 +526,9 @@ final class ImeStyler {
         int widthDp = KeyboardFormFactorPolicy.surfaceWidthDp(
             configuration.smallestScreenWidthDp, configuration.screenWidthDp, s.splitKeyboardDrawn());
         int width = widthDp == 0 ? FrameLayout.LayoutParams.MATCH_PARENT : s.pixels(widthDp);
-        FrameLayout.LayoutParams params = KeyboardGeometry.frameParamsPx(
+        FrameLayout.LayoutParams params = LayoutPolicy.frameParamsPx(
             width, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         s.keyboardSurface.setLayoutParams(params);
-        s.keyboardSurface.setElevation(widthDp == 0 ? 0 : s.pixels(10));
+        ViewPolicy.setElevation(s.keyboardSurface, widthDp == 0 ? 0 : s.pixels(10));
     }
 }

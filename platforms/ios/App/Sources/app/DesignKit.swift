@@ -14,7 +14,40 @@ private extension View {
   }
 }
 
+extension View {
+  /// Applies the app canvas colour through the safe-area edges.
+  func designCanvasBackground() -> some View {
+    background(MetasequoiaTheme.canvas.ignoresSafeArea())
+  }
+
+  /// Applies the standard compact secondary text treatment used by design-kit surfaces.
+  func designSubtext() -> some View {
+    font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+  }
+}
+
 // MARK: - 标志圆盘
+
+/// 统一绘制圆盘、标志框和白色描边；调用方决定圆盘的配色与尺寸。
+struct LogoDisc: View {
+  let diameter: CGFloat
+  let markSize: CGFloat
+  let discFill: Color
+  let frameFill: Color
+
+  var body: some View {
+    let scale = MSIMELogo.scale(for: CGRect(x: 0, y: 0, width: markSize, height: markSize))
+    ZStack {
+      Circle().fill(discFill)
+      ZStack {
+        MSIMELogoFrame().fill(frameFill)
+        MSIMELogoStroke().stroke(.white, style: StrokeStyle(lineWidth: MSIMELogo.strokeWidth * scale, lineCap: .round, lineJoin: .round))
+      }
+      .frame(width: markSize, height: markSize)
+    }
+    .frame(width: diameter, height: diameter)
+  }
+}
 
 /// 着色圆盘上的应用标志（「设置」「关于」和首次引导的页头）：圆盘用 `aM(14)` / `aM(22)`，边框用 `mix(accent 82%, #000)`，白色描边叠在最上面。
 struct AppMarkDisc: View {
@@ -26,21 +59,49 @@ struct AppMarkDisc: View {
   })
 
   var body: some View {
-    let scale = MSIMELogo.scale(for: CGRect(x: 0, y: 0, width: markSize, height: markSize))
-    ZStack {
-      Circle().fill(MetasequoiaTheme.accentMix(14, 22))
-      ZStack {
-        MSIMELogoFrame().fill(Self.frameFill)
-        MSIMELogoStroke().stroke(.white, style: StrokeStyle(lineWidth: MSIMELogo.strokeWidth * scale, lineCap: .round, lineJoin: .round))
-      }
-      .frame(width: markSize, height: markSize)
-    }
-    .frame(width: diameter, height: diameter)
+    LogoDisc(diameter: diameter, markSize: markSize,
+             discFill: MetasequoiaTheme.accentMix(14, 22), frameFill: Self.frameFill)
     .accessibilityHidden(true)
   }
 }
 
+/// Accent-colored initial tile shared by compact list rows and community cards.
+struct DesignInitialTile: View {
+  enum TileShape { case rounded, circle }
+  let text: String
+  var size: CGFloat = 40
+  var fontSize: CGFloat = 16
+  var fontWeight: Font.Weight = .bold
+  var cornerRadius: CGFloat = MetasequoiaTheme.tabCardRadius
+  var shape: TileShape = .rounded
+
+  var body: some View {
+    Text(text)
+      .font(.system(size: fontSize, weight: fontWeight))
+      .foregroundStyle(MetasequoiaTheme.accent)
+      .frame(width: size, height: size)
+      .background(MetasequoiaTheme.accentSoft, in: tileShape)
+      .accessibilityHidden(true)
+  }
+
+  private var tileShape: AnyShape {
+    switch shape {
+    case .rounded: AnyShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    case .circle: AnyShape(Circle())
+    }
+  }
+}
+
 // MARK: - 卡片与分组
+
+/// Section header shared by settings lists and design cards.
+struct SettingsGroupHeader: View {
+  let title: String
+  var body: some View {
+    Text(title).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.groupTitle).textCase(nil)
+      .accessibilityAddTraits(.isHeader)
+  }
+}
 
 /// 分组卡片：季节卡片色的连续圆角矩形，无阴影、无边框。卡片里的行之间没有间距，行与行之间放一个 `DesignDivider`。
 struct DesignCard<Content: View>: View {
@@ -86,7 +147,7 @@ struct DesignGroup<Content: View>: View {
       }
       DesignCard(radius: radius) { content }
       if let footer {
-        Text(footer).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+        Text(footer).designSubtext()
           .fixedSize(horizontal: false, vertical: true)
           .padding(.horizontal, 20)
       }
@@ -111,6 +172,45 @@ struct DesignDivider: View {
 
 // MARK: - 行
 
+/// Shared tinted capsule label used for compact status and action pills.
+struct DesignPillLabel: View {
+  enum Style { case filled, tonal, neutral }
+  enum Size { case micro, compact, regular, page }
+
+  let title: String
+  var style: Style = .tonal
+  var size: Size = .compact
+
+  var body: some View {
+    Text(title)
+      .font(.system(size: size == .micro ? 10 : size == .compact ? 12 : 13,
+        weight: size == .micro ? .medium : .semibold))
+      .foregroundStyle(foreground)
+      .lineLimit(1)
+      .fixedSize()
+      .padding(.vertical, size == .micro ? 2 : size == .compact ? 4 : size == .regular ? 5 : 6)
+      .padding(.horizontal, size == .micro ? 6 : size == .compact ? 12 : 14)
+      .background(background, in: Capsule())
+      .contentShape(Capsule())
+  }
+
+  private var foreground: Color {
+    switch style {
+    case .filled: MetasequoiaTheme.onAccent
+    case .tonal: MetasequoiaTheme.accent
+    case .neutral: MetasequoiaTheme.sub
+    }
+  }
+
+  private var background: Color {
+    switch style {
+    case .filled: MetasequoiaTheme.accent
+    case .tonal: MetasequoiaTheme.accentSoft
+    case .neutral: MetasequoiaTheme.segBg
+    }
+  }
+}
+
 /// 所有行共用的布局：最小高度 52pt，内边距 8/20，17pt 标题，其下 2pt 处是可选的 13pt 副标题，再加上行尾的内容。
 private struct DesignRowLayout<Leading: View, Trailing: View>: View {
   let title: String
@@ -128,14 +228,8 @@ private struct DesignRowLayout<Leading: View, Trailing: View>: View {
   var body: some View {
     HStack(spacing: 12) {
       leading
-      VStack(alignment: .leading, spacing: 2) {
-        Text(title).font(.system(size: 17)).foregroundStyle(.primary)
-        if let subtitle {
-          Text(subtitle).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
-            .fixedSize(horizontal: false, vertical: true)
-        }
-      }
-      .multilineTextAlignment(.leading)
+      DesignRowLabel(title: title, subtitle: subtitle)
+        .multilineTextAlignment(.leading)
       Spacer(minLength: 8)
       trailing
     }
@@ -153,9 +247,23 @@ private extension DesignRowLayout where Leading == EmptyView {
 }
 
 /// 导航行和选择行行尾的箭头。
-private struct DesignChevron: View {
+/// Shared trailing chevron for compact navigation rows.
+struct DesignChevron: View {
+  var fontSize: CGFloat = 13
+  var opacity: Double = 0.55
+
   var body: some View {
-    Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
+    Image(systemName: "chevron.right").font(.system(size: fontSize, weight: .semibold))
+      .foregroundStyle(MetasequoiaTheme.sub.opacity(opacity))
+      .accessibilityHidden(true)
+  }
+}
+
+/// Shared trailing icon for links that leave the current settings surface.
+struct DesignExternalLinkIcon: View {
+  var body: some View {
+    Image(systemName: "arrow.up.right")
+      .font(.system(size: 13, weight: .semibold))
       .foregroundStyle(MetasequoiaTheme.sub.opacity(0.55))
       .accessibilityHidden(true)
   }
@@ -199,19 +307,29 @@ struct DesignToggleRow: View {
 
   var body: some View {
     Toggle(isOn: $isOn) {
-      VStack(alignment: .leading, spacing: 2) {
-        Text(title).font(.system(size: 17)).foregroundStyle(.primary)
-        if let subtitle {
-          Text(subtitle).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
-            .fixedSize(horizontal: false, vertical: true)
-        }
-      }
+      DesignRowLabel(title: title, subtitle: subtitle)
     }
     .toggleStyle(.switch)
     .tint(MetasequoiaTheme.switchOn)
     .padding(.vertical, 8)
     .padding(.horizontal, 20)
     .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+  }
+}
+
+/// Shared title and optional subtitle layout for settings rows.
+private struct DesignRowLabel: View {
+  let title: String
+  let subtitle: String?
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 2) {
+      Text(title).font(.system(size: 17)).foregroundStyle(.primary)
+      if let subtitle {
+        Text(subtitle).designSubtext()
+          .fixedSize(horizontal: false, vertical: true)
+      }
+    }
   }
 }
 
@@ -255,7 +373,7 @@ struct DesignInlineButtonRow: View {
         action()
         guard doneTitle != nil else { return }
         showsDone = true
-        resetTask?.cancel()
+        ViewRequestTask.cancel(task: $resetTask)
         resetTask = Task { @MainActor in
           try? await Task.sleep(nanoseconds: 1_600_000_000)
           guard !Task.isCancelled else { return }
@@ -271,7 +389,7 @@ struct DesignInlineButtonRow: View {
       .accessibilityLabel(showsDone ? doneTitle ?? buttonTitle : buttonTitle)
       .designIdentifier(identifier)
     }
-    .onDisappear { resetTask?.cancel() }
+    .onDisappear { ViewRequestTask.cancel(task: $resetTask) }
   }
 }
 
@@ -303,7 +421,7 @@ struct DesignSliderRow: View {
           .frame(width: widthClass == .regular ? 160 : 110)
           .accessibilityValue(format(value))
           .designIdentifier(identifier)
-        Text(format(value)).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+        Text(format(value)).designSubtext()
           .monospacedDigit().lineLimit(1).minimumScaleFactor(0.8)
           .frame(width: 46, alignment: .trailing)
           .accessibilityHidden(true)
@@ -524,7 +642,7 @@ private struct DesignOptionSheetView<Value: Hashable>: View {
         VStack(spacing: 4) {
           Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(MetasequoiaTheme.sub)
           if let message = level.message {
-            Text(message).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+            Text(message).designSubtext()
           }
         }
         .multilineTextAlignment(.center)
@@ -742,7 +860,7 @@ struct ToastOverlay: View {
 
 // MARK: - 分段控件
 
-/// 设计稿的分段控件。`.capsule` 是社区和剪贴板的切换器（选中的滑块上是强调色文字）；`.rounded` 是统计页的切换器（主文字色，着色轨道）。每一项都是一个按钮，id 为 "<identifierPrefix>-<index>"。
+/// 设计稿的分段控件。`.capsule` 是剪贴板和 AI 设计皮肤的切换器（选中的滑块上是强调色文字）；`.rounded` 是统计页的切换器（主文字色，着色轨道）。每一项都是一个按钮，id 为 "<identifierPrefix>-<index>"。
 struct DesignSegmentedControl<Value: Hashable>: View {
   enum Style { case capsule, rounded }
 

@@ -1,35 +1,47 @@
-name: 缺陷报告
-description: 报告一个可复现的问题，不要附带私人输入或凭据。
+name: Bug 反馈
+description: 遇到出错、打不出字或显示异常？
 title: "[Bug]: "
 labels: [bug]
 body:
   - type: markdown
     attributes:
       value: |
-        请不要包含密码、访问令牌、真实输入文本、个人资料、私人路径或涉及安全的细节。安全漏洞请走私下报告入口。
-  - type: input
-    id: platform
+        反馈会公开显示，请不要填写密码、账号、聊天内容等个人信息。如果发现的是安全漏洞，请不要在这里提交，改用私下报告。
+  - type: textarea
+    id: problem
     attributes:
-      label: 平台与版本
-      description: 写明操作系统、架构，以及水杉输入法的提交或安装包版本。
-      placeholder: 例如 Linux arm64 容器，commit abc1234
+      label: 遇到了什么问题
+      placeholder: 例如：在备忘录里切换到水杉输入法后，候选字显示成方框，看不出是什么字。
     validations:
       required: true
   - type: textarea
     id: reproduce
     attributes:
-      label: 复现步骤
-      description: 使用合成输入，给出最小的操作序列。
+      label: 怎样操作会出现
+      description: 按顺序写下你做了什么，方便我们重现这个问题。
+      placeholder: |-
+        1. 打开备忘录，切换到水杉输入法
+        2. 输入拼音 nihao
+        3. 候选字显示成方框
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
-      label: 预期行为与实际行为
+      label: 你期望的结果
+      placeholder: 例如：候选字应该正常显示为汉字。
     validations:
       required: true
   - type: textarea
-    id: checks
+    id: version
     attributes:
-      label: 已经执行过的检查
-      description: 列出本地命令或平台测试及其结果。不要粘贴密钥或原始输入内容。
+      label: 系统与输入法版本
+      description: 输入法版本可以在输入法的设置或「关于」页面里找到。Android 版在「关于」或「帮助与反馈」里点「复制设备信息」，整段粘贴到这里即可。
+      placeholder: 例如：macOS 15.3，水杉输入法 1.2.0
+    validations:
+      required: true
+  - type: textarea
+    id: additional
+    attributes:
+      label: 其他信息（可选）
+      description: 例如多久出现一次、是不是在所有软件里都会出现。

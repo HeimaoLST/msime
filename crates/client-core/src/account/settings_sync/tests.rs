@@ -107,6 +107,9 @@ fn settings_sync_export_is_exactly_the_shared_android_keys() {
     preferences.custom_translation.api_key = "SENTINEL-translation".into();
     preferences.tencent_tmt.secret_id = "SENTINEL-secret-id".into();
     preferences.tencent_tmt.secret_key = "SENTINEL-secret-key".into();
+    // 云剪贴板中继是本机的配置，地址和令牌都不进同步文档。
+    preferences.cloud_clipboard_relay.url = "https://SENTINEL-relay.example.test".into();
+    preferences.cloud_clipboard_relay.token = "SENTINEL-relay-token".into();
     let exported = export_android_settings(&preferences, Some(&feedback())).unwrap();
     let keys: Vec<&str> = exported.keys().map(String::as_str).collect();
     assert_eq!(
@@ -122,9 +125,11 @@ fn settings_sync_export_is_exactly_the_shared_android_keys() {
             "input.schema",
             "input.shuangpin_schema",
             "input.smart_punctuation",
+            "input.wubi_auto_commit_unique",
             "input.wubi_code_hint",
             "input.wubi_schema",
             "platform.android.custom_candidate_skin",
+            "platform.android.custom_candidate_skin_dark",
             "platform.android.custom_keyboard_skin",
             "platform.android.custom_theme_base",
             "platform.android.global_theme",
@@ -134,6 +139,7 @@ fn settings_sync_export_is_exactly_the_shared_android_keys() {
             "platform.android.keyboard_height_adjustment",
             "platform.android.keyboard_layout",
             "platform.android.number_keypad_order",
+            "platform.android.shuangpin_key_hints",
             "platform.android.sound_enabled",
             "platform.android.theme",
             "platform.android.toolbar_ai",
@@ -146,6 +152,7 @@ fn settings_sync_export_is_exactly_the_shared_android_keys() {
             "platform.android.toolbar_skin",
             "platform.android.touch_key_spacing_tenths",
             "platform.android.touch_row_spacing_tenths",
+            "platform.android.twenty_six_key_number_layout",
             "platform.android.voice_language",
             "platform.android.voice_shortcut",
         ]
@@ -179,6 +186,59 @@ fn settings_sync_export_is_exactly_the_shared_android_keys() {
     assert_eq!(without.len(), exported.len() - 3);
 }
 
+/// 账号既没有 `custom` 这个取值也装不下用户的键位表：选着自定义方案时不上传双拼方案，账号里的值保留；账号里出现 `custom`（例如更新的客户端写的）也不应用，本机的表不会被一个空表的 `custom` 顶掉。
+#[test]
+fn settings_sync_leaves_a_custom_shuangpin_profile_on_the_device() {
+    let mut local = Preferences {
+        shuangpin_profile: ShuangpinProfile::Custom,
+        ..Preferences::default()
+    };
+    local
+        .shuangpin_custom_profile
+        .finals
+        .insert("ing".into(), ";".into());
+    let exported = export_android_settings(&local, None).unwrap();
+    assert!(!exported.contains_key("input.shuangpin_schema"));
+    assert!(exported.contains_key("input.character_set"));
+
+    let mut values = BTreeMap::new();
+    values.insert(
+        "input.shuangpin_schema".into(),
+        AccountPreferenceValue::String("custom".into()),
+    );
+    let applied = apply(
+        &Preferences::default(),
+        values,
+        &schema_for(&[("input.shuangpin_schema", "string")]),
+    );
+    assert_eq!(
+        applied.preferences.shuangpin_profile,
+        ShuangpinProfile::Xiaohe
+    );
+    assert_eq!(applied.skipped, ["input.shuangpin_schema"]);
+
+    // 反过来，本机选着自定义方案、账号里留着上次的内置方案：合并上传后应用回来时本机仍是自定义方案，表也还在。
+    let mut values = BTreeMap::new();
+    values.insert(
+        "input.shuangpin_schema".into(),
+        AccountPreferenceValue::String("xiaohe".into()),
+    );
+    let applied = apply(
+        &local,
+        values,
+        &schema_for(&[("input.shuangpin_schema", "string")]),
+    );
+    assert_eq!(
+        applied.preferences.shuangpin_profile,
+        ShuangpinProfile::Custom
+    );
+    assert_eq!(
+        applied.preferences.shuangpin_custom_profile,
+        local.shuangpin_custom_profile
+    );
+    assert!(applied.skipped.is_empty());
+}
+
 #[test]
 fn settings_sync_round_trips_every_exported_key() {
     let mut expected = Preferences {
@@ -191,6 +251,7 @@ fn settings_sync_round_trips_every_exported_key() {
         smart_punctuation: !Preferences::default().smart_punctuation,
         paired_punctuation: !Preferences::default().paired_punctuation,
         wubi_code_hint: !Preferences::default().wubi_code_hint,
+        wubi_auto_commit_unique: !Preferences::default().wubi_auto_commit_unique,
         touch_keyboard_layout: TouchKeyboardLayout::NineKey,
         theme: ThemeMode::Dark,
         touch_key_spacing_tenths: 40,
@@ -198,6 +259,8 @@ fn settings_sync_round_trips_every_exported_key() {
         touch_keyboard_height_adjustment: 10,
         touch_voice_shortcut: !Preferences::default().touch_voice_shortcut,
         touch_number_keypad_order: NumberKeypadOrder::Calculator,
+        touch_twenty_six_key_number_layout: TwentySixKeyNumberLayout::NineKey,
+        touch_shuangpin_key_hints: !Preferences::default().touch_shuangpin_key_hints,
         ..Preferences::default()
     };
     expected.frequency = FrequencyPreferences {
@@ -207,6 +270,8 @@ fn settings_sync_round_trips_every_exported_key() {
     };
     expected.global_theme = GlobalTheme::Custom;
     expected.custom_theme.base = GlobalTheme::Night;
+    expected.custom_theme.candidate_skin = Some("sakura".into());
+    expected.custom_theme.candidate_skin_dark = Some("midnight".into());
     expected.validate().unwrap();
     let host = HostKeyboardFeedback {
         sound_enabled: false,
@@ -218,6 +283,31 @@ fn settings_sync_round_trips_every_exported_key() {
     assert_eq!(applied.preferences, expected);
     assert_eq!(applied.feedback, Some(host));
     assert!(applied.skipped.is_empty());
+}
+
+/// 全拼 14 键和九键双拼的布局按 `fourteen_key`、`nine_key_shuangpin` 上传，读回来还是原来的布局，不会落成 26 键。九键双拼用哪张表是本机的设置，不上传。
+#[test]
+fn settings_sync_round_trips_the_fourteen_key_layout() {
+    for (layout, id) in [
+        (TouchKeyboardLayout::FourteenKey, "fourteen_key"),
+        (TouchKeyboardLayout::NineKeyShuangpin, "nine_key_shuangpin"),
+    ] {
+        let expected = Preferences {
+            touch_keyboard_layout: layout,
+            ..Preferences::default()
+        };
+        let exported = export_android_settings(&expected, None).unwrap();
+        assert_eq!(
+            exported.get("platform.android.keyboard_layout"),
+            Some(&AccountPreferenceValue::String(id.into()))
+        );
+        assert!(!exported
+            .keys()
+            .any(|key| key.contains("nine_key_shuangpin")));
+        let applied = apply(&Preferences::default(), exported, &full_schema());
+        assert_eq!(applied.preferences.touch_keyboard_layout, layout);
+        assert!(applied.skipped.is_empty());
+    }
 }
 
 #[test]
@@ -315,12 +405,13 @@ fn settings_sync_unknown_enum_values_skip_only_their_key() {
         ("input.shuangpin_schema", "sogou"),
         ("input.wubi_schema", "wubi06"),
         ("input.frequency_mode", "random"),
-        ("platform.android.keyboard_layout", "fourteen_key"),
+        ("platform.android.keyboard_layout", "future_layout"),
         ("platform.android.theme", "sepia"),
         ("platform.android.global_theme", "aurora"),
         ("platform.android.custom_theme_base", "custom"),
         ("platform.android.custom_keyboard_skin", "{not json"),
         ("platform.android.custom_candidate_skin", "../escape"),
+        ("platform.android.custom_candidate_skin_dark", "../escape"),
         ("platform.android.haptic_strength", "max"),
     ];
     let mut values: BTreeMap<String, AccountPreferenceValue> = unknown_values
@@ -350,6 +441,37 @@ fn settings_sync_unknown_enum_values_skip_only_their_key() {
         Preferences::default()
     );
     assert_eq!(applied.feedback, Some(feedback()));
+}
+
+/// 「原生」只在 iOS 提供：Android 收到它时与不认识的主题 id 一样只跳过这个键，主题和自定义主题的底都保持本机的值。
+#[test]
+fn settings_sync_skips_the_ios_only_native_theme() {
+    let local = Preferences {
+        global_theme: GlobalTheme::Night,
+        ..Preferences::default()
+    };
+    let values = BTreeMap::from([
+        (
+            GLOBAL_THEME.to_owned(),
+            AccountPreferenceValue::String("native".into()),
+        ),
+        (
+            CUSTOM_THEME_BASE.to_owned(),
+            AccountPreferenceValue::String("native".into()),
+        ),
+        (
+            "input.learning".to_owned(),
+            AccountPreferenceValue::Boolean(false),
+        ),
+    ]);
+    let applied = apply(&local, values, &full_schema());
+    assert_eq!(applied.skipped, [CUSTOM_THEME_BASE, GLOBAL_THEME]);
+    assert_eq!(applied.preferences.global_theme, GlobalTheme::Night);
+    assert_eq!(
+        applied.preferences.custom_theme.base,
+        local.custom_theme.base
+    );
+    assert!(!applied.preferences.learning);
 }
 
 #[test]
@@ -510,6 +632,46 @@ fn settings_sync_host_feedback_is_read_only_when_the_document_has_it() {
     );
     assert!(valid_haptic_strength("light") && !valid_haptic_strength("off"));
     assert!(valid_haptic_strength("system"), "跟随系统");
+}
+
+/// 深色槽位与浅色槽位各自同步：空串清掉本机的深色皮肤，字段表没收录这个键（旧服务端）时本机的深色皮肤保持不变。
+#[test]
+fn settings_sync_dark_candidate_skin_slot_syncs_on_its_own() {
+    let mut local = Preferences::default();
+    local.custom_theme.candidate_skin = Some("sakura".into());
+    local.custom_theme.candidate_skin_dark = Some("midnight".into());
+    local.validate().unwrap();
+    let exported = export_android_settings(&local, None).unwrap();
+    assert_eq!(
+        exported.get("platform.android.custom_candidate_skin_dark"),
+        Some(&AccountPreferenceValue::String("midnight".into()))
+    );
+
+    let cleared = BTreeMap::from([(
+        "platform.android.custom_candidate_skin_dark".to_owned(),
+        AccountPreferenceValue::String(String::new()),
+    )]);
+    let applied = apply(&local, cleared.clone(), &full_schema());
+    assert!(applied.skipped.is_empty(), "{:?}", applied.skipped);
+    assert_eq!(
+        applied.preferences.custom_theme.candidate_skin.as_deref(),
+        Some("sakura")
+    );
+    assert_eq!(applied.preferences.custom_theme.candidate_skin_dark, None);
+
+    let mut legacy = full_schema();
+    legacy
+        .fields
+        .remove("platform.android.custom_candidate_skin_dark");
+    let applied = apply(&local, cleared, &legacy);
+    assert_eq!(
+        applied
+            .preferences
+            .custom_theme
+            .candidate_skin_dark
+            .as_deref(),
+        Some("midnight")
+    );
 }
 
 #[test]
@@ -726,4 +888,70 @@ fn settings_sync_custom_keyboard_skin_library_is_bounded_and_an_array() {
         custom_keyboard_skins(&cloud, &schema_for(&[])).unwrap(),
         None
     );
+}
+
+#[test]
+fn settings_sync_desktop_export_is_only_the_shared_input_keys() {
+    let mut preferences = Preferences {
+        scheme: InputScheme::Wubi,
+        traditional_chinese_output: true,
+        ..Preferences::default()
+    };
+    preferences.cloud_clipboard_relay.url = "https://SENTINEL-relay.example.test".into();
+    preferences.cloud_clipboard_relay.token = "SENTINEL-relay-token".into();
+    let exported = export_desktop_settings(&preferences);
+    assert!(exported.keys().all(|key| key.starts_with("input.")));
+    assert!(exported.values().all(|value| !matches!(
+        value,
+        AccountPreferenceValue::String(text) if text.contains("SENTINEL")
+    )));
+    let android = export_android_settings(&preferences, None).unwrap();
+    let shared: BTreeMap<_, _> = android
+        .into_iter()
+        .filter(|(key, _)| key.starts_with("input."))
+        .collect();
+    assert_eq!(exported, shared);
+    assert_eq!(
+        exported.get("input.character_set"),
+        Some(&AccountPreferenceValue::String("traditional".into()))
+    );
+    assert_eq!(
+        exported.get("input.wubi_schema"),
+        Some(&AccountPreferenceValue::String("wubi86".into()))
+    );
+}
+
+#[test]
+fn settings_sync_desktop_apply_changes_only_the_shared_input_settings() {
+    let local = Preferences::default();
+    let mut settings = export_desktop_settings(&Preferences {
+        scheme: InputScheme::Shuangpin,
+        learning: !local.learning,
+        ..Preferences::default()
+    });
+    // 别的平台的设置和本机不认识的方案都不应改动桌面偏好。
+    settings.insert(
+        "platform.android.theme".into(),
+        AccountPreferenceValue::String("dark".into()),
+    );
+    let mut schema = full_schema();
+    schema.fields.insert(
+        "input.schema".into(),
+        AccountPreferenceField {
+            value_type: "string".into(),
+        },
+    );
+    let applied = apply_desktop_settings(&local, &document(settings.clone()), &schema).unwrap();
+    assert_eq!(applied.preferences.scheme, InputScheme::Shuangpin);
+    assert_eq!(applied.preferences.learning, !local.learning);
+    assert_eq!(applied.preferences.theme, local.theme);
+    assert!(applied.skipped.is_empty());
+
+    settings.insert(
+        "input.schema".into(),
+        AccountPreferenceValue::String("future-scheme".into()),
+    );
+    let applied = apply_desktop_settings(&local, &document(settings), &schema).unwrap();
+    assert_eq!(applied.preferences.scheme, local.scheme);
+    assert_eq!(applied.skipped, ["input.schema"]);
 }

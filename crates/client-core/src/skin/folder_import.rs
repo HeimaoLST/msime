@@ -1,5 +1,7 @@
 //! Copying a picked skin folder into a host's skin root.
 
+#[cfg(unix)]
+use std::fs::File;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
@@ -46,9 +48,24 @@ pub fn import(source: &Path, root: &Path) -> Result<String, &'static str> {
     for leftover in [&staging, &replaced] {
         remove_leftover(leftover)?;
     }
+    #[cfg(unix)]
+    let staging_directory = Some(create_staging_directory(root, &staging).map_err(|_| "storage")?);
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(&staging).map_err(|_| "storage")?;
+    }
     let mut budget = ImportBudget::default();
-    if copy_tree(source, &staging, 0, &mut budget).is_err() {
-        let _ = std::fs::remove_dir_all(&staging);
+    if copy_tree(
+        source,
+        &staging,
+        0,
+        &mut budget,
+        #[cfg(unix)]
+        staging_directory.as_ref(),
+    )
+    .is_err()
+    {
+        let _ = remove_leftover(&staging);
         return Err("storage");
     }
     replace_directory(&staging, &root.join(&name), &replaced)?;
@@ -191,7 +208,12 @@ fn copy_tree(
     destination: &Path,
     depth: usize,
     budget: &mut ImportBudget,
+    #[cfg(unix)] destination_directory: Option<&File>,
 ) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Some(destination_directory) = destination_directory {
+        return copy_tree_at(source, destination, depth, budget, destination_directory);
+    }
     if depth > MAX_IMPORT_DEPTH {
         return Err(std::io::Error::other("skin folder too deep"));
     }
@@ -205,7 +227,14 @@ fn copy_tree(
         let kind = entry.file_type()?;
         let target = destination.join(entry.file_name());
         if kind.is_dir() {
-            copy_tree(&entry.path(), &target, depth + 1, budget)?;
+            copy_tree(
+                &entry.path(),
+                &target,
+                depth + 1,
+                budget,
+                #[cfg(unix)]
+                None,
+            )?;
         } else if kind.is_file() {
             // Keep the type and bytes tied to the same no-follow handle. A picked
             // folder can be changed while it is being imported; `fs::copy` would
@@ -221,6 +250,71 @@ fn copy_tree(
                 .write(true)
                 .create_new(true)
                 .open(target)?;
+            std::io::copy(&mut input, &mut output)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_staging_directory(root: &Path, staging: &Path) -> std::io::Result<File> {
+    let parent = crate::storage::open_private_directory(root)?;
+    let name = staging
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("staging has no name"))?;
+    rustix::fs::mkdirat(&parent, name, rustix::fs::Mode::from_raw_mode(0o700))?;
+    crate::storage::open_private_directory_at(&parent, name)
+}
+
+#[cfg(unix)]
+fn copy_tree_at(
+    source: &Path,
+    destination: &Path,
+    depth: usize,
+    budget: &mut ImportBudget,
+    destination_directory: &File,
+) -> std::io::Result<()> {
+    if depth > MAX_IMPORT_DEPTH {
+        return Err(std::io::Error::other("skin folder too deep"));
+    }
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        budget.entries = budget
+            .entries
+            .checked_sub(1)
+            .ok_or_else(|| std::io::Error::other("skin folder too large"))?;
+        let name = entry.file_name();
+        let kind = entry.file_type()?;
+        let target = destination.join(&name);
+        if kind.is_dir() {
+            rustix::fs::mkdirat(
+                destination_directory,
+                &name,
+                rustix::fs::Mode::from_raw_mode(0o700),
+            )?;
+            let child = crate::storage::open_private_directory_at(destination_directory, &name)?;
+            copy_tree_at(&entry.path(), &target, depth + 1, budget, &child)?;
+        } else if kind.is_file() {
+            // Keep the type and bytes tied to the same no-follow handle. A picked
+            // folder can be changed while it is being imported; path-based output
+            // could otherwise follow a replaced staging directory.
+            let mut input = crate::storage::open_private_file_in(&entry.path())?;
+            let length = input.metadata()?.len();
+            budget.bytes = budget
+                .bytes
+                .checked_sub(length)
+                .ok_or_else(|| std::io::Error::other("skin folder too large"))?;
+            let descriptor = rustix::fs::openat(
+                destination_directory,
+                &name,
+                rustix::fs::OFlags::WRONLY
+                    | rustix::fs::OFlags::CREATE
+                    | rustix::fs::OFlags::EXCL
+                    | rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::from_raw_mode(0o600),
+            )?;
+            let mut output: File = descriptor.into();
             std::io::copy(&mut input, &mut output)?;
         }
     }
@@ -244,6 +338,40 @@ mod tests {
         .unwrap();
         std::fs::write(skin.join("images").join("bg.png"), b"new").unwrap();
         skin
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copied_files_stay_in_an_open_staging_directory_after_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let state = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let root = state.path().join("skins");
+        let outside = state.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(source.path().join("fixture.bin"), b"synthetic skin").unwrap();
+        let staging = root.join(".import-sakura");
+        let staging_directory = create_staging_directory(&root, &staging).unwrap();
+        let moved = state.path().join("skins-moved");
+        std::fs::rename(&root, &moved).unwrap();
+        symlink(&outside, &root).unwrap();
+
+        copy_tree(
+            source.path(),
+            &staging,
+            0,
+            &mut ImportBudget::default(),
+            Some(&staging_directory),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(moved.join(".import-sakura/fixture.bin")).unwrap(),
+            b"synthetic skin"
+        );
+        assert!(!outside.join("fixture.bin").exists());
     }
 
     #[test]
@@ -466,7 +594,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn leftover_cleanup_rejects_a_symlinked_parent() {
-        use std::os::unix::fs::symlink;
+        use msime_path_trust::untrusted_symlink as symlink;
 
         let state = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();

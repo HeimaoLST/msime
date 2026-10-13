@@ -265,6 +265,26 @@ fn cache_read_ignores_a_symlinked_cache_directory() {
     assert!(store.read().items.is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn cache_writes_stay_bound_to_the_locked_directory_after_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("notices");
+    std::fs::create_dir(&directory).unwrap();
+    let store = NoticeStore::new(&directory);
+    let lock = store.lock().unwrap();
+
+    let moved = root.path().join("notices-moved");
+    std::fs::rename(&directory, &moved).unwrap();
+    std::fs::create_dir(&directory).unwrap();
+
+    store.write_locked(&lock, &NoticeCache::default()).unwrap();
+
+    assert!(moved.join(NOTICES_FILE).exists());
+    assert!(!directory.join(NOTICES_FILE).exists());
+    std::fs::remove_dir_all(moved).unwrap();
+}
+
 #[test]
 fn the_feed_is_fetched_anonymously_and_bad_items_are_left_out() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

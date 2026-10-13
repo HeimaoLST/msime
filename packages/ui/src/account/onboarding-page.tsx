@@ -2,13 +2,16 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent } from "rea
 import { Switch } from "../core/platform-controls";
 import { ActionButton } from "../core/action-button";
 import { useAsyncActionRunner } from "../core/use-async-action";
+import { useTimeout } from "../core/use-timeout";
 import { FluentIcon, type FluentIconName } from "../core/fluent-icons";
 import { msimeFramePath, msimeStrokePath } from "../core/brand-logo";
 import { appThemeStyle, seasonAttr } from "../core/app-theme-style";
 import type { HostChromeClient, ImeSetupClient, ResolvedAppTheme } from "../core/host-contracts";
 import { makeDefaultAction, useImeSetupState } from "../keyboard/setup-status-card";
+import { KeyboardSwitchGuideHost } from "../keyboard/keyboard-switch-guide";
 import { useSettingsPlatform } from "../theme/settings-platform";
 import { useHarmonyWelcomeSystemBars } from "../settings/use-settings-theme";
+import { logo } from "../settings/app-resources";
 import type { EditionInfo, InputScheme, Preferences } from "../index";
 import * as onboarding from "./onboarding-style";
 
@@ -42,11 +45,6 @@ export interface OnboardingActions {
 
 /** How long the first-launch splash stays up before the flow opens on its own. */
 export const SPLASH_MS = 2800;
-/** The panel the mark sits in (the frame of msime_frame.svg without its brush-scatter texture, which is a 200KB raster-like path set). */
-const framePath = "M5.84314 5.8335H109.843V125.833H5.84314V5.8335Z";
-/** The MSIME mark as a single stroke, so the splash can draw it. */
-const logoPath =
-  "M80.394 18.8335L34.3451 36.489L80.394 49.7306L34.3451 71.7999C77.8789 79.1564 118.8 85.1887 31.8431 113.088";
 
 const stepTitles = [
   "把水杉加进键盘",
@@ -82,16 +80,13 @@ export function SetupStep({
 
 /** The splash: the mark draws itself, then the flow opens. A tap anywhere skips it. */
 function Splash({ onDone }: { onDone: () => void }) {
-  useEffect(() => {
-    const timer = window.setTimeout(onDone, SPLASH_MS);
-    return () => window.clearTimeout(timer);
-  }, [onDone]);
+  useTimeout(onDone, SPLASH_MS);
   return (
     <button type="button" className={onboarding.splash} aria-label="跳过开屏" onClick={onDone}>
       <span className={onboarding.splashGlow} aria-hidden="true" />
       <svg className={onboarding.splashLogo} viewBox="0 0 116 132" aria-hidden="true">
-        <path className={onboarding.splashFrame} d={framePath} />
-        <path className={onboarding.splashStroke} d={logoPath} pathLength={1} />
+        <path className={onboarding.splashFrame} d={msimeFramePath} />
+        <path className={onboarding.splashStroke} d={msimeStrokePath} pathLength={1} />
       </svg>
       <span className={onboarding.splashName} aria-hidden="true">
         水杉输入法
@@ -106,28 +101,25 @@ function Splash({ onDone }: { onDone: () => void }) {
   );
 }
 
-/** HarmonyOS 启动页（dc.html L2692-2698）：白色圆盘落到强调色底上并泛起波纹，标志旋转入场并描出自身线条，底部一条进度条在启动页停留期间填满。点一下仍可跳过；设计里没有提示这一点。 */
+/** HarmonyOS 首次启动的开屏（dc.html L2692-2698）：第一帧和系统启动窗相同（启动窗底色上的圆盘和水杉标志，跟随系统深浅色），随后淡入当季颜色、泛起波纹、出字，底部一条进度条在开屏停留期间填满。只在首次启动的欢迎流程里播，平时冷启动不播。点一下仍可跳过；设计里没有提示这一点。 */
 function HarmonySplash({ onDone }: { onDone: () => void }) {
-  useEffect(() => {
-    const timer = window.setTimeout(onDone, SPLASH_MS);
-    return () => window.clearTimeout(timer);
-  }, [onDone]);
+  useTimeout(onDone, SPLASH_MS);
   return (
     <button type="button" className={onboarding.hSplash} aria-label="跳过开屏" onClick={onDone}>
       <span className={onboarding.hSplashGlow} aria-hidden="true" />
       <span className={onboarding.hSplashDiscBox} aria-hidden="true">
         <span className={onboarding.hSplashRipple} />
         <span className={onboarding.hSplashDisc} />
+        <span className={onboarding.hSplashDiscVeil} />
         <svg className={onboarding.hSplashLogo} viewBox="0 0 116 132">
           <path className={onboarding.hSplashFrame} d={msimeFramePath} />
-          <path className={onboarding.hSplashStroke} d={msimeStrokePath} pathLength={1} />
+          <path className={onboarding.hSplashFrameVeil} d={msimeFramePath} />
+          <path className={onboarding.hSplashStroke} d={msimeStrokePath} />
         </svg>
       </span>
-      <span className={onboarding.splashName} aria-hidden="true">
-        水杉输入法
-      </span>
-      <span className={onboarding.splashTagline} aria-hidden="true">
-        METASEQUOIA IME
+      <span className={onboarding.hSplashCaption} aria-hidden="true">
+        <span className={onboarding.splashName}>水杉输入法</span>
+        <span className={onboarding.hSplashTagline}>METASEQUOIA IME</span>
       </span>
       <span className={onboarding.hSplashTrack} aria-hidden="true">
         <span className={onboarding.hSplashFill} />
@@ -724,6 +716,7 @@ export function WelcomeFlowPage({
           swipeStart.current = null;
         }}
       >
+        <KeyboardSwitchGuideHost setup={setup} />
         <div className={onboarding.hTopRow}>
           <span className={onboarding.hCounter}>{`${step + 1} / ${steps.length}`}</span>
           {skipFlow && (
@@ -843,7 +836,7 @@ export function WelcomeFlowPage({
         </div>
       )}
       <header className={onboarding.header}>
-        <img src={new URL("./assets/msime.svg", import.meta.url).href} alt="" />
+        <img src={logo} alt="" />
         <div>
           {/* Android 用上方的进度条显示进度。 */}
           {!android && <p className={onboarding.progress}>{`${step + 1} / ${steps.length}`}</p>}

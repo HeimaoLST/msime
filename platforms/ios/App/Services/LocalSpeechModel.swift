@@ -25,18 +25,14 @@ struct LocalSpeechModelManifest: Equatable {
   init(directory: URL) throws {
     let url = directory.appendingPathComponent(Self.fileName)
     let invalidManifest = ServiceFailure(message: "本地语音模型的描述文件已损坏，请删除后重新下载。")
-    let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
-    guard descriptor >= 0 else {
+    let data: Data
+    do {
+      data = try BoundedFileReader.read(from: url, maximumBytes: Self.maximumManifestBytes)
+    } catch is BoundedFileReader.OpenFailure {
       throw ServiceFailure(message: "所选目录不是已安装的本地语音模型。")
+    } catch {
+      throw invalidManifest
     }
-    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-    defer { try? handle.close() }
-    var manifestStatus = stat()
-    guard fstat(descriptor, &manifestStatus) == 0,
-          (manifestStatus.st_mode & S_IFMT) == S_IFREG else { throw invalidManifest }
-    guard manifestStatus.st_size <= Int64(Self.maximumManifestBytes) else { throw invalidManifest }
-    guard let data = try? handle.read(upToCount: Self.maximumManifestBytes + 1),
-          data.count <= Self.maximumManifestBytes else { throw invalidManifest }
     guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
           let kindName = object["kind"] as? String, let files = object["files"] as? [String: Any]
     else { throw invalidManifest }
@@ -234,6 +230,8 @@ struct LocalSpeechModelInfo: Decodable, Identifiable, Equatable {
   let licenseTerms: String
   let licenseNotice: String
   let hotwords: String
+  /// 不联网安装时要用户自己下载的文件：模型压缩包在前，带下载地址的附加文件在后。
+  let importFiles: [LocalSpeechModelImportFile]
 
   enum CodingKeys: String, CodingKey {
     case id, title, description, languages, streaming, installed, path, memory, hotwords
@@ -245,6 +243,7 @@ struct LocalSpeechModelInfo: Decodable, Identifiable, Equatable {
     case licenseSource = "license_source"
     case licenseTerms = "license_terms"
     case licenseNotice = "license_notice"
+    case importFiles = "import_files"
   }
 
   init(from decoder: Decoder) throws {
@@ -266,7 +265,15 @@ struct LocalSpeechModelInfo: Decodable, Identifiable, Equatable {
     licenseTerms = try values.decodeIfPresent(String.self, forKey: .licenseTerms) ?? ""
     licenseNotice = try values.decodeIfPresent(String.self, forKey: .licenseNotice) ?? ""
     hotwords = try values.decodeIfPresent(String.self, forKey: .hotwords) ?? ""
+    importFiles = try values.decodeIfPresent([LocalSpeechModelImportFile].self, forKey: .importFiles) ?? []
   }
+}
+
+/// 「从文件导入」需要的一个文件：上游文件名、下载地址和大小。导入时按大小和 SHA-256 认文件，不看文件名。
+struct LocalSpeechModelImportFile: Decodable, Equatable, Hashable {
+  let name: String
+  let url: String
+  let size: UInt64
 }
 
 /// Where the phone keeps on-device models and which one `voice_input.asr_model_path` names.
@@ -278,10 +285,8 @@ enum LocalSpeechModelLocation {
     guard !rejectsSymlinkAncestors(root) else { throw CocoaError(.fileWriteNoPermission) }
     try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
     guard !rejectsSymlinkAncestors(root) else { throw CocoaError(.fileWriteNoPermission) }
-    // Hundreds of megabytes that can be downloaded again do not belong in a device backup.
-    var values = URLResourceValues()
-    values.isExcludedFromBackup = true
-    try? root.setResourceValues(values)
+    // 可重新下载的模型可能占用数百 MB，无需写入设备备份。
+    IOSSharedPaths.excludeFromBackup(root, fileManager: fileManager)
     return root
   }
 

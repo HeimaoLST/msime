@@ -13,7 +13,10 @@ use crate::types::{autocorrect_type, WordItem};
 /// How many ranked correction cuts feed the query pipeline: the primary cut becomes the query key and the rest ride along as alternative segmentations. Dropped-initial keys such as `uan` have 10-15 equally weighted deletion targets (cuan/duan/guan/...), and k = 3 cut the list by table order before reaching the right reading (quan'li for uanli); k = 9 lifted R@1/R@3 on the deletion and mixed eval sets with no p95 change (QD:90-97).
 pub const AUTOCORRECT_CUT_KBEST: usize = 9;
 pub const ALTERNATIVE_SEGMENTATION_CANDIDATE_LIMIT: usize = 128;
-/// The protected slot only lifts a reading that cannot be seen at all. Anything already on the first page keeps the rank its weight earned, because frequency learning writes weight and pinning such a word again would overwrite the rank the user just typed for. 6 is the default page size and deliberately does not follow the page-size setting (QD:29-34, overlays.md §1.1).
+/// 被保护的那个座位只抬升「根本看不见」的读法。已经出现在首页上的读法保留权重挣来的名次：调频学习写的就是权重，
+/// 再钉一次等于把用户刚打出来的名次覆盖掉。6 是缺省页大小，而且故意不跟随每页候选数设置（QD:29-34，overlays.md §1.1）。
+/// 它和 `QuanpinDictionary::first_page_rows` 是两回事：那条问的是「这一页放不放得下」，所以跟随宿主的每页候选数；
+/// 这条保护的是跨输入的固定座位，因此写死。
 pub const ALTERNATIVE_SEGMENTATION_FIRST_PAGE_SIZE: usize = 6;
 /// Where the promoted best alternative lands.
 pub const BEST_ALTERNATIVE_SEGMENTATION_INDEX: usize = 1;
@@ -22,7 +25,8 @@ pub const ALTERNATIVE_SEGMENTATION_PROMOTION_RATIO: i64 = 100;
 pub const MAX_SYLLABLES_FOR_MULTIPLE_SEGMENTATIONS: usize = 4;
 /// Continuations are only taken up to three syllables longer: past that the rows' weights have dropped to a few dozen and the seats are better left to prefix characters (QD:23-25).
 pub const LONGER_PHRASE_EXTRA_SYLLABLES: usize = 3;
-pub const LONGER_PHRASE_LIMIT: usize = 12;
+/// 补全词最多并入这么多条。精确同音词够填一页时整组补全词都不并入（见 `query_series`），这个上限再压住同长度表不足一页时补全词能占的座位。
+pub const LONGER_PHRASE_LIMIT: usize = 3;
 const SMALL_UNIQUE_ROWS: usize = 64;
 
 /// How one raw input is read (QD:110-215).
@@ -306,7 +310,8 @@ pub fn append_unique_words(result: &mut Vec<WordItem>, rows: Vec<WordItem>) {
         .filter_map(|(index, item)| (!seen.insert(item.word.as_str())).then_some(index))
         .collect::<Vec<_>>();
     drop(seen);
-    result.reserve(rows.len());
+    let unique_count = rows.len() - duplicates.len();
+    result.reserve(unique_count);
     let mut duplicates = duplicates.into_iter().peekable();
     result.extend(rows.into_iter().enumerate().filter_map(|(index, item)| {
         if duplicates.peek() == Some(&index) {
@@ -580,6 +585,19 @@ mod tests {
 
         assert_eq!(result.len(), 11);
         assert_eq!(result.capacity(), 11);
+    }
+
+    #[test]
+    fn append_unique_words_reserves_only_unique_incoming_rows() {
+        let mut result = Vec::with_capacity(1);
+        result.push(row("a", "已有", 1));
+        let rows = (0..100).map(|index| row("a", "新增", index)).collect();
+
+        append_unique_words(&mut result, rows);
+
+        assert_eq!(words(&result), ["已有", "新增"]);
+        // `Vec` 会为极小的增长保留实现规定的最小余量，但不应按 100 行输入扩容。
+        assert!(result.capacity() <= 4);
     }
 
     #[test]

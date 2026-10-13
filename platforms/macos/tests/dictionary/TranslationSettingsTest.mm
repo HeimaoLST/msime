@@ -66,7 +66,7 @@ int main() {
         NSButton *revealNiuTrans = [window valueForKey:@"revealNiuTrans"];
         assert(target.numberOfItems == 7 && secondary.numberOfItems == 8 && secondary.indexOfSelectedItem == 0);
         assert(provider.indexOfSelectedItem == 0 && !endpoint.enabled);
-        assert(([provider.itemTitles isEqual:@[@"腾讯云", @"小牛翻译（NiuTrans）", @"自定义 DeepLX", @"水杉账号（发送到 api.msime.app）"]]));
+        assert(([provider.itemTitles isEqual:@[@"腾讯云", @"小牛翻译（NiuTrans）", @"自定义（DeepLX / DeepL API）", @"水杉账号（发送到 api.msime.app）"]]));
         assert(offline.state == NSControlStateValueOff && offline.enabled);
         assert([grid rowAtIndex:5].hidden && ![grid rowAtIndex:8].hidden);
         // A provider whose fields are incomplete is not written.

@@ -9,22 +9,52 @@ use crate::pinyin::syllables::normalize_umlaut_aliases;
 use crate::quanpin::QuanpinEngine;
 use crate::text::{count_utf8_chars, first_han_char, last_han_char};
 use crate::types::{
-    CandidateEdge, KeyResult, LocalInputMode, PersonalDictionaryKind, SchemeType, WordItem,
+    CandidateEdge, CandidateSource, KeyResult, LocalInputMode, PersonalDictionaryKind, SchemeType,
+    WordItem,
 };
 use crate::user_dictionary::journal::is_user_inserted;
 
+/// 提交只会读取这些候选字段；纠错来源用于计算原始按键的消费长度。
+fn clone_selected_candidate(item: &WordItem, copy_sentence_words: bool) -> WordItem {
+    WordItem {
+        pinyin: item.pinyin.clone(),
+        canonical_pinyin: item.canonical_pinyin.clone(),
+        word: item.word.clone(),
+        source: item.source,
+        scheme: item.scheme,
+        corrected_from: item.corrected_from.clone(),
+        sentence_words: if copy_sentence_words && item.source.is_generated_or_fallback() {
+            item.sentence_words.clone()
+        } else {
+            Vec::new()
+        },
+        ..WordItem::default()
+    }
+}
+
 impl InputSession {
     pub(super) fn select_candidate(&mut self, index: usize) -> KeyResult {
+        if self.conversion.is_some() {
+            return self.select_conversion_row(index);
+        }
         if let Some(result) = self.select_in_open_list(index) {
             return result;
         }
         if !self.has_composition() || index >= self.candidates().len() {
             return KeyResult::unhandled();
         }
+        // AI 占位行不是候选：点它或按它的数字键什么都不做，但按键算处理过了，数字不会落进文档（#6888）。
+        if self.candidates()[index].source == CandidateSource::AiPending {
+            return KeyResult::handled();
+        }
         self.commit(index)
     }
 
     pub(super) fn select_candidate_edge(&mut self, index: usize, edge: CandidateEdge) -> KeyResult {
+        // 改字的候选是光标处一段的替换，不是可以单独上屏的词。
+        if self.conversion.is_some() {
+            return KeyResult::unhandled();
+        }
         // A row of an editor-owned list is a choice for the conversion, not text to commit, so its edge characters are not either.
         if let Some(result) = self.select_in_open_list(index) {
             return result;
@@ -70,7 +100,21 @@ impl InputSession {
     pub(super) fn finish_composition(&mut self, first_index: usize) -> KeyResult {
         self.close_korean_hanja();
         let mut result = KeyResult::unhandled();
-        let mut index = first_index;
+        // 高亮停在 AI 占位行上时，按没有高亮处理：上屏首选，不上屏占位文字。
+        let mut index = if self
+            .candidates()
+            .get(first_index)
+            .is_some_and(|item| item.source == CandidateSource::AiPending)
+        {
+            0
+        } else {
+            first_index
+        };
+        // 改字时上屏的是改好的整句，不是光标处的候选。
+        if self.conversion.is_some() {
+            result = self.commit_conversion();
+            index = 0;
+        }
         while self.has_composition() {
             let part = self.commit(index);
             index = 0;
@@ -104,40 +148,61 @@ impl InputSession {
             }
             return KeyResult::committed(text);
         }
-        let selected = self.candidates().get(index).cloned();
-        // A Korean commit is the chosen Hanja or the Hangul itself, and nothing about it is learned: the rows are keyed by Dubeolsik letters, which every learning path below would read as pinyin. A Vietnamese commit is the displayed word, learned nowhere either.
-        // A Cantonese commit is learned nowhere either. A row that covers only the leading syllables commits at once and the letters after it keep composing (`holds_phrase_progress` is false), so there is no phrase being built to hold.
+        let committed = |text: Option<String>, diagnostic: Option<String>| KeyResult {
+            handled: true,
+            commit: text,
+            diagnostic,
+        };
+        if self.local_mode != LocalInputMode::None {
+            let text = self.candidates().get(index).map(|item| item.word.clone());
+            let diagnostic = self
+                .ranking_index(index)
+                .and_then(|learn_index| self.learn_candidate(learn_index));
+            self.chain.reset();
+            self.reset_composition();
+            return committed(text, diagnostic);
+        }
+        if self.stroke_rules_apply() {
+            let text = self.candidates().get(index).map_or_else(
+                || self.engine.request().raw_input.clone(),
+                |item| item.word.clone(),
+            );
+            self.reset_composition();
+            self.chain.reset();
+            return KeyResult::committed(text);
+        }
         if self.cantonese_rules_apply() {
-            let Some(selected) = selected else {
+            let Some(candidate) = self.candidates().get(index) else {
                 let text = self.preedit();
                 self.reset_composition();
                 self.chain.reset();
                 return KeyResult::committed(text);
             };
-            if self.engine.select_cantonese(&selected) {
+            let text = candidate.word.clone();
+            let end = candidate.pinyin.len();
+            if self.engine.select_cantonese_end(end) {
                 self.update_mixed_candidates();
             } else {
                 self.reset_composition();
             }
             self.chain.reset();
-            return KeyResult::committed(selected.word);
-        }
-        // 笔画的提交不学习：候选来自只读的 `msime-stroke.db`，键是笔画字母，任何学习路径都会把它当拼音写进用户词典。选中的字结束整个组合；没有候选时上屏键入的字母串，与 Enter 相同。
-        if self.stroke_rules_apply() {
-            let text =
-                selected.map_or_else(|| self.engine.request().raw_input.clone(), |item| item.word);
-            self.reset_composition();
-            self.chain.reset();
             return KeyResult::committed(text);
         }
-        // 藏文提交的是显示出来的藏文（不附加音节点），同样不学习。
         if self.korean_rules_apply() || self.vietnamese_rules_apply() || self.tibetan_rules_apply()
         {
-            let text = selected.map_or_else(|| self.preedit(), |item| item.word);
+            let text = self
+                .candidates()
+                .get(index)
+                .map_or_else(|| self.preedit(), |item| item.word.clone());
             self.reset_composition();
             self.chain.reset();
             return KeyResult::committed(text);
         }
+        let copy_sentence_words = self.personal_context_applies();
+        let selected = self
+            .candidates()
+            .get(index)
+            .map(|item| clone_selected_candidate(item, copy_sentence_words));
         let text = match &selected {
             Some(item) => Some(item.word.clone()),
             // The bare prefix letter of a temporary mode is a marker, not text.
@@ -148,18 +213,30 @@ impl InputSession {
             {
                 None
             }
+            // 五笔临时拼音反查没有候选时上屏键入的拼音，引导键 `z` 同样只是标记。
+            None if self.engine.wubi_pinyin_lookup_active() => {
+                Some(self.preedit().split_off(1)).filter(|text| !text.is_empty())
+            }
             None => Some(self.preedit()),
         };
+        let diagnostic = self
+            .ranking_index(index)
+            .and_then(|learn_index| self.learn_candidate(learn_index));
+        self.commit_selection(selected, text, diagnostic)
+    }
+
+    /// 拼音组字里上屏选中的行（`None` 是上屏 `text` 本身）之后的事：记个人上下文、推进组字或者结束组字、造词。`diagnostic` 是已经做过的学习留下的诊断。整句改字上屏改好的整句时也走这里。
+    pub(super) fn commit_selection(
+        &mut self,
+        selected: Option<WordItem>,
+        text: Option<String>,
+        mut diagnostic: Option<String>,
+    ) -> KeyResult {
         let committed = |text: Option<String>, diagnostic: Option<String>| KeyResult {
             handled: true,
             commit: text,
             diagnostic,
         };
-
-        let mut diagnostic = self
-            .ranking_index(index)
-            .and_then(|learn_index| self.learn_candidate(learn_index));
-
         let Some(selected) = selected else {
             self.record_context_into(&mut diagnostic, None, false, false);
             self.chain.last_pick = None;
@@ -189,28 +266,19 @@ impl InputSession {
             && !self.chain.same_composition
             && !selected.canonical_pinyin.is_empty()
             && count_utf8_chars(&selected.word) >= 3
-            && self.selection_completes_composition(
-                &selected.pinyin,
-                &selected.word,
-                selected.scheme,
-            )
+            && self.selection_completes_composition(&selected)
             && {
                 let mut segments = split_segments(&selected.canonical_pinyin);
                 normalize_umlaut_aliases(&mut segments);
                 is_user_inserted(
-                    &self.journal_path(),
+                    self.journal_path(),
                     PersonalDictionaryKind::Pinyin,
                     &join_segments(&segments),
                     &selected.word,
                 )
             };
         let opens_composition = self.phrase_progress.word.is_empty();
-        let transition = self.advance_composition_after_selection(
-            &selected.pinyin,
-            &selected.word,
-            &selected.canonical_pinyin,
-            selected.scheme,
-        );
+        let transition = self.advance_composition_after_selection(&selected);
         self.record_context_into(
             &mut diagnostic,
             Some(&selected),
@@ -252,9 +320,11 @@ impl InputSession {
             self.discard_abandoned_phrase_progress();
             return committed(text, diagnostic);
         }
+        // 反查是查编码用的，不造词：它的词条不该因为一次查询进到用户词库。
         if !self.phrase_progress.word.is_empty()
             && progress.can_store
             && self.learning_enabled
+            && !self.engine.wubi_pinyin_lookup_active()
             && self
                 .store_user_phrase_from_canonical_pinyin(&progress.pinyin, &progress.word)
                 .is_err()

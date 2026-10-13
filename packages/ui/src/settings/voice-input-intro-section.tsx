@@ -29,6 +29,10 @@ export function localVoiceIntro(localVoiceModelsAvailable: boolean): string {
 export const systemVoiceIntro =
   "在目标应用中启用水杉输入法，使用键盘内的语音入口录音。不需要识别 API Key；首次使用需授予麦克风和语音识别权限。服务可用性及是否联网由系统决定，可选文本润色仍使用你配置的云服务。";
 
+/** Windows 的系统识别是 SAPI 听写：在本机识别、不需要权限弹窗，但要装好识别语言的语音识别组件。 */
+export const windowsSystemVoiceIntro =
+  "用下方语音快捷键或悬浮工具栏开始语音输入，由 Windows 自带的语音识别在这台电脑上完成识别，音频不会离开本机，也不需要识别 API Key。需要先在 Windows 设置 › 时间和语言 › 语言和区域 中为识别语言安装“语音识别”。可选文本润色仍使用你配置的云服务。";
+
 /** 鸿蒙键盘如何借助云服务或 CoreSpeechKit 录音和识别。 */
 export const harmonyVoiceIntro =
   "豆包配置有效时，键盘直接采集 16 kHz 麦克风音频并进行实时识别；选择系统识别时由 HarmonyOS CoreSpeechKit 处理。识别结果会回到键盘，确认后才插入当前输入框。";
@@ -36,11 +40,12 @@ export const harmonyVoiceIntro =
 /** 鸿蒙手机在「识别服务」组下作为脚注显示的介绍，而不是单独成组；选择方式与 {@link VoiceInputIntroSection} 选它的组相同。 */
 export function harmonyPhoneVoiceFooter({
   localVoice,
-  localVoiceModelsAvailable,
   systemVoice,
 }: Pick<VoiceInputIntroSectionProps, "localVoice" | "localVoiceModelsAvailable" | "systemVoice">) {
-  if (localVoice) return localVoiceIntro(localVoiceModelsAvailable);
-  return systemVoice ? systemVoiceIntro : harmonyVoiceIntro;
+  // 手机上只说用户需要知道的一句：用的是什么、要不要配置、去哪配置。采样率、CoreSpeechKit、热词这些实现细节留给 2in1 和桌面的说明。
+  if (localVoice) return "在手机上识别，音频不离开手机。先在「服务配置」里下载一个模型。";
+  if (systemVoice) return "使用系统自带的语音识别，不用配置，只识别普通话。";
+  return "使用云端语音识别，先在「服务配置」里填好 API Key。说完后文字先出现在键盘上，确认后才输入。";
 }
 
 /** Platform-specific voice entry guidance: the first group of the 语音输入 page. */
@@ -67,7 +72,9 @@ export function VoiceInputIntroSection({
   if (systemVoice) {
     return (
       <GroupList title={`${systemVoiceHostName} 系统语音`}>
-        <SettingsGroupNote>{systemVoiceIntro}</SettingsGroupNote>
+        <SettingsGroupNote>
+          {systemVoiceHostName === "Windows" ? windowsSystemVoiceIntro : systemVoiceIntro}
+        </SettingsGroupNote>
       </GroupList>
     );
   }

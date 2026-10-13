@@ -4,8 +4,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, File};
-#[cfg(not(unix))]
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
@@ -14,6 +12,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 /// Only a guard against loading a hostile or garbage file, not a retention limit. It must stay far above anything `Forever` can produce, because a document over it cannot be read at all and the whole history is lost with it; a day costs a few hundred bytes, so 64 MiB covers centuries.
 const MAX_DOCUMENT_BYTES: u64 = 64 * 1_048_576;
+const STATISTICS_FILE: &str = "typing-statistics.json";
+const LOCK_FILE: &str = "typing-statistics.lock";
 const MAX_COMMIT_BYTES: usize = 40_000;
 const MAX_COMMIT_SCALARS: usize = 10_000;
 const MAX_COUNT: u64 = 9_000_000_000_000_000;
@@ -111,6 +111,8 @@ where
 pub enum TypingSource {
     Quanpin,
     NineKey,
+    /// 全拼 14 键。
+    FourteenKey,
     Shuangpin,
     Ziranma,
     Microsoft,
@@ -137,6 +139,7 @@ impl TypingSource {
         match self {
             Self::Quanpin => "quanpin",
             Self::NineKey => "nineKey",
+            Self::FourteenKey => "fourteenKey",
             Self::Shuangpin => "shuangpin",
             Self::Ziranma => "ziranma",
             Self::Microsoft => "microsoft",
@@ -514,6 +517,21 @@ pub const KEY_IDS: &[&str] = &[
     "SoftGlobe",
     "SoftEmoji",
     "SoftVoice",
+    // 屏幕键盘专有：全拼 14 键的各键，按键面上的字母命名（`FourteenQW` 是 Q、W 合在一起的键）。不记到 `KeyQ` 这些 26 键字母上，否则会混进 26 键的热力图。
+    "FourteenQW",
+    "FourteenER",
+    "FourteenTY",
+    "FourteenUI",
+    "FourteenOP",
+    "FourteenAS",
+    "FourteenDF",
+    "FourteenGH",
+    "FourteenJK",
+    "FourteenL",
+    "FourteenZX",
+    "FourteenCV",
+    "FourteenBN",
+    "FourteenM",
 ];
 
 /// Whether `id` is one of [`KEY_IDS`].
@@ -848,9 +866,27 @@ pub enum TypingStatisticsError {
     InvalidSkinId,
 }
 
+/// 设置页读到的统计状态：统计本身，加上统计文件写过没有、最后一次写在什么时候。
+///
+/// 共享设置页（`typing-statistics.tsx` 的 `TypingStatisticsStatus`）靠后两项说明「统计没有数据」的原因：文件从未写过是键盘还没记过，写过却是零多半是刚清空。Tauri 外壳和 Windows 原生设置窗口都由 [`TypingStatisticsStore::status`] 给出它，字段名与页面读的相同。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypingStatisticsStatus {
+    pub statistics: TypingStatistics,
+    /// `ready`：统计文件存在；`neverWritten`：还没有写过。
+    pub availability: &'static str,
+    /// 统计文件的修改时间，Unix 毫秒；文件不存在或读不到修改时间时为 `None`。
+    pub last_written_ms: Option<u64>,
+}
+
 #[derive(Clone, Debug)]
 pub struct TypingStatisticsStore {
     directory: PathBuf,
+}
+
+struct StatisticsLock {
+    directory: crate::file_lock::PrivateDirectory,
+    _lock: File,
 }
 
 impl TypingStatisticsStore {
@@ -866,10 +902,10 @@ impl TypingStatisticsStore {
     }
 
     fn path(&self) -> PathBuf {
-        self.directory.join("typing-statistics.json")
+        self.directory.join(STATISTICS_FILE)
     }
 
-    fn lock(&self) -> Result<File, TypingStatisticsError> {
+    fn lock(&self) -> Result<StatisticsLock, TypingStatisticsError> {
         if let Some(parent) = self.directory.parent() {
             crate::storage::reject_symlink(parent)?;
         }
@@ -879,61 +915,58 @@ impl TypingStatisticsStore {
                 "typing statistics directory is not a real directory",
             )));
         }
-        let lock = crate::file_lock::open_lock_file(self.directory.join("typing-statistics.lock"))?;
+        let directory = crate::file_lock::open_private_directory(&self.directory)?;
+        let lock = crate::file_lock::open_private_lock_file_at(
+            &directory,
+            std::ffi::OsStr::new(LOCK_FILE),
+        )?;
         crate::file_lock::exclusive(&lock)?;
-        Ok(lock)
+        Ok(StatisticsLock {
+            directory,
+            _lock: lock,
+        })
     }
 
-    fn read_locked(&self) -> Result<TypingStatistics, TypingStatisticsError> {
-        let path = self.path();
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
+    fn read_locked(
+        &self,
+        lock: &StatisticsLock,
+    ) -> Result<TypingStatistics, TypingStatisticsError> {
+        let file = match crate::file_lock::open_private_file_at(
+            &lock.directory,
+            std::ffi::OsStr::new(STATISTICS_FILE),
+        ) {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(TypingStatistics::default());
             }
-            Err(error) => return Err(error.into()),
+            Err(_) => return Err(TypingStatisticsError::InvalidDocument),
         };
-        if !metadata.file_type().is_file() {
-            return Err(TypingStatisticsError::InvalidDocument);
-        }
-        let bytes = crate::bounded_io::read_bounded_file(
-            crate::storage::open_private_file_in(&path)?,
-            MAX_DOCUMENT_BYTES,
-            || TypingStatisticsError::InvalidDocument,
-        )?;
+        let bytes = crate::bounded_io::read_bounded_file(file, MAX_DOCUMENT_BYTES, || {
+            TypingStatisticsError::InvalidDocument
+        })?;
         let value: TypingStatistics = serde_json::from_slice(&bytes)?;
         value.validate()?;
         Ok(value)
     }
 
-    fn write_locked(&self, value: &TypingStatistics) -> Result<(), TypingStatisticsError> {
+    fn write_locked(
+        &self,
+        lock: &StatisticsLock,
+        value: &TypingStatistics,
+    ) -> Result<(), TypingStatisticsError> {
         value.validate()?;
         let bytes = serde_json::to_vec(value)?;
-        #[cfg(unix)]
-        {
-            let directory = crate::storage::open_private_directory(&self.directory)?;
-            crate::storage::write_private_file_at(
-                &directory,
-                std::ffi::OsStr::new("typing-statistics.json"),
-                &bytes,
-            )?;
-            Ok(())
-        }
-        #[cfg(not(unix))]
-        {
-            let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
-            temporary.write_all(&bytes)?;
-            temporary.as_file().sync_all()?;
-            temporary
-                .persist(self.path())
-                .map(|_| ())
-                .map_err(|error| TypingStatisticsError::Io(error.error))
-        }
+        crate::file_lock::write_private_file_at(
+            &lock.directory,
+            std::ffi::OsStr::new(STATISTICS_FILE),
+            &bytes,
+        )?;
+        Ok(())
     }
 
     pub fn load(&self) -> Result<TypingStatistics, TypingStatisticsError> {
-        let _lock = self.lock()?;
-        self.read_locked()
+        let lock = self.lock()?;
+        self.read_locked(&lock)
     }
 
     pub fn last_written(&self) -> Result<Option<SystemTime>, TypingStatisticsError> {
@@ -944,6 +977,27 @@ impl TypingStatisticsStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// 把刚读到或刚写下的 `statistics` 连同统计文件的写入状态交给设置页。
+    pub fn status(
+        &self,
+        statistics: TypingStatistics,
+    ) -> Result<TypingStatisticsStatus, TypingStatisticsError> {
+        let last_written = self.last_written()?;
+        Ok(TypingStatisticsStatus {
+            statistics,
+            availability: if last_written.is_some() {
+                "ready"
+            } else {
+                "neverWritten"
+            },
+            last_written_ms: last_written.and_then(|time| {
+                time.duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+            }),
+        })
     }
 
     /// Count one commit's characters against `day`, and the gap since the previous commit as
@@ -976,8 +1030,8 @@ impl TypingStatisticsStore {
         if text.len() > MAX_COMMIT_BYTES || text.chars().count() > MAX_COMMIT_SCALARS {
             return Err(TypingStatisticsError::CommitTooLarge);
         }
-        let _lock = self.lock()?;
-        let mut value = self.read_locked()?;
+        let lock = self.lock()?;
+        let mut value = self.read_locked(&lock)?;
         if !value.enabled {
             return Ok(0);
         }
@@ -1066,7 +1120,7 @@ impl TypingStatisticsStore {
             value.apply_retention(day);
             value.last_pruned_day = day.to_owned();
         }
-        self.write_locked(&value)?;
+        self.write_locked(&lock, &value)?;
         Ok(count)
     }
 
@@ -1092,15 +1146,15 @@ impl TypingStatisticsStore {
         if selections.iter().all(|(_, count)| *count == 0) {
             return Ok(None);
         }
-        let _lock = self.lock()?;
-        let mut value = self.read_locked()?;
+        let lock = self.lock()?;
+        let mut value = self.read_locked(&lock)?;
         if !value.enabled {
             return Ok(Some(false));
         }
         for &(position, count) in selections {
             value.selections.add(position, count)?;
         }
-        self.write_locked(&value)?;
+        self.write_locked(&lock, &value)?;
         Ok(Some(true))
     }
 
@@ -1129,8 +1183,8 @@ impl TypingStatisticsStore {
         if presses == 0 {
             return Ok(0);
         }
-        let _lock = self.lock()?;
-        let mut value = self.read_locked()?;
+        let lock = self.lock()?;
+        let mut value = self.read_locked(&lock)?;
         if !value.enabled {
             return Ok(0);
         }
@@ -1142,7 +1196,7 @@ impl TypingStatisticsStore {
             value.apply_retention(day);
             value.last_pruned_day = day.to_owned();
         }
-        self.write_locked(&value)?;
+        self.write_locked(&lock, &value)?;
         Ok(presses)
     }
 
@@ -1154,8 +1208,8 @@ impl TypingStatisticsStore {
         if milliseconds == 0 || milliseconds > MAX_VOICE_MS_PER_CALL {
             return Err(TypingStatisticsError::InvalidVoiceDuration);
         }
-        let _lock = self.lock()?;
-        let mut value = self.read_locked()?;
+        let lock = self.lock()?;
+        let mut value = self.read_locked(&lock)?;
         if !value.enabled {
             return Ok(0);
         }
@@ -1169,7 +1223,7 @@ impl TypingStatisticsStore {
             value.apply_retention(day);
             value.last_pruned_day = day.to_owned();
         }
-        self.write_locked(&value)?;
+        self.write_locked(&lock, &value)?;
         Ok(added)
     }
 
@@ -1180,8 +1234,8 @@ impl TypingStatisticsStore {
         if !is_valid_skin_id(id) {
             return Err(TypingStatisticsError::InvalidSkinId);
         }
-        let _lock = self.lock()?;
-        let mut value = self.read_locked()?;
+        let lock = self.lock()?;
+        let mut value = self.read_locked(&lock)?;
         if !value.enabled
             || value.skins_tried.contains(id)
             || value.skins_tried.len() >= MAX_SKINS_TRIED
@@ -1189,7 +1243,7 @@ impl TypingStatisticsStore {
             return Ok(false);
         }
         value.skins_tried.insert(id.to_owned());
-        self.write_locked(&value)?;
+        self.write_locked(&lock, &value)?;
         Ok(true)
     }
 
@@ -1200,13 +1254,13 @@ impl TypingStatisticsStore {
         if batch.is_empty() {
             return Ok(());
         }
-        let _lock = self.lock()?;
-        let mut value = self.read_locked()?;
+        let lock = self.lock()?;
+        let mut value = self.read_locked(&lock)?;
         if !value.enabled {
             return Ok(());
         }
         value.efficiency.merge(batch)?;
-        self.write_locked(&value)?;
+        self.write_locked(&lock, &value)?;
         Ok(())
     }
 
@@ -1219,8 +1273,8 @@ impl TypingStatisticsStore {
         inputs: &SummaryInputs,
     ) -> Result<TypingSummary, TypingStatisticsError> {
         validate_day(today)?;
-        let _lock = self.lock()?;
-        let mut value = self.read_locked()?;
+        let lock = self.lock()?;
+        let mut value = self.read_locked(&lock)?;
         let summary = summarize(&value, today, inputs);
         if !value.enabled {
             return Ok(summary);
@@ -1237,16 +1291,16 @@ impl TypingStatisticsStore {
             }
         }
         if changed {
-            self.write_locked(&value)?;
+            self.write_locked(&lock, &value)?;
         }
         Ok(summary)
     }
 
     pub fn set_enabled(&self, enabled: bool) -> Result<TypingStatistics, TypingStatisticsError> {
-        let _lock = self.lock()?;
-        let mut value = self.read_locked()?;
+        let lock = self.lock()?;
+        let mut value = self.read_locked(&lock)?;
         value.enabled = enabled;
-        self.write_locked(&value)?;
+        self.write_locked(&lock, &value)?;
         Ok(value)
     }
 
@@ -1262,18 +1316,18 @@ impl TypingStatisticsStore {
         today: &str,
     ) -> Result<TypingStatistics, TypingStatisticsError> {
         validate_day(today)?;
-        let _lock = self.lock()?;
-        let mut value = self.read_locked()?;
+        let lock = self.lock()?;
+        let mut value = self.read_locked(&lock)?;
         value.retention = retention;
         value.apply_retention(today);
         value.last_pruned_day = today.to_owned();
-        self.write_locked(&value)?;
+        self.write_locked(&lock, &value)?;
         Ok(value)
     }
 
     pub fn reset(&self) -> Result<TypingStatistics, TypingStatisticsError> {
-        let _lock = self.lock()?;
-        let mut value = self.read_locked()?;
+        let lock = self.lock()?;
+        let mut value = self.read_locked(&lock)?;
         value.total = 0;
         value.days.clear();
         value.detail = TypingBreakdown::default();
@@ -1294,7 +1348,7 @@ impl TypingStatisticsStore {
         value.skins_tried.clear();
         // 徽章只增不减的唯一例外：用户要求清空统计时，解锁记录也一并清空。
         value.achievements.clear();
-        self.write_locked(&value)?;
+        self.write_locked(&lock, &value)?;
         Ok(value)
     }
 }

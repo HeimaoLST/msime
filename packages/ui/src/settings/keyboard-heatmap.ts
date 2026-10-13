@@ -4,6 +4,7 @@ import {
   touchKeyboardRows,
   type PreviewKey,
 } from "../keyboard/keyboard-layouts";
+import { clamp } from "../core/number";
 
 /** Per-key press counts per local day, as the statistics store keeps them: `{ "YYYY-MM-DD": { keyId: count } }`. */
 export type DailyKeyCounts = Record<string, Record<string, number>>;
@@ -58,9 +59,9 @@ export function scopedKeyCounts(
   return result;
 }
 
-/** Whether `code` exists only on an on-screen keyboard. */
+/** 只在屏幕键盘上才有的键：九宫格、14 键和其他触屏键。 */
 function softKey(code: string): boolean {
-  return code.startsWith("Nine") || code.startsWith("Soft");
+  return code.startsWith("Nine") || code.startsWith("Fourteen") || code.startsWith("Soft");
 }
 
 /**
@@ -149,6 +150,9 @@ export function keyLabel(code: string, platform?: string): string {
   if (match) return `小键盘 ${match[1]}`;
   match = /^Nine([0-9])$/.exec(code);
   if (match) return `九宫格 ${match[1]}`;
+  // 全拼 14 键按键面字母命名（`FourteenQW`、`FourteenL`），与 Android `KeyPressIds.label`、iOS `TypingKeyID` 一样写成「14 键 QW」。
+  match = /^Fourteen([A-Z]{1,2})$/.exec(code);
+  if (match) return `14 键 ${match[1]}`;
   match = /^(Control|Alt|Meta)(Left|Right)$/.exec(code);
   if (match) {
     const side = match[2] === "Left" ? "左" : "右";
@@ -229,7 +233,7 @@ export function keyboardHeatmapModel(
 
 /** The shade a count takes, 0 (never pressed) to 4, on the same scale as the calendar heatmap. */
 export function keyHeatLevel(count: number, maximum: number): number {
-  return count <= 0 ? 0 : Math.min(4, Math.max(1, Math.ceil((count / maximum) * 4)));
+  return count <= 0 ? 0 : clamp(Math.ceil((count / maximum) * 4), 1, 4);
 }
 
 /** 统计概览的按键热力图画哪种屏幕键盘。 */

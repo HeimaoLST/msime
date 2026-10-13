@@ -90,7 +90,7 @@ pub fn validate(phrase: &PhraseRow) -> Result<(), String> {
 
 /// `root` 下按 `enabled` 顺序启用的短语表的全部行，最多 `MAX_ENABLED_PHRASES` 行：宿主交给 Engine 的表。缺失或载入失败的包不贡献任何行，设置页会报告它。
 pub fn enabled_phrases(root: &std::path::Path, enabled: &[String]) -> Vec<PhraseRow> {
-    let mut rows: Vec<PhraseRow> = Vec::with_capacity(MAX_ENABLED_PHRASES);
+    let mut rows = Vec::new();
     for id in enabled {
         let Ok(package) = super::load_package(root, None, PluginKind::PhraseTable, id) else {
             continue;
@@ -98,10 +98,20 @@ pub fn enabled_phrases(root: &std::path::Path, enabled: &[String]) -> Vec<Phrase
         let super::PluginContent::PhraseTable(table) = package.content else {
             continue;
         };
-        for row in table.phrases {
-            if rows.len() == MAX_ENABLED_PHRASES {
-                return rows;
-            }
+        let count = table.phrases.len().min(MAX_ENABLED_PHRASES - rows.len());
+        if count == 0 {
+            return rows;
+        }
+        if rows.capacity() - rows.len() < count {
+            let required = rows.len() + count;
+            let target = rows
+                .capacity()
+                .saturating_mul(2)
+                .max(required)
+                .min(MAX_ENABLED_PHRASES);
+            rows.reserve_exact(target - rows.len());
+        }
+        for row in table.phrases.into_iter().take(count) {
             rows.push(row);
         }
     }

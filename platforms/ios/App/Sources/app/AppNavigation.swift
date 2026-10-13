@@ -1,12 +1,12 @@
 import AuthenticationServices
 import SwiftUI
 
-// Each tab owns its stack. Cross-tab discovery always opens the community root.
+// 每个标签页各有自己的导航栈。原来「社区」那一格是「对话」，打开 App 里与 AI 对话、同时试用键盘的页面（`KeyboardTryoutView`）；社区作品列在各自的功能页里，完整列表从那一页的「浏览更多…」推入同一条栈。
 final class AppNavigation: ObservableObject {
-  enum Tab: Hashable { case settings, community, statistics, account }
+  enum Tab: Hashable { case settings, chat, statistics, account }
   @Published var tab: Tab = .settings
-  @Published var communityCategory = 0
-  @Published var communityRoot = UUID()
+  /// 设置状态卡上的「试用键盘」每点一次加一。对话页出现时发现它变了就把焦点放进输入框，直接点标签栏进来则不弹键盘。
+  @Published var chatFocusRequest = 0
   /// 替换它即可把设置导航栈重建回根页面。
   @Published var settingsRoot = UUID()
   /// The keyboard's voice panel sends msime://voice: the keyboard cannot record, so the app opens straight onto the recording screen.
@@ -14,10 +14,10 @@ final class AppNavigation: ObservableObject {
   /// iPad 设置侧栏显示的页面。放在这里而不放在侧栏视图里，是为了在 app 因换主题或换季（`paletteVersion`）重建内容时保住它。
   @Published var tabletSettingsSelection: TabletSettingsView.Destination? = .page(.input)
 
-  func discoverSkins() {
-    communityRoot = UUID()
-    communityCategory = 0
-    tab = .community
+  /// 切到「对话」并把焦点放进输入框，供状态卡上的「试用键盘」使用：试用键盘的页面就是对话页，不再另外推入一份。
+  func openChat() {
+    chatFocusRequest += 1
+    tab = .chat
   }
 
   /// 点了标签栏的某一项。设置正显示时再点它就回到根页面，与 Android 标签栏重选时弹出该标签的页面一样；切换标签则各自保留导航栈，与 iOS 惯例一致。
@@ -69,6 +69,7 @@ struct AccountLoginSheet: View {
     .presentationCornerRadius(20)
     .presentationBackground(MetasequoiaTheme.canvas)
     .accessibilityIdentifier("accountLoginSheet")
+    .onDisappear { model.invalidate() }
   }
 
   private var compactDetent: PresentationDetent { contentHeight.map { .height($0) } ?? .medium }
@@ -146,7 +147,7 @@ struct AccountLoginOptions: View {
         ProgressView().frame(maxWidth: .infinity, minHeight: 50)
       } else if !offersAny {
         Text(model.message ?? "暂时没有可用的登录方式，请稍后重试。")
-          .font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+          .designSubtext()
           .fixedSize(horizontal: false, vertical: true)
         Button { pending = Task { await model.prepare() } } label: { Text("刷新登录方式") }
           .buttonStyle(AccountLoginButtonStyle(fill: MetasequoiaTheme.accentSoft, foreground: MetasequoiaTheme.accent))
@@ -175,7 +176,7 @@ struct AccountLoginOptions: View {
           .accessibilityIdentifier("backendCodeLogin_\(CodeLoginChannel.phone.rawValue)")
         }
         if let message = model.message, phoneChannel == nil {
-          Text(message).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+          Text(message).designSubtext()
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .center)
             .multilineTextAlignment(.center)
@@ -193,7 +194,7 @@ struct AccountLoginOptions: View {
       // 手机号登录在它自己的面板里完成；那个面板关掉后由它的 `onDismiss` 上报。
       if let via, phoneChannel == nil { onFinish(via) }
     }
-    .onDisappear { pending?.cancel() }
+    .onDisappear { ViewRequestTask.cancel(task: $pending) }
   }
 
   @ViewBuilder private var appleButton: some View {
@@ -266,7 +267,7 @@ struct AccountLoginOptions: View {
   @ViewBuilder private var emailForm: some View {
     if let challenge {
       Text("验证码已发到 \(sentTo)，\(max(1, challenge.expires_in / 60)) 分钟内有效")
-        .font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+        .designSubtext()
         .fixedSize(horizontal: false, vertical: true)
       TextField("6 位验证码", text: $code)
         .keyboardType(.numberPad)
@@ -311,7 +312,7 @@ struct AccountLoginOptions: View {
         .focused($focus, equals: .email)
         .accessibilityIdentifier("backendCodeTarget")
       TimelineView(.periodic(from: .now, by: 1)) { timeline in
-        let seconds = max(0, Int(ceil(resendAt.timeIntervalSince(timeline.date))))
+        let seconds = VerificationCodePolicy.remainingSeconds(until: resendAt, now: timeline.date)
         let ready = emailValid && seconds == 0 && !model.busy
         Button(action: sendCode) {
           HStack(spacing: 8) {

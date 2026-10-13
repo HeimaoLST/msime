@@ -29,14 +29,14 @@ FocusLease lease(uint64_t client, uint64_t epoch, uint64_t token) {
 constexpr auto beyond_debounce = std::chrono::milliseconds(850);
 
 // A query the worker can derive a cache key from: the key is built from the
-// provider identity, prompt settings and pinyin segments; nothing secret in
-// the envelope is needed on this side.
+// provider identity, prompt settings, context digest and pinyin segments.
 std::string query_for(const std::string &segments, int candidate_limit = 3,
-                      const std::string &prompt = {}) {
+                      const std::string &prompt = {},
+                      const std::string &context = {}) {
   return R"({"ai_eligible":true,"ai_assistant":{"enabled":true,"provider":"openai",)"
          R"("endpoint":"https://example.invalid/v1","model":"gpt","candidate_limit":)" +
          std::to_string(candidate_limit) + R"(,"prompt_custom_1":")" + prompt +
-         R"("},"pinyin_segments":[")" +
+         R"("},"ai_context":")" + context + R"(","pinyin_segments":[")" +
          segments + R"("]})";
 }
 
@@ -47,6 +47,7 @@ struct Recorder {
   std::mutex mutex;
   std::condition_variable changed;
   std::vector<std::string> queries;
+  std::vector<std::string> descriptors;
   std::vector<bool> cancelled_during;
   std::vector<std::string> answer{"设想", "思想"};
   bool hold = false;
@@ -54,10 +55,12 @@ struct Recorder {
   bool throwing = false;
 
   std::vector<std::string> operator()(const std::string &query,
+                                      const std::string &descriptor,
                                       const std::function<bool()> &cancelled) {
     {
       std::unique_lock lock(mutex);
       queries.push_back(query);
+      descriptors.push_back(descriptor);
       changed.notify_all();
       if (hold)
         changed.wait(lock, [&] { return release; });
@@ -90,10 +93,15 @@ struct Harness {
               results.push_back(std::move(result));
               done.notify_all();
             },
-            [this](const std::string &query,
+            [this](const std::string &query, const std::string &descriptor,
                    const std::function<bool()> &cancelled) {
-              return recorder(query, cancelled);
+              return recorder(query, descriptor, cancelled);
             }) {}
+
+  bool submit(const FocusLease &lease, std::string query,
+              std::string descriptor = R"({"url":"https://example.invalid/v1"})") {
+    return worker.submit(lease, std::move(query), std::move(descriptor));
+  }
 
   bool wait_for_results(size_t count) {
     std::unique_lock lock(mutex);
@@ -114,7 +122,7 @@ int main() {
     // candidates.
     {
       Harness harness;
-      require(harness.worker.submit(lease(42, 7, 9), query_for("ni")),
+      require(harness.submit(lease(42, 7, 9), query_for("ni")),
               "a valid request is accepted");
       require(harness.wait_for_results(1), "the completion runs");
       require(harness.results.size() == 1, "one submission completes once");
@@ -129,13 +137,25 @@ int main() {
       require(!harness.worker.failed(), "nothing went wrong");
     }
 
+    // The session has already built a descriptor with the provider credential
+    // and the Engine's pinyin_segments mapped to segmented_pinyin.
+    {
+      Harness harness;
+      const std::string descriptor = R"({"url":"https://example.invalid/v1","headers":{"Authorization":"synthetic"}})";
+      require(harness.submit(lease(42, 7, 9), query_for("ni"), descriptor),
+              "a query with its session descriptor is accepted");
+      require(harness.wait_for_results(1), "the authenticated request completes");
+      require(harness.recorder.descriptors == std::vector<std::string>{descriptor},
+              "the worker uses the session descriptor it was given");
+    }
+
     // Two submissions inside the debounce window are one model call, for the
     // newer query: the older prefix is one the user has already left.
     {
       Harness harness;
-      require(harness.worker.submit(lease(42, 7, 9), query_for("ni")),
+      require(harness.submit(lease(42, 7, 9), query_for("ni")),
               "the first request is accepted");
-      require(harness.worker.submit(lease(42, 7, 9), query_for("niha")),
+      require(harness.submit(lease(42, 7, 9), query_for("niha")),
               "the second request is accepted");
       require(harness.wait_for_results(1), "the coalesced request completes");
       std::this_thread::sleep_for(beyond_debounce);
@@ -154,11 +174,11 @@ int main() {
     // reusable across candidate generations, which is what the cache is for.
     {
       Harness harness;
-      require(harness.worker.submit(lease(42, 7, 9), query_for("nihao")),
+      require(harness.submit(lease(42, 7, 9), query_for("nihao")),
               "the first request is accepted");
       require(harness.wait_for_results(1), "the first request completes");
       std::this_thread::sleep_for(beyond_debounce);
-      require(harness.worker.submit(lease(42, 7, 10), query_for("nihao")),
+      require(harness.submit(lease(42, 7, 10), query_for("nihao")),
               "the same prefix is asked for again");
       require(harness.wait_for_results(2), "the repeat completes too");
       std::this_thread::sleep_for(beyond_debounce);
@@ -169,25 +189,44 @@ int main() {
               "with the lease that asked the second time");
     }
 
+    // A credential or request body change must not reuse an answer fetched
+    // under an earlier session descriptor for the same pinyin.
+    {
+      Harness harness;
+      const std::string first = R"({"url":"https://example.invalid/v1","headers":{"Authorization":"synthetic-a"}})";
+      const std::string second = R"({"url":"https://example.invalid/v1","headers":{"Authorization":"synthetic-b"}})";
+      require(harness.submit(lease(42, 7, 9), query_for("nihao"), first),
+              "the first credential request is accepted");
+      require(harness.wait_for_results(1), "the first credential request completes");
+      require(harness.submit(lease(42, 7, 10), query_for("nihao"), second),
+              "the changed credential request is accepted");
+      require(harness.wait_for_results(2), "the changed credential request completes");
+      require(harness.fetches() == 2,
+              "a changed session descriptor bypasses the old cached answer");
+    }
+
     // An empty answer is not cached. Caching it would turn one bad minute at
     // the provider into a prefix that never gets AI candidates again.
     {
       Harness harness;
       harness.recorder.answer = {};
-      require(harness.worker.submit(lease(42, 7, 9), query_for("nihao")),
+      require(harness.submit(lease(42, 7, 9), query_for("nihao")),
               "the first request is accepted");
-      std::this_thread::sleep_for(beyond_debounce);
+      require(harness.wait_for_results(1), "the empty answer is delivered");
       require(harness.fetches() == 1, "the first request reached the provider");
-      require(harness.results.empty(), "an empty answer delivers nothing");
+      // 空回答照样交给 owner，好把 AI 座位上的占位行换成「—」（#6888）。
+      require(harness.results[0].candidates.empty(),
+              "an empty answer arrives as no candidates");
       {
         std::lock_guard lock(harness.recorder.mutex);
         harness.recorder.answer = {"你好"};
       }
-      require(harness.worker.submit(lease(42, 7, 9), query_for("nihao")),
+      std::this_thread::sleep_for(beyond_debounce);
+      require(harness.submit(lease(42, 7, 9), query_for("nihao")),
               "the same prefix is asked for again");
-      require(harness.wait_for_results(1), "the retry completes");
+      require(harness.wait_for_results(2), "the retry completes");
       require(harness.fetches() == 2, "the retry was not suppressed by a cache");
-      require(harness.results[0].candidates == std::vector<std::string>{"你好"},
+      require(harness.results[1].candidates == std::vector<std::string>{"你好"},
               "and the answer that arrived is delivered");
     }
 
@@ -196,11 +235,11 @@ int main() {
     // of rows.
     {
       Harness harness;
-      require(harness.worker.submit(lease(42, 7, 9), query_for("nihao", 1)),
+      require(harness.submit(lease(42, 7, 9), query_for("nihao", 1)),
               "the one-candidate request is accepted");
       require(harness.wait_for_results(1), "the limited request completes");
       std::this_thread::sleep_for(beyond_debounce);
-      require(harness.worker.submit(lease(42, 7, 10), query_for("nihao", 2)),
+      require(harness.submit(lease(42, 7, 10), query_for("nihao", 2)),
               "the larger-candidate request is accepted");
       require(harness.wait_for_results(2), "the larger request completes");
       std::this_thread::sleep_for(beyond_debounce);
@@ -212,12 +251,12 @@ int main() {
     // one custom prompt must not be shown after the user changes that prompt.
     {
       Harness harness;
-      require(harness.worker.submit(lease(42, 7, 9),
+      require(harness.submit(lease(42, 7, 9),
                                     query_for("nihao", 3, "first")),
               "the first prompt request is accepted");
       require(harness.wait_for_results(1), "the first prompt completes");
       std::this_thread::sleep_for(beyond_debounce);
-      require(harness.worker.submit(lease(42, 7, 10),
+      require(harness.submit(lease(42, 7, 10),
                                     query_for("nihao", 3, "second")),
               "the changed prompt request is accepted");
       require(harness.wait_for_results(2), "the changed prompt completes");
@@ -226,12 +265,28 @@ int main() {
               "a changed prompt bypasses the old cache entry");
     }
 
+    // Recent committed text is sent to the model. The same pinyin after a
+    // different context needs a fresh answer.
+    {
+      Harness harness;
+      require(harness.submit(lease(42, 7, 9),
+                                    query_for("nihao", 3, {}, "first context")),
+              "the first context request is accepted");
+      require(harness.wait_for_results(1), "the first context completes");
+      require(harness.submit(lease(42, 7, 10),
+                                    query_for("nihao", 3, {}, "second context")),
+              "the changed context request is accepted");
+      require(harness.wait_for_results(2), "the changed context completes");
+      require(harness.fetches() == 2,
+              "a changed context bypasses the old cache entry");
+    }
+
     // A request superseded while it is in flight sees the cancellation, and its
     // candidates are dropped however it finishes.
     {
       Harness harness;
       harness.recorder.hold = true;
-      require(harness.worker.submit(lease(42, 7, 9), query_for("ni")),
+      require(harness.submit(lease(42, 7, 9), query_for("ni")),
               "the held request is accepted");
       {
         std::unique_lock lock(harness.recorder.mutex);
@@ -240,7 +295,7 @@ int main() {
                     [&] { return !harness.recorder.queries.empty(); }),
                 "the first request reaches the provider");
       }
-      require(harness.worker.submit(lease(42, 7, 9), query_for("nihao")),
+      require(harness.submit(lease(42, 7, 9), query_for("nihao")),
               "a newer request arrives mid-flight");
       {
         std::lock_guard lock(harness.recorder.mutex);
@@ -276,34 +331,48 @@ int main() {
     {
       Harness harness;
       harness.recorder.throwing = true;
-      require(harness.worker.submit(lease(42, 7, 9), query_for("ni")),
+      require(harness.submit(lease(42, 7, 9), query_for("ni")),
               "the failing request is accepted");
-      std::this_thread::sleep_for(beyond_debounce);
+      require(harness.wait_for_results(1), "the failure is delivered");
       require(harness.worker.failed(), "the failure is recorded");
-      require(harness.results.empty(), "and nothing is delivered");
+      require(harness.results[0].candidates.empty(),
+              "as no candidates, so the owner resolves the AI seat");
       {
         std::lock_guard lock(harness.recorder.mutex);
         harness.recorder.throwing = false;
       }
-      require(harness.worker.submit(lease(42, 7, 9), query_for("hao")),
+      require(harness.submit(lease(42, 7, 9), query_for("hao")),
               "the worker still takes requests");
-      require(harness.wait_for_results(1), "and still answers them");
+      require(harness.wait_for_results(2), "and still answers them");
+      require(!harness.results[1].candidates.empty(), "with candidates");
+    }
+
+    // 没向 AI 发问的查询（不符合条件或 AI 关着），空回答什么都不交。
+    {
+      Harness harness;
+      harness.recorder.answer = {};
+      require(harness.submit(
+                  lease(42, 7, 9),
+                  R"({"ai_eligible":false,"ai_assistant":{"enabled":true},"pinyin_segments":["n"]})"),
+              "an ineligible query is accepted");
+      std::this_thread::sleep_for(beyond_debounce);
+      require(harness.results.empty(), "and delivers nothing");
     }
 
     // Rejected envelopes never reach the provider: no lease, no query, or a
     // query past the bound this side is willing to send.
     {
       Harness harness;
-      require(!harness.worker.submit(lease(42, 0, 9), query_for("ni")),
+      require(!harness.submit(lease(42, 0, 9), query_for("ni")),
               "an epoch-less lease is refused");
-      require(!harness.worker.submit(lease(42, 7, 0), query_for("ni")),
+      require(!harness.submit(lease(42, 7, 0), query_for("ni")),
               "a token-less lease is refused");
-      require(!harness.worker.submit(lease(42, 7, 9), ""),
+      require(!harness.submit(lease(42, 7, 9), ""),
               "an empty query is refused");
-      require(!harness.worker.submit(lease(42, 7, 9), std::string(20000, 'a')),
+      require(!harness.submit(lease(42, 7, 9), std::string(20000, 'a')),
               "an oversized query is refused");
       harness.worker.request_stop();
-      require(!harness.worker.submit(lease(42, 7, 9), query_for("ni")),
+      require(!harness.submit(lease(42, 7, 9), query_for("ni")),
               "a stopping worker accepts nothing");
       require(harness.fetches() == 0, "none of them reached the provider");
     }

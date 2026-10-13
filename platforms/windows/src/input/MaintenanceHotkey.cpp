@@ -4,11 +4,13 @@ namespace msime::windows {
 MaintenanceHotkeyController *MaintenanceHotkeyController::instance_ = nullptr;
 
 MaintenanceHotkeyController::MaintenanceHotkeyController(Handler handler,
-                                                         CapsSink caps)
+                                                         CapsSink caps,
+                                                         KeySink key)
     : handler_(std::move(handler)), caps_sink_(std::move(caps)),
+      key_sink_(std::move(key)),
       // Seed from the OS so the first report is an actual change, not the
       // state the session already started in.
-      caps_((GetKeyState(VK_CAPITAL) & 1) != 0) {
+      caps_{(GetKeyState(VK_CAPITAL) & 1) != 0, false} {
   if (!handler_)
     return;
   instance_ = this;
@@ -38,7 +40,7 @@ LRESULT CALLBACK MaintenanceHotkeyController::keyboard_proc(int code,
   if (wparam == WM_KEYUP || wparam == WM_SYSKEYUP) {
     const auto *up = reinterpret_cast<const KBDLLHOOKSTRUCT *>(lparam);
     if (up && up->vkCode == VK_CAPITAL)
-      self->caps_down_ = false;
+      self->caps_.release();
     return CallNextHookEx(nullptr, code, wparam, lparam);
   }
   if (wparam != WM_KEYDOWN && wparam != WM_SYSKEYDOWN)
@@ -48,24 +50,27 @@ LRESULT CALLBACK MaintenanceHotkeyController::keyboard_proc(int code,
     return CallNextHookEx(nullptr, code, wparam, lparam);
   // Do not act on strokes this process injected, or a handler that types
   // something could drive itself.
-  if (event->flags & LLKHF_INJECTED)
-    return CallNextHookEx(nullptr, code, wparam, lparam);
+  const bool injected = (event->flags & LLKHF_INJECTED) != 0;
+  if (!injected && self->key_sink_) {
+    try {
+      self->key_sink_();
+    } catch (...) {
+    }
+  }
   // Caps Lock is observed, not claimed: the Server is the authority for the
   // indicator, and the TIP only sampled GetKeyState at activation, so pressing
   // Caps mid-session left the language-bar icon stale. The stroke is always
   // passed on - Caps Lock still has to work.
-  // Holding Caps auto-repeats key-downs that do not toggle it again.
+  // 注入的 Caps Lock 同样改了锁定状态，所以在跳过注入按键之前计入，见 CapsLockTracker。只是记录状态，不会触发任何动作。
   if (event->vkCode == VK_CAPITAL && !(event->flags & LLKHF_UP) &&
-      !self->caps_down_) {
-    self->caps_down_ = true;
-    self->caps_ = !self->caps_;
-    if (self->caps_sink_) {
-      try {
-        self->caps_sink_(self->caps_);
-      } catch (...) {
-      }
+      self->caps_.press() && self->caps_sink_) {
+    try {
+      self->caps_sink_(self->caps_.on);
+    } catch (...) {
     }
   }
+  if (injected)
+    return CallNextHookEx(nullptr, code, wparam, lparam);
   const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
   const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
   const bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;

@@ -36,23 +36,14 @@ public final class VoicePolishPolicy {
     /** Whether this host can run the request as configured. Same scheme rule as transcription. */
     public static boolean usable(String endpoint, String model, String token, String prompt) {
         return TextPolicy.validAuthority(endpoint, "https://", AiPolishConfiguration.MAX_ENDPOINT_LENGTH)
-            && model != null && !TextPolicy.trimmed(model).isEmpty() && TextPolicy.utf8Length(model) <= 512
-            && !TextPolicy.hasControl(model) && TextPolicy.validUnicode(model)
-            && token != null && !TextPolicy.trimmed(token).isEmpty()
-            && TextPolicy.utf8Length(token) <= 16 * 1024
-            && !TextPolicy.hasControl(token) && TextPolicy.validUnicode(token)
-            && prompt != null && !TextPolicy.trimmed(prompt).isEmpty()
-            && TextPolicy.utf8Length(prompt) <= MAX_PROMPT_BYTES
-            && !TextPolicy.hasControlExceptWhitespace(prompt)
-            && TextPolicy.validUnicode(prompt);
+            && TextPolicy.boundedNonBlank(model, 512)
+            && TextPolicy.boundedNonBlank(token, 16 * 1024)
+            && TextPolicy.boundedNonBlankAllowingWhitespaceControls(prompt, MAX_PROMPT_BYTES);
     }
 
     /** Whether a transcript is worth sending: empty or absurdly long is not. */
     public static boolean sendable(String text) {
-        return text != null && !TextPolicy.trimmed(text).isEmpty()
-            && TextPolicy.utf8Length(text) <= MAX_TEXT_BYTES
-            && !TextPolicy.hasControlExceptWhitespace(text)
-            && TextPolicy.validUnicode(text);
+        return TextPolicy.boundedNonBlankAllowingWhitespaceControls(text, MAX_TEXT_BYTES);
     }
 
     /**
@@ -74,15 +65,10 @@ public final class VoicePolishPolicy {
      * the result is handed over in one piece.
      */
     public static String requestBody(String model, String prompt, String text) {
-        return "{\"model\":" + json(model)
+        return "{\"model\":" + JsonPolicy.quote(model)
             + ",\"stream\":false,\"temperature\":0.2,\"messages\":["
-            + "{\"role\":\"system\",\"content\":" + json(prompt) + "},"
-            + "{\"role\":\"user\",\"content\":" + json(userMessage(text)) + "}]}";
-    }
-
-    /** Minimal JSON string escaping, so a prompt cannot break out of the document it travels in. */
-    public static String json(String value) {
-        return JsonPolicy.quote(value);
+            + "{\"role\":\"system\",\"content\":" + JsonPolicy.quote(prompt) + "},"
+            + "{\"role\":\"user\",\"content\":" + JsonPolicy.quote(userMessage(text)) + "}]}";
     }
 
 }

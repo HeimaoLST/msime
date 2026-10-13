@@ -15,6 +15,7 @@ msime-client-core = { path = "../client-core" }
 msime-path-trust = { path = "../path-trust" }
 msime-engine = { path = "../engine" }
 msime-input-runtime = { path = "../input-runtime" }
+base64 = "0.23"
 hex = "0.4"
 lru = "0.18"
 serde.workspace = true
@@ -24,21 +25,32 @@ sha2.workspace = true
 time.workspace = true
 libc.workspace = true
 
-# Microphone capture for `voice_capture_pcm` and `voice_capture_devices`. The iOS keyboard records through AVAudioEngine and HarmonyOS through its own audio kit, so neither links a capture backend (OpenHarmony reports target_os = "linux" and has no ALSA to link).
-[target.'cfg(not(any(target_os = "ios", target_env = "ohos")))'.dependencies]
+# Desktop hosts only; the mobile hosts do this natively. OpenHarmony reports target_os = "linux" and has no ALSA to link.
+#
+# Microphone capture for `voice_capture_pcm` and `voice_capture_devices`: cpal and rubato. The iOS keyboard records through AVAudioEngine, Android through `AudioRecord` in Java and HarmonyOS through its own audio kit.
+#
+# Key sounds, the typing melody, commit and achievement sounds and background music (`key_sound`): kira mixes, pitches and streams over the cpal above (the same 0.18, not a second copy); symphonia is the decoder kira already uses, named here so samples are decoded under the pack bounds rather than whole. Android and iOS keep their own key feedback, and HarmonyOS plays packs natively from the paths `msime_client_key_sound_pack` and `msime_client_music_pack` resolve.
+[target.'cfg(not(any(target_os = "ios", target_os = "android", target_env = "ohos")))'.dependencies]
 cpal = "0.18"
 rubato = "5"
-
-# Key sounds, the typing melody, commit and achievement sounds and background music (`key_sound`), for the desktop hosts only. kira mixes, pitches and streams over the cpal above (the same 0.18, not a second copy); symphonia is the decoder kira already uses, named here so samples are decoded under the pack bounds rather than whole. Android and iOS keep their own key feedback, and HarmonyOS plays packs natively from the paths `msime_client_key_sound_pack` and `msime_client_music_pack` resolve.
-[target.'cfg(not(any(target_os = "ios", target_os = "android", target_env = "ohos")))'.dependencies]
 kira = { version = "0.12.5", default-features = false, features = ["cpal", "wav", "pcm", "ogg", "vorbis"] }
 symphonia = { version = "0.6.1", default-features = false, features = ["wav", "pcm", "ogg", "vorbis"] }
+
+# 脚本插件的解释器和 ABI v1 校验（`scripts`），只在会运行脚本的桌面目标上编译：macOS、Windows 和非 ohos 的 Linux。iOS、Android、HarmonyOS 和 wasm32 的产物里没有它；Windows TIP 加载的是同一份 DLL，代码在但从不执行，因为 TIP 从不调用 `msime_client_scripts_enable`。
+[target.'cfg(any(target_os = "macos", target_os = "windows", all(target_os = "linux", not(target_env = "ohos"))))'.dependencies]
+msime-script-runtime = { path = "../script-runtime" }
 
 [dev-dependencies]
 msime-path-trust = { path = "../path-trust", features = ["test-support"] }
 rusqlite.workspace = true
 
+# 脚本插件的测试用 WAT 写模块（`test-support` 打开 wasmi 的 `wat` 特性），仓库不提交 `.wasm`。
+[target.'cfg(any(target_os = "macos", target_os = "windows", all(target_os = "linux", not(target_env = "ohos"))))'.dev-dependencies]
+msime-script-runtime = { path = "../script-runtime", features = ["test-support"] }
+
 [target.'cfg(windows)'.dependencies]
+# The clipboard read behind 从系统剪贴板同步 (`clipboard_history::windows_clipboard_text`): the same privacy-marker check the Tauri shell and the Server's capture use.
+msime-host-windows = { path = "../host-windows" }
 windows = { version = "0.62", features = ["Win32_Graphics_DirectWrite", "Win32_Graphics_Gdi", "Win32_Globalization"] }
 
 # Only linux_catalog uses rustix, and that module excludes OpenHarmony, which reports target_os = "linux" as well.

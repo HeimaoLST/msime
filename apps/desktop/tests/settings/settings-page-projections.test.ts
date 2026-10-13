@@ -20,6 +20,10 @@ const project = (overrides: Partial<Parameters<typeof settingsPageProjections>[0
     ...overrides,
   });
 
+test("desktop hosts with a community client keep the 社区 page", () => {
+  expect(project().availablePages.map((page) => page.id)).toContain("community");
+});
+
 test("filters pages by host capabilities while preserving registry order", () => {
   const desktop = project({
     hasHomePage: false,
@@ -84,16 +88,19 @@ test("projects mobile pages into tabs, grouped settings, and sidebar sections", 
   });
 
   expect(mobile.availablePages.find((page) => page.id === "appearance")?.title).toBe("候选栏");
+  // 原来「社区」的第二格换成了 AI 对话。
   expect(mobile.mobilePrimaryPages.map((page) => page.id)).toEqual([
     "home",
-    "community",
+    "chat",
     "typing-statistics",
     "account",
   ]);
+  // 触屏宿主即使有社区客户端也没有「社区」页：社区内容列在皮肤、词库、AI 辅助这些功能页里。
+  expect(mobile.availablePages.map((page) => page.id)).not.toContain("community");
   const listed = mobile.mobileSecondaryGroups.flatMap((group) =>
     group.pages.map((page) => page.id),
   );
-  for (const id of ["home", "community", "typing-statistics", "account", "shortcuts"]) {
+  for (const id of ["home", "chat", "community", "typing-statistics", "account", "shortcuts"]) {
     expect(listed).not.toContain(id);
   }
   expect(listed).not.toContain("floating-toolbar");
@@ -115,12 +122,22 @@ test("projects mobile pages into tabs, grouped settings, and sidebar sections", 
   );
 });
 
-// iPad 与手机同样 mobilePlatform 为真：标签栏上的社区、统计、我的不在侧栏里重复出现，侧栏只在首页之后列出分组。
+// 没有对话客户端的触屏宿主没有「对话」这一格，标签栏只剩三格，而不是留一个打不开的标签页。
+test("a touch host without a chat client has no 对话 tab", () => {
+  const mobile = project({ mobilePlatform: true, hasChat: false });
+  expect(mobile.mobilePrimaryPages.map((page) => page.id)).toEqual([
+    "home",
+    "typing-statistics",
+    "account",
+  ]);
+});
+
+// iPad 与手机同样 mobilePlatform 为真：标签栏上的对话、统计、我的不在侧栏里重复出现，侧栏只在首页之后列出分组；触屏宿主没有「社区」页，侧栏里也没有它。
 test("keeps the tab pages out of the iPad sidebar", () => {
   const ipad = project({ mobilePlatform: true });
   const sidebar = ipad.sidebarGroups.flatMap((group) => group.pages.map((page) => page.id));
   expect(sidebar[0]).toBe("home");
-  for (const id of ["community", "typing-statistics", "account"]) {
+  for (const id of ["chat", "community", "typing-statistics", "account"]) {
     expect(sidebar).not.toContain(id);
   }
 });
@@ -195,4 +212,13 @@ test("a host without the home page starts its sidebar at 输入", () => {
   expect(sidebar[0].title).toBe("打字");
   expect(sidebar[0].pages[0].id).toBe("input");
   expect(sidebar.flatMap((group) => group.pages.map((page) => page.id))).not.toContain("home");
+});
+
+// 有对话的触屏宿主在「对话」标签里试键盘，独立的试用页不再注册，历史记录里留下的这一页也会落回首页。
+test("a touch host offers the 试用键盘 sub-page only when it has no chat", () => {
+  const ids = (hasChat: boolean) =>
+    project({ mobilePlatform: true, hasChat }).availablePages.map((page) => page.id);
+  expect(ids(true)).not.toContain("try-keyboard");
+  expect(ids(false)).toContain("try-keyboard");
+  expect(project().availablePages.map((page) => page.id)).not.toContain("try-keyboard");
 });

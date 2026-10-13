@@ -4,13 +4,24 @@
  * Every colour is `#RRGGBB` or `#RRGGBBAA` (uppercase, alpha last). A `null` slot means "the host's own platform token", never "transparent".
  */
 import type { CSSProperties } from "react";
+import type { HostPlatform } from "../index";
 import type { TouchKeyboardSkinDesign } from "../keyboard/touch-keyboard-skin-design";
 import { candidateTextColor } from "../candidate/candidate-text-color";
 import catalog from "./theme-catalog.json";
 
-/** `Preferences.global_theme`: one id for the candidate window, floating toolbar, menus and touch keyboard. */
-export type GlobalTheme = "system" | "shuishan" | "light" | "paper" | "night" | "ink" | "custom";
-export type BuiltinGlobalTheme = Exclude<GlobalTheme, "system" | "custom">;
+/** `Preferences.global_theme`：候选窗、悬浮工具栏、菜单和触屏键盘共用的一个主题 id。`native`（原生）只在 iOS 提供，见 `offeredThemeCatalog`。 */
+export type GlobalTheme =
+  | "system"
+  | "native"
+  | "shuishan"
+  | "light"
+  | "paper"
+  | "night"
+  | "ink"
+  | "custom";
+export type BuiltinGlobalTheme = Exclude<GlobalTheme, "system" | "native" | "custom">;
+/** 自定义主题能画在其上的主题：`system` 或内置主题，不能是 `custom`，也不能是只在部分宿主上提供的 `native`。 */
+export type BaseGlobalTheme = Exclude<GlobalTheme, "native" | "custom">;
 export type ThemeAppearance = "light" | "dark";
 
 export type CandidateThemePalette = {
@@ -41,10 +52,12 @@ export type KeyboardThemePalette = {
 
 export type ThemePreview = { background: string; panel: string; accent: string; text: string };
 
-/** One picker entry. `system` and `custom` carry no palette. */
+/** 选择器的一项。`system`、`native` 和 `custom` 不带调色板。 */
 export type ThemeCatalogEntry = {
   id: GlobalTheme;
   title: string;
+  /** 提供这个主题的宿主，`null` 表示所有宿主都提供。 */
+  platforms: HostPlatform[] | null;
   appearance: ThemeAppearance | null;
   preview: ThemePreview | null;
   candidate: CandidateThemePalette | null;
@@ -67,21 +80,70 @@ export type CustomCandidateColors = {
 
 /** `Preferences.custom_theme`: what the `custom` theme is made of. It is kept while another theme is selected. */
 export type CustomTheme = {
-  /** The theme the custom theme is drawn over: `system` (the default, platform tokens) or a built-in theme, never `custom`. An applied package's own manifest base replaces it. */
-  base?: Exclude<GlobalTheme, "custom">;
-  /** The external candidate skin package id; never a global theme id. Unset means "no package". */
+  /** 自定义主题的底：`system`（默认，平台 token）或内置主题，不能是 `custom` 或 `native`。应用了皮肤包时改用包清单自己的 base。 */
+  base?: BaseGlobalTheme;
+  /** 浅色模式用的候选窗皮肤包 id，也是没设 `candidate_skin_dark` 时深色模式用的那款；不会是全局主题 id。未设表示没有皮肤包。 */
   candidate_skin?: string | null;
+  /** 深色模式用的候选窗皮肤包 id。未设时深色模式也取 `candidate_skin`。 */
+  candidate_skin_dark?: string | null;
   candidate_colors?: CustomCandidateColors;
   /** The keyboard editor design. Unset or `null` means "no design": the custom theme draws its base theme's keyboard. */
   keyboard?: TouchKeyboardSkinDesign | null;
 };
 
-/** The base a custom theme is drawn over once a picker is used while `current` is selected: the theme on screen stays underneath, and an already selected custom theme keeps its own base. */
+/** 以 `base` 为底的皮肤包放在哪个槽位：固定明暗的内置主题给出它自己的明暗，`system` 为 `null`，两个槽位都放（`theme::skin_appearance`）。 */
+export function skinSlot(base: GlobalTheme): ThemeAppearance | null {
+  return themeEntry(base).appearance;
+}
+
+/**
+ * 把皮肤包 `id`（清单 `base` 为 `base`）放进它所属的槽位，返回新的 `custom_theme`：深色皮肤写 `candidate_skin_dark`，浅色皮肤写 `candidate_skin`，`system` 底的写两个。`base` 照旧写成包的 base。
+ *
+ * 写深色槽位时，原来放在 `candidate_skin` 里的深色皮肤一并清掉。写浅色槽位时，如果深色槽位还空着，而原来的 `candidate_skin` 确知是深色或 `system` 底的皮肤（`slotOf` 给出 `"dark"` 或 `null`），就先把它挪到深色槽位；`slotOf` 给出 `undefined`（包不在目录里，槽位不知道）时不挪，直接覆盖，免得把一个本机没有的包塞进深色槽位：只设过一款深色皮肤的旧文档把它存在 `candidate_skin` 里，深色模式靠回退取到它，直接覆盖会让它悄悄消失。
+ */
+export function applyCandidateSkin(
+  custom: CustomTheme | undefined,
+  id: string,
+  base: BaseGlobalTheme,
+  slotOf: (id: string) => ThemeAppearance | null | undefined,
+): CustomTheme {
+  const slot = skinSlot(base);
+  const next: CustomTheme = { ...custom, base };
+  if (slot !== "light") next.candidate_skin_dark = id;
+  // 旧文档放在 `candidate_skin` 里的深色皮肤被新的深色皮肤取代：浅色模式本来就不画它，留着只会让它看起来还在用。
+  if (slot === "dark" && custom?.candidate_skin && slotOf(custom.candidate_skin) === "dark")
+    next.candidate_skin = null;
+  if (slot !== "dark") {
+    const previous = custom?.candidate_skin || null;
+    if (
+      slot === "light" &&
+      !custom?.candidate_skin_dark &&
+      previous &&
+      (slotOf(previous) === "dark" || slotOf(previous) === null)
+    )
+      next.candidate_skin_dark = previous;
+    next.candidate_skin = id;
+  }
+  return next;
+}
+
+/** 取消使用皮肤包 `id`：清掉放着它的槽位，另一个槽位不动。取下的是最后一款皮肤时底改回 `system`：应用皮肤时底被写成包的 base，两个槽位都空了以后 `resolve` 会在两种明暗下都用这个底，留着深色皮肤的 `night` 会让浅色模式变成深色。 */
+export function removeCandidateSkin(custom: CustomTheme | undefined, id: string): CustomTheme {
+  if (custom?.candidate_skin !== id && custom?.candidate_skin_dark !== id) return { ...custom };
+  const next: CustomTheme = { ...custom };
+  if (next.candidate_skin === id) next.candidate_skin = null;
+  if (next.candidate_skin_dark === id) next.candidate_skin_dark = null;
+  if (!next.candidate_skin && !next.candidate_skin_dark) next.base = "system";
+  return next;
+}
+
+/** 选着 `current` 时用了取色器，自定义主题画在哪个底上：屏幕上的主题留在下面，已经选着的自定义主题保留自己的底。`native` 不能当底，从它开始自定义时底是 `system`。 */
 export function customThemeBase(
   current: GlobalTheme,
   custom: CustomTheme | undefined,
-): Exclude<GlobalTheme, "custom"> {
-  return current === "custom" ? (custom?.base ?? "system") : current;
+): BaseGlobalTheme {
+  if (current === "custom") return custom?.base ?? "system";
+  return current === "native" ? "system" : current;
 }
 
 export type ThemeSource = "system" | "builtin" | "custom";
@@ -114,12 +176,34 @@ export function isGlobalTheme(value: unknown): value is GlobalTheme {
   return typeof value === "string" && (globalThemeIds as string[]).includes(value);
 }
 
+/** `platform` 的选择器列出的主题，顺序同 `themeCatalog`。只在部分宿主上提供的主题（`platforms` 不为 `null`）只列在那些宿主上；不知道宿主时一个也不列。 */
+export function offeredThemeCatalog(platform: HostPlatform | undefined): ThemeCatalogEntry[] {
+  return themeCatalog.filter(
+    (entry) =>
+      entry.platforms === null || (platform !== undefined && entry.platforms.includes(platform)),
+  );
+}
+
+/** 宿主实际画的主题：宿主不提供的主题（iOS 以外收到的 `native`）按 `system` 画，选择器也把「跟随系统」标为选中。 */
+export function offeredGlobalTheme(
+  theme: GlobalTheme,
+  platform: HostPlatform | undefined,
+): GlobalTheme {
+  return offeredThemeCatalog(platform).some((entry) => entry.id === theme) ? theme : "system";
+}
+
 /** The catalog entry for an id; unknown ids read as `system`, the theme that is always drawable. */
 export function themeEntry(id: string | undefined): ThemeCatalogEntry {
   return themeCatalog.find((entry) => entry.id === id) ?? themeCatalog[0];
 }
 
-/** The `--cand-*` custom properties the vendored candidate markup reads, for the slots a palette sets. Unset slots keep the stylesheet's own platform defaults. */
+/** Display title shared by settings rows and the home/account summaries. */
+export function globalThemeTitle(id: string | undefined): string {
+  const entry = themeEntry(id);
+  return entry.id === "custom" ? "我的皮肤" : entry.title;
+}
+
+/** 候选预览读的 `--cand-*` 自定义属性，只写调色板设了的槽位；没设的槽位留给样式表里按宿主平台给的默认值。`show_selected_bar` 写成 `--cand-selected-bar`（`block` 或 `none`），null 时不写，由平台决定画不画竖条。另外两个 `--cand-mac-selected-*` 只有 macOS 的默认值块会读，见 `macSelectedForegrounds`。 */
 export function candidatePaletteStyle(palette: CandidateThemePalette | null): CSSProperties {
   if (!palette) return {};
   const slots: [string, string | null][] = [
@@ -130,9 +214,40 @@ export function candidatePaletteStyle(palette: CandidateThemePalette | null): CS
     ["--cand-accent", palette.accent],
     ["--accent-strong", palette.accent],
     ["--cand-selected", palette.selected],
+    ["--cand-selected-text", palette.selected_text],
+    ["--cand-selected-num", palette.selected_number],
     ["--cand-hover", palette.hover],
+    [
+      "--cand-selected-bar",
+      palette.show_selected_bar === null ? null : palette.show_selected_bar ? "block" : "none",
+    ],
+    ...macSelectedForegrounds(palette),
   ];
   return Object.fromEntries(slots.filter(([, value]) => value !== null)) as CSSProperties;
+}
+
+/** macOS `DeriveSelectedForegrounds`（`platforms/macos/src/candidate/CandidateSkin.cpp`）：调色板没给选中行文字或序号颜色时，原生按实际画出的选中底推导。选中底是 `selected`，没有时跟随 `accent`；它的不透明度低于 0.85 时文字和序号退回普通行的颜色，否则按相对亮度 0.45 取白或 #1A1A1A，序号再取 82% 不透明。两者都没有时原生画的是平台强调色，留给样式表的白字。结果写成 `--cand-mac-selected-text` / `--cand-mac-selected-num`，只在 `skin-card-preview` 的 macOS 默认值块里读，其他平台不受影响。 */
+function macSelectedForegrounds(palette: CandidateThemePalette): [string, string | null][] {
+  const fill = normalizedColor(palette.selected ?? palette.accent ?? "");
+  if (!fill) return [];
+  const alpha = fill.length === 9 ? parseInt(fill.slice(7), 16) / 255 : 1;
+  const channel = (offset: number) => {
+    const value = parseInt(fill.slice(offset, offset + 2), 16) / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  };
+  const luminance = 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
+  const contrast = luminance < 0.45 ? "#FFFFFF" : "#1A1A1A";
+  const translucent = alpha < 0.85;
+  return [
+    [
+      "--cand-mac-selected-text",
+      palette.selected_text === null ? (translucent ? "var(--cand-text)" : contrast) : null,
+    ],
+    [
+      "--cand-mac-selected-num",
+      palette.selected_number === null ? (translucent ? "var(--cand-num)" : `${contrast}D1`) : null,
+    ],
+  ];
 }
 
 /** The candidate preview style of a global theme id: a built-in palette, or nothing for `system`, `custom` and unknown ids. */
@@ -235,6 +350,30 @@ export function customCandidatePalette(
       typeof packagePalette?.showSelectedBar === "boolean" ? packagePalette.showSelectedBar : null,
   };
   return Object.values(palette).some((value) => value !== null) ? palette : null;
+}
+
+/** `CustomTheme::candidate_skin_for`：`dark` 模式下取哪个槽位的皮肤包。深色模式先取 `candidate_skin_dark`，没设时与浅色模式一样取 `candidate_skin`。 */
+export function candidateSkinFor(custom: CustomTheme | undefined, dark: boolean): string | null {
+  const light = custom?.candidate_skin || null;
+  return dark ? custom?.candidate_skin_dark || light : light;
+}
+
+/** `ThemePackage::draws_in`：以 `base` 为底的皮肤包能否在 `dark` 模式下画。固定明暗的内置主题只画在自己的明暗下，`system` 两种都画。 */
+export function skinDrawsIn(base: GlobalTheme, dark: boolean): boolean {
+  const appearance = themeEntry(base).appearance;
+  return appearance === null || (appearance === "dark") === dark;
+}
+
+/** `resolve()` 给自定义主题选的底：画了皮肤包时是包的 base（`drawnPackageBase`）；设过皮肤、却没有能在 `dark` 下画的包时，`custom.base` 只在属于这种明暗时作底，否则是 `system`；没设皮肤时就是 `custom.base`。 */
+export function customDrawnBase(
+  custom: CustomTheme | undefined,
+  drawnPackageBase: BaseGlobalTheme | null,
+  dark: boolean,
+): BaseGlobalTheme {
+  if (drawnPackageBase !== null) return drawnPackageBase;
+  const base = custom?.base ?? "system";
+  const configured = Boolean(custom?.candidate_skin || custom?.candidate_skin_dark);
+  return !configured || skinDrawsIn(base, dark) ? base : "system";
 }
 
 /** The candidate preview style of a custom theme: `customCandidatePalette` as `--cand-*` properties. */

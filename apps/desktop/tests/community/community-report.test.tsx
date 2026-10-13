@@ -216,6 +216,98 @@ test.each([
   expect(communityPluginMessage(error, true)).toBe(message);
 });
 
+test.each([
+  [
+    "community_unauthorized",
+    "请先登录后执行此操作。",
+    "登录已失效；仍可退出后匿名浏览。",
+    "请先登录后执行此操作。",
+  ],
+  [
+    "community_forbidden",
+    "没有权限执行此操作。",
+    "没有权限执行此操作；自己的作品不能评分或下架。",
+    "下载后才能评分，且不能给自己的作品评分。",
+  ],
+  ["community_not_found", "作品不存在或已下架。", "作品不存在或已下架。", "作品不存在或已下架。"],
+  [
+    "community_cancelled",
+    "账号状态已变化，请重新加载。",
+    "账号状态已变化，请重新加载。",
+    "账号状态已变化，请重新加载。",
+  ],
+  [
+    "community_storage",
+    "无法安全保存本地模板，请稍后重试。",
+    "无法安全读取登录状态，请检查设备安全设置。",
+    "无法安全读取登录状态，请检查设备安全设置。",
+  ],
+])("community status %s keeps page-specific wording", (code, resource, skin, gallery) => {
+  const error = { code };
+  expect(resourceMessage(error)).toBe(resource);
+  expect(communitySkinMessage(error)).toBe(skin);
+  expect(candidateSkinMessage(error)).toBe(gallery);
+  expect(communityPluginMessage(error)).toBe(gallery);
+});
+
+test.each([
+  [
+    "community_conflict",
+    "作品状态已变化或已达到发布上限，请刷新后重试。",
+    "发布信息已变更，或皮肤库已达到数量上限。",
+    "作品状态已变化，请刷新后重试。",
+    "发布信息已变更，或已达到发布上限（最多 20 个、合计 32 MB）。",
+  ],
+  [
+    "community_rate_limited",
+    "请求过于频繁，请稍后再试。",
+    "发布太频繁，请稍后再试。",
+    "请求过于频繁，请稍后再试。",
+    "每小时最多发布 10 次，请稍后再试。",
+  ],
+])(
+  "community request status %s keeps gallery and publish wording",
+  (code, shared, candidate, plugin, pluginPublish) => {
+    const error = { code };
+    expect(resourceMessage(error)).toBe(shared);
+    expect(communitySkinMessage(error)).toBe(shared);
+    expect(candidateSkinMessage(error)).toBe(candidate);
+    expect(communityPluginMessage(error)).toBe(plugin);
+    expect(communityPluginMessage(error, true)).toBe(pluginPublish);
+  },
+);
+
+test("publish messages keep their specific wording", () => {
+  expect(communitySkinPublishMessage({ code: "community_unauthorized" })).toBe(
+    "请先登录后再发布皮肤。",
+  );
+  expect(candidateSkinMessage({ code: "community_invalid" }, true)).toContain(
+    "服务器未接受这款皮肤",
+  );
+  expect(communityPluginMessage({ code: "community_invalid" }, true)).toContain(
+    "服务器未接受这个插件",
+  );
+});
+
+test("invalid community content keeps gallery and publish wording", () => {
+  const error = { code: "community_invalid" };
+  expect(resourceMessage(error)).toBe("内容无效，请修改后重试。");
+  expect(communitySkinMessage(error)).toBe("搜索内容无效，请修改后重试。");
+  expect(candidateSkinMessage(error)).toBe("内容无效，请修改后重试。");
+  expect(communityPluginMessage(error)).toBe("内容无效，请修改后重试。");
+  expect(candidateSkinMessage(error, true)).toBe(
+    "服务器未接受这款皮肤：请确认图片每边不超过 2048 像素、能被正常解码，且皮肤 ID 不与内置主题重名。",
+  );
+  expect(communityPluginMessage(error, true)).toBe(
+    "服务器未接受这个插件：请确认名称、说明和包内容符合发布要求。",
+  );
+  expect(communitySkinPublishMessage(error)).toBe("名称、说明或皮肤设计不符合发布要求。");
+});
+
+test("unknown error codes keep the community fallback", () => {
+  expect(resourceMessage({ code: "toString" })).toBe("社区暂时不可用，请稍后重试。");
+});
+
 test("a refused upload is never worded as the service being down", () => {
   expect(communityPluginMessage({ code: "community_blocked_content" }, true)).not.toContain(
     "暂时不可用",

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { ControlledTextarea } from "../core/controlled-textarea";
 import { CommunityField } from "./community-field";
 import * as style from "./community-style";
 
@@ -26,7 +27,7 @@ export function CommunityTextareaField({
 }: CommunityTextareaFieldProps) {
   return (
     <CommunityField label={label}>
-      <textarea
+      <ControlledTextarea
         className={style.textArea}
         aria-label={ariaLabel}
         maxLength={maxLength}
@@ -34,7 +35,7 @@ export function CommunityTextareaField({
         value={value}
         disabled={disabled}
         placeholder={placeholder}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={onChange}
       />
     </CommunityField>
   );

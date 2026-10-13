@@ -52,10 +52,46 @@ pub fn convert(
     count: usize,
     pins: &[Span],
     mut best: impl FnMut(usize, usize) -> Result<Option<(String, LanguageEntry)>>,
+    fallback: impl FnMut(usize) -> String,
+) -> Result<Vec<Span>> {
+    convert_filtered(
+        count,
+        pins,
+        |start, end, can_improve| {
+            Ok(match best(start, end)? {
+                Some((key, entry)) if can_improve(entry.weight) => Lookup::Found(key, entry),
+                Some(_) => Lookup::Rejected,
+                None => Lookup::Missing,
+            })
+        },
+        fallback,
+    )
+}
+
+/// 被当前路径分数拒绝的词条仍然存在，不能把它当成缺失词条并生成单音节兜底。
+pub(super) enum Lookup {
+    Missing,
+    Rejected,
+    Found(String, LanguageEntry),
+}
+
+/// 在词条借用期间调用 `can_improve(weight)`，只为能改善路径的词条取得所有权；查询顺序和错误传播与 `convert` 相同。
+pub(super) fn convert_filtered(
+    count: usize,
+    pins: &[Span],
+    mut best: impl FnMut(usize, usize, &mut dyn FnMut(i64) -> bool) -> Result<Lookup>,
     mut fallback: impl FnMut(usize) -> String,
 ) -> Result<Vec<Span>> {
     // `paths[i]` 是转换前 `i` 个音节的最佳路径及结束它的那一段。
-    let mut paths: Vec<Option<(Score, Option<Span>)>> = vec![None; count + 1];
+    // 组合长度内的路径表放在栈上，超长直接调用仍使用动态缓冲。
+    let mut stack_paths = [const { None }; MAX_SYLLABLES + 1];
+    let mut heap_paths;
+    let paths: &mut [Option<(Score, Option<Span>)>] = if count <= MAX_SYLLABLES {
+        &mut stack_paths[..=count]
+    } else {
+        heap_paths = vec![None; count + 1];
+        &mut heap_paths
+    };
     paths[0] = Some((
         Score {
             length: 0,
@@ -70,22 +106,27 @@ pub fn convert(
         let score = *score;
         let pin = pins.iter().find(|pin| pin.start == start);
         if let Some(pin) = pin {
-            consider_span(&mut paths, score, pin.clone(), 0);
+            consider_span(paths, score, pin.clone(), 0);
         } else {
             for end in start + 1..=count {
                 if pins.iter().any(|pin| pin.overlaps(start, end)) {
                     break;
                 }
-                let (key, text, weight) = match best(start, end)? {
-                    Some((key, entry)) => (key, entry.text, entry.weight),
-                    None if end == start + 1 => {
+                let (key, text, weight) = match best(start, end, &mut |weight| {
+                    let arrival = score.add(end - start, weight);
+                    paths[end]
+                        .as_ref()
+                        .is_none_or(|(current, _)| arrival > *current)
+                })? {
+                    Lookup::Found(key, entry) => (key, entry.text, entry.weight),
+                    Lookup::Missing if end == start + 1 => {
                         let reading = fallback(start);
                         (reading.clone(), reading, 0)
                     }
-                    None => continue,
+                    Lookup::Missing | Lookup::Rejected => continue,
                 };
                 consider_span(
-                    &mut paths,
+                    paths,
                     score,
                     Span {
                         start,
@@ -176,6 +217,44 @@ mod tests {
             key: key.to_owned(),
             text: text.to_owned(),
         }
+    }
+
+    #[test]
+    fn bounded_conversion_does_not_allocate_path_storage() {
+        let pin = span(0, MAX_SYLLABLES, "合成讀音", "合成文字");
+        let (spans, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            convert(
+                MAX_SYLLABLES,
+                std::slice::from_ref(&pin),
+                |_, _| panic!("完整钉住的组合不应查询词库"),
+                |_| panic!("完整钉住的组合不应生成兜底读音"),
+            )
+            .unwrap()
+        });
+        assert_eq!(allocations, 3, "只应分配返回向量和钉住词条的两个字符串");
+        assert_eq!(spans, [pin]);
+
+        let (spans, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            convert(
+                0,
+                &[],
+                |_, _| panic!("空组合不应查询词库"),
+                |_| panic!("空组合不应生成兜底读音"),
+            )
+            .unwrap()
+        });
+        assert!(spans.is_empty());
+        assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn conversion_accepts_more_than_the_composition_limit() {
+        let syllables = vec!["ㄋㄧˇ"; MAX_SYLLABLES + 1];
+        let spans = run(&syllables, &[], &ENTRIES);
+        assert_eq!(spans.len(), syllables.len());
+        assert!(spans.iter().all(|span| span.text == "你"));
+        assert_eq!((spans[0].start, spans[0].end), (0, 1));
+        assert_eq!(spans.last().unwrap().end, syllables.len());
     }
 
     #[test]
@@ -273,6 +352,64 @@ mod tests {
             ("c", "C", 1),
         ];
         assert_eq!(texts(&run(&["a", "b", "c"], &[], &entries)), ["AB", "C"]);
+    }
+
+    #[test]
+    fn rejected_negative_single_rows_do_not_become_fallbacks() {
+        let entries = [
+            ("a", "A", 0),
+            ("b", "B", 0),
+            ("c", "C", 0),
+            ("d", "D", -20),
+            ("b c", "BC", 0),
+            ("c d", "CD", -10),
+        ];
+        assert_eq!(
+            texts(&run(&["a", "b", "c", "d"], &[], &entries)),
+            ["A", "B", "CD"]
+        );
+    }
+
+    #[test]
+    fn equal_and_saturated_scores_keep_the_first_arrival() {
+        for weight in [1, i64::MAX] {
+            let entries = [
+                ("a", "A", weight),
+                ("b", "B", weight),
+                ("c", "C", weight),
+                ("a b", "AB", weight),
+                ("b c", "BC", weight),
+            ];
+            assert_eq!(texts(&run(&["a", "b", "c"], &[], &entries)), ["A", "BC"]);
+        }
+    }
+
+    #[test]
+    fn losing_interval_queries_still_propagate_errors() {
+        let mut visited = Vec::new();
+        let result = convert(
+            3,
+            &[],
+            |start, end| {
+                visited.push((start, end));
+                if start == 1 {
+                    return Err(crate::error::EngineError::failed("合成查询失败"));
+                }
+                Ok(Some((
+                    "合成讀音".to_owned(),
+                    LanguageEntry {
+                        text: "合成文字".to_owned(),
+                        weight: 1,
+                    },
+                )))
+            },
+            |_| panic!("已有词条不应生成兜底读音"),
+        );
+        assert_eq!(visited, [(0, 1), (0, 2), (0, 3), (1, 2)]);
+        assert!(matches!(
+            result,
+            Err(crate::error::EngineError::Failed(message)) if message == "合成查询失败"
+        ));
     }
 
     #[test]

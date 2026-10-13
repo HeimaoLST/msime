@@ -109,6 +109,12 @@ targets:
         buildPhase: resources
       - path: ../../resources/licenses/ewts-MIT.txt
         buildPhase: resources
+      # 同一个 Engine 编入了拆字反查的部件拼音表，它改编自開放詞典的漢語拆字字典（CC BY 3.0），署名与改动说明随每个 Engine 构建分发。
+      - path: ../../resources/licenses/kfcd-chaizi-CC-BY-3.0.txt
+        buildPhase: resources
+      # 这张表里每个字的读音、名次和繁体字形取自 Unicode 汉字数据库（Unihan 17.0.0），Unicode License V3 要求随数据附上它的版权与许可声明。
+      - path: ../../resources/licenses/Unicode-License-V3.txt
+        buildPhase: resources
       - path: SharedResources/PrivacyInfo.xcprivacy
         buildPhase: resources
     settings:
@@ -201,6 +207,7 @@ targets:
       - path: ../../shared/backend/account/BackendAccountSession.swift
       - path: ../../shared/backend/account/BackendAnonymousAccount.swift
       - path: ../../shared/backend/storage/BackendLocalStore.swift
+      - path: ../../shared/backend/storage/BackendBoundedFileReader.swift
       - path: ../../shared/backend/clients/BackendSnapshotClient.swift
       # The keyboard's 云端 clipboard tab.
       - path: ../../shared/backend/clients/BackendClipboardClient.swift
@@ -290,7 +297,15 @@ targets:
       - path: App/Services/SkinCommunityAPI.swift
       - path: App/Sources/dictionary/TauriPersonalDictionaryBridge.swift
       - path: App/Sources/settings/CandidateOptionsSettingsView.swift
+      - path: App/Sources/settings/SettingsSaveFailure.swift
+      - path: App/Sources/settings/SettingsScenePhaseReload.swift
+      - path: App/Sources/settings/SharedPreferenceBinding.swift
       - path: App/Sources/settings/CandidatePreviewCard.swift
+      # 辅助码页导入码表的选择规则和导入、删除流程（#7176），HelpcodeChoicePolicyTests 与 HelpcodeSettingsTests 直接测它们。
+      - path: App/Sources/settings/HelpcodeChoicePolicy.swift
+      - path: App/Sources/settings/HelpcodeSettingsView.swift
+      - path: App/Sources/app/ViewRequestGeneration.swift
+      - path: App/Sources/app/ViewRequestTask.swift
       - path: App/Sources/app/DesignKit.swift
       - path: App/Sources/settings/IOSCloudSettings.swift
       - path: App/Sources/keyboard/KeyboardChatHistoryPolicy.swift
@@ -332,8 +347,14 @@ targets:
     platform: iOS
     sources:
       - path: ServiceTests
+      - path: App/Sources/community/CommunityUnseenItems.swift
+      - path: App/Sources/app/ViewRequestGeneration.swift
+      - path: App/Sources/app/ViewRequestTask.swift
       - path: App/Sources/settings/AppIconSettingsView.swift
+      - path: App/Sources/settings/SettingsScenePhaseReload.swift
+      - path: App/Sources/app/DesignKit.swift
       - path: App/Sources/settings/SettingsAutosave.swift
+      - path: App/Services/AboutUpdateRequestState.swift
       - path: App/Services/CustomService.swift
       - path: App/Services/LocalSpeechModel.swift
       - path: App/Services/LocalSpeechModelStore.swift
@@ -348,7 +369,9 @@ targets:
       - path: SharedUI/core/AIEndpointPolicy.swift
       - path: SharedUI/core/AppServicesBridge.swift
       - path: SharedUI/core/AppThemePalette.swift
+      - path: SharedUI/core/IOSSharedPaths.swift
       - path: SharedUI/core/MetasequoiaTheme.swift
+      - path: SharedUI/core/MSIMELogoShape.swift
       - path: SharedUI/core/SharedNumber.swift
       - path: ../../shared/backend
         excludes:

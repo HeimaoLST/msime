@@ -1,31 +1,79 @@
 import Foundation
 
-/// What the keyboard needs from the account's cloud clipboard. The live one goes through the signed-in session the app shares with the keyboard through the App Group keychain group; tests substitute their own.
-protocol KeyboardCloudClipboardService: Sendable {
-  /// Whether an account is signed in on this device. Reads the shared keychain only, no request.
-  func isSignedIn() async -> Bool
-  func page() async throws -> BackendAccountClient.ClipboardPage
-  func add(_ text: String) async throws
+struct KeyboardCloudClipboardBinding: Equatable, Sendable {
+  let userID: String
+  let sessionID: UUID
 }
 
+/// What the keyboard needs from the account's cloud clipboard. The live one goes through the signed-in session the app shares with the keyboard through the App Group keychain group; tests substitute their own.
+protocol KeyboardCloudClipboardService: Sendable {
+  /// Captures the current login before a panel request.
+  func binding() async throws -> KeyboardCloudClipboardBinding?
+  func matches(_ binding: KeyboardCloudClipboardBinding) async -> Bool
+  func page(matching binding: KeyboardCloudClipboardBinding) async throws -> BackendAccountClient.ClipboardPage
+  func add(_ text: String, matching binding: KeyboardCloudClipboardBinding) async throws
+  func uploadIfEnabled(_ text: String, matching binding: KeyboardCloudClipboardBinding) async throws -> BackendAccountClient.ClipboardPage?
+}
+
+extension KeyboardCloudClipboardService {
+  func uploadIfEnabled(_ text: String, matching binding: KeyboardCloudClipboardBinding) async throws -> BackendAccountClient.ClipboardPage? {
+    let before = try await page(matching: binding)
+    guard before.enabled else { return nil }
+    guard !before.isPending else { throw BackendAccountClient.Failure(status: 0, code: "clipboard_device_pending") }
+    try await add(text, matching: binding)
+    return try await page(matching: binding)
+  }
+}
+
+/// 列表和上传经端到端加密驱动（`IOSCloudClipboardDriver`），与 App 用同一份密钥串，所以键盘和 App 是同一台设备。
 struct BackendKeyboardCloudClipboardService: KeyboardCloudClipboardService {
   var session: BackendAccountSession = .shared
   var client = BackendAccountClient()
+  var e2e: BackendClipboardE2E? = IOSCloudClipboardDriver.e2e
 
-  func isSignedIn() async -> Bool { ((try? await session.user()) ?? nil) != nil }
-  func page() async throws -> BackendAccountClient.ClipboardPage {
-    try await authorized { [client] token in try await client.clipboard(token: token) }
-  }
-  func add(_ text: String) async throws {
-    _ = try await authorized { [client] token in try await client.addClipboard(text, token: token) }
-  }
-  /// One retry with a refreshed token when the access token was rejected, as the app's account-backed screens do.
-  private func authorized<T>(_ body: (String) async throws -> T) async throws -> T {
-    let token = try await session.accessToken()
-    do { return try await body(token) }
-    catch let failure as BackendAccountClient.Failure where failure.status == 401 {
-      return try await body(session.accessToken(retrying: token))
+  func binding() async throws -> KeyboardCloudClipboardBinding? {
+    do {
+      let identity = try await session.credentials()
+      return .init(userID: identity.userID, sessionID: identity.sessionID)
+    } catch let failure as BackendAccountClient.Failure where failure.status == 401 {
+      return nil
     }
+  }
+  func matches(_ binding: KeyboardCloudClipboardBinding) async -> Bool {
+    do {
+      try await session.requireSession(matchingUserID: binding.userID, matchingSessionID: binding.sessionID)
+      return true
+    } catch { return false }
+  }
+  func page(matching binding: KeyboardCloudClipboardBinding) async throws -> BackendAccountClient.ClipboardPage {
+    try await authorized(matching: binding) { [client, e2e] token in try await client.clipboard(token: token, e2e: e2e) }
+  }
+  func add(_ text: String, matching binding: KeyboardCloudClipboardBinding) async throws {
+    _ = try await authorized(matching: binding) { [client, e2e] token in try await client.addClipboard(text, token: token, e2e: e2e) }
+  }
+  /// 驱动上传前自己会读服务端的开关和本机是否已获批准：开关关着时返回 nil，本机等待批准时以 `clipboard_device_pending` 失败，两种情况都不上传。
+  func uploadIfEnabled(_ text: String, matching binding: KeyboardCloudClipboardBinding) async throws -> BackendAccountClient.ClipboardPage? {
+    func request<T: Sendable>(_ operation: @Sendable (String) async throws -> T) async throws -> T {
+      try await session.authenticated(matchingUserID: binding.userID,
+                                      matchingSessionID: binding.sessionID, operation).value
+    }
+    do {
+      _ = try await request { [client, e2e] token in try await client.addClipboard(text, token: token, e2e: e2e) }
+    } catch let failure as BackendAccountClient.Failure where failure.code == "clipboard_sync_disabled" {
+      return nil
+    }
+    return try await request { [client, e2e] token in try await client.clipboard(token: token, e2e: e2e) }
+  }
+  /// 将请求及可能发生的令牌刷新绑定到发起时的登录会话。
+  private func authorized<T: Sendable>(matching binding: KeyboardCloudClipboardBinding,
+                                       _ body: @Sendable (String) async throws -> T) async throws -> T {
+    let result = try await session.authenticated(matchingUserID: binding.userID,
+                                                 matchingSessionID: binding.sessionID) { token in
+      try await body(token)
+    }.value
+    try await session.requireSession(matchingUserID: binding.userID, matchingSessionID: binding.sessionID)
+    try Task.checkCancellation()
+    return result
   }
 }
 
@@ -37,6 +85,8 @@ final class KeyboardCloudClipboard {
     case loading
     case signedOut
     case disabled
+    /// 本机还在等待其他设备批准，带本机的核对码。
+    case pending(String)
     case failed(String)
     case loaded([BackendAccountClient.ClipboardItem])
   }
@@ -45,6 +95,10 @@ final class KeyboardCloudClipboard {
   static let disabledMessage = "云剪贴板未开启"
   static let needsFullAccessMessage = "请在系统键盘设置中开启「允许完全访问」，再使用云剪贴板。"
   static let offlineMessage = "连接未完成，请检查网络后重试。"
+  /// 本机等待批准时的一行提示：去哪里批准，核对什么。
+  static func pendingMessage(_ code: String) -> String {
+    "本机等待批准 · 核对码 \(code)，请在其他设备的云剪贴板里点「允许」"
+  }
 
   private(set) var state: State
   /// Known only once the panel's first fetch has looked at the keychain; until then 发到云剪贴板 stays disabled.
@@ -57,6 +111,7 @@ final class KeyboardCloudClipboard {
   var fieldAllowsCloud: () -> Bool = { true }
   private let service: any KeyboardCloudClipboardService
   private var fetch: Task<Void, Never>?
+  private var binding: KeyboardCloudClipboardBinding?
   private var generation = 0
   private var active = true
 
@@ -84,6 +139,7 @@ final class KeyboardCloudClipboard {
     case .loading: return "正在读取云端内容…"
     case .signedOut: return Self.signedOutMessage
     case .disabled: return Self.disabledMessage
+    case .pending(let code): return Self.pendingMessage(code)
     case .failed(let message): return message
     case .loaded(let items):
       return items.isEmpty ? "云端还没有内容。在其他设备发到云剪贴板后点刷新。" : "\(items.count)/50 条 · 点按插入"
@@ -97,29 +153,54 @@ final class KeyboardCloudClipboard {
     generation += 1
     let version = generation
     fetch?.cancel()
+    binding = nil
+    signedIn = false
+    notice = nil
     state = .loading
     onChange?()
     let service = service
     fetch = Task { [weak self] in
-      let signedIn = await service.isSignedIn()
+      var account: KeyboardCloudClipboardBinding?
       let outcome: State
-      if !signedIn { outcome = .signedOut }
-      else {
-        do {
-          let page = try await service.page()
-          outcome = page.enabled ? .loaded(page.items) : .disabled
-        } catch { outcome = Self.state(for: error) }
-      }
+      do {
+        account = try await service.binding()
+        if let account {
+          let page = try await service.page(matching: account)
+          if !page.enabled { outcome = .disabled }
+          else if page.isPending { outcome = .pending(page.e2e?.code ?? "") }
+          else { outcome = .loaded(page.items) }
+        } else { outcome = .signedOut }
+      } catch { outcome = Self.state(for: error) }
       guard let self, !Task.isCancelled, self.active, self.generation == version else { return }
-      self.signedIn = signedIn && !(outcome.isSignedOut)
+      if let account, !(await service.matches(account)) {
+        self.refresh()
+        return
+      }
+      guard !Task.isCancelled, self.active, self.generation == version else { return }
+      self.binding = account
+      self.signedIn = account != nil && !outcome.isSignedOut
       self.state = outcome
       self.onChange?()
     }
   }
 
+  /// A displayed row may outlive its account. Recheck the shared session before inserting it.
+  func insert(_ item: BackendAccountClient.ClipboardItem, onInsert: @escaping (String) -> Void) {
+    guard active, let binding, items.contains(where: { $0.id == item.id && $0.text == item.text }) else { return }
+    let version = generation
+    let service = service
+    Task { [weak self] in
+      let stillCurrent = await service.matches(binding)
+      guard let self, self.active, self.generation == version else { return }
+      guard stillCurrent else { self.refresh(); return }
+      guard self.fieldAllowsCloud(), self.items.contains(where: { $0.id == item.id && $0.text == item.text }) else { return }
+      onInsert(item.text)
+    }
+  }
+
   /// Send one local history item. The server's `enabled` flag is read first, so nothing goes up while the user has the cloud clipboard switched off on another device.
   func upload(_ text: String) {
-    guard canUpload else { return }
+    guard canUpload, let binding else { return }
     guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.utf16.count <= 4000,
           !text.contains("\0") else {
       notice = "这条记录超过 4000 字，不能发到云剪贴板。"
@@ -135,10 +216,8 @@ final class KeyboardCloudClipboard {
       var refreshed: State?
       var notice: String
       do {
-        let before = try await service.page()
-        if before.enabled {
-          try await service.add(text)
-          refreshed = .loaded(try await service.page().items)
+        if let page = try await service.uploadIfEnabled(text, matching: binding) {
+          refreshed = page.isPending ? .pending(page.e2e?.code ?? "") : .loaded(page.items)
           notice = "已发到云剪贴板"
         } else {
           refreshed = .disabled
@@ -150,6 +229,11 @@ final class KeyboardCloudClipboard {
         notice = "没能发到云剪贴板：" + (failed.failureText ?? Self.signedOutMessage)
       }
       guard let self, self.active else { return }
+      guard await service.matches(binding) else {
+        self.uploading = false
+        self.refresh()
+        return
+      }
       self.uploading = false
       self.notice = notice
       if let refreshed {

@@ -34,7 +34,7 @@ public final class CommunityReplyLibrary {
     }
 
     public static List<Template> read(Path file) throws IOException {
-        rejectSymlinkComponents(file);
+        SafePaths.rejectSymlinkComponents(file);
         if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) return List.of();
         if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) throw new IOException("Invalid community library");
         if (!SafePaths.isSingleLink(file)) throw new IOException("Community library is not a single link");
@@ -57,21 +57,21 @@ public final class CommunityReplyLibrary {
         Set<String> ids = new HashSet<>(items.size());
         for (Object value : items) {
             if (!(value instanceof Map<?, ?> item)) throw new IOException("Invalid community library");
-            String id = string(item.get("id"));
-            String kind = string(item.get("kind"));
+            String id = JsonPolicy.strictString(item.get("id"));
+            String kind = JsonPolicy.strictString(item.get("kind"));
             Object contentValue = item.get("content");
             if (id == null || kind == null || !(contentValue instanceof Map<?, ?> content))
                 throw new IOException("Invalid community library");
             if (!"reply".equals(kind)) continue;
-            String name = string(item.get("name"));
-            String prompt = string(content.get("prompt"));
+            String name = JsonPolicy.strictString(item.get("name"));
+            String prompt = JsonPolicy.strictString(content.get("prompt"));
             if (name == null || id.isEmpty() || name.isEmpty() || prompt == null
                     || TextPolicy.blank(id) || TextPolicy.blank(name) || TextPolicy.blank(prompt)
                     || !TextPolicy.trimmed(name).equals(name) || !ids.add(id))
                 throw new IOException("Invalid community library");
             if (!TextPolicy.validUnicode(id) || !TextPolicy.validUnicode(name)
                     || !TextPolicy.validUnicode(prompt) || TextPolicy.hasControl(id)
-                    || TextPolicy.hasControl(name) || TextPolicy.hasControl(prompt)
+                    || TextPolicy.hasControl(name) || CommunityTextPolicy.hasDisallowedControl(prompt, true)
                     || TextPolicy.utf8Length(id) > MAXIMUM_ID_BYTES
                     || !TextPolicy.withinCodePoints(name, MAXIMUM_NAME_CHARACTERS)
                     || !TextPolicy.withinCodePoints(prompt, MAXIMUM_PROMPT_CHARACTERS))
@@ -80,12 +80,6 @@ public final class CommunityReplyLibrary {
         }
         return List.copyOf(replies);
     }
-
-    private static void rejectSymlinkComponents(Path path) throws IOException {
-        SafePaths.rejectSymlinkComponents(path);
-    }
-
-    private static String string(Object value) { return JsonPolicy.strictString(value); }
 
     private static final class Parser {
         private static final int MAXIMUM_DEPTH = 24;
@@ -192,7 +186,7 @@ public final class CommunityReplyLibrary {
             int start = index;
             if (take('-') && index >= input.length()) throw invalid();
             if (take('0')) {
-                if (index < input.length() && Character.isDigit(input.charAt(index))) throw invalid();
+                if (index < input.length() && TextPolicy.isDigit(input.charAt(index))) throw invalid();
             } else {
                 digits();
             }
@@ -207,7 +201,7 @@ public final class CommunityReplyLibrary {
 
         private void digits() {
             int start = index;
-            while (index < input.length() && Character.isDigit(input.charAt(index))) index++;
+            while (index < input.length() && TextPolicy.isDigit(input.charAt(index))) index++;
             if (start == index) throw invalid();
         }
 

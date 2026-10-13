@@ -10,8 +10,10 @@ use crate::account::{
     BackendAccountClient, BackendAccountSession,
 };
 use crate::cloud::dictionary::percent_encode;
+use crate::community::write_actions::{delete_community_item, rate_community_item};
 use crate::community::{
-    valid_author, valid_description, valid_name, valid_query, valid_rating, CommunityModeration,
+    suggested_publication_fields, valid_author, valid_description, valid_name, valid_query,
+    valid_rating, CommunityDeletionResponse, CommunityModeration, CommunityRatingResponse,
     MAXIMUM_JAVASCRIPT_INTEGER, MAXIMUM_PAGE_ITEMS, MODERATION_FIELDS,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -152,6 +154,13 @@ pub struct CandidateSkinPreview {
     pub data: String,
 }
 
+impl CandidateSkinPreview {
+    /// The preview as a `data:` URL, the form every settings page draws it from. Built only from an image whose type and leading bytes were checked when it was received.
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.content_type, self.data)
+    }
+}
+
 /// A downloaded package: the manifest verbatim and each image, keyed by its package-relative path, in standard base64. [`install`] checks it before writing anything.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -222,18 +231,6 @@ pub struct CandidateSkinSyncEntry {
 #[serde(deny_unknown_fields)]
 struct CandidateSkinSyncList {
     skins: Vec<CandidateSkinSyncEntry>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CandidateSkinRating {
-    stars: u8,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CandidateSkinUnpublishResponse {
-    deleted: bool,
 }
 
 pub trait CandidateSkinCommunityApi: Send + Sync + 'static {
@@ -409,41 +406,25 @@ impl CandidateSkinCommunityApi for BackendAccountClient {
     }
 
     fn rate_candidate_skin(&self, id: Uuid, stars: u8, token: &str) -> Result<(), AccountError> {
-        if id.is_nil() || !(1..=5).contains(&stars) {
-            return Err(AccountError::Invalid);
-        }
-        #[derive(Serialize)]
-        struct RatingRequest {
-            stars: u8,
-        }
-        let path = format!("/v1/community/candidate-skins/{}/rating", id.hyphenated());
-        let result = self.json::<CandidateSkinRating, _>(
-            Method::PUT,
-            &path,
-            Some(token),
-            Some(&RatingRequest { stars }),
-        )?;
-        if result.stars != stars {
-            return Err(AccountError::Unavailable);
-        }
-        Ok(())
+        rate_community_item(
+            "/v1/community/candidate-skins",
+            id,
+            stars,
+            |path, request| {
+                self.json::<CommunityRatingResponse, _>(
+                    Method::PUT,
+                    path,
+                    Some(token),
+                    Some(request),
+                )
+            },
+        )
     }
 
     fn unpublish_candidate_skin(&self, id: Uuid, token: &str) -> Result<(), AccountError> {
-        if id.is_nil() {
-            return Err(AccountError::Invalid);
-        }
-        let path = format!("/v1/community/candidate-skins/{}", id.hyphenated());
-        let result = self.json::<CandidateSkinUnpublishResponse, ()>(
-            Method::DELETE,
-            &path,
-            Some(token),
-            None,
-        )?;
-        if !result.deleted {
-            return Err(AccountError::Unavailable);
-        }
-        Ok(())
+        delete_community_item("/v1/community/candidate-skins", id, |path| {
+            self.json::<CommunityDeletionResponse, ()>(Method::DELETE, path, Some(token), None)
+        })
     }
 
     fn candidate_skin_sync_list(
@@ -1010,6 +991,30 @@ fn shared_preview(summary: &SkinSummary) -> Result<&str, &'static str> {
     Ok(preview)
 }
 
+/// What [`pack_as`] made of an installed package before anything is uploaded, so a publish dialog can show a refusal, or the size against the limit, before the user fills in the form. Serialized in the page's camelCase.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateSkinPackPreview {
+    pub suggested_name: String,
+    pub license: SkinLicense,
+    pub file_count: usize,
+    pub size: usize,
+}
+
+/// Check the installed package `id` under `root` against the sharing rules for `visibility` without uploading it.
+pub fn pack_preview(
+    root: &Path,
+    id: &str,
+    visibility: CandidateSkinVisibility,
+) -> Result<CandidateSkinPackPreview, &'static str> {
+    pack_as(root, id, visibility).map(|packed| CandidateSkinPackPreview {
+        suggested_name: packed.suggested_name,
+        license: packed.license,
+        file_count: packed.file_count,
+        size: packed.size,
+    })
+}
+
 /// 为 `root` 下已安装的包 `id` 生成发布内容：原样的 `skin.toml` 加上它引用的那几张图，不多不少。服务端的规则凡是客户端能检查的都在这里检查，各有各的错误码，服务端会拒收的包在上传前就被拒绝。每张图都按扩展名完整解码一遍，尺寸和整包像素合计也按服务端的上限检查；服务端重新编码之后的大小仍由服务端判断。
 pub fn pack(root: &Path, id: &str) -> Result<PackedSkin, &'static str> {
     pack_as(root, id, CandidateSkinVisibility::Public)
@@ -1105,26 +1110,8 @@ pub fn pack_as(
         |_| PACKAGE,
     )?;
     let manifest = String::from_utf8(manifest).map_err(|_| PACKAGE)?;
-    let suggested: String = summary.name.chars().take(32).collect();
-    let suggested = suggested.trim();
-    let suggested_name = if valid_name(suggested) {
-        suggested.to_owned()
-    } else {
-        id.chars().take(32).collect()
-    };
-    let description: String = summary
-        .description
-        .as_deref()
-        .unwrap_or_default()
-        .chars()
-        .take(280)
-        .collect();
-    let description = description.trim();
-    let suggested_description = if valid_description(description) {
-        description.to_owned()
-    } else {
-        String::new()
-    };
+    let (suggested_name, suggested_description) =
+        suggested_publication_fields(&summary.name, summary.description.as_deref(), id);
     Ok(PackedSkin {
         package_id: summary.id,
         manifest,

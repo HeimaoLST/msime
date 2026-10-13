@@ -167,47 +167,47 @@ test("disables the tablet switch while saving", () => {
   expect((screen.getByLabelText("滑动方向") as HTMLSelectElement).disabled).toBe(true);
 });
 
-test("offers the number keypad order only where the host has a nine-key digit layer", () => {
-  const onNumberKeypadOrderChange = vi.fn();
+test("offers the shuangpin key hint switch only where the host draws the hints", () => {
+  const onShuangpinKeyHintsChange = vi.fn();
   const { rerender } = render(<TouchKeyboardGeometrySection {...baseProps} />);
-  expect(screen.queryByText("数字键盘顺序")).toBeNull();
+  expect(screen.queryByRole("switch", { name: "双拼键位提示" })).toBeNull();
 
   rerender(
     <TouchKeyboardGeometrySection
       {...baseProps}
       tabletFullKeys={undefined}
       tabletSplitKeyboard={undefined}
-      numberKeypadOrder="phone"
-      onNumberKeypadOrderChange={onNumberKeypadOrderChange}
+      shuangpinKeyHints
+      onShuangpinKeyHintsChange={onShuangpinKeyHintsChange}
     />,
   );
-  expect(screen.getByText("数字键盘顺序")).toBeTruthy();
-  expect(screen.getByRole("radio", { name: "电话" })).toHaveProperty("checked", true);
-  fireEvent.click(screen.getByRole("radio", { name: "计算器" }));
-  expect(onNumberKeypadOrderChange).toHaveBeenCalledWith("calculator");
+  // 只有这一行时也要有「布局」分组来放它。
+  expect(screen.getAllByText("布局")).toHaveLength(1);
+  const hints = screen.getByRole("switch", { name: "双拼键位提示" }) as HTMLInputElement;
+  expect(hints.checked).toBe(true);
+  fireEvent.click(hints);
+  expect(onShuangpinKeyHintsChange).toHaveBeenCalledWith(false);
 });
 
-test("puts the number keypad order after 中文键盘 when the size group is already 布局", () => {
+test("puts the shuangpin key hint switch in the size group when that group is already 布局", () => {
   render(
     <TouchKeyboardGeometrySection
       {...baseProps}
       tabletFullKeys={undefined}
       tabletSplitKeyboard={undefined}
-      numberKeypadOrder="calculator"
-      onNumberKeypadOrderChange={vi.fn()}
+      shuangpinKeyHints={false}
+      onShuangpinKeyHintsChange={vi.fn()}
       layoutRows={<div>中文键盘</div>}
     />,
   );
   // HarmonyOS 手机的尺寸组就叫「布局」，不再另起一个同名分组。
   expect(screen.getAllByText("布局")).toHaveLength(1);
-  const layoutRow = screen.getByText("中文键盘");
-  const orderRow = screen.getByText("数字键盘顺序");
+  const hints = screen.getByRole("switch", { name: "双拼键位提示" }) as HTMLInputElement;
+  expect(hints.checked).toBe(false);
   expect(
-    layoutRow.compareDocumentPosition(orderRow) & Node.DOCUMENT_POSITION_FOLLOWING,
+    screen.getByText("中文键盘").compareDocumentPosition(hints) & Node.DOCUMENT_POSITION_FOLLOWING,
   ).toBeTruthy();
   expect(
-    orderRow.compareDocumentPosition(screen.getByText("键盘高度")) &
-      Node.DOCUMENT_POSITION_FOLLOWING,
+    hints.compareDocumentPosition(screen.getByText("键盘高度")) & Node.DOCUMENT_POSITION_FOLLOWING,
   ).toBeTruthy();
-  expect(screen.getByRole("radio", { name: "计算器" })).toHaveProperty("checked", true);
 });

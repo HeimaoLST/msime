@@ -143,7 +143,7 @@ gh release view <os>-vX.Y.Z --json tagName,isPrerelease,targetCommitish,assets -
   gh run view <id> --log | grep 'EveryAPI 发布说明生成失败'
   ```
 
-  android-v0.2.0 到 android-v0.3.0、linux-v0.11.0 这几次全是 `HTTP Error 403: Forbidden`：api.everyapi.ai 前面的 Cloudflare 按 User-Agent 拒绝 urllib 默认的 `Python-urllib/3.x`（error 1010），跟 token 和额度都无关。脚本现在会发明确的 User-Agent。如果又看到 403，先用 curl 带一个无效密钥打同一个地址：返回 401 说明网关是通的，问题在密钥；返回 403 和 `error code: 1010` 说明又被网关拦了。退回兜底版本的发布说明要告诉用户，可以按「新增 / 修复 / 改进」重写一份，用 `gh release edit <tag> --notes-file` 替换。改公开的发布说明前先问用户。
+  android-v0.2.0 到 android-v0.3.0、linux-v0.11.0 这几次全是 `HTTP Error 403: Forbidden`：api.everyapi.ai 前面的 Cloudflare 按 User-Agent 拒绝 urllib 默认的 `Python-urllib/3.x`（error 1010），跟 token 和额度都无关。脚本现在会发明确的 User-Agent。如果又看到 403，先用 curl 带一个无效密钥打同一个地址：返回 401 说明网关是通的，问题在密钥；返回 403 和 `error code: 1010` 说明又被网关拦了。看到的是 `HTTP Error 400: Bad Request` 就是请求参数被模型拒绝：windows-v0.2.1 是请求带了 `temperature`，GPT-5 系列只接受默认值。脚本现在不带它，并把响应正文一起打进日志，原因直接看那一行。退回兜底版本的发布说明要告诉用户，可以按「新增 / 修复 / 改进」重写一份，用 `gh release edit <tag> --notes-file` 替换。改公开的发布说明前先问用户。
 
 ## 收尾
 

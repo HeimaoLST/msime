@@ -1,5 +1,6 @@
 package app.msime.android;
 
+
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -13,7 +14,7 @@ import app.msime.android.KeyboardGeometry;
  */
 public final class KeyboardIconKey extends KeyboardPressButton {
     /** 键上画的图标。 */
-    public enum Kind { SHIFT, CAPS_LOCK, BACKSPACE, RETURN, EMOJI, CURSOR_LEFT, TOGGLE_NEXT }
+    public enum Kind { SHIFT, CAPS_LOCK, BACKSPACE, RETURN, EMOJI, CURSOR_LEFT, TOGGLE_NEXT, TRASH }
 
     public static final float ICON_DP = 22f;
 
@@ -21,13 +22,26 @@ public final class KeyboardIconKey extends KeyboardPressButton {
     private Kind kind;
     private boolean drawsText;
     private java.util.Set<String> textFaces = java.util.Set.of();
+    private final Paint cornerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private String cornerHint = "";
 
     public KeyboardIconKey(Context context, Kind kind) {
         super(context);
-        KeyboardGeometry.normalizeKeyCap(this);
+        KeyboardTypographyPolicy.normalizeKeyCap(this);
         this.kind = kind;
         ViewPolicy.setAllCapsFalse(this);
+        cornerPaint.setTextAlign(Paint.Align.RIGHT);
     }
+
+    /** 右上角的提示（组字中的「确认」长按能上屏译文时标「译」），字号和位置与字母键的角标相同（{@link KeyHintButton}），颜色取键面文字色；空串或 {@code null} 表示不画。只绘制、不进节点 text。 */
+    public void setCornerHint(String value) {
+        String next = TextPolicy.emptyIfNull(value);
+        if (cornerHint.equals(next)) return;
+        cornerHint = next;
+        invalidate();
+    }
+
+    public String cornerHint() { return cornerHint; }
 
     public Kind kind() { return kind; }
 
@@ -69,23 +83,38 @@ public final class KeyboardIconKey extends KeyboardPressButton {
             case EMOJI -> KeyboardIconPaths.Icon.KEY_EMOJI;
             case CURSOR_LEFT -> KeyboardIconPaths.Icon.CURSOR_LEFT;
             case TOGGLE_NEXT -> KeyboardIconPaths.Icon.TOGGLE_NEXT;
+            case TRASH -> KeyboardIconPaths.Icon.TRASH;
         };
     }
 
     @Override protected void onDraw(Canvas canvas) {
         if (showsText()) {
             super.onDraw(canvas);
+            drawCornerHint(canvas);
             return;
         }
-        int width = KeyboardGeometry.contentWidth(this);
-        int height = KeyboardGeometry.contentHeight(this);
-        float size = BoundsPolicy.atMost(KeyboardGeometry.shorterSide(width, height),
-            KeyboardGeometry.floatPixels(getContext(), ICON_DP));
+        int width = DimensionPolicy.contentWidth(this);
+        int height = DimensionPolicy.contentHeight(this);
+        float size = BoundsPolicy.atMost(DimensionPolicy.shorterSide(width, height),
+            DimensionPolicy.floatPixels(getContext(), ICON_DP));
         if (size <= 0) return;
         int color = getCurrentTextColor();
         if (!isEnabled()) color = ColorPolicy.withAlpha(color, 96f / 255f);
         KeyboardIconPaths.draw(canvas, paint, iconFor(kind),
             getPaddingLeft() + (width - size) / 2f, getPaddingTop() + (height - size) / 2f,
             size, color);
+        drawCornerHint(canvas);
+    }
+
+    private void drawCornerHint(Canvas canvas) {
+        if (cornerHint.isEmpty() || getWidth() <= 0 || getHeight() <= 0) return;
+        ViewPolicy.setTextSize(cornerPaint, KeyboardTypographyPolicy.keySp(getContext(), KeyHintButton.CORNER_HINT_SP));
+        cornerPaint.setColor(getCurrentTextColor());
+        cornerPaint.setAlpha(ColorPolicy.enabledAlpha(isEnabled(), 204, 96));
+        Paint.FontMetrics metrics = cornerPaint.getFontMetrics();
+        float baseline = DimensionPolicy.floatPixels(getContext(), KeyHintButton.CORNER_HINT_TOP_DP) - metrics.ascent;
+        canvas.drawText(cornerHint,
+            getWidth() - DimensionPolicy.floatPixels(getContext(), KeyHintButton.CORNER_HINT_RIGHT_DP), baseline,
+            cornerPaint);
     }
 }

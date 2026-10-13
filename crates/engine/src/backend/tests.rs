@@ -221,6 +221,35 @@ fn validate_dictionary_batch_stops_at_the_first_failure() {
 }
 
 #[test]
+fn invalid_dictionary_batch_does_not_reserve_unused_output() {
+    let raw = json!({
+        "operation": "validate_dictionary_batch",
+        "entries": (0..50)
+            .map(|_| json!({"kind": "pinyin", "code": "", "text": "合成"}))
+            .collect::<Vec<_>>(),
+    });
+    let request = super::request::Request::new(&raw).unwrap();
+    let single_raw = json!({
+        "operation": "validate_dictionary_batch",
+        "entries": [{"kind": "pinyin", "code": "", "text": "合成"}],
+    });
+    let single_request = super::request::Request::new(&single_raw).unwrap();
+    let (_, single_measurement) = crate::ime::personal_rerank::allocations::measure(|| {
+        super::validation::validate_dictionary_batch(&single_request)
+    });
+    let (result, measurement) = crate::ime::personal_rerank::allocations::measure(|| {
+        super::validation::validate_dictionary_batch(&request)
+    });
+
+    assert_eq!(result, Err(super::BackendError::InvalidDictionaryEntry));
+    assert_eq!(
+        measurement.peak_bytes, single_measurement.peak_bytes,
+        "首条无效时不应为剩余批次预留输出：单条 {}，批量 {}",
+        single_measurement.peak_bytes, measurement.peak_bytes
+    );
+}
+
+#[test]
 fn request_framing_rejects_oversized_or_malformed_input() {
     let resources = resources();
     let scratch = Path::new("/nonexistent-scratch");
@@ -312,6 +341,25 @@ fn date_time_validates_the_supplied_date() {
         .map(|item| item["word"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(words, ["2026年9月9日", "2026-09-09", "2026/09/09"]);
+    // 农历关键词也在服务端白名单里。
+    let summer = json!({"year": 2026, "month": 8, "day": 9, "weekday": 0, "hour": 8, "minute": 5, "second": 0});
+    for text in ["nl", "nongli", "yinli"] {
+        let response = run(
+            json!({"operation": "datetime", "text": text, "date": summer, "limit": 2}),
+            Path::new(""),
+        );
+        let words: Vec<_> = response["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["word"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            words,
+            ["丙午年六月二十七日", "丙午年六月二十七日 星期日"],
+            "{text}"
+        );
+    }
     for (text, date) in [
         ("hello", date.clone()),
         (
@@ -393,6 +441,71 @@ fn local_modes_read_the_shipped_catalogs() {
             "{operation}"
         );
     }
+}
+
+#[test]
+fn empty_catalog_page_does_not_reserve_result_page() {
+    let resources = resources();
+    let connection = Connection::open(resources.path().join(assets::OTHER_DICTIONARY)).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE emoji(emoji TEXT,category TEXT,keywords TEXT,sort_order INTEGER);
+             INSERT INTO emoji VALUES('😀','faces','smile',1);",
+        )
+        .unwrap();
+    let empty_request = json!({
+        "operation": "catalog",
+        "kind": "emoji",
+        "text": "missing",
+        "limit": 200,
+    });
+    let matching_request = json!({
+        "operation": "catalog",
+        "kind": "emoji",
+        "text": "smile",
+        "limit": 200,
+    });
+    let (empty_response, empty_allocations) =
+        crate::ime::personal_rerank::allocations::count(|| {
+            run(empty_request.clone(), resources.path())
+        });
+    let (matching_response, matching_allocations) =
+        crate::ime::personal_rerank::allocations::count(|| run(matching_request, resources.path()));
+    assert_eq!(empty_response["items"], json!([]));
+    assert!(!matching_response["items"].as_array().unwrap().is_empty());
+    assert!(
+        empty_allocations < matching_allocations,
+        "空 catalog 页不应申请结果缓冲：空页 {empty_allocations}，非空页 {matching_allocations}"
+    );
+}
+
+#[test]
+fn empty_dictionary_page_does_not_reserve_result_page() {
+    let resources = resources();
+    let empty_request = json!({
+        "operation": "dictionary",
+        "kind": "quick",
+        "text": "zzz",
+        "limit": 200,
+    });
+    let matching_request = json!({
+        "operation": "dictionary",
+        "kind": "quick",
+        "text": "em",
+        "limit": 200,
+    });
+    let (empty_response, empty_allocations) =
+        crate::ime::personal_rerank::allocations::count(|| {
+            run(empty_request.clone(), resources.path())
+        });
+    let (matching_response, matching_allocations) =
+        crate::ime::personal_rerank::allocations::count(|| run(matching_request, resources.path()));
+    assert_eq!(empty_response["entries"], json!([]));
+    assert!(!matching_response["entries"].as_array().unwrap().is_empty());
+    assert!(
+        empty_allocations < matching_allocations,
+        "空 dictionary 页不应申请结果缓冲：空页 {empty_allocations}，非空页 {matching_allocations}"
+    );
 }
 
 #[test]

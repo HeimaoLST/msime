@@ -1,5 +1,6 @@
 package app.msime.android;
 
+
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -8,9 +9,9 @@ import android.graphics.RectF;
 import java.util.function.IntSupplier;
 
 /**
- * Draws the tintable MSIME brand mark without baking a white square into the shortcut bar.
+ * 绘制随主题配色的水杉品牌标记。
  *
- * <p>新设计里品牌键是 30 dp 的 logoCirc 圆盘托着 18 dp 的 logoBg 标记，功能面板或任何面板打开时整个 40 dp 按钮垫一块圆角 12 dp 的 accentSoft。调用 {@link #setLogoColors} 之后按新设计画；没调用时保持原来只画一枚 accent 标记的样子，旧调用点不受影响。节点 text（如「更多」）照常保留给无障碍，不绘制。
+ * <p>新设计里品牌键是 34 dp 的 logoCirc 圆盘托着 28 dp 的 logoBg 标记，功能面板或任何面板打开时整个 40 dp 按钮垫一块圆角 12 dp 的 accentSoft。调用 {@link #setLogoColors} 之后按新设计画；没调用时保持原来只画一枚 accent 标记的样子，旧调用点不受影响。节点 text（如「更多」）照常保留给无障碍，不绘制。
  */
 public final class KeyboardBrandButton extends KeyboardPressButton {
     /**
@@ -20,9 +21,9 @@ public final class KeyboardBrandButton extends KeyboardPressButton {
      * its own 110-unit box; the two read at the same weight in the flat toolbar.
      */
     private static final float MARK_SCALE = 0.72f;
-    private static final float DISC_DP = 30f;
-    /** 设计是 18 dp；圆盘与浅色键盘底色接近时 18 dp 的 logo 比旁边 24 dp 的工具栏图标小一圈，按用户要求放大到同为 24 dp。 */
-    private static final float DISC_MARK_DP = 24f;
+    private static final float DISC_DP = 34f;
+    /** 品牌标记与旁边的工具栏图标同为 28 dp，使放大后的九键界面比例协调。 */
+    private static final float DISC_MARK_DP = 28f;
     private static final float ACTIVE_SIDE_DP = 40f;
     private static final float ACTIVE_RADIUS_DP = 12f;
 
@@ -63,20 +64,15 @@ public final class KeyboardBrandButton extends KeyboardPressButton {
     public boolean isPanelOpen() { return panelOpen; }
 
     @Override protected void onDraw(Canvas canvas) {
-        int width = KeyboardGeometry.contentWidth(this);
-        int height = KeyboardGeometry.contentHeight(this);
+        int width = DimensionPolicy.contentWidth(this);
+        int height = DimensionPolicy.contentHeight(this);
         if (designed) {
             drawDesigned(canvas, width, height);
             return;
         }
         // The text remains available to accessibility and device smoke tests, while the visible
         // shortcut is the same mark Apple turns into an accent-tinted template.
-        int color;
-        try {
-            color = accent.getAsInt();
-        } catch (RuntimeException error) {
-            color = Color.WHITE;
-        }
+        int color = KeyboardBrandMark.colorOrWhite(accent);
         mark.setColor(color);
         mark.setAlpha(ColorPolicy.enabledAlpha(isEnabled(), 255, 96));
         KeyboardBrandMark.draw(canvas, mark, getPaddingLeft(), getPaddingTop(), width, height,
@@ -84,22 +80,22 @@ public final class KeyboardBrandButton extends KeyboardPressButton {
     }
 
     private void drawDesigned(Canvas canvas, int width, int height) {
-        float shorter = KeyboardGeometry.shorterSide(width, height);
+        float shorter = DimensionPolicy.shorterSide(width, height);
         if (shorter <= 0) return;
         float centerX = getPaddingLeft() + width / 2f;
         float centerY = getPaddingTop() + height / 2f;
         if (panelOpen && Color.alpha(panelOpenFill) > 0) {
             float side = BoundsPolicy.atMost(shorter,
-                KeyboardGeometry.floatPixels(getContext(), ACTIVE_SIDE_DP));
+                DimensionPolicy.floatPixels(getContext(), ACTIVE_SIDE_DP));
             bounds.set(centerX - side / 2f, centerY - side / 2f, centerX + side / 2f,
                 centerY + side / 2f);
             fill.setColor(panelOpenFill);
             float radius = BoundsPolicy.atMost(side / 2f,
-                KeyboardGeometry.floatPixels(getContext(), ACTIVE_RADIUS_DP));
+                DimensionPolicy.floatPixels(getContext(), ACTIVE_RADIUS_DP));
             canvas.drawRoundRect(bounds, radius, radius, fill);
         }
         float disc = BoundsPolicy.atMost(shorter,
-            KeyboardGeometry.floatPixels(getContext(), DISC_DP));
+            DimensionPolicy.floatPixels(getContext(), DISC_DP));
         fill.setColor(discColor);
         canvas.drawCircle(centerX, centerY, disc / 2f, fill);
         float markSize = disc * (DISC_MARK_DP / DISC_DP);

@@ -7,7 +7,7 @@ use super::*;
 #[cfg(unix)]
 #[test]
 fn stale_sweep_does_not_follow_a_replaced_directory() {
-    use std::os::unix::fs::symlink;
+    use msime_path_trust::untrusted_symlink as symlink;
     use std::time::{Duration, SystemTime};
 
     let root = tempfile::tempdir().unwrap();
@@ -36,7 +36,7 @@ fn stale_sweep_does_not_follow_a_replaced_directory() {
 #[cfg(unix)]
 #[test]
 fn recovery_backup_does_not_follow_a_symlinked_directory() {
-    use std::os::unix::fs::symlink;
+    use msime_path_trust::untrusted_symlink as symlink;
 
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("preferences");
@@ -107,6 +107,73 @@ fn ctrl_space_defaults_on_and_persists_an_explicit_disable() {
 }
 
 #[test]
+fn caps_lock_language_switch_defaults_off_and_persists_an_explicit_enable() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let snapshot = store.load().unwrap();
+    assert!(!snapshot.preferences.keybindings.switch_language_caps_lock);
+    // 早于这个开关的文档没有这个键，读出来是关。
+    let mut value = serde_json::to_value(&snapshot.preferences).unwrap();
+    assert_eq!(
+        value["keybindings"]
+            .as_object_mut()
+            .unwrap()
+            .remove("switch_language_caps_lock"),
+        Some(false.into())
+    );
+    let legacy: Preferences = serde_json::from_value(value.clone()).unwrap();
+    assert!(!legacy.keybindings.switch_language_caps_lock);
+    // 打开它不改动其他切换键。
+    value["keybindings"]["switch_language_caps_lock"] = true.into();
+    let enabled: Preferences = serde_json::from_value(value).unwrap();
+    store.save(snapshot.revision, enabled).unwrap();
+    let keybindings = store.load().unwrap().preferences.keybindings;
+    assert_eq!(
+        keybindings,
+        KeybindingPreferences {
+            switch_language_caps_lock: true,
+            ..KeybindingPreferences::default()
+        }
+    );
+}
+
+#[test]
+fn japanese_toggle_defaults_off_and_persists_an_explicit_enable() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let snapshot = store.load().unwrap();
+    assert!(
+        !snapshot
+            .preferences
+            .keybindings
+            .toggle_japanese_ctrl_shift_j
+    );
+    // 早于这个开关的文档没有这个键，读出来是关。
+    let mut value = serde_json::to_value(&snapshot.preferences).unwrap();
+    assert_eq!(
+        value["keybindings"]
+            .as_object_mut()
+            .unwrap()
+            .remove("toggle_japanese_ctrl_shift_j"),
+        Some(false.into())
+    );
+    let legacy: Preferences = serde_json::from_value(value.clone()).unwrap();
+    assert!(!legacy.keybindings.toggle_japanese_ctrl_shift_j);
+    // 打开它不改动其他快捷键。
+    value["keybindings"]["toggle_japanese_ctrl_shift_j"] = true.into();
+    let enabled: Preferences = serde_json::from_value(value).unwrap();
+    store.save(snapshot.revision, enabled).unwrap();
+    let keybindings = store.load().unwrap().preferences.keybindings;
+    assert_eq!(
+        keybindings,
+        KeybindingPreferences {
+            toggle_japanese_ctrl_shift_j: true,
+            ..KeybindingPreferences::default()
+        }
+    );
+}
+
+#[test]
 fn voice_commit_mode_defaults_for_legacy_documents() {
     let mut value = serde_json::to_value(Preferences::default()).unwrap();
     value["voice_input"]
@@ -115,6 +182,41 @@ fn voice_commit_mode_defaults_for_legacy_documents() {
         .remove("commit_mode");
     let restored: Preferences = serde_json::from_value(value).unwrap();
     assert_eq!(restored.voice_input.commit_mode, "tsf");
+}
+
+#[test]
+fn the_retired_everyapi_asr_model_falls_back_to_the_current_default_on_load() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let load_with = |provider: &str, model: &str| {
+        let snapshot = store.load().unwrap();
+        let mut preferences = snapshot.preferences;
+        preferences.voice_input.asr_provider = provider.into();
+        preferences.voice_input.asr_model = model.into();
+        store.save(snapshot.revision, preferences).unwrap();
+        store.load().unwrap().preferences.voice_input.asr_model
+    };
+    // EveryAPI never served this model; an empty field lets the resolver use the current default.
+    assert_eq!(load_with("everyapi", "openai/whisper-large-v3-turbo"), "");
+    assert_eq!(load_with("everyapi", " openai/whisper-large-v3-turbo "), "");
+    let resolved = crate::voice::provider::mobile_voice_provider_configuration(&{
+        let mut preferences = store.load().unwrap().preferences;
+        preferences.voice_input.asr_token = "fixture-token".into();
+        preferences.voice_input.asr_endpoint.clear();
+        preferences
+    })
+    .unwrap();
+    assert_eq!(resolved.model, "volc.seedasr.sauc.duration");
+    // A model the user chose, or the same name under another provider, is left alone.
+    assert_eq!(
+        load_with("everyapi", "volc.seedasr.sauc.duration"),
+        "volc.seedasr.sauc.duration"
+    );
+    assert_eq!(load_with("everyapi", "custom-model"), "custom-model");
+    assert_eq!(
+        load_with("groq", "openai/whisper-large-v3-turbo"),
+        "openai/whisper-large-v3-turbo"
+    );
 }
 
 #[test]
@@ -179,6 +281,8 @@ fn ai_assistant_without_a_provider_key_loads_with_the_default_provider() {
 
 #[test]
 fn every_reachable_voice_provider_validates_and_others_are_rejected_on_save() {
+    // 阿里云百炼（#6017）走整句识别，id 是 `bailian`。
+    assert!(ASR_PROVIDERS.contains(&"bailian"));
     for provider in ASR_PROVIDERS {
         let preferences = Preferences {
             voice_input: VoiceInputPreferences {
@@ -491,6 +595,38 @@ fn app_logo_starts_hidden_but_an_upgraded_document_keeps_it() {
 }
 
 #[test]
+fn shuangpin_keymap_hint_stays_out_of_the_document_until_chosen() {
+    let defaults = Preferences::default();
+    assert_eq!(defaults.shuangpin_keymap_hint, None);
+    // 没选过时不写进文档，macOS 才分得出「从没选过」和「选了关」，前者仍读本机 defaults 里的旧选择。
+    let serialized = serde_json::to_value(&defaults).unwrap();
+    assert!(serialized.get("shuangpin_keymap_hint").is_none());
+    assert_eq!(
+        serde_json::from_value::<Preferences>(serialized)
+            .unwrap()
+            .shuangpin_keymap_hint,
+        None
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let chosen = Preferences {
+        shuangpin_keymap_hint: Some(false),
+        ..defaults
+    };
+    store.save(0, chosen).unwrap();
+    // 选了关也是一个选择，照样存下来，免得 macOS 退回去读旧的开。
+    assert_eq!(
+        store.load().unwrap().preferences.shuangpin_keymap_hint,
+        Some(false)
+    );
+    assert_eq!(
+        serde_json::to_value(store.load().unwrap().preferences).unwrap()["shuangpin_keymap_hint"],
+        false
+    );
+}
+
+#[test]
 fn cloud_candidates_start_off_but_an_upgraded_document_keeps_them() {
     let defaults = Preferences::default();
     assert!(!defaults.cloud_candidates);
@@ -601,6 +737,34 @@ fn wubi_code_hint_defaults_on_and_roundtrips() {
         !serde_json::from_str::<Preferences>(&serde_json::to_string(&disabled).unwrap())
             .unwrap()
             .wubi_code_hint
+    );
+}
+
+#[test]
+fn wubi_auto_commit_unique_defaults_on_and_roundtrips() {
+    let defaults = Preferences::default();
+    assert!(defaults.wubi_auto_commit_unique);
+
+    // 没有这个键的文档是本次之前写的，读出来仍然是开：那是当时唯一可能的实际行为。
+    let mut legacy = serde_json::to_value(&defaults).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("wubi_auto_commit_unique");
+    assert!(
+        serde_json::from_value::<Preferences>(legacy)
+            .unwrap()
+            .wubi_auto_commit_unique
+    );
+
+    let disabled = Preferences {
+        wubi_auto_commit_unique: false,
+        ..defaults
+    };
+    assert!(
+        !serde_json::from_str::<Preferences>(&serde_json::to_string(&disabled).unwrap())
+            .unwrap()
+            .wubi_auto_commit_unique
     );
 }
 
@@ -919,6 +1083,71 @@ fn generated_local_modes_are_off_by_default_and_when_absent() {
     let mut unknown = serde_json::to_value(Preferences::default()).unwrap();
     unknown["local_modes"]["calculator"] = true.into();
     assert!(serde_json::from_value::<Preferences>(unknown).is_err());
+}
+
+#[test]
+fn shift_letter_entry_defaults_on_and_survives_a_save() {
+    assert!(LocalModePreferences::default().shift_letter_entry);
+
+    // 早于总开关的文档没有这个键，读出来仍是开，其余模式开关照原样。
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let mut sparse = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+    let local_modes = sparse["preferences"]["local_modes"]
+        .as_object_mut()
+        .unwrap();
+    assert_eq!(local_modes.remove("shift_letter_entry"), Some(true.into()));
+    local_modes.insert("date_time".into(), false.into());
+    fs::write(store.path(), serde_json::to_vec(&sparse).unwrap()).unwrap();
+    let loaded = store.load().unwrap().preferences.local_modes;
+    assert!(loaded.shift_letter_entry && !loaded.date_time && loaded.unicode);
+
+    // 关掉总开关只改它自己，各模式开关保留。
+    let mut value = serde_json::to_value(Preferences::default()).unwrap();
+    value["local_modes"]["shift_letter_entry"] = false.into();
+    let saved = store
+        .save(0, serde_json::from_value(value).unwrap())
+        .unwrap();
+    let modes = store.load().unwrap();
+    assert_eq!(modes, saved);
+    let modes = modes.preferences.local_modes;
+    assert!(!modes.shift_letter_entry);
+    assert_eq!(
+        modes,
+        LocalModePreferences {
+            shift_letter_entry: false,
+            ..LocalModePreferences::default()
+        }
+    );
+}
+
+#[test]
+fn chaizi_is_unset_until_the_user_flips_it() {
+    // 缺省是 `None`：由宿主形态决定开关，文档里也不写这个键，旧版本照常读得懂。
+    assert_eq!(LocalModePreferences::default().chaizi, None);
+    let written = serde_json::to_value(Preferences::default()).unwrap();
+    assert!(written["local_modes"].get("chaizi").is_none());
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let snapshot = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+    fs::write(store.path(), serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    assert_eq!(store.load().unwrap().preferences.local_modes.chaizi, None);
+
+    // 用户动过开关后，明确的布尔值保存后原样读回。
+    for (revision, flag) in [false, true].into_iter().enumerate() {
+        let mut value = serde_json::to_value(Preferences::default()).unwrap();
+        value["local_modes"]["chaizi"] = flag.into();
+        let saved = store
+            .save(revision as u64, serde_json::from_value(value).unwrap())
+            .unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded, saved);
+        assert_eq!(loaded.preferences.local_modes.chaizi, Some(flag));
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(on_disk["preferences"]["local_modes"]["chaizi"], flag);
+    }
 }
 
 #[test]
@@ -1253,6 +1482,131 @@ fn game_compatibility_process_names_are_validated() {
 }
 
 #[test]
+fn app_input_mode_rules_stay_out_of_the_document_until_written() {
+    // 没有规则时不写这个键，没有它的旧版本照样能读；缺这个键的文档读成空表。
+    let serialized = serde_json::to_value(Preferences::default()).unwrap();
+    assert!(serialized.get("app_input_mode_rules").is_none());
+    assert!(Preferences::default().app_input_mode_rules.is_empty());
+
+    // macOS 的 bundle id 和 Windows 的进程基名放在同一张表里，保存再读回原样不变。
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let mut chosen = Preferences::default();
+    chosen
+        .app_input_mode_rules
+        .insert("com.apple.Terminal".into(), AppInputModeRule::English);
+    chosen
+        .app_input_mode_rules
+        .insert("code.exe".into(), AppInputModeRule::English);
+    chosen
+        .app_input_mode_rules
+        .insert("wechat.exe".into(), AppInputModeRule::Chinese);
+    let written = serde_json::to_value(&chosen).unwrap();
+    assert_eq!(
+        written["app_input_mode_rules"],
+        serde_json::json!({
+            "code.exe": "english",
+            "com.apple.Terminal": "english",
+            "wechat.exe": "chinese",
+        })
+    );
+    store.save(0, chosen.clone()).unwrap();
+    assert_eq!(
+        store.load().unwrap().preferences.app_input_mode_rules,
+        chosen.app_input_mode_rules
+    );
+    assert!(chosen
+        .restored_to_defaults()
+        .app_input_mode_rules
+        .is_empty());
+
+    // 模式只认 chinese 和 english。
+    let mut value = serialized;
+    value["app_input_mode_rules"] = serde_json::json!({ "code.exe": "global" });
+    assert!(serde_json::from_value::<Preferences>(value).is_err());
+}
+
+#[test]
+fn app_input_mode_rule_identifiers_are_validated() {
+    let invalid: [fn(&mut std::collections::BTreeMap<String, AppInputModeRule>); 8] = [
+        |rules| {
+            rules.insert(String::new(), AppInputModeRule::English);
+        },
+        |rules| {
+            rules.insert(" code.exe".into(), AppInputModeRule::English);
+        },
+        |rules| {
+            rules.insert(
+                r"C:\Program Files\code.exe".into(),
+                AppInputModeRule::English,
+            );
+        },
+        |rules| {
+            rules.insert("apps/code".into(), AppInputModeRule::English);
+        },
+        |rules| {
+            rules.insert("code\n.exe".into(), AppInputModeRule::English);
+        },
+        |rules| {
+            rules.insert(
+                "a".repeat(MAX_APP_INPUT_MODE_RULE_ID_BYTES + 1),
+                AppInputModeRule::English,
+            );
+        },
+        // Windows 不分大小写地比较进程名，只差大小写的两条会让同一个进程拿到两种模式。
+        |rules| {
+            rules.insert("Code.exe".into(), AppInputModeRule::English);
+            rules.insert("code.exe".into(), AppInputModeRule::Chinese);
+        },
+        |rules| {
+            for index in 0..=MAX_APP_INPUT_MODE_RULES {
+                rules.insert(format!("app{index}.exe"), AppInputModeRule::English);
+            }
+        },
+    ];
+    for (index, change) in invalid.into_iter().enumerate() {
+        let mut preferences = Preferences::default();
+        change(&mut preferences.app_input_mode_rules);
+        assert!(
+            matches!(
+                preferences.validate(),
+                Err(PreferencesError::InvalidAppInputModeRules)
+            ),
+            "{index}"
+        );
+    }
+
+    // 恰好上限的条数和字节数、带空格和非 ASCII 字符的程序名都合法。
+    let mut preferences = Preferences::default();
+    for index in 0..MAX_APP_INPUT_MODE_RULES - 2 {
+        preferences
+            .app_input_mode_rules
+            .insert(format!("app{index}.exe"), AppInputModeRule::Chinese);
+    }
+    preferences.app_input_mode_rules.insert(
+        "a".repeat(MAX_APP_INPUT_MODE_RULE_ID_BYTES),
+        AppInputModeRule::English,
+    );
+    preferences
+        .app_input_mode_rules
+        .insert("微信 beta.exe".into(), AppInputModeRule::English);
+    assert!(preferences.validate().is_ok());
+
+    // 拒绝的文档不会被保存。
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let mut rejected = Preferences::default();
+    rejected
+        .app_input_mode_rules
+        .insert("apps/code".into(), AppInputModeRule::English);
+    assert!(matches!(
+        store.save(0, rejected),
+        Err(PreferencesError::InvalidAppInputModeRules)
+    ));
+    assert!(!store.path().exists());
+}
+
+#[test]
 fn appearance_preferences_absent_defaults_and_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(dir.path());
@@ -1266,12 +1620,20 @@ fn appearance_preferences_absent_defaults_and_roundtrip() {
         "custom_theme",
         "candidate_follow_cursor",
         "input_mode_hud",
+        "input_mode_status_item",
+        "expand_candidates",
     ] {
         sparse["preferences"].as_object_mut().unwrap().remove(key);
     }
     let bytes = serde_json::to_vec(&sparse).unwrap();
     fs::write(store.path(), &bytes).unwrap();
     let loaded = store.load().unwrap();
+    // 菜单栏状态项是新加的开关，缺字段的旧文档和新装一样读成关闭。
+    assert!(!Preferences::default().input_mode_status_item);
+    assert!(!loaded.preferences.input_mode_status_item);
+    // 「展开候选」同样是新加的开关，缺字段的旧文档和新装都读成关闭。
+    assert!(!Preferences::default().expand_candidates);
+    assert!(!loaded.preferences.expand_candidates);
     // 缺这两项的旧文档按类型默认值读，保持跟随系统；触屏构建的新安装才用薄荷晨光（#2178），所以这里不能直接比 `Preferences::default()`。
     let mut expected = PreferencesSnapshot::default();
     expected.preferences.global_theme = crate::skin::theme::GlobalTheme::default();
@@ -1292,10 +1654,14 @@ fn appearance_preferences_absent_defaults_and_roundtrip() {
         toolbar_theme: SettingsTheme::Light,
         candidate_follow_cursor: false,
         input_mode_hud: false,
+        input_mode_status_item: true,
+        expand_candidates: true,
         ..Preferences::default()
     };
     let saved = store.save(0, preferences).unwrap();
     assert_eq!(store.load().unwrap(), saved);
+    assert!(store.load().unwrap().preferences.input_mode_status_item);
+    assert!(store.load().unwrap().preferences.expand_candidates);
 }
 
 #[test]
@@ -1446,6 +1812,7 @@ fn custom_theme_round_trips_every_part() {
     let custom_theme = CustomTheme {
         base: crate::skin::theme::GlobalTheme::Paper,
         candidate_skin: Some("sakura.v2".into()),
+        candidate_skin_dark: Some("night-sakura".into()),
         candidate_colors: CustomCandidateColors {
             text: Some("#101010".into()),
             number: Some("#202020".into()),
@@ -1495,12 +1862,18 @@ fn custom_theme_round_trips_every_part() {
         );
     }
 
-    let mut preferences = saved.preferences.clone();
-    preferences.custom_theme.base = crate::skin::theme::GlobalTheme::Custom;
-    assert!(matches!(
-        store.save(saved.revision, preferences),
-        Err(PreferencesError::InvalidCustomThemeBase)
-    ));
+    // `native` 只在部分宿主上提供，不能当自定义主题的底。
+    for base in [
+        crate::skin::theme::GlobalTheme::Custom,
+        crate::skin::theme::GlobalTheme::Native,
+    ] {
+        let mut preferences = saved.preferences.clone();
+        preferences.custom_theme.base = base;
+        assert!(matches!(
+            store.save(saved.revision, preferences),
+            Err(PreferencesError::InvalidCustomThemeBase)
+        ));
+    }
     assert_eq!(store.load().unwrap(), saved);
 }
 
@@ -1610,18 +1983,46 @@ fn mixed_input_legacy_roundtrip_and_bounds() {
         cfg!(any(windows, target_os = "macos"))
     );
     assert_eq!(fs::read(store.path()).unwrap(), bytes);
-    for mask in 0..8 {
+    // 只写前四项的旧对象（`japanese` 之前的文档、各宿主自己拼的对象）照样能读，日文混输按关处理。
+    let mut four_fields = legacy.clone();
+    four_fields["preferences"]["mixed_input"] = serde_json::json!({
+        "english": false,
+        "minimum_prefix": 3,
+        "emoji": true,
+        "kaomoji": true,
+    });
+    fs::write(store.path(), serde_json::to_vec(&four_fields).unwrap()).unwrap();
+    assert_eq!(
+        store.load().unwrap().preferences.mixed_input,
+        MixedInputPreferences {
+            english: false,
+            minimum_prefix: 3,
+            emoji: true,
+            kaomoji: true,
+            japanese: false,
+        }
+    );
+    fs::write(store.path(), &bytes).unwrap();
+    for mask in 0..16 {
         let preferences = Preferences {
             mixed_input: MixedInputPreferences {
                 english: mask & 1 != 0,
                 emoji: mask & 2 != 0,
                 kaomoji: mask & 4 != 0,
-                minimum_prefix: mask + 1,
+                japanese: mask & 8 != 0,
+                minimum_prefix: mask % 8 + 1,
             },
             ..Preferences::default()
         };
         let saved = store.save(u64::from(mask), preferences).unwrap();
         assert_eq!(store.load().unwrap(), saved);
+        // 关着时不写这个键，文档和加这一项之前逐字节一样；开着时才写出来。
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(
+            written["preferences"]["mixed_input"].get("japanese"),
+            (mask & 8 != 0).then_some(&serde_json::Value::Bool(true))
+        );
     }
     let saved = store.load().unwrap();
     for value in [0, 9, 255] {
@@ -1734,6 +2135,55 @@ fn word_character_legacy_roundtrip_and_conflict_protection() {
             Err(PreferencesError::ConflictingKeyBindings)
         ));
         assert_eq!(store.load().unwrap(), saved);
+    }
+}
+
+#[test]
+fn second_third_candidate_defaults_off_and_stays_out_of_default_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let defaults = Preferences::default();
+    assert!(!defaults.second_third_candidate.enabled);
+    assert_eq!(
+        defaults.second_third_candidate.keys,
+        SecondThirdCandidateKeys::SemicolonQuote
+    );
+    // 关闭时不写进文档：不认识这个键的旧版本（`deny_unknown_fields`）照样能读。
+    let document = serde_json::to_value(&defaults).unwrap();
+    assert!(document.get("second_third_candidate").is_none());
+    let saved = store.save(0, defaults.clone()).unwrap();
+    assert_eq!(
+        saved.preferences.second_third_candidate,
+        defaults.second_third_candidate
+    );
+
+    let enabled = Preferences {
+        second_third_candidate: SecondThirdCandidatePreferences {
+            enabled: true,
+            keys: SecondThirdCandidateKeys::SemicolonQuote,
+        },
+        ..Preferences::default()
+    };
+    assert_eq!(
+        serde_json::to_value(&enabled).unwrap()["second_third_candidate"],
+        serde_json::json!({"enabled": true, "keys": "semicolon_quote"})
+    );
+    let saved = store.save(saved.revision, enabled.clone()).unwrap();
+    assert_eq!(store.load().unwrap(), saved);
+    assert!(saved.preferences.second_third_candidate.enabled);
+
+    // 只写了 `enabled` 的对象按默认键位读。
+    let partial: SecondThirdCandidatePreferences =
+        serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
+    assert!(partial.enabled);
+    assert_eq!(partial.keys, SecondThirdCandidateKeys::SemicolonQuote);
+
+    // 未知的键位名和多余字段都拒绝，不会被悄悄读成某个默认键位。
+    for invalid in [
+        serde_json::json!({"enabled": true, "keys": "shift"}),
+        serde_json::json!({"enabled": true, "keys": "semicolon_quote", "extra": 1}),
+    ] {
+        assert!(serde_json::from_value::<SecondThirdCandidatePreferences>(invalid).is_err());
     }
 }
 
@@ -2050,7 +2500,7 @@ fn touch_keyboard_layout_defaults_and_roundtrips_without_rewriting_legacy_files(
         store.load().unwrap().preferences.touch_keyboard_layout,
         TouchKeyboardLayout::NineKey
     );
-    let saved = store
+    store
         .save(
             1,
             Preferences {
@@ -2062,6 +2512,23 @@ fn touch_keyboard_layout_defaults_and_roundtrips_without_rewriting_legacy_files(
     assert_eq!(
         store.load().unwrap().preferences.touch_keyboard_layout,
         TouchKeyboardLayout::Handwriting
+    );
+    let saved = store
+        .save(
+            2,
+            Preferences {
+                touch_keyboard_layout: TouchKeyboardLayout::FourteenKey,
+                ..Preferences::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved).unwrap()["preferences"]["touch_keyboard_layout"],
+        "fourteen_key"
+    );
+    assert_eq!(
+        store.load().unwrap().preferences.touch_keyboard_layout,
+        TouchKeyboardLayout::FourteenKey
     );
     let mut invalid = serde_json::to_value(saved).unwrap();
     invalid["preferences"]["touch_keyboard_layout"] = "future_layout".into();
@@ -2240,9 +2707,18 @@ fn cantonese_zhuyin_and_vietnamese_touch_schemes_are_appended_and_opt_in() {
             TouchKeyboardScheme::Tibetan,
             TouchKeyboardScheme::Stroke,
             TouchKeyboardScheme::ZhuyinNineKey,
+            TouchKeyboardScheme::FourteenKey,
+            TouchKeyboardScheme::NineKeyShuangpin,
         ]
     );
-    assert_eq!(TouchKeyboardScheme::ALL.len(), 17);
+    assert_eq!(TouchKeyboardScheme::ALL.len(), 19);
+    // 全拼 14 键和九键双拼也不在以前的默认列表里，没存列表的旧文档不会凭空多出它们。
+    for scheme in [
+        TouchKeyboardScheme::FourteenKey,
+        TouchKeyboardScheme::NineKeyShuangpin,
+    ] {
+        assert!(!TouchKeyboardScheme::LEGACY_DEFAULT_ENABLED.contains(&scheme));
+    }
     for (scheme, id) in [
         (TouchKeyboardScheme::Cantonese, "cantonese"),
         (TouchKeyboardScheme::Zhuyin, "zhuyin"),
@@ -2250,6 +2726,8 @@ fn cantonese_zhuyin_and_vietnamese_touch_schemes_are_appended_and_opt_in() {
         (TouchKeyboardScheme::Tibetan, "tibetan"),
         (TouchKeyboardScheme::Stroke, "stroke"),
         (TouchKeyboardScheme::ZhuyinNineKey, "zhuyin_nine_key"),
+        (TouchKeyboardScheme::FourteenKey, "fourteen_key"),
+        (TouchKeyboardScheme::NineKeyShuangpin, "nine_key_shuangpin"),
     ] {
         assert_eq!(serde_json::to_value(scheme).unwrap(), id);
         assert_eq!(
@@ -2437,23 +2915,26 @@ fn first_document_tells_a_fresh_install_from_an_upgrade() {
     assert_eq!(store.load().unwrap(), first);
 
     // 指向别处的 `user/dictionaries` 不算准备过。
-    let elsewhere = tempfile::tempdir().unwrap();
-    let linked = tempfile::tempdir().unwrap();
-    fs::create_dir_all(linked.path().join("user")).unwrap();
-    std::os::unix::fs::symlink(
-        elsewhere.path(),
-        linked.path().join("user").join("dictionaries"),
-    )
-    .unwrap();
-    assert_eq!(
-        PreferencesStore::new(linked.path())
-            .load()
-            .unwrap()
-            .preferences
-            .touch_keyboard_schemes
-            .enabled,
-        chinese
-    );
+    #[cfg(unix)]
+    {
+        let elsewhere = tempfile::tempdir().unwrap();
+        let linked = tempfile::tempdir().unwrap();
+        fs::create_dir_all(linked.path().join("user")).unwrap();
+        std::os::unix::fs::symlink(
+            elsewhere.path(),
+            linked.path().join("user").join("dictionaries"),
+        )
+        .unwrap();
+        assert_eq!(
+            PreferencesStore::new(linked.path())
+                .load()
+                .unwrap()
+                .preferences
+                .touch_keyboard_schemes
+                .enabled,
+            chinese
+        );
+    }
 
     // 不是 full 的版本升级时同样按以前的默认列表，只是收窄到本版本提供的入口：拼音版的日文和韩文入口本来就没有。
     let pinyin = crate::edition::Edition::by_id("pinyin").unwrap();
@@ -2481,6 +2962,8 @@ fn touch_keyboard_spacing_uses_apple_defaults_bounds_and_legacy_roundtrip() {
         "touch_keyboard_height_adjustment",
         "touch_voice_shortcut",
         "touch_number_keypad_order",
+        "touch_twenty_six_key_number_layout",
+        "touch_shuangpin_key_hints",
     ] {
         legacy["preferences"].as_object_mut().unwrap().remove(key);
     }
@@ -2495,6 +2978,13 @@ fn touch_keyboard_spacing_uses_apple_defaults_bounds_and_legacy_roundtrip() {
         loaded.preferences.touch_number_keypad_order,
         NumberKeypadOrder::Phone
     );
+    assert_eq!(
+        loaded.preferences.touch_twenty_six_key_number_layout,
+        TwentySixKeyNumberLayout::Row
+    );
+    // 旧文档没有这个键：双拼键位提示照旧显示。
+    assert!(loaded.preferences.touch_shuangpin_key_hints);
+    assert!(Preferences::default().touch_shuangpin_key_hints);
     assert_eq!(fs::read(store.path()).unwrap(), bytes);
 
     let saved = store
@@ -2506,10 +2996,14 @@ fn touch_keyboard_spacing_uses_apple_defaults_bounds_and_legacy_roundtrip() {
                 touch_keyboard_height_adjustment: 24,
                 touch_voice_shortcut: true,
                 touch_number_keypad_order: NumberKeypadOrder::Calculator,
+                touch_twenty_six_key_number_layout: TwentySixKeyNumberLayout::NineKey,
+                touch_shuangpin_key_hints: false,
                 ..Preferences::default()
             },
         )
         .unwrap();
+    assert!(!saved.preferences.touch_shuangpin_key_hints);
+    assert!(!store.load().unwrap().preferences.touch_shuangpin_key_hints);
     assert_eq!(
         saved.preferences.touch_number_keypad_order,
         NumberKeypadOrder::Calculator
@@ -2517,6 +3011,14 @@ fn touch_keyboard_spacing_uses_apple_defaults_bounds_and_legacy_roundtrip() {
     assert_eq!(
         serde_json::to_value(NumberKeypadOrder::Calculator).unwrap(),
         "calculator"
+    );
+    assert_eq!(
+        saved.preferences.touch_twenty_six_key_number_layout,
+        TwentySixKeyNumberLayout::NineKey
+    );
+    assert_eq!(
+        serde_json::to_value(TwentySixKeyNumberLayout::NineKey).unwrap(),
+        "nine_key"
     );
     assert_eq!(saved.preferences.touch_key_spacing_tenths, 35);
     assert_eq!(saved.preferences.touch_row_spacing_tenths, 95);
@@ -2567,6 +3069,7 @@ fn helpcode_legacy_defaults_and_independent_schemes_roundtrip() {
         HelpcodeSchema::Ziranma,
         HelpcodeSchema::Shouyou2,
         HelpcodeSchema::Shouyouplus,
+        HelpcodeSchema::Wubi86,
         HelpcodeSchema::Xiaohe,
     ]
     .into_iter()
@@ -2591,7 +3094,7 @@ fn helpcode_legacy_defaults_and_independent_schemes_roundtrip() {
         .unwrap()
         .replace("xiaohe", "unknown");
     fs::write(store.path(), &unknown).unwrap();
-    assert!(store.save(5, Preferences::default()).is_err());
+    assert!(store.save(6, Preferences::default()).is_err());
     assert_eq!(fs::read_to_string(store.path()).unwrap(), unknown);
 }
 
@@ -2663,6 +3166,37 @@ fn traditional_chinese_output_legacy_default_and_enabled_roundtrip() {
     assert!(store.load().unwrap().preferences.traditional_chinese_output);
 }
 
+// 「中英文之间加空格」默认关，关着时不写进文档：更旧的版本读同一份文档不会因为不认识这个键而整份失败。打开后保存能读回。
+#[test]
+fn chinese_english_spacing_defaults_off_is_omitted_and_roundtrips() {
+    let defaults = Preferences::default();
+    assert!(!defaults.chinese_english_spacing);
+    let written = serde_json::to_value(&defaults).unwrap();
+    assert!(written.get("chinese_english_spacing").is_none());
+    assert!(
+        !serde_json::from_value::<Preferences>(written)
+            .unwrap()
+            .chinese_english_spacing
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let saved = store
+        .save(
+            0,
+            Preferences {
+                chinese_english_spacing: true,
+                ..Preferences::default()
+            },
+        )
+        .unwrap();
+    assert!(saved.preferences.chinese_english_spacing);
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(on_disk["preferences"]["chinese_english_spacing"], true);
+    assert_eq!(store.load().unwrap(), saved);
+}
+
 #[test]
 fn shuangpin_profiles_preserve_legacy_files_and_reject_unknown_values() {
     let dir = tempfile::tempdir().unwrap();
@@ -2701,6 +3235,126 @@ fn shuangpin_profiles_preserve_legacy_files_and_reject_unknown_values() {
     assert!(store.load().is_err());
     assert!(store.save(revision, Preferences::default()).is_err());
     assert_eq!(fs::read_to_string(store.path()).unwrap(), unknown);
+}
+
+#[test]
+fn custom_shuangpin_profile_round_trips_and_stays_out_of_documents_without_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let saved = store.save(0, Preferences::default()).unwrap();
+    assert!(!fs::read_to_string(store.path())
+        .unwrap()
+        .contains("shuangpin_custom_profile"));
+    let mut preferences = Preferences {
+        scheme: InputScheme::Shuangpin,
+        shuangpin_profile: ShuangpinProfile::Custom,
+        ..Preferences::default()
+    };
+    let table = &mut preferences.shuangpin_custom_profile;
+    table.initials.insert("zh".into(), "a".into());
+    table.finals.insert("ing".into(), ";".into());
+    table.zero_initials.insert("a".into(), "oa".into());
+    let saved = store.save(saved.revision, preferences.clone()).unwrap();
+    let document: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(store.path()).unwrap()).unwrap();
+    assert_eq!(document["preferences"]["shuangpin_profile"], "custom");
+    assert_eq!(
+        document["preferences"]["shuangpin_custom_profile"],
+        serde_json::json!({
+            "initials": { "zh": "a" },
+            "finals": { "ing": ";" },
+            "zero_initials": { "a": "oa" }
+        })
+    );
+    assert_eq!(store.load().unwrap(), saved);
+    // 结构上的限制：单位只能是小写字母，键是可见 ASCII，大小有上限。合不合法是 Engine 的事，这里不判断。
+    for (unit, key) in [("Zh", "a"), ("zh", "é"), ("zh", "a b"), ("zhzhzhzhz", "a")] {
+        let mut invalid = preferences.clone();
+        invalid.shuangpin_custom_profile.initials = [(unit.to_owned(), key.to_owned())].into();
+        assert!(
+            matches!(
+                invalid.validate(),
+                Err(PreferencesError::InvalidShuangpinCustomProfile)
+            ),
+            "{unit:?} {key:?}"
+        );
+    }
+    let mut oversized = preferences.clone();
+    oversized.shuangpin_custom_profile.finals = (0..65u8)
+        .map(|index| {
+            (
+                format!(
+                    "{}{}",
+                    char::from(b'a' + index / 26),
+                    char::from(b'a' + index % 26)
+                ),
+                "q".to_owned(),
+            )
+        })
+        .collect();
+    assert!(matches!(
+        oversized.validate(),
+        Err(PreferencesError::InvalidShuangpinCustomProfile)
+    ));
+}
+
+#[test]
+fn nine_key_shuangpin_preferences_round_trip_and_stay_out_of_documents_without_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let saved = store.save(0, Preferences::default()).unwrap();
+    let text = fs::read_to_string(store.path()).unwrap();
+    // 没用过九键双拼的文档与以前的版本相同，以前的版本照样读得懂。
+    assert!(!text.contains("nine_key_shuangpin"));
+    assert_eq!(
+        Preferences::default().nine_key_shuangpin_profile,
+        NineKeyShuangpinProfile::Migala3
+    );
+    let mut preferences = Preferences {
+        touch_keyboard_layout: TouchKeyboardLayout::NineKeyShuangpin,
+        nine_key_shuangpin_profile: NineKeyShuangpinProfile::Custom,
+        ..Preferences::default()
+    };
+    let table = &mut preferences.nine_key_shuangpin_custom_profile;
+    table.initials.insert("zh".into(), "8".into());
+    table.finals.insert("ong".into(), "1".into());
+    table.zero_initials.insert("a".into(), "22".into());
+    let saved = store.save(saved.revision, preferences.clone()).unwrap();
+    let document: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(store.path()).unwrap()).unwrap();
+    assert_eq!(
+        document["preferences"]["touch_keyboard_layout"],
+        "nine_key_shuangpin"
+    );
+    assert_eq!(
+        document["preferences"]["nine_key_shuangpin_profile"],
+        "custom"
+    );
+    assert_eq!(
+        document["preferences"]["nine_key_shuangpin_custom_profile"],
+        serde_json::json!({
+            "initials": { "zh": "8" },
+            "finals": { "ong": "1" },
+            "zero_initials": { "a": "22" }
+        })
+    );
+    assert_eq!(store.load().unwrap(), saved);
+    for (profile, id) in [
+        (NineKeyShuangpinProfile::Migala2, "migala2"),
+        (NineKeyShuangpinProfile::Migala3, "migala3"),
+        (NineKeyShuangpinProfile::Gushi2Low, "gushi2_low"),
+        (NineKeyShuangpinProfile::Custom, "custom"),
+    ] {
+        assert_eq!(serde_json::to_value(profile).unwrap(), id);
+    }
+    // 两张自定义表互不影响：九键的表不合规矩时报它自己的错。
+    let mut invalid = preferences.clone();
+    invalid.nine_key_shuangpin_custom_profile.initials = [("ZH".to_owned(), "8".to_owned())].into();
+    assert!(matches!(
+        invalid.validate(),
+        Err(PreferencesError::InvalidNineKeyShuangpinCustomProfile)
+    ));
+    assert!(preferences.shuangpin_custom_profile.is_empty());
 }
 
 #[test]
@@ -2772,7 +3426,7 @@ fn invalid_values_do_not_change_disk() {
     let dir = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(dir.path());
     let initial = store.save(0, Preferences::default()).unwrap();
-    for size in [0, 10, 255] {
+    for size in [0, 11, 255] {
         assert!(matches!(
             store.save(
                 1,
@@ -2818,7 +3472,10 @@ fn default_ai_assistant_requests_carry_the_builtin_associative_prompt() {
     ai.enabled = true;
     ai.endpoint = "https://synthetic.invalid/chat".into();
     ai.model = "synthetic-model".into();
-    ai.token = "synthetic-token".into();
+    ai.tokens.insert(
+        "https://synthetic.invalid:443".into(),
+        "synthetic-token".into(),
+    );
     let request = crate::ai::AiSuggestionRequest {
         segmented_pinyin: vec!["shu".into(), "ru".into()],
         context: String::new(),
@@ -3304,6 +3961,41 @@ fn smart_punctuation_sub_switches_survive_a_save() {
     }
 }
 
+// 「大写锁定时使用英文标点」默认关：新装和缺这个键的旧文档都按关读入，打开后保存能读回。
+#[test]
+fn caps_lock_ascii_punctuation_defaults_off_and_survives_a_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    assert!(!Preferences::default().caps_lock_ascii_punctuation);
+
+    let mut legacy = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+    legacy["preferences"]
+        .as_object_mut()
+        .unwrap()
+        .remove("caps_lock_ascii_punctuation")
+        .unwrap();
+    fs::write(store.path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert!(
+        !store
+            .load()
+            .unwrap()
+            .preferences
+            .caps_lock_ascii_punctuation
+    );
+
+    let saved = store
+        .save(
+            0,
+            Preferences {
+                caps_lock_ascii_punctuation: true,
+                ..Preferences::default()
+            },
+        )
+        .unwrap();
+    assert!(saved.preferences.caps_lock_ascii_punctuation);
+    assert_eq!(store.load().unwrap(), saved);
+}
+
 // The source ships every smart-punctuation switch disabled, and the running host reads this document rather than the installed template. A fresh Windows or macOS profile must therefore start with the family off, macOS following the desktop product it ports; Linux, Android, iOS and HarmonyOS keep what they have shipped. A stored value is never reinterpreted either way.
 #[test]
 fn smart_punctuation_first_run_follows_the_source_on_desktop_ports() {
@@ -3475,7 +4167,7 @@ fn error_wordings_the_harmony_host_matches_on() {
     );
     assert_eq!(
         PreferencesError::InvalidPageSize.to_string(),
-        "candidate page size must be between 1 and 9"
+        "candidate page size must be between 1 and 10"
     );
     assert_eq!(
         PreferencesError::InvalidFrequency.to_string(),
@@ -3535,6 +4227,8 @@ fn restoring_defaults_keeps_what_cannot_be_retyped() {
     edited.tencent_tmt.secret_key = "fixture-tencent-key".into();
     edited.niutrans.app_id = "fixture-niutrans-app".into();
     edited.niutrans.apikey = "fixture-niutrans-key".into();
+    edited.cloud_clipboard_relay.url = "https://relay.example.test/msime".into();
+    edited.cloud_clipboard_relay.token = "fixture-relay-token".into();
 
     let restored = edited.restored_to_defaults();
     let defaults = Preferences::default();
@@ -3564,6 +4258,7 @@ fn restoring_defaults_keeps_what_cannot_be_retyped() {
         "fixture-tencent-id",
         "fixture-tencent-key",
         "fixture-niutrans-key",
+        "fixture-relay-token",
     ] {
         assert!(
             document.contains(secret),
@@ -3583,6 +4278,10 @@ fn restoring_defaults_keeps_what_cannot_be_retyped() {
     assert_eq!(
         restored.voice_input.asr_model_mirror,
         "https://mirror.example.test/"
+    );
+    assert_eq!(
+        restored.cloud_clipboard_relay.url,
+        "https://relay.example.test/msime"
     );
     // The seeding marker is not a setting: clearing it would re-seed rules the user turned off.
     assert!(restored.fuzzy_pinyin.seeded);
@@ -4087,8 +4786,48 @@ fn candidate_window_style_rejects_out_of_range_values() {
     ));
     assert_eq!(
         PreferencesError::InvalidCandidateWindowStyle.to_string(),
-        "candidate window scale must be 50-200%, opacity 50-100% and corner radius 0-32"
+        "candidate window scale must be 50-200%, opacity 50-100%, corner radius 0-32 and padding 0-16"
     );
+}
+
+/// 卡片内边距缺省时不写进文档，旧版设置应用读得了；0 是真的选择，不能和「跟随皮肤」混成一样；超过 16 拒收（#7316）。
+#[test]
+fn candidate_padding_is_absent_by_default_and_bounded() {
+    let preferences = Preferences::default();
+    assert_eq!(preferences.candidate_padding, None);
+    let value = serde_json::to_value(&preferences).unwrap();
+    assert!(value.get("candidate_padding").is_none());
+
+    for padding in [0, 2, 16] {
+        let padded = Preferences {
+            candidate_padding: Some(padding),
+            ..Preferences::default()
+        };
+        assert!(padded.validate().is_ok(), "{padding} was refused");
+        let value = serde_json::to_value(&padded).unwrap();
+        assert_eq!(value["candidate_padding"], padding);
+        let decoded: Preferences = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, padded);
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let padded = Preferences {
+        candidate_padding: Some(3),
+        ..Preferences::default()
+    };
+    store.save(0, padded.clone()).unwrap();
+    assert_eq!(store.load().unwrap().preferences, padded);
+    assert!(matches!(
+        store.save(
+            1,
+            Preferences {
+                candidate_padding: Some(17),
+                ..Preferences::default()
+            }
+        ),
+        Err(PreferencesError::InvalidCandidateWindowStyle)
+    ));
 }
 
 fn wubi_edition() -> &'static crate::edition::Edition {
@@ -4391,12 +5130,15 @@ const NOT_CREDENTIALS: &[&str] = &[
     "floating_toolbar.screen_keyboard",
     "keybindings",
     "screen_keyboard_theme",
+    "second_third_candidate.keys",
     "sentence_association.neural_keyboard",
     "touch_key_spacing_tenths",
     "touch_keyboard_height_adjustment",
     "touch_keyboard_layout",
     "touch_keyboard_schemes",
     "touch_number_keypad_order",
+    "touch_shuangpin_key_hints",
+    "touch_twenty_six_key_number_layout",
     "voice_input.hotkey_ctrl_f9",
     "voice_input.hotkey_ctrl_win",
     "voice_input.hotkey_hold_space_lock",
@@ -4451,6 +5193,8 @@ fn every_credential_like_preference_field_is_listed() {
     // 默认值里没有键盘皮肤（`None`），填上一份，扫描才覆盖得到这一段字段。
     let mut scanned = Preferences::default();
     scanned.custom_theme.keyboard = Some(TouchKeyboardSkinDesign::mint_morning());
+    // 二三候选键位关着时不写进文档，打开它，扫描才看得到 `keys`。
+    scanned.second_third_candidate.enabled = true;
     let document = serde_json::to_value(with_every_credential(scanned)).unwrap();
     let mut paths = Vec::new();
     credential_like_paths(&document, "", &mut paths);
@@ -4519,6 +5263,8 @@ fn diagnostic_snapshot_strips_secrets_from_endpoints() {
         "https://polish.example.com/chat?key=secret-value".into();
     preferences.ai_assistant.endpoint = "https://secret-value@ai.example.com/v1".into();
     preferences.custom_translation.endpoint = "not a url secret-value".into();
+    preferences.cloud_clipboard_relay.url =
+        "https://relay.example.com/msime?token=secret-value".into();
     let redacted = preferences.redacted_for_diagnostics();
     assert!(!redacted.to_string().contains("secret-value"), "{redacted}");
     assert_eq!(
@@ -4534,6 +5280,10 @@ fn diagnostic_snapshot_strips_secrets_from_endpoints() {
         "https://ai.example.com/v1"
     );
     assert_eq!(redacted["custom_translation"]["endpoint"], REDACTED);
+    assert_eq!(
+        redacted["cloud_clipboard_relay"]["url"],
+        "https://relay.example.com/msime"
+    );
 
     // 没填的地址照样是空的。
     preferences.custom_translation.endpoint.clear();
@@ -4563,4 +5313,59 @@ fn restoring_defaults_keeps_exactly_the_listed_credentials() {
             _ => panic!("{path} changed type"),
         }
     }
+}
+
+/// 中继的地址和令牌要么都空，要么都合规；没配置时不写进文档，旧版本读得了。
+#[test]
+fn cloud_clipboard_relay_is_both_or_nothing_and_left_out_until_configured() {
+    let defaults = Preferences::default();
+    let document = serde_json::to_value(&defaults).unwrap();
+    assert!(document.get("cloud_clipboard_relay").is_none());
+    assert!(!defaults.cloud_clipboard_relay.is_configured());
+
+    let configured = |url: &str, token: &str| {
+        let mut preferences = Preferences::default();
+        preferences.cloud_clipboard_relay.url = url.into();
+        preferences.cloud_clipboard_relay.token = token.into();
+        preferences
+    };
+    let token = "synthetic-relay-token";
+    for (url, token, valid) in [
+        ("https://relay.example.test", token, true),
+        ("https://relay.example.test/msime/", token, true),
+        ("http://127.0.0.1:8787", token, true),
+        ("http://localhost:8787/msime", token, true),
+        ("http://relay.example.test", token, false),
+        ("https://relay.example.test/?q=1", token, false),
+        ("https://user:secret@relay.example.test", token, false),
+        ("https://relay.example.test#frag", token, false),
+        ("ftp://relay.example.test", token, false),
+        ("https://relay.example.test", "", false),
+        ("https://relay.example.test", "too-short", false),
+        ("https://relay.example.test", "has a space in it", false),
+        ("", token, false),
+    ] {
+        let preferences = configured(url, token);
+        assert_eq!(
+            preferences.validate().is_ok(),
+            valid,
+            "{url} {token}: {:?}",
+            preferences.validate()
+        );
+        if !valid {
+            assert!(matches!(
+                preferences.validate(),
+                Err(PreferencesError::InvalidCloudClipboardRelay)
+            ));
+        }
+    }
+
+    let preferences = configured("https://relay.example.test", token);
+    let text = serde_json::to_string(&preferences).unwrap();
+    let back: Preferences = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        back.cloud_clipboard_relay,
+        preferences.cloud_clipboard_relay
+    );
+    assert!(back.cloud_clipboard_relay.is_configured());
 }

@@ -120,8 +120,19 @@ struct BackendAccountClient: Sendable {
       return Self.moderationMessages[code]
     }
 
+    /// 云剪贴板端到端加密驱动给出的错误码对应的中文提示（`docs/cloud-clipboard-e2e.md`）。这些码只在云剪贴板里出现，所以不按状态码区分。
+    static let clipboardMessages = [
+      "clipboard_device_pending": "这台设备还在等待批准，请在已经能用云剪贴板的设备上点「允许」后再试。",
+      "clipboard_sync_disabled": "云剪贴板未开启",
+      "clipboard_key_conflict": "云剪贴板的密钥刚被其他设备更换，请稍后重试。",
+      "clipboard_device_limit": "这个账号登记的设备已达 20 台，请先在设备列表里移除不用的设备。",
+      "clipboard_e2e_required": "云剪贴板已改为端到端加密，请把所有设备上的水杉输入法升级到最新版本。",
+      "invalid_clipboard_text": "内容为空、超过 4000 字或含有不支持的字符，不能发到云剪贴板。",
+    ]
+
     var errorDescription: String? {
       if let moderationMessage { return moderationMessage }
+      if let code, let message = Self.clipboardMessages[code] { return message }
       switch status {
       case 400: return "请求内容无效或超出大小限制，请检查后重试。"
       case 401: return "登录已失效，请重新登录。"
@@ -235,6 +246,22 @@ struct BackendAccountClient: Sendable {
     }
     try Task.checkCancellation()
     return data
+  }
+  /// 发一个请求，不论状态码都把状态码和正文交回，由调用方（云剪贴板的端到端加密驱动）自己判断成败；只有传输失败（断网、超时、正文超限、不是 HTTP 响应）才抛错。正文不超过 `maximumResponseBytes`，不跟随重定向。
+  func exchange(_ method: String, _ path: String, token: String, body: Data? = nil,
+                timeout: TimeInterval = 30, maximumResponseBytes: Int) async throws -> (status: Int, body: Data) {
+    guard (1...48 * 1024 * 1024).contains(maximumResponseBytes) else { throw Failure(status: 0) }
+    let request = try makeRequest(method, path, token: token, body: body, timeout: timeout)
+    let (bytes, response) = try await session.bytes(for: request)
+    guard let response = response as? HTTPURLResponse else { throw Failure(status: 0) }
+    guard response.expectedContentLength <= maximumResponseBytes else { throw Failure(status: 0) }
+    var data = Data()
+    for try await byte in bytes {
+      guard data.count < maximumResponseBytes else { throw Failure(status: 0) }
+      data.append(byte)
+    }
+    try Task.checkCancellation()
+    return (response.statusCode, data)
   }
   /// `error.code` of a refusal body `{"error":{"code":...}}`, reading at most 4 KiB. The server's message text is never shown.
   static func errorCode(_ bytes: URLSession.AsyncBytes) async throws -> String? {

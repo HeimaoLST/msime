@@ -47,16 +47,16 @@ public final class CenteredGlyphSpan extends ReplacementSpan {
             fm.bottom = metrics.bottom;
             fm.leading = metrics.leading;
         }
-        paint.setTextSize(size * scale);
+        ViewPolicy.setTextSize(paint, size * scale);
         int width = Math.round(paint.measureText(text, start, end));
-        paint.setTextSize(size);
+        ViewPolicy.setTextSize(paint, size);
         return width;
     }
 
     @Override public void draw(Canvas canvas, CharSequence text, int start, int end, float x, int top, int y,
                                int bottom, Paint paint) {
         float size = paint.getTextSize();
-        paint.setTextSize(size * scale);
+        ViewPolicy.setTextSize(paint, size * scale);
         String glyph = text.subSequence(start, end).toString();
         paint.getTextBounds(glyph, 0, glyph.length(), ink);
         float width = paint.measureText(glyph);
@@ -65,6 +65,6 @@ public final class CenteredGlyphSpan extends ReplacementSpan {
         float baseline = centerY - (ink.top + ink.bottom) / 2f;
         float left = x + (width - ink.width()) / 2f - ink.left;
         canvas.drawText(glyph, left, baseline, paint);
-        paint.setTextSize(size);
+        ViewPolicy.setTextSize(paint, size);
     }
 }

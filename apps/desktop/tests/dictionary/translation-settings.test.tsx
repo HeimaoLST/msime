@@ -1,15 +1,18 @@
 // @vitest-environment jsdom
 import { testHost } from "../support/host";
-import { settingsFormReady, saveSettingsNow } from "../support/settings-form";
+import { selectSettingsTab, settingsFormReady, saveSettingsNow } from "../support/settings-form";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
   SettingsPage,
+  customTranslationKeyIssue,
+  isDeepLApiEndpoint,
   translationEndpointIssue,
   type Preferences,
   type SettingsClient,
   type Snapshot,
 } from "@msime/ui";
+import customTranslationContract from "../../../../shared/contracts/custom-translation/cases.json";
 
 afterEach(cleanup);
 
@@ -38,6 +41,7 @@ async function mount(preferences: Record<string, unknown> = {}) {
   // The translation controls live on the 输入 page; other pages are hidden, and
   // hidden subtrees are absent from the accessibility tree.
   fireEvent.click(screen.getByRole("button", { name: "标点与翻译" }));
+  selectSettingsTab("翻译服务");
   return mounted;
 }
 
@@ -71,6 +75,37 @@ test("a scheme-less endpoint warns instead of silently returning no glosses", as
   fireEvent.change(endpointField(), { target: { value: "example.com/translate" } });
   expect(screen.getByRole("status").textContent).toContain("http://");
   fireEvent.change(endpointField(), { target: { value: "https://example.com/translate" } });
+  expect(screen.queryByRole("status")).toBeNull();
+});
+
+// 与 crates/client-core/src/translation.rs 的 custom_translation_request 跑同一组用例：Rust 按 DeepL 格式构造（DeepL-Auth-Key）或拒绝构造（没有密钥）的地址，设置页也要认成 DeepL，否则页面会放过一个键盘永远不发请求的配置。
+describe("the DeepL check mirrors the shared request builder", () => {
+  test.each(customTranslationContract.cases)("$name", ({ endpoint, api_key, request }) => {
+    const authorization = request?.headers.Authorization ?? "";
+    expect(isDeepLApiEndpoint(endpoint)).toBe(
+      request === null || authorization.startsWith("DeepL-Auth-Key "),
+    );
+    expect(customTranslationKeyIssue(endpoint, api_key) !== "").toBe(request === null);
+  });
+
+  test("a whitespace-only key is no key", () => {
+    expect(customTranslationKeyIssue("https://api.deepl.com/v2/translate", "  ")).not.toBe("");
+    expect(customTranslationKeyIssue("https://deeplx.example/translate", "")).toBe("");
+  });
+});
+
+test("a DeepL endpoint without a key warns instead of silently returning no glosses", async () => {
+  await mount({
+    custom_translation: {
+      enabled: true,
+      endpoint: "https://api-free.deepl.com/v2/translate",
+      api_key: "",
+    },
+  });
+  expect(screen.getByRole("status").textContent).toContain("Auth Key");
+  fireEvent.change(screen.getByLabelText("自定义翻译 API Key"), {
+    target: { value: "synthetic-key:fx" },
+  });
   expect(screen.queryByRole("status")).toBeNull();
 });
 
@@ -162,6 +197,7 @@ describe("the MSIME account translation is an explicit choice", () => {
       />,
     );
     await settingsFormReady();
+    selectSettingsTab("翻译服务");
     return save;
   }
   const serviceSelect = () =>
@@ -178,7 +214,7 @@ describe("the MSIME account translation is an explicit choice", () => {
     expect(saved.niutrans?.enabled).toBe(false);
   };
 
-  test.each(["macos", "linux"])(
+  test.each(["macos", "linux", "windows"])(
     "%s offers the account and saves it with every other service off",
     async (platform) => {
       const save = await mountOn(platform);
@@ -212,8 +248,8 @@ describe("the MSIME account translation is an explicit choice", () => {
     },
   );
 
-  test("Windows has no account option", async () => {
-    const platform = "windows";
+  test("HarmonyOS has no account option", async () => {
+    const platform = "harmony";
     await mountOn(platform);
     expect(optionValues()).not.toContain("account");
   });
@@ -331,6 +367,7 @@ describe("macOS points at undownloaded Apple translation languages", () => {
       />,
     );
     await settingsFormReady();
+    selectSettingsTab("候选翻译");
     // Let the host's answer land, so a hidden hint means hidden and not merely not yet shown.
     await waitFor(() => expect(downloadableLanguages).toHaveBeenCalled());
     await act(async () => {});

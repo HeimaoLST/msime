@@ -1,6 +1,7 @@
 import { rewriteCssImages } from "./css-image-value";
 import { preserveAnimationShorthands } from "./animation-shorthand-source";
 import { walkCssRulesAsync } from "./css-rules";
+import { boundedResourceReader } from "./bounded-resource-reader";
 
 export async function prepareToolbarImages(
   css: string,
@@ -11,22 +12,15 @@ export async function prepareToolbarImages(
   const sheet = new CSSStyleSheet();
   sheet.replaceSync(css);
   let partial = preserved.partial || /@import\b/i.test(css);
-  const cache = new Map<string, Promise<string>>();
-  let total = 0;
   let expanded = 0;
-  const cached = (relative: string) => {
-    let result = cache.get(relative);
-    if (!result) {
-      if (cache.size >= 32) return Promise.reject(new Error("resource count exceeded"));
-      result = resolve(relative).then((data) => {
-        total += data.length;
-        if (total > 16 * 1024 * 1024) throw new Error("resource budget exceeded");
-        return data;
-      });
-      cache.set(relative, result);
-    }
-    return result;
-  };
+  const cached = boundedResourceReader(resolve, {
+    maxResources: 32,
+    countError: "resource count exceeded",
+    sizeOf: (data) => data.length,
+    validate: (_data, total) => {
+      if (total > 16 * 1024 * 1024) throw new Error("resource budget exceeded");
+    },
+  });
   await walkCssRulesAsync(sheet.cssRules, async (rule) => {
     const nested = rule.constructor.name === "CSSNestedDeclarations";
     if (rule.type !== CSSRule.STYLE_RULE && rule.type !== CSSRule.KEYFRAME_RULE && !nested) return;

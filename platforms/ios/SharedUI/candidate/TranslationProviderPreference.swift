@@ -10,7 +10,7 @@ enum TranslationProvider: String, CaseIterable, Sendable {
     case .account: "水杉账号（发送到 api.msime.app）"
     case .niutrans: "小牛翻译"
     case .tencent: "腾讯云机器翻译"
-    case .custom: "自定义接口（DeepLX 兼容）"
+    case .custom: "自定义接口（DeepLX 或 DeepL API）"
     }
   }
 }
@@ -71,7 +71,8 @@ enum TranslationProviderPreference {
     }
     if custom["enabled"] as? Bool == true {
       let endpoint = trimmed(custom["endpoint"] as? String ?? "")
-      return endpoint.isEmpty ? .none : .custom(endpoint: endpoint, apiKey: trimmed(custom["api_key"] as? String ?? ""))
+      let apiKey = trimmed(custom["api_key"] as? String ?? "")
+      return customRequestBuildable(endpoint: endpoint, apiKey: apiKey) ? .custom(endpoint: endpoint, apiKey: apiKey) : .none
     }
     // Tencent defaults to enabled, so only usable secrets make it the route.
     let secretID = trimmed(tencent["secret_id"] as? String ?? "")
@@ -81,6 +82,16 @@ enum TranslationProviderPreference {
       return .tencent(secretID: secretID, secretKey: secretKey, region: region.isEmpty ? defaultTencentRegion : region)
     }
     return preferences?[accountKey] as? Bool == true ? .account : .none
+  }
+
+  /// 自定义服务能否发出请求，交给键盘实际调用的共享请求构造判断：DeepL 官方地址没有密钥时共享层不构造请求，这里若仍算可用，设置页不会显示「凭据不完整」，键盘却每个词都拿不到释义。与 macOS 翻译设置窗口保存前的检查是同一个判断。
+  private static func customRequestBuildable(endpoint: String, apiKey: String) -> Bool {
+    guard !endpoint.isEmpty else { return false }
+    let probe: [String: Any] = [
+      "config": ["enabled": true, "endpoint": endpoint, "api_key": apiKey], "text": "你好",
+      "source_language": "zh", "target_language": "en",
+    ]
+    return MetasequoiaInputSessionBridge.translationRequest(provider: "custom", probe) != nil
   }
 
   /// The provider the settings page shows as selected, which may be one whose credentials are still incomplete.
@@ -186,26 +197,17 @@ struct TranslationProviderClient: Sendable {
     if descriptor["timeout_ms"] == nil {
       milliseconds = 2500
     } else {
-      guard let value = integer(descriptor["timeout_ms"]), value > 0 else { return nil }
+      guard let value = SharedNumber.nonnegativeInt(descriptor["timeout_ms"]), value > 0 else { return nil }
       milliseconds = value
     }
-    let timeout = TimeInterval(min(10_000, max(1_000, milliseconds))) / 1000
+    let timeout = OnlineRequestPolicy.timeout(milliseconds: milliseconds)
     let maxBytes: Int
     if descriptor["max_response_bytes"] == nil {
       maxBytes = 1_048_576
     } else {
-      guard let value = integer(descriptor["max_response_bytes"]), value > 0 else { return nil }
+      guard let value = SharedNumber.nonnegativeInt(descriptor["max_response_bytes"]), value > 0 else { return nil }
       maxBytes = min(1_048_576, value)
     }
     return OnlineCandidateRequest(urlRequest: request, connectTimeout: timeout, timeout: timeout, maxBytes: maxBytes)
-  }
-
-  private static func integer(_ value: Any?) -> Int? {
-    guard let number = value as? NSNumber,
-          CFGetTypeID(number) != CFBooleanGetTypeID(),
-          let integer = Int(number.stringValue),
-          integer >= 0,
-          NSNumber(value: integer).compare(number) == .orderedSame else { return nil }
-    return integer
   }
 }

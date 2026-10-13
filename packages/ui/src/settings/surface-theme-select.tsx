@@ -9,6 +9,17 @@ const surfaceThemeLabels: Record<SurfaceTheme, string> = {
 };
 const defaultSurfaceThemeOrder: readonly SurfaceTheme[] = ["follow", "dark", "light"];
 
+/** 明暗覆盖的 `<option>` 列表。是返回数组的普通函数而不是组件：`SelectRow` 在 HarmonyOS 上只认直接的 `<option>` 子元素。 */
+export function surfaceThemeOptions(
+  optionOrder: readonly SurfaceTheme[] = defaultSurfaceThemeOrder,
+) {
+  return optionOrder.map((theme) => (
+    <option key={theme} value={theme}>
+      {surfaceThemeLabels[theme]}
+    </option>
+  ));
+}
+
 export interface SurfaceThemeSelectProps {
   label: string;
   value: SurfaceTheme;
@@ -29,11 +40,7 @@ export function SurfaceThemeSelect({
       value={value}
       onChange={(event) => onChange(event.target.value as SurfaceTheme)}
     >
-      {optionOrder.map((theme) => (
-        <option key={theme} value={theme}>
-          {surfaceThemeLabels[theme]}
-        </option>
-      ))}
+      {surfaceThemeOptions(optionOrder)}
     </Select>
   );
 }

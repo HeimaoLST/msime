@@ -6,8 +6,11 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -18,7 +21,7 @@ import org.json.JSONObject;
 /**
  * 「MCP 开发者访问」的云端接口：上传一份日志快照、读回快照与最近访问、重新生成访问令牌、删除快照（`/v1/users/me/diagnostics`）。
  *
- * <p>上传的内容只来自 Rust 写出的诊断包（`NativeClient.diagnosticBundle`）：配置快照是诊断包里已经脱敏的 `config_snapshot`，这里不自己脱敏；输入事件和性能数据从诊断包里按 P19 白名单校验过的 jsonl 读出，再在这里按 {@link EventKind} 枚举逐条重建，只留 `t_ms`、`kind`、`duration_ms`，不认识的种类整行丢弃。请求体里不会出现任何文本、拼音、候选或按键字面值。
+ * <p>上传的内容只来自 Rust 写出的诊断包（`NativeClient.diagnosticBundle`）：配置快照是诊断包里已经脱敏的 `config_snapshot`，这里不自己脱敏；输入事件和性能数据从诊断包里按 P19 白名单校验过的 jsonl 读出，再在这里按 {@link DiagnosticEventKind} 枚举逐条重建，只留 `t_ms`、`kind`、`duration_ms`，不认识的种类整行丢弃。请求体里不会出现任何文本、拼音、候选或按键字面值。
  *
  * <p>匿名账号也可以上传（`ACCOUNT_OR_ANONYMOUS`）。每个请求都阻塞在网络上，不要在主线程调用。
  */
@@ -32,6 +35,8 @@ public final class DiagnosticsApi {
     /** 每类事件最多带多少条，超出时保留最新的。 */
     static final int MAX_EVENTS = 8000;
     static final int MAX_CRASH_LOGS = 50;
+    /** 原生诊断包只有少量固定条目；拒绝异常归档的无界条目遍历。 */
+    static final int MAX_ARCHIVE_ENTRIES = 128;
 
     /** 快照在云端保留多久，对应偏好 `developer_options.mcp_upload.retention` 和请求里的 `ttl`。 */
     public enum Retention {
@@ -60,39 +65,11 @@ public final class DiagnosticsApi {
         }
     }
 
-    /** P19 允许的事件种类；输入事件和性能记录的 `kind` 只能取这些值。 */
-    public enum EventKind {
-        KEY_DOWN("key_down"),
-        KEY_UP("key_up"),
-        CANDIDATE_SHOWN("candidate_shown"),
-        CANDIDATE_SELECTED("candidate_selected"),
-        COMMIT("commit"),
-        BACKSPACE("backspace"),
-        PANEL_OPEN("panel_open"),
-        PANEL_CLOSE("panel_close"),
-        IME_START("ime_start"),
-        IME_FINISH("ime_finish");
-
-        private final String wire;
-
-        EventKind(String wire) { this.wire = wire; }
-
-        public String wire() { return wire; }
-
-        /** 不在枚举里的种类返回 null，调用方丢弃这一条。 */
-        public static EventKind fromWire(String value) {
-            for (EventKind kind : values()) {
-                if (kind.wire.equals(value)) return kind;
-            }
-            return null;
-        }
-    }
-
     /** 一条输入事件或性能记录；`durationMs` 小于 0 表示没有耗时。 */
-    public record Event(long tMs, EventKind kind, long durationMs) {
+    public record Event(long tMs, DiagnosticEventKind kind, long durationMs) {
         /** 按枚举重建一条记录；种类不认识、时间为负时返回 null。 */
         public static Event of(long tMs, String kind, long durationMs) {
-            EventKind known = EventKind.fromWire(kind);
+            DiagnosticEventKind known = DiagnosticEventKind.fromWire(kind);
             if (known == null || tMs < 0) return null;
             return new Event(tMs, known, durationMs < 0 ? -1 : durationMs);
         }
@@ -101,8 +78,9 @@ public final class DiagnosticsApi {
     /** 一条崩溃记录；摘要和堆栈按后端上限截断。 */
     public record CrashLog(String at, String message, String stack) {
         public static CrashLog of(String at, String message, String stack) {
-            return new CrashLog(at == null ? "" : at, clipUtf8(message, MAX_MESSAGE_BYTES),
-                clipUtf8(stack, MAX_STACK_BYTES));
+            return new CrashLog(at == null ? "" : at,
+                TextPolicy.clipUtf8(message, MAX_MESSAGE_BYTES),
+                TextPolicy.clipUtf8(stack, MAX_STACK_BYTES));
         }
     }
 
@@ -194,9 +172,9 @@ public final class DiagnosticsApi {
     public static String requestBody(String platform, String appVersion, Sections sections, Retention ttl) {
         StringBuilder out = new StringBuilder(4096);
         out.append("{\"platform\":");
-        quote(out, platform);
+        out.append(JsonPolicy.quote(platform));
         out.append(",\"app_version\":");
-        quote(out, appVersion);
+        out.append(JsonPolicy.quote(appVersion));
         out.append(",\"sections\":{");
         boolean first = true;
         if (sections.crashLogs() != null) {
@@ -206,11 +184,11 @@ public final class DiagnosticsApi {
                 CrashLog log = sections.crashLogs().get(i);
                 if (i > 0) out.append(',');
                 out.append("{\"at\":");
-                quote(out, log.at());
+                out.append(JsonPolicy.quote(log.at()));
                 out.append(",\"message\":");
-                quote(out, log.message());
+                out.append(JsonPolicy.quote(log.message()));
                 out.append(",\"stack\":");
-                quote(out, log.stack());
+                out.append(JsonPolicy.quote(log.stack()));
                 out.append('}');
             }
             out.append(']');
@@ -232,7 +210,7 @@ public final class DiagnosticsApi {
             events(out, sections.inputEvents(), false);
         }
         out.append("},\"ttl\":");
-        quote(out, ttl.wire());
+        out.append(JsonPolicy.quote(ttl.wire()));
         out.append('}');
         return out.toString();
     }
@@ -255,22 +233,30 @@ public final class DiagnosticsApi {
      * 从诊断包 zip 里取出要上传的各节。按条目文件名认：`config_snapshot.json`、`input_events.jsonl`（或 `input-events.jsonl`）、`perf.jsonl`（或 `perf_trace.jsonl`、`performance_logs.jsonl`）和 `*.crash`；没选的类别不读。
      */
     public static Sections readBundle(File zip, Include include) throws IOException {
+        Path path = zip == null ? null : zip.toPath();
+        if (path == null || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+                || !SafePaths.isSingleLink(path))
+            throw new IOException("diagnostics archive is not a private regular file");
         List<CrashLog> crashes = include.crashLogs() ? new ArrayList<>(MAX_CRASH_LOGS) : null;
         List<Event> perf = include.performanceLogs() ? new ArrayList<>(MAX_EVENTS) : null;
         List<Event> input = include.inputEvents() ? new ArrayList<>(MAX_EVENTS) : null;
         String config = null;
         try (ZipInputStream stream = new ZipInputStream(
-                Files.newInputStream(zip.toPath(), LinkOption.NOFOLLOW_LINKS), StandardCharsets.UTF_8)) {
+                Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS), StandardCharsets.UTF_8)) {
+            int archiveEntries = 0;
             for (ZipEntry entry = stream.getNextEntry(); entry != null; entry = stream.getNextEntry()) {
+                if (++archiveEntries > MAX_ARCHIVE_ENTRIES) {
+                    throw new IOException("diagnostics archive has too many entries");
+                }
                 if (entry.isDirectory()) continue;
                 String name = baseName(entry.getName());
                 if (include.configSnapshot() && name.equals("config_snapshot.json")) {
                     config = configSnapshot(entryText(stream));
                 } else if (input != null && (name.equals("input_events.jsonl") || name.equals("input-events.jsonl"))) {
-                    input.addAll(eventLines(entryText(stream), false));
+                    appendEvents(input, eventLines(entryText(stream), false));
                 } else if (perf != null && (name.equals("perf.jsonl") || name.equals("perf_trace.jsonl")
                         || name.equals("performance_logs.jsonl"))) {
-                        perf.addAll(eventLines(entryText(stream), true));
+                        appendEvents(perf, eventLines(entryText(stream), true));
                 } else if (crashes != null && name.endsWith(".crash") && crashes.size() < MAX_CRASH_LOGS) {
                     crashes.add(crashRecord(entryText(stream), entry.getTime()));
                 }
@@ -282,7 +268,7 @@ public final class DiagnosticsApi {
 
     /** 每条 jsonl 都按枚举重建，只取三个数值/枚举字段；坏行和不认识的种类丢弃。 */
     static List<Event> eventLines(String text, boolean durationRequired) {
-        List<Event> events = new ArrayList<>(MAX_EVENTS);
+        Deque<Event> events = new ArrayDeque<>(MAX_EVENTS);
         for (String line : text.split("\n")) {
             String trimmed = TextPolicy.trimmed(line);
             if (trimmed.isEmpty()) continue;
@@ -291,18 +277,32 @@ public final class DiagnosticsApi {
                 Object kind = row.opt("kind");
                 if (!(kind instanceof String) || !row.has("t_ms")) continue;
                 if (durationRequired && !row.has("duration_ms")) continue;
-                Long time = strictInteger(row.opt("t_ms"));
+                Long time = JsonPolicy.strictLong(row.opt("t_ms"));
                 Object rawDuration = row.opt("duration_ms");
                 Long duration = rawDuration == null || rawDuration == JSONObject.NULL
-                    ? -1L : strictInteger(rawDuration);
+                    ? -1L : JsonPolicy.strictLong(rawDuration);
                 if (time == null || duration == null) continue;
                 Event event = Event.of(time, (String) kind, duration);
-                if (event != null) events.add(event);
+                if (event != null) {
+                    if (events.size() == MAX_EVENTS) events.removeFirst();
+                    events.addLast(event);
+                }
             } catch (JSONException malformed) {
                 // 不合规的行丢弃，与 Rust 诊断包和后端的口径一致。
             }
         }
-        return events;
+        return new ArrayList<>(events);
+    }
+
+    private static void appendEvents(List<Event> target, List<Event> additions) {
+        int overflow = target.size() + additions.size() - MAX_EVENTS;
+        if (overflow > 0) target.subList(0, BoundsPolicy.atMost(overflow, target.size())).clear();
+        int remaining = MAX_EVENTS - target.size();
+        if (additions.size() > remaining) {
+            target.addAll(additions.subList(additions.size() - remaining, additions.size()));
+        } else {
+            target.addAll(additions);
+        }
     }
 
     private static String configSnapshot(String text) {
@@ -351,8 +351,8 @@ public final class DiagnosticsApi {
         }
         JSONArray list = root.optJSONArray("accesses");
         int accessCount = list == null ? 0 : list.length();
-        int firstAccess = Math.max(0, accessCount - MAX_EVENTS);
-        List<Access> accesses = new ArrayList<>(Math.min(accessCount, MAX_EVENTS));
+        int firstAccess = BoundsPolicy.nonNegative(accessCount - MAX_EVENTS);
+        List<Access> accesses = new ArrayList<>(BoundsPolicy.atMost(accessCount, MAX_EVENTS));
         if (list != null) {
             for (int i = firstAccess; i < list.length(); i++) {
                 JSONObject item = list.optJSONObject(i);
@@ -372,11 +372,6 @@ public final class DiagnosticsApi {
         return new State(snapshot, ListPolicy.copyOrEmpty(accesses));
     }
 
-    /** Diagnostics wire numbers are JSON integers; do not let org.json truncate decimals. */
-    public static Long strictInteger(Object value) {
-        return JsonPolicy.strictLong(value);
-    }
-
     /** Optional response strings: absent/null means empty, every other JSON type is malformed. */
     static String optionalString(JSONObject object, String key) {
         if (object == null || !object.has(key) || object.isNull(key)) return "";
@@ -386,7 +381,7 @@ public final class DiagnosticsApi {
     /** Optional response integers: absent/null means zero, every other non-integer is malformed. */
     static Long optionalInteger(JSONObject object, String key) {
         if (object == null || !object.has(key) || object.isNull(key)) return 0L;
-        return strictInteger(object.opt(key));
+        return JsonPolicy.strictLong(object.opt(key));
     }
 
     private static String entryText(InputStream stream) throws IOException {
@@ -396,21 +391,6 @@ public final class DiagnosticsApi {
     private static String baseName(String path) {
         int slash = path.lastIndexOf('/');
         return TextPolicy.lowercase(slash < 0 ? path : path.substring(slash + 1));
-    }
-
-    /** 按 UTF-8 字节截断，不切开多字节字符和代理对。 */
-    static String clipUtf8(String value, int maxBytes) {
-        return TextPolicy.clipUtf8(value, maxBytes);
-    }
-
-    /** JSON 字符串转义（RFC 8259）。 */
-    static void quote(StringBuilder out, String value) {
-        out.append(JsonPolicy.quote(value));
-    }
-
-    /** Compatibility entry point retained for the host smoke contract. */
-    static String strictString(Object value) {
-        return JsonPolicy.strictString(value);
     }
 
 }

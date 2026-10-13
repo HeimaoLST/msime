@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { ControlledCheckbox } from "../core/controlled-checkbox";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { errorCode } from "../core/error-code";
 import { StatusMessage } from "../core/status-message";
 import { ErrorAlert } from "../core/error-alert";
@@ -38,9 +39,13 @@ import {
 import * as skin from "./touch-skin-style";
 import * as doc from "../settings/document-style";
 import * as community from "../community/community-style";
-import * as settings from "../settings/settings-style";
+import { SettingsPageHeader } from "../settings/settings-page-header";
 import { ActionButton } from "../core/action-button";
 import { FluentIcon } from "../core/fluent-icons";
+import { GroupList, Row } from "../core/platform-controls";
+import { SelectRow } from "../settings/select-row";
+import { SliderRow } from "../settings/slider-row";
+import { SwitchRow } from "../settings/switch-row";
 import { useAsyncGeneration } from "../settings/use-async-generation";
 import { useMountedRef } from "../settings/use-mounted-ref";
 
@@ -48,10 +53,10 @@ type Category = "背景" | "按键" | "文本" | "设计" | "我的";
 type NameEditor = { operation: "create" } | { operation: "rename"; id: string };
 type Confirmation = { operation: "update" | "delete"; item: SavedTouchKeyboardSkin };
 
-// 全屏呈现以页面自身的背景覆盖整个设置界面，并避开系统栏。
-const fullScreenSurface =
+// 全屏呈现以页面自身的背景覆盖整个设置界面，并避开系统栏。功能页里打开的社区图库（`CommunityGallerySubview`）也用这一套。
+export const fullScreenSurface =
   "fixed inset-0 z-40 overflow-y-auto bg-[var(--p-bg)] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] text-[var(--p-text)] [font-family:var(--p-font)]";
-const fullScreenColumn = "mx-auto flex w-full max-w-[760px] flex-col gap-3.5 px-4 pt-1 pb-6";
+export const fullScreenColumn = "mx-auto flex w-full max-w-[760px] flex-col gap-3.5 px-4 pt-1 pb-6";
 
 /**
  * AI 皮肤抽卡：每次抽三款皮肤，每款都可以使用、保存到「我的皮肤」或发布。编辑器以对话框形式在页面上打开它。`fullScreen` 则把它呈现为独立视图，标题前带返回按钮，手机皮肤网格里的 AI 磁贴就是这样打开它的。`useLabel` 是把方案交给 `onUse` 的那个按钮的名称。
@@ -85,6 +90,11 @@ export function AiSkinGeneration({
   const [publishCategory, setPublishCategory] = useState<CommunitySkinCategory>("other");
   const [publishBusy, setPublishBusy] = useState(false);
   const publishRunning = useRef(false);
+  const surface = useRef<HTMLElement>(null);
+  // 全屏视图叠在皮肤页上，共用外壳的滚动容器：不滚回顶部的话，它会停在皮肤页原来的滚动位置，标题和返回按钮都在屏幕外。
+  useLayoutEffect(() => {
+    if (fullScreen) surface.current?.scrollIntoView?.({ block: "start" });
+  }, [fullScreen]);
   const generateRunning = useRef(false);
   const saveRunning = useRef(false);
   const requestRef = useRef("");
@@ -112,10 +122,22 @@ export function AiSkinGeneration({
 
   useEffect(
     () => () => {
-      if (requestRef.current && busy) void client.cancel(requestRef.current).catch(() => undefined);
+      if (requestRef.current) void client.cancel(requestRef.current).catch(() => undefined);
     },
-    [busy, client],
+    [client],
   );
+
+  const cancelGeneration = () => {
+    const id = requestRef.current;
+    if (!id) return;
+    // 先使本地请求代次失效；服务端取消可能在生成结果之后才返回，迟到的结果不能重新出现在页面上。
+    requestRef.current = "";
+    setRequestId("");
+    generateRunning.current = false;
+    setBusy(false);
+    setMessage("已取消生成");
+    void client.cancel(id).catch(() => undefined);
+  };
 
   const generate = async () => {
     if (busy || generateRunning.current) return;
@@ -141,15 +163,17 @@ export function AiSkinGeneration({
           },
         })),
       );
-      if (!mounted.current) return;
+      if (!mounted.current || requestRef.current !== id) return;
       setProposals(prepared);
     } catch (error) {
-      if (errorCode(error) !== "ai_skin_cancelled")
+      if (requestRef.current === id && errorCode(error) !== "ai_skin_cancelled")
         if (mounted.current) setMessage(aiSkinMessage(error));
     } finally {
-      generateRunning.current = false;
-      if (mounted.current) setBusy(false);
-      if (requestRef.current === id) requestRef.current = "";
+      if (requestRef.current === id) {
+        generateRunning.current = false;
+        requestRef.current = "";
+        if (mounted.current) setBusy(false);
+      }
     }
   };
 
@@ -219,6 +243,7 @@ export function AiSkinGeneration({
   return (
     <div className={fullScreen ? fullScreenSurface : community.backdrop}>
       <section
+        ref={surface}
         className={fullScreen ? fullScreenColumn : `${community.dialog} ${doc.generation}`}
         role="dialog"
         aria-modal="true"
@@ -226,16 +251,12 @@ export function AiSkinGeneration({
       >
         {fullScreen ? (
           <>
-            <header className={settings.pageHeader}>
-              <ActionButton
-                action={onClose}
-                className={settings.pageBackButton}
-                disabled={busy}
-                ariaLabel="返回"
-                label={<FluentIcon name="arrow_left" size={22} />}
-              />
-              <h2 className={settings.pageTitle}>AI 皮肤抽卡</h2>
-            </header>
+            <SettingsPageHeader
+              title="AI 皮肤抽卡"
+              onBack={onClose}
+              backDisabled={busy}
+              level={2}
+            />
             <p className={doc.generationNote}>一次抽出三张原创皮肤，遇到喜欢的就留下。</p>
           </>
         ) : (
@@ -264,7 +285,8 @@ export function AiSkinGeneration({
         )}
         <ActionButton
           action={() => generate()}
-          className="primary"
+          // 全屏时这是整页唯一的主操作，铺满宽度。
+          className={fullScreen ? "primary w-full py-3 text-[15px]" : "primary"}
           disabled={busy}
           ariaLabel="抽三张皮肤"
           label={proposals.length ? "再抽三张" : "抽三张皮肤"}
@@ -275,11 +297,7 @@ export function AiSkinGeneration({
         {busy && (
           <StatusMessage role="status">
             主题插画已完成 {completed}/3，可能需要几分钟…{" "}
-            <ActionButton
-              action={() => client.cancel(requestRef.current)}
-              className="secondary"
-              label="取消"
-            />
+            <ActionButton action={cancelGeneration} className="secondary" label="取消" />
           </StatusMessage>
         )}
         {message && <StatusMessage role="status">{message}</StatusMessage>}
@@ -371,11 +389,7 @@ export function AiSkinGeneration({
               </select>
             </label>
             <label>
-              <input
-                type="checkbox"
-                checked={publishAgreed}
-                onChange={(event) => setPublishAgreed(event.target.checked)}
-              />
+              <ControlledCheckbox checked={publishAgreed} onChange={setPublishAgreed} />
               我拥有发布所用素材的权利，并同意其他用户免费下载使用
             </label>
             <p>发布后插画背景将公开，请勿包含私人或敏感资料。</p>
@@ -393,13 +407,85 @@ export function AiSkinGeneration({
             />
           </div>
         )}
-        <div className={community.dialogActions}>
-          <ActionButton action={onClose} className="secondary" disabled={busy} label="完成" />
-        </div>
+        {/* 全屏时标题前已有返回按钮，再放一个「完成」是重复的出口。 */}
+        {!fullScreen && (
+          <div className={community.dialogActions}>
+            <ActionButton action={onClose} className="secondary" disabled={busy} label="完成" />
+          </div>
+        )}
       </section>
     </div>
   );
 }
+
+/** 颜色设置行：末端是当前色值和一个圆形色块，色块就是原生取色器，点开即系统的取色面板。 */
+function ColorRow({
+  title,
+  value,
+  hidden,
+  onChange,
+}: {
+  title: string;
+  value: number;
+  hidden?: boolean;
+  onChange: (value: number) => void;
+}) {
+  const hex = skinColor(value);
+  return (
+    <Row title={title} hidden={hidden}>
+      <span className={skin.colorControl}>
+        <span className={skin.colorValue} aria-hidden="true">
+          {hex}
+        </span>
+        <input
+          className={skin.colorSwatch}
+          aria-label={title}
+          type="color"
+          value={hex}
+          onChange={(event) => onChange(skinColorNumber(event.target.value))}
+        />
+      </span>
+    </Row>
+  );
+}
+
+function CheckGlyph() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="m5 12.5 4.5 4.5L19 7.5" />
+    </svg>
+  );
+}
+
+function ChevronGlyph() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="m9 6 6 6-6 6" />
+    </svg>
+  );
+}
+
+const percent = (value: number) => `${Math.round(value * 100)}%`;
 
 export function TouchKeyboardSkinEditor({
   design,
@@ -412,6 +498,7 @@ export function TouchKeyboardSkinEditor({
   onChange,
   onUse,
   onClose,
+  fullScreen = false,
 }: {
   design: TouchKeyboardSkinDesign;
   selected: boolean;
@@ -423,6 +510,8 @@ export function TouchKeyboardSkinEditor({
   onChange: (design: TouchKeyboardSkinDesign) => void;
   onUse: () => void;
   onClose: () => void;
+  /** 作为独立视图呈现：覆盖整个设置界面，标题前带返回按钮，返回即 `onClose`，所以不再画「完成」。HarmonyOS 手机的皮肤页这样打开它，不在页面里就地展开。 */
+  fullScreen?: boolean;
 }) {
   const [category, setCategory] = useState<Category>("背景");
   const [undo, setUndo] = useState<TouchKeyboardSkinDesign[]>([]);
@@ -541,37 +630,71 @@ export function TouchKeyboardSkinEditor({
       setConfirmation(null);
   };
 
-  return (
-    <div className={`${skin.editor} ${skin.editorFilled}`} aria-label="自定义皮肤编辑器">
-      <div className={skin.editorHeading}>
-        <div>
+  const editor = (
+    <div
+      className={`${fullScreen ? fullScreenColumn : skin.editor} ${skin.editorFilled}`}
+      aria-label="自定义皮肤编辑器"
+    >
+      {fullScreen ? (
+        <>
+          <SettingsPageHeader title="设计我的皮肤" onBack={onClose} level={2} />
+          <p className={doc.generationNote}>修改后自动保存，键盘随即换上</p>
+        </>
+      ) : (
+        <div className={skin.editorHeading}>
           <div className="section-title">
             自定义皮肤
-            <small>Apple 同款当前设计字段；修改后自动写入共享配置</small>
+            <small>修改后自动保存，键盘随即换上</small>
           </div>
-        </div>
-        <div className={skin.editorHeadingActions}>
-          {aiSkins && library && (
-            <ActionButton
-              action={() => setAiGenerationOpen(true)}
-              className="primary"
-              disabled={disabled || libraryBusy}
-              label="AI 皮肤抽卡"
-            />
-          )}
-          {library && (
-            <ActionButton
-              action={() => {
-                setSkinName(`我的设计 ${saved.length + 1}`);
-                setNameEditor({ operation: "create" });
-                setLibraryNotice("");
-              }}
-              className="primary"
-              disabled={disabled || libraryBusy || saved.length >= 12}
-              label="保存设计"
-            />
-          )}
           <ActionButton action={onClose} className="secondary" label="完成" />
+        </div>
+      )}
+      {/* 预览在控件上方：改哪一项都能马上看到键盘的样子。全屏时整块吸顶。 */}
+      <div className={skin.previewDock(fullScreen)}>
+        <div className={skin.previewCard}>
+          <div className={skin.previewFrame(fullScreen)}>
+            <ScreenKeyboardPreview
+              theme={theme}
+              skin="custom"
+              customDesign={design}
+              phone={fullScreen}
+            />
+          </div>
+          <div className={skin.previewBar}>
+            <ActionButton
+              action={stepBack}
+              className={skin.iconButton}
+              disabled={!undo.length || disabled}
+              ariaLabel="撤销设计"
+              label={<FluentIcon name="arrow_reset" />}
+            />
+            <ActionButton
+              action={stepForward}
+              className={skin.iconButton}
+              disabled={!redo.length || disabled}
+              ariaLabel="重做"
+              label={<FluentIcon name="arrow_reset" className="-scale-x-100" />}
+            />
+            <span className={skin.previewBarSpacer} />
+            {library && (
+              <ActionButton
+                action={() => {
+                  setSkinName(`我的设计 ${saved.length + 1}`);
+                  setNameEditor({ operation: "create" });
+                  setLibraryNotice("");
+                }}
+                className={skin.tonalButton}
+                disabled={disabled || libraryBusy || saved.length >= 12}
+                label="保存设计"
+              />
+            )}
+            <ActionButton
+              action={onUse}
+              className="primary"
+              disabled={disabled || selected}
+              label={selected ? "正在使用" : "使用皮肤"}
+            />
+          </div>
         </div>
       </div>
       {aiGenerationOpen && aiSkins && library && (
@@ -650,6 +773,24 @@ export function TouchKeyboardSkinEditor({
           {libraryNotice}
         </p>
       )}
+      {aiSkins && library && (
+        <ActionButton
+          action={() => setAiGenerationOpen(true)}
+          className={skin.aiEntry}
+          disabled={disabled || libraryBusy}
+          ariaLabel="AI 皮肤抽卡"
+          label={
+            <>
+              <FluentIcon name="sparkle" size={24} />
+              <span className={skin.aiEntryText}>
+                <strong>AI 皮肤抽卡</strong>
+                <small>一次抽三款原创皮肤，喜欢就留下</small>
+              </span>
+              <ChevronGlyph />
+            </>
+          }
+        />
+      )}
       <div className={skin.editorTabs} role="tablist" aria-label="皮肤编辑分类">
         {(
           ["背景", "按键", "文本", "设计", ...(library ? ["我的" as const] : [])] as Category[]
@@ -670,447 +811,404 @@ export function TouchKeyboardSkinEditor({
       <div className={skin.editorControls}>
         {category === "背景" && (
           <>
-            <div className={skin.controlBlock}>
-              <div className={skin.controlTitle}>背景预设</div>
-              <div className={skin.backgroundGrid}>
-                {touchKeyboardBackgroundPresets.map((preset) => (
-                  <button
-                    type="button"
-                    aria-label={`背景预设 ${preset.title}`}
-                    onClick={() =>
-                      patch({
-                        photo: undefined,
-                        background: preset.start,
-                        gradientEnd: preset.end,
-                        gradientHorizontal: false,
-                      })
-                    }
-                    key={preset.title}
-                    style={{
-                      background: `linear-gradient(135deg, ${skinColor(preset.start)}, ${skinColor(preset.end ?? preset.start)})`,
-                    }}
-                  >
-                    <span>{preset.title}</span>
-                  </button>
-                ))}
+            <GroupList title="预设">
+              <div className={skin.groupBody}>
+                <div className={skin.backgroundGrid}>
+                  {touchKeyboardBackgroundPresets.map((preset) => {
+                    const chosen =
+                      design.photo === undefined &&
+                      design.background === preset.start &&
+                      design.gradientEnd === preset.end &&
+                      design.keyBackground === preset.keyBackground;
+                    return (
+                      <button
+                        type="button"
+                        className={skin.backgroundPreset}
+                        aria-label={`背景预设 ${preset.title}`}
+                        aria-pressed={chosen}
+                        onClick={() =>
+                          patch({
+                            photo: undefined,
+                            background: preset.start,
+                            gradientEnd: preset.end,
+                            gradientHorizontal: false,
+                            keyBackground: preset.keyBackground,
+                            keyForeground: preset.keyForeground,
+                            accent: preset.accent,
+                            actionBackground: preset.actionBackground,
+                          })
+                        }
+                        key={preset.title}
+                      >
+                        <span
+                          className={skin.backgroundSwatch(chosen)}
+                          style={{
+                            background: `linear-gradient(135deg, ${skinColor(preset.start)}, ${skinColor(preset.end ?? preset.start)})`,
+                          }}
+                        >
+                          {chosen && (
+                            <span className={skin.backgroundCheck}>
+                              <CheckGlyph />
+                            </span>
+                          )}
+                        </span>
+                        <span>{preset.title}</span>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-            <div className={`${skin.controlBlock} ${skin.formGrid}`}>
-              <label>
-                背景起始色
-                <input
-                  className={skin.colorInput}
-                  aria-label="背景起始色"
-                  type="color"
-                  value={skinColor(design.background)}
-                  onChange={(event) => patch({ background: skinColorNumber(event.target.value) })}
-                />
-              </label>
-              <label className={skin.checkLabel}>
-                <input
-                  aria-label="渐变背景"
-                  type="checkbox"
-                  checked={design.gradientEnd !== undefined}
-                  onChange={(event) =>
-                    patch({ gradientEnd: event.target.checked ? design.background : undefined })
-                  }
-                />
-                渐变背景
-              </label>
-              {design.gradientEnd !== undefined && (
-                <>
-                  <label>
-                    渐变结束色
-                    <input
-                      className={skin.colorInput}
-                      aria-label="渐变结束色"
-                      type="color"
-                      value={skinColor(design.gradientEnd)}
-                      onChange={(event) =>
-                        patch({ gradientEnd: skinColorNumber(event.target.value) })
-                      }
-                    />
-                  </label>
-                  <label className={skin.checkLabel}>
-                    <input
-                      aria-label="横向渐变"
-                      type="checkbox"
-                      checked={design.gradientHorizontal ?? false}
-                      onChange={(event) => patch({ gradientHorizontal: event.target.checked })}
-                    />
-                    横向渐变
-                  </label>
-                </>
-              )}
-            </div>
-            <div className={skin.controlBlock}>
-              <div className={skin.controlTitle}>照片壁纸</div>
-              <label className={`secondary ${skin.photoButton}`}>
-                {design.photo ? "更换照片" : "选择照片"}
-                <input
-                  aria-label="选择皮肤照片"
-                  type="file"
-                  accept="image/*"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    event.target.value = "";
-                    if (!file) return;
-                    setPhotoError("");
-                    void readAndCompressTouchSkinPhoto(file)
-                      .then((photo) => patch({ photo }))
-                      .catch(() => setPhotoError("无法读取或压缩这张照片，请换一张再试。"));
-                  }}
-                />
-              </label>
-              {photoError && <ErrorAlert className={skin.warning}>{photoError}</ErrorAlert>}
-              {design.photo && (
-                <div className={skin.formGrid}>
-                  <label>
-                    照片位置 · {Math.round((design.photoPosition ?? 0.5) * 100)}%
-                    <input
-                      aria-label="照片位置"
-                      type="range"
-                      min="0"
-                      max="1"
-                      step=".01"
-                      value={design.photoPosition ?? 0.5}
-                      onChange={(event) => patch({ photoPosition: Number(event.target.value) })}
-                    />
-                  </label>
-                  <label>
-                    压暗照片 · {Math.round((design.photoShade ?? 0.25) * 100)}%
-                    <input
-                      aria-label="压暗照片"
-                      type="range"
-                      min="0"
-                      max=".8"
-                      step=".01"
-                      value={design.photoShade ?? 0.25}
-                      onChange={(event) => patch({ photoShade: Number(event.target.value) })}
-                    />
-                  </label>
+            </GroupList>
+            <GroupList title="颜色">
+              <ColorRow
+                title={design.gradientEnd === undefined ? "背景颜色" : "渐变起始色"}
+                value={design.background}
+                onChange={(background) => patch({ background })}
+              />
+              <SwitchRow
+                title="渐变背景"
+                checked={design.gradientEnd !== undefined}
+                onChange={(checked) =>
+                  patch({ gradientEnd: checked ? design.background : undefined })
+                }
+              />
+              <ColorRow
+                title="渐变结束色"
+                hidden={design.gradientEnd === undefined}
+                value={design.gradientEnd ?? design.background}
+                onChange={(gradientEnd) => patch({ gradientEnd })}
+              />
+              <SwitchRow
+                title="横向渐变"
+                hidden={design.gradientEnd === undefined}
+                checked={design.gradientHorizontal ?? false}
+                onChange={(checked) => patch({ gradientHorizontal: checked })}
+              />
+            </GroupList>
+            <GroupList title="照片壁纸">
+              <Row
+                title="照片"
+                description={design.photo ? "已设为键盘背景" : "用自己的照片做键盘背景"}
+              >
+                {design.photo && (
                   <button
                     type="button"
-                    className="danger-text"
+                    className={skin.rowActionDanger}
                     onClick={() => patch({ photo: undefined })}
                   >
-                    移除照片
+                    移除
                   </button>
-                </div>
-              )}
-            </div>
-            <div className={`${skin.controlBlock} ${skin.formGrid}`}>
-              <label>
-                背景纹理
-                <select
-                  aria-label="背景纹理"
-                  value={design.pattern}
-                  onChange={(event) =>
-                    patch({
-                      pattern: Number(event.target.value) as TouchKeyboardSkinDesign["pattern"],
-                    })
-                  }
-                >
-                  <option value="0">纯色</option>
-                  <option value="1">网点</option>
-                  <option value="2">网格</option>
-                  <option value="3">波纹</option>
-                </select>
-              </label>
-              {design.pattern !== 0 && (
-                <label>
-                  纹理强度 · {Math.round((design.patternOpacity ?? 0.15) * 100)}%
+                )}
+                <label className={skin.rowAction}>
+                  {design.photo ? "更换照片" : "选择照片"}
                   <input
-                    aria-label="纹理强度"
-                    type="range"
-                    min="0"
-                    max=".5"
-                    step=".01"
-                    value={design.patternOpacity ?? 0.15}
-                    onChange={(event) => patch({ patternOpacity: Number(event.target.value) })}
+                    aria-label="选择皮肤照片"
+                    type="file"
+                    accept="image/*"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = "";
+                      if (!file) return;
+                      setPhotoError("");
+                      void readAndCompressTouchSkinPhoto(file)
+                        .then((photo) => patch({ photo }))
+                        .catch(() => setPhotoError("无法读取或压缩这张照片，请换一张再试。"));
+                    }}
                   />
                 </label>
-              )}
-            </div>
+              </Row>
+              {photoError && <ErrorAlert className={skin.warning}>{photoError}</ErrorAlert>}
+              <SliderRow
+                title="照片位置"
+                aria-label="照片位置"
+                hidden={!design.photo}
+                wide
+                min={0}
+                max={1}
+                step={0.01}
+                value={design.photoPosition ?? 0.5}
+                displayValue={percent(design.photoPosition ?? 0.5)}
+                onChange={(photoPosition) => patch({ photoPosition })}
+              />
+              <SliderRow
+                title="压暗照片"
+                aria-label="压暗照片"
+                hidden={!design.photo}
+                wide
+                min={0}
+                max={0.8}
+                step={0.01}
+                value={design.photoShade ?? 0.25}
+                displayValue={percent(design.photoShade ?? 0.25)}
+                onChange={(photoShade) => patch({ photoShade })}
+              />
+            </GroupList>
+            <GroupList title="纹理">
+              <SelectRow
+                title="背景纹理"
+                aria-label="背景纹理"
+                value={design.pattern}
+                onChange={(event) =>
+                  patch({
+                    pattern: Number(event.target.value) as TouchKeyboardSkinDesign["pattern"],
+                  })
+                }
+              >
+                <option value="0">纯色</option>
+                <option value="1">网点</option>
+                <option value="2">网格</option>
+                <option value="3">波纹</option>
+              </SelectRow>
+              <SliderRow
+                title="纹理强度"
+                aria-label="纹理强度"
+                hidden={design.pattern === 0}
+                wide
+                min={0}
+                max={0.5}
+                step={0.01}
+                value={design.patternOpacity ?? 0.15}
+                displayValue={percent(design.patternOpacity ?? 0.15)}
+                onChange={(patternOpacity) => patch({ patternOpacity })}
+              />
+            </GroupList>
           </>
         )}
 
         {category === "按键" && (
           <>
-            <div className={`${skin.controlBlock} ${skin.formGrid}`}>
-              <label>
-                键帽颜色
-                <input
-                  className={skin.colorInput}
-                  aria-label="键帽颜色"
-                  type="color"
-                  value={skinColor(design.keyBackground)}
-                  onChange={(event) =>
-                    patch({ keyBackground: skinColorNumber(event.target.value) })
-                  }
-                />
-              </label>
-              <label>
-                功能键颜色
-                <input
-                  className={skin.colorInput}
-                  aria-label="功能键颜色"
-                  type="color"
-                  value={skinColor(design.actionBackground)}
-                  onChange={(event) =>
-                    patch({ actionBackground: skinColorNumber(event.target.value) })
-                  }
-                />
-              </label>
-            </div>
-            <div className={`${skin.controlBlock} ${skin.formGrid}`}>
-              <label>
-                键帽造型
-                <select
-                  aria-label="键帽造型"
-                  value={design.keyShape ?? "rounded"}
-                  onChange={(event) => patch({ keyShape: event.target.value as TouchSkinKeyShape })}
-                >
-                  <option value="rounded">圆角</option>
-                  <option value="capsule">胶囊</option>
-                  <option value="ticket">票券</option>
-                  <option value="pebble">卵石</option>
-                </select>
-              </label>
-              <label>
-                键帽材质
-                <select
-                  aria-label="键帽材质"
-                  value={design.keyMaterial ?? "flat"}
-                  onChange={(event) =>
-                    patch({ keyMaterial: event.target.value as TouchSkinKeyMaterial })
-                  }
-                >
-                  <option value="flat">哑光</option>
-                  <option value="raised">立体</option>
-                  <option value="glass">玻璃</option>
-                  <option value="paper">纸张</option>
-                </select>
-              </label>
-              <label>
-                键帽不透明度 · {Math.round((design.keyOpacity ?? 1) * 100)}%
-                <input
-                  aria-label="键帽不透明度"
-                  type="range"
-                  min=".25"
-                  max="1"
-                  step=".01"
-                  value={design.keyOpacity ?? 1}
-                  onChange={(event) => patch({ keyOpacity: Number(event.target.value) })}
-                />
-              </label>
-              <label>
-                圆角 · {Math.round(design.cornerRadius)}
-                <input
-                  aria-label="自定义键帽圆角"
-                  type="range"
-                  min="0"
-                  max="20"
-                  step="1"
-                  value={design.cornerRadius}
-                  onChange={(event) => patch({ cornerRadius: Number(event.target.value) })}
-                />
-              </label>
-              <label>
-                边框 · {design.borderWidth.toFixed(1)}
-                <input
-                  aria-label="自定义键帽边框"
-                  type="range"
-                  min="0"
-                  max="2"
-                  step=".5"
-                  value={design.borderWidth}
-                  onChange={(event) => patch({ borderWidth: Number(event.target.value) })}
-                />
-              </label>
-              <label>
-                阴影 · {Math.round(design.shadow * 100)}%
-                <input
-                  aria-label="自定义键帽阴影"
-                  type="range"
-                  min="0"
-                  max=".4"
-                  step=".05"
-                  value={design.shadow}
-                  onChange={(event) => patch({ shadow: Number(event.target.value) })}
-                />
-              </label>
-              <label>
-                边框颜色
-                <input
-                  className={skin.colorInput}
-                  aria-label="边框颜色"
-                  type="color"
-                  value={skinColor(design.customBorderColor ?? design.accent)}
-                  onChange={(event) =>
-                    patch({ customBorderColor: skinColorNumber(event.target.value) })
-                  }
-                />
-              </label>
-            </div>
+            <GroupList title="颜色">
+              <ColorRow
+                title="键帽颜色"
+                value={design.keyBackground}
+                onChange={(keyBackground) => patch({ keyBackground })}
+              />
+              <ColorRow
+                title="功能键颜色"
+                value={design.actionBackground}
+                onChange={(actionBackground) => patch({ actionBackground })}
+              />
+              <ColorRow
+                title="边框颜色"
+                value={design.customBorderColor ?? design.accent}
+                onChange={(customBorderColor) => patch({ customBorderColor })}
+              />
+            </GroupList>
+            <GroupList title="造型">
+              <SelectRow
+                title="键帽造型"
+                aria-label="键帽造型"
+                value={design.keyShape ?? "rounded"}
+                onChange={(event) => patch({ keyShape: event.target.value as TouchSkinKeyShape })}
+              >
+                <option value="rounded">圆角</option>
+                <option value="capsule">胶囊</option>
+                <option value="ticket">票券</option>
+                <option value="pebble">卵石</option>
+              </SelectRow>
+              <SelectRow
+                title="键帽材质"
+                aria-label="键帽材质"
+                value={design.keyMaterial ?? "flat"}
+                onChange={(event) =>
+                  patch({ keyMaterial: event.target.value as TouchSkinKeyMaterial })
+                }
+              >
+                <option value="flat">哑光</option>
+                <option value="raised">立体</option>
+                <option value="glass">玻璃</option>
+                <option value="paper">纸张</option>
+              </SelectRow>
+              <SliderRow
+                title="键帽不透明度"
+                aria-label="键帽不透明度"
+                wide
+                min={0.25}
+                max={1}
+                step={0.01}
+                value={design.keyOpacity ?? 1}
+                displayValue={percent(design.keyOpacity ?? 1)}
+                onChange={(keyOpacity) => patch({ keyOpacity })}
+              />
+              <SliderRow
+                title="圆角"
+                aria-label="自定义键帽圆角"
+                wide
+                min={0}
+                max={20}
+                step={1}
+                value={design.cornerRadius}
+                displayValue={Math.round(design.cornerRadius)}
+                onChange={(cornerRadius) => patch({ cornerRadius })}
+              />
+              <SliderRow
+                title="边框"
+                aria-label="自定义键帽边框"
+                wide
+                min={0}
+                max={2}
+                step={0.5}
+                value={design.borderWidth}
+                displayValue={design.borderWidth.toFixed(1)}
+                onChange={(borderWidth) => patch({ borderWidth })}
+              />
+              <SliderRow
+                title="阴影"
+                aria-label="自定义键帽阴影"
+                wide
+                min={0}
+                max={0.4}
+                step={0.05}
+                value={design.shadow}
+                displayValue={percent(design.shadow)}
+                onChange={(shadow) => patch({ shadow })}
+              />
+            </GroupList>
           </>
         )}
 
         {category === "文本" && (
-          <div className={`${skin.controlBlock} ${skin.formGrid}`}>
-            <label className={skin.checkLabel}>
-              <input
-                aria-label="等宽字形"
-                type="checkbox"
+          <>
+            <GroupList title="文字">
+              <SwitchRow
+                title="等宽字形"
                 checked={design.monospaced}
-                onChange={(event) => patch({ monospaced: event.target.checked })}
+                onChange={(monospaced) => patch({ monospaced })}
               />
-              等宽字形
-            </label>
-            <label>
-              按键文字
-              <input
-                className={skin.colorInput}
-                aria-label="按键文字"
-                type="color"
-                value={skinColor(design.keyForeground)}
-                onChange={(event) => patch({ keyForeground: skinColorNumber(event.target.value) })}
+              <ColorRow
+                title="按键文字"
+                value={design.keyForeground}
+                onChange={(keyForeground) => patch({ keyForeground })}
               />
-            </label>
-            <label>
-              提示与工具栏
-              <input
-                className={skin.colorInput}
-                aria-label="提示与工具栏"
-                type="color"
-                value={skinColor(design.accent)}
-                onChange={(event) => patch({ accent: skinColorNumber(event.target.value) })}
+              <ColorRow
+                title="提示与工具栏"
+                value={design.accent}
+                onChange={(accent) => patch({ accent })}
               />
-            </label>
-            {!hasReadableSkinText(design) && (
-              <p className={skin.warning}>部分文字与背景对比度偏低，建议调整配色。</p>
-            )}
-            <ActionButton action={optimizeContrast} className="secondary" label="优化文字对比度" />
-          </div>
+              {!hasReadableSkinText(design) && (
+                <p className={skin.warning}>部分文字与背景对比度偏低，建议调整配色。</p>
+              )}
+            </GroupList>
+            <div className={skin.footerAction}>
+              <ActionButton
+                action={optimizeContrast}
+                className={skin.tonalButton}
+                label="优化文字对比度"
+              />
+            </div>
+          </>
         )}
 
         {category === "设计" && (
           <>
-            <div className={skin.templateGrid}>
-              {touchKeyboardSkinTemplates.map((template) => (
-                <button
-                  type="button"
-                  aria-label={`皮肤模板 ${template.title}`}
-                  onClick={() => apply(template.design)}
-                  key={template.title}
-                  style={{
-                    background: `linear-gradient(135deg, ${skinColor(template.design.background)}, ${skinColor(template.design.gradientEnd ?? template.design.background)})`,
-                    color: skinColor(template.design.accent),
-                  }}
-                >
-                  <ScreenKeyboardPreview
-                    theme={theme}
-                    skin="custom"
-                    customDesign={template.design}
-                    compact
-                  />
-                  <span>{template.title}</span>
-                </button>
-              ))}
+            <GroupList title="模板">
+              <div className={skin.groupBody}>
+                <div className={skin.templateGrid}>
+                  {touchKeyboardSkinTemplates.map((template) => (
+                    <button
+                      type="button"
+                      className={skin.templateCard}
+                      aria-label={`皮肤模板 ${template.title}`}
+                      onClick={() => apply(template.design)}
+                      key={template.title}
+                      style={{
+                        background: `linear-gradient(135deg, ${skinColor(template.design.background)}, ${skinColor(template.design.gradientEnd ?? template.design.background)})`,
+                        color: skinColor(template.design.accent),
+                      }}
+                    >
+                      <ScreenKeyboardPreview
+                        theme={theme}
+                        skin="custom"
+                        customDesign={template.design}
+                        compact
+                      />
+                      <span>{template.title}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </GroupList>
+            <div className={skin.footerAction}>
+              <ActionButton
+                action={() => apply(defaultTouchKeyboardSkinDesign)}
+                className="danger-text"
+                label="重置我的皮肤"
+              />
             </div>
-            <ActionButton
-              action={() => apply(defaultTouchKeyboardSkinDesign)}
-              className="danger-text"
-              label="重置我的皮肤"
-            />
           </>
         )}
         {category === "我的" && library && (
-          <div className={skin.controlBlock} aria-label="我的皮肤图库">
-            <div className={skin.controlTitle}>我的皮肤 · {saved.length}/12</div>
-            {libraryBusy && saved.length === 0 && <p className={skin.libraryEmpty}>正在读取…</p>}
-            {!libraryBusy && saved.length === 0 && (
-              <p className={skin.libraryEmpty}>
-                还没有命名保存的皮肤。调整满意后，点击“保存设计”。
-              </p>
-            )}
-            <div className={skin.libraryList}>
-              {saved.map((item) => (
-                <article key={item.id} className={skin.libraryCard}>
-                  <button
-                    type="button"
-                    className={skin.libraryApply}
-                    aria-label={`应用已保存皮肤 ${item.name}`}
-                    onClick={() => {
-                      apply(item.design);
-                      setLibraryNotice("已载入设计；点击“使用皮肤”并保存页面设置后会应用到键盘。");
-                    }}
-                  >
-                    <ScreenKeyboardPreview
-                      theme={theme}
-                      skin="custom"
-                      customDesign={item.design}
-                      compact
-                    />
-                    <strong>{item.name}</strong>
-                  </button>
-                  <div className={skin.libraryActions}>
-                    <ActionButton
-                      action={() => setConfirmation({ operation: "update", item })}
-                      className="secondary"
-                      disabled={libraryBusy}
-                      ariaLabel={`用当前设计更新 ${item.name}`}
-                      label="更新"
-                    />
-                    <ActionButton
-                      action={() => {
-                        setSkinName(item.name);
-                        setNameEditor({ operation: "rename", id: item.id });
-                        setLibraryNotice("");
+          <GroupList title={`我的皮肤 · ${saved.length}/12`}>
+            <div className={skin.groupBody} aria-label="我的皮肤图库">
+              {libraryBusy && saved.length === 0 && <p className={skin.libraryEmpty}>正在读取…</p>}
+              {!libraryBusy && saved.length === 0 && (
+                <p className={skin.libraryEmpty}>
+                  还没有命名保存的皮肤。调整满意后，点击“保存设计”。
+                </p>
+              )}
+              <div className={skin.libraryList}>
+                {saved.map((item) => (
+                  <article key={item.id} className={skin.libraryCard}>
+                    <button
+                      type="button"
+                      className={skin.libraryApply}
+                      aria-label={`应用已保存皮肤 ${item.name}`}
+                      onClick={() => {
+                        apply(item.design);
+                        setLibraryNotice(
+                          "已载入设计；点击“使用皮肤”并保存页面设置后会应用到键盘。",
+                        );
                       }}
-                      className="secondary"
-                      disabled={libraryBusy}
-                      ariaLabel={`重命名 ${item.name}`}
-                      label="重命名"
-                    />
-                    <ActionButton
-                      action={() => setConfirmation({ operation: "delete", item })}
-                      className="danger-text"
-                      disabled={libraryBusy}
-                      ariaLabel={`删除 ${item.name}`}
-                      label="删除"
-                    />
-                  </div>
-                </article>
-              ))}
+                    >
+                      <ScreenKeyboardPreview
+                        theme={theme}
+                        skin="custom"
+                        customDesign={item.design}
+                        compact
+                      />
+                      <strong>{item.name}</strong>
+                    </button>
+                    <div className={skin.libraryActions}>
+                      <ActionButton
+                        action={() => setConfirmation({ operation: "update", item })}
+                        className="secondary"
+                        disabled={libraryBusy}
+                        ariaLabel={`用当前设计更新 ${item.name}`}
+                        label="更新"
+                      />
+                      <ActionButton
+                        action={() => {
+                          setSkinName(item.name);
+                          setNameEditor({ operation: "rename", id: item.id });
+                          setLibraryNotice("");
+                        }}
+                        className="secondary"
+                        disabled={libraryBusy}
+                        ariaLabel={`重命名 ${item.name}`}
+                        label="重命名"
+                      />
+                      <ActionButton
+                        action={() => setConfirmation({ operation: "delete", item })}
+                        className="danger-text"
+                        disabled={libraryBusy}
+                        ariaLabel={`删除 ${item.name}`}
+                        label="删除"
+                      />
+                    </div>
+                  </article>
+                ))}
+              </div>
             </div>
-          </div>
+          </GroupList>
         )}
       </div>
-
-      <div className={skin.editorPreview}>
-        <div className={skin.editorActions}>
-          <ActionButton
-            action={stepBack}
-            className="secondary"
-            disabled={!undo.length || disabled}
-            label="撤销设计"
-          />
-          <ActionButton
-            action={stepForward}
-            className="secondary"
-            disabled={!redo.length || disabled}
-            label="重做"
-          />
-          <ActionButton
-            action={onUse}
-            className="primary"
-            disabled={disabled || selected}
-            label={selected ? "正在使用" : "使用皮肤"}
-          />
-        </div>
-        <ScreenKeyboardPreview theme={theme} skin="custom" customDesign={design} />
-      </div>
     </div>
+  );
+  return fullScreen ? (
+    <div className={fullScreenSurface} role="dialog" aria-modal="true" aria-label="设计我的皮肤">
+      {editor}
+    </div>
+  ) : (
+    editor
   );
 }

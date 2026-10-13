@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
+import java.util.function.BooleanSupplier;
 
 /** Debounced, display-only online candidate translation cache. All callbacks run on main. */
 public final class CandidateTranslationStore {
@@ -18,6 +19,14 @@ public final class CandidateTranslationStore {
 
     public interface Service {
         List<String> translate(List<String> texts, String target) throws Exception;
+
+        /**
+         * 同上，另带一个「这次请求是否已经过期」的判断：用户接着打字后 store 换了 epoch，它就返回 true。逐词请求的服务在每个词之前问一次，过期就停下，免得旧的一页占着单线程的 worker、继续花用户服务的额度。返回的列表仍要与 {@code texts} 等长，没问到的位置填 null。
+         */
+        default List<String> translate(List<String> texts, String target, BooleanSupplier stale)
+                throws Exception {
+            return translate(texts, target);
+        }
     }
     public interface Listener {
         void onArrival(long generation);
@@ -31,7 +40,9 @@ public final class CandidateTranslationStore {
     private final Map<String, String> cache = new LinkedHashMap<>(MAX_CACHE_ENTRIES, 0.75f, true);
     private Runnable pending;
     private String signature;
-    private long requestEpoch;
+    private String binding;
+    // 主线程写，worker 在逐词请求之间读（见 Service#translate 的 stale），所以是 volatile。
+    private volatile long requestEpoch;
 
     public CandidateTranslationStore(Context context, ExecutorService worker, Handler main,
                                      Listener listener) {
@@ -62,6 +73,16 @@ public final class CandidateTranslationStore {
 
     public String gloss(String word, String target) {
         return cache.get(key(target, word));
+    }
+
+    public boolean hasEntries() { return !cache.isEmpty(); }
+
+    /** Bind cached display data to one account session lineage; changing it fences and clears old rows. */
+    public boolean bindTo(String nextBinding) {
+        if (java.util.Objects.equals(binding, nextBinding)) return nextBinding != null;
+        binding = nextBinding;
+        clear();
+        return false;
     }
 
     public void refresh(List<String> words, String target, long generation) {
@@ -121,11 +142,13 @@ public final class CandidateTranslationStore {
         signature = stamp;
         try {
             worker.execute(() -> {
+                BooleanSupplier stale = () -> epoch != requestEpoch;
                 for (Map.Entry<String, ArrayList<String>> request : requests.entrySet()) {
+                    if (stale.getAsBoolean()) return;
                     String target = request.getKey();
                     ArrayList<String> missing = request.getValue();
                     try {
-                        List<String> values = service.translate(missing, target);
+                        List<String> values = service.translate(missing, target, stale);
                         scheduler.post(() -> absorb(epoch, target, generation, missing, values));
                     } catch (Exception ignored) {
                         // Optional display data must never disturb input or expose response text.
@@ -156,7 +179,7 @@ public final class CandidateTranslationStore {
         boolean arrived = false;
         for (int index = 0; index < words.size(); index++) {
             String value = values.get(index);
-            value = trimWhitespace(value);
+            value = TextPolicy.stripSpaceChars(value);
             if (value == null || value.isEmpty() || value.equals(words.get(index))
                     || TextPolicy.utf8Length(value) > 4096) continue;
             remember(key(target, words.get(index)), value);
@@ -170,24 +193,6 @@ public final class CandidateTranslationStore {
             cache.remove(cache.keySet().iterator().next());
         }
         cache.put(cacheKey, value);
-    }
-
-    /** Match Apple's whitespace/newline normalization before a gloss enters the cache. */
-    private static String trimWhitespace(String value) {
-        if (value == null || value.isEmpty()) return value;
-        int start = 0;
-        while (start < value.length()) {
-            int codePoint = value.codePointAt(start);
-            if (!Character.isWhitespace(codePoint) && !Character.isSpaceChar(codePoint)) break;
-            start += Character.charCount(codePoint);
-        }
-        int end = value.length();
-        while (end > start) {
-            int codePoint = value.codePointBefore(end);
-            if (!Character.isWhitespace(codePoint) && !Character.isSpaceChar(codePoint)) break;
-            end -= Character.charCount(codePoint);
-        }
-        return value.substring(start, end);
     }
 
     private static final class HandlerScheduler implements Scheduler {

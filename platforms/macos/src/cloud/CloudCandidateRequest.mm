@@ -52,8 +52,9 @@ static BOOL MSIMEIsAllowedDescriptorURL(NSURL *url) {
     if (![headers isKindOfClass:NSDictionary.class] || headers.count > 2 || ![headers[@"Content-Type"] isEqual:@"application/json"]) return self;
     for (id key in headers) {
         id value = headers[key];
+        // 4111 = 最长 4096 字节的密钥加上 DeepL 官方 API 的 `DeepL-Auth-Key ` 前缀（DeepLX 的 `Bearer ` 更短）。
         if (![@[@"Content-Type", @"Authorization"] containsObject:key] || ![value isKindOfClass:NSString.class] ||
-            [value lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 4103 ||
+            [value lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 4111 ||
             [value rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location != NSNotFound) return self;
     }
     if (![descriptor[@"body"] isKindOfClass:NSDictionary.class] || ![NSJSONSerialization isValidJSONObject:descriptor[@"body"]]) return self;

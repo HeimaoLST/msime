@@ -1,4 +1,5 @@
 import type { InputHTMLAttributes, ReactNode } from "react";
+import { ControlledInput } from "../core/controlled-input";
 import { SettingField } from "./setting-field";
 
 export interface TextSettingFieldProps extends Omit<
@@ -23,12 +24,7 @@ export function TextSettingField({
 }: TextSettingFieldProps) {
   return (
     <SettingField label={label} description={description}>
-      <input
-        {...inputProps}
-        aria-label={inputLabel}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      />
+      <ControlledInput {...inputProps} aria-label={inputLabel} value={value} onChange={onChange} />
     </SettingField>
   );
 }

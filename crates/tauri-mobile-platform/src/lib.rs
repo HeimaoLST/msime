@@ -204,7 +204,7 @@ pub struct IosKeyboardPreferences {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tablet_split_keyboard: Option<bool>,
     pub dictionary_learning: bool,
-    /// The global theme id (`Preferences::global_theme`), kept in the App Group under `globalTheme` so the keyboard extension reads it without the preferences document. Only the seven theme ids are valid.
+    /// 全局主题 id（`Preferences::global_theme`），存在 App Group 的 `globalTheme` 下，键盘扩展不读偏好文档也能拿到。只有八个主题 id 有效。
     pub global_theme: String,
     /// The custom theme's keyboard design (`Preferences::custom_theme.keyboard`) as JSON; `None` when the custom theme has no design and draws its base theme's keyboard. The App Group keeps it under `customKeyboardSkin.v1`.
     pub custom_keyboard_skin: Option<String>,
@@ -253,6 +253,8 @@ pub struct MobileVoiceRequestHeader {
 pub struct MobileVoiceTranscriptionRequest {
     pub request_id: String,
     pub provider: String,
+    /// 请求格式（`msime_client_core::voice::provider::asr_request_format`）：`multipart`、`chat_audio`、`doubao_websocket` 或 `local`。原生插件按它挑请求构造，不按 provider 名字判断。
+    pub request_format: String,
     pub endpoint: String,
     pub model: String,
     pub token: String,
@@ -301,7 +303,11 @@ impl MobileVoiceTranscriptionRequest {
             )
             && is_bounded_text(&self.model_path, MAX_MOBILE_VOICE_MODEL_PATH_BYTES)
             && valid_mobile_voice_hotwords(&self.hotwords);
-        if !common {
+        // 格式必须就是这个 provider 的格式，插件只看格式，所以两者不一致的请求一律拒绝。
+        if !common
+            || msime_client_core::voice::provider::asr_request_format(&self.provider)
+                != Some(self.request_format.as_str())
+        {
             return false;
         }
         // On-device recognition: nothing is sent anywhere, so no endpoint, token, header or boosting table may ride along, and the model has to be an absolute path in the app's own storage.
@@ -316,11 +322,11 @@ impl MobileVoiceTranscriptionRequest {
         if !self.model_path.is_empty() || !self.hotwords.is_empty() {
             return false;
         }
-        // Every one of these is the same OpenAI-compatible multipart upload, so they share one
-        // shape check; Doubao below is the streaming websocket and validates separately.
+        // multipart 和 chat_audio 都是带 Bearer 密钥的 HTTPS 整句上传，形状检查相同；豆包是流式 WebSocket，在下面单独检查。
         if matches!(
-            self.provider.as_str(),
-            "openai" | "siliconflow" | "groq" | "everyapi" | "mistral"
+            self.request_format.as_str(),
+            msime_client_core::voice::provider::ASR_REQUEST_MULTIPART
+                | msime_client_core::voice::provider::ASR_REQUEST_CHAT_AUDIO
         ) {
             return msime_client_core::voice::provider::valid_mobile_voice_endpoint(
                 &self.endpoint,
@@ -397,6 +403,7 @@ impl IosKeyboardPreferences {
                 | "vietnamese"
                 | "tibetan"
                 | "stroke"
+                | "fourteenKey"
         ) && matches!(
             self.haptic_strength.as_str(),
             "light" | "medium" | "strong" | "system"
@@ -404,7 +411,7 @@ impl IosKeyboardPreferences {
             // The ids of msime_client_core::skin::theme::GlobalTheme, which this crate does not depend on; the desktop crate's iOS account tests hold the two lists together.
             && matches!(
                 self.global_theme.as_str(),
-                "system" | "shuishan" | "light" | "paper" | "night" | "ink" | "custom"
+                "system" | "native" | "shuishan" | "light" | "paper" | "night" | "ink" | "custom"
             )
             && self.custom_keyboard_skin.as_ref().is_none_or(|value| {
                 value.len() <= MAX_IOS_CUSTOM_KEYBOARD_SKIN_BYTES
@@ -560,6 +567,12 @@ fn migrated_account_session_payload(value: &str) -> Option<String> {
     None
 }
 
+/// 云剪贴板密钥串约 130 个字符，与桌面端文件的上限相同。
+#[cfg(target_os = "ios")]
+fn is_valid_cloud_clipboard_keystore(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 4096
+}
+
 #[cfg(target_os = "ios")]
 pub struct MobilePlatform<R: Runtime>(PluginHandle<R>);
 
@@ -633,6 +646,37 @@ impl<R: Runtime> MobilePlatform<R> {
 
     pub fn clear_account_session(&self) -> Result<(), ()> {
         self.0.run_mobile_plugin("clearSession", ()).map_err(|_| ())
+    }
+
+    /// 云剪贴板密钥串：钥匙串里与账号会话同一个 App Group 访问组的通用密码项，App、键盘扩展和这里共用一份；`clearSession` 会一并删除它。
+    pub fn load_cloud_clipboard_keystore(&self) -> Result<Option<String>, ()> {
+        let response = self
+            .0
+            .run_mobile_plugin::<AccountSessionResponse>("loadCloudClipboardKeystore", ())
+            .map_err(|_| ())?;
+        response
+            .value
+            .map(|value| {
+                if is_valid_cloud_clipboard_keystore(&value) {
+                    Ok(value)
+                } else {
+                    Err(())
+                }
+            })
+            .transpose()
+    }
+
+    /// 原子替换云剪贴板密钥串。
+    pub fn save_cloud_clipboard_keystore(&self, value: &str) -> Result<(), ()> {
+        if !is_valid_cloud_clipboard_keystore(value) {
+            return Err(());
+        }
+        self.0
+            .run_mobile_plugin(
+                "saveCloudClipboardKeystore",
+                AccountSessionRequest { value },
+            )
+            .map_err(|_| ())
     }
 
     pub async fn sign_in_with_apple(&self, challenge_id: &str, nonce: &str) -> Result<String, ()> {
@@ -900,6 +944,7 @@ mod tests {
         let request = MobileVoiceTranscriptionRequest {
             request_id: "fixture-request-1".into(),
             provider: "openai".into(),
+            request_format: "multipart".into(),
             endpoint: "https://fixture.invalid/v1/audio/transcriptions".into(),
             model: "fixture-model".into(),
             token: "synthetic-token".into(),
@@ -912,9 +957,29 @@ mod tests {
             hotwords: Vec::new(),
         };
         assert!(request.is_valid());
-        for provider in ["openai", "siliconflow", "groq", "everyapi", "mistral"] {
+        for (provider, format) in [
+            ("openai", "multipart"),
+            ("siliconflow", "multipart"),
+            ("groq", "multipart"),
+            ("everyapi", "multipart"),
+            ("mistral", "multipart"),
+            ("bailian", "chat_audio"),
+        ] {
             assert!(MobileVoiceTranscriptionRequest {
                 provider: provider.into(),
+                request_format: format.into(),
+                ..request.clone()
+            }
+            .is_valid());
+            // 格式和 provider 对不上时拒绝，插件不会按错的格式发请求。
+            assert!(!MobileVoiceTranscriptionRequest {
+                provider: provider.into(),
+                request_format: if format == "multipart" {
+                    "chat_audio"
+                } else {
+                    "multipart"
+                }
+                .into(),
                 ..request.clone()
             }
             .is_valid());
@@ -955,6 +1020,7 @@ mod tests {
         let request = MobileVoiceTranscriptionRequest {
             request_id: "fixture-request-1".into(),
             provider: "local".into(),
+            request_format: "local".into(),
             endpoint: String::new(),
             model: String::new(),
             token: String::new(),
@@ -1022,6 +1088,7 @@ mod tests {
         // A network provider never carries the on-device fields, and an older serialisation without them still reads.
         let network = MobileVoiceTranscriptionRequest {
             provider: "openai".into(),
+            request_format: "multipart".into(),
             endpoint: "https://fixture.invalid/v1/audio/transcriptions".into(),
             model: "fixture-model".into(),
             token: "synthetic-token".into(),
@@ -1066,6 +1133,7 @@ mod tests {
         let request = MobileVoiceTranscriptionRequest {
             request_id: "fixture-request-1".into(),
             provider: "doubao".into(),
+            request_format: "doubao_websocket".into(),
             endpoint: "wss://fixture.invalid/asr".into(),
             model: String::new(),
             token: String::new(),
@@ -1127,6 +1195,7 @@ mod tests {
         let request = MobileVoiceTranscriptionRequest {
             request_id: "fixture-request-1".into(),
             provider: "doubao".into(),
+            request_format: "doubao_websocket".into(),
             endpoint: "wss://fixture.invalid/asr".into(),
             model: String::new(),
             token: String::new(),
@@ -1203,6 +1272,18 @@ mod tests {
             dictionary_learning: false,
             global_theme: "custom".into(),
             custom_keyboard_skin: Some(r#"{"background":15269867}"#.into()),
+        }
+    }
+
+    /// 全拼 14 键的原生 id 是 `fourteenKey`，与 `MobilePlatformPlugin.schemeOrder` 一致。
+    #[test]
+    fn ios_keyboard_preferences_accept_the_fourteen_key_touch_scheme() {
+        let mut preferences = keyboard_preferences();
+        preferences.input_scheme = "fourteenKey".into();
+        assert!(preferences.is_valid());
+        for scheme in ["fourteen_key", "FourteenKey", "fourteen"] {
+            preferences.input_scheme = scheme.into();
+            assert!(!preferences.is_valid(), "{scheme}");
         }
     }
 

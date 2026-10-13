@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { testHost } from "../support/host";
-import { settingsFormReady, saveSettingsNow } from "../support/settings-form";
+import { selectSettingsTab, settingsFormReady, saveSettingsNow } from "../support/settings-form";
 import { afterEach, expect, test, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { SettingsPage, type SettingsClient, type Snapshot } from "@msime/ui";
@@ -26,14 +26,14 @@ function mount(client: Partial<SettingsClient>) {
 async function openVoice() {
   await settingsFormReady();
   fireEvent.click(screen.getByRole("button", { name: "语音输入" }));
-  return screen.getByLabelText("识别服务") as HTMLSelectElement;
+  return screen.getByRole("combobox", { name: "识别服务" }) as HTMLSelectElement;
 }
 
 // The Linux voice provider builds ASR_PROVIDERS = {openai, groq, siliconflow, everyapi,
-// mistral, doubao}. Anything else makes select_profile return None and every recording fail
+// mistral, bailian, doubao}. Anything else makes select_profile return None and every recording fail
 // with ok=false. Keep this list in step with that script, the shared C++ provider table and
 // the mobile transport's accepted set; an option no backend implements is a dead menu entry.
-const REACHABLE = ["doubao", "siliconflow", "openai", "groq", "everyapi", "mistral"];
+const REACHABLE = ["doubao", "siliconflow", "openai", "groq", "everyapi", "mistral", "bailian"];
 
 test("macOS system recognition is configurable without cloud ASR fields", async () => {
   const save = vi
@@ -65,13 +65,16 @@ test("macOS system recognition is configurable without cloud ASR fields", async 
   expect(screen.queryByRole("textbox", { name: "识别模型" })).toBeNull();
   expect(screen.queryByLabelText("识别 API Token")).toBeNull();
   expect(screen.queryByRole("textbox", { name: "Doubao 资源 ID" })).toBeNull();
-  fireEvent.change(screen.getByRole("combobox", { name: "结果提交策略" }), {
-    target: { value: "ctrl_v" },
-  });
-  expect(screen.getByRole("switch", { name: "启用文本润色" })).toBeTruthy();
   expect((screen.getByRole("combobox", { name: "识别语言" }) as HTMLInputElement).value).toBe(
     "zh-CN",
   );
+  selectSettingsTab("录音与结果");
+  fireEvent.change(screen.getByRole("combobox", { name: "结果提交策略" }), {
+    target: { value: "ctrl_v" },
+  });
+  selectSettingsTab("润色");
+  expect(screen.getByRole("switch", { name: "启用文本润色" })).toBeTruthy();
+
   saveSettingsNow();
   await vi.waitFor(() => expect(save).toHaveBeenCalled());
   expect(save.mock.calls[0][1].voice_input).toMatchObject({
@@ -84,7 +87,7 @@ test("macOS system recognition is configurable without cloud ASR fields", async 
   });
 });
 
-test("a stored system provider is preserved on macOS and marked unavailable elsewhere", async () => {
+test("a stored system provider is preserved on macOS and Windows and marked unavailable elsewhere", async () => {
   for (const platform of ["macos", "windows", "linux"]) {
     mount({
       host: testHost({ platform }),
@@ -99,7 +102,7 @@ test("a stored system provider is preserved on macOS and marked unavailable else
     const select = await openVoice();
     expect(select.value).toBe("system");
     expect(Array.from(select.options).find((option) => option.value === "system")?.disabled).toBe(
-      platform !== "macos",
+      platform === "linux",
     );
     cleanup();
   }

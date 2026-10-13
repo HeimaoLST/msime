@@ -26,7 +26,11 @@ public enum KeyboardScheme {
     // 笔画方案自己画五笔画键盘，偏好里的 26 键/9 键都显示它；与注音一样存 `twenty_six_key`，由宿主按方案号换面。
     STROKE("stroke", "stroke", null, "twenty_six_key", "笔画", "笔", "5"),
     // 注音 9 键与大千注音是同一个 Engine 方案，只是触屏布局存 `nine_key`；追加在末尾，与共享 `TouchKeyboardScheme::ALL` 的顺序一致。
-    ZHUYIN_NINE_KEY("zhuyin_nine_key", "zhuyin", null, "nine_key", "注音 9 键", "注", "9");
+    ZHUYIN_NINE_KEY("zhuyin_nine_key", "zhuyin", null, "nine_key", "注音 9 键", "注", "9"),
+    // 全拼 14 键：QWERTY 上相邻两个字母合成一个键，引擎按组码网格解码。追加在末尾，与共享 `TouchKeyboardScheme::ALL` 的顺序一致；默认不启用（{@link #optIn}）。
+    QUANPIN_FOURTEEN_KEY("fourteen_key", "quanpin", null, "fourteen_key", "全拼 14 键", "拼", "14"),
+    // 九键双拼（#6572）：九宫格上每个音节两位数字，声母一位、韵母一位，用哪张表由偏好 `nine_key_shuangpin_profile` 选；引擎方案是全拼，解码复用九宫格。追加在末尾，与共享 `TouchKeyboardScheme::ALL` 的顺序一致；默认不启用（{@link #optIn}）。
+    NINE_KEY_SHUANGPIN("nine_key_shuangpin", "quanpin", null, "nine_key_shuangpin", "九键双拼", "双", "9");
 
     /** Complete preference values needed for one compare-and-swap update. */
     public record PreferenceMapping(
@@ -114,13 +118,14 @@ public enum KeyboardScheme {
     }
 
     /**
-     * 偏好里没有 `touch_keyboard_schemes.enabled` 时不启用的方案：粤拼、注音（大千和 9 键）、越南语、藏文和笔画。与共享的 `TouchKeyboardScheme::LEGACY_DEFAULT_ENABLED` 有意保持一致。
+     * 偏好里没有 `touch_keyboard_schemes.enabled` 时不启用的方案：粤拼、注音（大千和 9 键）、越南语、藏文、笔画、全拼 14 键和九键双拼。与共享的 `TouchKeyboardScheme::LEGACY_DEFAULT_ENABLED` 有意保持一致，14 键也不在新装的默认列表 `DEFAULT_ENABLED` 里。
      *
      * <p>没有列表的文档只可能出自默认值改成只有中文之前的版本，那时日语和韩语默认启用，所以这里不含它们，升级的用户键盘不变。新装的默认值（只有中文方案，日语、韩语由用户在「添加语言」里打开）由 client-core 决定并显式写进文档（`TouchKeyboardScheme::DEFAULT_ENABLED`），这里读到的总是那份列表。
      */
     public boolean optIn() {
         return this == CANTONESE || this == ZHUYIN || this == ZHUYIN_NINE_KEY || this == VIETNAMESE
-            || this == TIBETAN || this == STROKE;
+            || this == TIBETAN || this == STROKE || this == QUANPIN_FOURTEEN_KEY
+            || this == NINE_KEY_SHUANGPIN;
     }
 
     /** 日文词典资源包的 id，与 client-core `ResourcePack::Japanese` 一致。 */
@@ -238,6 +243,34 @@ public enum KeyboardScheme {
         return schemes == null || schemes.isEmpty() ? List.of(fallback(edition)) : schemes;
     }
 
+    /**
+     * 键盘「输入方式」面板里列出的方案：`schemes` 里的双拼只留一种，其余方案原样、按原顺序保留。
+     *
+     * <p>留下的那一种依次取：`selected` 本身是双拼时就是它；否则是偏好 `shuangpin_profile`（`profile`，缺省或不认识时按小鹤，与 {@link #mapping} 的规整相同）对应的那一种；它不在 `schemes` 里时取 `schemes` 里第一种双拼。大多数人只用一种双拼，四种都列出来会把手写挤到第二页（#6450）；换双拼方案在设置的「双拼」子菜单里。与 iOS 的 `InputSchemePreference.pickerSchemes`、鸿蒙的 `KeyboardScheme.pickerSchemes` 一致。
+     */
+    public static List<KeyboardScheme> pickerSchemes(
+            List<KeyboardScheme> schemes, KeyboardScheme selected, String profile) {
+        KeyboardScheme kept = null;
+        if (selected != null && selected.shuangpinProfile != null && schemes.contains(selected)) {
+            kept = selected;
+        } else {
+            String configured = normalizedProfile(profile);
+            for (KeyboardScheme candidate : schemes) {
+                if (candidate.shuangpinProfile == null) continue;
+                if (kept == null) kept = candidate;
+                if (configured.equals(candidate.shuangpinProfile)) {
+                    kept = candidate;
+                    break;
+                }
+            }
+        }
+        List<KeyboardScheme> picker = new ArrayList<>(schemes.size());
+        for (KeyboardScheme candidate : schemes) {
+            if (candidate.shuangpinProfile == null || candidate == kept) picker.add(candidate);
+        }
+        return List.copyOf(picker);
+    }
+
     /** Shared selected is authoritative; otherwise preserve the applied scheme or use first enabled. */
     public static KeyboardScheme resolveEnabledSelection(KeyboardScheme applied,
             String selectedPreferenceId, List<KeyboardScheme> enabled, AppEdition edition) {
@@ -267,6 +300,8 @@ public enum KeyboardScheme {
             String scheme, String profile, String touchLayout, String handwritingScheme) {
         if (handwritingScheme.equals(scheme) && "handwriting".equals(touchLayout)) return HANDWRITING;
         if ("quanpin".equals(scheme) && "nine_key".equals(touchLayout)) return QUANPIN_NINE_KEY;
+        if ("quanpin".equals(scheme) && "fourteen_key".equals(touchLayout)) return QUANPIN_FOURTEEN_KEY;
+        if ("quanpin".equals(scheme) && "nine_key_shuangpin".equals(touchLayout)) return NINE_KEY_SHUANGPIN;
         if ("japanese".equals(scheme) && "nine_key".equals(touchLayout)) return JAPANESE_NINE_KEY;
         if ("zhuyin".equals(scheme) && "nine_key".equals(touchLayout)) return ZHUYIN_NINE_KEY;
         if ("shuangpin".equals(scheme)) {
@@ -275,9 +310,12 @@ public enum KeyboardScheme {
             }
             return XIAOHE;
         }
+        // 九键、14 键和九键双拼只由上面的显式分支按存下的布局给出；通用循环按方案找入口，不能落到它们身上。
         for (KeyboardScheme candidate : values()) {
             if (candidate.shuangpinProfile == null && candidate.engineScheme.equals(scheme)
-                    && !"nine_key".equals(candidate.touchKeyboardLayout)) return candidate;
+                    && !"nine_key".equals(candidate.touchKeyboardLayout)
+                    && !"fourteen_key".equals(candidate.touchKeyboardLayout)
+                    && !"nine_key_shuangpin".equals(candidate.touchKeyboardLayout)) return candidate;
         }
         return QUANPIN;
     }
@@ -296,13 +334,24 @@ public enum KeyboardScheme {
         return new PreferenceMapping(scheme, lastChinese, profile, touchKeyboardLayout);
     }
 
+    /** 中文以外的语言键盘：日语、韩语、越南语和藏文。手写跑的是中文方案，不算。中英键开了「轮换其他语言」时按启用顺序轮到它们（{@link LanguageKeyCyclePolicy}）。 */
+    public boolean otherLanguage() {
+        return this != HANDWRITING && !isChineseScheme(engineScheme);
+    }
+
+    /** 这个入口属于哪种语言：就是它的 Engine 方案（日语 9 键和日语 26 键都是 `japanese`）。手写没有自己的语言，返回 null。 */
+    public String language() {
+        return this == HANDWRITING ? null : engineScheme;
+    }
+
     private static boolean isChineseScheme(String value) {
         return "quanpin".equals(value) || "shuangpin".equals(value) || "wubi".equals(value)
             || "cantonese".equals(value) || "zhuyin".equals(value) || "stroke".equals(value);
     }
 
     private static String normalizedProfile(String value) {
-        if ("ziranma".equals(value) || "microsoft".equals(value) || "shoudao".equals(value)) {
+        if ("ziranma".equals(value) || "microsoft".equals(value) || "shoudao".equals(value)
+                || "custom".equals(value)) {
             return value;
         }
         return "xiaohe";

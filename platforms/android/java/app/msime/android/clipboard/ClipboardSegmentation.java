@@ -51,19 +51,16 @@ public final class ClipboardSegmentation {
         if (words == null) throw new IllegalArgumentException("No word iterator");
         String source = text;
         if (truncated(source)) {
-            int end = MAX_CHARS;
-            // 不把一个代理对从中间切开。
-            if (Character.isHighSurrogate(source.charAt(end - 1))) end--;
-            source = source.substring(0, end);
+            source = TextPolicy.clipSurrogateSafe(source, MAX_CHARS);
         }
         List<Segment> segments = new ArrayList<>();
         words.setText(source);
         int start = words.first();
         for (int end = words.next(); end != BreakIterator.DONE; start = end, end = words.next()) {
             String piece = source.substring(start, end);
-            if (isBlank(piece)) {
+            if (TextPolicy.blank(piece)) {
                 appendSeparator(segments, piece);
-            } else if (isIdeographRun(piece) && piece.codePointCount(0, piece.length()) > MAX_IDEOGRAPH_RUN) {
+            } else if (isIdeographRun(piece) && TextPolicy.codePointLength(piece) > MAX_IDEOGRAPH_RUN) {
                 for (int offset = 0; offset < piece.length(); ) {
                     int next = piece.offsetByCodePoints(offset, 1);
                     segments.add(new Segment(piece.substring(offset, next), false));
@@ -120,15 +117,6 @@ public final class ClipboardSegmentation {
         } else {
             segments.add(new Segment(piece, true));
         }
-    }
-
-    private static boolean isBlank(String piece) {
-        for (int offset = 0; offset < piece.length(); ) {
-            int codePoint = piece.codePointAt(offset);
-            if (!Character.isWhitespace(codePoint) && !Character.isSpaceChar(codePoint)) return false;
-            offset += Character.charCount(codePoint);
-        }
-        return true;
     }
 
     private static boolean isIdeographRun(String piece) {

@@ -28,7 +28,7 @@ inline std::string read_runtime_options(const std::filesystem::path &path) {
     ~CloseOnExit() { ::close(descriptor); }
   } close_on_exit{descriptor};
   struct stat metadata {};
-  if (::fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
+  if (::fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode) || metadata.st_nlink != 1) {
     throw std::runtime_error("runtime options unavailable");
   }
   std::string document;

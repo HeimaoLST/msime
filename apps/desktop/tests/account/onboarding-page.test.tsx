@@ -506,11 +506,11 @@ test("a HarmonyOS phone colours the system bars to the splash and then to the st
     />,
   );
 
-  // 启动画面底色是季节强调色以 20% 叠在 `#0A0B0A` 上，内容为浅色。
+  // 启动画面底色是系统启动窗的颜色，不随季节变：浅色文档是 #F1F3F5，内容为深色。
   expect(setSystemBars).toHaveBeenLastCalledWith({
-    background: "#2c1a11",
-    navigationBar: "#2c1a11",
-    dark: true,
+    background: "#F1F3F5",
+    navigationBar: "#F1F3F5",
+    dark: false,
   });
   fireEvent.click(screen.getByRole("button", { name: "跳过开屏" }));
   expect(setSystemBars).toHaveBeenLastCalledWith({
@@ -519,6 +519,26 @@ test("a HarmonyOS phone colours the system bars to the splash and then to the st
     dark: false,
   });
   cleanup();
+
+  // 深色文档：启动窗是近黑色 #0A0B0A，内容为浅色。
+  document.documentElement.dataset.theme = "dark";
+  const darkBars = vi.fn();
+  render(
+    <WelcomeFlowPage
+      actions={makeActions({ platform: "harmony", mobileSettings: true })}
+      onComplete={vi.fn().mockResolvedValue(undefined)}
+      appTheme={autumn}
+      chrome={{ setSystemBars: darkBars }}
+      splash
+    />,
+  );
+  expect(darkBars).toHaveBeenLastCalledWith({
+    background: "#0A0B0A",
+    navigationBar: "#0A0B0A",
+    dark: true,
+  });
+  cleanup();
+  delete document.documentElement.dataset.theme;
 
   // 2in1 没有需要着色的手机系统栏。
   const desktopBars = vi.fn();

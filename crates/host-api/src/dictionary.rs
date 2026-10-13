@@ -203,10 +203,62 @@ enum Operation {
         #[serde(default)]
         user_only: bool,
     },
-    /// 把用户词库导出成与 `/v1/users/me/dictionary/snapshot` 相同的 NDJSON 文件，`destination` 是绝对路径。
+    /// 把用户词库导出成与 `/v1/users/me/dictionary/snapshot` 相同的 NDJSON 文件，`destination` 是绝对路径。`include_learning` 为真时再写上输入记录（本地备份用；云同步不传，输出与原来逐字节相同）。
     ExportSnapshot {
         destination: String,
+        #[serde(default)]
+        include_learning: bool,
     },
+    /// 本机输入记录的条数，只读（`dictionary_snapshot::learning_count`）。
+    LearningCount,
+    /// 把快照文件 `source` 里的输入记录存成待合并的文件，键盘收起后空闲时合并进本机（`dictionary_snapshot::queue_learning_merge`）。要求 `preferences_directory` 是绝对路径。
+    QueueLearningMerge {
+        source: String,
+    },
+    /// 合并 `QueueLearningMerge` 排下的输入记录和 `QueueHabitsMerge` 排下的输入习惯（`dictionary_snapshot::merge_pending_learning`），要独占维护权。要求 `preferences_directory` 是绝对路径。
+    MergePendingLearning,
+    /// 只读地完整校验一份词库快照文件 `source`（本地备份恢复前先查一遍），返回它的元数据（`dictionary_snapshot::inspect_snapshot`）。
+    InspectSnapshot {
+        source: String,
+    },
+    /// 把本机的输入习惯（整句联想、选词对、拼写纠错、自动纠错抑制、置顶）写成 `destination`（`dictionary_snapshot::habits::export_learning_habits`），本地备份用。
+    ExportHabits {
+        destination: String,
+    },
+    /// 只读地完整校验一份输入习惯文件 `source`，返回 `{habits}`。
+    InspectHabits {
+        source: String,
+    },
+    /// 把输入习惯文件 `source` 存成待合并的文件，键盘收起后空闲时与输入记录一起合并（`dictionary_snapshot::habits::queue_habits_merge`）。要求 `preferences_directory` 是绝对路径。
+    QueueHabitsMerge {
+        source: String,
+    },
+    /// 五笔查码，只读：`text` 里每个不同汉字（以及整段作为一个词）在 86 和 98 码表里的编码（[`wubi_codes_json`]）。
+    WubiCodes {
+        text: String,
+    },
+}
+
+/// 五笔查码一次接受的文字上限（字节）。查码只列出前 `MAX_WUBI_LOOKUP_CHARACTERS` 个不同汉字，更长的粘贴没有意义。
+const MAX_WUBI_LOOKUP_TEXT: usize = 4096;
+
+/// `wubi_codes` 的回答：`{phrase, characters, truncated}`，`phrase` 和每个字都是 `{text, wubi86, wubi98}`，编码短码在前。
+///
+/// 只读五笔码表（会话用的同一份），不拿词库的维护租约：码表由 SQLite 只读打开，维护进行时读到的是替换前或替换后的完整文件，而一次查码不该让维护等它，也不该在 Android 设置进程里因为键盘进程持有维护而失败。移动端的个人词库队列也直接回答它，因为它不改任何东西。
+fn wubi_codes_json(
+    options: &msime_engine::host::EngineOptions,
+    text: &str,
+) -> Result<serde_json::Value, String> {
+    if text.len() > MAX_WUBI_LOOKUP_TEXT {
+        return Err("invalid wubi lookup".into());
+    }
+    let lookup = msime_engine::host::wubi_code_lookup(options, text);
+    let item = |codes: &msime_engine::host::WubiTextCodes| json!({ "text": codes.text, "wubi86": codes.wubi86, "wubi98": codes.wubi98 });
+    Ok(json!({
+        "phrase": lookup.phrase.as_ref().map(item),
+        "characters": lookup.characters.iter().map(item).collect::<Vec<_>>(),
+        "truncated": lookup.truncated,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -263,6 +315,34 @@ pub unsafe extern "C" fn msime_client_dictionary(request: *const u8, length: usi
         // SAFETY: guaranteed by the caller contract above.
         let bytes = unsafe { std::slice::from_raw_parts(request, length) };
         dictionary_request_json(bytes)
+    })
+}
+
+/// The largest `msime_client_settings_dictionary` request: an import carries the whole file, up to `settings_dictionary::MAX_IMPORT_TEXT_BYTES` of text, which JSON escaping can at most double, plus the host options.
+const SETTINGS_DICTIONARY_REQUEST_LIMIT: usize =
+    2 * crate::settings_dictionary::MAX_IMPORT_TEXT_BYTES + 1024 * 1024;
+
+/// A settings-page dictionary request, `{options, action}` as `msime_client_dictionary` takes it, through `settings_dictionary::request`: an edit, import or reset first has the input hosts let go of the dictionaries, an import of a whole file is sent in batches and answered with one report, and a refusal comes back as the settings pages' code (`dictionary_busy`, `dictionary_invalid_entry`, ...). Blocks until the hosts have let go: call off the UI thread.
+/// # Safety
+/// `request` must point to `length` readable bytes. Null is rejected.
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_settings_dictionary(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        if request.is_null() || length > SETTINGS_DICTIONARY_REQUEST_LIMIT {
+            return Err("dictionary_too_large".into());
+        }
+        // SAFETY: guaranteed by the caller contract above.
+        let bytes = unsafe { std::slice::from_raw_parts(request, length) };
+        let document: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| "storage".to_owned())?;
+        let (Some(options), Some(action)) = (document.get("options"), document.get("action"))
+        else {
+            return Err("storage".into());
+        };
+        crate::settings_dictionary::request(options, action, || {}).map_err(|code| code.to_owned())
     })
 }
 
@@ -530,6 +610,12 @@ pub fn dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Value, String
         .preferences
         .validate()
         .map_err(|_| "invalid dictionary options".to_owned())?;
+    // 只有 `queue_learning_merge` 和 `merge_pending_learning` 用到：待合并的输入记录放在它下面。
+    let preferences_directory = request
+        .options
+        .preferences_directory
+        .clone()
+        .filter(|path| Path::new(path).is_absolute());
     let options = request.options.into_engine_options();
     match request.action {
         Operation::List {
@@ -709,41 +795,17 @@ pub fn dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Value, String
             )
             .map_err(|_| "dictionary access unavailable")?
             .ok_or("dictionary maintenance busy")?;
-            let mut cursor = 0usize;
-            // Export pages are fetched in fixed 1000-entry chunks; reserve one
-            // chunk so the first filtered page does not grow the accumulator.
-            let mut matching = Vec::with_capacity(1000);
-            let mut source_has_more = true;
-            while source_has_more && matching.len() < offset.saturating_add(limit) {
-                // The pinyin export also carries the weights learned or set for bundled words, and leaves out single characters, as the reference's does; the other dictionaries export the user's own words only.
-                let page = msime_engine::host::dictionary_export_entries(
-                    &options,
-                    cursor,
-                    1000,
-                    kind == Kind::Pinyin,
-                )
-                .map_err(|_| "dictionary read rejected")?;
-                if page.entries.is_empty() {
-                    source_has_more = false;
-                    break;
-                }
-                cursor = cursor.saturating_add(page.entries.len());
-                source_has_more = page.has_more;
-                matching.extend(
-                    page.entries
-                        .into_iter()
-                        .filter(|entry| entry.kind == kind.into()),
-                );
-                if cursor > 1_000_000 {
-                    break;
-                }
-            }
-            let has_more = matching.len() > offset.saturating_add(limit)
-                || (source_has_more && matching.len() >= offset.saturating_add(limit));
-            let text = matching
+            let page = msime_engine::host::dictionary_export_entries_for_kind(
+                &options,
+                kind.into(),
+                offset,
+                limit,
+            )
+            .map_err(|_| "dictionary read rejected")?;
+            let has_more = page.has_more;
+            let text = page
+                .entries
                 .into_iter()
-                .skip(offset)
-                .take(limit)
                 .map(|entry| {
                     if format == "windows" {
                         format!("{}\t{}\t{}", entry.key, entry.value, entry.weight)
@@ -772,16 +834,88 @@ pub fn dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Value, String
             .ok_or("dictionary maintenance busy")?;
             count_entries(&options, kind, user_only)
         }
-        Operation::ExportSnapshot { destination } => {
+        Operation::ExportSnapshot {
+            destination,
+            include_learning,
+        } => {
             let _access = DictionaryAccess::try_session(
                 Path::new(&options.user_data),
                 Path::new(&options.dictionaries),
             )
             .map_err(|_| "dictionary access unavailable")?
             .ok_or("dictionary maintenance busy")?;
-            crate::dictionary_snapshot::export_local_snapshot(&options, Path::new(&destination))
+            crate::dictionary_snapshot::export_local_snapshot(
+                &options,
+                Path::new(&destination),
+                include_learning,
+            )
+            .map_err(str::to_owned)
+        }
+        Operation::LearningCount => {
+            let _access = DictionaryAccess::try_session(
+                Path::new(&options.user_data),
+                Path::new(&options.dictionaries),
+            )
+            .map_err(|_| "dictionary access unavailable")?
+            .ok_or("dictionary maintenance busy")?;
+            crate::dictionary_snapshot::learning_count(&options).map_err(str::to_owned)
+        }
+        Operation::QueueLearningMerge { source } => {
+            let preferences =
+                preferences_directory.ok_or("personal dictionary shared directory unavailable")?;
+            crate::dictionary_snapshot::queue_learning_merge(
+                Path::new(&preferences),
+                Path::new(&source),
+            )
+            .map_err(str::to_owned)
+        }
+        Operation::MergePendingLearning => {
+            let preferences =
+                preferences_directory.ok_or("personal dictionary shared directory unavailable")?;
+            crate::dictionary_snapshot::merge_pending_learning(&options, Path::new(&preferences))
                 .map_err(str::to_owned)
         }
+        Operation::InspectSnapshot { source } => {
+            let source = Path::new(&source);
+            if !source.is_absolute() {
+                return Err("invalid snapshot path".into());
+            }
+            let metadata =
+                crate::dictionary_snapshot::inspect_snapshot(source).map_err(str::to_owned)?;
+            serde_json::to_value(metadata).map_err(|_| "invalid snapshot file".to_owned())
+        }
+        Operation::ExportHabits { destination } => {
+            let _access = DictionaryAccess::try_session(
+                Path::new(&options.user_data),
+                Path::new(&options.dictionaries),
+            )
+            .map_err(|_| "dictionary access unavailable")?
+            .ok_or("dictionary maintenance busy")?;
+            crate::dictionary_snapshot::habits::export_learning_habits(
+                &options,
+                Path::new(&destination),
+            )
+            .map_err(str::to_owned)
+        }
+        Operation::InspectHabits { source } => {
+            let source = Path::new(&source);
+            if !source.is_absolute() {
+                return Err("invalid habits path".into());
+            }
+            crate::dictionary_snapshot::habits::inspect_learning_habits(source)
+                .map(|habits| json!({ "habits": habits }))
+                .map_err(str::to_owned)
+        }
+        Operation::QueueHabitsMerge { source } => {
+            let preferences =
+                preferences_directory.ok_or("personal dictionary shared directory unavailable")?;
+            crate::dictionary_snapshot::habits::queue_habits_merge(
+                Path::new(&preferences),
+                Path::new(&source),
+            )
+            .map_err(str::to_owned)
+        }
+        Operation::WubiCodes { text } => wubi_codes_json(&options, &text),
     }
 }
 
@@ -1024,7 +1158,15 @@ pub fn personal_dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Valu
             let state = store.read().map_err(personal_dictionary_error)?;
             Ok(json!({ "pending_count": state.pending_count() }))
         }
-        Operation::Count { .. } | Operation::ExportSnapshot { .. } => {
+        Operation::Count { .. }
+        | Operation::ExportSnapshot { .. }
+        | Operation::LearningCount
+        | Operation::QueueLearningMerge { .. }
+        | Operation::MergePendingLearning
+        | Operation::InspectSnapshot { .. }
+        | Operation::ExportHabits { .. }
+        | Operation::InspectHabits { .. }
+        | Operation::QueueHabitsMerge { .. } => {
             Err("dictionary read operations require msime_client_dictionary".into())
         }
         Operation::DismissFailure { request_id } => {
@@ -1033,6 +1175,10 @@ pub fn personal_dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Valu
                 .map_err(personal_dictionary_error)?;
             let state = store.read().map_err(personal_dictionary_error)?;
             Ok(json!({ "pending_count": state.pending_count() }))
+        }
+        // 查码只读五笔码表，不经过个人词库队列：Android 的设置页把所有词库操作都送到这里，而这一个不必等键盘空闲。
+        Operation::WubiCodes { text } => {
+            wubi_codes_json(&request.options.clone().into_engine_options(), &text)
         }
     }
 }
@@ -1088,6 +1234,23 @@ fn user_entries_page(
             .map(|entry| Entry::try_from(entry).map(|entry| entry.with_source(Source::User)))
             .collect::<Result<_, _>>()?;
         return Ok((entries, page.has_more));
+    }
+    if prefix.is_empty() {
+        if let Some(kind) = kind {
+            let page = msime_engine::host::dictionary_entries_for_kind(
+                options,
+                kind.into(),
+                offset,
+                limit,
+            )
+            .map_err(|_| "dictionary read rejected")?;
+            let entries: Vec<Entry> = page
+                .entries
+                .into_iter()
+                .map(|entry| Entry::try_from(entry).map(|entry| entry.with_source(Source::User)))
+                .collect::<Result<_, _>>()?;
+            return Ok((entries, page.has_more));
+        }
     }
     // The Engine pages the whole store in one sequence with no kind or prefix filter, so the selection happens here. Doing it on the client meant asking for 100 rows and discarding most of them: a user with more than a page of pinyin words who selected 五笔 saw an empty page 1 even though wubi entries existed.
     let mut selector = PageSelector::new(offset, limit);
@@ -2107,6 +2270,8 @@ pub enum CandidateOrigin {
     Kaomoji,
     Generated,
     Fallback,
+    /// 日文混输（实验选项）给整段罗马字补的日文转换，例如 `ohayou` 的おはよう；来自日文模型，不是哪个词库里的一行。
+    Japanese,
 }
 
 /// A candidate typing a code offers, in the order the Engine ranks it.
@@ -2172,6 +2337,8 @@ pub fn lookup_candidates(
     options.local_expression = false;
     options.local_command = false;
     options.local_mention = false;
+    options.local_chaizi = false;
+    // 日文混输照用户的设置留着：它不学习、不改用户数据，查询看到的就是用户打这串键时看到的那一行日文（`msime expand ohayou`）。
     let _access = DictionaryAccess::try_session(
         Path::new(&options.user_data),
         Path::new(&options.dictionaries),
@@ -2244,6 +2411,7 @@ pub fn lookup_candidates(
                 7 => (CandidateOrigin::Kaomoji, None),
                 8 => (CandidateOrigin::Generated, None),
                 9 => (CandidateOrigin::Fallback, None),
+                13 => (CandidateOrigin::Japanese, None),
                 // Cloud (2) and AI (3) suggestions come only from providers this session never has; one here means the lookup is no longer local.
                 _ => return Err("the lookup produced a candidate that is not local".to_owned()),
             };

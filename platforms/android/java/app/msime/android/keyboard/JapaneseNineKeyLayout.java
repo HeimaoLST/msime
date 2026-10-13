@@ -79,10 +79,30 @@ public final class JapaneseNineKeyLayout {
         return cycle.get(Math.floorMod(position + step, cycle.size()));
     }
 
+    /** 上一次轻点过去 `elapsedMillis` 毫秒后再点同一个键，是否还算连点切换。轻点时的切换判断和按下时提示中间格的判断都走这里，两边不会一边算到、一边没算到。 */
+    public static boolean withinToggleWindow(long elapsedMillis) {
+        return elapsedMillis <= TOGGLE_WINDOW_MS;
+    }
+
+    /**
+     * 此刻轻点 `key` 会打出的方向。`toggleKey` 和 `toggleDirection` 是上一次连点留下的键和方向（没有时 `toggleKey` 为 null），`elapsedMillis` 是距那一下的时间；组字是否还原样在那里由调用方先判断，判过不成立就传 null。数字符号层、换了键、过了时间窗都从键面上的那个（0）开始，否则是循环里的下一个（あ 之后是 い，や 之后跳过「」是 ゆ）。
+     */
+    public static int tapDirection(Key key, boolean symbolsLayer, Key toggleKey, int toggleDirection,
+                                   long elapsedMillis) {
+        if (symbolsLayer || toggleKey == null || key != toggleKey || !withinToggleWindow(elapsedMillis)) return 0;
+        return toggleStep(toggleCycle(key), toggleDirection, 1);
+    }
+
+    /** 参数同 {@link #tapDirection}：连点时间窗还剩多少毫秒，不在连点 `key` 时为 -1。按住不动超过它再松手，轻点就从键面上的假名重新开始，提示中间格要在那一刻换回来。 */
+    public static long toggleRemainingMillis(Key key, boolean symbolsLayer, Key toggleKey, long elapsedMillis) {
+        if (symbolsLayer || toggleKey == null || key != toggleKey || !withinToggleWindow(elapsedMillis)) return -1;
+        return TOGGLE_WINDOW_MS - elapsedMillis;
+    }
+
     /** The longest stroke a key sends (`shi`, `chi`, `tsu`): one kana never takes more deletes than this. */
     public static final int LONGEST_STROKE = 3;
 
-    /** Whether the composed reading ends in romaji the Engine has not turned into kana yet (`こんch`, `こn'`): a nine-key delete keeps going until it does not, so one press removes one whole kana. */
+    /** 画出来的读音（`display_reading`）末尾是否还挂着引擎没转成假名的罗马字（`こんch`、`こn`）：九键的删除一直删到不再挂着为止，按一次删掉一整个假名。 */
     public static boolean endsWithPendingRomaji(String reading) {
         if (reading == null || reading.isEmpty()) return false;
         char last = reading.charAt(reading.length() - 1);

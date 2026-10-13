@@ -347,3 +347,15 @@ fn a_stroke_that_doubles_back_is_not_one_pass() {
         assert!(one_pass.is_none_or(|at| at > 0), "{word}: {result:?}");
     }
 }
+
+#[test]
+fn decoding_a_long_stroke_reuses_beam_storage() {
+    let keyboard = keyboard();
+    let points = stroke("zhonghuarenmingongheguowansui", 0.0, &[]);
+    let (_, allocations) =
+        crate::ime::personal_rerank::allocations::count(|| decode_glide(&keyboard, &points, 8));
+    assert!(
+        allocations <= 22_000,
+        "glide beam allocations: {allocations}"
+    );
+}

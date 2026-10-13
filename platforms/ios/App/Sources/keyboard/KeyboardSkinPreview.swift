@@ -139,17 +139,8 @@ struct KeyboardSkinPreview: View {
     let accent = resolved(skin.accent)
     let disc = AppThemePalette.mix(accent, colorScheme == .dark ? 22 : 14, resolved(skin.keyBackground).withAlphaComponent(1))
     let frame = AppThemePalette.mix(accent, 82, .black)
-    let markSize: CGFloat = 13
-    let scale = MSIMELogo.scale(for: CGRect(x: 0, y: 0, width: markSize, height: markSize))
-    return ZStack {
-      Circle().fill(Color(uiColor: disc))
-      ZStack {
-        MSIMELogoFrame().fill(Color(uiColor: frame))
-        MSIMELogoStroke().stroke(.white, style: StrokeStyle(lineWidth: MSIMELogo.strokeWidth * scale, lineCap: .round, lineJoin: .round))
-      }
-      .frame(width: markSize, height: markSize)
-    }
-    .frame(width: 22, height: 22)
+    return LogoDisc(diameter: 22, markSize: 13,
+                    discFill: Color(uiColor: disc), frameFill: Color(uiColor: frame))
   }
 
   /// 按键下方系统画主屏指示条的区域，指示条用按键色。
@@ -202,14 +193,13 @@ struct KeyboardSkinPreview: View {
     }
   }
 
-  /// 设计稿缩略图的 26 键底行：123 / 中 / ， / 带麦克风和方案名的空格键 / 。 / 回车，宽度比例沿用键盘自身的权重（1.25 / 1.05 / 1 / 4 / 1 / 1.9）。
+  /// 设计稿缩略图的 26 键底行：123 / ， / 带麦克风和方案名的空格键 / 。 / 中 / 回车，宽度比例沿用键盘自身的权重（1.25 / 1 / 4 / 1 / 1.05 / 1.9）。
   private var miniatureBottomRow: some View {
     GeometryReader { proxy in
       let spacing: CGFloat = 5
       let unit = (proxy.size.width - spacing * 5) / 10.2
       HStack(spacing: spacing) {
         key("123", function: true).frame(width: unit * 1.25)
-        key("中", function: true).frame(width: unit * 1.05)
         key("，").frame(width: unit)
         ZStack {
           keySurface()
@@ -221,6 +211,7 @@ struct KeyboardSkinPreview: View {
         }
         .frame(width: unit * 4)
         key("。").frame(width: unit)
+        key("中", function: true).frame(width: unit * 1.05)
         ZStack {
           keySurface(emphasized: true)
           Image(systemName: "return").font(.system(size: 15, weight: .medium))

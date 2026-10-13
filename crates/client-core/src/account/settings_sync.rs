@@ -9,9 +9,10 @@
 //! 按键音、振动开关和振动强度不在共享偏好里，而在宿主自己的本地存储（Android 的 `KeyboardFeedbackStore`），由调用方读出来作为 [`HostKeyboardFeedback`] 传入，应用后再由调用方写回。
 
 use super::{AccountError, AccountPreferenceSchema, AccountPreferenceValue, AccountPreferences};
+use crate::host_surface::HostPlatform;
 use crate::preferences::{
     FrequencyMode, InputScheme, NumberKeypadOrder, Preferences, ShuangpinProfile, ThemeMode,
-    TouchKeyboardLayout, WubiProfile,
+    TouchKeyboardLayout, TwentySixKeyNumberLayout, WubiProfile,
 };
 use crate::skin::theme::GlobalTheme;
 use serde::{Deserialize, Serialize};
@@ -27,9 +28,15 @@ pub const ANDROID_FEEDBACK_KEYS: [&str; 3] = [
 const GLOBAL_THEME: &str = "platform.android.global_theme";
 /// 共享偏好 `touch_number_keypad_order`；账号字段表收录它之前上传时会被滤掉。
 const NUMBER_KEYPAD_ORDER: &str = "platform.android.number_keypad_order";
+/// 共享偏好 `touch_twenty_six_key_number_layout`；账号字段表收录它之前上传时会被滤掉。
+const TWENTY_SIX_KEY_NUMBER_LAYOUT: &str = "platform.android.twenty_six_key_number_layout";
+/// 共享偏好 `touch_shuangpin_key_hints`；账号字段表收录它之前上传时会被滤掉。
+const SHUANGPIN_KEY_HINTS: &str = "platform.android.shuangpin_key_hints";
 const CUSTOM_THEME_BASE: &str = "platform.android.custom_theme_base";
 const CUSTOM_KEYBOARD_SKIN: &str = "platform.android.custom_keyboard_skin";
 const CUSTOM_CANDIDATE_SKIN: &str = "platform.android.custom_candidate_skin";
+/// 深色模式槽位的候选窗口皮肤包（`custom_theme.candidate_skin_dark`），与 [`CUSTOM_CANDIDATE_SKIN`] 同一形状。
+const CUSTOM_CANDIDATE_SKIN_DARK: &str = "platform.android.custom_candidate_skin_dark";
 /// 整个自定义键盘皮肤库（JSON 数组，只含设计参数），值来自宿主的皮肤库而不是共享偏好。
 pub const CUSTOM_KEYBOARD_SKINS: &str = "platform.android.custom_keyboard_skins";
 /// [`CUSTOM_KEYBOARD_SKINS`] 的字节上限，与服务端字段表相同。
@@ -308,12 +315,14 @@ pub fn account_wubi_schema(profile: WubiProfile) -> &'static str {
     }
 }
 
-fn shuangpin_schema(profile: ShuangpinProfile) -> &'static str {
+/// 双拼方案在账号里的取值。自定义方案为空：账号 schema 既没有 `custom` 也装不下用户的表，不写它，账号保留上次记录的方案，与 `account_input_schema` 对待账号还没有收录的方案相同。
+fn shuangpin_schema(profile: ShuangpinProfile) -> Option<&'static str> {
     match profile {
-        ShuangpinProfile::Xiaohe => "xiaohe",
-        ShuangpinProfile::Ziranma => "ziranma",
-        ShuangpinProfile::Shoudao => "shoudao",
-        ShuangpinProfile::Microsoft => "microsoft",
+        ShuangpinProfile::Xiaohe => Some("xiaohe"),
+        ShuangpinProfile::Ziranma => Some("ziranma"),
+        ShuangpinProfile::Shoudao => Some("shoudao"),
+        ShuangpinProfile::Microsoft => Some("microsoft"),
+        ShuangpinProfile::Custom => None,
     }
 }
 
@@ -324,11 +333,20 @@ fn number_keypad_order(order: NumberKeypadOrder) -> &'static str {
     }
 }
 
+fn twenty_six_key_number_layout(layout: TwentySixKeyNumberLayout) -> &'static str {
+    match layout {
+        TwentySixKeyNumberLayout::Row => "row",
+        TwentySixKeyNumberLayout::NineKey => "nine_key",
+    }
+}
+
 fn keyboard_layout(layout: TouchKeyboardLayout) -> &'static str {
     match layout {
         TouchKeyboardLayout::TwentySixKey => "twenty_six_key",
         TouchKeyboardLayout::NineKey => "nine_key",
         TouchKeyboardLayout::Handwriting => "handwriting",
+        TouchKeyboardLayout::FourteenKey => "fourteen_key",
+        TouchKeyboardLayout::NineKeyShuangpin => "nine_key_shuangpin",
     }
 }
 
@@ -361,67 +379,7 @@ pub fn export_android_settings(
     feedback: Option<&HostKeyboardFeedback>,
 ) -> Result<BTreeMap<String, AccountPreferenceValue>, AccountError> {
     let mut settings = BTreeMap::new();
-    if let Some(schema) = account_input_schema(preferences.scheme) {
-        insert_string(&mut settings, "input.schema", schema);
-    }
-    insert_string(
-        &mut settings,
-        "input.character_set",
-        if preferences.traditional_chinese_output {
-            "traditional"
-        } else {
-            "simplified"
-        },
-    );
-    insert_string(
-        &mut settings,
-        "input.shuangpin_schema",
-        shuangpin_schema(preferences.shuangpin_profile),
-    );
-    // 五笔版本只随五笔方案上传（与 iOS、鸿蒙一致）：上传是合并进账号文档的，不在五笔上时本机的缺省 86 不该盖掉账号里别的设备选的 98。
-    if preferences.scheme == InputScheme::Wubi {
-        insert_string(
-            &mut settings,
-            "input.wubi_schema",
-            account_wubi_schema(preferences.wubi_profile),
-        );
-    }
-    insert_bool(&mut settings, "input.learning", preferences.learning);
-    insert_string(
-        &mut settings,
-        "input.frequency_mode",
-        preferences.frequency.mode.as_str(),
-    );
-    insert_integer(
-        &mut settings,
-        "input.frequency_trigger_count",
-        i64::from(preferences.frequency.trigger_count),
-    );
-    insert_integer(
-        &mut settings,
-        "input.frequency_linear_step",
-        i64::from(preferences.frequency.linear_step),
-    );
-    insert_bool(
-        &mut settings,
-        "input.chinese_punctuation",
-        preferences.chinese_punctuation,
-    );
-    insert_bool(
-        &mut settings,
-        "input.smart_punctuation",
-        preferences.smart_punctuation,
-    );
-    insert_bool(
-        &mut settings,
-        "input.paired_punctuation",
-        preferences.paired_punctuation,
-    );
-    insert_bool(
-        &mut settings,
-        "input.wubi_code_hint",
-        preferences.wubi_code_hint,
-    );
+    insert_input_settings(&mut settings, preferences);
     insert_string(
         &mut settings,
         "platform.android.keyboard_layout",
@@ -458,6 +416,16 @@ pub fn export_android_settings(
         NUMBER_KEYPAD_ORDER,
         number_keypad_order(preferences.touch_number_keypad_order),
     );
+    insert_string(
+        &mut settings,
+        TWENTY_SIX_KEY_NUMBER_LAYOUT,
+        twenty_six_key_number_layout(preferences.touch_twenty_six_key_number_layout),
+    );
+    insert_bool(
+        &mut settings,
+        SHUANGPIN_KEY_HINTS,
+        preferences.touch_shuangpin_key_hints,
+    );
     insert_new_android_settings(&mut settings, preferences);
     if let Some(feedback) = feedback {
         insert_bool(
@@ -479,6 +447,82 @@ pub fn export_android_settings(
     Ok(settings)
 }
 
+/// 各平台共有的 `input.*` 键：方案、繁简、双拼和五笔版本、学习、调频和标点。Android 与桌面宿主都上传它们。
+fn insert_input_settings(
+    settings: &mut BTreeMap<String, AccountPreferenceValue>,
+    preferences: &Preferences,
+) {
+    if let Some(schema) = account_input_schema(preferences.scheme) {
+        insert_string(settings, "input.schema", schema);
+    }
+    insert_string(
+        settings,
+        "input.character_set",
+        if preferences.traditional_chinese_output {
+            "traditional"
+        } else {
+            "simplified"
+        },
+    );
+    if let Some(schema) = shuangpin_schema(preferences.shuangpin_profile) {
+        insert_string(settings, "input.shuangpin_schema", schema);
+    }
+    // 五笔版本只随五笔方案上传（与 iOS、鸿蒙一致）：上传是合并进账号文档的，不在五笔上时本机的缺省 86 不该盖掉账号里别的设备选的 98。
+    if preferences.scheme == InputScheme::Wubi {
+        insert_string(
+            settings,
+            "input.wubi_schema",
+            account_wubi_schema(preferences.wubi_profile),
+        );
+    }
+    insert_bool(settings, "input.learning", preferences.learning);
+    insert_string(
+        settings,
+        "input.frequency_mode",
+        preferences.frequency.mode.as_str(),
+    );
+    insert_integer(
+        settings,
+        "input.frequency_trigger_count",
+        i64::from(preferences.frequency.trigger_count),
+    );
+    insert_integer(
+        settings,
+        "input.frequency_linear_step",
+        i64::from(preferences.frequency.linear_step),
+    );
+    insert_bool(
+        settings,
+        "input.chinese_punctuation",
+        preferences.chinese_punctuation,
+    );
+    insert_bool(
+        settings,
+        "input.smart_punctuation",
+        preferences.smart_punctuation,
+    );
+    insert_bool(
+        settings,
+        "input.paired_punctuation",
+        preferences.paired_punctuation,
+    );
+    insert_bool(settings, "input.wubi_code_hint", preferences.wubi_code_hint);
+    insert_bool(
+        settings,
+        "input.wubi_auto_commit_unique",
+        preferences.wubi_auto_commit_unique,
+    );
+}
+
+/// 桌面宿主（Windows）导出成账号文档的键值：只有各平台共有的 `input.*` 键。桌面专属的设置（候选窗口、快捷键、皮肤）在账号文档里只有 `platform.macos.*`，那是 macOS 原生偏好的映射，Windows 不写，免得改掉 macOS 的设置。调用方再按版本（`edition::filter_uploaded_account_settings`）和服务端字段表过滤，然后合并上传。
+pub fn export_desktop_settings(
+    preferences: &Preferences,
+) -> BTreeMap<String, AccountPreferenceValue> {
+    let mut settings = BTreeMap::new();
+    insert_input_settings(&mut settings, preferences);
+    settings
+}
+
 /// 设计改版新增、仍在共享偏好里的键：按键音包、工具栏按钮和语音识别语言。其余新增的 Android 设置在宿主的本地设置文件里，见 [`insert_android_local_settings`]。
 fn insert_new_android_settings(
     settings: &mut BTreeMap<String, AccountPreferenceValue>,
@@ -498,7 +542,7 @@ fn insert_new_android_settings(
     }
 }
 
-/// 全局主题、自定义主题的底色、它的键盘设计和外部候选窗口皮肤包。设计是 JSON，包是 id；两者都用空串表示「没有」，这样清除也能同步。
+/// 全局主题、自定义主题的底色、它的键盘设计和浅色、深色两个槽位的外部候选窗口皮肤包。设计是 JSON，包是 id；都用空串表示「没有」，这样清除也能同步。
 fn insert_theme_settings(
     settings: &mut BTreeMap<String, AccountPreferenceValue>,
     preferences: &Preferences,
@@ -520,6 +564,15 @@ fn insert_theme_settings(
         preferences
             .custom_theme
             .candidate_skin
+            .as_deref()
+            .unwrap_or_default(),
+    );
+    insert_string(
+        settings,
+        CUSTOM_CANDIDATE_SKIN_DARK,
+        preferences
+            .custom_theme
+            .candidate_skin_dark
             .as_deref()
             .unwrap_or_default(),
     );
@@ -652,13 +705,11 @@ impl Applier<'_> {
     }
 }
 
-/// 把云端文档应用到本机偏好。`feedback` 是宿主当前的按键反馈，[`needs_host_feedback`] 为真时必须传入，否则返回 `Storage`。调用方之前应当已经按版本过滤过文档（`edition::filter_downloaded_account_settings`）。
-pub fn apply_android_settings(
-    local: &Preferences,
+/// 云端文档先整体校验：文档本身合规，且每个字段表收录了的键，取值类型都与字段表一致（`number` 字段可以是整数）。
+fn validate_cloud_document(
     cloud: &AccountPreferences,
     schema: &AccountPreferenceSchema,
-    feedback: Option<HostKeyboardFeedback>,
-) -> Result<AndroidSettingsApplied, AccountError> {
+) -> Result<(), AccountError> {
     super::validate_account_preferences(cloud)?;
     for (key, value) in &cloud.settings {
         if let Some(field) = schema.fields.get(key) {
@@ -669,15 +720,11 @@ pub fn apply_android_settings(
             }
         }
     }
-    let needs_feedback = needs_host_feedback(cloud, schema);
-    let mut applier = Applier {
-        values: &cloud.settings,
-        schema,
-        preferences: local.clone(),
-        feedback: if needs_feedback { feedback } else { None },
-        skipped: Vec::new(),
-    };
+    Ok(())
+}
 
+/// [`insert_input_settings`] 的反方向，Android 与桌面宿主共用。
+fn apply_input_settings(applier: &mut Applier<'_>) -> Result<(), AccountError> {
     // 本机不提供的方案（较新设备上的粤拼、注音、越南文或笔画）保留本机的方案，文档里其他的键照常应用。
     applier.set_string("input.schema", |preferences, value| {
         preferences.scheme = match value {
@@ -698,7 +745,11 @@ pub fn apply_android_settings(
         };
         Some(())
     })?;
+    // 本机选着自定义方案时不导出这个键（账号装不下这张表），账号里留着的是上次的内置方案；合并上传后再应用回来时不能拿它盖掉本机的自定义方案。
     applier.set_string("input.shuangpin_schema", |preferences, value| {
+        if preferences.shuangpin_profile == ShuangpinProfile::Custom {
+            return Some(());
+        }
         preferences.shuangpin_profile = match value {
             "xiaohe" => ShuangpinProfile::Xiaohe,
             "ziranma" => ShuangpinProfile::Ziranma,
@@ -750,17 +801,123 @@ pub fn apply_android_settings(
     applier.set_bool("input.wubi_code_hint", |preferences, value| {
         preferences.wubi_code_hint = value
     })?;
+    applier.set_bool("input.wubi_auto_commit_unique", |preferences, value| {
+        preferences.wubi_auto_commit_unique = value
+    })?;
+    Ok(())
+}
+
+/// 应用到桌面宿主的结果。
+#[derive(Clone, Debug, PartialEq)]
+pub struct DesktopSettingsApplied {
+    /// 应用之后的共享偏好，已经通过 `Preferences::validate`。
+    pub preferences: Preferences,
+    /// 取值超出本机范围或是本机不认识的枚举值而没有应用的键，按键名排序。
+    pub skipped: Vec<String>,
+}
+
+/// 把云端文档里各平台共有的 `input.*` 键应用到桌面宿主的共享偏好，其余键（别的平台的设置）不动。调用方之前应当已经按版本过滤过文档（`edition::filter_downloaded_account_settings`）。
+pub fn apply_desktop_settings(
+    local: &Preferences,
+    cloud: &AccountPreferences,
+    schema: &AccountPreferenceSchema,
+) -> Result<DesktopSettingsApplied, AccountError> {
+    validate_cloud_document(cloud, schema)?;
+    let mut applier = Applier {
+        values: &cloud.settings,
+        schema,
+        preferences: local.clone(),
+        feedback: None,
+        skipped: Vec::new(),
+    };
+    apply_input_settings(&mut applier)?;
+    let Applier {
+        preferences,
+        mut skipped,
+        ..
+    } = applier;
+    preferences.validate().map_err(|_| AccountError::Invalid)?;
+    skipped.sort();
+    Ok(DesktopSettingsApplied {
+        preferences,
+        skipped,
+    })
+}
+
+/// Windows「设置同步」的上传：本机的 `input.*` 设置按版本过滤（单方案版本不上传方案，多方案版本只上传本版本提供的方案）、只留服务端字段表收录的键，合并进云端文档，再按读到云端文档时的会话代次上传，期间退出或换号就取消。一个键都没有时报告服务不可用。共享应用（`windows_settings_sync.rs`）和原生设置窗口（host-api 的 `msime_client_account`）都调这里。
+pub fn upload_desktop_settings<A: super::AccountApi, S: super::AccountSessionStorage>(
+    session: &super::BackendAccountSession<A, S>,
+    store: &crate::preferences::PreferencesStore,
+    edition: Option<&crate::edition::Edition>,
+) -> Result<AccountPreferences, AccountError> {
+    let (user_id, _, generation) = session.credentials_with_generation(None, None)?;
+    let schema = session.preference_schema()?;
+    let cloud = session.preferences()?;
+    let local = store.load().map_err(|_| AccountError::Storage)?;
+    let mut values = export_desktop_settings(&local.preferences);
+    crate::edition::filter_uploaded_account_settings(edition, &mut values);
+    let values = values
+        .into_iter()
+        .filter(|(key, _)| schema.fields.contains_key(key))
+        .collect::<BTreeMap<_, _>>();
+    if values.is_empty() {
+        return Err(AccountError::Unavailable);
+    }
+    let merged = super::merge_account_preferences(&cloud, &values, &schema)?;
+    session.put_preferences_with_generation(&merged, generation, &user_id)
+}
+
+/// Windows「设置同步」的应用：把页面刚下载的账号设置（`preferences`）按版本过滤（单方案版本不应用方案，多方案版本把本版本没有的方案当作缺失）后应用到本机偏好，返回读到本机偏好时的修订号和应用后的偏好，由调用方按这个修订号比较并交换写回。`user_id` 是页面下载时的账号，期间退出、换号或重新登录就以 `Cancelled` 失败。共享应用和原生设置窗口都调这里。
+pub fn prepare_desktop_settings_apply<A: super::AccountApi, S: super::AccountSessionStorage>(
+    session: &super::BackendAccountSession<A, S>,
+    store: &crate::preferences::PreferencesStore,
+    edition: Option<&crate::edition::Edition>,
+    user_id: &str,
+    mut preferences: AccountPreferences,
+) -> Result<(u64, Preferences), AccountError> {
+    crate::edition::filter_downloaded_account_settings(edition, &mut preferences.settings);
+    let (_, _, generation) = session.credentials_with_generation(None, Some(user_id))?;
+    let schema = session.preference_schema()?;
+    let local = store.load().map_err(|_| AccountError::Storage)?;
+    let applied = apply_desktop_settings(&local.preferences, &preferences, &schema)?;
+    session.with_generation(generation, Some(user_id), || {
+        Ok((local.revision, applied.preferences))
+    })
+}
+
+/// 把云端文档应用到本机偏好。`feedback` 是宿主当前的按键反馈，[`needs_host_feedback`] 为真时必须传入，否则返回 `Storage`。调用方之前应当已经按版本过滤过文档（`edition::filter_downloaded_account_settings`）。
+pub fn apply_android_settings(
+    local: &Preferences,
+    cloud: &AccountPreferences,
+    schema: &AccountPreferenceSchema,
+    feedback: Option<HostKeyboardFeedback>,
+) -> Result<AndroidSettingsApplied, AccountError> {
+    validate_cloud_document(cloud, schema)?;
+    let needs_feedback = needs_host_feedback(cloud, schema);
+    let mut applier = Applier {
+        values: &cloud.settings,
+        schema,
+        preferences: local.clone(),
+        feedback: if needs_feedback { feedback } else { None },
+        skipped: Vec::new(),
+    };
+
+    apply_input_settings(&mut applier)?;
     applier.set_string("platform.android.keyboard_layout", |preferences, value| {
         preferences.touch_keyboard_layout = match value {
             "twenty_six_key" => TouchKeyboardLayout::TwentySixKey,
             "nine_key" => TouchKeyboardLayout::NineKey,
             "handwriting" => TouchKeyboardLayout::Handwriting,
+            "fourteen_key" => TouchKeyboardLayout::FourteenKey,
+            "nine_key_shuangpin" => TouchKeyboardLayout::NineKeyShuangpin,
             _ => return None,
         };
         Some(())
     })?;
+    // 只在部分宿主上提供的主题（只在 iOS 的 `native`）对 Android 来说和不认识的 id 一样：只跳过这个键，本机主题不变。
     applier.set_string(GLOBAL_THEME, |preferences, value| {
-        preferences.global_theme = GlobalTheme::from_id(value)?;
+        preferences.global_theme = GlobalTheme::from_id(value)
+            .filter(|theme| theme.is_offered_on(HostPlatform::Android))?;
         Some(())
     })?;
     applier.set_string(CUSTOM_THEME_BASE, |preferences, value| {
@@ -781,6 +938,14 @@ pub fn apply_android_settings(
             return None;
         }
         preferences.custom_theme.candidate_skin = (!value.is_empty()).then(|| value.to_owned());
+        Some(())
+    })?;
+    applier.set_string(CUSTOM_CANDIDATE_SKIN_DARK, |preferences, value| {
+        if !value.is_empty() && !crate::skin::catalog::is_selectable_id(value) {
+            return None;
+        }
+        preferences.custom_theme.candidate_skin_dark =
+            (!value.is_empty()).then(|| value.to_owned());
         Some(())
     })?;
     applier.set_string("platform.android.theme", |preferences, value| {
@@ -823,6 +988,17 @@ pub fn apply_android_settings(
             _ => return None,
         };
         Some(())
+    })?;
+    applier.set_string(TWENTY_SIX_KEY_NUMBER_LAYOUT, |preferences, value| {
+        preferences.touch_twenty_six_key_number_layout = match value {
+            "row" => TwentySixKeyNumberLayout::Row,
+            "nine_key" => TwentySixKeyNumberLayout::NineKey,
+            _ => return None,
+        };
+        Some(())
+    })?;
+    applier.set_bool(SHUANGPIN_KEY_HINTS, |preferences, value| {
+        preferences.touch_shuangpin_key_hints = value
     })?;
 
     apply_new_android_settings(&mut applier)?;

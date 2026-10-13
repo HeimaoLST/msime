@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { settingsFormReady, saveSettingsNow } from "../support/settings-form";
+import { selectSettingsTab, settingsFormReady, saveSettingsNow } from "../support/settings-form";
 import { afterEach, expect, test, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { SettingsPage, type HostCapabilities, type SettingsClient, type Snapshot } from "@msime/ui";
@@ -42,6 +42,7 @@ function capabilities(overrides: Partial<HostCapabilities> = {}): HostCapabiliti
     candidate_selection_appearance: true,
     candidate_follow_cursor: true,
     input_mode_hud: false,
+    input_mode_status_item: false,
     candidate_english_font: false,
     english_suggestions: false,
     shuangpin_preedit: false,
@@ -58,6 +59,7 @@ function capabilities(overrides: Partial<HostCapabilities> = {}): HostCapabiliti
     candidate_window_scale: false,
     candidate_window_opacity: false,
     candidate_corner_radius: false,
+    candidate_padding: false,
     helpcode_shift_entry: mobile,
     skin_directory_import: false,
     touch_toolbar_components: false,
@@ -136,12 +138,14 @@ test("Windows and Linux hosts expose the shared fuzzy-pinyin settings on the 输
   mount({ host: capabilities({ platform: "windows", fuzzy_pinyin: true }), fuzzyPinyin: true });
   await settingsFormReady();
   fireEvent.click(screen.getByRole("button", { name: "输入" }));
+  selectSettingsTab("进阶");
   expect(screen.getByRole("group", { name: "模糊音" })).toBeTruthy();
 
   cleanup();
   mount({ host: capabilities({ platform: "linux", fuzzy_pinyin: true }), fuzzyPinyin: true });
   await settingsFormReady();
   fireEvent.click(screen.getByRole("button", { name: "输入" }));
+  selectSettingsTab("进阶");
   expect(screen.getByRole("group", { name: "模糊音" })).toBeTruthy();
 });
 
@@ -229,7 +233,8 @@ test("toolbar scale is hidden while Linux component choices remain available", a
   });
   await settingsFormReady();
   fireEvent.click(screen.getByRole("button", { name: "悬浮工具栏" }));
-  expect(screen.getByLabelText("在桌面显示悬浮工具栏")).toBeTruthy();
+  expect(screen.getByLabelText("在输入法菜单显示工具栏")).toBeTruthy();
+  expect(screen.queryByLabelText("在桌面显示悬浮工具栏")).toBeNull();
   expect(screen.queryByLabelText("工具栏缩放")).toBeNull();
   expect(screen.queryByLabelText("图标尺寸")).toBeNull();
   expect(screen.getByRole("group", { name: "按钮" })).toBeTruthy();
@@ -239,9 +244,97 @@ test("toolbar scale is hidden while Linux component choices remain available", a
   mount({ host: capabilities({ platform: "macos", floating_toolbar_appearance: true }) });
   await settingsFormReady();
   fireEvent.click(screen.getByRole("button", { name: "悬浮工具栏" }));
+  expect(screen.getByLabelText("在桌面显示悬浮工具栏")).toBeTruthy();
   expect(screen.getByLabelText("工具栏缩放")).toBeTruthy();
   expect(screen.getByLabelText("图标尺寸")).toBeTruthy();
 });
+
+test("the Linux toolbar page explains the menu at the top instead of previewing a floating bar", async () => {
+  mount({
+    host: capabilities({
+      platform: "linux",
+      floating_toolbar_appearance: false,
+      floating_toolbar_components: true,
+    }),
+  });
+  await settingsFormReady();
+  fireEvent.click(screen.getByRole("button", { name: "悬浮工具栏" }));
+  const toolbar = screen.getByRole("group", { name: "悬浮工具栏" });
+  // Linux 不画悬浮条，没有预览；说明排在第一组「显示」之前。
+  expect(toolbar.querySelector("[data-toolbar-preview]")).toBeNull();
+  const note = screen.getByText(
+    /^Linux 不显示悬浮工具栏窗口，工具栏以输入法菜单里的「工具栏」子菜单呈现/,
+  );
+  const groups = [...toolbar.querySelectorAll("[data-group-title]")];
+  expect(groups.map((title) => title.textContent)).toEqual(["显示", "按钮"]);
+  expect(note.compareDocumentPosition(groups[0]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(
+    screen.getByText(
+      "「工具栏」子菜单：IBus 在面板的属性菜单里，Fcitx5 在托盘的状态区菜单里，需要桌面提供托盘",
+    ),
+  ).toBeTruthy();
+  expect(screen.getByText("勾选要显示在「工具栏」子菜单里的按钮")).toBeTruthy();
+  expect(screen.queryByText("颜色与明暗")).toBeNull();
+});
+
+test("the Linux toolbar page says nothing applies under GNOME Shell", async () => {
+  mount({
+    host: capabilities({
+      platform: "linux",
+      floating_toolbar_appearance: false,
+      floating_toolbar_components: true,
+      candidate_panel_limit: "gnome_shell",
+    }),
+  });
+  await settingsFormReady();
+  fireEvent.click(screen.getByRole("button", { name: "悬浮工具栏" }));
+  expect(
+    screen.getByText(
+      "Linux 不显示悬浮工具栏窗口。当前是 GNOME 桌面，IBus 在输入源菜单里只列出输入模式和设置，没有「工具栏」子菜单，这一页的设置在当前桌面不生效。",
+    ),
+  ).toBeTruthy();
+  expect(screen.queryByText(/仍然生效/)).toBeNull();
+  // 开关和按钮组的描述跟页首说明一致，不再指向 GNOME 下不存在的「工具栏」子菜单。
+  expect(
+    screen.getByText("当前 GNOME 桌面的输入源菜单没有「工具栏」子菜单，这个开关在这里不生效"),
+  ).toBeTruthy();
+  expect(screen.getByText("勾选工具栏要列出的按钮，当前 GNOME 桌面不生效")).toBeTruthy();
+  expect(screen.queryByText(/IBus 在面板的属性菜单里/)).toBeNull();
+  expect(screen.queryByText("勾选要显示在「工具栏」子菜单里的按钮")).toBeNull();
+});
+
+test.each(["windows", "macos", "harmony"] as const)(
+  "the %s toolbar page keeps the floating bar preview and wording",
+  async (platform) => {
+    // 鸿蒙按 2in1 形态给能力位（手机形态没有这一页），直接从这一页打开，三家走同一条路径。
+    render(
+      <SettingsPage
+        initialPage="floating-toolbar"
+        client={{
+          load: async () => initial,
+          save: vi.fn(),
+          host: capabilities({
+            platform,
+            mobile_settings: false,
+            panel_windows: true,
+            floating_toolbar: true,
+            floating_toolbar_appearance: true,
+            floating_toolbar_components: true,
+          }),
+        }}
+      />,
+    );
+    await settingsFormReady();
+    const toolbar = screen.getByRole("group", { name: "悬浮工具栏" });
+    expect(toolbar.querySelector("[data-toolbar-preview]")).toBeTruthy();
+    expect(screen.getByLabelText("在桌面显示悬浮工具栏")).toBeTruthy();
+    expect(screen.getByText("快速访问输入法状态与常用功能")).toBeTruthy();
+    expect(screen.getByText("勾选要显示在悬浮工具栏上的按钮")).toBeTruthy();
+    expect(screen.queryByText(/Linux 不显示悬浮工具栏窗口/)).toBeNull();
+    const groups = [...toolbar.querySelectorAll("[data-group-title]")];
+    expect(groups.map((title) => title.textContent)).toEqual(["显示", "按钮", "尺寸"]);
+  },
+);
 
 test("the floating-toolbar settings page is hidden when the host has no toolbar", async () => {
   mount({
@@ -315,11 +408,15 @@ test.each([
   ],
   [
     "fcitx_theme",
-    "Fcitx5 正在使用你在 Fcitx5 配置中选择的经典界面主题，这里的候选颜色和皮肤不会覆盖它；字体仍然生效。改回 Fcitx5 默认主题后即可使用这里的设置。",
+    "Fcitx5 正在使用你在 Fcitx5 配置中选择的经典界面主题，这里的候选颜色和皮肤不会覆盖它；字体仍然生效。把它改回 Fcitx5 默认主题，或在这里换一个全局主题，即可让候选颜色与皮肤生效。",
   ],
   [
     "kimpanel",
     "Fcitx5 的候选窗口由桌面的 Kimpanel 绘制，使用桌面自己的字体和主题，这里的候选字体、颜色和皮肤不会生效。",
+  ],
+  [
+    "ibus_panel",
+    "IBus 的候选窗口由桌面的输入法面板绘制，只接收候选字体和颜色：这里的圆角、边框颜色和皮肤的装饰图在 IBus 下不会生效。",
   ],
 ] as const)(
   "a Linux panel that ignores the appearance settings (%s) is named on the appearance and skin pages",
@@ -354,6 +451,7 @@ test("a panel that honours the appearance settings gets no limit note", async ()
   expect(screen.queryByText(/GNOME Shell 自己绘制/)).toBeNull();
   expect(screen.queryByText(/Fcitx5 正在使用你在 Fcitx5 配置中选择的/)).toBeNull();
   expect(screen.queryByText(/Kimpanel 绘制/)).toBeNull();
+  expect(screen.queryByText(/IBus 的候选窗口由桌面的输入法面板绘制/)).toBeNull();
 });
 
 test("Linux panel font takes the family and size but not a preedit size", async () => {
@@ -421,7 +519,8 @@ test("Linux candidate appearance offers the English face, which leads the panel'
   expect(screen.getByLabelText("主字体")).toBeTruthy();
 });
 
-test("Android candidate appearance exposes native font and color controls", async () => {
+// Android 的触屏候选栏画键盘皮肤的颜色，不读候选颜色：字体和字号照常给，候选颜色取色器不显示。
+test("Android candidate appearance exposes native font controls but no candidate colours", async () => {
   mount({
     host: capabilities({
       platform: "android",
@@ -436,9 +535,9 @@ test("Android candidate appearance exposes native font and color controls", asyn
   expect(screen.getByLabelText("英文字体")).toBeTruthy();
   expect(screen.getByLabelText("主字体")).toBeTruthy();
   expect(screen.getByLabelText("字号")).toBeTruthy();
-  expect(screen.getByLabelText("候选强调色")).toBeTruthy();
-  expect(screen.getByLabelText("候选悬停色")).toBeTruthy();
-  expect(screen.getByLabelText("候选边框色")).toBeTruthy();
+  expect(screen.queryByLabelText("候选强调色")).toBeNull();
+  expect(screen.queryByLabelText("候选悬停色")).toBeNull();
+  expect(screen.queryByLabelText("候选边框色")).toBeNull();
 });
 
 test("a host that does not place its own card hides the follow-cursor choice", async () => {
@@ -456,7 +555,8 @@ test("a host with one commit path is not offered a choice between three", async 
       client={{
         load: async () => initial,
         save: vi.fn(),
-        host: capabilities({ platform: "harmony" }),
+        // 2in1 画完整的语音页；手机把录音行为收成「录音」组，这里要测的是能力，不是手机的排版。
+        host: capabilities({ platform: "harmony", mobile_settings: false }),
       }}
     />,
   );
@@ -611,7 +711,12 @@ test("a host that can enumerate microphones gets the picker, whatever it is call
           load: async () => initial,
           save: vi.fn(),
           listVoiceCaptureDevices: read,
-          host: capabilities({ platform: "harmony", voice_capture_devices }),
+          // 2in1 把录音设备列在语音页上；手机收在「服务配置」子视图里，这里测的是能力。
+          host: capabilities({
+            platform: "harmony",
+            mobile_settings: false,
+            voice_capture_devices,
+          }),
         }}
       />,
     );
@@ -635,18 +740,36 @@ test("the mode badge switch follows the capability rather than the macOS platfor
   expect(screen.queryByLabelText("中英文切换提示")).toBeNull();
 });
 
+test("the menu bar status item switch appears only where the host declares it", async () => {
+  // 只有 macOS 宿主在菜单栏放状态项；Windows 有托盘语言栏、Linux 有输入法面板，不提供这个开关。
+  mount({ host: capabilities({ platform: "macos", input_mode_status_item: true }) });
+  await settingsFormReady();
+  expect(screen.getByLabelText("菜单栏显示中/英状态")).toBeTruthy();
+  for (const platform of ["windows", "linux"] as const) {
+    cleanup();
+    mount({ host: capabilities({ platform, input_mode_status_item: false }) });
+    await settingsFormReady();
+    expect(screen.queryByLabelText("菜单栏显示中/英状态")).toBeNull();
+  }
+});
+
 test("a host whose skin folder is unreachable is offered an import, not a folder", async () => {
   // The source opens its skin folder so a skin can be dropped in. HarmonyOS keeps that folder in
   // the application sandbox where no file manager reaches it, so the button has to say what it
   // actually does — it was disabled there, promising a folder that never appeared.
   mount({
-    host: capabilities({ platform: "harmony", skin_directory_import: true }),
+    // HarmonyOS 2in1：手机不显示外部皮肤这一行，桌面形态的 2in1 才有。
+    host: capabilities({
+      platform: "harmony",
+      mobile_settings: false,
+      skin_directory_import: true,
+    }),
     scanSkinCatalog: async () => ({ directory: "/skins", packages: [], issues: [] }),
     openSkinDirectory: async () => undefined,
   });
   await settingsFormReady();
-  // 触屏宿主把这个页面叫作 皮肤。
-  fireEvent.click(screen.getByRole("button", { name: "皮肤" }));
+  // 2in1 是桌面形态，这个页面叫 主题。
+  fireEvent.click(screen.getByRole("button", { name: "主题" }));
   expect(screen.getByRole("button", { name: "导入皮肤" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "打开目录" })).toBeNull();
 });

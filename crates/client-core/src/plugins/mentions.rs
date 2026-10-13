@@ -6,11 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-#[cfg(unix)]
-use std::ffi::OsStr;
 use std::fs;
-#[cfg(not(unix))]
-use std::io::Write;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 /// Entries in the list: the Engine keeps no more.
@@ -24,6 +21,7 @@ pub const MAX_DOCUMENT_BYTES: u64 = 1024 * 1024;
 
 const FORMAT_VERSION: u32 = 1;
 const DOCUMENT: &str = "mentions.json";
+const LOCK_FILE: &str = "mentions.lock";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,6 +81,11 @@ pub struct MentionStore {
     directory: PathBuf,
 }
 
+struct MentionLock {
+    directory: crate::file_lock::PrivateDirectory,
+    _lock: File,
+}
+
 impl MentionStore {
     /// `directory` is the plugins root.
     pub fn new(directory: impl Into<PathBuf>) -> Self {
@@ -129,8 +132,30 @@ impl MentionStore {
         {
             return Err(MentionError::Storage);
         }
-        let lock = crate::file_lock::open_lock_file(self.directory.join("mentions.lock"))?;
+        let guard = self.lock()?;
+        self.write_locked(&guard, entries)
+    }
+
+    fn lock(&self) -> Result<MentionLock, MentionError> {
+        let directory = crate::file_lock::open_private_directory(&self.directory)
+            .map_err(|_| MentionError::Storage)?;
+        let lock = crate::file_lock::open_private_lock_file_at(
+            &directory,
+            std::ffi::OsStr::new(LOCK_FILE),
+        )
+        .map_err(|_| MentionError::Storage)?;
         crate::file_lock::exclusive(&lock)?;
+        Ok(MentionLock {
+            directory,
+            _lock: lock,
+        })
+    }
+
+    fn write_locked(
+        &self,
+        lock: &MentionLock,
+        entries: &[MentionEntry],
+    ) -> Result<(), MentionError> {
         let bytes = serde_json::to_vec_pretty(&Document {
             format_version: FORMAT_VERSION,
             entries: entries.to_vec(),
@@ -139,22 +164,12 @@ impl MentionStore {
         if bytes.len() as u64 > MAX_DOCUMENT_BYTES {
             return Err(MentionError::Invalid("名单太大".into()));
         }
-        #[cfg(unix)]
-        {
-            let directory = crate::storage::open_private_directory(&self.directory)?;
-            crate::storage::write_private_file_at(&directory, OsStr::new(DOCUMENT), &bytes)?;
-            Ok(())
-        }
-        #[cfg(not(unix))]
-        {
-            let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
-            temporary.write_all(&bytes)?;
-            temporary.as_file().sync_all()?;
-            temporary
-                .persist(self.path())
-                .map_err(|error| error.error)?;
-            Ok(())
-        }
+        crate::file_lock::write_private_file_at(
+            &lock.directory,
+            std::ffi::OsStr::new(DOCUMENT),
+            &bytes,
+        )?;
+        Ok(())
     }
 }
 
@@ -292,5 +307,25 @@ mod tests {
             store.save(&[entry("x", "")]),
             Err(MentionError::Storage)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writes_stay_bound_to_the_locked_directory_after_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("plugins");
+        fs::create_dir(&directory).unwrap();
+        let store = MentionStore::new(&directory);
+        let lock = store.lock().unwrap();
+
+        let moved = root.path().join("plugins-moved");
+        fs::rename(&directory, &moved).unwrap();
+        fs::create_dir(&directory).unwrap();
+
+        store.write_locked(&lock, &[]).unwrap();
+
+        assert!(moved.join(DOCUMENT).exists());
+        assert!(!directory.join(DOCUMENT).exists());
+        fs::remove_dir_all(moved).unwrap();
     }
 }

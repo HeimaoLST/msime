@@ -22,10 +22,30 @@ public final class CommunitySkinCache {
     private static final int MAX_ENTRIES = 200;
     private static final long MAX_BYTES = 4_000_000;
 
+    /** 缓存写入后多久算旧：设置里的皮肤页每次打开都会检查，这段时间内反复打开不再联网重拉整份目录。 */
+    public static final long MAX_AGE_MILLIS = 30L * 60 * 1000;
+
     /** 一款社区皮肤。 */
     public record Entry(String id, String name, String author, JSONObject design) {}
 
     private CommunitySkinCache() {}
+
+    /** 缓存是不是该重拉了：文件不在、读不到修改时间、或按 {@link #stale(long, long)} 算已经过期。 */
+    public static boolean stale(Path preferencesDirectory, long nowMillis) {
+        try {
+            SafePaths.rejectSymlinkComponents(preferencesDirectory);
+            Path file = preferencesDirectory.resolve(FILE);
+            if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) return true;
+            return stale(Files.getLastModifiedTime(file, LinkOption.NOFOLLOW_LINKS).toMillis(), nowMillis);
+        } catch (IOException | RuntimeException error) {
+            return true;
+        }
+    }
+
+    /** 写入时间早于现在 {@link #MAX_AGE_MILLIS} 以上算过期；写入时间在现在之后（系统时间被往回调过）也算，否则缓存会一直不更新。 */
+    public static boolean stale(long modifiedMillis, long nowMillis) {
+        return modifiedMillis > nowMillis || nowMillis - modifiedMillis >= MAX_AGE_MILLIS;
+    }
 
     /** 原子地整份替换缓存；超过上限的条目和整份过大的内容不写。 */
     public static void write(Path preferencesDirectory, List<Entry> entries) throws IOException {
@@ -76,11 +96,11 @@ public final class CommunitySkinCache {
             for (int index = 0; index < array.length() && entries.size() < MAX_ENTRIES; index++) {
                 JSONObject value = array.optJSONObject(index);
                 if (value == null) continue;
-                String id = text(value, "id");
-                String name = text(value, "name");
+                String id = JsonPolicy.strictStringOrEmpty(value.opt("id"));
+                String name = JsonPolicy.strictStringOrEmpty(value.opt("name"));
                 JSONObject design = value.isNull("design") ? null : value.optJSONObject("design");
                 if (id.isEmpty() || name.isEmpty() || design == null) continue;
-                entries.add(new Entry(id, name, text(value, "author"), design));
+                entries.add(new Entry(id, name, JsonPolicy.strictStringOrEmpty(value.opt("author")), design));
             }
             return entries;
         } catch (IOException | JSONException | RuntimeException error) {
@@ -88,13 +108,4 @@ public final class CommunitySkinCache {
         }
     }
 
-    private static String text(JSONObject value, String key) {
-        String text = JsonPolicy.strictString(value.opt(key));
-        return text == null ? "" : text;
-    }
-
-    /** org.json's optString coerces numbers and booleans; cache text must remain JSON strings. */
-    static String strictString(Object value) {
-        return JsonPolicy.strictString(value);
-    }
 }

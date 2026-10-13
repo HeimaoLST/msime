@@ -22,6 +22,8 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
 # The brand mark leading the candidate card is the installed application icon, decoded with cairo, which the classic UI itself is built on.
 pkg_check_modules(CAIRO REQUIRED IMPORTED_TARGET cairo)
+# 模式提示的补宽用 Pango 测量 classicui 实际使用的字体与 DPI；没有 pangocairo 时不编译它，提示保持原样。
+pkg_check_modules(MSIME_HINT_FONT QUIET IMPORTED_TARGET pangocairo)
 set(MSIME_HOST_LIBRARY "${CMAKE_CURRENT_SOURCE_DIR}/../../../target/debug/libmsime_host_api.so" CACHE FILEPATH "Cargo-built Linux Host API")
 if(NOT EXISTS "${MSIME_HOST_LIBRARY}")
   message(FATAL_ERROR "Build msime-host-api for Linux first")
@@ -84,7 +86,7 @@ if(MSIME_BADGE_WAYLAND_FOUND AND MSIME_BADGE_WAYLAND_SCANNER)
         "${MSIME_BADGE_PROTOCOL_DIR}/xdg-shell-protocol.c")
   endif()
 endif()
-add_library(msime-fcitx5 MODULE FcitxEngine.cpp SystemTheme.cpp ../src/system/ChineseTextConversion.cpp ../src/system/DiagnosticLog.cpp ${MSIME_BADGE_WAYLAND_SOURCES})
+add_library(msime-fcitx5 MODULE FcitxEngine.cpp SystemTheme.cpp ../src/system/ChineseTextConversion.cpp ../src/system/DiagnosticLog.cpp ../src/system/CapsLockRelease.cpp ${MSIME_BADGE_WAYLAND_SOURCES})
 # X11 会话下的后端。两个后端互不依赖：只有一种可用时徽章照常工作，都没有时宿主只发面板那半文字提示。xrandr 用来找焦点所在的显示器，和语音浮层同一套定位。
 pkg_check_modules(MSIME_BADGE_X11 QUIET IMPORTED_TARGET x11 xext xrandr cairo-xlib pangocairo)
 set(MSIME_BADGE_X11_SOURCES "")
@@ -133,6 +135,10 @@ target_compile_features(msime-fcitx5 PRIVATE cxx_std_20)
 target_compile_options(msime-fcitx5 PRIVATE -Wall -Wextra -Werror)
 target_include_directories(msime-fcitx5 PRIVATE ../../../crates/host-api/include)
 target_link_libraries(msime-fcitx5 PRIVATE Fcitx5::Core PkgConfig::GIO PkgConfig::CAIRO nlohmann_json::nlohmann_json "${MSIME_HOST_LIBRARY}")
+if(MSIME_HINT_FONT_FOUND)
+  target_link_libraries(msime-fcitx5 PRIVATE PkgConfig::MSIME_HINT_FONT)
+  target_compile_definitions(msime-fcitx5 PRIVATE MSIME_FCITX5_HINT_FONT)
+endif()
 # The built-in sound packs the parent project installs beside the resource bundle; the addon names them to the Host API as sound_packs.
 target_compile_definitions(msime-fcitx5 PRIVATE MSIME_SYSTEM_OPTIONS="${CMAKE_INSTALL_FULL_SYSCONFDIR}/${MSIME_CLIENT_DIRECTORY}/runtime-options.json"
   MSIME_BINDIR="${CMAKE_INSTALL_FULL_BINDIR}" MSIME_ICON_DIR="${MSIME_SYSTEM_FULL_DATADIR}/icons/hicolor"
@@ -196,7 +202,7 @@ if(BUILD_TESTING)
   target_compile_options(fcitx5-preceding-characters-test PRIVATE -Wall -Wextra -Werror)
   target_link_libraries(fcitx5-preceding-characters-test PRIVATE Fcitx5::Core)
   add_test(NAME fcitx5-preceding-characters COMMAND fcitx5-preceding-characters-test)
-  add_executable(fcitx5-native-test tests/native.cpp SystemTheme.cpp ../src/system/ChineseTextConversion.cpp ../src/system/DiagnosticLog.cpp)
+  add_executable(fcitx5-native-test tests/native.cpp SystemTheme.cpp ../src/system/ChineseTextConversion.cpp ../src/system/DiagnosticLog.cpp ../src/system/CapsLockRelease.cpp)
   if(X11_SURFACE_FOUND)
     target_sources(fcitx5-native-test PRIVATE ../src/overlay/WaveOverlayX11Surface.cpp)
     target_compile_definitions(fcitx5-native-test PRIVATE MSIME_LINUX_HAS_X11_SURFACE)
@@ -217,6 +223,12 @@ if(BUILD_TESTING)
   target_compile_options(fcitx5-native-test PRIVATE -Wall -Wextra -Werror)
   target_include_directories(fcitx5-native-test PRIVATE ../../../crates/host-api/include)
   target_link_libraries(fcitx5-native-test PRIVATE Fcitx5::Core PkgConfig::GIO PkgConfig::CAIRO nlohmann_json::nlohmann_json "${MSIME_HOST_LIBRARY}")
+  if(MSIME_HINT_FONT_FOUND)
+    target_link_libraries(fcitx5-native-test PRIVATE PkgConfig::MSIME_HINT_FONT)
+    # 模式提示回归测试统计字体映射分配，确保缓存命中不触发 Pango 排版。
+    target_link_options(fcitx5-native-test PRIVATE -Wl,--wrap=pango_cairo_font_map_new)
+    target_compile_definitions(fcitx5-native-test PRIVATE MSIME_FCITX5_HINT_FONT)
+  endif()
   if(Fcitx5Core_VERSION VERSION_GREATER_EQUAL 5.1.22)
     target_compile_definitions(fcitx5-native-test PRIVATE MSIME_FCITX5_XKB_STATE_MASK)
   endif()
@@ -242,6 +254,19 @@ if(BUILD_TESTING)
   target_compile_options(linux-candidate-fcitx-overlay-scale-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
   target_link_libraries(linux-candidate-fcitx-overlay-scale-test PRIVATE PkgConfig::CAIRO nlohmann_json::nlohmann_json)
   add_test(NAME linux-candidate-fcitx-overlay-scale COMMAND linux-candidate-fcitx-overlay-scale-test)
+  # 接管、退出与恢复需要真实的 classicui 运行库；只装开发库的构建环境没有它，这时候跳过（77）。这不依赖已验证词库，所以与下面的资源 fixture 分开注册。
+  find_library(MSIME_FCITX5_CLASSICUI NAMES classicui PATH_SUFFIXES fcitx5)
+  if(MSIME_FCITX5_CLASSICUI)
+    add_test(NAME fcitx5-candidate-theme-priority COMMAND fcitx5-native-test --theme-priority)
+    set_tests_properties(fcitx5-candidate-theme-priority PROPERTIES SKIP_RETURN_CODE 77)
+    # 模式提示的宽度既需要真实 classicui（它画的主题）也需要 pangocairo（按它的字体与 DPI 测量）。
+    if(MSIME_HINT_FONT_FOUND)
+      add_test(NAME fcitx5-candidate-theme-hint COMMAND fcitx5-native-test --theme-hint)
+      set_tests_properties(fcitx5-candidate-theme-hint PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
+  endif()
+  # 候选行的文字和格式（纠错标记、训音、脚本插件注释）只靠插件代码，不需要词库，所以不跟着下面的资源 fixture 注册。
+  add_test(NAME fcitx5-candidate-rows COMMAND fcitx5-native-test --rows)
   set(MSIME_FCITX5_TEST_RESOURCES "" CACHE PATH "Verified resources directory for the native Fcitx5 test")
   if(MSIME_FCITX5_TEST_RESOURCES)
     add_test(NAME fcitx5-native-context
@@ -250,6 +275,10 @@ if(BUILD_TESTING)
       COMMAND fcitx5-native-test "${MSIME_FCITX5_TEST_RESOURCES}" --ai)
     add_test(NAME fcitx5-local-mode-shortcuts
       COMMAND fcitx5-native-test "${MSIME_FCITX5_TEST_RESOURCES}" --local-modes)
+    add_test(NAME fcitx5-caps-lock-tap
+      COMMAND fcitx5-native-test "${MSIME_FCITX5_TEST_RESOURCES}" --caps-lock)
+    add_test(NAME fcitx5-japanese-toggle
+      COMMAND fcitx5-native-test "${MSIME_FCITX5_TEST_RESOURCES}" --japanese-toggle)
     find_package(Python3 COMPONENTS Interpreter)
     find_program(DBUS_RUN_SESSION dbus-run-session)
     if(Python3_Interpreter_FOUND AND DBUS_RUN_SESSION)
@@ -258,6 +287,14 @@ if(BUILD_TESTING)
           "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/daemon.py"
           "${MSIME_FCITX5_TEST_RESOURCES}" "${MSIME_HOST_LIBRARY}"
           "$<TARGET_FILE:msime-fcitx5>")
+      foreach(online_case cloud-empty cloud-failure ai-empty ai-failure ai-cache-hit)
+        add_test(NAME fcitx5-online-${online_case}
+          COMMAND "${DBUS_RUN_SESSION}" --
+            "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/online_requests.py"
+            "${MSIME_FCITX5_TEST_RESOURCES}" "${MSIME_HOST_LIBRARY}"
+            "$<TARGET_FILE:msime-fcitx5>" "${online_case}")
+        set_tests_properties(fcitx5-online-${online_case} PROPERTIES TIMEOUT 60)
+      endforeach()
       find_program(XVFB_RUN xvfb-run)
       if(XVFB_RUN)
         add_test(NAME fcitx5-page-number-visibility

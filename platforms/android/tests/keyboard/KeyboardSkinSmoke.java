@@ -68,6 +68,9 @@ public final class KeyboardSkinSmoke {
         check("#99FFFFFF".equals(KeyboardSkin.androidColor("#FFFFFF99")));
         check("#12ABCDEF".equals(KeyboardSkin.androidColor("#abcdef12")));
         check("#ABCDEF".equals(KeyboardSkin.androidColor("#abcdef")));
+        check(ColorPolicy.withAlpha(0x80ABCDEF, .5) == 0x40ABCDEF);
+        check(ColorPolicy.withAlpha(0x80ABCDEF, 2d) == 0x80ABCDEF);
+        check(ColorPolicy.withAlpha(0x80ABCDEF, -1d) == 0x00ABCDEF);
         check(KeyboardSkin.androidColor("red") == null && KeyboardSkin.androidColor("#12345") == null);
         check(KeyboardSkin.androidColor(null) == null);
         KeyboardSkin partial = KeyboardSkin.palette("custom", "自定义", false, null, "#FFFFFF",
@@ -110,8 +113,11 @@ public final class KeyboardSkinSmoke {
         check(CustomKeyboardSkin.doubleValue("8.5", 7) == 7);
         check(CustomKeyboardSkin.doubleValue(Boolean.TRUE, 7) == 7);
         check(CustomKeyboardSkin.doubleValue(Double.NaN, 7) == 7);
-        check(CustomKeyboardSkin.booleanValue("true", false) == false);
-        check(CustomKeyboardSkin.booleanValue(Boolean.TRUE, false));
+        check(JsonPolicy.strictBoolean("true", false) == false);
+        check(JsonPolicy.strictBoolean(Boolean.TRUE, false));
+        check("skin".equals(JsonPolicy.strictString("skin", "fallback")));
+        check("fallback".equals(JsonPolicy.strictString(7, "fallback")));
+        check(JsonPolicy.strictString(null, null) == null);
         KeyboardSkin custom = KeyboardSkin.customFixture(design, false);
         check("custom".equals(custom.id()) && "我的皮肤".equals(custom.title()) && custom.designed());
         check("#151022".equals(custom.background()) && "#30224A".equals(custom.gradientEnd()));
@@ -166,6 +172,15 @@ public final class KeyboardSkinSmoke {
         check("#8FD5A6".equals(night.accent()) && "#000000".equals(night.onAccent()));
         check(!KeyboardSkin.resolved("paper", "纸", "light", true, shuishanSlots, null).dark());
         check(KeyboardSkin.resolved("paper", "纸", null, true, shuishanSlots, null).dark());
+        // 固定明暗的主题只在那一种明暗下提供；所选主题属于另一种明暗时按跟随系统画。
+        check(KeyboardSkin.fitsMode(null, true) && KeyboardSkin.fitsMode(null, false));
+        check(KeyboardSkin.fitsMode("dark", true) && !KeyboardSkin.fitsMode("dark", false));
+        check(KeyboardSkin.fitsMode("light", false) && !KeyboardSkin.fitsMode("light", true));
+        check("night".equals(KeyboardSkin.effectiveTheme("night", "dark", true)));
+        check("system".equals(KeyboardSkin.effectiveTheme("night", "dark", false)));
+        check("system".equals(KeyboardSkin.effectiveTheme("paper", "light", true)));
+        check("paper".equals(KeyboardSkin.effectiveTheme("paper", "light", false)));
+        check("custom".equals(KeyboardSkin.effectiveTheme("custom", null, false)));
         // No keyboard in the answer: `system` is the Material 3 keyboard, anything else keeps its own id and title over the same tokens.
         KeyboardSkin bare = KeyboardSkin.resolved("system", "跟随系统", null, true, null, null);
         check("system".equals(bare.id()) && "跟随系统".equals(bare.title()) && bare.dark());

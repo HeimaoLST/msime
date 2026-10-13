@@ -1,9 +1,9 @@
 import type { CSSProperties } from "react";
 import { clamp } from "../core/number";
-import { keyboardThemeLook } from "./screen-keyboard-preview";
+import { resolveKeyboardSkinLook } from "./keyboard-skin-look";
 import { keyboardBackgroundStyle } from "./keyboard-background";
 import { keyboardRgba, mixKeyboardColor, readableKeyboardText } from "./keyboard-colors";
-import { skinColor, type TouchKeyboardSkinDesign } from "./touch-keyboard-skin-design";
+import type { TouchKeyboardSkinDesign } from "./touch-keyboard-skin-design";
 import type { GlobalTheme } from "../theme/global-theme";
 
 export function keyboardSkinStyles(
@@ -11,39 +11,30 @@ export function keyboardSkinStyles(
   skin: GlobalTheme,
   customDesign?: TouchKeyboardSkinDesign,
 ): CSSProperties {
-  const custom = skin === "custom" && customDesign ? customDesign : undefined;
-  const option = keyboardThemeLook(skin, theme);
-  const palette = custom
-    ? {
-        background: skinColor(custom.background),
-        key: skinColor(custom.keyBackground),
-        foreground: skinColor(custom.keyForeground),
-        accent: skinColor(custom.accent),
-        action: skinColor(custom.actionBackground),
-      }
-    : option.palette;
-  const radius = custom?.cornerRadius ?? option.cornerRadius;
-  const borderWidth = custom?.borderWidth ?? option.borderWidth;
-  const shadowOpacity = custom?.shadow ?? option.shadowOpacity;
-  const shadowOffset = custom ? 1 : option.shadowOffset;
-  const shadowRadius = custom ? 2 : option.shadowRadius;
-  const keyOpacity = custom?.keyOpacity ?? 1;
-  const keyShape = custom?.keyShape ?? "rounded";
-  const keyMaterial = custom?.keyMaterial ?? "flat";
+  const look = resolveKeyboardSkinLook(theme, skin, customDesign);
+  const {
+    palette,
+    cornerRadius,
+    borderWidth,
+    shadowOpacity,
+    shadowOffset,
+    shadowRadius,
+    keyOpacity,
+    keyShape,
+    keyMaterial,
+    monospaced,
+  } = look;
   const keyRadius =
     keyShape === "capsule"
       ? "999px"
       : keyShape === "pebble"
         ? "42% 58% 48% 52% / 52% 44% 56% 48%"
         : keyShape === "ticket"
-          ? `${clamp(radius, 0, 4)}px`
-          : `${clamp(radius, 0, 20)}px`;
-  const fontFamily =
-    (custom?.monospaced ?? option.monospaced)
-      ? "ui-monospace, SFMono-Regular, Consolas, monospace"
-      : "inherit";
+          ? `${clamp(cornerRadius, 0, 4)}px`
+          : `${clamp(cornerRadius, 0, 20)}px`;
+  const fontFamily = monospaced ? "ui-monospace, SFMono-Regular, Consolas, monospace" : "inherit";
   return {
-    ...keyboardBackgroundStyle(theme, skin, customDesign, palette),
+    ...keyboardBackgroundStyle(look),
     "--kb-background": palette.background,
     "--kb-text": palette.foreground,
     "--kb-heading": palette.accent,

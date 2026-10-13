@@ -59,18 +59,29 @@ pub fn enumerate_complete_segmentations(
         graph: &SyllableGraph,
         position: usize,
         path_limit: usize,
-        current: &mut Vec<String>,
+        current: &mut Vec<&'static str>,
         result: &mut Vec<Vec<String>>,
     ) {
         if result.len() >= path_limit {
             return;
         }
         if position == graph.input_length {
-            result.push(current.clone());
+            if result.is_empty() {
+                result.reserve_exact(path_limit);
+            }
+            result.push(
+                current
+                    .iter()
+                    .map(|syllable| (*syllable).to_owned())
+                    .collect(),
+            );
             return;
         }
         for edge in &graph.edges[position] {
-            current.push(edge.syllable.to_owned());
+            if current.capacity() == 0 {
+                current.reserve_exact(graph.input_length);
+            }
+            current.push(edge.syllable);
             visit(graph, edge.end, path_limit, current, result);
             current.pop();
             if result.len() >= path_limit {
@@ -79,17 +90,11 @@ pub fn enumerate_complete_segmentations(
         }
     }
 
-    let mut result = Vec::with_capacity(path_limit);
+    let mut result = Vec::new();
     if path_limit == 0 || graph.input_length == 0 || graph.edges.len() != graph.input_length + 1 {
         return result;
     }
-    visit(
-        graph,
-        0,
-        path_limit,
-        &mut Vec::with_capacity(graph.input_length),
-        &mut result,
-    );
+    visit(graph, 0, path_limit, &mut Vec::new(), &mut result);
     result
 }
 
@@ -119,6 +124,25 @@ mod tests {
         assert!(paths("xi'an", SYLLABLE_GRAPH_PATH_LIMIT).is_empty());
         assert!(paths("", SYLLABLE_GRAPH_PATH_LIMIT).is_empty());
         assert!(paths("xian", 0).is_empty());
+    }
+
+    #[test]
+    fn complete_segmentations_reserve_after_the_first_path() {
+        let graph = build_syllable_graph("xian");
+        let paths = enumerate_complete_segmentations(&graph, 8);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths.capacity(), 8);
+    }
+
+    #[test]
+    fn complete_segmentation_walk_borrows_temporary_syllables() {
+        let graph = build_syllable_graph("xian");
+        let (result, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            enumerate_complete_segmentations(&graph, SYLLABLE_GRAPH_PATH_LIMIT)
+        });
+
+        assert_eq!(result, [vec!["xian"], vec!["xi", "an"]]);
+        assert_eq!(allocations, 7, "临时遍历路径仍复制音节: {allocations}");
     }
 
     #[test]
@@ -156,11 +180,27 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_graph_does_not_allocate_path_storage() {
+        let graph = build_syllable_graph(&"z".repeat(256));
+        let (paths, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            enumerate_complete_segmentations(&graph, SYLLABLE_GRAPH_PATH_LIMIT)
+        });
+
+        assert!(paths.is_empty());
+        assert_eq!(
+            allocations, 0,
+            "无路径时不应申请遍历工作缓冲: {allocations}"
+        );
+    }
+
+    #[test]
     fn the_empty_or_mismatched_graph_has_no_paths() {
         let graph = SyllableGraph {
             input_length: 2,
             edges: Vec::new(),
         };
-        assert!(enumerate_complete_segmentations(&graph, 4).is_empty());
+        let paths = enumerate_complete_segmentations(&graph, 4);
+        assert!(paths.is_empty());
+        assert_eq!(paths.capacity(), 0);
     }
 }

@@ -37,10 +37,20 @@ void MarkNamedpipeSessionDirty();
 bool MarkNamedpipeSessionDirtyForOwner(_In_ const void *owner);
 bool EnsureNamedpipeFocusSessionActivated();
 bool SupportsCharacterSetShortcut();
+// Server 处理 Ctrl+Shift+J 中日切换（协商到 FanyImeProtocol::JapaneseToggleShortcut）。
+bool SupportsJapaneseToggleShortcut();
 bool SupportsGameHostCandidate();
 bool SupportsKeyboardCompositionCancel(_In_ const void *owner);
+// Server 认得 FieldTraits 事件（协商到 FanyImeProtocol::FieldTraits）。
+bool SupportsFieldTraits();
+// 记下本线程当前字段的属性（FanyImeFieldTraits::Observe 的值）。下一次发按键、状态快照或 FocusRestored 时，属性和这条连接上报过的不同、或者这条连接还没报过，就先发一个 FieldTraits 事件；Server 没协商到时什么都不发。
+void NoteFieldTraitsForServer(uint32_t traits);
 bool FlushNamedpipeFocusSessionReset();
 bool FlushNamedpipeImeDeactivation(uint64_t focusToken = 0);
+// 本线程当前的焦点令牌，也就是 ClientActivated 交给 Server 的那个；线程没有焦点时为 0。Aux 管道上的 KeySound 带着它，Server 只让正持有这个焦点的会话出声。
+uint64_t GetNamedpipeFocusToken();
+// 本线程的管道客户端号 (pid << 32) | tid，和 Hello 里报给 Server 的相同。
+uint64_t GetNamedpipeClientId();
 
 KeyEventSendResult SendKeyEventToUIProcess(_Out_opt_ uint64_t *requestId = nullptr);
 void DebugTsfKeyLatency(_In_z_ const wchar_t *stage, uint64_t requestId, double elapsedMs, HRESULT result);
@@ -168,8 +178,12 @@ inline std::atomic_bool SmartPunctuationDirectLetterEnabled{false};
 // Default on until the Server sends the persisted setting.
 inline std::atomic_bool PairedPunctuationEnabled{true};
 inline std::atomic_bool MicrosoftShuangpinEnabled{false};
+// 组字时 ';' 和 '\'' 选第二、第三个候选。Server 用 SecondThirdCandidateChanged 推送之前保持关闭，两个键照常是标点。
+inline std::atomic_bool SecondThirdCandidateEnabled{false};
 // The scheme the TIP keys before its host session answers a key: scheme::mode_scheme of the mode the Server last announced in InputModeChanged, or of the scheme the preferences run before it has (common/InputSchemeTraits.h). The pinyin and shape schemes all read as quanpin, which they key alike.
 inline std::atomic_int InputModeScheme{0};
+// 任务栏模式图标显示的模式：Server 上次在 InputModeChanged 里给的码（scheme::input_mode_code），双拼和五笔也各有自己的码；Server 还没给时是偏好里正在运行的方案。只有语言栏读它，键入看上面的 InputModeScheme。
+inline std::atomic_int InputModeIndicator{L'0'};
 // The V, "/" and "@" local modes, off until the Server sends LocalModeTriggersChanged: while off their keys route exactly as before the modes existed.
 inline std::atomic_bool ExpressionModeEnabled{false};
 inline std::atomic_bool CommandModeEnabled{false};

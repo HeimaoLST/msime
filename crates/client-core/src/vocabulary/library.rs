@@ -10,9 +10,8 @@
 
 use super::wordbook::{self, Wordbook, WordbookEntry};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::fs::File;
-#[cfg(not(unix))]
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// The most books one library may hold.
@@ -71,6 +70,11 @@ pub struct WordbookLibrary {
     directory: PathBuf,
 }
 
+struct LibraryLock {
+    directory: crate::file_lock::PrivateDirectory,
+    _lock: File,
+}
+
 impl WordbookLibrary {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
@@ -82,15 +86,17 @@ impl WordbookLibrary {
         &self.directory
     }
 
+    #[cfg(all(test, unix))]
     fn book_path(&self, id: &str) -> PathBuf {
         self.directory.join(format!("{id}.json"))
     }
 
+    #[cfg(test)]
     fn index_path(&self) -> PathBuf {
         self.directory.join("index.json")
     }
 
-    fn lock(&self) -> Result<File, WordbookLibraryError> {
+    fn lock(&self) -> Result<LibraryLock, WordbookLibraryError> {
         if let Some(parent) = self.directory.parent() {
             crate::storage::reject_symlink(parent)?;
         }
@@ -100,19 +106,26 @@ impl WordbookLibrary {
                 "vocabulary wordbook directory is not a real directory",
             )));
         }
-        let lock = crate::file_lock::open_lock_file(self.directory.join("wordbooks.lock"))?;
+        let directory = crate::file_lock::open_private_directory(&self.directory)?;
+        let lock =
+            crate::file_lock::open_private_lock_file_at(&directory, OsStr::new("wordbooks.lock"))?;
         crate::file_lock::exclusive(&lock)?;
-        Ok(lock)
+        Ok(LibraryLock {
+            directory,
+            _lock: lock,
+        })
     }
 
-    fn read_index_locked(&self) -> Result<LibraryIndex, WordbookLibraryError> {
-        let file = match crate::storage::open_private_file_in(&self.index_path()) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(LibraryIndex::default());
-            }
-            Err(_) => return Err(WordbookLibraryError::InvalidWordbook),
-        };
+    fn read_index_locked(&self, lock: &LibraryLock) -> Result<LibraryIndex, WordbookLibraryError> {
+        let file =
+            match crate::file_lock::open_private_file_at(&lock.directory, OsStr::new("index.json"))
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(LibraryIndex::default());
+                }
+                Err(_) => return Err(WordbookLibraryError::InvalidWordbook),
+            };
         let bytes = crate::bounded_io::read_bounded_file(file, MAX_INDEX_BYTES, || {
             WordbookLibraryError::InvalidWordbook
         })?;
@@ -131,29 +144,14 @@ impl WordbookLibrary {
         Ok(index)
     }
 
-    fn write_atomically(&self, path: &Path, bytes: &[u8]) -> Result<(), WordbookLibraryError> {
-        #[cfg(unix)]
-        {
-            let directory = crate::storage::open_private_directory(&self.directory)?;
-            let name = path.file_name().ok_or_else(|| {
-                WordbookLibraryError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "wordbook path has no file name",
-                ))
-            })?;
-            crate::storage::write_private_file_at(&directory, name, bytes)
-                .map_err(WordbookLibraryError::Io)
-        }
-        #[cfg(not(unix))]
-        {
-            let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
-            temporary.write_all(bytes)?;
-            temporary.as_file().sync_all()?;
-            temporary
-                .persist(path)
-                .map(|_| ())
-                .map_err(|error| WordbookLibraryError::Io(error.error))
-        }
+    fn write_atomically(
+        &self,
+        lock: &LibraryLock,
+        name: &OsStr,
+        bytes: &[u8],
+    ) -> Result<(), WordbookLibraryError> {
+        crate::file_lock::write_private_file_at(&lock.directory, name, bytes)
+            .map_err(WordbookLibraryError::Io)
     }
 
     /// Every book the library holds, in the order they were imported.
@@ -161,11 +159,12 @@ impl WordbookLibrary {
     /// An index entry whose file has gone is dropped rather than reported: the book is genuinely
     /// not there, and a picker row that fails to open is worse than a row that is absent.
     pub fn list(&self) -> Result<Vec<WordbookSummary>, WordbookLibraryError> {
-        let _lock = self.lock()?;
-        let index = self.read_index_locked()?;
+        let lock = self.lock()?;
+        let index = self.read_index_locked(&lock)?;
         let mut books = Vec::with_capacity(index.books.len());
         books.extend(index.books.into_iter().filter(|book| {
-            crate::storage::open_private_file_in(&self.book_path(&book.id)).is_ok()
+            let name = format!("{}.json", book.id);
+            crate::file_lock::open_private_file_at(&lock.directory, OsStr::new(&name)).is_ok()
         }));
         Ok(books)
     }
@@ -175,8 +174,10 @@ impl WordbookLibrary {
         if !wordbook::id_is_well_formed(id) {
             return Err(WordbookLibraryError::InvalidWordbook);
         }
-        let _lock = self.lock()?;
-        let file = match crate::storage::open_private_file_in(&self.book_path(id)) {
+        let lock = self.lock()?;
+        let name = format!("{id}.json");
+        let file = match crate::file_lock::open_private_file_at(&lock.directory, OsStr::new(&name))
+        {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(WordbookLibraryError::InvalidWordbook),
@@ -215,8 +216,8 @@ impl WordbookLibrary {
             return Err(WordbookLibraryError::InvalidWordbook);
         }
 
-        let _lock = self.lock()?;
-        let mut index = self.read_index_locked()?;
+        let lock = self.lock()?;
+        let mut index = self.read_index_locked(&lock)?;
         if !index.books.iter().any(|entry| entry.id == book.id) && index.books.len() >= MAX_BOOKS {
             return Err(WordbookLibraryError::LibraryFull);
         }
@@ -228,7 +229,8 @@ impl WordbookLibrary {
         // The book first, then the index. A crash between the two leaves a file no index names,
         // which is invisible and harmless; the other order would leave a picker row that opens
         // nothing.
-        self.write_atomically(&self.book_path(&book.id), &bytes)?;
+        let book_name = format!("{}.json", book.id);
+        self.write_atomically(&lock, OsStr::new(&book_name), &bytes)?;
 
         let summary = WordbookSummary {
             id: book.id.clone(),
@@ -241,7 +243,11 @@ impl WordbookLibrary {
             Some(existing) => *existing = summary,
             None => index.books.push(summary),
         }
-        self.write_atomically(&self.index_path(), &serde_json::to_vec(&index)?)?;
+        self.write_atomically(
+            &lock,
+            OsStr::new("index.json"),
+            &serde_json::to_vec(&index)?,
+        )?;
         Ok(book)
     }
 
@@ -250,20 +256,28 @@ impl WordbookLibrary {
         if !wordbook::id_is_well_formed(id) {
             return Err(WordbookLibraryError::InvalidWordbook);
         }
-        let _lock = self.lock()?;
-        let mut index = self.read_index_locked()?;
+        let lock = self.lock()?;
+        let mut index = self.read_index_locked(&lock)?;
         let before = index.books.len();
         index.books.retain(|entry| entry.id != id);
         if index.books.len() == before
-            && crate::storage::open_private_file_in(&self.book_path(id)).is_err()
+            && crate::file_lock::open_private_file_at(
+                &lock.directory,
+                OsStr::new(&format!("{id}.json")),
+            )
+            .is_err()
         {
             return Err(WordbookLibraryError::UnknownWordbook);
         }
         // The index first this time, so a crash between the two leaves an orphan file rather than
         // a row pointing at a deleted book.
-        self.write_atomically(&self.index_path(), &serde_json::to_vec(&index)?)?;
-        // Unix 经目录句柄删除；其他平台沿用路径删除。
-        let removed = crate::storage::remove_private_file(&self.book_path(id));
+        self.write_atomically(
+            &lock,
+            OsStr::new("index.json"),
+            &serde_json::to_vec(&index)?,
+        )?;
+        let name = format!("{id}.json");
+        let removed = crate::file_lock::remove_private_file_at(&lock.directory, OsStr::new(&name));
         match removed {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -529,11 +543,33 @@ mod tests {
         .unwrap();
         fs::remove_file(library.book_path("user-1")).unwrap();
         fs::hard_link(&outside_book, library.book_path("user-1")).unwrap();
+        msime_path_trust::open_to_other_users(library.book_path("user-1").parent().unwrap())
+            .unwrap();
 
         assert!(matches!(
             library.load("user-1"),
             Err(WordbookLibraryError::InvalidWordbook)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writes_stay_bound_to_the_locked_library_directory_after_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let library = WordbookLibrary::new(root.path());
+        fs::create_dir_all(library.directory()).unwrap();
+        let lock = library.lock().unwrap();
+        let moved = root.path().join("vocabulary-wordbooks-moved");
+        fs::rename(library.directory(), &moved).unwrap();
+        fs::create_dir(library.directory()).unwrap();
+
+        library
+            .write_atomically(&lock, std::ffi::OsStr::new("index.json"), b"{}")
+            .unwrap();
+
+        assert!(moved.join("index.json").exists());
+        assert!(!library.directory().join("index.json").exists());
+        fs::remove_dir_all(moved).unwrap();
     }
 
     #[test]

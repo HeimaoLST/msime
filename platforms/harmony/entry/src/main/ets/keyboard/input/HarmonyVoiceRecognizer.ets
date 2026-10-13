@@ -3,7 +3,7 @@ import { VoiceRecognitionPolicy } from './VoiceRecognitionPolicy';
 import { HarmonyDoubaoRecognizer } from './HarmonyDoubaoRecognizer';
 import { HarmonyHttpAsrRecognizer } from './HarmonyHttpAsrRecognizer';
 import { HarmonyVoicePolisher } from './HarmonyVoicePolisher';
-import { VoiceInputConfiguration } from './VoiceInputConfiguration';
+import { DoubaoCredentialPolicy, VoiceInputConfiguration } from './VoiceInputConfiguration';
 import { HttpAsrConfigurationPolicy } from './HttpAsrConfigurationPolicy';
 import { HarmonyLocalAsrRecognizer } from './HarmonyLocalAsrRecognizer';
 import { HarmonyPcmCapture } from './HarmonyPcmCapture';
@@ -40,8 +40,10 @@ export class HarmonyVoiceRecognizer {
    */
   async start(language: string, config: VoiceInputConfiguration, onResult: VoiceResultHandler,
     onError: VoiceErrorHandler, hotwordOptions: Object | null = null): Promise<void> {
-    const doubaoProvider: boolean = config.asr_provider === 'doubao'
-      && config.asr_token.trim().length > 0;
+    // 一项凭据都没填的豆包（出厂配置）照旧交给系统识别；填过的按豆包走，缺项直接报出来。
+    const doubaoProvider: boolean = DoubaoCredentialPolicy.attempted(config);
+    const doubaoMissing: string | null = DoubaoCredentialPolicy.missing(config);
+    if (doubaoMissing !== null) throw new Error(doubaoMissing);
     const httpProvider: boolean = HttpAsrConfigurationPolicy.supported(config.asr_provider);
     if (doubaoProvider && this.doubao.isActive()) throw new Error('豆包语音识别正在进行');
     if (httpProvider && this.httpAsr.isActive()) throw new Error('语音识别正在进行');

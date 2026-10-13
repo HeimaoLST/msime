@@ -215,8 +215,8 @@ scope_classify() {
     flake.nix | flake.lock) echo linux ;;
     platforms/macos/*) echo macos; echo named ;;
     platforms/ios/* | resources/* | scripts/* | tools/*) echo named ;;
-    # 没有 --quick 阶段从这些路径构建：常驻的契约检查、Rust workspace 检查和 agent-notes 阶段覆盖它们。
-    docs/* | crates/dict-builder/* | crates/pack-tool/* | crates/mcp-server/* | \
+    # 没有 --quick 阶段从这些路径构建：常驻的契约检查、Rust workspace 检查和 agent-notes 阶段覆盖它们。脚本插件（plugins/）不属于任何平台，由 CI 的 Script plugins 作业和 scripts/test-script-plugins.sh 测试。
+    docs/* | crates/dict-builder/* | crates/pack-tool/* | crates/mcp-server/* | plugins/* | \
       .agents/* | *.md | LICENSE | .editorconfig) ;;
     *) echo all ;;
   esac
@@ -475,7 +475,7 @@ android_clang="$android_ndk/toolchains/llvm/prebuilt/$android_host_tag/bin/aarch
 if ! scoped desktop android; then
   :
 elif [ -n "$android_host_tag" ] && [ -x "$android_clang" ] \
-  && rustup target list --installed 2>/dev/null | grep -q '^aarch64-linux-android$'; then
+  && grep -q '^aarch64-linux-android$' <<< "$(rustup target list --installed 2>/dev/null)"; then
   env "CC_aarch64_linux_android=$android_clang" \
     "CXX_aarch64_linux_android=${android_clang}++" \
     "AR_aarch64_linux_android=$android_ndk/toolchains/llvm/prebuilt/$android_host_tag/bin/llvm-ar" \
@@ -506,7 +506,7 @@ if ! scoped wasm; then
   :
 elif [ -n "$wasm_cc" ] && [ -n "$wasm_ar" ] \
   && printf 'int x;\n' | "$wasm_cc" --target=wasm32-unknown-unknown -x c -c -o /dev/null - >/dev/null 2>&1 \
-  && rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
+  && grep -q '^wasm32-unknown-unknown$' <<< "$(rustup target list --installed 2>/dev/null)"; then
   env "CC_wasm32_unknown_unknown=$wasm_cc" "AR_wasm32_unknown_unknown=$wasm_ar" \
     cargo check --locked -p msime-engine-wasm --target wasm32-unknown-unknown 2>&1 | tail -3
   [ "${PIPESTATUS[0]}" -eq 0 ] || fail "cargo check --target wasm32-unknown-unknown"
@@ -599,7 +599,7 @@ note "compile: linux desktop shell"
 # the host's own and the two would rebuild each other on every run.
 #
 # The build dependencies live in an image (platforms/linux/tests/tools/Dockerfile.desktop-check) rather than being installed with apt in a throwaway container: that reinstall of the whole webkit2gtk closure ran on every --quick and so on every push, and it is the part of this phase that does not change. The image is tagged per checkout the same way platforms/linux/build-container.sh tags its gate image, so concurrent worktrees never run each other's Dockerfile; the README says how to prune the tags old worktrees leave behind.
-linux_desktop_note="image=msime-linux-desktop-check:\$(printf %s \"\$PWD\" | shasum | cut -c1-12); docker build -t \"\$image\" -f platforms/linux/tests/tools/Dockerfile.desktop-check platforms/linux/tests && docker run --rm -v \"\$PWD\":/source -w /source \"\$image\" cargo check -p msime-desktop --locked --all-targets"
+linux_desktop_note="image=msime-linux-desktop-check:\$(printf %s \"\$PWD\" | shasum | cut -c1-12); docker build -t \"\$image\" -f platforms/linux/tests/tools/Dockerfile.desktop-check platforms/linux/tests && docker run --rm -v \"\$PWD\":/source -v \"\$PWD/target/linux-desktop-check\":/ctarget -w /source -e CARGO_TARGET_DIR=/ctarget -e CARGO_HOME=/ctarget/cargo-home \"\$image\" cargo check -p msime-desktop --locked --all-targets"
 if ! scoped desktop linux; then
   :
 elif [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
@@ -617,6 +617,7 @@ elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
       -v "$root/target/linux-desktop-check":/ctarget \
       -w /source \
       -e CARGO_TARGET_DIR=/ctarget \
+      -e CARGO_HOME=/ctarget/cargo-home \
       "$linux_desktop_image" \
       cargo check -p msime-desktop --locked --all-targets --message-format short \
       > "$root/target/linux-desktop-check/check.log" 2>&1
@@ -932,8 +933,9 @@ fi
 # all collects no failing names and is reported as being at baseline. msime-desktop did not link on macOS
 # for that reason, and its 86 tests had never run. msime-engine and msime-tauri-mobile-platform
 # were missing too, and nothing else runs their tests on the host target.
+# msime-clipboard-relay 也不在 default-members 里，其他地方都不跑它的测试；它的端到端测试在 127.0.0.1 上起参考中继，用真正的客户端驱动连它。
 for package in msime-client-core msime-engine msime-engine-wasm msime-host-api msime-input-runtime msime-host-windows \
-  msime-host-macos msime-mcp-server msime-tauri-mobile-platform msime-desktop; do
+  msime-host-macos msime-mcp-server msime-tauri-mobile-platform msime-clipboard-relay msime-desktop; do
   # A package that does not build produces no failing test names, which reads as "at baseline" - which is
   # how msime-desktop went unbuildable on macOS without anything noticing. Say so instead.
   status=0 build_failed=0
@@ -1055,13 +1057,20 @@ if [ -n "${MSIME_EVAL_RESOURCES:-}" ] && [ -d "${MSIME_EVAL_RESOURCES:-}" ]; the
   # 1104 cases where the hand-written set produced three disagreements and McNemar p = 0.25.
   #
   # `nine-key` is the words set typed on the phone grid: each letter becomes the digit printed beside it, so readings that share digits (xi'an and yi'an) compete for one input. The full-keyboard numbers say nothing about it, and nine-key ranking had no gate before.
-  for set in sentences harvested neutral words nine-key; do
+  #
+  # `nine-key-sentences` 是九键长句：4 到 12 个字的整句在九宫格上打，每条都在 32 个数字以内。词级集量不到整句，而整句集的长句大多超过九键的数字上限（#6059）。
+  #
+  # `fourteen-key` 和 `fourteen-key-sentences` 是同样两份集合在全拼 14 键上打：每个字母换成它所在键的组码（这一组的首字母），从 `GridKey` 送进去。14 键与九键共用一套解码，只换码表，所以两者的数字可以直接比。
+  for set in sentences harvested neutral words nine-key nine-key-sentences fourteen-key fourteen-key-sentences; do
     case "$set" in
       sentences) args="--set resources/eval/sentences-v1.tsv" ;;
       harvested) args="--set resources/eval/sentences-v2.tsv" ;;
       neutral) args="--set resources/eval/sentences-neutral-v1.tsv" ;;
       words) args="--set resources/eval/quanpin-words-v1.tsv --limit 3000" ;;
       nine-key) args="--set resources/eval/quanpin-words-v1.tsv --limit 3000 --nine-key" ;;
+      nine-key-sentences) args="--set resources/eval/sentences-nine-key-v1.tsv --nine-key" ;;
+      fourteen-key) args="--set resources/eval/quanpin-words-v1.tsv --limit 3000 --grid fourteen" ;;
+      fourteen-key-sentences) args="--set resources/eval/sentences-nine-key-v1.tsv --grid fourteen" ;;
     esac
     # shellcheck disable=SC2086
     if cargo run --release -q -p msime-input-runtime --example convert_eval --locked -- \

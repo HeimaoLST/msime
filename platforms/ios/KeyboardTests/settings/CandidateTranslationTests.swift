@@ -123,6 +123,19 @@ final class CandidateTranslationTests: XCTestCase {
     XCTAssertEqual(service.calls.count, 2)
   }
 
+  func testMemoryPressureClearsGlossCache() async throws {
+    let service = StubTranslationService(answers: ["EN": ["你好": "hello"]])
+    let store = CandidateTranslationStore(service: service)
+    let arrived = expectation(description: "gloss arrived")
+    store.onArrival = { arrived.fulfill() }
+    store.refresh(words: ["你好"], codes: ["EN"])
+    await fulfillment(of: [arrived], timeout: 5)
+
+    store.clearCacheForMemoryPressure()
+
+    XCTAssertNil(store.gloss(word: "你好", code: "EN"))
+  }
+
   func testAResponseWithTheWrongCountIsDropped() async throws {
     let store = CandidateTranslationStore(service: TruncatingTranslationService())
     store.refresh(words: ["你好", "中国"], codes: ["EN"])
@@ -272,6 +285,32 @@ final class CandidateTranslationTests: XCTestCase {
     XCTAssertEqual(longChip.bounds.width, short, accuracy: 0.5)
   }
 
+  func testExpandedGridFillsEachWrappedRowToTheEdge() throws {
+    func cells(_ spans: [Int], _ columns: Int) -> [[Int]] {
+      KeyboardCandidatePanelView.place(spans: spans, columns: columns).map { [$0.row, $0.column, $0.span] }
+    }
+    // The cell before a wrap stretches to the end of its row; the last row keeps its spans.
+    XCTAssertEqual(cells([1, 1, 2, 2, 2, 1], 5),
+                   [[0, 0, 1], [0, 1, 1], [0, 2, 3], [1, 0, 2], [1, 2, 2], [1, 4, 1]])
+    XCTAssertEqual(cells([1, 1], 4), [[0, 0, 1], [0, 1, 1]])
+    XCTAssertEqual(cells([2, 3, 1], 5), [[0, 0, 2], [0, 2, 3], [1, 0, 1]])
+    XCTAssertTrue(cells([], 3).isEmpty)
+
+    let panel = KeyboardCandidatePanelView(
+      candidates: ["好", "好", "好", "好", "你今天晚上吃什么呢"], preedit: "hao",
+      display: { $0 }, onSelect: { _ in }, onClose: {})
+    panel.frame = CGRect(x: 0, y: 0, width: 390, height: 240)
+    panel.layoutIfNeeded()
+    let chips = try (1...5).map { index in
+      try XCTUnwrap(descendants(panel).first { $0.accessibilityIdentifier == "panelCandidate-\(index)" })
+    }
+    let edge = try XCTUnwrap(chips[0].superview).bounds.width - KeyboardCandidatePanelView.gridPadding
+    XCTAssertEqual(chips[3].frame.minY, chips[0].frame.minY, accuracy: 0.5)
+    XCTAssertGreaterThan(chips[4].frame.minY, chips[0].frame.minY)
+    XCTAssertEqual(chips[3].frame.maxX, edge, accuracy: 0.5, "the row before the sentence ends flush")
+    XCTAssertLessThan(chips[4].frame.maxX, edge - 1, "the last row is not stretched")
+  }
+
   /// A row is reserved only for a gloss that can actually arrive.
   ///
   /// English has the offline dictionary the keyboard ships with, so it answers without a
@@ -351,6 +390,15 @@ final class CandidateTranslationTests: XCTestCase {
     XCTAssertEqual(glossed - bare,
                    KeyboardViewController.topRowHeight(glossLines: 1) - KeyboardViewController.topRowHeight(glossLines: 0),
                    accuracy: 0.5, "the gloss row was taken off the keys instead of added to the keyboard")
+  }
+
+  /// 带释义的词块按内容取宽：候选字和释义里更宽的那个，释义最多把词块撑到一栏，候选字本身更宽时照旧按候选字。
+  func testGlossedChipsFitTheirContentUpToAColumn() {
+    XCTAssertEqual(KeyboardKeyButton.chipContentWidth(titleLine: 40, glossLine: 26, glossLines: 1, column: 110), 40)
+    XCTAssertEqual(KeyboardKeyButton.chipContentWidth(titleLine: 40, glossLine: 80, glossLines: 1, column: 110), 80)
+    XCTAssertEqual(KeyboardKeyButton.chipContentWidth(titleLine: 40, glossLine: 300, glossLines: 1, column: 110), 110)
+    XCTAssertEqual(KeyboardKeyButton.chipContentWidth(titleLine: 140, glossLine: 300, glossLines: 1, column: 110), 140)
+    XCTAssertEqual(KeyboardKeyButton.chipContentWidth(titleLine: 40, glossLine: 300, glossLines: 0, column: 110), 40)
   }
 
   /// The gloss sits on its own line under the candidate rather than beside it, and a candidate

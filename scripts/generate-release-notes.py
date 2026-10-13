@@ -131,8 +131,8 @@ def model_notes(label: str, version: str, records: list[dict[str, object]]) -> s
 {commit_context(records)}"""
     payload = json.dumps(
         {
+            # 不带 temperature：GPT-5 系列的推理模型只接受默认值，带别的值会被直接拒绝（HTTP 400），windows-v0.2.1 的发布说明就是这样退回了确定性版本。
             "model": model,
-            "temperature": 0.2,
             "messages": [
                 {"role": "system", "content": "你只输出符合要求的 Markdown，不要输出分析。"},
                 {"role": "user", "content": prompt},
@@ -164,7 +164,14 @@ def model_notes(label: str, version: str, records: list[dict[str, object]]) -> s
             raise ValueError("模型返回的发布说明格式不符合约束")
         return content + "\n"
     except (OSError, ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError, urllib.error.URLError) as error:
-        print(f"EveryAPI 发布说明生成失败，使用确定性平台说明：{error}", file=sys.stderr)
+        # HTTPError 本身只说状态码，拒绝的原因在响应正文里；带上它，下次失败从日志就能看出是哪个参数。
+        detail = ""
+        if isinstance(error, urllib.error.HTTPError):
+            try:
+                detail = f"：{error.read().decode('utf-8', 'replace')[:500]}"
+            except OSError:
+                pass
+        print(f"EveryAPI 发布说明生成失败，使用确定性平台说明：{error}{detail}", file=sys.stderr)
         return None
 
 

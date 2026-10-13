@@ -2,7 +2,7 @@
 //!
 //! A `Session` always configures frequency adjustment (session.cpp:21-23 rejects invalid options instead), so the reference's unconfigured compatibility path, which bumped a picked row to its key's maximum plus one, is unreachable and not ported.
 
-use std::time::Duration;
+use std::{borrow::Cow, time::Duration};
 
 use super::composition::{
     append_canonical_pinyin, fold_autocorrect_letters, normalize_canonical_pinyin_for_word,
@@ -37,7 +37,7 @@ pub const MAX_PICK_PAIR_WORD_CHARS: usize = 4;
 pub const PICK_PAIR_MAX_GAP_SECONDS: u64 = 10;
 
 /// An explicit pick among alternatives says more than accepting a decoded sentence, so it counts twice (IS:1181).
-const DICTIONARY_PICK_TIMES: u32 = 2;
+pub(super) const DICTIONARY_PICK_TIMES: u32 = 2;
 
 /// Split and umlaut-normalised syllables of a reading.
 fn normalized_syllables(pinyin: &str) -> Vec<String> {
@@ -88,26 +88,42 @@ fn clone_matching_rows(
 impl InputSession {
     /// input_session.cpp:1274-1319; `index` is in ranking order.
     pub(super) fn learn_candidate(&mut self, index: usize) -> Option<String> {
-        if !self.learning_enabled {
+        // 五笔的临时拼音反查只是查编码：选中的拼音词不调词频、不记整句，免得一次查询改了拼音的排序。
+        if !self.learning_enabled || self.engine.wubi_pinyin_lookup_active() {
             return None;
         }
-        let selected = self.ranking_list().get(index)?.clone();
+        let selected_source = self.ranking_list().get(index)?.source;
         let temporary_english = self.local_mode == LocalInputMode::TemporaryEnglish;
         if (self.dedicated_english || temporary_english)
-            && selected.source == CandidateSource::EnglishDictionary
+            && selected_source == CandidateSource::EnglishDictionary
             && self.frequency.mode != FrequencyAdjustmentMode::Disabled
             && index != 0
         {
             return self.adjust_candidate_frequency(index, self.frequency, false);
         }
         // Generated/Fallback and injected online sentences are not dictionary rows, so frequency adjustment has nowhere to persist them. Store the selected sentence as a user phrase instead. This applies even at index zero and is independent of the frequency-adjustment mode.
-        if selected.source.is_sentence_learning() {
-            return self.learn_sentence_candidate(&selected);
+        if selected_source.is_sentence_learning() {
+            return self.learn_sentence_candidate(index);
         }
-        if self.frequency.mode == FrequencyAdjustmentMode::Disabled || index == 0 {
+        // 混输英文或日文混输行占了首位（拼音拆不开、英文完全匹配，用户把英文固定在第一位，或者日文领先；英文和日文可以先后占住前两位）时，紧跟在这些领先行后面的那一行才是拼音给的首选：选它仍是默认的选择，不调词频，也不写日志。
+        let leading = self
+            .ranking_list()
+            .iter()
+            .take_while(|item| {
+                matches!(
+                    item.source,
+                    CandidateSource::EnglishDictionary | CandidateSource::MixedJapanese
+                )
+            })
+            .count();
+        let default_behind_leaders = leading > 0 && index == leading;
+        if self.frequency.mode == FrequencyAdjustmentMode::Disabled
+            || index == 0
+            || default_behind_leaders
+        {
             return None;
         }
-        if !selected.source.is_dictionary()
+        if !selected_source.is_dictionary()
             || !self
                 .engine
                 .current_scheme_type()
@@ -127,7 +143,7 @@ impl InputSession {
     ) -> Option<String> {
         // Ranks are read from the order before personal context reordering.
         let ordered = self.ranking_list();
-        let selected = ordered.get(index)?.clone();
+        let selected = ordered.get(index)?;
         let user_db = self.journal_path();
         if selected.source == CandidateSource::EnglishDictionary {
             let context = if self.dedicated_english {
@@ -138,15 +154,12 @@ impl InputSession {
                 self.engine.request().raw_input.clone()
             };
             let context_key = english_context_key(&context);
-            let english_rows = clone_matching_rows(ordered, |item| {
-                item.source == CandidateSource::EnglishDictionary
-            });
             let english_db = self.paths.dictionary(assets::ENGLISH_DICTIONARY);
             let adjusted = adjust_english_candidate_ranking(&RankingRequest {
                 main_db: &english_db,
-                user_db: &user_db,
+                user_db,
                 context_key: &context_key,
-                ordered: &english_rows,
+                ordered,
                 entry_key: &selected.pinyin,
                 value: &selected.word,
                 mode: options.mode,
@@ -162,7 +175,7 @@ impl InputSession {
 
         let super_jianpin = self.local_mode == LocalInputMode::SuperJianpin;
         // In a mixed wubi list the selected row's producer decides: a quanpin row is ranked, keyed and stored as pinyin, and only a row the wubi table answered is ranked under the code itself (overlays.md §3.3). The pinyin fallback reuses the context the fixed positions are written under, otherwise a pinned candidate would not be recognised here.
-        let wubi = Self::is_wubi_native_candidate(&selected);
+        let wubi = Self::is_wubi_native_candidate(selected);
         let pinyin_fallback = self.is_wubi() && !wubi;
         let request = self.engine.request();
         let mut context_key = if super_jianpin {
@@ -183,23 +196,27 @@ impl InputSession {
         }
         let wubi_row = wubi && !super_jianpin;
         let entry_key = if wubi_row {
-            selected.pinyin.clone()
+            selected.pinyin.as_str()
         } else if selected.canonical_pinyin.is_empty() {
-            context_key.clone()
+            context_key.as_str()
         } else {
-            selected.canonical_pinyin.clone()
+            selected.canonical_pinyin.as_str()
         };
         let mixed_wubi = self.is_wubi();
-        let ranked = clone_matching_rows(ordered, |item| {
-            !mixed_wubi || item.scheme == selected.scheme
-        });
+        let ranked_storage;
+        let ranked = if mixed_wubi {
+            ranked_storage = clone_matching_rows(ordered, |item| item.scheme == selected.scheme);
+            ranked_storage.as_slice()
+        } else {
+            ordered
+        };
         let main_db = self.paths.dictionary(assets::MAIN_DICTIONARY);
         let adjusted = adjust_candidate_ranking(&RankingRequest {
             main_db: &main_db,
-            user_db: &user_db,
+            user_db,
             context_key: &context_key,
-            ordered: &ranked,
-            entry_key: &entry_key,
+            ordered: ranked,
+            entry_key,
             value: &selected.word,
             mode: options.mode,
             linear_step: options.linear_step,
@@ -223,42 +240,52 @@ impl InputSession {
     }
 
     /// input_session_composition.cpp:562-600.
-    pub(super) fn learn_sentence_candidate(&mut self, selected: &WordItem) -> Option<String> {
+    pub(super) fn learn_sentence_candidate(&mut self, index: usize) -> Option<String> {
         // Local shortcuts and English/Japanese modes also use Generated candidates, but they are not pinyin sentences and must never enter the pinyin user dictionary. A native wubi row is not one either, while a pinyin row beside it in a mixed list is (overlays.md §3.3).
-        if self.local_mode != LocalInputMode::None
-            || self.dedicated_english
-            || !self
-                .engine
-                .current_scheme_type()
-                .learns_into_main_dictionary()
-            || Self::is_wubi_native_candidate(selected)
-        {
-            return None;
-        }
-        let typo_diagnostic = self.learn_accepted_typos(selected);
-        // Both quanpin and shuangpin sentences carry canonical quanpin; require a complete reading with one syllable per Han character before creating the row. Online cloud/AI rows are injected after the local query and carry no canonical reading: for a complete full-pinyin query the session's explicit segmentation is the canonical key, because the committed letters without apostrophes would let correction re-segment a reading such as qi'e'huan before it is stored.
-        let online = selected.source.is_online();
-        let selected_canonical =
-            if selected.canonical_pinyin.is_empty() && online && self.is_all_complete_pure_pinyin()
+        let (typo_diagnostic, online, canonical, word) = {
+            let selected = self.ranking_list().get(index)?;
+            if !self.can_learn_sentence_candidate(selected) {
+                return None;
+            }
+            let typo_diagnostic = self.learn_accepted_typos(selected);
+            // Both quanpin and shuangpin sentences carry canonical quanpin; require a complete reading with one syllable per Han character before creating the row. Online cloud/AI rows are injected after the local query and carry no canonical reading: for a complete full-pinyin query the session's explicit segmentation is the canonical key, because the committed letters without apostrophes would let correction re-segment a reading such as qi'e'huan before it is stored.
+            let online = selected.source.is_online();
+            let selected_canonical: Cow<'_, str> = if selected.canonical_pinyin.is_empty()
+                && online
+                && self.is_all_complete_pure_pinyin()
             {
-                self.pinyin_segmentation()
+                Cow::Owned(self.pinyin_segmentation())
             } else {
-                selected.canonical_pinyin.clone()
+                Cow::Borrowed(&selected.canonical_pinyin)
             };
-        let canonical = normalize_canonical_pinyin_for_word(&selected_canonical, &selected.word);
+            let canonical =
+                normalize_canonical_pinyin_for_word(&selected_canonical, &selected.word);
+            let word = selected.word.clone();
+            (typo_diagnostic, online, canonical, word)
+        };
         if canonical.is_empty() || segment_count(&canonical) > MAX_LEARNED_SENTENCE_SYLLABLES {
             return typo_diagnostic;
         }
-        if online && !self.online_word_matches_reading(&canonical, &selected.word) {
+        if online && !self.online_word_matches_reading(&canonical, &word) {
             return typo_diagnostic;
         }
         if self
-            .store_user_phrase_from_canonical_pinyin(&canonical, &selected.word)
+            .store_user_phrase_from_canonical_pinyin(&canonical, &word)
             .is_err()
         {
             return Some(diagnostics::SENTENCE_NOT_PERSISTED.to_owned());
         }
         typo_diagnostic
+    }
+
+    pub(super) fn can_learn_sentence_candidate(&self, selected: &WordItem) -> bool {
+        self.local_mode == LocalInputMode::None
+            && !self.dedicated_english
+            && self
+                .engine
+                .current_scheme_type()
+                .learns_into_main_dictionary()
+            && !Self::is_wubi_native_candidate(selected)
     }
 
     /// Providers return bare words, so the only reading to check an online row against is the typed one. A character absent from every single-character table cannot be checked and is accepted so rare words stay learnable (input_session_composition.cpp:538-560).
@@ -282,7 +309,7 @@ impl InputSession {
     }
 
     /// input_session_composition.cpp:602-627.
-    pub(super) fn learn_accepted_typos(&mut self, selected: &WordItem) -> Option<String> {
+    pub(super) fn learn_accepted_typos(&self, selected: &WordItem) -> Option<String> {
         if selected.source != CandidateSource::Generated
             || !selected.sentence_association
             || selected.corrected_from.is_empty()
@@ -323,7 +350,12 @@ impl InputSession {
             return None;
         }
         let request = self.engine.request();
-        let key = autocorrect_suppression_key(&request.raw_input, &request.raw_input_with_cases);
+        let cases = if request.enable_quanpin_helpcode {
+            &request.raw_input_with_cases
+        } else {
+            &request.raw_input
+        };
+        let key = autocorrect_suppression_key(&request.raw_input, cases);
         // An input the store cannot hold (longer than its limit) is not a write failure to report on every Enter.
         if !is_storable_autocorrect_suppression(&key) {
             return None;
@@ -375,9 +407,8 @@ impl InputSession {
             return None;
         }
         let key = append_canonical_pinyin(&previous_key, &current_key);
-        let user_db = self.journal_path();
         let Ok(count) = record_pick_transition(
-            &user_db,
+            self.journal_path(),
             &previous_key,
             &previous.word,
             &current_key,
@@ -389,7 +420,12 @@ impl InputSession {
             return None;
         }
         // A word the user deleted must not come back from the same habit that created it.
-        if !is_user_deleted(&user_db, PersonalDictionaryKind::Pinyin, &key, &word) {
+        if !is_user_deleted(
+            self.journal_path(),
+            PersonalDictionaryKind::Pinyin,
+            &key,
+            &word,
+        ) {
             // The counter stays so that the next occurrence retries the insert.
             if self
                 .store_user_phrase_from_canonical_pinyin(&key, &word)
@@ -402,7 +438,7 @@ impl InputSession {
         }
         // The reference discards this result (ISC:686): a counter left behind only makes the next occurrence of the pair try the insert again, which finds the word and changes nothing.
         let _ = clear_pick_transition(
-            &user_db,
+            self.journal_path(),
             &previous_key,
             &previous.word,
             &current_key,
@@ -427,24 +463,28 @@ impl InputSession {
             self.chain.reset();
             return None;
         }
-        let words: Vec<(&str, u32)> = if selected.source.is_dictionary() {
-            vec![(selected.word.as_str(), DICTIONARY_PICK_TIMES)]
+        let dictionary = selected.source.is_dictionary();
+        // 借用现有词文本，避免为上下文记录额外构造中间词列表。
+        let words = if dictionary {
+            std::slice::from_ref(&selected.word)
         } else if selected.source.is_generated_or_fallback() && !selected.sentence_words.is_empty()
         {
-            let continues = self.chain.same_composition && self.chain.previous.is_some();
-            selected
-                .sentence_words
-                .iter()
-                .enumerate()
-                .map(|(index, word)| (word.as_str(), if index == 0 && continues { 2 } else { 1 }))
-                .collect()
+            selected.sentence_words.as_slice()
         } else {
             self.chain.reset();
             return None;
         };
         let now = self.steady_now();
+        let continues = self.chain.same_composition && self.chain.previous.is_some();
         let mut transitions = Vec::with_capacity(words.len());
-        for (word, times) in words {
+        for (index, word) in words.iter().enumerate() {
+            let times = if dictionary {
+                DICTIONARY_PICK_TIMES
+            } else if index == 0 && continues {
+                2
+            } else {
+                1
+            };
             transitions.push(PersonalTransition {
                 earlier: self.chain.earlier.clone().unwrap_or_default(),
                 previous: self.chain.previous.clone().unwrap_or_default(),

@@ -199,11 +199,21 @@ test("cloud dictionary apply ignores status from a replaced client", async () =>
 
 test("desktop dictionary subpages reuse the session client and return without closing its window", async () => {
   const close = vi.fn().mockResolvedValue(undefined);
-  const request = vi.fn().mockResolvedValue({ entries: [], has_more: false, offset: 0 });
+  // 请求已发出时按钮仍禁用，用延迟响应覆盖这个窗口。
+  const request = vi
+    .fn()
+    .mockResolvedValue({ entries: [], has_more: false, offset: 0 })
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          setTimeout(() => resolve({ entries: [], has_more: false, offset: 0 }), 100);
+        }),
+    );
   render(<DesktopCloudDictionary client={{ close, request }} />);
-  await waitFor(() =>
-    expect(request).toHaveBeenCalledWith(expect.objectContaining({ operation: "list" })),
-  );
+  await waitFor(() => {
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ operation: "list" }));
+    expect(screen.getByRole("button", { name: "完整目录" }).hasAttribute("disabled")).toBe(false);
+  });
   fireEvent.click(screen.getByRole("button", { name: "完整目录" }));
   expect(screen.getByText("完整云词库目录")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "返回云词库" }));
@@ -245,14 +255,15 @@ test("desktop dictionary apply page previews, confirms and cancels through the s
     return {};
   });
   render(<DesktopCloudDictionary client={{ close, request, snapshot: true }} />);
-  await waitFor(() =>
+  await waitFor(() => {
     expect(request).toHaveBeenCalledWith({
       operation: "list",
       kind: "pinyin",
       offset: 0,
       search: "",
-    }),
-  );
+    });
+    expect(screen.getByRole("button", { name: "应用到本机" }).hasAttribute("disabled")).toBe(false);
+  });
   fireEvent.click(screen.getByRole("button", { name: "应用到本机" }));
   await waitFor(() => expect(screen.getByText("已获取本机词库版本")).toBeTruthy());
   fireEvent.click(screen.getByRole("button", { name: "下载云词库并预览" }));
@@ -268,6 +279,54 @@ test("desktop dictionary apply page previews, confirms and cancels through the s
   fireEvent.click(screen.getByRole("button", { name: "取消待应用快照" }));
   await answerConfirm("confirm");
   await waitFor(() => expect(request).toHaveBeenCalledWith({ operation: "snapshot_cancel" }));
+});
+
+test("a host that applies snapshots in the panel does not promise an idle-time apply", async () => {
+  let pending: { id: string; cloudRevision: number; status: string } | null = null;
+  const request = vi.fn().mockImplementation(async (action: { operation: string }) => {
+    if (action.operation === "snapshot_status")
+      return { localVersion: "local-v1", request: pending };
+    if (action.operation === "snapshot_preview")
+      return {
+        previewToken: "preview-token",
+        snapshot: {
+          cloudRevision: 7,
+          sha256: "a".repeat(64),
+          bytes: 128,
+          records: 4,
+          entries: 2,
+          overlays: 1,
+          positions: 1,
+          selections: 0,
+        },
+      };
+    if (action.operation === "snapshot_enqueue")
+      return { request: { id: "request", cloudRevision: 7, status: "queued" } };
+    return {};
+  });
+  render(
+    <CloudDictionaryApplyPanel
+      client={{ close: async () => {}, request, snapshot: true, snapshotAppliesInPanel: true }}
+    />,
+  );
+  await waitFor(() => expect(screen.getByText("已获取本机词库版本")).toBeTruthy());
+  fireEvent.click(screen.getByRole("button", { name: "下载云词库并预览" }));
+  fireEvent.click(await screen.findByRole("button", { name: "替换本机词库" }));
+  const dialog = (await screen.findByRole("alertdialog")).textContent ?? "";
+  expect(dialog).toContain("请保持这个面板打开");
+  expect(dialog).not.toContain("空闲");
+  await answerConfirm("confirm");
+  // Windows 上没有别人处理队列：没能马上应用时提示保持面板打开，而不是说输入法空闲时会应用。
+  expect((await screen.findByText(/稍后会自动重试/)).textContent).toContain("请保持这个面板打开");
+  expect(screen.getByText(/快照只在这个面板开着时应用/)).toBeTruthy();
+  expect(screen.queryByText(/空闲/)).toBeNull();
+
+  // 面板轮询时重试成功：结果被取走前换掉「请保持面板打开」那句。
+  pending = { id: "request", cloudRevision: 7, status: "applied" };
+  fireEvent.click(screen.getByRole("button", { name: "刷新状态" }));
+  expect(await screen.findByText("云端快照已应用到本机")).toBeTruthy();
+  expect(screen.queryByText(/稍后会自动重试/)).toBeNull();
+  expect(screen.queryByText(/快照只在这个面板开着时应用/)).toBeNull();
 });
 
 test("apply status polling cannot overwrite a mutation result with a stale response", async () => {
@@ -352,6 +411,11 @@ test("desktop dictionary file page reuses the authenticated client and returns t
   render(<DesktopCloudDictionary client={{ close, request }} />);
   await waitFor(() =>
     expect(request).toHaveBeenCalledWith(expect.objectContaining({ operation: "list" })),
+  );
+  await waitFor(() =>
+    expect((screen.getByRole("button", { name: "导入与导出" }) as HTMLButtonElement).disabled).toBe(
+      false,
+    ),
   );
   fireEvent.click(screen.getByRole("button", { name: "导入与导出" }));
   expect(screen.getByText("导入与导出")).toBeTruthy();

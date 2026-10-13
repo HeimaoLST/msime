@@ -1,5 +1,6 @@
 import app.msime.android.DoubaoAsrPolicy;
 import app.msime.android.HttpAsrPolicy;
+import app.msime.android.JsonPolicy;
 import java.util.Arrays;
 import java.util.List;
 import java.lang.reflect.Method;
@@ -26,7 +27,7 @@ public final class DoubaoAsrPolicySmoke {
         check(!DoubaoAsrPolicy.isStreaming("openai") && !DoubaoAsrPolicy.isStreaming(null),
             "nothing else is");
         // The two protocols are disjoint: a request qualifies for exactly one path.
-        check(!HttpAsrPolicy.supported("doubao"), "doubao is not an upload provider");
+        check(!HttpAsrPolicy.supported("doubao_websocket"), "doubao is not an upload format");
         check(!DoubaoAsrPolicy.usable("openai", endpoint, apiKey),
             "an upload provider is not opened as a stream");
 
@@ -90,19 +91,15 @@ public final class DoubaoAsrPolicySmoke {
                 "Doubao rejects control characters before display");
             check("".equals(strictText.invoke(null, "好\uD800")),
                 "Doubao rejects unpaired surrogates before display");
-            Method strictPayload = DoubaoAsrPolicy.class.getDeclaredMethod("strictPayload", Object.class);
-            strictPayload.setAccessible(true);
-            check("{\"result\":{}}".equals(strictPayload.invoke(null, "{\"result\":{}}")),
+            check("{\"result\":{}}".equals(JsonPolicy.strictString("{\"result\":{}}")),
                 "Doubao accepts string payloads");
-            check(strictPayload.invoke(null, 42) == null,
+            check(JsonPolicy.strictString(42) == null,
                 "Doubao rejects numeric payloads instead of coercing them");
-            check(strictPayload.invoke(null, new Object()) == null,
+            check(JsonPolicy.strictString(new Object()) == null,
                 "Doubao rejects object payloads instead of coercing them");
-            Method strictBoolean = DoubaoAsrPolicy.class.getDeclaredMethod("strictBoolean", Object.class);
-            strictBoolean.setAccessible(true);
-            check(Boolean.TRUE.equals(strictBoolean.invoke(null, Boolean.TRUE)),
+            check(Boolean.TRUE.equals(JsonPolicy.strictBoolean(Boolean.TRUE)),
                 "Doubao accepts JSON booleans");
-            check(strictBoolean.invoke(null, "true") == null,
+            check(JsonPolicy.strictBoolean("true") == null,
                 "Doubao rejects boolean strings instead of coercing them");
         } catch (ReflectiveOperationException error) {
             throw new AssertionError("Doubao response parser unavailable", error);

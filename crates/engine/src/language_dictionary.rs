@@ -87,7 +87,7 @@ impl LanguageDictionary {
 
     /// The entries stored under exactly `key`, heaviest first and by text within a weight, at most `limit`.
     pub fn lookup(&self, key: &str, limit: usize) -> Result<Vec<LanguageEntry>> {
-        let mut result = query_capacity(limit).map_or_else(Vec::new, Vec::with_capacity);
+        let mut result = Vec::new();
         self.lookup_into(key, limit, &mut result)?;
         Ok(result)
     }
@@ -99,6 +99,7 @@ impl LanguageDictionary {
         limit: usize,
         result: &mut Vec<LanguageEntry>,
     ) -> Result<()> {
+        let capacity = query_capacity(limit);
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut statement = self.connection.prepare_cached(
             "SELECT text, weight FROM entries WHERE key = ?1 ORDER BY weight DESC, text ASC LIMIT ?2",
@@ -110,6 +111,7 @@ impl LanguageDictionary {
                 rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
             })?;
             let weight = row.get(1)?;
+            reserve_query_capacity(result, length, capacity);
             if let Some(entry) = result.get_mut(length) {
                 entry.text.clear();
                 entry.text.push_str(text);
@@ -149,7 +151,7 @@ impl LanguageDictionary {
         prefix: &str,
         limit: usize,
     ) -> Result<Vec<(String, LanguageEntry)>> {
-        let mut result = query_capacity(limit).map_or_else(Vec::new, Vec::with_capacity);
+        let mut result = Vec::new();
         self.lookup_completions_into(prefix, limit, &mut result)?;
         Ok(result)
     }
@@ -161,6 +163,7 @@ impl LanguageDictionary {
         limit: usize,
         result: &mut Vec<(String, LanguageEntry)>,
     ) -> Result<()> {
+        let capacity = query_capacity(limit);
         // Keys are space-joined syllables, so every key starting with `prefix` sorts at or after it and before `prefix` with its last character incremented.
         let Some(upper) = completion_upper_bound(prefix) else {
             result.clear();
@@ -180,6 +183,7 @@ impl LanguageDictionary {
                 rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
             })?;
             let weight = row.get(2)?;
+            reserve_query_capacity(result, length, capacity);
             if let Some((existing_key, entry)) = result.get_mut(length) {
                 existing_key.clear();
                 existing_key.push_str(key);
@@ -213,7 +217,7 @@ impl LanguageDictionary {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The entries whose key matches `pattern`, where `wildcard` stands for any one character other than a space and every other character for itself. With `completions` the pattern only has to match the start of the key, as in `lookup_completions`, and the rest of the key may not hold a syllable boundary; without it the key must match the whole pattern. Each comes with its key, heaviest first and by text within a weight, at most `limit`. The literal characters before the first wildcard bound the scan to their key range, so only a leading wildcard reads the whole table.
+    /// 匹配 `pattern` 的词条，`wildcard` 匹配任意非空格字符，其他字符按字面匹配。补全只匹配键前缀且余下部分不能有音节边界；精确匹配整个键。按权重降序、文字升序返回至多 `limit` 条。首个通配符前的字面前缀限制扫描范围，只有开头通配符需要整表过滤。
     pub fn lookup_pattern(
         &self,
         pattern: &str,
@@ -224,41 +228,53 @@ impl LanguageDictionary {
         if pattern.is_empty() {
             return Ok(Vec::new());
         }
+        let mut result = Vec::new();
+        self.lookup_pattern_into(pattern, wildcard, completions, limit, &mut result)?;
+        Ok(result)
+    }
+
+    /// 将通配查询写入已有缓冲，复用键与文字的字符串容量；空模式清空结果。
+    pub fn lookup_pattern_into(
+        &self,
+        pattern: &str,
+        wildcard: char,
+        completions: bool,
+        limit: usize,
+        result: &mut Vec<(String, LanguageEntry)>,
+    ) -> Result<()> {
+        if pattern.is_empty() {
+            result.clear();
+            return Ok(());
+        }
         let glob = glob_pattern(pattern, wildcard, completions);
         let length = i64::try_from(pattern.chars().count()).unwrap_or(i64::MAX);
         let literal = pattern.split(wildcard).next().unwrap_or_default();
-        let requested_limit = limit;
+        let capacity = query_capacity(limit);
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let read = |row: &rusqlite::Row<'_>| {
-            Ok((
-                row.get(0)?,
-                LanguageEntry {
-                    text: row.get(1)?,
-                    weight: row.get(2)?,
-                },
-            ))
-        };
-        let mut result = query_capacity(requested_limit).map_or_else(Vec::new, Vec::with_capacity);
         // 字面前缀为空（通配符打头）时没有可用的键范围，只能整表按 GLOB 过滤。
         match completion_upper_bound(literal) {
             Some(upper) => {
                 let mut statement = self.connection.prepare_cached(
                     "SELECT key, text, weight FROM entries WHERE key >= ?1 AND key < ?2 AND key GLOB ?3 AND instr(substr(key, ?4 + 1), ' ') = 0 ORDER BY weight DESC, text ASC LIMIT ?5",
                 )?;
-                for row in statement.query_map((literal, upper, glob, length, limit), read)? {
-                    result.push(row?);
-                }
+                read_keyed_rows_into(
+                    &mut statement.query((literal, upper, glob, length, limit))?,
+                    result,
+                    capacity,
+                )?;
             }
             None => {
                 let mut statement = self.connection.prepare_cached(
                     "SELECT key, text, weight FROM entries WHERE key GLOB ?1 AND instr(substr(key, ?2 + 1), ' ') = 0 ORDER BY weight DESC, text ASC LIMIT ?3",
                 )?;
-                for row in statement.query_map((glob, length, limit), read)? {
-                    result.push(row?);
-                }
+                read_keyed_rows_into(
+                    &mut statement.query((glob, length, limit))?,
+                    result,
+                    capacity,
+                )?;
             }
         }
-        Ok(result)
+        Ok(())
     }
 
     /// 键按位置逐段取自 `positions[i]`（以单个空格连接）的词条，各带自己的键；按权重从重到轻，再按文字、键排序，至多 `limit` 条。每个位置都只有一个读音时就是 `lookup` 对连接后的键查询，结果与它逐条相同。
@@ -272,20 +288,39 @@ impl LanguageDictionary {
         };
         if positions.iter().all(|readings| readings.len() == 1) {
             let key = join_single_readings(positions);
-            return Ok(self
-                .lookup(&key, limit)?
-                .into_iter()
-                .map(|entry| (key.clone(), entry))
-                .collect());
+            let mut entries = self.lookup(&key, limit)?;
+            if entries.len() <= 1 {
+                return Ok(entries
+                    .pop()
+                    .map(|entry| vec![(key, entry)])
+                    .unwrap_or_default());
+            }
+            let mut entries = entries.into_iter();
+            let first = entries.next().expect("多结果查询至少有一条结果");
+            let mut result = Vec::with_capacity(entries.len() + 1);
+            result.push((key, first));
+            for entry in entries {
+                result.push((result[0].0.clone(), entry));
+            }
+            return Ok(result);
         }
         let mut result = Vec::new();
         if rest.is_empty() {
+            let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+            let mut statement = self.connection.prepare_cached(
+                "SELECT text, weight FROM entries WHERE key = ?1 ORDER BY weight DESC, text ASC LIMIT ?2",
+            )?;
             for reading in first.iter() {
-                result.extend(
-                    self.lookup(reading, limit)?
-                        .into_iter()
-                        .map(|entry| (reading.clone(), entry)),
-                );
+                let mut rows = statement.query((reading, limit))?;
+                while let Some(row) = rows.next()? {
+                    result.push((
+                        reading.clone(),
+                        LanguageEntry {
+                            text: row.get(0)?,
+                            weight: row.get(1)?,
+                        },
+                    ));
+                }
             }
         } else {
             // 后面各位置拼成一个 GLOB，配合首个读音的键范围只扫以它开头的多音节词；不加 SQL `LIMIT`，因为 GLOB 只是粗筛，精确的校验在 Rust 里做，提前截断可能丢掉正确的行。
@@ -293,26 +328,41 @@ impl LanguageDictionary {
             let mut statement = self.connection.prepare_cached(
                 "SELECT key, text, weight FROM entries WHERE key >= ?1 AND key < ?2 AND key GLOB ?3",
             )?;
+            let mut lower = String::new();
+            let mut upper = String::new();
+            let mut glob = String::new();
             for reading in first.iter() {
-                let lower = format!("{reading} ");
-                let upper = format!("{reading}!");
-                let mut glob = String::with_capacity(reading.len() * 2 + 1 + tail.len());
+                // 每个首读音查询结束后复用范围与 GLOB 的存储，容量不足时再补足。
+                lower.clear();
+                lower.reserve_exact(reading.len() + 1);
+                lower.push_str(reading);
+                lower.push(' ');
+                upper.clear();
+                upper.reserve_exact(reading.len() + 1);
+                upper.push_str(reading);
+                upper.push('!');
+                glob.clear();
+                glob.reserve_exact(reading.len() * 2 + 1 + tail.len());
                 push_glob_literal(&mut glob, reading);
                 glob.push(' ');
                 glob.push_str(&tail);
-                let rows = statement.query_map((lower, upper, glob), |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        LanguageEntry {
-                            text: row.get(1)?,
-                            weight: row.get(2)?,
-                        },
-                    ))
-                })?;
-                for row in rows {
-                    let (key, entry) = row?;
-                    if key_matches(&key, positions) {
-                        result.push((key, entry));
+                let mut rows = statement.query((lower.as_str(), upper.as_str(), glob.as_str()))?;
+                while let Some(row) = rows.next()? {
+                    let key = row.get_ref(0)?.as_str().map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+                    })?;
+                    let text = row.get_ref(1)?.as_str().map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
+                    })?;
+                    let weight = row.get(2)?;
+                    if key_matches(key, positions) {
+                        result.push((
+                            key.to_owned(),
+                            LanguageEntry {
+                                text: text.to_owned(),
+                                weight,
+                            },
+                        ));
                     }
                 }
             }
@@ -434,6 +484,50 @@ fn glob_pattern(pattern: &str, wildcard: char, completions: bool) -> String {
     glob
 }
 
+fn read_keyed_rows_into(
+    rows: &mut rusqlite::Rows<'_>,
+    result: &mut Vec<(String, LanguageEntry)>,
+    capacity: Option<usize>,
+) -> rusqlite::Result<()> {
+    let mut length = 0;
+    while let Some(row) = rows.next()? {
+        let key = row.get_ref(0)?.as_str().map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+        })?;
+        let text = row.get_ref(1)?.as_str().map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
+        })?;
+        let weight = row.get(2)?;
+        reserve_query_capacity(result, length, capacity);
+        if let Some((existing_key, entry)) = result.get_mut(length) {
+            existing_key.clear();
+            existing_key.push_str(key);
+            entry.text.clear();
+            entry.text.push_str(text);
+            entry.weight = weight;
+        } else {
+            result.push((
+                key.to_owned(),
+                LanguageEntry {
+                    text: text.to_owned(),
+                    weight,
+                },
+            ));
+        }
+        length += 1;
+    }
+    result.truncate(length);
+    Ok(())
+}
+
+fn reserve_query_capacity<T>(result: &mut Vec<T>, length: usize, capacity: Option<usize>) {
+    if length == 0 && result.is_empty() && result.capacity() == 0 {
+        if let Some(capacity) = capacity {
+            result.reserve_exact(capacity);
+        }
+    }
+}
+
 fn completion_upper_bound(prefix: &str) -> Option<String> {
     let last = prefix.chars().next_back()?;
     let next = char::from_u32(u32::from(last) + 1)?;
@@ -522,7 +616,9 @@ mod tests {
             dictionary.lookup("nei", 10).unwrap(),
             vec![entry("你", 5000)]
         );
-        assert!(dictionary.lookup("ngo", 10).unwrap().is_empty());
+        let empty = dictionary.lookup("ngo", 10).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.capacity(), 0);
         assert!(dictionary.has_syllable("hou").unwrap());
         assert!(!dictionary.has_syllable("ho").unwrap());
         assert_eq!(
@@ -575,8 +671,12 @@ mod tests {
         assert_eq!(completions("nei h", 1).1, [pair("nei hou", "你好")]);
         assert_eq!(completions("ne", 10).1, [pair("nei", "你")]);
         assert!(completions("nei ho", 0).1.is_empty());
-        assert!(completions("ngo", 10).1.is_empty());
-        assert!(completions("", 10).1.is_empty());
+        let (capacity, rows) = completions("ngo", 10);
+        assert!(rows.is_empty());
+        assert_eq!(capacity, 0);
+        let (capacity, rows) = completions("", 10);
+        assert!(rows.is_empty());
+        assert_eq!(capacity, 0);
     }
 
     #[test]
@@ -617,6 +717,11 @@ mod tests {
             let rows = dictionary
                 .lookup_pattern(pattern, 'x', completions, limit)
                 .unwrap();
+            let mut reused = Vec::new();
+            dictionary
+                .lookup_pattern_into(pattern, 'x', completions, limit, &mut reused)
+                .unwrap();
+            assert_eq!(reused, rows);
             (
                 rows.capacity(),
                 rows.into_iter()
@@ -642,10 +747,66 @@ mod tests {
         assert_eq!(texts("hsx", true, 10).1, ["hsh:土"]);
         // GLOB 的元字符按字面匹配。
         assert_eq!(texts("a*b", false, 10).1, ["a*b:星"]);
-        assert!(texts("a?b", false, 10).1.is_empty());
+        let (capacity, rows) = texts("a?b", false, 10);
+        assert!(rows.is_empty());
+        assert_eq!(capacity, 0);
         assert!(texts("", true, 10).1.is_empty());
-        assert!(texts("xxxxxx", true, 10).1.is_empty());
+        let (capacity, rows) = texts("xxxxxx", true, 10);
+        assert!(rows.is_empty());
+        assert_eq!(capacity, 0);
         assert!(texts("hx", true, 0).1.is_empty());
+    }
+
+    #[test]
+    fn wildcard_query_reuses_row_strings_and_truncates_stale_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("msime-stroke.db");
+        build(&path, &FORMAT_VERSION.to_string());
+        let dictionary = open_read_only(&path).unwrap();
+        let mut result = Vec::new();
+        for pattern in ["nei xxx", "xxx xxx"] {
+            dictionary
+                .lookup_pattern_into(pattern, 'x', false, 10, &mut result)
+                .unwrap();
+            assert_eq!(result.len(), 3);
+            let expected = result.clone();
+            let pointers = result
+                .iter()
+                .map(|(key, entry)| (key.as_ptr(), entry.text.as_ptr()))
+                .collect::<Vec<_>>();
+            let vector = result.as_ptr();
+            for (key, entry) in &mut result {
+                key.clear();
+                entry.text.clear();
+                entry.weight = -9;
+            }
+            dictionary
+                .lookup_pattern_into(pattern, 'x', false, 10, &mut result)
+                .unwrap();
+            assert_eq!(result, expected);
+            assert_eq!(result.as_ptr(), vector);
+            assert_eq!(
+                result
+                    .iter()
+                    .map(|(key, entry)| (key.as_ptr(), entry.text.as_ptr()))
+                    .collect::<Vec<_>>(),
+                pointers
+            );
+            dictionary
+                .lookup_pattern_into(pattern, 'x', false, 1, &mut result)
+                .unwrap();
+            assert_eq!(result, expected[..1]);
+        }
+        for (pattern, limit) in [("xxx xxx", 0), ("missing", 10), ("", 10)] {
+            dictionary
+                .lookup_pattern_into("nei xxx", 'x', false, 10, &mut result)
+                .unwrap();
+            assert!(!result.is_empty());
+            dictionary
+                .lookup_pattern_into(pattern, 'x', false, limit, &mut result)
+                .unwrap();
+            assert!(result.is_empty());
+        }
     }
 
     fn readings(values: &[&str]) -> Vec<String> {
@@ -733,6 +894,225 @@ mod tests {
         assert_eq!(rows(&[&ni], 1), ["ㄋㄧˇ:你:1000"]);
         assert!(rows(&[], 10).is_empty());
         assert!(rows(&[&hao, &ni_li], 10).is_empty());
+    }
+
+    #[test]
+    fn single_reading_result_does_not_clone_the_query_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("msime-zhuyin.db");
+        build(&path, &FORMAT_VERSION.to_string());
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO entries VALUES (?1, ?2, ?3)",
+                ("ㄋㄧˇ", "你", 1000),
+            )
+            .unwrap();
+        drop(connection);
+
+        let dictionary = open_read_only(&path).unwrap();
+        let reading = readings(&["ㄋㄧˇ"]);
+        // 预热语句缓存，统计只覆盖候选查询本身。
+        let expected = dictionary.lookup_readings(&[&reading], 1).unwrap();
+        let (actual, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            dictionary.lookup_readings(&[&reading], 1).unwrap()
+        });
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            allocations, 5,
+            "单结果查询不应为键再分配副本：{allocations}"
+        );
+    }
+
+    #[test]
+    fn alternative_readings_write_rows_without_temporary_result_vectors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("msime-zhuyin.db");
+        build(&path, &FORMAT_VERSION.to_string());
+        let connection = Connection::open(&path).unwrap();
+        for (key, text, weight) in [
+            ("ㄋㄧˇ", "你", 1000),
+            ("ㄋㄧˇ", "妳", 900),
+            ("ㄌㄧˇ", "李", 800),
+            ("ㄌㄧˇ", "里", 700),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO entries VALUES (?1, ?2, ?3)",
+                    (key, text, weight),
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let dictionary = open_read_only(&path).unwrap();
+        let readings = readings(&["ㄋㄧˇ", "ㄌㄧˇ"]);
+        // 预热语句缓存，统计只覆盖候选查询本身。
+        let expected = dictionary.lookup_readings(&[&readings], 10).unwrap();
+        let (actual, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            dictionary.lookup_readings(&[&readings], 10).unwrap()
+        });
+
+        assert_eq!(actual, expected);
+        assert!(
+            allocations <= 10,
+            "多个读音查询不应为每个读音建立临时结果向量：{allocations}"
+        );
+    }
+
+    #[test]
+    fn missing_alternative_readings_reuse_query_string_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("msime-zhuyin.db");
+        build(&path, &FORMAT_VERSION.to_string());
+        let dictionary = open_read_only(&path).unwrap();
+        let first = readings(&[
+            "ㄅㄚ", "ㄆㄚ", "ㄇㄚ", "ㄈㄚ", "ㄉㄚ", "ㄊㄚ", "ㄋㄚ", "ㄌㄚ",
+        ]);
+        let rest = readings(&["ㄏㄠˇ"]);
+        // 预热语句缓存，只统计一次多读音未命中查询的 Rust 分配。
+        assert!(dictionary
+            .lookup_readings(&[&first, &rest], usize::MAX)
+            .unwrap()
+            .is_empty());
+        let (actual, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            dictionary
+                .lookup_readings(&[&first, &rest], usize::MAX)
+                .unwrap()
+        });
+        assert!(actual.is_empty());
+        assert_eq!(actual.capacity(), 0);
+        assert!(
+            allocations <= 8,
+            "多个首读音不应各自分配查询字符串：{allocations}"
+        );
+    }
+
+    #[test]
+    fn reused_reading_query_strings_keep_literal_keys_order_and_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("msime-zhuyin.db");
+        build(&path, &FORMAT_VERSION.to_string());
+        let connection = Connection::open(&path).unwrap();
+        for (key, text, weight) in [
+            ("a tail", "row-a", 5),
+            ("b tale", "row-b", 90),
+            ("synthetic*?[ tail", "same", 70),
+            ("ㄋㄧˇ tail", "same", 70),
+            ("syntheticXX[ tail", "wrong-literal", 1000),
+            ("a taie", "wrong-reading", 1000),
+            ("a tail extra", "wrong-span", 1000),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO entries VALUES (?1, ?2, ?3)",
+                    (key, text, weight),
+                )
+                .unwrap();
+        }
+        drop(connection);
+        let dictionary = open_read_only(&path).unwrap();
+        // 短、长、Unicode、GLOB 元字符及重复读音交替，验证复用不会残留上一次的键。
+        let first = readings(&["a", "ㄋㄧˇ", "a", "synthetic*?[", "b"]);
+        let rest = readings(&["tail", "tale"]);
+        let expected = [
+            ("b tale", "row-b", 90),
+            ("synthetic*?[ tail", "same", 70),
+            ("ㄋㄧˇ tail", "same", 70),
+            ("a tail", "row-a", 5),
+            ("a tail", "row-a", 5),
+        ]
+        .map(|(key, text, weight)| {
+            (
+                key.to_owned(),
+                LanguageEntry {
+                    text: text.to_owned(),
+                    weight,
+                },
+            )
+        });
+        for limit in [0, 1, 3, usize::MAX] {
+            let actual = dictionary.lookup_readings(&[&first, &rest], limit).unwrap();
+            assert_eq!(actual, expected[..limit.min(expected.len())]);
+        }
+        let actual = dictionary
+            .lookup_readings(&[&first, &rest], usize::MAX)
+            .unwrap();
+        drop(first);
+        drop(rest);
+        drop(dictionary);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn reading_glob_rejects_rows_before_allocating_their_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("msime-zhuyin.db");
+        build(&path, &FORMAT_VERSION.to_string());
+        let connection = Connection::open(&path).unwrap();
+        for (key, text, weight) in [
+            ("ㄋㄧˇ ㄏㄠˇ", "你好", 1000),
+            ("ㄋㄧˇ ㄏㄠˇ ㄇㄚ˙", "你好嗎", 900),
+            ("ㄋㄧˇ ㄏㄠˇ ㄉㄜ˙", "你的", 800),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO entries VALUES (?1, ?2, ?3)",
+                    (key, text, weight),
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let dictionary = open_read_only(&path).unwrap();
+        let first = readings(&["ㄋㄧˇ"]);
+        let rest = readings(&["ㄏㄠˇ", "ㄏㄠˇ ㄇㄚ˙"]);
+        let expected = dictionary
+            .lookup_readings(&[&first, &rest], usize::MAX)
+            .unwrap();
+        let (actual, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            dictionary
+                .lookup_readings(&[&first, &rest], usize::MAX)
+                .unwrap()
+        });
+
+        assert_eq!(actual, expected);
+        assert!(
+            allocations <= 11,
+            "粗筛淘汰行不应分配键字符串：{allocations}"
+        );
+    }
+
+    #[test]
+    fn multiple_reading_results_clone_the_query_key_only_after_the_first_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("msime-zhuyin.db");
+        build(&path, &FORMAT_VERSION.to_string());
+        let connection = Connection::open(&path).unwrap();
+        for (text, weight) in [("你", 1000), ("妳", 900), ("尼", 800)] {
+            connection
+                .execute(
+                    "INSERT INTO entries VALUES (?1, ?2, ?3)",
+                    ("ㄋㄧˇ", text, weight),
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let dictionary = open_read_only(&path).unwrap();
+        let reading = readings(&["ㄋㄧˇ"]);
+        // 预热语句缓存，统计只覆盖候选查询本身。
+        let expected = dictionary.lookup_readings(&[&reading], 10).unwrap();
+        let (actual, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            dictionary.lookup_readings(&[&reading], 10).unwrap()
+        });
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            allocations, 9,
+            "多结果查询的第一行应直接取得原键：{allocations}"
+        );
     }
 
     #[test]

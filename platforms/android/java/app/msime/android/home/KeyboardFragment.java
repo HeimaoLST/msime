@@ -1,6 +1,10 @@
 package app.msime.android.home;
 
-import android.content.Intent;
+import app.msime.android.DimensionPolicy;
+
+import app.msime.android.ThemeColorPolicy;
+import app.msime.android.NumberPolicy;
+
 import android.content.res.ColorStateList;
 import android.os.Bundle;
 import android.view.LayoutInflater;
@@ -12,14 +16,12 @@ import androidx.annotation.DrawableRes;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.StringRes;
-import androidx.core.graphics.Insets;
-import androidx.core.view.ViewCompat;
-import androidx.core.view.WindowInsetsCompat;
 import androidx.core.widget.NestedScrollView;
 import app.msime.android.AndroidLocalSettings;
+import app.msime.android.DrawablePolicy;
 import app.msime.android.AppEdition;
 import app.msime.android.FirstRunPreparation;
-import app.msime.android.KeyboardGeometry;
+import app.msime.android.KeyboardHeightPolicy;
 import app.msime.android.KeyboardScheme;
 import app.msime.android.KeyboardSkin;
 import app.msime.android.R;
@@ -61,14 +63,14 @@ public final class KeyboardFragment extends HomeTabFragment {
 
     @Override public void onViewCreated(@NonNull View view, @Nullable Bundle state) {
         View card = view.findViewById(R.id.keyboard_status_card);
-        ViewPolicy.setBackground(card, Ui.rounded(Ui.card(requireContext()),
-            Ui.dp(requireContext(), Ui.NAV_GROUP_RADIUS)));
+        ViewPolicy.setBackground(card, DrawablePolicy.rounded(ThemeColorPolicy.card(requireContext()),
+            DimensionPolicy.pixels(requireContext(), Ui.NAV_GROUP_RADIUS)));
 
         MaterialButton trial = view.findViewById(R.id.keyboard_try);
-        // The Apple app opens an editor here rather than the system picker: trying the keyboard
-        // means typing with it, and the picker only offers to switch away from it.
-        ViewPolicy.bindClick(trial,
-            () -> startActivity(new Intent(requireContext(), KeyboardTryoutActivity.class)));
+        // 这里和 Apple 一样打开一个输入框而不是系统的输入法选择器：试用键盘就是用它打字，选择器只能把它换走。试用的输入框就是「对话」tab 的那一个，所以切过去并弹出键盘，不再另开一页。
+        ViewPolicy.bindClick(trial, () -> {
+            if (getActivity() instanceof HomeActivity home) home.openChat();
+        });
 
         TextView system = view.findViewById(R.id.keyboard_system_settings);
         system.setText("系统输入法设置 ›");
@@ -82,12 +84,12 @@ public final class KeyboardFragment extends HomeTabFragment {
         search.setOnQueryChange(query -> applySearch());
 
         View bar = view.findViewById(R.id.keyboard_bar);
-        int threshold = Ui.dp(requireContext(), Ui.COLLAPSE_THRESHOLD);
+        int threshold = DimensionPolicy.pixels(requireContext(), Ui.COLLAPSE_THRESHOLD);
         NestedScrollView scroll = view.findViewById(R.id.keyboard_scroll);
         scroll.setOnScrollChangeListener(
             (NestedScrollView.OnScrollChangeListener) (scrolled, x, y, oldX, oldY) -> {
                 boolean collapsed = y > threshold;
-                if (collapsed == (bar.getVisibility() == View.VISIBLE)) return;
+                if (collapsed == ViewPolicy.isVisible(bar)) return;
                 bar.animate().cancel();
                 if (collapsed) {
                     ViewPolicy.show(bar);
@@ -98,16 +100,7 @@ public final class KeyboardFragment extends HomeTabFragment {
                 }
             });
         // 和 DetailPage 一样：底部留出 tab 栏加系统导航栏的高度，键盘弹出时改留键盘的高度，最后一组和搜索结果才能滚到可见处。
-        int base = Ui.dp(requireContext(), Ui.PAGE_PADDING_BOTTOM);
-        int tabs = Ui.dp(requireContext(), Ui.TAB_BAR_HEIGHT);
-        ViewCompat.setOnApplyWindowInsetsListener(scroll, (target, insets) -> {
-            Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
-            Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
-            int bottom = Ui.bottomContentInset(bars.bottom, tabs, ime.bottom, base);
-            Ui.setBottomPadding(target, bottom);
-            return insets;
-        });
-        ViewCompat.requestApplyInsets(scroll);
+        PageInsetsPolicy.bind(scroll);
         buildRows(view);
         render();
         reload();
@@ -115,7 +108,7 @@ public final class KeyboardFragment extends HomeTabFragment {
         // Preparation is silent while it works out and while it is done; it only takes the screen
         // when the keyboard cannot reach the Engine, which is the one case the user has to know.
         TextView preparation = view.findViewById(R.id.keyboard_preparation);
-        ViewPolicy.setBackground(preparation, Ui.rounded(Ui.page(requireContext()), Ui.dp(requireContext(), 12)));
+        ViewPolicy.setBackground(preparation, DrawablePolicy.rounded(ThemeColorPolicy.page(requireContext()), DimensionPolicy.pixels(requireContext(), 12)));
         ViewPolicy.bindClick(preparation, () -> FirstRunPreparation.retry(requireContext()));
         preparationListener = status -> {
             if (!isAdded()) return;
@@ -340,11 +333,11 @@ public final class KeyboardFragment extends HomeTabFragment {
     private void check(View view, int rowId, int markId, int actionId, @StringRes int label,
             boolean done, Runnable action) {
         TextView mark = view.findViewById(markId);
-        Ui.applyStatusMark(mark, requireContext(), done);
+        StatusMarkPolicy.apply(mark, requireContext(), done);
         TextView button = view.findViewById(actionId);
         ViewPolicy.setVisible(button, !done);
         ViewPolicy.bindOptionalClick(button, done ? null : action);
-        ViewPolicy.setTextColor(button, ColorStateList.valueOf(Ui.accent(requireContext())));
+        ViewPolicy.setTextColor(button, ColorStateList.valueOf(ThemeColorPolicy.accent(requireContext())));
         view.findViewById(rowId).setContentDescription(
             getString(label) + (done ? "，已完成" : "，未完成"));
     }
@@ -357,15 +350,19 @@ public final class KeyboardFragment extends HomeTabFragment {
 
     private static String keysSummary(JSONObject preferences, AndroidLocalSettings.Snapshot local) {
         // 和键盘页一样按百分比显示：存的是 dp 调整量，MIN_VALUE 表示没有设置（即 100 %），超出范围的旧值先夹紧再换算。
-        int percent = KeyboardGeometry.heightAdjustmentToPercent(
+        int percent = KeyboardHeightPolicy.heightAdjustmentToPercent(
             local.has(AndroidLocalSettings.KEYBOARD_HEIGHT_ADJUSTMENT)
                 ? local.integer(AndroidLocalSettings.KEYBOARD_HEIGHT_ADJUSTMENT)
-                : KeyboardGeometry.strictInt(preferences, "touch_keyboard_height_adjustment", Integer.MIN_VALUE));
-        String layout = "nine_key".equals(InputViewValuePolicy.textOr(preferences, "touch_keyboard_layout", "twenty_six_key"))
-            ? "九键" : "全键盘";
-        return percent == KeyboardGeometry.DEFAULT_HEIGHT_PERCENT
+                : NumberPolicy.strictInt(preferences, "touch_keyboard_height_adjustment", Integer.MIN_VALUE));
+        String layout = switch (InputViewValuePolicy.textOr(preferences, "touch_keyboard_layout", "twenty_six_key")) {
+            case "nine_key" -> "九键";
+            case "fourteen_key" -> "14 键";
+            case "nine_key_shuangpin" -> "九键双拼";
+            default -> "全键盘";
+        };
+        return percent == KeyboardHeightPolicy.DEFAULT_HEIGHT_PERCENT
             ? layout + " · 标准高度"
-            : layout + " · 高度 " + KeyboardGeometry.displayPercent(percent);
+            : layout + " · 高度 " + KeyboardHeightPolicy.displayPercent(percent);
     }
 
     private static String voiceLanguage(JSONObject preferences) {

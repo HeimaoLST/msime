@@ -532,18 +532,23 @@ pub fn keyboard_stroke(request: &KeyboardInputRequest) -> Option<KeyStroke> {
     Some(KeyStroke { code, flags })
 }
 
-/// Must be called on the AppKit main thread. No permission prompt or focus change.
+/// 必须在 AppKit 主线程调用；返回受控错误码，不请求权限或改变焦点。
 #[cfg(target_os = "macos")]
-pub fn send_keyboard_key(request: &KeyboardInputRequest) -> bool {
+pub fn send_keyboard_key(request: &KeyboardInputRequest) -> Result<(), &'static str> {
     let Some(stroke) = keyboard_stroke(request) else {
-        return false;
+        return Err("invalid_key");
     };
     unsafe extern "C" {
-        fn msime_macos_send_keyboard_key(code: u16, flags: u64) -> bool;
+        fn msime_macos_send_keyboard_key_result(code: u16, flags: u64) -> i32;
     }
-    // SAFETY: scalar-only ABI. Native code checks main thread, permissions,
-    // external foreground ownership and event allocation before posting.
-    unsafe { msime_macos_send_keyboard_key(stroke.code, stroke.flags) }
+    // SAFETY: ABI 只传标量；原生层在投递前检查主线程、权限、前台目标和事件分配。
+    match unsafe { msime_macos_send_keyboard_key_result(stroke.code, stroke.flags) } {
+        0 => Ok(()),
+        1 => Err("permission_denied"),
+        2 => Err("no_input_target"),
+        3 => Err("input_target_changed"),
+        _ => Err("unavailable"),
+    }
 }
 
 /// Ask the user for a file and return its path, or `None` if they cancelled.
@@ -612,6 +617,79 @@ pub fn pick_voice_model_directory() -> Option<String> {
         .map(str::to_owned);
     unsafe { msime_macos_free_picked_path(raw) };
     path
+}
+
+/// 应用例外的「添加应用…」：弹出只能选应用程序的面板（默认打开 /Applications），返回所选应用的路径，用户取消时为 `None`。必须在 AppKit 主线程上调用，别处调用原生侧直接拒绝。
+#[cfg(target_os = "macos")]
+pub fn pick_application() -> Option<String> {
+    unsafe extern "C" {
+        fn msime_macos_pick_application() -> *mut std::os::raw::c_char;
+    }
+    // SAFETY: the native side returns either null or a strdup'd UTF-8 string that take_native_string owns and frees.
+    unsafe { take_native_string(msime_macos_pick_application()) }
+}
+
+/// 路径上那个应用程序的 Bundle ID；不是应用程序或路径不存在时为 `None`。
+#[cfg(target_os = "macos")]
+pub fn bundle_identifier_at(path: &str) -> Option<String> {
+    unsafe extern "C" {
+        fn msime_macos_bundle_identifier_at(
+            path: *const std::os::raw::c_char,
+        ) -> *mut std::os::raw::c_char;
+    }
+    let path = std::ffi::CString::new(path).ok()?;
+    // SAFETY: the argument is a NUL-terminated string that outlives the call; the result is null or strdup'd.
+    unsafe { take_native_string(msime_macos_bundle_identifier_at(path.as_ptr())) }
+}
+
+/// 用户在 Finder 里看到的名称（本地化，按 Finder 的设置隐藏 .app）；路径不存在时为 `None`。
+#[cfg(target_os = "macos")]
+pub fn display_name_at(path: &str) -> Option<String> {
+    unsafe extern "C" {
+        fn msime_macos_display_name_at(
+            path: *const std::os::raw::c_char,
+        ) -> *mut std::os::raw::c_char;
+    }
+    let path = std::ffi::CString::new(path).ok()?;
+    // SAFETY: as in bundle_identifier_at.
+    unsafe { take_native_string(msime_macos_display_name_at(path.as_ptr())) }
+}
+
+/// 本机已安装应用按 Bundle ID 查到的名称；没装时为 `None`，应用例外列表就照旧显示 Bundle ID。
+#[cfg(target_os = "macos")]
+pub fn application_name(bundle_identifier: &str) -> Option<String> {
+    unsafe extern "C" {
+        fn msime_macos_application_name_for_bundle_identifier(
+            identifier: *const std::os::raw::c_char,
+        ) -> *mut std::os::raw::c_char;
+    }
+    let identifier = std::ffi::CString::new(bundle_identifier).ok()?;
+    // SAFETY: as in bundle_identifier_at.
+    unsafe {
+        take_native_string(msime_macos_application_name_for_bundle_identifier(
+            identifier.as_ptr(),
+        ))
+    }
+}
+
+/// 取走原生侧 strdup 出来的字符串并释放它；null 和非 UTF-8 都当作没有。
+///
+/// # Safety
+/// `raw` must be null or a pointer returned by one of file_picker.mm's functions, not yet freed.
+#[cfg(target_os = "macos")]
+unsafe fn take_native_string(raw: *mut std::os::raw::c_char) -> Option<String> {
+    unsafe extern "C" {
+        fn msime_macos_free_picked_path(path: *mut std::os::raw::c_char);
+    }
+    if raw.is_null() {
+        return None;
+    }
+    let value = unsafe { std::ffi::CStr::from_ptr(raw) }
+        .to_str()
+        .ok()
+        .map(str::to_owned);
+    unsafe { msime_macos_free_picked_path(raw) };
+    value
 }
 
 /// 搬动状态之前停掉本版本输入法 bundle 的每个运行实例；同时安装的其他版本不受影响。必须在 AppKit 主线程上调用。安装包的版本声明坏了时什么也不停，返回 false。
@@ -729,5 +807,24 @@ mod tests {
     #[test]
     fn capture_device_buffer_reserves_the_listing_capacity() {
         assert!(capture_device_buffer().capacity() >= INITIAL_CAPTURE_DEVICE_CAPACITY);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn application_identity_reads_through_the_native_side() {
+        let calculator = "/System/Applications/Calculator.app";
+        assert_eq!(
+            bundle_identifier_at(calculator).as_deref(),
+            Some("com.apple.calculator")
+        );
+        let name = display_name_at(calculator).expect("Calculator has a display name");
+        assert_eq!(application_name("com.apple.calculator"), Some(name));
+        // 内嵌 NUL 过不了 C 字符串边界，当作没有，而不是截断成另一个标识去查。
+        assert_eq!(
+            bundle_identifier_at("/System/Applications\0/Calculator.app"),
+            None
+        );
+        assert_eq!(application_name("com.apple.calculator\0x"), None);
+        assert_eq!(application_name("app.msime.tests.not-installed"), None);
     }
 }

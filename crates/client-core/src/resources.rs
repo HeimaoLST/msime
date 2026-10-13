@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 #[cfg(unix)]
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -229,6 +229,10 @@ impl ResourceStage {
     fn path(&self) -> &Path {
         &self.path
     }
+
+    fn open_directory(&self) -> std::io::Result<File> {
+        crate::storage::open_private_directory_at(&self.parent, &self.name)
+    }
 }
 
 #[cfg(unix)]
@@ -238,21 +242,22 @@ impl Drop for ResourceStage {
     }
 }
 
-fn create_private_file(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    options.open(path)
+#[cfg(any(not(unix), test))]
+use crate::file_lock::create_private_file;
+
+#[cfg(unix)]
+fn create_private_file_at(directory: &File, name: &str) -> std::io::Result<File> {
+    let descriptor = rustix::fs::openat(
+        directory,
+        name,
+        rustix::fs::OFlags::WRONLY
+            | rustix::fs::OFlags::CREATE
+            | rustix::fs::OFlags::EXCL
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::from_raw_mode(0o600),
+    )?;
+    Ok(descriptor.into())
 }
 
 #[cfg(unix)]
@@ -261,19 +266,48 @@ fn publish_generation(
     staging_name: &str,
     generation: &str,
 ) -> std::io::Result<()> {
-    rustix::fs::renameat(
-        directory,
-        std::ffi::OsStr::new(staging_name),
-        directory,
-        std::ffi::OsStr::new(generation),
-    )
-    .map_err(Into::into)
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    {
+        rustix::fs::renameat_with(
+            directory,
+            std::ffi::OsStr::new(staging_name),
+            directory,
+            std::ffi::OsStr::new(generation),
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+        .map_err(Into::into)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    {
+        rustix::fs::renameat(
+            directory,
+            std::ffi::OsStr::new(staging_name),
+            directory,
+            std::ffi::OsStr::new(generation),
+        )
+        .map_err(Into::into)
+    }
 }
 
 impl ResourceStore {
     /// root is an application-owned directory, separate from user learning data.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
+    }
+
+    #[cfg(unix)]
+    fn ensure_root_still_current(&self, opened: &File) -> std::io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        let current = crate::storage::open_private_directory(&self.root)?;
+        let opened = opened.metadata()?;
+        let current = current.metadata()?;
+        if opened.dev() != current.dev() || opened.ino() != current.ino() {
+            return Err(std::io::Error::other(
+                "resource root changed during installation",
+            ));
+        }
+        Ok(())
     }
 
     pub fn install(
@@ -283,10 +317,16 @@ impl ResourceStore {
     ) -> Result<PathBuf, ResourceError> {
         let generation = specification.generation()?;
         crate::storage::create_directory_and_check(&self.root)?;
-        let lock = crate::file_lock::open_lock_file(self.root.join("resources.lock"))?;
-        crate::file_lock::exclusive(&lock)?;
         #[cfg(unix)]
         let root_directory = crate::storage::open_private_directory(&self.root)?;
+        #[cfg(unix)]
+        let lock = crate::file_lock::open_private_lock_file_at_raw(
+            &root_directory,
+            std::ffi::OsStr::new("resources.lock"),
+        )?;
+        #[cfg(not(unix))]
+        let lock = crate::file_lock::open_lock_file(self.root.join("resources.lock"))?;
+        crate::file_lock::exclusive(&lock)?;
         #[cfg(unix)]
         sweep_abandoned_stages(&root_directory);
         #[cfg(not(unix))]
@@ -294,6 +334,8 @@ impl ResourceStore {
         let destination = self.root.join(&generation);
         if fs::symlink_metadata(&destination).is_ok() {
             self.verify(&destination, specification)?;
+            #[cfg(unix)]
+            self.ensure_root_still_current(&root_directory)?;
             return Ok(destination);
         }
         #[cfg(unix)]
@@ -302,8 +344,13 @@ impl ResourceStore {
         let stage = tempfile::Builder::new()
             .prefix("incoming-")
             .tempdir_in(&self.root)?;
+        #[cfg(unix)]
+        let stage_directory = stage.open_directory()?;
         for artifact in &specification.artifacts {
             let mut source = fetch(artifact)?;
+            #[cfg(unix)]
+            let mut output = create_private_file_at(&stage_directory, &artifact.name)?;
+            #[cfg(not(unix))]
             let mut output = create_private_file(&stage.path().join(&artifact.name))?;
             copy_verified(source.as_mut(), &mut output, artifact)?;
             output.sync_all()?;
@@ -311,6 +358,7 @@ impl ResourceStore {
         // Published directories are complete. Existing generations are never overwritten.
         #[cfg(unix)]
         {
+            self.ensure_root_still_current(&root_directory)?;
             publish_generation(
                 &root_directory,
                 stage
@@ -331,6 +379,8 @@ impl ResourceStore {
         }
         #[cfg(not(unix))]
         fs::rename(stage.path(), &destination)?;
+        #[cfg(unix)]
+        self.ensure_root_still_current(&root_directory)?;
         Ok(destination)
     }
 
@@ -678,6 +728,28 @@ mod tests {
         assert!(!outside.join("generation").exists());
     }
 
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn generation_publish_does_not_replace_a_generation_created_after_the_check() {
+        let root = tempfile::tempdir().unwrap();
+        let stage = root.path().join("incoming-fixture");
+        let generation = root.path().join("generation");
+        fs::create_dir(&stage).unwrap();
+        fs::write(stage.join("artifact"), b"new").unwrap();
+        fs::create_dir(&generation).unwrap();
+        let directory = crate::storage::open_private_directory(root.path()).unwrap();
+
+        assert_eq!(
+            publish_generation(&directory, "incoming-fixture", "generation")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert!(generation.is_dir());
+        assert!(!generation.join("artifact").exists());
+        assert_eq!(fs::read(stage.join("artifact")).unwrap(), b"new");
+    }
+
     #[cfg(unix)]
     #[test]
     fn stage_creation_stays_in_an_open_resource_directory() {
@@ -698,6 +770,42 @@ mod tests {
         assert!(stage.path().starts_with(&root));
         assert!(moved.join(stage.path().file_name().unwrap()).is_dir());
         assert!(!outside.join(stage.path().file_name().unwrap()).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_rejects_replaced_root_without_publishing() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("resources");
+        let outside = parent.path().join("outside");
+        let moved = parent.path().join("moved");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let spec = specification();
+        let generation = spec.generation().unwrap();
+        let store = ResourceStore::new(&root);
+
+        let result = store.install(&spec, |_| {
+            let stage_name = fs::read_dir(&root)?
+                .map(|entry| entry.map(|entry| entry.file_name()))
+                .collect::<std::io::Result<Vec<_>>>()?
+                .into_iter()
+                .find(|name| name.to_string_lossy().starts_with("incoming-"))
+                .expect("created stage");
+            fs::create_dir(outside.join(&stage_name))?;
+            fs::rename(&root, &moved)?;
+            symlink(&outside, &root)?;
+            Ok(source(b"fixture"))
+        });
+
+        assert!(matches!(result, Err(ResourceError::Io(_))));
+
+        assert!(!moved.join(generation).exists());
+        assert!(!fs::read_dir(&outside)
+            .unwrap()
+            .any(|entry| { entry.unwrap().path().join("msime-pinyin.db").exists() }));
     }
 
     #[cfg(unix)]
@@ -965,7 +1073,7 @@ mod tests {
         fs::create_dir(&outside_root).unwrap();
         fs::write(outside_root.join("msime-pinyin.db"), b"fixture").unwrap();
         let linked = parent.path().join("linked");
-        std::os::unix::fs::symlink(outside.path(), &linked).unwrap();
+        msime_path_trust::untrusted_symlink(outside.path(), &linked).unwrap();
         let directory = linked.join("resources");
         let store = ResourceStore::new(&directory);
 

@@ -1,3 +1,4 @@
+use super::super::catalog::SkinAnimation;
 use super::*;
 use crate::preferences::CustomCandidateColors;
 
@@ -45,7 +46,7 @@ fn ids_round_trip_in_picker_order() {
     let ids: Vec<_> = GlobalTheme::ALL.iter().map(|theme| theme.id()).collect();
     assert_eq!(
         ids,
-        ["system", "shuishan", "light", "paper", "night", "ink", "custom"]
+        ["system", "native", "shuishan", "light", "paper", "night", "ink", "custom"]
     );
     for theme in GlobalTheme::ALL {
         assert_eq!(GlobalTheme::from_id(theme.id()), Some(theme));
@@ -80,14 +81,63 @@ fn unknown_and_retired_ids_are_refused() {
         );
     }
     assert_eq!(GlobalTheme::from_id("ink"), Some(GlobalTheme::Ink));
-    assert!(GlobalTheme::ALL[..6].iter().all(|theme| theme.is_base()));
+    for theme in GlobalTheme::ALL {
+        assert_eq!(
+            theme.is_base(),
+            theme == GlobalTheme::System || theme.builtin().is_some(),
+            "{}",
+            theme.id()
+        );
+    }
     assert!(!GlobalTheme::Custom.is_base());
+    assert!(!GlobalTheme::Native.is_base());
+}
+
+#[test]
+fn native_is_offered_only_on_ios() {
+    use crate::host_surface::HostPlatform;
+    assert_eq!(GlobalTheme::Native.title(), "原生");
+    assert_eq!(
+        GlobalTheme::Native.platforms(),
+        Some(&[HostPlatform::Ios][..])
+    );
+    for platform in [
+        HostPlatform::Windows,
+        HostPlatform::Macos,
+        HostPlatform::Linux,
+        HostPlatform::Android,
+        HostPlatform::Ios,
+        HostPlatform::Harmony,
+    ] {
+        let ids: Vec<_> = catalog_for(platform)
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        let expected: Vec<_> = GlobalTheme::ALL
+            .into_iter()
+            .filter(|theme| *theme != GlobalTheme::Native || platform == HostPlatform::Ios)
+            .collect();
+        assert_eq!(ids, expected, "{}", platform.as_str());
+    }
+    let native = catalog()
+        .into_iter()
+        .find(|entry| entry.id == GlobalTheme::Native)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&native).unwrap()["platforms"],
+        serde_json::json!(["ios"])
+    );
+    let system = &catalog()[0];
+    assert_eq!(
+        serde_json::to_value(system).unwrap()["platforms"],
+        serde_json::Value::Null
+    );
 }
 
 #[test]
 fn catalog_is_complete_and_copies_the_design() {
     let catalog = catalog();
-    assert_eq!(catalog.len(), 7);
+    assert_eq!(catalog.len(), 8);
     assert_eq!(
         catalog.iter().map(|entry| entry.id).collect::<Vec<_>>(),
         GlobalTheme::ALL
@@ -95,7 +145,7 @@ fn catalog_is_complete_and_copies_the_design() {
     for entry in &catalog {
         assert!(!entry.title.is_empty());
     }
-    for edge in [&catalog[0], &catalog[6]] {
+    for edge in [&catalog[0], &catalog[1], &catalog[7]] {
         assert!(edge.appearance.is_none());
         assert!(edge.preview.is_none());
         assert!(edge.candidate.is_none());
@@ -206,6 +256,25 @@ fn system_resolves_to_platform_tokens() {
         value,
         serde_json::json!({
             "id": "system", "source": "system", "appearance": null,
+            "candidate": null, "keyboard": null, "candidate_skin": null
+        })
+    );
+}
+
+/// `native` 与 `system` 一样不带调色板，忽略自定义主题，只把自己的 id 带回去，宿主据此分辨两者。
+#[test]
+fn native_resolves_to_platform_tokens_under_its_own_id() {
+    let resolved = resolve(
+        GlobalTheme::Native,
+        &sakura(),
+        false,
+        CandidateLayout::Horizontal,
+        None,
+    );
+    assert_eq!(
+        serde_json::to_value(&resolved).unwrap(),
+        serde_json::json!({
+            "id": "native", "source": "system", "appearance": null,
             "candidate": null, "keyboard": null, "candidate_skin": null
         })
     );
@@ -351,11 +420,11 @@ fn custom_layers_base_package_and_pickers() {
         ..sakura()
     };
     let night = GlobalTheme::Night.builtin().unwrap();
-    // Night fixes the dark mode, so the host's light mode is ignored and the package's dark palette applies.
+    // 深色模式下画 night 底的皮肤包，用它的深色配色。
     let resolved = resolve(
         GlobalTheme::Custom,
         &custom,
-        false,
+        true,
         CandidateLayout::Vertical,
         Some(&package(GlobalTheme::Night, true, true)),
     );
@@ -380,16 +449,17 @@ fn custom_layers_base_package_and_pickers() {
 }
 
 #[test]
-fn a_builtin_base_fixes_the_package_mode() {
+fn a_package_is_drawn_only_in_the_mode_of_its_base() {
     let paper = GlobalTheme::Paper.builtin().unwrap();
-    // A light base under a dark host still draws the package's light palette.
+    // 浅色模式下画 paper 底的皮肤包，用它的浅色配色。
     let resolved = resolve(
         GlobalTheme::Custom,
         &sakura(),
-        true,
+        false,
         CandidateLayout::Vertical,
         Some(&package(GlobalTheme::Paper, true, false)),
     );
+    assert_eq!(resolved.candidate_skin.as_deref(), Some("sakura"));
     assert_eq!(resolved.appearance, Some(ThemeAppearance::Light));
     let candidate = resolved.candidate.unwrap();
     assert_eq!(candidate.surface.as_deref(), Some("#FFF0F5"));
@@ -397,17 +467,125 @@ fn a_builtin_base_fixes_the_package_mode() {
     assert_eq!(candidate.selected.as_deref(), Some("#FF69B424"));
     assert_eq!(candidate.selected_text.as_deref(), Some("#FF69B4"));
 
-    // A dark base under a light host with a light-only package: the package has nothing for the base's mode, so the base is drawn unchanged.
+    // 同一个浅色皮肤到了深色模式不画；`custom.base` 是 system，于是画平台自己的。
+    let resolved = resolve(
+        GlobalTheme::Custom,
+        &sakura(),
+        true,
+        CandidateLayout::Vertical,
+        Some(&package(GlobalTheme::Paper, true, false)),
+    );
+    assert_eq!(resolved.candidate_skin, None);
+    assert_eq!(resolved.appearance, None);
+    assert_eq!(resolved.candidate, None);
+
+    // 深色底、只声明浅色的包在深色模式下：包属于这个模式但没有这个模式的配色，底原样画。
     let night = GlobalTheme::Night.builtin().unwrap();
     let resolved = resolve(
         GlobalTheme::Custom,
         &sakura(),
-        false,
+        true,
         CandidateLayout::Vertical,
         Some(&package(GlobalTheme::Night, true, false)),
     );
     assert_eq!(resolved.appearance, Some(ThemeAppearance::Dark));
     assert_eq!(resolved.candidate, Some(night.candidate()));
+
+    // system 底的包两种模式都画，按模式取配色。
+    for (dark, surface) in [(false, "#FFF0F5"), (true, "#102030")] {
+        let resolved = resolve(
+            GlobalTheme::Custom,
+            &sakura(),
+            dark,
+            CandidateLayout::Vertical,
+            Some(&package(GlobalTheme::System, true, true)),
+        );
+        assert_eq!(resolved.candidate_skin.as_deref(), Some("sakura"));
+        assert_eq!(
+            resolved.candidate.unwrap().surface.as_deref(),
+            Some(surface)
+        );
+    }
+}
+
+#[test]
+fn the_dark_slot_is_used_in_dark_mode() {
+    let mut dusk = package(GlobalTheme::Night, false, true);
+    dusk.id = "dusk".into();
+    let custom = CustomTheme {
+        candidate_skin_dark: Some("dusk".into()),
+        ..sakura()
+    };
+    assert_eq!(custom.candidate_skin_for(false), Some("sakura"));
+    assert_eq!(custom.candidate_skin_for(true), Some("dusk"));
+    let resolved = resolve(
+        GlobalTheme::Custom,
+        &custom,
+        true,
+        CandidateLayout::Vertical,
+        Some(&dusk),
+    );
+    assert_eq!(resolved.candidate_skin.as_deref(), Some("dusk"));
+    // 浅色模式取的是浅色槽位，交来深色槽位的包被当作 id 对不上而忽略。
+    let resolved = resolve(
+        GlobalTheme::Custom,
+        &custom,
+        false,
+        CandidateLayout::Vertical,
+        Some(&dusk),
+    );
+    assert_eq!(resolved.candidate_skin, None);
+    // 没设深色槽位的旧文档：深色模式也取 `candidate_skin`。
+    assert_eq!(sakura().candidate_skin_for(true), Some("sakura"));
+}
+
+#[test]
+fn a_skin_base_left_from_another_mode_follows_the_host() {
+    // 应用深色皮肤时 `custom.base` 被写成 night；浅色模式下这款皮肤不画，底也不留在 night。
+    let custom = CustomTheme {
+        base: GlobalTheme::Night,
+        ..sakura()
+    };
+    let resolved = resolve(
+        GlobalTheme::Custom,
+        &custom,
+        false,
+        CandidateLayout::Vertical,
+        Some(&package(GlobalTheme::Night, false, true)),
+    );
+    assert_eq!(resolved.appearance, None);
+    assert_eq!(resolved.candidate, None);
+    assert_eq!(resolved.keyboard, None);
+    // 皮肤包没装时也一样。
+    let resolved = resolve(
+        GlobalTheme::Custom,
+        &custom,
+        false,
+        CandidateLayout::Vertical,
+        None,
+    );
+    assert_eq!(resolved.appearance, None);
+    // 深色模式下 night 底照常。
+    let resolved = resolve(
+        GlobalTheme::Custom,
+        &custom,
+        true,
+        CandidateLayout::Vertical,
+        None,
+    );
+    assert_eq!(resolved.appearance, Some(ThemeAppearance::Dark));
+    // 完全没设皮肤的自定义主题，底是用户自己选的，不受明暗规则影响。
+    let resolved = resolve(
+        GlobalTheme::Custom,
+        &CustomTheme {
+            base: GlobalTheme::Night,
+            ..CustomTheme::default()
+        },
+        false,
+        CandidateLayout::Vertical,
+        None,
+    );
+    assert_eq!(resolved.appearance, Some(ThemeAppearance::Dark));
 }
 
 #[test]
@@ -419,7 +597,7 @@ fn the_package_base_wins_over_the_custom_base() {
     let resolved = resolve(
         GlobalTheme::Custom,
         &custom,
-        false,
+        true,
         CandidateLayout::Vertical,
         Some(&package(GlobalTheme::Ink, false, true)),
     );
@@ -638,6 +816,7 @@ fn package_colours_normalize_to_hex() {
 #[test]
 fn summary_packages_keep_only_declared_modes() {
     let summary = SkinSummary {
+        schema_version: 1,
         id: "sakura".into(),
         name: "樱花".into(),
         version: "1".into(),
@@ -657,6 +836,7 @@ fn summary_packages_keep_only_declared_modes() {
         toolbar_stylesheet: None,
         preview: None,
         candidate: Default::default(),
+        animation: SkinAnimation::disabled(),
         license: None,
     };
     let package = ThemePackage::from(&summary);
@@ -852,7 +1032,7 @@ fn web_custom_theme_mirror_cases_match_resolve() {
         },
         {
             "name": "the package number and converted notations are drawn",
-            "base": "night", "dark": false,
+            "base": "night", "dark": true,
             "package": {"themes": ["dark"], "candidate": {"light": {}, "dark": {"number": "#123456", "surface": "rgb(1, 2, 3)"}}},
             "colors": {},
         },
@@ -872,8 +1052,8 @@ fn web_custom_theme_mirror_cases_match_resolve() {
             "colors": {"accent": "#2c7a4b"},
         },
         {
-            "name": "a built-in base fixes the mode even when the package does not declare it",
-            "base": "ink", "dark": false,
+            "name": "a package that does not declare its base's mode leaves the base unchanged",
+            "base": "ink", "dark": true,
             "package": {"themes": ["light"], "candidate": {"light": {"surface": "#FFF0F5"}, "dark": {"surface": "#102030"}}},
             "colors": {},
         },
@@ -918,6 +1098,18 @@ fn web_custom_theme_mirror_cases_match_resolve() {
             "base": "paper", "dark": false,
             "package": {"themes": ["light"], "candidate": {"light": {"selected": "#11111180", "accent": "#AA0000"}, "dark": {}}},
             "colors": {"selected": "#1A3D7C"},
+        },
+        {
+            "name": "a dark package is not drawn in light mode and the base follows the host",
+            "base": "night", "dark": false,
+            "package": {"themes": ["dark"], "candidate": {"light": {}, "dark": {"surface": "#102030", "accent": "#FF69B4"}}},
+            "colors": {"hover": "#010203"},
+        },
+        {
+            "name": "a light package is not drawn in dark mode",
+            "base": "paper", "dark": true,
+            "package": {"themes": ["light"], "candidate": {"light": {"surface": "#FFF0F5"}, "dark": {}}},
+            "colors": {},
         },
     ]);
     let palette = |value: &Value| CandidatePalette {

@@ -1,15 +1,6 @@
 import SwiftUI
 import UIKit
 
-/// 任务取消不是错误。切换标签页会让 `.task` 连同它已经发出的请求一起取消,而 URLSession 抛回来的是 `URLError.cancelled` —— 它的 `localizedDescription` 就是 "cancelled"。把它当错误弹出来,结果就是每次切到「我的」都跳一个写着 cancelled 的框。
-///
-/// 只判 `CancellationError` 不够:那是 Swift 结构化并发自己抛的那一种,而这里真正会抛的是网络层那一种,两者没有继承关系。
-private func isCancellation(_ error: Error) -> Bool {
-  if error is CancellationError { return true }
-  if let error = error as? URLError { return error.code == .cancelled }
-  return false
-}
-
 /// 后端在 `identities` 中报告的登录方式的显示名称。
 private func providerTitle(_ provider: String) -> String {
   switch provider {
@@ -18,33 +9,6 @@ private func providerTitle(_ provider: String) -> String {
   case "email": return "邮箱"
   case "phone", "sms": return "手机号"
   default: return provider
-  }
-}
-
-/// 设计稿中「我的」子页面的行：16pt 标签，可带次要色的 15pt 值和右箭头，最低 50pt 高，左右内边距 16pt。
-private struct ProfileRowLabel: View {
-  let title: String
-  var value: String? = nil
-  var chevron = true
-
-  var body: some View {
-    HStack(spacing: 8) {
-      Text(title).font(.system(size: 16)).foregroundStyle(.primary)
-      Spacer(minLength: 12)
-      if let value {
-        Text(value).font(.system(size: 15)).foregroundStyle(MetasequoiaTheme.sub)
-          .lineLimit(1).truncationMode(.middle)
-      }
-      if chevron {
-        Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
-          .foregroundStyle(MetasequoiaTheme.sub.opacity(0.55))
-          .accessibilityHidden(true)
-      }
-    }
-    .padding(.horizontal, 16)
-    .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
-    .contentShape(Rectangle())
-    .accessibilityElement(children: .combine)
   }
 }
 
@@ -83,6 +47,9 @@ struct AccountProfileEditor: View {
   @State private var confirmLogoutAll = false
   @State private var confirmRelogin = false
   @State private var confirmDeleteAccount = false
+  @State private var operation: Task<Void, Never>?
+  @State private var loadTask: Task<Void, Never>?
+  @State private var request = ViewRequestGeneration()
 
   private var displayName: String {
     profile?.user.preferredDisplayName ?? initialUser?.preferredDisplayName ?? "水杉用户"
@@ -122,7 +89,7 @@ struct AccountProfileEditor: View {
             ProfileDangerRow(title: "注销账号", identifier: "deleteAccount") { confirmDeleteAccount = true }
               .disabled(busy)
             Text("注销后，已发布的皮肤、评分和其他云端账号数据会立即删除，无法撤销")
-              .font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+              .designSubtext()
               .fixedSize(horizontal: false, vertical: true)
               .padding(.horizontal, 16)
           }
@@ -137,7 +104,7 @@ struct AccountProfileEditor: View {
       .frame(maxWidth: 760)
       .frame(maxWidth: .infinity)
     }
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .navigationTitle("个人资料")
     .navigationBarTitleDisplayMode(.inline)
     .overlay { if busy { ProgressView().controlSize(.large) } }
@@ -157,7 +124,15 @@ struct AccountProfileEditor: View {
       Button("好", role: .cancel) {}
     } message: { Text(actionMessage ?? "") }
     .tint(MetasequoiaTheme.accent)
-    .task { await load() }
+    .task {
+      request.appear()
+      startLoad()
+    }
+    .onDisappear {
+      ViewRequestTask.disappear(request: $request, pending: $operation)
+      ViewRequestTask.cancel(task: $loadTask)
+      busy = false
+    }
   }
 
   /// 84pt 的强调色圆盘显示名字的首字，下面是名字、有邮箱时的邮箱，以及账号用哪种方式登录。
@@ -198,7 +173,8 @@ struct AccountProfileEditor: View {
           onSaved(updated.user)
         }
       } label: {
-        ProfileRowLabel(title: "昵称", value: profile.user.preferredDisplayName)
+        SettingsNavigationLabel(title: "昵称", value: profile.user.preferredDisplayName,
+          valueTruncationMode: .middle)
       }
       .buttonStyle(PressFillButtonStyle())
       .accessibilityIdentifier("accountNicknameLink")
@@ -207,14 +183,16 @@ struct AccountProfileEditor: View {
         UIPasteboard.general.string = profile.user.id
         ToastCenter.shared.show("已复制")
       } label: {
-        ProfileRowLabel(title: "水杉 ID", value: profile.user.id, chevron: false)
+        SettingsNavigationLabel(title: "水杉 ID", value: profile.user.id, showsChevron: false,
+          valueTruncationMode: .middle)
       }
       .buttonStyle(PressFillButtonStyle())
       .accessibilityHint("轻点复制完整 ID")
       .accessibilityIdentifier("copyAccountID")
       if let email {
         DesignDivider()
-        ProfileRowLabel(title: "邮箱", value: email, chevron: false)
+        SettingsNavigationLabel(title: "邮箱", value: email, showsChevron: false,
+          valueTruncationMode: .middle)
       }
     }
   }
@@ -224,7 +202,8 @@ struct AccountProfileEditor: View {
     DesignGroup(title: "登录方式", radius: MetasequoiaTheme.tabCardRadius) {
       ForEach(Array(providers.enumerated()), id: \.element) { index, provider in
         if index > 0 { DesignDivider() }
-        ProfileRowLabel(title: providerTitle(provider), value: "已关联", chevron: false)
+        SettingsNavigationLabel(title: providerTitle(provider), value: "已关联", showsChevron: false,
+          valueTruncationMode: .middle)
       }
     }
   }
@@ -233,7 +212,7 @@ struct AccountProfileEditor: View {
   private var accountActions: some View {
     DesignGroup(title: "账号操作", radius: MetasequoiaTheme.tabCardRadius) {
       Button { confirmLogoutAll = true } label: {
-        ProfileRowLabel(title: "退出所有设备", chevron: false)
+        SettingsNavigationLabel(title: "退出所有设备", showsChevron: false)
       }
       .buttonStyle(PressFillButtonStyle())
       .disabled(busy)
@@ -241,7 +220,7 @@ struct AccountProfileEditor: View {
       if needsRecovery {
         DesignDivider()
         Button { confirmRelogin = true } label: {
-          ProfileRowLabel(title: "重新登录", chevron: false)
+          SettingsNavigationLabel(title: "重新登录", showsChevron: false)
         }
         .buttonStyle(PressFillButtonStyle())
         .disabled(busy)
@@ -256,7 +235,7 @@ struct AccountProfileEditor: View {
         Label(loadMessage ?? "", systemImage: "exclamationmark.circle")
           .font(.subheadline).foregroundStyle(MetasequoiaTheme.sub)
           .fixedSize(horizontal: false, vertical: true)
-        Button("重新加载") { Task { await load() } }
+        Button("重新加载") { startLoad() }
           .font(.subheadline.weight(.semibold))
           .foregroundStyle(MetasequoiaTheme.accent)
       }
@@ -268,35 +247,36 @@ struct AccountProfileEditor: View {
 
   /// 四个动作都以「这台设备不再登录」收尾,所以走同一条路:调用、回调父视图、退回上一页。失败时留在原地把原因说出来。
   private func perform(_ action: @escaping () async throws -> Void) {
-    busy = true
-    actionMessage = nil
-    Task {
-      defer { busy = false }
-      do {
-        try await action()
-        onSignedOut()
-        dismiss()
-      } catch {
-        guard !isCancellation(error) else { return }
-        actionMessage = error.localizedDescription
-      }
+    ViewRequestTask.run(request: $request, busy: $busy, message: $actionMessage,
+                        pending: $operation, isCancellation: AccountRequestPolicy.isCancellation) { id in
+      try await action()
+      try request.checkCurrent(id)
+      onSignedOut()
+      dismiss()
     }
   }
 
   /// 每次页面出现都重新读取资料，所以从「昵称」返回后会刷新；只有还没有内容可显示时才显示加载指示。
-  @MainActor private func load() async {
+  @MainActor private func startLoad() {
+    ViewRequestTask.startLoad(request: $request, pending: $loadTask) { id in await load(id: id) }
+  }
+
+  @MainActor private func load(id: UUID) async {
+    guard request.isCurrent(id) else { return }
     loading = profile == nil
     loadMessage = nil
-    defer { loading = false }
+    defer { if request.isCurrent(id) { loading = false } }
     do {
       let result = try await SkinCommunityAPI.shared.profile()
+      try request.checkCurrent(id)
       profile = result
       needsRecovery = false
       onSaved(result.user)
+    } catch is CancellationError {
+      return
     } catch {
-      guard !isCancellation(error) else { return }
-      needsRecovery = true
-      loadMessage = error.localizedDescription
+      guard request.isCurrent(id), !AccountRequestPolicy.isCancellation(error) else { return }
+      needsRecovery = true; loadMessage = error.localizedDescription
     }
   }
 }
@@ -311,6 +291,8 @@ private struct AccountNicknameEditor: View {
   @State private var saving = false
   @State private var message: String?
   @State private var confirmDiscard = false
+  @State private var operation: Task<Void, Never>?
+  @State private var request = ViewRequestGeneration()
 
   init(profile: CommunityProfile, onSaved: @escaping (CommunityProfile) -> Void) {
     self.profile = profile
@@ -371,7 +353,7 @@ private struct AccountNicknameEditor: View {
       .frame(maxWidth: 760)
       .frame(maxWidth: .infinity)
     }
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .navigationTitle("昵称")
     .navigationBarTitleDisplayMode(.inline)
     // 系统自带的返回按钮会直接返回而不询问，输入了一半的昵称会随之丢失。
@@ -402,28 +384,26 @@ private struct AccountNicknameEditor: View {
       Button("继续编辑", role: .cancel) {}
     }
     .tint(MetasequoiaTheme.accent)
-    .onAppear { editing = true }
+    .onAppear { request.appear(); editing = true }
+    .onDisappear {
+      ViewRequestTask.disappear(request: $request, pending: $operation)
+      saving = false
+    }
   }
 
   private func save() {
-    guard !saving else { return }
+    guard request.isVisible, !saving else { return }
     guard hasChanges else { dismiss(); return }
     guard validName else { return }
     editing = false
-    saving = true
-    message = nil
     let submittedName = normalizedName
-    Task {
-      defer { saving = false }
-      do {
-        let updated = try await SkinCommunityAPI.shared.updateProfile(name: submittedName)
-        onSaved(updated)
-        ToastCenter.shared.show("昵称已更新")
-        dismiss()
-      } catch {
-        guard !isCancellation(error) else { return }
-        message = error.localizedDescription
-      }
+    ViewRequestTask.run(request: $request, busy: $saving, message: $message,
+                        pending: $operation, isCancellation: AccountRequestPolicy.isCancellation) { id in
+      let updated = try await SkinCommunityAPI.shared.updateProfile(name: submittedName)
+      try request.checkCurrent(id)
+      onSaved(updated)
+      ToastCenter.shared.show("昵称已更新")
+      dismiss()
     }
   }
 }

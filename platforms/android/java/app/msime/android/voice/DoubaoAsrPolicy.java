@@ -26,21 +26,9 @@ public final class DoubaoAsrPolicy {
         return PROVIDER.equals(provider);
     }
 
-    /** A streaming response carries text; reject non-string JSON values before display. */
+    /** Compatibility entry point; transcript validation is shared with HTTP ASR. */
     static String strictText(Object value) {
-        String text = AiProviderResponse.strictText(value);
-        return text.length() <= HttpAsrPolicy.MAX_TRANSCRIPT
-                && !TextPolicy.hasControlExceptWhitespace(text)
-                && TextPolicy.validUnicode(text) ? text : "";
-    }
-
-    /** The provider envelope carries its nested result as a JSON string; reject coercion. */
-    static String strictPayload(Object value) {
-        return JsonPolicy.strictString(value);
-    }
-
-    static Boolean strictBoolean(Object value) {
-        return JsonPolicy.strictBoolean(value);
+        return HttpAsrPolicy.strictText(value);
     }
 
     static boolean validEndpoint(String endpoint) {

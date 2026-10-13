@@ -1,5 +1,11 @@
 package app.msime.android.home;
 
+import app.msime.android.LayoutPolicy;
+
+import app.msime.android.DimensionPolicy;
+
+import app.msime.android.ImageViewPolicy;
+import app.msime.android.ThemeColorPolicy;
 import android.content.Context;
 import android.os.Bundle;
 import android.view.Gravity;
@@ -12,6 +18,8 @@ import android.widget.TextView;
 import androidx.annotation.DrawableRes;
 import androidx.annotation.Nullable;
 import app.msime.android.CloudApi;
+import app.msime.android.BackendAccount;
+import app.msime.android.DrawablePolicy;
 import app.msime.android.DownloadLinkApi;
 import app.msime.android.R;
 import app.msime.android.ViewPolicy;
@@ -33,6 +41,14 @@ public final class DownloadPage extends DetailPage {
     private final Set<String> sentPlatforms = new HashSet<>(6);
     private final Set<String> sending = new HashSet<>(6);
 
+    @Override public void onDestroyView() {
+        // NetworkTask.run fences its callback to this view. If the view goes away first,
+        // the callback is dropped, so the transient in-flight marker must not lock the rebuilt
+        // page out of retrying that platform.
+        sending.clear();
+        super.onDestroyView();
+    }
+
     @Override protected void buildContent(LinearLayout column, Bundle args) {
         Context context = requireContext();
         column.addView(hero(context));
@@ -47,42 +63,43 @@ public final class DownloadPage extends DetailPage {
         getRow(mobile, R.drawable.ic_ms_smartphone, "iOS", "TestFlight 测试版", "ios");
         getRow(mobile, R.drawable.ic_ms_tablet, "iPadOS", "与 iPhone 共用同一个 TestFlight", "ios");
         GroupCard.Row android = row(mobile, R.drawable.ic_ms_smartphone, "Android", "各版本的 APK 在 GitHub 发布页");
-        TextView current = Ui.styledLabel(context, "当前设备", Ui.TEXT_BUTTON_SMALL, 500, Ui.text(context));
-        LinearLayout.LayoutParams currentParams = Ui.rowGapParams(context);
+        TextView current = ViewPolicy.styledLabel(context, "当前设备", Ui.TEXT_BUTTON_SMALL, 500, ThemeColorPolicy.text(context));
+        LinearLayout.LayoutParams currentParams = LayoutPolicy.rowGapParams(context, Ui.ROW_GAP);
         ((LinearLayout) android.view()).addView(current, currentParams);
         getRow(mobile, R.drawable.ic_ms_smartphone, "HarmonyOS", "从源码构建", "harmony");
     }
 
     /** 「在电脑上打开」卡：accentSoft 底的 r20 卡片，左边强调色圆角方块里一枚链接图标。 */
     private View hero(Context context) {
-        LinearLayout card = Ui.row(context);
+        LinearLayout card = LayoutPolicy.row(context);
         ViewPolicy.setCenteredVertically(card);
-        ViewPolicy.setBackground(card, Ui.rounded(Ui.accentSoft(context), Ui.dp(context, 20)));
-        int pad = Ui.dp(context, 16);
-        Ui.setSymmetricPaddingPx(card, pad);
+        ViewPolicy.setBackground(card, DrawablePolicy.rounded(ThemeColorPolicy.accentSoft(context), DimensionPolicy.pixels(context, 20)));
+        int pad = DimensionPolicy.pixels(context, 16);
+        ViewPolicy.setSymmetricPadding(card, pad);
 
         FrameLayout tile = new FrameLayout(context);
-        ViewPolicy.setBackground(tile, Ui.rounded(Ui.accent(context), Ui.dp(context, 12)));
-        ImageView icon = Ui.decorativeIcon(context, R.drawable.ic_ms_link, Ui.onAccent(context));
-        int iconSize = Ui.dp(context, 24);
-        tile.addView(icon, Ui.squareFrameParamsPx(iconSize, Gravity.CENTER));
-        int tileSize = Ui.dp(context, 44);
-        card.addView(tile, Ui.squareParamsPx(tileSize));
+        ViewPolicy.setBackground(tile, DrawablePolicy.rounded(ThemeColorPolicy.accent(context), DimensionPolicy.pixels(context, 12)));
+        ImageView icon = ImageViewPolicy.decorative(context, R.drawable.ic_ms_link, ThemeColorPolicy.onAccent(context));
+        int iconSize = DimensionPolicy.pixels(context, 24);
+        tile.addView(icon, LayoutPolicy.squareFrameParamsPx(iconSize, Gravity.CENTER));
+        int tileSize = DimensionPolicy.pixels(context, 44);
+        card.addView(tile, ViewPolicy.newSquareParamsPx(tileSize));
 
-        LinearLayout texts = Ui.column(context);
-        TextView title = Ui.styledLabel(context, "在电脑上打开", Ui.TEXT_ROW_TITLE, 600, Ui.text(context));
+        LinearLayout texts = LayoutPolicy.column(context);
+        TextView title = ViewPolicy.styledLabel(context, "在电脑上打开", Ui.TEXT_ROW_TITLE, 600, ThemeColorPolicy.text(context));
         texts.addView(title);
-        TextView link = Ui.styledLabel(context, DOWNLOAD_LABEL, Ui.TEXT_ROW_SUBTITLE, 400, Ui.subText(context));
+        TextView link = ViewPolicy.styledLabel(context, DOWNLOAD_LABEL, Ui.TEXT_ROW_SUBTITLE, 400, ThemeColorPolicy.subText(context));
         texts.addView(link);
-        LinearLayout.LayoutParams textParams = Ui.weightWrap(1f);
-        textParams.setMarginStart(Ui.dp(context, 14));
+        LinearLayout.LayoutParams textParams = LayoutPolicy.weightedWrapParams(1f);
+        textParams.setMarginStart(DimensionPolicy.pixels(context, 14));
         card.addView(texts, textParams);
 
-        TextView copy = Ui.pillButton(context, "复制链接", Ui.TEXT_BUTTON_SMALL, 600, Ui.onAccent(context),
+        TextView copy = ViewPolicy.pillButton(context, "复制链接", Ui.TEXT_BUTTON_SMALL, 600, ThemeColorPolicy.accent(context),
+            ThemeColorPolicy.onAccent(context),
             14, 6, Ui.COMPACT_BUTTON_MIN_HEIGHT, 0, () -> copyLink(context));
         copy.setContentDescription("复制下载页链接");
-        LinearLayout.LayoutParams copyParams = Ui.wrap();
-        copyParams.setMarginStart(Ui.dp(context, 12));
+        LinearLayout.LayoutParams copyParams = LayoutPolicy.wrapParams();
+        copyParams.setMarginStart(DimensionPolicy.pixels(context, 12));
         card.addView(copy, copyParams);
         return card;
     }
@@ -95,10 +112,10 @@ public final class DownloadPage extends DetailPage {
     private static GroupCard.Row row(GroupCard group, @DrawableRes int icon, String title, String subtitle) {
         GroupCard.Row row = group.value(title, subtitle, null);
         Context context = row.view().getContext();
-        ImageView image = Ui.decorativeIcon(context, icon, Ui.text(context));
-        int size = Ui.dp(context, 24);
-        LinearLayout.LayoutParams params = Ui.squareParamsPx(size);
-        params.setMarginEnd(Ui.dp(context, 18));
+        ImageView image = ImageViewPolicy.decorative(context, icon, ThemeColorPolicy.text(context));
+        int size = DimensionPolicy.pixels(context, 24);
+        LinearLayout.LayoutParams params = ViewPolicy.newSquareParamsPx(size);
+        params.setMarginEnd(DimensionPolicy.pixels(context, 18));
         ((LinearLayout) row.view()).addView(image, 0, params);
         return row;
     }
@@ -106,7 +123,7 @@ public final class DownloadPage extends DetailPage {
     private void getRow(GroupCard group, @DrawableRes int icon, String title, String subtitle, String platform) {
         GroupCard.Row row = row(group, icon, title, subtitle);
         Context context = row.view().getContext();
-        TextView button = KeyboardSheets.tonalButton(context, "获取", "获取，" + title, 600,
+        TextView button = HomeButtonPolicy.tonalButton(context, "获取", "获取，" + title, 600,
             () -> AboutPage.openLink(context, DOWNLOAD + "?release=" + platform));
         attach(row, button);
     }
@@ -115,24 +132,30 @@ public final class DownloadPage extends DetailPage {
         GroupCard.Row row = row(group, icon, title, subtitle);
         Context context = row.view().getContext();
         String label = sentPlatforms.contains(platform) ? "已发送" : "发送链接";
-        TextView button = KeyboardSheets.tonalButton(context, label, label + "，" + title, 600);
+        TextView button = HomeButtonPolicy.tonalButton(context, label, label + "，" + title, 600);
         ViewPolicy.setEnabled(button, !sentPlatforms.contains(platform));
         ViewPolicy.bindClick(button, () -> send(platform, button));
         attach(row, button);
     }
 
     private static void attach(GroupCard.Row row, TextView button) {
-        LinearLayout.LayoutParams params = Ui.rowGapParams(button.getContext());
+        LinearLayout.LayoutParams params = LayoutPolicy.rowGapParams(button.getContext(), Ui.ROW_GAP);
         ((LinearLayout) row.view()).addView(button, params);
     }
 
     private void send(String platform, TextView button) {
         if (sending.contains(platform) || sentPlatforms.contains(platform)) return;
         Context application = requireContext().getApplicationContext();
+        String expectedSessionId = new BackendAccount(application).sessionId();
+        if (expectedSessionId.isEmpty()) {
+            MsToast.show(requireContext(), "登录已失效，请重新打开页面");
+            return;
+        }
         sending.add(platform);
         button.setText("正在发送…");
         ViewPolicy.setEnabled(button, false);
-        AboutPage.network(this, () -> new DownloadLinkApi(new CloudApi(application)).send(platform), outcome -> {
+        NetworkTask.run(this, () -> new DownloadLinkApi(
+            new CloudApi(application).forAccountSession(expectedSessionId)).send(platform), outcome -> {
             sending.remove(platform);
             if (outcome.error() != null) {
                 button.setText("发送链接");
@@ -151,7 +174,7 @@ public final class DownloadPage extends DetailPage {
         if (error instanceof CloudApi.Failure failure) {
             if (DownloadLinkApi.noVerifiedEmail(failure)) return "账号还没有验证过的邮箱，请改用「复制链接」";
             if (failure.signedOut()) return "登录后才能发到邮箱，也可以改用「复制链接」";
-            if (failure.status == 429) return "发送得太频繁了，请过一会儿再试";
+            if (failure.rateLimited()) return "发送得太频繁了，请过一会儿再试";
             if (failure.unavailable()) return "暂时不能发送邮件，请改用「复制链接」";
             if (failure.network()) return "连不上服务器，请检查网络后重试";
         }

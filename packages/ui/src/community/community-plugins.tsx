@@ -18,12 +18,15 @@ import {
   communityPluginMessage,
   communityPublishLoginAction,
 } from "./community-helpers";
-import { useCommunityGallery, type CommunityGalleryClient } from "./community-gallery";
+import {
+  createCommunityGalleryClient,
+  useCommunityGallery,
+  type CommunityGalleryClient,
+} from "./community-gallery";
 import { CommunityDialogActions, CommunityDialogFrame } from "./community-dialog";
-import { CommunityDetailStatus } from "./community-detail-status";
-import { CommunityDetailHeader } from "./community-detail-header";
+import { CommunityDetailSummary } from "./community-detail-summary";
 import * as style from "./community-style";
-import { CommunitySearchForm } from "./community-search-form";
+import { CommunityGalleryHeader } from "./community-gallery-header";
 import { CommunityModerationSection } from "./community-moderation-section";
 import { CommunityScopeButtons } from "./community-scope-buttons";
 import { CommunitySelectField } from "./community-select-field";
@@ -39,8 +42,7 @@ import { CommunityCardMetrics } from "./community-card-metrics";
 import { CommunityCardAuthor } from "./community-card-author";
 import { CommunityCard } from "./community-card";
 import { CommunityMetrics } from "./community-metrics";
-import { CommunityInstallButton } from "./community-install-button";
-import { CommunityReplaceConfirmation } from "./community-replace-confirmation";
+import { CommunityInstallActions } from "./community-install-actions";
 import { CommunityGalleryLoadMore } from "./community-gallery-load-more";
 import { CommunityGalleryFeedback } from "./community-gallery-feedback";
 import { CommunityDetailFrame } from "./community-detail-frame";
@@ -49,18 +51,19 @@ import { useAsyncActionRunner } from "../core/use-async-action";
 import { useCommunityPublicationDraft } from "./use-community-publication-draft";
 import { useAsyncGeneration } from "../settings/use-async-generation";
 import { CommunityActionNotice } from "./community-action-notice";
-import { CommunityGalleryHeading } from "./community-gallery-heading";
 import { CommunityGalleryGrid } from "./community-gallery-grid";
 import { CommunityPageShell } from "./community-page-shell";
 import { useCommunityInstallState } from "./community-install-state";
+import { communityInstallPreflight } from "./community-install-preflight";
 
-/** The kinds a pack can be shared as; effect packs stay local for now. Mirrors `client-core::plugins::community::PUBLISHABLE_KINDS`. */
-export type CommunityPluginKind = Exclude<PluginKind, "effect">;
+/** The kinds a pack can be shared as, which is every kind, effect packs included. Mirrors `client-core::plugins::community::PUBLISHABLE_KINDS`. */
+export type CommunityPluginKind = PluginKind;
 
 export const communityPluginKinds: readonly CommunityPluginKind[] = [
   "sound",
   "music",
   "command_table",
+  "effect",
   "phrase_table",
   "helpcode",
   "wordbook",
@@ -93,7 +96,7 @@ export type CommunityPlugin = {
 export type CommunityPluginPage = {
   plugins: CommunityPlugin[];
   has_more: boolean;
-  /** Listed packs of a kind this client cannot install (effect packs), left out by the host but still counted toward the next offset. */
+  /** Listed packs of a kind this client cannot install (one newer than this client), left out by the host but still counted toward the next offset. */
   skipped?: number;
 };
 
@@ -140,10 +143,6 @@ const archiveLimit = "8 MB";
 const publishWarning =
   "上传的是插件目录中的全部文件（不含隐藏文件），压缩后不超过 8 MB；每个账号最多发布 20 个、合计 32 MB，每小时最多发布 10 次。其他用户下载后会按原样安装。";
 
-function isCommunityKind(kind: PluginKind): kind is CommunityPluginKind {
-  return kind !== "effect";
-}
-
 function CommunityPluginCard({ plugin, open }: { plugin: CommunityPlugin; open: () => void }) {
   return (
     <CommunityCard aria-label={`查看插件 ${plugin.name}`} onClick={open}>
@@ -183,23 +182,15 @@ export function CommunityPluginsPage({
   // The gallery hook pages by offset and search; the kind filter rides along through a ref so a page appended by 加载更多 keeps the filter the first page was read with.
   const kindFilter = useRef<CommunityPluginKind | null>(null);
   const galleryClient = useMemo<CommunityGalleryClient<CommunityPlugin>>(
-    () => ({
-      list: async (offset, search, mine) => {
-        const page = await client.list(offset, search, kindFilter.current, mine ?? false);
-        return { items: page.plugins, has_more: page.has_more, skipped: page.skipped };
-      },
-      detail: client.detail,
-      rate: async (id, stars) => {
-        await client.rate(id, stars);
-      },
-      unpublish: async (id) => {
-        await client.delete(id);
-      },
-      ...(client.report && {
-        report: (id: string, reason: CommunityReportReason, detail: string) =>
-          client.report!(id, reason, detail),
-      }),
-    }),
+    () =>
+      createCommunityGalleryClient(
+        client,
+        async (offset, search, mine) => {
+          const page = await client.list(offset, search, kindFilter.current, mine ?? false);
+          return { items: page.plugins, has_more: page.has_more, skipped: page.skipped };
+        },
+        (id) => client.delete(id),
+      ),
     [client],
   );
   const gallery = useCommunityGallery({
@@ -221,7 +212,7 @@ export function CommunityPluginsPage({
     confirmUnpublish,
     activeSearch,
     setActionNotice,
-    setMineOnly,
+    changeMineOnly,
     setConfirmUnpublish,
     requestList,
     open,
@@ -258,13 +249,16 @@ export function CommunityPluginsPage({
       async (currentClient) => {
         // An install replaces a pack of the same kind and id whole, so ask first. The scan is only a courtesy: when it fails the install goes ahead as the import from a local `.zip` would.
         if (!replace && localPlugins) {
-          const catalog = await localPlugins().catch(() => null);
-          if (!gallery.isCurrent(currentClient)) return;
-          if (
-            catalog?.packages.some(
-              (item) => item.kind === target.kind && item.id === target.plugin_id,
-            )
-          ) {
+          const preflight = await communityInstallPreflight(
+            localPlugins,
+            () => gallery.isCurrent(currentClient),
+            (catalog) =>
+              catalog.packages.some(
+                (item) => item.kind === target.kind && item.id === target.plugin_id,
+              ),
+          );
+          if (preflight === "stale") return;
+          if (preflight === "conflict") {
             setConfirmReplace(true);
             return;
           }
@@ -294,29 +288,27 @@ export function CommunityPluginsPage({
         signInRequired={signInRequired}
         onLogin={onLogin}
       >
-        <CommunityDetailHeader
+        <CommunityDetailSummary
           title={selected.name}
-          note={[
+          noteParts={[
             kindLabels[selected.kind],
             selected.author,
             selected.version && `v${selected.version}`,
-          ]
-            .filter(Boolean)
-            .join(" · ")}
+          ]}
           owned={selected.owned}
           moderation={selected.moderation}
           description={selected.description}
-        />
-        <CommunityMetrics>
-          {[
-            selected.plugin_id,
-            selected.license && `授权 ${selected.license}`,
-            candidateSkinMegabytes(selected.size),
-          ]
-            .filter(Boolean)
-            .join(" · ")}
-        </CommunityMetrics>
-        <CommunityDetailStatus
+          metrics={
+            <CommunityMetrics>
+              {[
+                selected.plugin_id,
+                selected.license && `授权 ${selected.license}`,
+                candidateSkinMegabytes(selected.size),
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </CommunityMetrics>
+          }
           downloads={selected.downloads}
           ratingCount={selected.rating_count}
           ratingAverage={selected.rating_average}
@@ -325,30 +317,26 @@ export function CommunityPluginsPage({
           actionNotice={actionNotice}
           loadingText="正在读取插件详情…"
         />
-        {installed ? (
-          <CommunityActionNotice>已安装到插件目录，可在「我的插件」中选用。</CommunityActionNotice>
-        ) : (
-          <CommunityInstallButton
-            actionBusy={actionBusy}
-            detailBusy={detailBusy}
-            confirmReplace={confirmReplace}
-            onInstall={() => void install(false)}
-          />
-        )}
-        {confirmReplace && (
-          <CommunityReplaceConfirmation
-            ariaLabel="确认替换插件"
-            message={
-              <>
-                已安装同 id 的{kindLabels[selected.kind]}“{selected.plugin_id}
-                ”，安装会整体替换它。
-              </>
-            }
-            actionBusy={actionBusy}
-            onConfirm={() => void install(true)}
-            onCancel={() => setConfirmReplace(false)}
-          />
-        )}
+        <CommunityInstallActions
+          installed={installed}
+          installedContent={
+            <CommunityActionNotice>
+              已安装到插件目录，可在「我的插件」中选用。
+            </CommunityActionNotice>
+          }
+          actionBusy={actionBusy}
+          detailBusy={detailBusy}
+          confirmReplace={confirmReplace}
+          replaceAriaLabel="确认替换插件"
+          replaceMessage={
+            <>
+              已安装同 id 的{kindLabels[selected.kind]}“{selected.plugin_id}
+              ”，安装会整体替换它。
+            </>
+          }
+          onInstall={(replace) => void install(replace)}
+          onCancelReplace={() => setConfirmReplace(false)}
+        />
         <CommunityModerationSection
           owned={selected.owned}
           actionBusy={actionBusy}
@@ -373,25 +361,20 @@ export function CommunityPluginsPage({
 
   return (
     <CommunityPageShell>
-      <CommunitySearchForm
-        label="搜索插件"
-        value={search}
-        onChange={setSearch}
-        onSubmit={() => void requestList(search, false)}
-      />
-      <CommunityGalleryHeading
+      <CommunityGalleryHeader
+        searchLabel="搜索插件"
+        search={search}
+        onSearchChange={setSearch}
+        onSearchSubmit={() => void requestList(search, false)}
         title="社区插件"
-        note="音效、音乐、指令表、短语表、辅助码表、单词本与符号集，安装后在「我的插件」中选用"
+        note="音效、音乐、指令表、特效、短语表、辅助码表、单词本与符号集，安装后在「我的插件」中选用"
       >
         <CommunityScopeButtons
           ariaLabel="插件范围"
           mineOnly={mineOnly}
           allLabel="全部插件"
           mineLabel="我的作品"
-          onMineOnlyChange={(nextMineOnly) => {
-            setMineOnly(nextMineOnly);
-            void requestList(activeSearch, false, nextMineOnly);
-          }}
+          onMineOnlyChange={changeMineOnly}
         />
         {localPlugins && (
           <ActionButton
@@ -400,7 +383,7 @@ export function CommunityPluginsPage({
             label="发布我的插件"
           />
         )}
-      </CommunityGalleryHeading>
+      </CommunityGalleryHeader>
       <div className={style.kindFilter} role="group" aria-label="插件类型">
         <ActionButton
           action={() => changeKind(null)}
@@ -536,7 +519,9 @@ export function CommunityPluginPublishDialog({
         if (generation !== clientGeneration.current) return;
         const loaded: LocalPluginOption[] = [];
         for (const item of catalog.packages) {
-          if (item.builtin || !isCommunityKind(item.kind)) continue;
+          if (item.builtin) continue;
+          // 桌面的目录里有脚本插件，它们不能发布到社区（`PUBLISHABLE_KINDS` 里没有 script）。
+          if (!communityPluginKinds.includes(item.kind)) continue;
           loaded.push({
             key: optionKey(item.kind, item.id),
             kind: item.kind,
@@ -633,7 +618,7 @@ export function CommunityPluginPublishDialog({
       {optionsLoading && <StatusMessage role="status">正在读取本地插件…</StatusMessage>}
       {!optionsLoading && options.length === 0 && (
         <CommunityNotice>
-          还没有可发布的插件。内置插件和特效包不能发布，请先在「我的插件」中导入自己的音效包、音乐包、指令表、短语表、辅助码表、单词本或符号集。
+          还没有可发布的插件。内置插件不能发布，请先在「我的插件」中导入自己的音效包、音乐包、指令表、特效包、短语表、辅助码表、单词本或符号集。
         </CommunityNotice>
       )}
       {options.length > 0 && (

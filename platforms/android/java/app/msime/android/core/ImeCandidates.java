@@ -1,5 +1,7 @@
 package app.msime.android;
 
+import app.msime.android.LayoutPolicy;
+
 import android.graphics.Typeface;
 import android.os.Build;
 import android.util.TypedValue;
@@ -26,6 +28,8 @@ final class ImeCandidates {
     private int accentSoft;
     private int accentText;
     private Typeface candidateTypeface;
+    /** 整面展开网格；滚动视图随键盘视图重建时跟着换。 */
+    private ImeCandidateGrid expandedGrid;
 
     ImeCandidates(MSIMEInputService s) {
         this.s = s;
@@ -76,14 +80,14 @@ final class ImeCandidates {
         applyCandidateTypeface(button);
         ViewPolicy.setMinimumWidth(button, s.pixels(30));
         ViewPolicy.clearMinimumHeight(button);
-        KeyboardGeometry.setHorizontalPaddingDp(button, s, 11);
+        LayoutPolicy.setHorizontalPaddingDp(button, s, 11);
         ViewPolicy.setLineSpacing(button, 0, 1.0f);
         ViewPolicy.clearFontPadding(button);
         ViewPolicy.clearElevation(button);
     }
 
     private void applyCandidateTypeface(Button button) {
-        button.setTypeface(candidateTypeface,
+        ViewPolicy.setTypeface(button, candidateTypeface,
             button.isSelected() ? Typeface.BOLD : Typeface.NORMAL);
     }
 
@@ -163,6 +167,8 @@ final class ImeCandidates {
             JSONObject current = s.visibleCandidate(slot);
             JSONObject id = current == null ? null : current.optJSONObject("id");
             if (id == null || (!s.candidateManagementEnabled() && !s.candidateGlossInsertionEnabled())) return false;
+            // AI 座位上的占位行没有可管理的词，长按不弹菜单（#6888）；平时它也不可长按，见 updateCandidateButton。
+            if (!AiPendingCandidatePolicy.offersMenu(InputViewValuePolicy.integer(current, "source", -1))) return false;
             String text = s.chineseOutput(InputViewValuePolicy.textOr(current, "text", ""), s.view);
             return showCandidateMenu(button, slot, id, text);
         });
@@ -181,17 +187,23 @@ final class ImeCandidates {
         int labelLines = MSIMEInputService.candidateLabelLines(annotation);
         ViewPolicy.setFixedLines(button, labelLines);
         s.configureCandidateTextLayout(button, labelLines);
-        KeyboardGeometry.setKeyTextSize(button, 17);
+        KeyboardTypographyPolicy.setKeyTextSize(button, 17);
         ViewPolicy.setSelected(button, highlighted);
+        // AI 座位上的占位行（Engine 候选来源 12，「…」或「—」）和候选条一样画淡，免得在完整候选列表里像真候选（#6888）。
+        int source = InputViewValuePolicy.integer(candidate, "source", -1);
+        boolean placeholder = AiPendingCandidatePolicy.isPlaceholder(source);
+        button.setAlpha(AiPendingCandidatePolicy.alpha(source));
         expandedCells.add(button);
-        ViewPolicy.setMinimumSize(button, s.pixels(64), s.pixels(44));
-        KeyboardGeometry.setHorizontalPaddingDp(button, s, 10);
+        // 格子宽度由网格的列决定（CandidateGridPolicy），这里只量自然宽度。Button 默认样式自带 88 dp 的 minWidth，View 级的 setMinimumWidth 盖不掉它：每格至少 88 dp，手机上一行只放得下三格，右边空出一截。
+        ViewPolicy.clearMinimumWidth(button);
+        ViewPolicy.setMinimumHeight(button, s.pixels(44));
+        LayoutPolicy.setHorizontalPaddingDp(button, s, 10);
         // The completed keyboard tree is styled once by MSIMEInputService.render().
         // Styling here would be repeated immediately after this button is attached.
         long index = id == null ? -1
             : CandidateGlossPolicy.strictOr(id.opt("index"), -1);
-        button.setContentDescription(index < 0 ? "候选" : "候选 " + (index + 1) + "："
-            + text + s.candidateAccessibilitySuffix(candidate, typed));
+        button.setContentDescription(index < 0 ? "候选" : AiPendingCandidatePolicy.description(source,
+            "候选 " + (index + 1) + "：", text, s.candidateAccessibilitySuffix(candidate, typed)));
         if (Build.VERSION.SDK_INT >= 30)
             button.setStateDescription(highlighted ? "已选中" : "未选中");
         if (id == null || index < 0) {
@@ -199,7 +211,8 @@ final class ImeCandidates {
         } else {
             ViewPolicy.bindClick(button, () -> {
                 s.imeKeyFeedback.playFeedback(button);
-                if (s.session == 0
+                // 点占位行什么也不发生：Engine 本来就不上屏，这里连面板也不收起，用户还在看完整列表（#6888）。
+                if (placeholder || s.session == 0
                         || CandidateGlossPolicy.strictOr(id.opt("session"), Long.MIN_VALUE)
                             != s.session) return;
                 s.candidatePanelOpen = false;
@@ -210,7 +223,8 @@ final class ImeCandidates {
                         MSIMEInputService.strictCandidateLong(id, "index")));
                 } catch (JSONException | LinkageError error) { s.fail(); }
             });
-            button.setOnLongClickListener(ignored -> {
+            // 占位行不挂长按：没有可管理的词，读屏也不该提示长按（#6888）。
+            if (AiPendingCandidatePolicy.offersMenu(source)) button.setOnLongClickListener(ignored -> {
                 if (!s.candidateManagementEnabled() && !s.candidateGlossInsertionEnabled()) return false;
                 return showCandidateMenu(button, -1, id, text, candidate, true);
             });
@@ -223,7 +237,7 @@ final class ImeCandidates {
         KeyboardPressButton button = candidateButton();
         button.setKeyboardRole(KeyboardKeyRole.ACCENT);
         ViewPolicy.setTextSizeLabel(button, label, sizeSp);
-        KeyboardGeometry.setKeyTextSize(button, sizeSp);
+        KeyboardTypographyPolicy.setKeyTextSize(button, sizeSp);
         button.setContentDescription(description);
         ViewPolicy.bindClick(button, () -> {
             s.imeKeyFeedback.playFeedback(button);
@@ -243,7 +257,7 @@ final class ImeCandidates {
             // The normal keyboard render reaches this method on every keystroke. The panel is
             // normally already hidden by closeCandidatePanel(); avoid traversing and clearing an
             // empty subtree until the next open actually needs to rebuild it.
-            if (s.expandedCandidates.getVisibility() != View.GONE) {
+            if (!ViewPolicy.isGone(s.expandedCandidates)) {
                 ViewPolicy.hide(s.expandedCandidates);
                 ViewPolicy.hide(s.expandedCandidateScroll);
             }
@@ -253,7 +267,7 @@ final class ImeCandidates {
         }
         // 全拼九键的三栏面板：选拼音、⌫、筛选换了一代候选时不收起，重新取完整候选再画；组字结束时 eligible 为假，落到下面按代次收起。
         if (s.imeNineKeyPanel.eligible() && s.imeNineKeyPanel.refreshSnapshot()) {
-            if (s.expandedCandidates.getVisibility() != View.GONE) {
+            if (!ViewPolicy.isGone(s.expandedCandidates)) {
                 s.expandedCandidates.removeAllViews();
                 ViewPolicy.hide(s.expandedCandidates);
                 ViewPolicy.hide(s.expandedCandidateScroll);
@@ -272,27 +286,20 @@ final class ImeCandidates {
         }
         ViewPolicy.show(s.expandedCandidateScroll);
         ViewPolicy.show(s.expandedCandidates);
-        KeyboardGeometry.setSymmetricPaddingDp(s.expandedCandidates, s, 8, 6);
+        LayoutPolicy.setSymmetricPaddingDp(s.expandedCandidates, s, 8, 6);
         JSONArray entries = s.candidatePanelSnapshot.optJSONArray("candidates");
         int count = entries == null ? 0 : entries.length();
         String reading = InputViewValuePolicy.textOr(s.candidatePanelSnapshot, "reading", "");
         String compositionText = reading.isEmpty()
             ? InputViewValuePolicy.textOr(s.candidatePanelSnapshot, "preedit", "") : reading;
-        // 设计的网格不画标题；组合文本和候选总数留在网格的描述里给读屏。
-        CandidateWrapLayout list = new CandidateWrapLayout(s, s.pixels(6));
-        list.setContentDescription("完整候选列表；" + compositionText + "；" + count + " 个候选");
-        if (entries != null) {
-            for (int index = 0; index < entries.length(); index++) {
-                JSONObject candidate = entries.optJSONObject(index);
-                if (candidate == null) continue;
-                Button button = expandedCandidateButton(candidate);
-                list.addView(button, new android.view.ViewGroup.LayoutParams(
-                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT, s.pixels(44)));
-            }
-        }
-        s.expandedCandidates.addView(list, KeyboardGeometry.weightedWidthParams(1));
+        // 设计的网格不画标题；组合文本和候选总数留在网格的描述里给读屏。格子分批建，滚到接近底部再追加（#6471）。
+        if (expandedGrid == null || !expandedGrid.drives(s.expandedCandidateScroll))
+            expandedGrid = new ImeCandidateGrid(s, s.expandedCandidateScroll, true);
+        CandidateWrapLayout list = expandedGrid.build(s.candidatePanelSnapshot, entries,
+            "完整候选列表；" + compositionText + "；" + count + " 个候选");
+        s.expandedCandidates.addView(list, LayoutPolicy.weightedWidthParams(1));
         // 底部 返回 + ⌫，各 40 dp 高、功能键底色。
-        LinearLayout footer = KeyboardGeometry.row(s);
+        LinearLayout footer = LayoutPolicy.row(s);
         KeyboardPressButton close = expandedActionButton("返回", 15, "收起候选面板", () -> {
             s.closeCandidatePanel();
             s.render();
@@ -301,12 +308,12 @@ final class ImeCandidates {
             s.closeCandidatePanel();
             s.deleteFromHandwriting();
         });
-        LinearLayout.LayoutParams closeParams = KeyboardGeometry.weightedHeightParams(s, 40, 1);
-        LinearLayout.LayoutParams deleteParams = KeyboardGeometry.weightedHeightParams(s, 40, 1);
+        LinearLayout.LayoutParams closeParams = LayoutPolicy.weightedHeightParams(s, 40, 1);
+        LinearLayout.LayoutParams deleteParams = LayoutPolicy.weightedHeightParams(s, 40, 1);
         deleteParams.setMarginStart(s.pixels(6));
         footer.addView(close, closeParams);
         footer.addView(delete, deleteParams);
-        LinearLayout.LayoutParams footerParams = KeyboardGeometry.matchWidthWrapParams();
+        LinearLayout.LayoutParams footerParams = LayoutPolicy.matchWidthWrapParams();
         footerParams.topMargin = s.pixels(6);
         s.expandedCandidates.addView(footer, footerParams);
     }

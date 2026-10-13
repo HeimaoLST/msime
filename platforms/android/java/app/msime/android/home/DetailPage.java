@@ -1,5 +1,8 @@
 package app.msime.android.home;
 
+import app.msime.android.DimensionPolicy;
+
+import app.msime.android.ThemeColorPolicy;
 import android.animation.ValueAnimator;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
@@ -10,9 +13,6 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.core.graphics.Insets;
-import androidx.core.view.ViewCompat;
-import androidx.core.view.WindowInsetsCompat;
 import androidx.core.widget.NestedScrollView;
 import app.msime.android.HostDeepLink;
 import app.msime.android.R;
@@ -62,7 +62,7 @@ public abstract class DetailPage extends HomeTabFragment {
         largeTitle = view.findViewById(R.id.ms_detail_title);
         barTitle = view.findViewById(R.id.ms_detail_bar_title);
         bar = view.findViewById(R.id.ms_detail_bar);
-        ViewPolicy.setBackgroundColor(bar, Ui.page(requireContext()));
+        ViewPolicy.setBackgroundColor(bar, ThemeColorPolicy.page(requireContext()));
         bar.getBackground().setAlpha(0);
         collapsed = false;
         setTitle(title());
@@ -73,21 +73,12 @@ public abstract class DetailPage extends HomeTabFragment {
             () -> requireActivity().getOnBackPressedDispatcher().onBackPressed());
 
         NestedScrollView scroll = view.findViewById(R.id.ms_detail_scroll);
-        int threshold = Ui.dp(requireContext(), Ui.COLLAPSE_THRESHOLD);
+        int threshold = DimensionPolicy.pixels(requireContext(), Ui.COLLAPSE_THRESHOLD);
         scroll.setOnScrollChangeListener((NestedScrollView.OnScrollChangeListener)
             (ignored, x, y, oldX, oldY) -> setCollapsed(y > threshold, true));
 
         // home_content 已经让开了状态栏和左右的刘海，这里只管底部：内容要能滚到底部导航栏（80dp 加手势区）之上，键盘弹出时再让到键盘之上。
-        int base = Ui.dp(requireContext(), Ui.PAGE_PADDING_BOTTOM);
-        int tabs = Ui.dp(requireContext(), Ui.TAB_BAR_HEIGHT);
-        ViewCompat.setOnApplyWindowInsetsListener(scroll, (target, insets) -> {
-            Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
-            Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
-            int bottom = Ui.bottomContentInset(bars.bottom, tabs, ime.bottom, base);
-            Ui.setBottomPadding(target, bottom);
-            return insets;
-        });
-        ViewCompat.requestApplyInsets(scroll);
+        PageInsetsPolicy.bind(scroll);
 
         Bundle args = getArguments();
         buildContent(view.findViewById(R.id.ms_detail_column), args == null ? new Bundle() : args);
@@ -137,6 +128,7 @@ public abstract class DetailPage extends HomeTabFragment {
         barFade.addUpdateListener(animation -> fill.setAlpha((int) animation.getAnimatedValue()));
         barFade.start();
         // 收起后读屏要能从顶栏读到标题，展开时标题在大标题那里。
-        barTitle.setImportantForAccessibility(value ? View.IMPORTANT_FOR_ACCESSIBILITY_YES : View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        ViewPolicy.setImportantForAccessibility(barTitle,
+            value ? View.IMPORTANT_FOR_ACCESSIBILITY_YES : View.IMPORTANT_FOR_ACCESSIBILITY_NO);
     }
 }

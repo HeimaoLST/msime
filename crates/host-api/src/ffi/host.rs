@@ -58,6 +58,20 @@ pub unsafe extern "C" fn msime_client_resolve_font_families(
     })
 }
 
+/// The installed font family names, from the same catalog the shared app's 刷新字体列表 reads
+/// (`list_font_families` in the Tauri shell): sorted, without repeats, each a bounded display name.
+/// Fails with `unsupported` on a host without a catalog and `font_catalog` / `font_catalog_limit`
+/// when enumeration fails or exceeds its bound. Enumerates the system's fonts, so call it off a
+/// UI thread.
+#[no_mangle]
+pub extern "C" fn msime_client_list_font_families() -> *mut c_char {
+    response(|| {
+        system_fonts::list()
+            .map(|names| json!(names))
+            .map_err(str::to_owned)
+    })
+}
+
 /// Resolve a shared surface route so a native host launches the shared shell by
 /// name instead of hardcoding window labels. Returns the canonical route plus
 /// the panel label, query and geometry, or an error for an unknown route.
@@ -201,6 +215,43 @@ pub unsafe extern "C" fn msime_client_ensure_anonymous_account(
     })
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountAccessTokenRequest {
+    directory: String,
+    #[serde(default)]
+    rejected_token: Option<String>,
+}
+
+/// 输入法进程取账号服务的访问令牌（[`msime_client_core::account::shared_access_token`]）：设置应用登录的账号优先，没有登录时用本机匿名账号。`request` 是 UTF-8 JSON `{"directory": "<绝对路径>", "rejected_token": "<可选，服务端刚以 401 拒绝的令牌>"}`，`directory` 是设置应用和输入法共用的账号目录，Windows 上是 `%LOCALAPPDATA%\<本版本的用户目录>\account`，与 [`msime_client_ensure_anonymous_account`] 的目录相同。成功时 value 是 `{"access_token", "user_id", "anonymous"}`，失败时 error 是账号错误码（例如没有任何会话时的 `account_unauthorized`）。响应里有凭据：不要写进日志，用完交给 `msime_client_string_free`。刷新令牌时会阻塞网络，调用方放在输入线程以外。
+/// # Safety
+/// `request` 指向 `length` 个可读的 UTF-8 字节，空指针被拒绝。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_account_access_token(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        if request.is_null() || length == 0 || length > 16_384 {
+            return Err("account_invalid".into());
+        }
+        // SAFETY: 由调用方契约保证。
+        let bytes = unsafe { std::slice::from_raw_parts(request, length) };
+        let request: AccountAccessTokenRequest =
+            serde_json::from_slice(bytes).map_err(|_| "account_invalid")?;
+        let directory = std::path::Path::new(&request.directory);
+        if !directory.is_absolute() {
+            return Err("account_invalid".into());
+        }
+        msime_client_core::account::shared_access_token(
+            directory,
+            request.rejected_token.as_deref(),
+        )
+        .map_err(|error| error.code().to_owned())
+        .and_then(|token| serde_json::to_value(token).map_err(|_| "account_unavailable".into()))
+    })
+}
+
 /// The shared preference defaults, as the document a host would have to produce.
 ///
 /// A host that patches one key into a nested preference object needs the rest of
@@ -246,6 +297,7 @@ pub unsafe extern "C" fn msime_client_mobile_voice_configuration(
         .map(|value| {
             json!({
                 "provider": value.provider,
+                "requestFormat": value.request_format,
                 "endpoint": value.endpoint,
                 "model": value.model,
                 "token": value.token,
@@ -279,14 +331,31 @@ pub unsafe extern "C" fn msime_client_mobile_voice_configuration(
     })
 }
 
-/// The global theme picker: every theme id in picker order with its title and palettes, and the default id.
+/// 本库编译到的宿主平台。主题目录按它列出主题、会话按它截断每页候选数：这些接口不带平台参数，而每个原生宿主链接的都是为自己的平台编出的库。
+pub(crate) fn compiled_platform() -> HostPlatform {
+    if cfg!(target_os = "ios") {
+        HostPlatform::Ios
+    } else if cfg!(target_os = "android") {
+        HostPlatform::Android
+    } else if cfg!(target_env = "ohos") {
+        HostPlatform::Harmony
+    } else if cfg!(target_os = "macos") {
+        HostPlatform::Macos
+    } else if cfg!(windows) {
+        HostPlatform::Windows
+    } else {
+        HostPlatform::Linux
+    }
+}
+
+/// 全局主题选择器：本平台提供的主题 id，按选择器顺序，带标题和调色板，以及默认 id。
 ///
-/// `system` and `custom` carry no palettes here: `system` is the host's native tokens, and `custom` is only known once resolved against the user's `custom_theme`. Hosts draw the picker from this and keep no copy of the ids, titles or colours.
+/// 只列出本库编译到的平台提供的主题（`theme::catalog_for`）：`native` 只在 iOS 的库里出现，其他宿主的选择器因此不必各自过滤。`system`、`native` 和 `custom` 在这里不带调色板：`system` 和 `native` 由宿主自己取色，`custom` 要按用户的 `custom_theme` 解析后才知道。宿主据此画选择器，不保存 id、标题或颜色的副本。
 #[no_mangle]
 pub extern "C" fn msime_client_theme_catalog() -> *mut c_char {
     response(|| {
         Ok(serde_json::json!({
-            "themes": msime_client_core::skin::theme::catalog(),
+            "themes": msime_client_core::skin::theme::catalog_for(compiled_platform()),
             "default": msime_client_core::skin::theme::GlobalTheme::default(),
         }))
     })
@@ -321,7 +390,7 @@ fn requested_season(
 
 /// Resolve the colours a host draws for a global theme.
 ///
-/// The request carries the two preference fields as the host read them, so this takes no preferences directory and does no preference I/O: `global_theme` (one of the seven ids; any other id, a retired skin id included, fails the request as `invalid theme request`) and `custom_theme` (optional, validated as strictly as the preference itself). `dark` is the host's effective mode for the surface being drawn, and `layout` (`horizontal` or `vertical`) its candidate layout: a package is drawn only in a layout and a mode its manifest declares, so no host keeps a gate of its own. For `custom` with a `custom_theme.candidate_skin`, the host names where that package comes from with at most one of `skins_directory` (an absolute skin root; the package is loaded and validated as `msime_client_skin_package` does; every host that scans the root, which is every host but Linux) or `package` (one entry of the published `candidate_skin_catalog`, which only the Linux hosts read). A `package` that is not such an entry, a `SkinSummary` from `msime_client_skin_catalog` included, fails the call: that is a host bug, and reading it anyway would drop its declared modes and selection bar without a word. A package that is missing from the root, invalid on disk or not the one `candidate_skin` names is left out rather than failing the call: the theme still resolves, over its base.
+/// 请求带着宿主读到的两个偏好字段，所以这里不需要偏好目录，也不做偏好 I/O：`global_theme`（`GlobalTheme::ALL` 的八个 id 之一，本平台目录里没有的 `native` 也接受，解析结果与 `system` 相同、只是 `id` 为 `native`；其他 id，包括已停用的皮肤 id，都以 `invalid theme request` 失败）和 `custom_theme`（可省略，按偏好本身同样严格地校验）。`dark` 是宿主正在绘制的界面当前的明暗模式，`layout`（`horizontal` 或 `vertical`）是它的候选排列：皮肤包只在清单声明的排列和模式下绘制，宿主不另设一道关卡。`dark` 同时决定取哪个槽位：深色模式取 `custom_theme.candidate_skin_dark`，没设时与浅色模式一样取 `custom_theme.candidate_skin`；选中的包只在它清单 `base` 的明暗下绘制（见 `theme::resolve`）。`custom` 主题要用皮肤包时，宿主最多用下面两者之一说明包从哪里来：`skins_directory`（皮肤根目录的绝对路径；包按 `msime_client_skin_package` 的规则加载和校验；除 Linux 外的宿主都扫描根目录）或 `package`（已发布的 `candidate_skin_catalog` 中的一项，只有 Linux 宿主读它，宿主要传当前模式槽位指名的那一项）。`package` 不是这样的一项时（包括 `msime_client_skin_catalog` 给出的 `SkinSummary`）调用失败：那是宿主的缺陷，照读会悄悄丢掉它声明的模式和选中条。根目录里没有、磁盘上无效、或不是当前槽位指名的那个包会被略过而不是让调用失败：主题照常在它的底上解析。
 /// # Safety
 /// `request` points to `length` readable UTF-8 JSON bytes. Null is rejected.
 /// The returned response must be released with `msime_client_string_free`.
@@ -353,10 +422,10 @@ pub unsafe extern "C" fn msime_client_resolve_theme(
             return Err("skin directory must be absolute".into());
         }
         let theme = request.global_theme;
+        // 按当前明暗取槽位：深色模式先取 `candidate_skin_dark`。
         let wanted = request
             .custom_theme
-            .candidate_skin
-            .as_deref()
+            .candidate_skin_for(request.dark)
             .filter(|_| theme == msime_client_core::skin::theme::GlobalTheme::Custom);
         let entry = request
             .package
@@ -468,6 +537,85 @@ pub unsafe extern "C" fn msime_client_restore_default_preferences(
     })
 }
 
+/// 「导出设置」：读出偏好目录里的当前偏好，返回设置文件的全文（字符串，见 `msime_client_core::settings_document`）。语音、AI 辅助和翻译服务的配置与密钥、诊断日志、使用统计和剪贴板历史开关不写进文件。宿主负责让用户选位置并写盘。
+/// # Safety
+/// `directory` 必须指向 `length` 个可读字节，空指针被拒绝。
+/// 返回的响应必须交给 `msime_client_string_free` 释放。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_export_settings(
+    directory: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        if directory.is_null() || length > 16384 {
+            return Err("invalid preferences directory buffer".into());
+        }
+        // SAFETY: 由上面写明的调用方契约保证。
+        let bytes = unsafe { std::slice::from_raw_parts(directory, length) };
+        let directory = super::parse_absolute_path(
+            bytes,
+            "invalid preferences directory encoding",
+            "preferences directory must be absolute",
+        )?;
+        let snapshot = PreferencesStore::new(directory)
+            .load()
+            .map_err(|e| e.to_string())?;
+        msime_client_core::settings_document::export_document(&snapshot.preferences)
+            .map(Value::String)
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// 「导入设置」：把用户选的设置文件换算成偏好（本机的服务配置与密钥、诊断日志、使用统计和剪贴板历史开关保留，按本目录所属的版本收窄输入方案），再按 `expected_revision` 比较并交换写回，返回新的快照。剪贴板历史开关不随文件变，所以导入不会像保存偏好那样清空已存的剪贴板历史，保存成功就是整个导入成功。失败时的错误是 `settings_document_invalid`（不是设置文件）、`settings_document_macos`（macOS 原生设置窗口导出的文件）、`settings_document_unsupported`（更新版本的文件或读不懂的设置）、`settings_conflict`（设置已在别处更新）之一，或者存储错误的说明；失败时什么也不写。
+/// # Safety
+/// `directory` 必须指向 `directory_length` 个可读字节，`document` 必须指向 `document_length` 个可读字节，空指针被拒绝。
+/// 返回的响应必须交给 `msime_client_string_free` 释放。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_import_settings(
+    directory: *const u8,
+    directory_length: usize,
+    expected_revision: u64,
+    document: *const u8,
+    document_length: usize,
+) -> *mut c_char {
+    use msime_client_core::settings_document;
+    response(|| {
+        if directory.is_null() || document.is_null() || directory_length > 16384 {
+            return Err("invalid preferences directory buffer".into());
+        }
+        if document_length > settings_document::MAX_DOCUMENT_BYTES {
+            return Err(
+                settings_document::SettingsDocumentError::NotSettingsDocument
+                    .code()
+                    .into(),
+            );
+        }
+        // SAFETY: 由上面写明的调用方契约保证。
+        let directory_bytes = unsafe { std::slice::from_raw_parts(directory, directory_length) };
+        let directory = super::parse_absolute_path(
+            directory_bytes,
+            "invalid preferences directory encoding",
+            "preferences directory must be absolute",
+        )?;
+        // SAFETY: 由上面写明的调用方契约保证。
+        let document = unsafe { std::slice::from_raw_parts(document, document_length) };
+        let store = PreferencesStore::new(directory);
+        let current = store.load().map_err(|e| e.to_string())?;
+        let imported =
+            settings_document::import_document(document, &current.preferences, store.edition())
+                .map_err(|error| error.code().to_owned())?;
+        let saved = store
+            .save(expected_revision, imported)
+            .map_err(|error| match error {
+                msime_client_core::preferences::PreferencesError::Conflict => {
+                    "settings_conflict".to_owned()
+                }
+                error => error.to_string(),
+            })?;
+        serde_json::to_value(saved).map_err(|e| e.to_string())
+    })
+}
+
 /// Per-key double-pinyin hint text for one profile, read out of the Engine's own
 /// profile tables.
 ///
@@ -533,6 +681,38 @@ pub unsafe extern "C" fn msime_client_shuangpin_zero_initials(
     })
 }
 
+/// 九键双拼方案在宿主看来的样子，见 [`crate::nine_key_shuangpin_layout`]。键面和设置页的编辑器都从这里取，不另存键位。
+/// # Safety
+/// `request` points to `length` readable UTF-8 bytes holding `{"profile": ..., "table"?: ...}`. Null is rejected.
+/// The returned response must be released with `msime_client_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_nine_key_shuangpin_layout(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        profile: msime_client_core::preferences::NineKeyShuangpinProfile,
+        #[serde(default)]
+        table: msime_client_core::preferences::ShuangpinCustomProfile,
+    }
+    response(|| {
+        if request.is_null() || length > 16384 {
+            return Err("invalid nine-key shuangpin request buffer".into());
+        }
+        // SAFETY: guaranteed by the documented caller contract; size checked above.
+        let bytes = unsafe { std::slice::from_raw_parts(request, length) };
+        let request: Request = serde_json::from_slice(bytes)
+            .map_err(|error| format!("invalid nine-key shuangpin request: {error}"))?;
+        serde_json::to_value(crate::nine_key_shuangpin_layout(
+            request.profile,
+            &request.table,
+        ))
+        .map_err(|error| error.to_string())
+    })
+}
+
 /// Load the shared store on a worker thread; no session handle is accessed.
 /// # Safety
 /// `directory` points to `length` readable UTF-8 bytes. Null is rejected.
@@ -572,6 +752,9 @@ pub unsafe extern "C" fn msime_client_typing_statistics(
     struct Request {
         directory: String,
         action: StatisticsAction,
+        /// 设置页要的是状态：load、set_enabled、set_retention 和 reset 回答 `{statistics, availability, lastWrittenMs}`（client-core 的 `TypingStatisticsStatus`），而不只是统计本身。
+        #[serde(default)]
+        status: bool,
     }
     #[derive(Deserialize)]
     #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -635,11 +818,36 @@ pub unsafe extern "C" fn msime_client_typing_statistics(
             return Err("invalid typing statistics directory".into());
         }
         let store = TypingStatisticsStore::new(request.directory);
-        match request.action {
-            StatisticsAction::Load => {
-                serde_json::to_value(store.load().map_err(|error| error.to_string())?)
-                    .map_err(|_| "typing statistics response failed".to_owned())
+        let status = request.status;
+        if status
+            && !matches!(
+                request.action,
+                StatisticsAction::Load
+                    | StatisticsAction::SetEnabled { .. }
+                    | StatisticsAction::SetRetention { .. }
+                    | StatisticsAction::Reset
+            )
+        {
+            return Err(
+                "typing statistics status applies to load, set_enabled, set_retention and reset"
+                    .into(),
+            );
+        }
+        // 统计本身，或者设置页要的状态。
+        let answer = |statistics: msime_client_core::typing_statistics::TypingStatistics| {
+            if status {
+                serde_json::to_value(
+                    store
+                        .status(statistics)
+                        .map_err(|error| error.to_string())?,
+                )
+            } else {
+                serde_json::to_value(statistics)
             }
+            .map_err(|_| "typing statistics response failed".to_owned())
+        };
+        match request.action {
+            StatisticsAction::Load => answer(store.load().map_err(|error| error.to_string())?),
             StatisticsAction::Record {
                 text,
                 source,
@@ -690,13 +898,12 @@ pub unsafe extern "C" fn msime_client_typing_statistics(
                 let recorded = store.record_skin(&id).map_err(|error| error.to_string())?;
                 Ok(json!({"recorded": recorded}))
             }
-            StatisticsAction::SetEnabled { enabled } => serde_json::to_value(
+            StatisticsAction::SetEnabled { enabled } => answer(
                 store
                     .set_enabled(enabled)
                     .map_err(|error| error.to_string())?,
-            )
-            .map_err(|_| "typing statistics response failed".to_owned()),
-            StatisticsAction::SetRetention { retention, day } => serde_json::to_value(
+            ),
+            StatisticsAction::SetRetention { retention, day } => answer(
                 store
                     .set_retention(
                         msime_client_core::typing_statistics::StatisticsRetention::parse(
@@ -705,12 +912,8 @@ pub unsafe extern "C" fn msime_client_typing_statistics(
                         &day,
                     )
                     .map_err(|error| error.to_string())?,
-            )
-            .map_err(|_| "typing statistics response failed".to_owned()),
-            StatisticsAction::Reset => {
-                serde_json::to_value(store.reset().map_err(|error| error.to_string())?)
-                    .map_err(|_| "typing statistics response failed".to_owned())
-            }
+            ),
+            StatisticsAction::Reset => answer(store.reset().map_err(|error| error.to_string())?),
         }
     })
 }
@@ -1457,6 +1660,7 @@ enum MobileClipboardAction {
     Capture { text: String },
     SetPinned { text: String, pinned: bool },
     Remove { text: String },
+    Replace { text: String, replacement: String },
     Clear,
 }
 
@@ -1527,6 +1731,31 @@ pub unsafe extern "C" fn msime_client_mobile_clipboard_history(
                     .map_err(|_| "mobile clipboard removal failed")?;
                 Ok(json!({
                     "removed": removed,
+                    "entries": history.entries()
+                }))
+            }
+            MobileClipboardAction::Replace { text, replacement } => {
+                if text.is_empty()
+                    || text.len() > msime_client_core::clipboard::MAX_MOBILE_TEXT_BYTES
+                {
+                    return Err("invalid mobile clipboard entry".into());
+                }
+                use msime_client_core::clipboard::ReplaceOutcome;
+                let outcome = history
+                    .replace(&text, replacement)
+                    .map_err(|_| "mobile clipboard replace failed")?;
+                // 改成已存在的文字时两条合并成一条，宿主据 merged 告诉用户；旧条目不在了或新文字不合规时 replaced 为 false，reason 说明是哪一种。
+                let reason = match outcome {
+                    ReplaceOutcome::NotFound => Some("not_found"),
+                    ReplaceOutcome::Invalid => Some("invalid"),
+                    ReplaceOutcome::Replaced
+                    | ReplaceOutcome::Merged
+                    | ReplaceOutcome::Unchanged => None,
+                };
+                Ok(json!({
+                    "replaced": reason.is_none(),
+                    "merged": outcome == ReplaceOutcome::Merged,
+                    "reason": reason,
                     "entries": history.entries()
                 }))
             }
@@ -1624,6 +1853,247 @@ pub unsafe extern "C" fn msime_client_remove_clipboard_history(
     })
 }
 
+const MAX_DESKTOP_CLIPBOARD_REQUEST_BYTES: usize = 131_072;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DesktopClipboardRequest {
+    directory: String,
+    action: DesktopClipboardAction,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+enum DesktopClipboardAction {
+    List,
+    Sync,
+    Clear,
+    SetPinned { text: String, pinned: bool },
+    Remove { text: String },
+}
+
+/// The desktop clipboard history as the 剪贴板 settings page manages it, with the timestamps and pins `msime_client_load_clipboard_history` leaves out. Every operation answers with the history as it now stands, empty while the preference is off; see the header for the operations and codes.
+/// # Safety
+/// `request` points to `length` readable JSON bytes. Null is rejected.
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_desktop_clipboard_history(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    use crate::clipboard_history::{self, ClipboardHistoryError};
+    use msime_client_core::clipboard::{ClipboardHistoryStore, MAX_TEXT_BYTES};
+    response(|| {
+        const INVALID: &str = "clipboard_history_invalid";
+        const UNAVAILABLE: &str = "clipboard_history_unavailable";
+        if request.is_null() || length > MAX_DESKTOP_CLIPBOARD_REQUEST_BYTES {
+            return Err(INVALID.into());
+        }
+        // SAFETY: guaranteed by the documented caller contract.
+        let bytes = unsafe { std::slice::from_raw_parts(request, length) };
+        let request: DesktopClipboardRequest =
+            serde_json::from_slice(bytes).map_err(|_| INVALID)?;
+        let directory = std::path::Path::new(&request.directory);
+        if !directory.is_absolute() || request.directory.len() > 16384 {
+            return Err(INVALID.into());
+        }
+        let failed = |error: ClipboardHistoryError| match error {
+            ClipboardHistoryError::Disabled => "clipboard_history_disabled".to_owned(),
+            ClipboardHistoryError::Unavailable => UNAVAILABLE.to_owned(),
+        };
+        let entry = |text: &str| {
+            if text.is_empty() || text.len() > MAX_TEXT_BYTES {
+                Err(INVALID.to_owned())
+            } else {
+                Ok(())
+            }
+        };
+        let preferences = PreferencesStore::new(directory);
+        let mut history = ClipboardHistoryStore::open(directory.join("clipboard_history.json"));
+        match &request.action {
+            DesktopClipboardAction::List => {}
+            DesktopClipboardAction::Sync => {
+                #[cfg(windows)]
+                let read = clipboard_history::windows_clipboard_text;
+                // Only Windows reads its clipboard here; the other desktops sync in their own shells.
+                #[cfg(not(windows))]
+                let read = || Err::<Option<String>, ()>(());
+                clipboard_history::capture_clipboard(&preferences, read).map_err(failed)?;
+            }
+            DesktopClipboardAction::Clear => history.clear().map_err(|_| UNAVAILABLE)?,
+            DesktopClipboardAction::SetPinned { text, pinned } => {
+                entry(text)?;
+                history.set_pinned(text, *pinned).map_err(|_| UNAVAILABLE)?;
+            }
+            DesktopClipboardAction::Remove { text } => {
+                entry(text)?;
+                history.remove(text).map_err(|_| UNAVAILABLE)?;
+            }
+        }
+        let enabled = clipboard_history::enabled(&preferences).map_err(failed)?;
+        let entries = if enabled {
+            clipboard_history::entries(&mut history).map_err(failed)?
+        } else {
+            Vec::new()
+        };
+        Ok(json!({ "enabled": enabled, "entries": entries }))
+    })
+}
+
+/// One cloud clipboard action over the signed-in account session stored in `directory`, for a settings window that holds no session of its own. Blocks on the network; see the header.
+/// # Safety
+/// `request` points to `length` readable JSON bytes. Null is rejected.
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_account_cloud_clipboard(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    use msime_client_core::account::{
+        AccountSessionFileLayout, BackendAccountClient, BackendAccountSession,
+        FileAccountSessionStorage,
+    };
+    response(|| {
+        const INVALID: &str = "invalid_cloud_clipboard";
+        if request.is_null() || length > MAX_DESKTOP_CLIPBOARD_REQUEST_BYTES {
+            return Err(INVALID.into());
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct CloudRequest {
+            directory: String,
+            action: Value,
+        }
+        // SAFETY: guaranteed by the documented caller contract.
+        let bytes = unsafe { std::slice::from_raw_parts(request, length) };
+        let request: CloudRequest = serde_json::from_slice(bytes).map_err(|_| INVALID)?;
+        let directory = std::path::Path::new(&request.directory);
+        if !directory.is_absolute() || request.directory.len() > 16384 {
+            return Err(INVALID.into());
+        }
+        crate::cloud_clipboard::validate_request(&request.action).map_err(|_| INVALID)?;
+        let client = BackendAccountClient::new().map_err(|error| error.code().to_owned())?;
+        let session = BackendAccountSession::new(
+            client,
+            FileAccountSessionStorage::new(directory, AccountSessionFileLayout::Native),
+        );
+        crate::cloud_clipboard::account_request(&session, &request.action).map_err(str::to_owned)
+    })
+}
+
+/// 经自建云剪贴板中继答一个动作；中继配置在偏好里。会联网，格式见头文件。
+/// # Safety
+/// `request` 指向 `length` 个可读的 JSON 字节，空指针会被拒绝。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_relay_cloud_clipboard(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        const INVALID: &str = "invalid_cloud_clipboard";
+        if request.is_null() || length > MAX_DESKTOP_CLIPBOARD_REQUEST_BYTES {
+            return Err(INVALID.into());
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RelayRequest {
+            preferences_directory: String,
+            directory: String,
+            #[serde(default)]
+            device_name: Option<String>,
+            action: Value,
+        }
+        // SAFETY: 由文档写明的调用方约定保证。
+        let bytes = unsafe { std::slice::from_raw_parts(request, length) };
+        let request: RelayRequest = serde_json::from_slice(bytes).map_err(|_| INVALID)?;
+        let absolute = |path: &str| path.len() <= 16384 && std::path::Path::new(path).is_absolute();
+        if !absolute(&request.preferences_directory) || !absolute(&request.directory) {
+            return Err(INVALID.into());
+        }
+        crate::cloud_clipboard::validate_relay_request(&request.action).map_err(|_| INVALID)?;
+        let config = crate::cloud_clipboard::configured_relay(std::path::Path::new(
+            &request.preferences_directory,
+        ))
+        .map_err(str::to_owned)?
+        .ok_or("relay_not_configured")?;
+        // 宿主没给名称或给的不能用时，与账号路径一样取计算机名或平台名；驱动登记前还会再清理一遍。
+        let device_name = request
+            .device_name
+            .filter(|name| !name.trim().is_empty() && is_bounded_text(name, 256))
+            .unwrap_or_else(msime_client_core::account::cloud_clipboard_device_name);
+        crate::cloud_clipboard::relay_request(
+            config,
+            std::path::Path::new(&request.directory),
+            &device_name,
+            &request.action,
+        )
+        .map_err(str::to_owned)
+    })
+}
+
+/// 向宿主给出的中继发端到端加密驱动给出的一个请求，答 `{status, body}`。不读偏好、不读写密钥串，会联网，格式见头文件。
+/// # Safety
+/// `request` 指向 `length` 个可读的 JSON 字节，空指针会被拒绝。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_relay_cloud_clipboard_exchange(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        const INVALID: &str = "invalid_cloud_clipboard";
+        if request.is_null() || length > MAX_DESKTOP_CLIPBOARD_REQUEST_BYTES {
+            return Err(INVALID.into());
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ExchangeRequest {
+            url: String,
+            token: String,
+            method: String,
+            path: String,
+            #[serde(default)]
+            body: Option<String>,
+        }
+        // SAFETY: 由文档写明的调用方约定保证。
+        let bytes = unsafe { std::slice::from_raw_parts(request, length) };
+        let request: ExchangeRequest = serde_json::from_slice(bytes).map_err(|_| INVALID)?;
+        // 地址和令牌按偏好里的同一套规则校验：不是 HTTPS（或本机回环的 HTTP）就不发。
+        let config =
+            msime_client_core::clipboard_relay::RelayConfig::new(&request.url, &request.token)
+                .map_err(|error| error.code().to_owned())?;
+        crate::cloud_clipboard::relay_exchange(
+            config,
+            &request.method,
+            &request.path,
+            request.body.as_deref(),
+        )
+        .map_err(str::to_owned)
+    })
+}
+
+/// 云剪贴板该走哪条路：偏好里配置了中继时是 `relay`，否则是 `account`。不联网。
+/// # Safety
+/// `directory` 必须指向 `length` 个可读字节，空指针会被拒绝。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_cloud_clipboard_source(
+    directory: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        if directory.is_null() || length > 16384 {
+            return Err("invalid preferences directory buffer".into());
+        }
+        // SAFETY: 由文档写明的调用方约定保证。
+        let bytes = unsafe { std::slice::from_raw_parts(directory, length) };
+        let directory = super::parse_absolute_path(
+            bytes,
+            "invalid preferences directory encoding",
+            "preferences directory must be absolute",
+        )?;
+        let source = crate::cloud_clipboard::source(std::path::Path::new(directory))
+            .map_err(str::to_owned)?;
+        Ok(json!({ "source": source }))
+    })
+}
+
 /// Try to read preferences without waiting for the writer lock.
 /// # Safety
 /// `directory` must point to `length` readable bytes. Null is rejected.
@@ -1659,6 +2129,38 @@ pub unsafe extern "C" fn msime_client_recover_preferences(
     directory: *const u8,
     length: usize,
 ) -> *mut c_char {
+    // SAFETY: forwarded under the same caller contract.
+    unsafe { recover_preferences_in(directory, length, RecoveryScope::Malformed) }
+}
+
+/// The settings page's explicit 修复配置文件: repair a preferences document `load` rejects for any reason, a newer build's included, backing it up first.
+/// See `PreferencesStore::recover`; a valid or missing document is left untouched. Only call it on the user's request: a document an older build cannot read is usually a newer build's, and the repair keeps only what this schema accepts.
+/// # Safety
+/// `directory` must point to `length` readable bytes. Null is rejected.
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_repair_preferences(
+    directory: *const u8,
+    length: usize,
+) -> *mut c_char {
+    // SAFETY: forwarded under the same caller contract.
+    unsafe { recover_preferences_in(directory, length, RecoveryScope::Unreadable) }
+}
+
+#[derive(Clone, Copy)]
+enum RecoveryScope {
+    /// Only a document that is not well-formed JSON; what input method hosts may do on their own.
+    Malformed,
+    /// Anything `load` rejects; only on the user's request.
+    Unreadable,
+}
+
+/// # Safety
+/// `directory` must point to `length` readable bytes. Null is rejected.
+unsafe fn recover_preferences_in(
+    directory: *const u8,
+    length: usize,
+    scope: RecoveryScope,
+) -> *mut c_char {
     response(|| {
         if directory.is_null() || length > 16384 {
             return Err("invalid preferences directory buffer".into());
@@ -1670,9 +2172,12 @@ pub unsafe extern "C" fn msime_client_recover_preferences(
             "invalid preferences directory encoding",
             "preferences directory must be absolute",
         )?;
-        let outcome = PreferencesStore::new(directory)
-            .recover_malformed()
-            .map_err(|e| e.to_string())?;
+        let store = PreferencesStore::new(directory);
+        let outcome = match scope {
+            RecoveryScope::Malformed => store.recover_malformed(),
+            RecoveryScope::Unreadable => store.recover(),
+        }
+        .map_err(|e| e.to_string())?;
         Ok(match outcome {
             msime_client_core::preferences::RecoveryOutcome::NotNeeded(snapshot) => json!({
                 "recovered": false,

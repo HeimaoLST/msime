@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useId, useState } from "react";
 import type { EditionInfo, InputScheme } from "../index";
 import { Row } from "../core/platform-controls";
 import { ActionButton } from "./action-button";
@@ -141,14 +141,20 @@ export function MacosInputModeEntriesSection({
   );
   const current = missing.find((entry) => entry.scheme === scheme);
 
-  let description: string;
+  let description: ReactNode;
   if (missing.length === 0) {
     description = `输入法菜单里已经有${edition?.display_name ?? fullName}的全部入口。`;
   } else {
-    const where = missing.map((entry) => `「${entry.name}」在「${entry.language}」下`).join("，");
-    description = `${
-      current ? `菜单栏里还没有「${current.name}」，要先把它加进输入法列表才能从菜单栏切过去。` : ""
-    }macOS 只允许你自己添加：点「打开键盘设置」，在「输入法」一行点「编辑…」，再点左下角「+」，在左栏选或搜索对应的语言后添加。还没加入的：${where}。`;
+    description = (
+      <>
+        <span className="block">
+          {current
+            ? `菜单栏里还没有「${current.name}」，到「${current.language}」下添加后才能从菜单栏切过去。`
+            : `还有 ${missing.length} 个入口没加进输入法菜单。`}
+        </span>
+        <MissingEntries entries={missing} />
+      </>
+    );
   }
 
   const openSettings = () => {
@@ -166,5 +172,57 @@ export function MacosInputModeEntriesSection({
         <ActionButton action={openSettings} className="secondary" label="打开键盘设置" />
       )}
     </Row>
+  );
+}
+
+/** 还没加入的入口默认收起，展开后先说怎么添加，再按系统设置「添加」对话框里的语言分组，每组一行：语言在前，入口名排在后面，顺序与输入法菜单一致。全版本缺的入口可以有八九个，平铺开来会把这一行撑成一大段，而大多数人只用其中一两个。展开状态放在 React 里（`aria-expanded` 的按钮加 `hidden`），不用 `<details>`：装好的设置应用里曾看到它一打开就是展开的，原因没查清，React 状态的行为可以在测试里点按钮核对。 */
+function MissingEntries({ entries }: { entries: readonly ModeEntry[] }) {
+  const [open, setOpen] = useState(false);
+  const listId = useId();
+  const groups = new Map<string, ModeEntry[]>();
+  for (const entry of entries)
+    groups.set(entry.language, [...(groups.get(entry.language) ?? []), entry]);
+  return (
+    <>
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={listId}
+        onClick={() => setOpen(!open)}
+        className="mt-1 inline-flex cursor-pointer items-center gap-1 border-0 bg-transparent p-0 [font:inherit] [color:var(--p-accent-text)]"
+      >
+        {open ? "收起" : `查看怎么添加和全部 ${entries.length} 个入口`}
+        <span
+          aria-hidden="true"
+          className={`transition-transform motion-reduce:transition-none ${open ? "-rotate-90" : "rotate-90"}`}
+        >
+          ›
+        </span>
+      </button>
+      <span id={listId} hidden={!open} className="block">
+        <span className="mt-1.5 block">
+          {
+            "macOS 只能手动添加：点「打开键盘设置」，在「输入法」一行点「编辑…」，再点左下角「+」，在左栏按下面的语言找。"
+          }
+        </span>
+        <span role="list" aria-label="还没加入的入口" className="mt-2 flex flex-col gap-1.5">
+          {[...groups].map(([language, members]) => (
+            <span key={language} role="listitem" className="flex items-start gap-1.5">
+              <span className="w-16 shrink-0 py-0.5">{language}</span>
+              <span className="flex flex-wrap gap-1.5">
+                {members.map((entry) => (
+                  <span
+                    key={entry.mode}
+                    className="rounded-[var(--p-seg-item-r)] bg-[var(--p-seg-bg)] px-2 py-0.5 whitespace-nowrap [color:var(--p-text)]"
+                  >
+                    {entry.name}
+                  </span>
+                ))}
+              </span>
+            </span>
+          ))}
+        </span>
+      </span>
+    </>
   );
 }

@@ -1,5 +1,7 @@
 package app.msime.android;
 
+import app.msime.android.LayoutPolicy;
+
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.view.MotionEvent;
@@ -119,6 +121,7 @@ final class ImeGlideTyping implements KeyboardKeyArea.GlideTracker {
             ShuangpinHintButton key = s.shuangpinKeyButtons.get(index);
             if (key.getWindowToken() == null || key.getWidth() <= 0 || key.getHeight() <= 0) continue;
             int slot = (input.charAt(0) - 'a') * 4;
+            // 同一个字母只量第一个键：分离式键盘右半边重复的 G、V（#6022）建得比左边那个晚，滑行只认左边的。交给 Engine 的键位每个字母只有一个中心点，右边那个在滑行里和空隙一样不算字母键。
             if (keyRects[slot + 2] > 0) continue;
             rect.set(0, 0, key.getWidth(), key.getHeight());
             area.offsetDescendantRectToMyCoords(key, rect);
@@ -185,7 +188,7 @@ final class ImeGlideTyping implements KeyboardKeyArea.GlideTracker {
         }
         xs[count] = x;
         ys[count] = y;
-        times[count] = Math.max(0, eventTime - downTime);
+        times[count] = BoundsPolicy.nonNegative(eventTime - downTime);
         count++;
         if (gliding && trail != null) trail.lineTo(x + trailOffsetX, y + trailOffsetY);
     }
@@ -198,7 +201,7 @@ final class ImeGlideTyping implements KeyboardKeyArea.GlideTracker {
         if (layer == null) return;
         if (trail == null || trail.getParent() != layer) {
             trail = new GlideTrailView(s);
-            layer.addView(trail, KeyboardGeometry.frameMatchParentParams());
+            layer.addView(trail, LayoutPolicy.frameMatchParentParams());
         }
         area.getLocationInWindow(areaLocation);
         layer.getLocationInWindow(trailLocation);

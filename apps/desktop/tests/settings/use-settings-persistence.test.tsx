@@ -49,7 +49,6 @@ test("does not start a second settings load while reload is in flight", async ()
     return useSettingsPersistence({
       client,
       mobile: true,
-      macos: false,
       mounted,
       snapshot: currentSnapshot,
       draft,
@@ -59,12 +58,6 @@ test("does not start a second settings load while reload is in flight", async ()
       setError: vi.fn(),
       setNotice: vi.fn(),
       setRecoveredBackup: vi.fn(),
-      macosShuangpinKeymap: undefined,
-      savedMacosShuangpinKeymap: undefined,
-      setSavedMacosShuangpinKeymap: vi.fn(),
-      macosWubiAutoCommitUnique: undefined,
-      savedMacosWubiAutoCommitUnique: undefined,
-      setSavedMacosWubiAutoCommitUnique: vi.fn(),
     });
   });
 
@@ -109,7 +102,6 @@ test("clears the previous settings while a replacement client is loading", async
     return useSettingsPersistence({
       client: activeClient,
       mobile: false,
-      macos: false,
       mounted,
       snapshot: currentSnapshot,
       draft,
@@ -119,12 +111,6 @@ test("clears the previous settings while a replacement client is loading", async
       setError: vi.fn(),
       setNotice: vi.fn(),
       setRecoveredBackup: vi.fn(),
-      macosShuangpinKeymap: undefined,
-      savedMacosShuangpinKeymap: undefined,
-      setSavedMacosShuangpinKeymap: vi.fn(),
-      macosWubiAutoCommitUnique: undefined,
-      savedMacosWubiAutoCommitUnique: undefined,
-      setSavedMacosWubiAutoCommitUnique: vi.fn(),
     });
   });
 
@@ -176,7 +162,6 @@ test("does not let a save from the previous client restore stale settings", asyn
     return useSettingsPersistence({
       client: activeClient,
       mobile: false,
-      macos: false,
       mounted,
       snapshot: currentSnapshot,
       draft,
@@ -186,12 +171,6 @@ test("does not let a save from the previous client restore stale settings", asyn
       setError: vi.fn(),
       setNotice: vi.fn(),
       setRecoveredBackup: vi.fn(),
-      macosShuangpinKeymap: undefined,
-      savedMacosShuangpinKeymap: undefined,
-      setSavedMacosShuangpinKeymap: vi.fn(),
-      macosWubiAutoCommitUnique: undefined,
-      savedMacosWubiAutoCommitUnique: undefined,
-      setSavedMacosWubiAutoCommitUnique: vi.fn(),
     });
   });
 
@@ -257,7 +236,6 @@ test("does not let a pending save from the previous client block the replacement
     return useSettingsPersistence({
       client: activeClient,
       mobile: false,
-      macos: false,
       mounted,
       snapshot: currentSnapshot,
       draft,
@@ -267,12 +245,6 @@ test("does not let a pending save from the previous client block the replacement
       setError: vi.fn(),
       setNotice: vi.fn(),
       setRecoveredBackup: vi.fn(),
-      macosShuangpinKeymap: undefined,
-      savedMacosShuangpinKeymap: undefined,
-      setSavedMacosShuangpinKeymap: vi.fn(),
-      macosWubiAutoCommitUnique: undefined,
-      savedMacosWubiAutoCommitUnique: undefined,
-      setSavedMacosWubiAutoCommitUnique: vi.fn(),
     });
   });
 
@@ -333,7 +305,6 @@ test("retries an autosave that races with another window during unmount", async 
     return useSettingsPersistence({
       client,
       mobile: false,
-      macos: false,
       mounted,
       snapshot: currentSnapshot,
       draft,
@@ -343,12 +314,6 @@ test("retries an autosave that races with another window during unmount", async 
       setError: vi.fn(),
       setNotice: vi.fn(),
       setRecoveredBackup: vi.fn(),
-      macosShuangpinKeymap: undefined,
-      savedMacosShuangpinKeymap: undefined,
-      setSavedMacosShuangpinKeymap: vi.fn(),
-      macosWubiAutoCommitUnique: undefined,
-      savedMacosWubiAutoCommitUnique: undefined,
-      setSavedMacosWubiAutoCommitUnique: vi.fn(),
     });
   });
 

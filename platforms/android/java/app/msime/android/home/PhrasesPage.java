@@ -1,39 +1,29 @@
 package app.msime.android.home;
 
-import android.os.Bundle;
+import app.msime.android.DimensionPolicy;
+
 import android.text.InputType;
 import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import androidx.annotation.Nullable;
 import app.msime.android.CommonPhrasesStore;
+import app.msime.android.CommunityRequest;
 import app.msime.android.ViewPolicy;
 
 /**
- * 常用语页（设置、「我的」和键盘常用语面板下方的按钮都进这一页）：一组常用语，点一条修改正文，行尾一个「删除」，下面一组「添加常用语」。
+ * 常用语页（设置、「我的」和键盘常用语面板下方的按钮都进这一页）：一组常用语，点一条修改正文，行尾一个「删除」，下面一组「添加常用语」和「浏览社区短语包」（进社区短语的完整列表）。
  *
  * <p>读写全部经 {@link CommonPhrasesStore}，键盘的「常用语」面板读的是同一份，所以这里改完键盘下次打开面板就能看到。修改经 {@link CommonPhrasesStore#replace}，条目仍属于原来的来源（自己添加的或某个短语包）。
  */
-public final class PhrasesPage extends DetailPage {
-    @Nullable private LinearLayout column;
+public final class PhrasesPage extends ReloadingDetailPage {
     @Nullable private CommonPhrasesStore.Document document;
 
-    @Override protected void buildContent(LinearLayout column, Bundle args) {
-        this.column = column;
+    @Override protected void onContentReady() {
         if (document != null) render(document);
-        reload();
     }
 
-    @Override protected void onBecameVisible() {
-        if (column != null) reload();
-    }
-
-    @Override public void onDestroyView() {
-        column = null;
-        super.onDestroyView();
-    }
-
-    private void reload() {
+    @Override protected void reload() {
         HostTask.run(this, CommonPhrasesStore::load, this::apply);
     }
 
@@ -51,7 +41,7 @@ public final class PhrasesPage extends DetailPage {
     }
 
     private void render(CommonPhrasesStore.Document current) {
-        LinearLayout target = column;
+        LinearLayout target = contentColumn();
         if (target == null) return;
         target.removeAllViews();
         GroupCard list = GroupCard.add(target, "在键盘「常用语」面板中，点一下即可发送");
@@ -61,12 +51,15 @@ public final class PhrasesPage extends DetailPage {
         for (CommonPhrasesStore.Phrase phrase : current.phrases()) {
             GroupCard.Row row = list.button(phrase.text(), null, "删除", () -> remove(phrase));
             // 点整行修改这一条（#5673）；行尾的「删除」按钮自己响应，不会连带打开修改框。
-            Ui.makeClickable(row.view(), requireContext(), () -> showEditDialog(phrase));
+            ViewPolicy.makeClickable(row.view(), requireContext(), () -> showEditDialog(phrase));
             row.view().setContentDescription(phrase.text() + "，点按修改");
         }
         if (!current.phrases().isEmpty()) list.footer("点一条常用语可以修改。");
         GroupCard add = GroupCard.add(target, null);
         add.button("添加常用语", null, "添加", this::showAddDialog);
+        // 社区短语包装进来就在这一页里；浏览和添加在社区短语的完整列表里，表达页的「发现短语」也通向那里。
+        add.nav("浏览社区短语包", "别人分享的短语包，添加后出现在这里", null,
+            () -> CommunityFragment.browse(requireContext(), CommunityRequest.Kind.PHRASE));
     }
 
     private void remove(CommonPhrasesStore.Phrase phrase) {
@@ -102,8 +95,8 @@ public final class PhrasesPage extends DetailPage {
         ViewPolicy.setMinLines(field, 3);
         ViewPolicy.setMaxLines(field, 6);
         ViewPolicy.setTopStart(field);
-        int padding = Ui.dp(requireContext(), 10);
-        int horizontal = Ui.dp(requireContext(), 12);
+        int padding = DimensionPolicy.pixels(requireContext(), 10);
+        int horizontal = DimensionPolicy.pixels(requireContext(), 12);
         ViewPolicy.setPadding(field, horizontal, padding, horizontal, padding);
         ViewGroup.LayoutParams params = field.getLayoutParams();
         if (params != null) {

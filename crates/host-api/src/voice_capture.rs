@@ -2,7 +2,7 @@
 //!
 //! This replaces the Engine's miniaudio `AudioCapture` and keeps what hosts relied on: the same bounds, a partial buffer when the time runs out first, and device identities in the backend-qualified hex form (`wasapi:`, `coreaudio:`, `alsa:`) that saved preferences already hold and the Windows TSF host still opens. Identities and labels may identify a user's hardware, so neither belongs in logs.
 
-// iOS and HarmonyOS have no capture path here, and Android's AAudio endpoints have no identity a host can select by, so the shared bounds and encoders go unused there.
+// iOS, Android and HarmonyOS record in their own hosts and have no capture path here, so the shared bounds and encoders go unused there.
 #![cfg_attr(
     any(target_os = "ios", target_os = "android", target_env = "ohos"),
     allow(dead_code)
@@ -65,7 +65,7 @@ where
     values
 }
 
-#[cfg(not(any(target_os = "ios", target_env = "ohos")))]
+#[cfg(not(any(target_os = "ios", target_os = "android", target_env = "ohos")))]
 mod backend {
     use super::{bounded_collect, capacity, MAX_DEVICES, MAX_MILLISECONDS, SAMPLE_RATE};
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -243,7 +243,7 @@ mod backend {
                         target_os = "netbsd"
                     ))]
                     cpal::HostId::Alsa => super::byte_device_id("alsa:", native.id()),
-                    // Other backends (AAudio, ASIO, JACK) had no identity the hosts could select by.
+                    // Other backends (ASIO, JACK) had no identity the hosts could select by.
                     #[allow(unreachable_patterns)]
                     _ => None,
                 }?;
@@ -255,8 +255,8 @@ mod backend {
     }
 }
 
-/// The iOS keyboard records through AVAudioEngine and HarmonyOS through its own audio kit; neither has a capture path here.
-#[cfg(any(target_os = "ios", target_env = "ohos"))]
+/// The iOS keyboard records through AVAudioEngine, Android through `AudioRecord` in Java and HarmonyOS through its own audio kit; none of them has a capture path here.
+#[cfg(any(target_os = "ios", target_os = "android", target_env = "ohos"))]
 mod backend {
     pub(crate) fn capture_audio(_milliseconds: u32) -> Vec<f32> {
         Vec::new()

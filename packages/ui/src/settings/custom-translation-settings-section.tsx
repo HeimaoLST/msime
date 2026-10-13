@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { Preferences } from "../index";
 import { GroupList } from "../core/platform-controls";
 import { CustomTranslationSection } from "./custom-translation-section";
-import { translationEndpointIssue } from "./translation-validation";
+import { customTranslationKeyIssue, translationEndpointIssue } from "./translation-validation";
 
 type CustomTranslationPreferences = NonNullable<Preferences["custom_translation"]>;
 
@@ -28,6 +28,7 @@ export function CustomTranslationSettingsSection({
       endpoint={customTranslation.endpoint}
       apiKey={customTranslation.api_key}
       endpointIssue={translationEndpointIssue(customTranslation.endpoint)}
+      apiKeyIssue={customTranslationKeyIssue(customTranslation.endpoint, customTranslation.api_key)}
       onEndpointChange={(endpoint) =>
         onPreferencesChange({
           custom_translation: { ...customTranslation, endpoint },

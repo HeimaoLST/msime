@@ -5,15 +5,30 @@ protocol CandidateTranslationService: Sendable {
 }
 
 struct BackendCandidateTranslationService: CandidateTranslationService {
-  private static let client = BackendAccountClient()
-  private static let session = BackendAccountSession(storage: BackendAnonymousAccount.sessionStorage())
-  func translate(words: [String], target: String) async throws -> [String] {
-    try await Self.client.translate(texts: words, target: target, token: token())
+  private let client: BackendAccountClient
+  private let account: BackendAccountSession
+  private let anonymous: BackendAccountSession
+
+  init(client: BackendAccountClient = BackendAccountClient(),
+       account: BackendAccountSession = .shared,
+       anonymous: BackendAccountSession = BackendAnonymousAccount.session) {
+    self.client = client
+    self.account = account
+    self.anonymous = anonymous
   }
+
+  func translate(words: [String], target: String) async throws -> [String] {
+    if (try? await account.user()) != nil {
+      return try await client.translate(texts: words, target: target, session: account)
+    }
+    _ = try await token()
+    return try await client.translate(texts: words, target: target, session: anonymous)
+  }
+
   private func token() async throws -> String {
-    if let value = try? await Self.session.accessToken() { return value }
-    _ = try await BackendAnonymousAccount.ensureSignedIn(session: Self.session, client: Self.client)
-    return try await Self.session.accessToken()
+    if let value = try? await anonymous.accessToken() { return value }
+    _ = try await BackendAnonymousAccount.ensureSignedIn(session: anonymous, client: client)
+    return try await anonymous.accessToken()
   }
 }
 
@@ -76,6 +91,13 @@ final class CandidateTranslationStore {
     for task in tasks.values { task.cancel() }
     tasks.removeAll()
     signature = nil
+  }
+
+  /// Release candidate glosses when the keyboard extension is under memory pressure. The visible
+  /// page will request them again after the warning has passed.
+  func clearCacheForMemoryPressure() {
+    cancel()
+    cache.removeAll(keepingCapacity: false)
   }
   private static func signature(_ values: [String]) -> String {
      values.reduce(into: "\(values.count):") { result, value in

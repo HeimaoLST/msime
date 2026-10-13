@@ -296,7 +296,8 @@ test("the mobile login sheet exposes its caller's cancel action", async () => {
   expect(onCancelLogin).toHaveBeenCalledOnce();
 });
 
-test("Harmony chat login focuses the tryout and cancel returns to it", async () => {
+// 对话是常驻标签，打开时不自动聚焦输入框（不弹键盘）；登录面板关掉后回到对话。
+test("Harmony chat login leaves the composer unfocused and cancel returns to it", async () => {
   window.history.replaceState({ msimeSettings: true, page: "chat" }, "");
   render(
     <SettingsPage
@@ -316,8 +317,8 @@ test("Harmony chat login focuses the tryout and cancel returns to it", async () 
   );
 
   const composer = await screen.findByRole("textbox", { name: "聊天消息" });
-  await waitFor(() => expect(document.activeElement).toBe(composer));
   fireEvent.click(await screen.findByRole("button", { name: "登录使用 AI" }));
+  expect(document.activeElement).not.toBe(composer);
   expect(await screen.findByRole("heading", { name: "登录水杉" })).not.toBeNull();
   expect(screen.queryByText("账号操作")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "关闭" }));
@@ -668,6 +669,17 @@ test("logged-in accounts expose local designs and every community collection", a
   ]);
 });
 
+test("a community page without the skin gallery offers only its dictionary and reply collections", async () => {
+  const openCommunity = vi.fn();
+  const client = account({ status: vi.fn().mockResolvedValue({ user }) });
+  // Windows：社区页只有词包与回复模板，「我发布的皮肤」不能经社区页打开。
+  render(<AccountPage client={client} onOpenCommunity={openCommunity} communityHasSkins={false} />);
+  fireEvent.click(await screen.findByRole("button", { name: "我发布的词库" }));
+  fireEvent.click(screen.getByRole("button", { name: "收藏的回复模板" }));
+  expect(screen.queryByRole("button", { name: "我发布的皮肤" })).toBeNull();
+  expect(openCommunity.mock.calls).toEqual([["published-dictionary"], ["saved-reply"]]);
+});
+
 test("logged-in mobile accounts expose direct cloud dictionary and clipboard entries", async () => {
   const openCloudDictionary = vi.fn();
   const openCloudClipboard = vi.fn();
@@ -972,6 +984,32 @@ test("settings sync requires confirmation and preserves a remote conflict error"
     }),
   );
   expect(await screen.findByText("云端设置已被其他设备更新，请刷新后重新确认。")).not.toBeNull();
+});
+
+test("settings sync shows the host's own message after applying cloud settings", async () => {
+  const apply = vi.fn().mockResolvedValue(undefined);
+  const client = account({
+    status: vi.fn().mockResolvedValue({ user }),
+    settingsSync: {
+      appliedMessage: "已应用云端设置。",
+      schema: vi.fn().mockResolvedValue({
+        fields: { "input.schema": { type: "string" } },
+        maximumBytes: 65536,
+        updateMode: "replace",
+        revisionRequired: true,
+      }),
+      load: vi.fn().mockResolvedValue({ revision: 7, settings: { "input.schema": "quanpin" } }),
+      upload: vi.fn(),
+      apply,
+    },
+  });
+  render(<AccountPage client={client} />);
+  expect(await screen.findByText("云端版本：7")).not.toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "下载并应用云端设置" }));
+  fireEvent.click(screen.getByRole("button", { name: "确认应用" }));
+  await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
+  expect(await screen.findByText("已应用云端设置。")).not.toBeNull();
+  expect(screen.queryByText(/重新打开键盘/)).toBeNull();
 });
 
 test("ignores a second settings upload while the first is pending", async () => {
@@ -1296,6 +1334,72 @@ test("Harmony 我的 shows a signed-out card that opens the code sign-in sheet",
   await waitFor(() => expect(client.profile).toHaveBeenCalled());
 });
 
+test("the Harmony sheet offers Google only when the host can run it", async () => {
+  harmonyMe({
+    client: account({
+      providers: vi.fn().mockResolvedValue({ email: true, phone: false, google: true }),
+    }),
+  });
+  fireEvent.click(await screen.findByRole("button", { name: "未登录，点按登录" }));
+  const sheet = within(await screen.findByRole("dialog", { name: "登录水杉" }));
+  expect(sheet.getByRole("button", { name: "使用邮箱登录" })).not.toBeNull();
+  expect(sheet.queryByRole("button", { name: "使用 Google 登录" })).toBeNull();
+});
+
+test("the Harmony sheet signs in with Google through the host and closes", async () => {
+  const pending = deferred<{ user?: typeof user | null }>();
+  const googleLogin = vi.fn(() => pending.promise);
+  const client = account({
+    providers: vi.fn().mockResolvedValue({ email: true, phone: false, google: true }),
+    googleLogin,
+    googleCancel: vi.fn().mockResolvedValue(undefined),
+  });
+  harmonyMe({ client });
+  fireEvent.click(await screen.findByRole("button", { name: "未登录，点按登录" }));
+  const sheet = within(await screen.findByRole("dialog", { name: "登录水杉" }));
+
+  fireEvent.click(sheet.getByRole("button", { name: "使用 Google 登录" }));
+  expect(googleLogin).toHaveBeenCalledOnce();
+  expect(
+    await sheet.findByRole("button", { name: "正在等待浏览器完成 Google 登录…" }),
+  ).not.toBeNull();
+  expect(sheet.getByRole("button", { name: "取消 Google 登录" })).not.toBeNull();
+
+  await act(async () => pending.resolve({ user }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "登录水杉" })).toBeNull());
+  expect(await screen.findByText("已登录")).not.toBeNull();
+  expect(client.googleCancel).not.toHaveBeenCalled();
+});
+
+test("cancelling or closing the Harmony sheet ends a Google sign-in that is waiting", async () => {
+  const pending = deferred<{ user?: typeof user | null }>();
+  const googleCancel = vi.fn(async () => {
+    pending.resolve({ user: null });
+  });
+  const client = account({
+    providers: vi.fn().mockResolvedValue({ email: true, phone: false, google: true }),
+    googleLogin: vi.fn(() => pending.promise),
+    googleCancel,
+  });
+  harmonyMe({ client });
+  fireEvent.click(await screen.findByRole("button", { name: "未登录，点按登录" }));
+  const sheet = within(await screen.findByRole("dialog", { name: "登录水杉" }));
+  fireEvent.click(sheet.getByRole("button", { name: "使用 Google 登录" }));
+  fireEvent.click(await sheet.findByRole("button", { name: "取消 Google 登录" }));
+  expect(googleCancel).toHaveBeenCalledOnce();
+  expect(await sheet.findByRole("button", { name: "使用 Google 登录" })).not.toBeNull();
+  expect(sheet.queryByRole("button", { name: "取消 Google 登录" })).toBeNull();
+
+  // 等浏览器时关面板，也会结束本机监听。
+  const second = deferred<{ user?: typeof user | null }>();
+  vi.mocked(client.googleLogin!).mockImplementation(() => second.promise);
+  googleCancel.mockImplementation(async () => second.resolve({ user: null }));
+  fireEvent.click(sheet.getByRole("button", { name: "使用 Google 登录" }));
+  await sheet.findByRole("button", { name: "取消 Google 登录" });
+  fireEvent.click(sheet.getByRole("button", { name: "关闭" }));
+  expect(googleCancel).toHaveBeenCalledTimes(2);
+});
+
 test("Harmony 我的 groups its rows with real values and destinations", async () => {
   const calls: string[] = [];
   const record = (name: string) => () => void calls.push(name);
@@ -1345,8 +1449,10 @@ test("Harmony 我的 groups its rows with real values and destinations", async (
   expect(general.getByRole("button", { name: "应用主题" }).textContent).toContain("四季 · 秋杉");
   const privacy = general.getByRole("button", { name: "隐私" });
   expect(privacy.textContent).toContain("本地优先");
+  // 打开应用里的「隐私」页，不直接跳去浏览器看隐私政策网页。
   fireEvent.click(privacy);
-  expect(onOpenUrl).toHaveBeenCalledWith("https://msime.app/privacy/");
+  expect(onOpenPage).toHaveBeenLastCalledWith("privacy");
+  expect(onOpenUrl).not.toHaveBeenCalledWith("https://msime.app/privacy/");
 
   expect(screen.getByRole("button", { name: "其他平台下载" }).textContent).toContain("7 个平台");
   expect(screen.getByRole("button", { name: "关于" }).textContent).toContain("1.2.3");
@@ -1358,7 +1464,8 @@ test("Harmony 我的 groups its rows with real values and destinations", async (
   // 旧的区块都没了：没有工具分组，没有内嵌的同步卡片，也没有数据区块标题。
   expect(screen.queryByRole("region", { name: "工具" })).toBeNull();
   expect(screen.queryByRole("heading", { name: "本地数据与云端作品" })).toBeNull();
-  expect(screen.getByText(/皮肤设计和打字统计保存在本机/)).not.toBeNull();
+  // 底部那段「保存在本机、不会自动上传」的说明也删了：Android 会自动同步，鸿蒙和 iOS 也要改成自动同步，这句话不成立。
+  expect(screen.queryByText(/皮肤设计和打字统计保存在本机/)).toBeNull();
 });
 
 test("Harmony 应用主题 saves the theme chosen in its action sheet", async () => {
@@ -1472,10 +1579,8 @@ test("Harmony 个人资料 lists the account, copies its ID, renames in a sheet 
   expect(await screen.findByRole("button", { name: "未登录，点按登录" })).not.toBeNull();
 });
 
-test("Harmony 同步 rows confirm in an action sheet and report through a toast", async () => {
-  const upload = vi
-    .fn()
-    .mockResolvedValue({ revision: 8, settings: { "input.schema": "quanpin" } });
+// 鸿蒙手机的「我的」不画「同步」组：键盘扩展有独立沙箱，设置应用里上传、应用的只是它自己那份偏好，键盘读不到。
+test("Harmony 我的 has no manual 同步 rows even with a settings sync client", async () => {
   const settingsSync: SettingsSyncClient = {
     schema: vi.fn().mockResolvedValue({
       fields: {},
@@ -1484,23 +1589,13 @@ test("Harmony 同步 rows confirm in an action sheet and report through a toast"
       revisionRequired: true,
     }),
     load: vi.fn().mockResolvedValue({ revision: 7, settings: {} }),
-    upload,
+    upload: vi.fn(),
     apply: vi.fn(),
   };
   harmonyMe({ client: account({ status: vi.fn().mockResolvedValue({ user }), settingsSync }) });
 
-  const sync = within(await screen.findByRole("region", { name: "同步" }));
-  const uploadRow = sync.getByRole("button", { name: "上传本机设置" }) as HTMLButtonElement;
-  await waitFor(() => expect(uploadRow.disabled).toBe(false));
-  // 云端还什么都没有，所以没有可应用的内容。
-  expect(
-    (sync.getByRole("button", { name: "下载并应用云端设置" }) as HTMLButtonElement).disabled,
-  ).toBe(true);
-  expect(screen.queryByRole("button", { name: "刷新云端设置" })).toBeNull();
-
-  fireEvent.click(uploadRow);
-  const sheet = within(screen.getByRole("dialog", { name: "上传本机设置" }));
-  fireEvent.click(sheet.getByRole("button", { name: "确认上传" }));
-  await waitFor(() => expect(upload).toHaveBeenCalledOnce());
-  expect(await screen.findByText("本机设置已上传")).not.toBeNull();
+  expect((await screen.findAllByText("水杉测试用户")).length).toBeGreaterThan(0);
+  expect(screen.queryByRole("region", { name: "同步" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "上传本机设置" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "下载并应用云端设置" })).toBeNull();
 });

@@ -163,7 +163,7 @@ pub fn dictionary_table_entries(
         .prepare(&sql)
         .map_err(|_| failed(DICTIONARY_NOT_READ))?;
     let mut page = DictionaryTablePage {
-        entries: Vec::with_capacity(limit),
+        entries: Vec::new(),
         has_more: false,
     };
     let read = (|| -> rusqlite::Result<()> {
@@ -180,6 +180,9 @@ pub fn dictionary_table_entries(
             if page.entries.len() == limit {
                 page.has_more = true;
                 break;
+            }
+            if page.entries.capacity() == 0 {
+                page.entries.reserve_exact(limit);
             }
             page.entries.push(DictionaryTableEntry {
                 entry: PersonalDictionaryEntry {
@@ -728,6 +731,9 @@ mod tests {
         let page = dictionary_table_entries(&fixture.paths, Pinyin, "ni", 1, 2).unwrap();
         assert_eq!(values(&page.entries), ["你好", "你们"]);
         assert!(page.has_more);
+        let empty = dictionary_table_entries(&fixture.paths, Pinyin, "nx", 0, 100).unwrap();
+        assert!(empty.entries.is_empty());
+        assert_eq!(empty.entries.capacity(), 0);
         assert!(!fixture.paths.user(assets::USER_JOURNAL).exists());
         std::fs::remove_file(fixture.paths.dictionary(assets::MAIN_DICTIONARY)).unwrap();
         assert!(fixture.lookup(Pinyin, "ni").is_empty());

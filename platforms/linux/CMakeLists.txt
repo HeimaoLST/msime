@@ -34,12 +34,21 @@ if(BUILD_TESTING)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_test(NAME linux-fcitx5-contract
            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/fcitx5_contract.py")
+  add_test(NAME linux-ibus-component-contract
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/ibus_component_contract.py")
 endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# GCC 8（Debian 10 的编译器，package-legacy-container.sh 用它）的 std::filesystem 在单独的静态库 libstdc++fs 里，GCC 9 起才并入 libstdc++。加在每条链接命令的末尾，排在所有用到它的目标文件和静态库之后。
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  string(APPEND CMAKE_CXX_STANDARD_LIBRARIES " -lstdc++fs")
+endif()
 find_package(PkgConfig REQUIRED)
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}/src/core" "${CMAKE_CURRENT_SOURCE_DIR}/src/candidates" "${CMAKE_CURRENT_SOURCE_DIR}/src/clipboard" "${CMAKE_CURRENT_SOURCE_DIR}/src/providers" "${CMAKE_CURRENT_SOURCE_DIR}/src/voice" "${CMAKE_CURRENT_SOURCE_DIR}/src/overlay" "${CMAKE_CURRENT_SOURCE_DIR}/src/system" "${CMAKE_CURRENT_SOURCE_DIR}/src/entrypoints")
-pkg_check_modules(IBUS REQUIRED IMPORTED_TARGET ibus-1.0>=1.5.20)
+# IBus 与 Python 的最低版本。配置时按前者检查 IBus 开发包，cmake/packaging.cmake 把两者写进 .deb 的 Depends 和 RPM 的 Requires。缺省值是发布页的包所声明的；Debian 10 基线的 legacy 包（package-legacy-container.sh）传 1.5.19 和 3.7，IBus 1.5.20 起才有的接口在源码里按 IBUS_CHECK_VERSION 条件编译。
+set(MSIME_IBUS_MIN_VERSION "1.5.20" CACHE STRING "Oldest IBus the host builds against and the packages depend on")
+set(MSIME_PYTHON_MIN_VERSION "3.9" CACHE STRING "Oldest Python 3 the packages depend on for the installed scripts")
+pkg_check_modules(IBUS REQUIRED IMPORTED_TARGET ibus-1.0>=${MSIME_IBUS_MIN_VERSION})
 pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
 find_package(nlohmann_json 3.11 REQUIRED)
 # Optional on Wayland-only systems; the monitor retains bounded polling.
@@ -51,6 +60,13 @@ pkg_check_modules(WAYLAND_TEXT QUIET IMPORTED_TARGET pangocairo)
 find_program(WAYLAND_SCANNER_EXECUTABLE wayland-scanner)
 if(WAYLAND_CLIENT_FOUND AND WAYLAND_SCANNER_EXECUTABLE)
   enable_language(C)
+  # Wayland 浮层用 shm_open 建共享内存缓冲。glibc 2.34 起它在 libc 里，更早的 glibc（legacy 包所在的 Debian 10 是 2.28）要另外链接 librt。
+  include(CheckSymbolExists)
+  check_symbol_exists(shm_open "sys/mman.h" MSIME_LIBC_HAS_SHM_OPEN)
+  set(MSIME_SHM_LIBRARIES "")
+  if(NOT MSIME_LIBC_HAS_SHM_OPEN)
+    set(MSIME_SHM_LIBRARIES rt)
+  endif()
   set(MSIME_WAYLAND_PROTOCOL_DIR "${CMAKE_CURRENT_BINARY_DIR}/wayland-protocols")
   set(MSIME_LAYER_SHELL_HEADER
       "${MSIME_WAYLAND_PROTOCOL_DIR}/wlr-layer-shell-unstable-v1-client-protocol.h")
@@ -117,7 +133,7 @@ if(NOT EXISTS "${MSIME_HOST_LIBRARY}")
 endif()
 msime_edition_host_library(MSIME_HOST_LIBRARY)
 add_library(msime-ibus-host STATIC
-  src/core/ClientEngine.cpp src/system/DiagnosticLog.cpp src/system/ChineseTextConversion.cpp src/overlay/WaveOverlayIbusSurface.cpp
+  src/core/ClientEngine.cpp src/system/DiagnosticLog.cpp src/system/ChineseTextConversion.cpp src/system/CapsLockRelease.cpp src/overlay/WaveOverlayIbusSurface.cpp
   src/overlay/WaveOverlaySurfaceFactory.cpp)
 target_compile_options(msime-ibus-host PRIVATE -Wall -Wextra -Werror)
 target_include_directories(msime-ibus-host PUBLIC src src/core src/candidates src/clipboard src/providers src/voice src/overlay src/system src/entrypoints ../../crates/host-api/include)
@@ -132,7 +148,7 @@ if(WAYLAND_CLIENT_FOUND AND WAYLAND_SCANNER_EXECUTABLE AND MSIME_XDG_SHELL_XML)
                  "${MSIME_LAYER_SHELL_CODE}" ${MSIME_XDG_SHELL_CODE})
   target_include_directories(msime-ibus-host PRIVATE "${MSIME_WAYLAND_PROTOCOL_DIR}")
   target_compile_definitions(msime-ibus-host PRIVATE MSIME_LINUX_HAS_WAYLAND_SURFACE)
-  target_link_libraries(msime-ibus-host PUBLIC PkgConfig::WAYLAND_CLIENT)
+  target_link_libraries(msime-ibus-host PUBLIC PkgConfig::WAYLAND_CLIENT ${MSIME_SHM_LIBRARIES})
   if(WAYLAND_TEXT_FOUND)
     target_compile_definitions(msime-ibus-host PRIVATE MSIME_LINUX_WAYLAND_TEXT)
     target_link_libraries(msime-ibus-host PUBLIC PkgConfig::WAYLAND_TEXT)
@@ -184,21 +200,25 @@ target_link_libraries(msime-linux-cloud-clipboard PRIVATE msime-ibus-host)
 add_executable(msime-linux-online src/providers/online_request.cpp)
 target_compile_options(msime-linux-online PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(msime-linux-online PRIVATE msime-ibus-host)
-add_executable(msime-linux-online-provider-contract tests/provider/online_provider_contract.cpp)
-target_compile_options(msime-linux-online-provider-contract PRIVATE -Wall -Wextra -Werror)
-target_include_directories(msime-linux-online-provider-contract PRIVATE ../../crates/host-api/include)
-target_link_libraries(msime-linux-online-provider-contract PRIVATE nlohmann_json::nlohmann_json "${MSIME_HOST_LIBRARY}")
-add_test(NAME linux-online-provider-contract COMMAND msime-linux-online-provider-contract)
+if(BUILD_TESTING)
+  add_executable(msime-linux-online-provider-contract tests/provider/online_provider_contract.cpp)
+  target_compile_options(msime-linux-online-provider-contract PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(msime-linux-online-provider-contract PRIVATE ../../crates/host-api/include)
+  target_link_libraries(msime-linux-online-provider-contract PRIVATE nlohmann_json::nlohmann_json "${MSIME_HOST_LIBRARY}" Threads::Threads)
+  add_test(NAME linux-online-provider-contract COMMAND msime-linux-online-provider-contract)
+endif()
 add_executable(msime-linux-translation src/providers/translation_request.cpp)
 target_compile_options(msime-linux-translation PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(msime-linux-translation PRIVATE msime-ibus-host)
 add_executable(msime-linux-clipboard src/clipboard/clipboard_history.cpp)
 target_compile_options(msime-linux-clipboard PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(msime-linux-clipboard PRIVATE nlohmann_json::nlohmann_json)
-add_executable(linux-clipboard-atomic-write-test tests/clipboard/clipboard_atomic_write.cpp)
-target_compile_options(linux-clipboard-atomic-write-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-target_include_directories(linux-clipboard-atomic-write-test PRIVATE src)
-add_test(NAME linux-clipboard-atomic-write COMMAND linux-clipboard-atomic-write-test)
+if(BUILD_TESTING)
+  add_executable(linux-clipboard-atomic-write-test tests/clipboard/clipboard_atomic_write.cpp)
+  target_compile_options(linux-clipboard-atomic-write-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-clipboard-atomic-write-test PRIVATE src)
+  add_test(NAME linux-clipboard-atomic-write COMMAND linux-clipboard-atomic-write-test)
+endif()
 add_executable(msime-linux-clipboard-capture src/clipboard/clipboard_capture.cpp)
 target_compile_options(msime-linux-clipboard-capture PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(msime-linux-clipboard-capture PRIVATE msime-ibus-host)
@@ -218,275 +238,319 @@ target_link_libraries(msime-voice-local PRIVATE nlohmann_json::nlohmann_json Thr
 add_executable(msime-linux-emoji src/providers/emoji_request.cpp)
 target_compile_options(msime-linux-emoji PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(msime-linux-emoji PRIVATE msime-ibus-host)
-add_executable(ibus-engine-smoke tests/runtime/engine_smoke.cpp)
-target_compile_options(ibus-engine-smoke PRIVATE -Wall -Wextra -Werror)
-target_link_libraries(ibus-engine-smoke PRIVATE msime-ibus-host)
-# The Zhuyin and Stroke cases install these dictionaries into a directory of their own; the locked resources carry none.
-target_compile_definitions(ibus-engine-smoke PRIVATE
-  MSIME_ZHUYIN_DICTIONARY_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime/zhuyin_dictionary.py"
-  MSIME_STROKE_DICTIONARY_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime/stroke_dictionary.py")
-if(BUILD_TESTING AND MSIME_ENGINE_RESOURCES)
-  add_test(NAME ibus-page-number-visibility
-    COMMAND ibus-engine-smoke "${MSIME_ENGINE_RESOURCES}" --page-number)
-  set_tests_properties(ibus-page-number-visibility PROPERTIES TIMEOUT 60)
-endif()
-add_executable(linux-navigation-bindings-test tests/input/navigation_bindings.cpp)
-target_compile_options(linux-navigation-bindings-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-navigation-bindings-test PRIVATE src ../../crates/host-api/include)
-target_link_libraries(linux-navigation-bindings-test PRIVATE PkgConfig::IBUS)
-add_test(NAME linux-navigation-bindings COMMAND linux-navigation-bindings-test)
-add_executable(linux-spelling-symbols-test tests/input/spelling_symbols.cpp)
-target_compile_options(linux-spelling-symbols-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-target_include_directories(linux-spelling-symbols-test PRIVATE src)
-target_link_libraries(linux-spelling-symbols-test PRIVATE nlohmann_json::nlohmann_json)
-add_test(NAME linux-spelling-symbols COMMAND linux-spelling-symbols-test)
-add_executable(linux-input-schemes-test tests/input/input_schemes.cpp)
-target_compile_options(linux-input-schemes-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-target_include_directories(linux-input-schemes-test PRIVATE src)
-target_link_libraries(linux-input-schemes-test PRIVATE nlohmann_json::nlohmann_json)
-add_test(NAME linux-input-schemes COMMAND linux-input-schemes-test)
-add_executable(linux-korean-hanja-test tests/input/korean_hanja.cpp)
-target_compile_options(linux-korean-hanja-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-target_include_directories(linux-korean-hanja-test PRIVATE src)
-target_link_libraries(linux-korean-hanja-test PRIVATE nlohmann_json::nlohmann_json PkgConfig::IBUS)
-add_test(NAME linux-korean-hanja COMMAND linux-korean-hanja-test)
-add_executable(linux-key-sound-test tests/input/key_sound.cpp)
-target_compile_options(linux-key-sound-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-target_include_directories(linux-key-sound-test PRIVATE src)
-add_test(NAME linux-key-sound COMMAND linux-key-sound-test)
-add_executable(linux-client-input-mode-memory-test tests/input/client_input_mode_memory.cpp)
-target_compile_options(linux-client-input-mode-memory-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-client-input-mode-memory-test PRIVATE src)
-add_test(NAME linux-client-input-mode-memory COMMAND linux-client-input-mode-memory-test)
-add_executable(linux-shuangpin-profile-names-test tests/input/shuangpin_profile_names.cpp)
-target_compile_options(linux-shuangpin-profile-names-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-shuangpin-profile-names-test PRIVATE src)
-add_test(NAME linux-shuangpin-profile-names COMMAND linux-shuangpin-profile-names-test)
-add_executable(linux-wubi-profile-names-test tests/input/wubi_profile_names.cpp)
-target_compile_options(linux-wubi-profile-names-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-target_include_directories(linux-wubi-profile-names-test PRIVATE src)
-add_test(NAME linux-wubi-profile-names COMMAND linux-wubi-profile-names-test)
-add_executable(linux-candidate-palette-test tests/candidate/candidate_palette.cpp)
-target_compile_options(linux-candidate-palette-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-candidate-palette-test PRIVATE src)
-target_link_libraries(linux-candidate-palette-test PRIVATE nlohmann_json::nlohmann_json)
-add_test(NAME linux-candidate-palette COMMAND linux-candidate-palette-test)
-add_executable(linux-candidate-fcitx-theme-test tests/candidate/candidate_fcitx_theme.cpp)
-target_compile_options(linux-candidate-fcitx-theme-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-candidate-fcitx-theme-test PRIVATE src)
-target_link_libraries(linux-candidate-fcitx-theme-test PRIVATE nlohmann_json::nlohmann_json)
-add_test(NAME linux-candidate-fcitx-theme COMMAND linux-candidate-fcitx-theme-test)
-# fcitx5-gtk 的客户端输入面板用 GKeyFile 读生成的主题；GLib 随 IBus 开发包而来，不是新依赖。
-pkg_check_modules(GLIB2 REQUIRED IMPORTED_TARGET glib-2.0)
-add_executable(linux-candidate-fcitx-theme-gkeyfile-test tests/candidate/candidate_fcitx_theme_gkeyfile.cpp)
-target_compile_options(linux-candidate-fcitx-theme-gkeyfile-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-candidate-fcitx-theme-gkeyfile-test PRIVATE src)
-target_link_libraries(linux-candidate-fcitx-theme-gkeyfile-test PRIVATE nlohmann_json::nlohmann_json PkgConfig::GLIB2)
-add_test(NAME linux-candidate-fcitx-theme-gkeyfile COMMAND linux-candidate-fcitx-theme-gkeyfile-test)
-add_executable(linux-candidate-font-policy-test tests/candidate/candidate_font_policy.cpp)
-target_compile_options(linux-candidate-font-policy-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-candidate-font-policy-test PRIVATE src)
-target_link_libraries(linux-candidate-font-policy-test PRIVATE nlohmann_json::nlohmann_json)
-add_test(NAME linux-candidate-font-policy COMMAND linux-candidate-font-policy-test)
-add_executable(linux-candidate-wheel-paging-test tests/candidate/candidate_wheel_paging.cpp)
-target_compile_options(linux-candidate-wheel-paging-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-candidate-wheel-paging-test PRIVATE src)
-target_link_libraries(linux-candidate-wheel-paging-test PRIVATE nlohmann_json::nlohmann_json)
-add_test(NAME linux-candidate-wheel-paging COMMAND linux-candidate-wheel-paging-test)
-add_executable(linux-panel-restore-record-test tests/candidate/panel_restore_record.cpp)
-target_compile_options(linux-panel-restore-record-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-target_include_directories(linux-panel-restore-record-test PRIVATE src)
-target_link_libraries(linux-panel-restore-record-test PRIVATE nlohmann_json::nlohmann_json)
-add_test(NAME linux-panel-restore-record COMMAND linux-panel-restore-record-test)
-add_executable(linux-candidate-action-policy-test tests/candidate/candidate_action_policy.cpp)
-target_compile_options(linux-candidate-action-policy-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-candidate-action-policy-test PRIVATE src)
-add_test(NAME linux-candidate-action-policy COMMAND linux-candidate-action-policy-test)
-add_executable(linux-candidate-local-mode-labels-test tests/candidate/candidate_local_mode_labels.cpp)
-target_compile_options(linux-candidate-local-mode-labels-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-candidate-local-mode-labels-test PRIVATE src)
-add_test(NAME linux-candidate-local-mode-labels COMMAND linux-candidate-local-mode-labels-test)
-add_executable(linux-candidate-panel-status-test tests/candidate/candidate_panel_status.cpp)
-target_compile_options(linux-candidate-panel-status-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-candidate-panel-status-test PRIVATE src)
-add_test(NAME linux-candidate-panel-status COMMAND linux-candidate-panel-status-test)
-add_executable(linux-input-status-test tests/core/input_status.cpp)
-target_compile_options(linux-input-status-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-input-status-test PRIVATE src)
-target_link_libraries(linux-input-status-test PRIVATE nlohmann_json::nlohmann_json)
-add_test(NAME linux-input-status COMMAND linux-input-status-test)
-add_executable(linux-json-integer-test tests/core/json_integer.cpp)
-target_compile_options(linux-json-integer-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-target_include_directories(linux-json-integer-test PRIVATE src)
-target_link_libraries(linux-json-integer-test PRIVATE nlohmann_json::nlohmann_json)
-add_test(NAME linux-json-integer COMMAND linux-json-integer-test)
-add_executable(linux-candidate-translation-policy-test tests/candidate/candidate_translation_policy.cpp)
-target_compile_options(linux-candidate-translation-policy-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-candidate-translation-policy-test PRIVATE src)
-add_test(NAME linux-candidate-translation-policy COMMAND linux-candidate-translation-policy-test)
-add_executable(linux-paired-punctuation-test tests/input/paired_punctuation.cpp)
-target_compile_options(linux-paired-punctuation-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-paired-punctuation-test PRIVATE src)
-add_test(NAME linux-paired-punctuation COMMAND linux-paired-punctuation-test)
-add_executable(linux-dictionary-quiesce-lease-test tests/core/dictionary_quiesce_lease.cpp)
-target_compile_options(linux-dictionary-quiesce-lease-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-dictionary-quiesce-lease-test PRIVATE src)
-add_test(NAME linux-dictionary-quiesce-lease COMMAND linux-dictionary-quiesce-lease-test)
-add_executable(linux-emoji-plugin-groups-test tests/core/emoji_plugin_groups.cpp)
-target_compile_options(linux-emoji-plugin-groups-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-target_include_directories(linux-emoji-plugin-groups-test PRIVATE src)
-target_link_libraries(linux-emoji-plugin-groups-test PRIVATE nlohmann_json::nlohmann_json)
-add_test(NAME linux-emoji-plugin-groups COMMAND linux-emoji-plugin-groups-test)
-add_executable(common-dictionary-quiesce-lease-test ../common/tests/dictionary_quiesce_lease.cpp)
-target_compile_options(common-dictionary-quiesce-lease-test PRIVATE -Wall -Wextra -Werror)
-add_test(NAME common-dictionary-quiesce-lease COMMAND common-dictionary-quiesce-lease-test)
-add_executable(common-telemetry-test ../common/tests/telemetry.cpp ../common/Telemetry.cpp)
-target_compile_options(common-telemetry-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-target_include_directories(common-telemetry-test PRIVATE ../common ../../crates/host-api/include)
-target_link_libraries(common-telemetry-test PRIVATE nlohmann_json::nlohmann_json "${MSIME_HOST_LIBRARY}" Threads::Threads)
-add_test(NAME common-telemetry COMMAND common-telemetry-test)
-add_executable(linux-input-mode-indicator-test tests/core/input_mode_indicator.cpp)
-target_compile_options(linux-input-mode-indicator-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-input-mode-indicator-test PRIVATE src)
-add_test(NAME linux-input-mode-indicator COMMAND linux-input-mode-indicator-test)
-add_executable(linux-voice-provider-options-test tests/voice/voice_provider_options.cpp)
-target_compile_options(linux-voice-provider-options-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-voice-provider-options-test PRIVATE src)
-target_link_libraries(linux-voice-provider-options-test PRIVATE nlohmann_json::nlohmann_json)
-add_test(NAME linux-voice-provider-options COMMAND linux-voice-provider-options-test)
-add_executable(linux-prepare-paths-test tests/core/prepare_paths.cpp)
-target_compile_options(linux-prepare-paths-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-prepare-paths-test PRIVATE src)
-add_test(NAME linux-prepare-paths COMMAND linux-prepare-paths-test)
-add_executable(linux-safe-path-test tests/core/safe_path.cpp)
-target_compile_options(linux-safe-path-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-target_include_directories(linux-safe-path-test PRIVATE src)
-add_test(NAME linux-safe-path COMMAND linux-safe-path-test)
-add_executable(linux-key-router-adapter-test tests/input/key_router_adapter.cpp)
-target_compile_options(linux-key-router-adapter-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-key-router-adapter-test PRIVATE src ../../crates/host-api/include)
-add_test(NAME linux-key-router-adapter COMMAND linux-key-router-adapter-test)
-add_executable(linux-backspace-hold-policy-test tests/input/backspace_hold_policy.cpp)
-target_compile_options(linux-backspace-hold-policy-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-backspace-hold-policy-test PRIVATE src)
-add_test(NAME linux-backspace-hold-policy COMMAND linux-backspace-hold-policy-test)
-add_executable(linux-diagnostic-log-test tests/core/diagnostic_log.cpp)
-target_compile_options(linux-diagnostic-log-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-diagnostic-log-test PRIVATE src)
-target_sources(linux-diagnostic-log-test PRIVATE src/system/DiagnosticLog.cpp)
-add_test(NAME linux-diagnostic-log COMMAND linux-diagnostic-log-test)
-add_executable(linux-surrounding-characters-test tests/core/surrounding_characters.cpp)
-target_compile_options(linux-surrounding-characters-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-surrounding-characters-test PRIVATE src)
-target_link_libraries(linux-surrounding-characters-test PRIVATE PkgConfig::IBUS)
-add_test(NAME linux-surrounding-characters COMMAND linux-surrounding-characters-test)
-# The composition both front ends draw while a phrase is being assembled: the piece already picked
-# leads the reading, and the caret has to move past it in the unit each toolkit counts in - bytes
-# for fcitx5, Unicode scalars for IBus.
-# Space converts and Enter takes what is on screen: the decision both front ends share, and the
-# reason the Engine's raw-input command cannot be what Enter sends in Japanese.
-add_executable(linux-japanese-conversion-test tests/core/japanese_conversion.cpp)
-target_compile_options(linux-japanese-conversion-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-target_include_directories(linux-japanese-conversion-test PRIVATE src)
-add_test(NAME linux-japanese-conversion COMMAND linux-japanese-conversion-test)
-# One table for the two menus over one setting, because they disagreed: 首右 had been written as
-# 搜狗, which names a different company's input method.
-add_executable(linux-helpcode-schema-names-test tests/core/helpcode_schema_names.cpp)
-target_compile_options(linux-helpcode-schema-names-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-target_include_directories(linux-helpcode-schema-names-test PRIVATE src)
-add_test(NAME linux-helpcode-schema-names COMMAND linux-helpcode-schema-names-test)
-add_executable(linux-phrase-preedit-test tests/core/phrase_preedit.cpp)
-target_compile_options(linux-phrase-preedit-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-target_include_directories(linux-phrase-preedit-test PRIVATE src)
-add_test(NAME linux-phrase-preedit COMMAND linux-phrase-preedit-test)
-add_executable(linux-replaced-program-test tests/core/replaced_program.cpp)
-target_compile_options(linux-replaced-program-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-target_include_directories(linux-replaced-program-test PRIVATE src)
-add_test(NAME linux-replaced-program COMMAND linux-replaced-program-test)
-add_executable(linux-smart-punctuation-space-test tests/core/smart_punctuation_space.cpp)
-target_compile_options(linux-smart-punctuation-space-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-smart-punctuation-space-test PRIVATE src)
-add_test(NAME linux-smart-punctuation-space COMMAND linux-smart-punctuation-space-test)
-add_test(NAME linux-setup-resolution
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/setup_resolution.py")
-add_test(NAME linux-setup-update
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/setup_update.py"
-                 $<TARGET_FILE:msime-linux-prepare>)
-add_test(NAME linux-setup-registration
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/setup_registration.py")
-add_test(NAME linux-setup-omarchy
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/setup_omarchy.py")
-add_test(NAME linux-setup-panel-restore
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/setup_panel_restore.py")
-add_test(NAME linux-setup-gnome-wayland
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/setup_gnome_wayland.py")
-add_test(NAME linux-first-run-guide
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/first_run_guide.py")
-add_test(NAME linux-settings-launcher-contract
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/settings_launcher_contract.py")
-add_test(NAME linux-deb-maintainer-scripts
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/deb_maintainer_scripts.py"
-                 "${CMAKE_CURRENT_BINARY_DIR}/debian" "${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake" "${MSIME_USER_UNIT_LIST}"
-                 "${CMAKE_INSTALL_FULL_BINDIR}/${MSIME_EDITION_PACKAGE}-setup")
-add_test(NAME linux-uninstall-unregister
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/uninstall_unregister.py"
-                 "${CMAKE_COMMAND}" "${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake")
-add_test(NAME linux-clipboard-autostart
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/clipboard_autostart.py"
-                 "${CMAKE_COMMAND}" "${CMAKE_CURRENT_BINARY_DIR}" "${MSIME_XDG_AUTOSTART_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake")
-add_test(NAME linux-ibus-launcher-supervisor
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/ibus_launcher_supervisor.py")
-add_executable(linux-ibus-registration-bus tests/core/ibus_registration_bus.cpp)
-target_compile_options(linux-ibus-registration-bus PRIVATE -Wall -Wextra -Werror)
-target_link_libraries(linux-ibus-registration-bus PRIVATE PkgConfig::IBUS)
-add_test(NAME linux-ibus-startup-telemetry
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/ibus_startup_telemetry.py"
-                 $<TARGET_FILE:msime-linux-ibus> $<TARGET_FILE:linux-ibus-registration-bus> "${MSIME_LINUX_VERSION}")
-set_tests_properties(linux-ibus-startup-telemetry PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
-add_test(NAME linux-voice-provider-degraded-start
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/voice/provider_degraded_start.py")
-add_test(NAME linux-voice-local-stream
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/voice/local_stream.py")
-add_test(NAME linux-voice-provider-local
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/voice/provider_local.py"
-                 $<TARGET_FILE:msime-voice-local>)
-set_tests_properties(linux-voice-local-stream linux-voice-provider-local PROPERTIES TIMEOUT 120)
-add_test(NAME linux-voice-command-bounds
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/voice/voice_command_bounds.py")
-add_test(NAME linux-voice-capture-device
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/voice/capture_device_contract.py")
-add_test(NAME linux-clipboard-tool-parity
-         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/clipboard/clipboard_tool_parity.py"
-                 $<TARGET_FILE:msime-linux-clipboard>)
-add_executable(linux-first-run-guidance-test tests/core/first_run_guidance.cpp)
-target_compile_options(linux-first-run-guidance-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-target_include_directories(linux-first-run-guidance-test PRIVATE src)
-add_test(NAME linux-first-run-guidance COMMAND linux-first-run-guidance-test)
-add_executable(linux-candidate-skin-catalog-test tests/core/candidate_skin_catalog.cpp)
-target_compile_options(linux-candidate-skin-catalog-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-candidate-skin-catalog-test PRIVATE src)
-target_link_libraries(linux-candidate-skin-catalog-test PRIVATE nlohmann_json::nlohmann_json)
-add_test(NAME linux-candidate-skin-catalog COMMAND linux-candidate-skin-catalog-test)
-add_executable(linux-typing-statistics-test tests/core/typing_statistics.cpp)
-target_compile_options(linux-typing-statistics-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-typing-statistics-test PRIVATE src ../../crates/host-api/include)
-target_link_libraries(linux-typing-statistics-test PRIVATE "${MSIME_HOST_LIBRARY}")
-add_test(NAME linux-typing-statistics COMMAND linux-typing-statistics-test)
-add_executable(linux-panel-input-channel-test tests/core/panel_input_channel.cpp)
-target_compile_options(linux-panel-input-channel-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-panel-input-channel-test PRIVATE src src/system)
-target_link_libraries(linux-panel-input-channel-test PRIVATE nlohmann_json::nlohmann_json)
-add_test(NAME linux-panel-input-channel COMMAND linux-panel-input-channel-test)
-add_executable(linux-traditional-output-test tests/input/traditional_output.cpp src/system/ChineseTextConversion.cpp)
-target_compile_options(linux-traditional-output-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-traditional-output-test PRIVATE src ../../crates/host-api/include)
-target_link_libraries(linux-traditional-output-test PRIVATE "${MSIME_HOST_LIBRARY}")
-add_test(NAME linux-traditional-output COMMAND linux-traditional-output-test)
-if(MSIME_LINUX_VOICE)
- add_executable(msime-voice-worker-test tests/voice/voice_worker.cpp)
- target_compile_options(msime-voice-worker-test PRIVATE -Wall -Wextra -Werror)
- target_include_directories(msime-voice-worker-test PRIVATE src)
- add_test(NAME linux-voice-worker COMMAND msime-voice-worker-test)
+if(BUILD_TESTING)
+  add_executable(ibus-engine-smoke tests/runtime/engine_smoke.cpp)
+  target_compile_options(ibus-engine-smoke PRIVATE -Wall -Wextra -Werror)
+  target_link_libraries(ibus-engine-smoke PRIVATE msime-ibus-host Threads::Threads)
+  # 注音和笔画用例把测试词库安装到独立目录，锁定资源中没有这些词库。
+  target_compile_definitions(ibus-engine-smoke PRIVATE
+    MSIME_ZHUYIN_DICTIONARY_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime/zhuyin_dictionary.py"
+    MSIME_STROKE_DICTIONARY_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime/stroke_dictionary.py")
+  if(MSIME_ENGINE_RESOURCES)
+    add_test(NAME ibus-page-number-visibility
+      COMMAND ibus-engine-smoke "${MSIME_ENGINE_RESOURCES}" --page-number)
+    set_tests_properties(ibus-page-number-visibility PROPERTIES TIMEOUT 60)
+    add_test(NAME ibus-empty-translation
+      COMMAND ibus-engine-smoke "${MSIME_ENGINE_RESOURCES}" --empty-translation)
+    set_tests_properties(ibus-empty-translation PROPERTIES TIMEOUT 60)
+    add_test(NAME ibus-caps-lock-tap
+      COMMAND ibus-engine-smoke "${MSIME_ENGINE_RESOURCES}" --caps-lock)
+    set_tests_properties(ibus-caps-lock-tap PROPERTIES TIMEOUT 60)
+    add_test(NAME ibus-japanese-toggle
+      COMMAND ibus-engine-smoke "${MSIME_ENGINE_RESOURCES}" --japanese-toggle)
+    set_tests_properties(ibus-japanese-toggle PROPERTIES TIMEOUT 60)
+    add_test(NAME ibus-chaizi
+      COMMAND ibus-engine-smoke "${MSIME_ENGINE_RESOURCES}" --chaizi)
+    set_tests_properties(ibus-chaizi PROPERTIES TIMEOUT 60)
+    add_test(NAME ibus-stale-candidate-click
+      COMMAND ibus-engine-smoke "${MSIME_ENGINE_RESOURCES}" --stale-candidate-click)
+    set_tests_properties(ibus-stale-candidate-click PROPERTIES TIMEOUT 60)
+  endif()
+  add_executable(linux-navigation-bindings-test tests/input/navigation_bindings.cpp)
+  target_compile_options(linux-navigation-bindings-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-navigation-bindings-test PRIVATE src ../../crates/host-api/include)
+  target_link_libraries(linux-navigation-bindings-test PRIVATE PkgConfig::IBUS)
+  add_test(NAME linux-navigation-bindings COMMAND linux-navigation-bindings-test)
+  add_executable(linux-spelling-symbols-test tests/input/spelling_symbols.cpp)
+  target_compile_options(linux-spelling-symbols-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-spelling-symbols-test PRIVATE src)
+  target_link_libraries(linux-spelling-symbols-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-spelling-symbols COMMAND linux-spelling-symbols-test)
+  add_executable(linux-input-schemes-test tests/input/input_schemes.cpp)
+  target_compile_options(linux-input-schemes-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-input-schemes-test PRIVATE src)
+  target_link_libraries(linux-input-schemes-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-input-schemes COMMAND linux-input-schemes-test)
+  add_executable(linux-korean-hanja-test tests/input/korean_hanja.cpp)
+  target_compile_options(linux-korean-hanja-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-korean-hanja-test PRIVATE src)
+  target_link_libraries(linux-korean-hanja-test PRIVATE nlohmann_json::nlohmann_json PkgConfig::IBUS)
+  add_test(NAME linux-korean-hanja COMMAND linux-korean-hanja-test)
+  add_executable(linux-key-sound-test tests/input/key_sound.cpp)
+  target_compile_options(linux-key-sound-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-key-sound-test PRIVATE src)
+  add_test(NAME linux-key-sound COMMAND linux-key-sound-test)
+  add_executable(linux-lifecycle-feedback-test tests/input/lifecycle_feedback.cpp)
+  target_compile_options(linux-lifecycle-feedback-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-lifecycle-feedback-test PRIVATE src ../../crates/host-api/include)
+  target_link_libraries(linux-lifecycle-feedback-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-lifecycle-feedback COMMAND linux-lifecycle-feedback-test)
+  add_executable(linux-client-input-mode-memory-test tests/input/client_input_mode_memory.cpp)
+  target_compile_options(linux-client-input-mode-memory-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-client-input-mode-memory-test PRIVATE src)
+  add_test(NAME linux-client-input-mode-memory COMMAND linux-client-input-mode-memory-test)
+  add_executable(linux-shuangpin-profile-names-test tests/input/shuangpin_profile_names.cpp)
+  target_compile_options(linux-shuangpin-profile-names-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-shuangpin-profile-names-test PRIVATE src)
+  add_test(NAME linux-shuangpin-profile-names COMMAND linux-shuangpin-profile-names-test)
+  add_executable(linux-wubi-profile-names-test tests/input/wubi_profile_names.cpp)
+  target_compile_options(linux-wubi-profile-names-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-wubi-profile-names-test PRIVATE src)
+  add_test(NAME linux-wubi-profile-names COMMAND linux-wubi-profile-names-test)
+  add_executable(linux-candidate-palette-test tests/candidate/candidate_palette.cpp)
+  target_compile_options(linux-candidate-palette-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-candidate-palette-test PRIVATE src)
+  target_link_libraries(linux-candidate-palette-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-candidate-palette COMMAND linux-candidate-palette-test)
+  add_executable(linux-candidate-fcitx-theme-test tests/candidate/candidate_fcitx_theme.cpp)
+  target_compile_options(linux-candidate-fcitx-theme-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-candidate-fcitx-theme-test PRIVATE src)
+  target_link_libraries(linux-candidate-fcitx-theme-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-candidate-fcitx-theme COMMAND linux-candidate-fcitx-theme-test)
+  # fcitx5-gtk 的客户端输入面板用 GKeyFile 读生成的主题；GLib 随 IBus 开发包而来，不是新依赖。
+  pkg_check_modules(GLIB2 REQUIRED IMPORTED_TARGET glib-2.0)
+  add_executable(linux-candidate-fcitx-theme-gkeyfile-test tests/candidate/candidate_fcitx_theme_gkeyfile.cpp)
+  target_compile_options(linux-candidate-fcitx-theme-gkeyfile-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-candidate-fcitx-theme-gkeyfile-test PRIVATE src)
+  target_link_libraries(linux-candidate-fcitx-theme-gkeyfile-test PRIVATE nlohmann_json::nlohmann_json PkgConfig::GLIB2)
+  add_test(NAME linux-candidate-fcitx-theme-gkeyfile COMMAND linux-candidate-fcitx-theme-gkeyfile-test)
+  add_executable(linux-candidate-font-policy-test tests/candidate/candidate_font_policy.cpp)
+  target_compile_options(linux-candidate-font-policy-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-candidate-font-policy-test PRIVATE src)
+  target_link_libraries(linux-candidate-font-policy-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-candidate-font-policy COMMAND linux-candidate-font-policy-test)
+  add_executable(linux-candidate-wheel-paging-test tests/candidate/candidate_wheel_paging.cpp)
+  target_compile_options(linux-candidate-wheel-paging-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-candidate-wheel-paging-test PRIVATE src)
+  target_link_libraries(linux-candidate-wheel-paging-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-candidate-wheel-paging COMMAND linux-candidate-wheel-paging-test)
+  add_executable(linux-panel-restore-record-test tests/candidate/panel_restore_record.cpp)
+  target_compile_options(linux-panel-restore-record-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-panel-restore-record-test PRIVATE src)
+  target_link_libraries(linux-panel-restore-record-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-panel-restore-record COMMAND linux-panel-restore-record-test)
+  add_executable(linux-candidate-action-policy-test tests/candidate/candidate_action_policy.cpp)
+  target_compile_options(linux-candidate-action-policy-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-candidate-action-policy-test PRIVATE src)
+  add_test(NAME linux-candidate-action-policy COMMAND linux-candidate-action-policy-test)
+  add_executable(linux-candidate-local-mode-labels-test tests/candidate/candidate_local_mode_labels.cpp)
+  target_compile_options(linux-candidate-local-mode-labels-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-candidate-local-mode-labels-test PRIVATE src)
+  add_test(NAME linux-candidate-local-mode-labels COMMAND linux-candidate-local-mode-labels-test)
+  add_executable(linux-candidate-panel-status-test tests/candidate/candidate_panel_status.cpp)
+  target_compile_options(linux-candidate-panel-status-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-candidate-panel-status-test PRIVATE src)
+  add_test(NAME linux-candidate-panel-status COMMAND linux-candidate-panel-status-test)
+  add_executable(linux-candidate-atomic-write-test tests/candidate/candidate_atomic_write.cpp)
+  target_compile_options(linux-candidate-atomic-write-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-candidate-atomic-write-test PRIVATE src)
+  add_test(NAME linux-candidate-atomic-write COMMAND linux-candidate-atomic-write-test)
+  add_executable(linux-input-status-test tests/core/input_status.cpp)
+  target_compile_options(linux-input-status-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-input-status-test PRIVATE src)
+  target_link_libraries(linux-input-status-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-input-status COMMAND linux-input-status-test)
+  add_executable(linux-json-integer-test tests/core/json_integer.cpp)
+  target_compile_options(linux-json-integer-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-json-integer-test PRIVATE src)
+  target_link_libraries(linux-json-integer-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-json-integer COMMAND linux-json-integer-test)
+  add_executable(linux-candidate-translation-policy-test tests/candidate/candidate_translation_policy.cpp)
+  target_compile_options(linux-candidate-translation-policy-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-candidate-translation-policy-test PRIVATE src)
+  add_test(NAME linux-candidate-translation-policy COMMAND linux-candidate-translation-policy-test)
+  add_executable(linux-candidate-script-annotation-test tests/candidate/candidate_script_annotation.cpp)
+  target_compile_options(linux-candidate-script-annotation-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-candidate-script-annotation-test PRIVATE src)
+  target_link_libraries(linux-candidate-script-annotation-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-candidate-script-annotation COMMAND linux-candidate-script-annotation-test)
+  add_executable(linux-paired-punctuation-test tests/input/paired_punctuation.cpp)
+  target_compile_options(linux-paired-punctuation-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-paired-punctuation-test PRIVATE src)
+  add_test(NAME linux-paired-punctuation COMMAND linux-paired-punctuation-test)
+  add_executable(linux-dictionary-quiesce-lease-test tests/core/dictionary_quiesce_lease.cpp)
+  target_compile_options(linux-dictionary-quiesce-lease-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-dictionary-quiesce-lease-test PRIVATE src)
+  add_test(NAME linux-dictionary-quiesce-lease COMMAND linux-dictionary-quiesce-lease-test)
+  add_executable(linux-emoji-plugin-groups-test tests/core/emoji_plugin_groups.cpp)
+  target_compile_options(linux-emoji-plugin-groups-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-emoji-plugin-groups-test PRIVATE src)
+  target_link_libraries(linux-emoji-plugin-groups-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-emoji-plugin-groups COMMAND linux-emoji-plugin-groups-test)
+  add_executable(common-dictionary-quiesce-lease-test ../common/tests/dictionary_quiesce_lease.cpp)
+  target_compile_options(common-dictionary-quiesce-lease-test PRIVATE -Wall -Wextra -Werror)
+  add_test(NAME common-dictionary-quiesce-lease COMMAND common-dictionary-quiesce-lease-test)
+  add_executable(common-telemetry-test ../common/tests/telemetry.cpp ../common/Telemetry.cpp)
+  target_compile_options(common-telemetry-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(common-telemetry-test PRIVATE ../common ../../crates/host-api/include)
+  target_link_libraries(common-telemetry-test PRIVATE nlohmann_json::nlohmann_json "${MSIME_HOST_LIBRARY}" Threads::Threads)
+  add_test(NAME common-telemetry COMMAND common-telemetry-test)
+  add_executable(linux-input-mode-indicator-test tests/core/input_mode_indicator.cpp)
+  target_compile_options(linux-input-mode-indicator-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-input-mode-indicator-test PRIVATE src)
+  add_test(NAME linux-input-mode-indicator COMMAND linux-input-mode-indicator-test)
+  add_executable(linux-view-composition-test tests/core/view_composition.cpp)
+  target_compile_options(linux-view-composition-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-view-composition-test PRIVATE src)
+  target_link_libraries(linux-view-composition-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-view-composition COMMAND linux-view-composition-test)
+  add_executable(linux-voice-provider-options-test tests/voice/voice_provider_options.cpp)
+  target_compile_options(linux-voice-provider-options-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-voice-provider-options-test PRIVATE src)
+  target_link_libraries(linux-voice-provider-options-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-voice-provider-options COMMAND linux-voice-provider-options-test)
+  add_executable(linux-prepare-paths-test tests/core/prepare_paths.cpp)
+  target_compile_options(linux-prepare-paths-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-prepare-paths-test PRIVATE src)
+  add_test(NAME linux-prepare-paths COMMAND linux-prepare-paths-test)
+  add_executable(linux-safe-path-test tests/core/safe_path.cpp)
+  target_compile_options(linux-safe-path-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-safe-path-test PRIVATE src)
+  add_test(NAME linux-safe-path COMMAND linux-safe-path-test)
+  add_executable(linux-key-router-adapter-test tests/input/key_router_adapter.cpp)
+  target_compile_options(linux-key-router-adapter-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-key-router-adapter-test PRIVATE src ../../crates/host-api/include)
+  add_test(NAME linux-key-router-adapter COMMAND linux-key-router-adapter-test)
+  add_executable(linux-backspace-hold-policy-test tests/input/backspace_hold_policy.cpp)
+  target_compile_options(linux-backspace-hold-policy-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-backspace-hold-policy-test PRIVATE src)
+  add_test(NAME linux-backspace-hold-policy COMMAND linux-backspace-hold-policy-test)
+  add_executable(linux-caps-lock-tap-test tests/input/caps_lock_tap.cpp)
+  target_compile_options(linux-caps-lock-tap-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-caps-lock-tap-test PRIVATE src)
+  add_test(NAME linux-caps-lock-tap COMMAND linux-caps-lock-tap-test)
+  add_executable(linux-diagnostic-log-test tests/core/diagnostic_log.cpp)
+  target_compile_options(linux-diagnostic-log-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-diagnostic-log-test PRIVATE src)
+  target_sources(linux-diagnostic-log-test PRIVATE src/system/DiagnosticLog.cpp)
+  add_test(NAME linux-diagnostic-log COMMAND linux-diagnostic-log-test)
+  add_executable(linux-surrounding-characters-test tests/core/surrounding_characters.cpp)
+  target_compile_options(linux-surrounding-characters-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-surrounding-characters-test PRIVATE src)
+  target_link_libraries(linux-surrounding-characters-test PRIVATE PkgConfig::IBUS)
+  add_test(NAME linux-surrounding-characters COMMAND linux-surrounding-characters-test)
+  # 两个前端在组词时都把已选片段放在读音之前；光标越过它时，Fcitx5 按字节计数，IBus 按 Unicode 标量计数。
+  # 空格转换、回车提交当前显示内容，是两个前端共用的规则；日文回车因此不能发送引擎的原始输入命令。
+  add_executable(linux-japanese-conversion-test tests/core/japanese_conversion.cpp)
+  target_compile_options(linux-japanese-conversion-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-japanese-conversion-test PRIVATE src)
+  add_test(NAME linux-japanese-conversion COMMAND linux-japanese-conversion-test)
+  # 两个菜单对同一设置共用名称表，避免把首右误写成另一家输入法的名字搜狗。
+  add_executable(linux-helpcode-schema-names-test tests/core/helpcode_schema_names.cpp)
+  target_compile_options(linux-helpcode-schema-names-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-helpcode-schema-names-test PRIVATE src)
+  add_test(NAME linux-helpcode-schema-names COMMAND linux-helpcode-schema-names-test)
+  # 选了辅助码表包时两个菜单显示插件，在菜单里选内置方案时停用插件，与共享设置页同一约定。
+  add_executable(linux-helpcode-pack-test tests/core/helpcode_pack.cpp)
+  target_compile_options(linux-helpcode-pack-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-helpcode-pack-test PRIVATE src)
+  target_link_libraries(linux-helpcode-pack-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-helpcode-pack COMMAND linux-helpcode-pack-test)
+  add_executable(linux-phrase-preedit-test tests/core/phrase_preedit.cpp)
+  target_compile_options(linux-phrase-preedit-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-phrase-preedit-test PRIVATE src)
+  add_test(NAME linux-phrase-preedit COMMAND linux-phrase-preedit-test)
+  add_executable(linux-replaced-program-test tests/core/replaced_program.cpp)
+  target_compile_options(linux-replaced-program-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-replaced-program-test PRIVATE src)
+  add_test(NAME linux-replaced-program COMMAND linux-replaced-program-test)
+  add_executable(linux-smart-punctuation-space-test tests/core/smart_punctuation_space.cpp)
+  target_compile_options(linux-smart-punctuation-space-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-smart-punctuation-space-test PRIVATE src)
+  add_test(NAME linux-smart-punctuation-space COMMAND linux-smart-punctuation-space-test)
+  add_test(NAME linux-setup-resolution
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/setup_resolution.py")
+  add_test(NAME linux-setup-update
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/setup_update.py"
+                   $<TARGET_FILE:msime-linux-prepare>)
+  add_test(NAME linux-setup-registration
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/setup_registration.py")
+  add_test(NAME linux-setup-omarchy
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/setup_omarchy.py")
+  add_test(NAME linux-setup-panel-restore
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/setup_panel_restore.py")
+  add_test(NAME linux-setup-gnome-wayland
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/setup_gnome_wayland.py")
+  add_test(NAME linux-setup-linglong
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/setup_linglong.py")
+  add_test(NAME linux-first-run-guide
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/first_run_guide.py")
+  add_test(NAME linux-settings-launcher-contract
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/settings_launcher_contract.py")
+  add_test(NAME linux-deb-maintainer-scripts
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/deb_maintainer_scripts.py"
+                   "${CMAKE_CURRENT_BINARY_DIR}/debian" "${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake" "${MSIME_USER_UNIT_LIST}"
+                   "${CMAKE_INSTALL_FULL_BINDIR}/${MSIME_EDITION_PACKAGE}-setup")
+  add_test(NAME linux-uninstall-unregister
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/uninstall_unregister.py"
+                   "${CMAKE_COMMAND}" "${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake")
+  add_test(NAME linux-clipboard-autostart
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/clipboard_autostart.py"
+                   "${CMAKE_COMMAND}" "${CMAKE_CURRENT_BINARY_DIR}" "${MSIME_XDG_AUTOSTART_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/uninstall.cmake")
+  add_test(NAME linux-ibus-launcher-supervisor
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/ibus_launcher_supervisor.py")
+  add_executable(linux-ibus-registration-bus tests/core/ibus_registration_bus.cpp)
+  target_compile_options(linux-ibus-registration-bus PRIVATE -Wall -Wextra -Werror)
+  target_link_libraries(linux-ibus-registration-bus PRIVATE PkgConfig::IBUS)
+  add_test(NAME linux-ibus-startup-telemetry
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/ibus_startup_telemetry.py"
+                   $<TARGET_FILE:msime-linux-ibus> $<TARGET_FILE:linux-ibus-registration-bus> "${MSIME_LINUX_VERSION}")
+  set_tests_properties(linux-ibus-startup-telemetry PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+  add_test(NAME linux-voice-provider-degraded-start
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/voice/provider_degraded_start.py")
+  add_test(NAME linux-voice-local-stream
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/voice/local_stream.py")
+  add_test(NAME linux-voice-provider-local
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/voice/provider_local.py"
+                   $<TARGET_FILE:msime-voice-local>)
+  set_tests_properties(linux-voice-local-stream linux-voice-provider-local PROPERTIES TIMEOUT 120)
+  add_test(NAME linux-voice-command-bounds
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/voice/voice_command_bounds.py")
+  add_test(NAME linux-voice-capture-device
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/voice/capture_device_contract.py")
+  add_test(NAME linux-clipboard-tool-parity
+           COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/clipboard/clipboard_tool_parity.py"
+                   $<TARGET_FILE:msime-linux-clipboard>)
+  add_executable(linux-first-run-guidance-test tests/core/first_run_guidance.cpp)
+  target_compile_options(linux-first-run-guidance-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+  target_include_directories(linux-first-run-guidance-test PRIVATE src)
+  add_test(NAME linux-first-run-guidance COMMAND linux-first-run-guidance-test)
+  add_executable(linux-candidate-skin-catalog-test tests/core/candidate_skin_catalog.cpp)
+  target_compile_options(linux-candidate-skin-catalog-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-candidate-skin-catalog-test PRIVATE src)
+  target_link_libraries(linux-candidate-skin-catalog-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-candidate-skin-catalog COMMAND linux-candidate-skin-catalog-test)
+  add_executable(linux-typing-statistics-test tests/core/typing_statistics.cpp)
+  target_compile_options(linux-typing-statistics-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-typing-statistics-test PRIVATE src ../../crates/host-api/include)
+  target_link_libraries(linux-typing-statistics-test PRIVATE "${MSIME_HOST_LIBRARY}" Threads::Threads)
+  add_test(NAME linux-typing-statistics COMMAND linux-typing-statistics-test)
+  add_executable(linux-panel-input-channel-test tests/core/panel_input_channel.cpp)
+  target_compile_options(linux-panel-input-channel-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-panel-input-channel-test PRIVATE src src/system)
+  target_link_libraries(linux-panel-input-channel-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-panel-input-channel COMMAND linux-panel-input-channel-test)
+  add_executable(linux-traditional-output-test tests/input/traditional_output.cpp src/system/ChineseTextConversion.cpp)
+  target_compile_options(linux-traditional-output-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-traditional-output-test PRIVATE src ../../crates/host-api/include)
+  target_link_libraries(linux-traditional-output-test PRIVATE "${MSIME_HOST_LIBRARY}")
+  add_test(NAME linux-traditional-output COMMAND linux-traditional-output-test)
+  if(MSIME_LINUX_VOICE)
+    add_executable(msime-voice-worker-test tests/voice/voice_worker.cpp)
+    target_compile_options(msime-voice-worker-test PRIVATE -Wall -Wextra -Werror)
+    target_include_directories(msime-voice-worker-test PRIVATE src)
+    add_test(NAME linux-voice-worker COMMAND msime-voice-worker-test)
+  endif()
 endif()
 # IBus 组件文件以版本的包名命名，组件名和引擎名也随版本（full 仍是 msime-linux.xml）。
 msime_edition_source(MSIME_IBUS_COMPONENT_SOURCE data/msime-linux.xml.in)
@@ -494,8 +558,8 @@ configure_file("${MSIME_IBUS_COMPONENT_SOURCE}" ${CMAKE_CURRENT_BINARY_DIR}/${MS
 install(TARGETS msime-linux-ibus msime-linux-dictionary msime-linux-cloud-dictionary msime-linux-cloud-clipboard msime-linux-online msime-linux-translation msime-linux-clipboard
                 msime-linux-handwriting msime-linux-voice msime-linux-emoji msime-linux-clipboard-capture msime-linux-prepare
                 RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
-if(MSIME_LINUX_VOICE)
- install(TARGETS msime-voice-worker-test RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+if(BUILD_TESTING AND MSIME_LINUX_VOICE)
+  install(TARGETS msime-voice-worker-test RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 endif()
 # 带着每用户目录名、单元名或命令名的脚本按版本改写（full 原样安装）；其余脚本只按自己的目录找同级程序，各版本相同。
 foreach(MSIME_EDITION_SCRIPT msime-linux-ibus-launcher msime-linux-first-run-guide msime-linux-online-provider msime-linux-provider-session)
@@ -530,7 +594,7 @@ foreach(MSIME_PROVIDER online voice)
   install(FILES "${MSIME_UNIT_SOURCE}" DESTINATION "${MSIME_SYSTEMD_USER_UNIT_DIR}"
           RENAME ${MSIME_EDITION_PACKAGE}-${MSIME_PROVIDER}.socket)
 endforeach()
-install(FILES scripts/msime_voice_doubao.py scripts/msime_voice_local.py scripts/msime_provider_runtime.py DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(FILES scripts/msime_voice_doubao.py scripts/msime_voice_local.py scripts/msime_provider_runtime.py scripts/host_api.py DESTINATION "${CMAKE_INSTALL_BINDIR}")
 # The helper and the sherpa-onnx runtime share the host library's private directory: the helper finds the runtime in its own directory, and libsherpa-onnx-c-api.so finds libonnxruntime.so through its $ORIGIN RPATH.
 install(TARGETS msime-voice-local RUNTIME DESTINATION "${CMAKE_INSTALL_LIBDIR}/${MSIME_CLIENT_DIRECTORY}")
 set(MSIME_VOICE_RUNTIME_DIR "" CACHE PATH "sherpa-onnx runtime for on-device recognition, as unpacked by scripts/fetch_voice_runtime.py --platform linux-<arch>")
@@ -620,10 +684,15 @@ elseif(MSIME_ENABLE_PACKAGING AND MSIME_EDITION_HANDWRITING AND MSIME_BUNDLE_HAN
   message(FATAL_ERROR "Packaging requires the handwriting model; fetch it with scripts/fetch_handwriting_model.py, or configure with -DMSIME_BUNDLE_HANDWRITING_MODEL=OFF to leave it to the on-demand download")
 endif()
 # 上面只按锁核对模型的字节；这里用构建出的识别入口真正加载它并识别一笔，各打包路线的 ctest 都会跑到。
+# 识别的是复制到构建目录里的一份，不是模型目录里的原件：Nix 的 store 去重会把原件合并成硬链接，而构建沙箱里 store 的属主显示为 nobody，引擎不会信任那个目录里的多链接文件（#6386）。复制出来的是新的单链接文件。
 if(BUILD_TESTING AND MSIME_HANDWRITING_MODEL_DIR)
+  set(MSIME_HANDWRITING_TEST_MODEL "${CMAKE_CURRENT_BINARY_DIR}/handwriting-test/handwriting-zh_CN.model")
+  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/handwriting-test")
+  file(COPY_FILE "${MSIME_HANDWRITING_MODEL_DIR}/handwriting-zh_CN.model" "${MSIME_HANDWRITING_TEST_MODEL}"
+       ONLY_IF_DIFFERENT)
   add_test(NAME linux-handwriting-local-model
            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/provider/handwriting_local_model.py"
-                   $<TARGET_FILE:msime-linux-handwriting> "${MSIME_HANDWRITING_MODEL_DIR}/handwriting-zh_CN.model")
+                   $<TARGET_FILE:msime-linux-handwriting> "${MSIME_HANDWRITING_TEST_MODEL}")
 endif()
 if(MSIME_EMOJI_RESOURCES)
   if(NOT IS_DIRECTORY "${MSIME_EMOJI_RESOURCES}")
@@ -662,7 +731,7 @@ if(MSIME_ENGINE_RESOURCES)
     install(FILES "${MSIME_ENGINE_RESOURCE_FILE}"
             DESTINATION "${CMAKE_INSTALL_DATADIR}/${MSIME_CLIENT_DIRECTORY}/resources")
   endforeach()
-  # The helpcode tables are not part of the dictionary release; the repository carries them in resources/helpcodes, and the Engine reads them from helpcodes/ under the resource directory (crates/engine/src/assets.rs names the six files). The hosts' verification lets a real helpcodes/ directory through. Their notices are installed with the others below.
+  # 辅助码表不在词库发布里，由仓库自带在 resources/helpcodes，Engine 从资源目录下的 helpcodes/ 读它们（crates/engine/src/assets.rs 列出七个文件）。宿主的校验放行真实的 helpcodes/ 目录。它们的来源声明与下面其他声明一起安装。
   install(FILES
             "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/helpcodes/helpcode.txt"
             "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/helpcodes/zrm_helpcode_big_unique.txt"
@@ -670,6 +739,7 @@ if(MSIME_ENGINE_RESOURCES)
             "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/helpcodes/shouyouplus_helpcode.txt"
             "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/helpcodes/xiaohe_helpcode.txt"
             "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/helpcodes/jiajia_helpcode.txt"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/helpcodes/wubi86_helpcode.txt"
           DESTINATION "${CMAKE_INSTALL_DATADIR}/${MSIME_CLIENT_DIRECTORY}/resources/helpcodes")
   # Keep the reviewed lock beside the installed bundle as provenance metadata;
   # it is not copied into the runtime directory because the Engine verifier
@@ -920,57 +990,59 @@ set_target_properties(msime-linux-ibus msime-linux-dictionary msime-linux-cloud-
                       msime-linux-voice msime-linux-emoji msime-linux-clipboard-capture msime-linux-prepare PROPERTIES
   INSTALL_RPATH "$ORIGIN/${MSIME_HOST_LIBRARY_RELATIVE_DIR}")
 
-add_executable(linux-native-compose-test tests/input/native_compose.cpp)
-add_executable(linux-wave-overlay-model-test
-  tests/runtime/wave_overlay_model.cpp src/overlay/WaveOverlayIbusSurface.cpp
-  src/overlay/WaveOverlaySurfaceFactory.cpp)
-target_compile_features(linux-wave-overlay-model-test PRIVATE cxx_std_17)
-target_compile_options(linux-wave-overlay-model-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-wave-overlay-model-test PRIVATE src)
-target_link_libraries(linux-wave-overlay-model-test PRIVATE PkgConfig::IBUS)
-if(X11_SURFACE_FOUND)
-  target_sources(linux-wave-overlay-model-test PRIVATE src/overlay/WaveOverlayX11Surface.cpp)
-  target_compile_definitions(linux-wave-overlay-model-test PRIVATE MSIME_LINUX_HAS_X11_SURFACE)
-  target_link_libraries(linux-wave-overlay-model-test PRIVATE PkgConfig::X11_SURFACE)
-endif()
-if(WAYLAND_CLIENT_FOUND AND WAYLAND_SCANNER_EXECUTABLE AND MSIME_XDG_SHELL_XML)
-  target_sources(linux-wave-overlay-model-test PRIVATE
-                 src/overlay/WaveOverlayWaylandSurface.cpp "${MSIME_LAYER_SHELL_CODE}"
-                 ${MSIME_XDG_SHELL_CODE})
-  target_include_directories(linux-wave-overlay-model-test PRIVATE
-                             "${MSIME_WAYLAND_PROTOCOL_DIR}")
-  target_compile_definitions(linux-wave-overlay-model-test PRIVATE
-                             MSIME_LINUX_HAS_WAYLAND_SURFACE)
-  target_link_libraries(linux-wave-overlay-model-test PRIVATE
-                        PkgConfig::WAYLAND_CLIENT)
-  if(WAYLAND_TEXT_FOUND)
-    target_compile_definitions(linux-wave-overlay-model-test PRIVATE
-                               MSIME_LINUX_WAYLAND_TEXT)
-    target_link_libraries(linux-wave-overlay-model-test PRIVATE
-                          PkgConfig::WAYLAND_TEXT)
+if(BUILD_TESTING)
+  add_executable(linux-native-compose-test tests/input/native_compose.cpp)
+  add_executable(linux-wave-overlay-model-test
+    tests/runtime/wave_overlay_model.cpp src/overlay/WaveOverlayIbusSurface.cpp
+    src/overlay/WaveOverlaySurfaceFactory.cpp)
+  target_compile_features(linux-wave-overlay-model-test PRIVATE cxx_std_17)
+  target_compile_options(linux-wave-overlay-model-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-wave-overlay-model-test PRIVATE src)
+  target_link_libraries(linux-wave-overlay-model-test PRIVATE PkgConfig::IBUS)
+  if(X11_SURFACE_FOUND)
+    target_sources(linux-wave-overlay-model-test PRIVATE src/overlay/WaveOverlayX11Surface.cpp)
+    target_compile_definitions(linux-wave-overlay-model-test PRIVATE MSIME_LINUX_HAS_X11_SURFACE)
+    target_link_libraries(linux-wave-overlay-model-test PRIVATE PkgConfig::X11_SURFACE)
   endif()
+  if(WAYLAND_CLIENT_FOUND AND WAYLAND_SCANNER_EXECUTABLE AND MSIME_XDG_SHELL_XML)
+    target_sources(linux-wave-overlay-model-test PRIVATE
+                   src/overlay/WaveOverlayWaylandSurface.cpp "${MSIME_LAYER_SHELL_CODE}"
+                   ${MSIME_XDG_SHELL_CODE})
+    target_include_directories(linux-wave-overlay-model-test PRIVATE
+                               "${MSIME_WAYLAND_PROTOCOL_DIR}")
+    target_compile_definitions(linux-wave-overlay-model-test PRIVATE
+                               MSIME_LINUX_HAS_WAYLAND_SURFACE)
+    target_link_libraries(linux-wave-overlay-model-test PRIVATE
+                          PkgConfig::WAYLAND_CLIENT ${MSIME_SHM_LIBRARIES})
+    if(WAYLAND_TEXT_FOUND)
+      target_compile_definitions(linux-wave-overlay-model-test PRIVATE
+                                 MSIME_LINUX_WAYLAND_TEXT)
+      target_link_libraries(linux-wave-overlay-model-test PRIVATE
+                            PkgConfig::WAYLAND_TEXT)
+    endif()
+  endif()
+  add_test(NAME linux-wave-overlay-model COMMAND linux-wave-overlay-model-test)
+  # 此测试检查 X11 的定位并读取 RandR 头文件，仅在构建 X11 浮层时启用。
+  if(X11_SURFACE_FOUND)
+    add_executable(linux-wave-overlay-placement-test tests/runtime/wave_overlay_placement.cpp)
+    target_compile_features(linux-wave-overlay-placement-test PRIVATE cxx_std_17)
+    target_compile_options(linux-wave-overlay-placement-test PRIVATE -Wall -Wextra -Werror)
+    target_include_directories(linux-wave-overlay-placement-test PRIVATE src)
+    target_link_libraries(linux-wave-overlay-placement-test PRIVATE nlohmann_json::nlohmann_json)
+    add_test(NAME linux-wave-overlay-placement COMMAND linux-wave-overlay-placement-test)
+  endif()
+  add_executable(linux-mode-badge-style-test tests/runtime/mode_badge_style.cpp)
+  target_compile_features(linux-mode-badge-style-test PRIVATE cxx_std_17)
+  target_compile_options(linux-mode-badge-style-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-mode-badge-style-test PRIVATE src)
+  target_link_libraries(linux-mode-badge-style-test PRIVATE nlohmann_json::nlohmann_json)
+  add_test(NAME linux-mode-badge-style COMMAND linux-mode-badge-style-test)
+  target_compile_options(linux-native-compose-test PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(linux-native-compose-test PRIVATE src)
+  target_link_libraries(linux-native-compose-test PRIVATE PkgConfig::XKBCOMMON)
+  add_test(NAME linux-native-compose COMMAND linux-native-compose-test
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/compose.fixture")
 endif()
-add_test(NAME linux-wave-overlay-model COMMAND linux-wave-overlay-model-test)
-# The placement it tests is X11's and reads the RandR headers, so it builds where the X11 surface does.
-if(X11_SURFACE_FOUND)
-  add_executable(linux-wave-overlay-placement-test tests/runtime/wave_overlay_placement.cpp)
-  target_compile_features(linux-wave-overlay-placement-test PRIVATE cxx_std_17)
-  target_compile_options(linux-wave-overlay-placement-test PRIVATE -Wall -Wextra -Werror)
-  target_include_directories(linux-wave-overlay-placement-test PRIVATE src)
-  target_link_libraries(linux-wave-overlay-placement-test PRIVATE nlohmann_json::nlohmann_json)
-  add_test(NAME linux-wave-overlay-placement COMMAND linux-wave-overlay-placement-test)
-endif()
-add_executable(linux-mode-badge-style-test tests/runtime/mode_badge_style.cpp)
-target_compile_features(linux-mode-badge-style-test PRIVATE cxx_std_17)
-target_compile_options(linux-mode-badge-style-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-mode-badge-style-test PRIVATE src)
-target_link_libraries(linux-mode-badge-style-test PRIVATE nlohmann_json::nlohmann_json)
-add_test(NAME linux-mode-badge-style COMMAND linux-mode-badge-style-test)
-target_compile_options(linux-native-compose-test PRIVATE -Wall -Wextra -Werror)
-target_include_directories(linux-native-compose-test PRIVATE src)
-target_link_libraries(linux-native-compose-test PRIVATE PkgConfig::XKBCOMMON)
-add_test(NAME linux-native-compose COMMAND linux-native-compose-test
-  "${CMAKE_CURRENT_SOURCE_DIR}/tests/input/compose.fixture")
 
 option(MSIME_ENABLE_PACKAGING "Enable Linux TGZ and Debian package generation" OFF)
 # IBus 与 Fcitx5 是并列的两个系统入口，不是宿主和它的插件，所以一次普通的开发构建
@@ -990,16 +1062,20 @@ if(NOT MSIME_ENABLE_FCITX5)
   message(STATUS "跳过：Fcitx5 插件；请安装 Fcitx5 开发包（Fcitx5Core 5.0.20+），"
                  "或在配置时传入 -DMSIME_ENABLE_FCITX5=ON")
 endif()
-# License and third-party notices, the Linux counterpart of the macOS bundle's Resources/Licenses. Every install redistributes the code compiled into the host library, so plain `cmake --install` gets them as well, not only packages. The project license is `copyright` here (GPL-3.0.txt on macOS); it also covers the input engine (crates/engine), which is this project's code. What the engine carries from elsewhere keeps its own notice: zinnia, whose recognizer crates/engine/src/handwriting ports; the place names `@` mode offers, from modood/Administrative-divisions-of-China (WTFPL); the Korean Hanja table, from libhangul's data/hanja/hanja.txt (BSD-3-Clause); the Jyutping and bopomofo data of the Cantonese and Zhuyin schemes, from rime-cantonese (CC BY 4.0) and libchewing-data (LGPL-2.1-or-later), and the stroke orders of the Stroke scheme, from rime-stroke (LGPL-3.0, with the CNS11643 attribution), whose notices travel with every engine build even where those schemes are not offered; the provenance of the dictionary data msime-linux-setup downloads, carried verbatim from msime-engine as resources/licenses/msime-engine-dictionary-NOTICE.md, the copy every platform ships; and the provenance of the helpcode tables installed into the packaged resource directory: the five the Engine brought (ENGINE-NOTICE.md) and jiajia (NOTICE.md).
+# License and third-party notices, the Linux counterpart of the macOS bundle's Resources/Licenses. Every install redistributes the code compiled into the host library, so plain `cmake --install` gets them as well, not only packages. The project license is `copyright` here (GPL-3.0.txt on macOS); it also covers the input engine (crates/engine), which is this project's code. What the engine carries from elsewhere keeps its own notice: zinnia, whose recognizer crates/engine/src/handwriting ports; the place names `@` mode offers, from modood/Administrative-divisions-of-China (WTFPL); the Korean Hanja table, from libhangul's data/hanja/hanja.txt (BSD-3-Clause); the component reverse lookup table of 拆字反查 (C mode), adapted from kfcd/chaizi (CC BY 3.0, whose attribution and list of changes travel with it), with readings, ranks and traditional variants from the Unicode Han Database (Unicode License V3); the Jyutping and bopomofo data of the Cantonese and Zhuyin schemes, from rime-cantonese (CC BY 4.0) and libchewing-data (LGPL-2.1-or-later), and the stroke orders of the Stroke scheme, from rime-stroke (LGPL-3.0, with the CNS11643 attribution), whose notices travel with every engine build even where those schemes are not offered; the provenance of the dictionary data msime-linux-setup downloads, carried verbatim from msime-engine as resources/licenses/msime-engine-dictionary-NOTICE.md, the copy every platform ships; and the provenance of the helpcode tables installed into the packaged resource directory: the five the Engine brought (ENGINE-NOTICE.md) and jiajia (NOTICE.md).
 set(MSIME_NOTICE_SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/../../LICENSE"
   "${CMAKE_CURRENT_SOURCE_DIR}/data/THIRD_PARTY_NOTICES.txt"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/msime-engine-dictionary-NOTICE.md"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/helpcodes/ENGINE-NOTICE.md"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/helpcodes/NOTICE.md"
+  # 五笔 86 辅助码表的来源与生成方法，附它所派生的极点码表的 Apache-2.0 全文。
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/helpcodes/NOTICE-wubi86.md"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/Zinnia-LICENSE.txt"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/Administrative-divisions-of-China-WTFPL.txt"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/libhangul-hanja-BSD-3-Clause.txt"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/kfcd-chaizi-CC-BY-3.0.txt"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/Unicode-License-V3.txt"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/rime-cantonese-CC-BY-4.0.txt"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/libchewing-data-LGPL-2.1.txt"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/ewts-MIT.txt"
@@ -1012,9 +1088,12 @@ set(MSIME_NOTICE_NAMES
   msime-engine-dictionary-NOTICE.md
   msime-engine-helpcode-NOTICE.md
   msime-helpcode-jiajia-NOTICE.md
+  msime-helpcode-wubi86-NOTICE.md
   Zinnia-LICENSE.txt
   Administrative-divisions-of-China-WTFPL.txt
   libhangul-hanja-BSD-3-Clause.txt
+  kfcd-chaizi-CC-BY-3.0.txt
+  Unicode-License-V3.txt
   rime-cantonese-CC-BY-4.0.txt
   libchewing-data-LGPL-2.1.txt
   ewts-MIT.txt

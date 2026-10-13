@@ -1,11 +1,7 @@
 package app.msime.android.test;
 
-import android.os.ParcelFileDescriptor;
-import android.os.SystemClock;
-import android.util.AtomicFile;
 import android.view.accessibility.AccessibilityNodeInfo;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.function.Predicate;
@@ -64,8 +60,25 @@ public final class NineKeyEnglishDeviceSmoke extends DeviceSmoke {
             stage = "nine-key English commit identity";
             await(field("msime-test-plain").and(node -> node.getText() != null
                 && node.getText().toString().equalsIgnoreCase("ok")));
+
+            // 第一格短按仍是符号入口，长按的 1 经真实 InputConnection 上屏。
+            stage = "nine-key long-press one";
+            AccessibilityNodeInfo one = await(key("@#"));
+            if (!one.isLongClickable() || !one.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK))
+                throw new AssertionError("Key 1 must offer its literal digit");
+            tap(described("输入 1"));
+            await(field("msime-test-plain").and(node -> node.getText() != null
+                && node.getText().toString().equalsIgnoreCase("ok1")));
+
+            stage = "nine-key numeric one and layer restoration";
+            tap(key("123"));
+            tap(key("1"));
+            await(field("msime-test-plain").and(node -> node.getText() != null
+                && node.getText().toString().equalsIgnoreCase("ok11")));
+            tap(key("九键"));
+            await(key("@#").and(AccessibilityNodeInfo::isLongClickable));
         } finally {
-            shell("am start -W -n app.msime.android/app.msime.android.home.HomeActivity");
+            shellDiscard("am start -W -n app.msime.android/app.msime.android.home.HomeActivity");
             if (original == null) Files.deleteIfExists(preferences.toPath());
             else publish(preferences, original);
         }
@@ -85,34 +98,10 @@ public final class NineKeyEnglishDeviceSmoke extends DeviceSmoke {
         };
     }
 
-    private void restartIme() throws Exception {
-        shell("ime disable app.msime.android/.MSIMEInputService");
-        shell("ime enable app.msime.android/.MSIMEInputService");
-        shell("ime set app.msime.android/.MSIMEInputService");
-        SystemClock.sleep(1000);
-    }
 
     private void openEditor() throws Exception {
-        shell("am start -W -f 0x10008000 -n app.msime.android.test/app.msime.android.test.EditorActivity");
+        shellDiscard("am start -W -f 0x10008000 -n app.msime.android.test/app.msime.android.test.EditorActivity");
     }
 
-    private void shell(String command) throws Exception {
-        try (var input = new ParcelFileDescriptor.AutoCloseInputStream(
-                automation.executeShellCommand(command))) {
-            byte[] buffer = new byte[1024];
-            while (input.read(buffer) != -1) { }
-        }
-    }
 
-    private void publish(File file, byte[] contents) throws Exception {
-        AtomicFile target = new AtomicFile(file);
-        FileOutputStream output = target.startWrite();
-        try {
-            output.write(contents);
-            target.finishWrite(output);
-        } catch (Exception error) {
-            target.failWrite(output);
-            throw error;
-        }
-    }
 }

@@ -1,5 +1,11 @@
 package app.msime.android.home;
 
+import app.msime.android.LayoutPolicy;
+
+import app.msime.android.DimensionPolicy;
+
+import app.msime.android.ImageViewPolicy;
+import app.msime.android.ThemeColorPolicy;
 import android.content.Context;
 import android.view.View;
 import android.view.ViewGroup;
@@ -12,6 +18,7 @@ import androidx.annotation.DrawableRes;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
 import app.msime.android.AndroidLocalSettings;
+import app.msime.android.DrawablePolicy;
 import app.msime.android.CustomKeyboardSkin;
 import app.msime.android.KeyboardFeedbackStore;
 import app.msime.android.R;
@@ -80,7 +87,7 @@ final class KeyboardSheets {
     }
 
     /**
-     * 选中一个自定义设计：与键盘自己的皮肤面板（`MSIMEInputService.saveKeyboardSkin`）写法相同——原来显示的主题记进 `custom_theme.base` 并清掉 `candidate_skin`，设计写进 `custom_theme.keyboard`，`global_theme` 改成 `custom`；另外按 P23 写设计带的按键音包（静音不改音包）。按键动画和本地按键音开关不在共享偏好里，由 {@link #applyLocalFeedback} 另写。
+     * 选中一个自定义设计：与键盘自己的皮肤面板（`MSIMEInputService.saveKeyboardSkin`）写法相同——原来显示的主题记进 `custom_theme.base` 并清掉浅色、深色两个槽位的皮肤包（`candidate_skin` 和 `candidate_skin_dark`），设计写进 `custom_theme.keyboard`，`global_theme` 改成 `custom`；另外按 P23 写设计带的按键音包（静音不改音包）。按键动画和本地按键音开关不在共享偏好里，由 {@link #applyLocalFeedback} 另写。
      */
     static void applyDesign(JSONObject preferences, JSONObject design) throws JSONException {
         String current = InputViewValuePolicy.textOr(preferences, "global_theme", "system");
@@ -88,6 +95,7 @@ final class KeyboardSheets {
         if (!"custom".equals(current)) {
             customTheme.put("base", current);
             customTheme.remove("candidate_skin");
+            customTheme.remove("candidate_skin_dark");
         }
         customTheme.put("keyboard", new JSONObject(design.toString()));
         preferences.put("global_theme", "custom");
@@ -174,7 +182,7 @@ final class KeyboardSheets {
     /** 设计里语言卡那种行：左边一个字的徽标，标题和副标题，行尾是值和 ›。 */
     static View badgeNavRow(Context context, String badge, String title, @Nullable String subtitle,
             @Nullable String value, Runnable action) {
-        return badgeNavRow(context, badge, title, subtitle, value, Ui.subText(context), action);
+        return badgeNavRow(context, badge, title, subtitle, value, ThemeColorPolicy.subText(context), action);
     }
 
     /** 徽标导航行的尾部值可使用强调色，供已启用状态等页面复用。 */
@@ -182,21 +190,21 @@ final class KeyboardSheets {
             @Nullable String value, int valueColor, Runnable action) {
         LinearLayout row = baseRow(context);
         row.addView(badge(context, badge));
-        row.addView(texts(context, title, subtitle, Ui.text(context)),
-            Ui.weightWrap(1f));
+        row.addView(texts(context, title, subtitle, ThemeColorPolicy.text(context)),
+            LayoutPolicy.weightedWrapParams(1f));
         if (value != null && !value.isEmpty()) {
-            TextView state = Ui.trailingValue(context, value, Ui.TEXT_ROW_TITLE, valueColor);
-            LinearLayout.LayoutParams params = Ui.rowGapParams(context);
+            TextView state = ViewPolicy.trailingValue(context, value, Ui.TEXT_ROW_TITLE, valueColor);
+            LinearLayout.LayoutParams params = LayoutPolicy.rowGapParams(context, Ui.ROW_GAP);
             row.addView(state, params);
         }
-        ImageView chevron = Ui.chevron(context);
-        LinearLayout.LayoutParams chevronParams = Ui.squareParams(context, Ui.CHEVRON_SIZE);
-        chevronParams.setMarginStart(Ui.dp(context, 6));
+        ImageView chevron = ImageViewPolicy.chevron(context, ThemeColorPolicy.subText(context));
+        LinearLayout.LayoutParams chevronParams = LayoutPolicy.squareParams(context, Ui.CHEVRON_SIZE);
+        chevronParams.setMarginStart(DimensionPolicy.pixels(context, 6));
         row.addView(chevron, chevronParams);
         row.setContentDescription(title
             + (subtitle == null || subtitle.isEmpty() ? "" : "，" + subtitle)
             + (value == null || value.isEmpty() ? "" : "，" + value));
-        Ui.makeClickable(row, context, action);
+        ViewPolicy.makeClickable(row, context, action);
         return row;
     }
 
@@ -217,21 +225,21 @@ final class KeyboardSheets {
     static View accentActionRow(Context context, @Nullable String glyph, String title, Runnable action,
             int iconSize, int iconMarginEnd, int labelMarginStart) {
         LinearLayout row = baseRow(context);
-        Ui.setMinimumHeightDp(row, context, Ui.COMPACT_ROW_MIN_HEIGHT);
+        ViewPolicy.setMinimumHeightDp(context, row, Ui.COMPACT_ROW_MIN_HEIGHT);
         if (glyph != null) {
-            TextView icon = Ui.styledLabel(context, glyph, 22, 400, Ui.accent(context));
+            TextView icon = ViewPolicy.styledLabel(context, glyph, 22, 400, ThemeColorPolicy.accent(context));
             ViewPolicy.setCentered(icon);
-            Ui.hideFromAccessibility(icon);
-            LinearLayout.LayoutParams iconParams = Ui.squareParams(context, iconSize);
-            iconParams.setMarginEnd(Ui.dp(context, iconMarginEnd));
+            ViewPolicy.hideFromAccessibility(icon);
+            LinearLayout.LayoutParams iconParams = LayoutPolicy.squareParams(context, iconSize);
+            iconParams.setMarginEnd(DimensionPolicy.pixels(context, iconMarginEnd));
             row.addView(icon, iconParams);
         }
-        TextView label = Ui.styledLabel(context, title, Ui.TEXT_ROW_TITLE, 400, Ui.accent(context));
-        LinearLayout.LayoutParams labelParams = Ui.weightWrap(1f);
-        labelParams.setMarginStart(Ui.dp(context, labelMarginStart));
+        TextView label = ViewPolicy.styledLabel(context, title, Ui.TEXT_ROW_TITLE, 400, ThemeColorPolicy.accent(context));
+        LinearLayout.LayoutParams labelParams = LayoutPolicy.weightedWrapParams(1f);
+        labelParams.setMarginStart(DimensionPolicy.pixels(context, labelMarginStart));
         row.addView(label, labelParams);
-        Ui.makeClickable(row, context, action);
-        row.setAccessibilityDelegate(buttonDelegate(title));
+        ViewPolicy.makeClickable(row, context, action);
+        row.setAccessibilityDelegate(HomeButtonPolicy.buttonDelegate(title));
         return row;
     }
 
@@ -244,136 +252,110 @@ final class KeyboardSheets {
             String label, @Nullable Runnable action) {
         LinearLayout row = baseRow(context);
         row.addView(badge(context, badge));
-        row.addView(texts(context, title, subtitle, Ui.text(context)),
-            Ui.weightWrap(1f));
+        row.addView(texts(context, title, subtitle, ThemeColorPolicy.text(context)),
+            LayoutPolicy.weightedWrapParams(1f));
         boolean enabled = action != null;
         TextView button;
         if (enabled) {
-            button = Ui.pillButton(context, label, Ui.TEXT_BUTTON_SMALL, 500,
-                Ui.accentSoft(context), Ui.accent(context), Ui.BUTTON_PADDING_H, Ui.BUTTON_PADDING_V,
+            button = ViewPolicy.pillButton(context, label, Ui.TEXT_BUTTON_SMALL, 500,
+                ThemeColorPolicy.accentSoft(context), ThemeColorPolicy.accent(context), Ui.BUTTON_PADDING_H, Ui.BUTTON_PADDING_V,
                 Ui.COMPACT_BUTTON_MIN_HEIGHT, 0, action);
         } else {
-            button = Ui.styledLabel(context, label, Ui.TEXT_BUTTON_SMALL, 500, Ui.subText(context));
+            button = ViewPolicy.styledLabel(context, label, Ui.TEXT_BUTTON_SMALL, 500, ThemeColorPolicy.subText(context));
             ViewPolicy.setCentered(button);
             ViewPolicy.setSingleLine(button);
-            Ui.setButtonPadding(button, context);
-            Ui.setTextMinHeightDp(button, context, Ui.COMPACT_BUTTON_MIN_HEIGHT);
+            ViewPolicy.setButtonPadding(context, button);
+            ViewPolicy.setTextMinHeightDp(context, button, Ui.COMPACT_BUTTON_MIN_HEIGHT);
             ViewPolicy.setEnabled(button, false);
         }
-        button.setAccessibilityDelegate(buttonDelegate(label + "，" + title));
-        LinearLayout.LayoutParams params = Ui.rowGapParams(context);
+        button.setAccessibilityDelegate(HomeButtonPolicy.buttonDelegate(label + "，" + title));
+        LinearLayout.LayoutParams params = LayoutPolicy.rowGapParams(context, Ui.ROW_GAP);
         row.addView(button, params);
         return row;
     }
 
     /** 页面底部的大按钮：主按钮是实心强调色，次按钮是卡片底、正文色；52dp 高、r16。 */
     static TextView bigButton(Context context, String label, boolean primary, Runnable action) {
-        TextView button = Ui.textButton(context, label, Ui.TEXT_ROW_TITLE, 600,
-            primary ? Ui.onAccent(context) : Ui.text(context),
-            Ui.rippleOn(context, primary ? Ui.accent(context) : Ui.card(context), Ui.dp(context, 16)),
+        TextView button = ViewPolicy.textButton(context, label, Ui.TEXT_ROW_TITLE, 600,
+            primary ? ThemeColorPolicy.onAccent(context) : ThemeColorPolicy.text(context),
+            ViewPolicy.ripple(context, primary ? ThemeColorPolicy.accent(context) : ThemeColorPolicy.card(context), DimensionPolicy.pixels(context, 16)),
             Ui.ACTION_BUTTON_MIN_HEIGHT, action);
-        Ui.setHorizontalPaddingDp(button, context, 16);
-        button.setAccessibilityDelegate(buttonDelegate(label));
+        ViewPolicy.setHorizontalPaddingDp(context, button, 16);
+        button.setAccessibilityDelegate(HomeButtonPolicy.buttonDelegate(label));
         return button;
     }
 
     static LinearLayout baseRow(Context context) {
-        LinearLayout row = Ui.row(context);
+        LinearLayout row = LayoutPolicy.row(context);
         ViewPolicy.setCenteredVertically(row);
-        Ui.setRowMinimumHeight(row, context);
-        Ui.setRowPadding(row, context);
+        ViewPolicy.setRowMinimumHeight(context, row);
+        ViewPolicy.setRowPadding(context, row);
         return row;
     }
 
     /** 32dp 的圆角方块徽标，供词库和语言行共用。 */
     static TextView badge(Context context, String text) {
-        TextView badge = Ui.styledLabel(context, text, 15, 600, Ui.accent(context));
+        TextView badge = ViewPolicy.styledLabel(context, text, 15, 600, ThemeColorPolicy.accent(context));
         ViewPolicy.setCentered(badge);
-        ViewPolicy.setBackground(badge, Ui.rounded(Ui.accentSoft(context), Ui.dp(context, 8)));
-            Ui.hideFromAccessibility(badge);
-        LinearLayout.LayoutParams params = Ui.squareParams(context, 32);
-        params.setMarginEnd(Ui.dp(context, Ui.ROW_GAP));
+        ViewPolicy.setBackground(badge, DrawablePolicy.rounded(ThemeColorPolicy.accentSoft(context), DimensionPolicy.pixels(context, 8)));
+            ViewPolicy.hideFromAccessibility(badge);
+        LinearLayout.LayoutParams params = LayoutPolicy.squareParams(context, 32);
+        params.setMarginEnd(DimensionPolicy.pixels(context, Ui.ROW_GAP));
         badge.setLayoutParams(params);
         return badge;
     }
 
     static LinearLayout texts(Context context, String title, @Nullable String subtitle, int titleColor) {
-        LinearLayout texts = Ui.column(context);
-        TextView heading = Ui.styledLabel(context, title, Ui.TEXT_ROW_TITLE, 400, titleColor);
+        LinearLayout texts = LayoutPolicy.column(context);
+        TextView heading = ViewPolicy.styledLabel(context, title, Ui.TEXT_ROW_TITLE, 400, titleColor);
         ViewPolicy.setSingleLine(heading);
         texts.addView(heading);
         if (subtitle != null && !subtitle.isEmpty()) {
-            TextView detail = Ui.styledLabel(context, subtitle, Ui.TEXT_ROW_SUBTITLE, 400,
-                Ui.subText(context));
+            TextView detail = ViewPolicy.styledLabel(context, subtitle, Ui.TEXT_ROW_SUBTITLE, 400,
+                ThemeColorPolicy.subText(context));
             ViewPolicy.setSingleLine(detail);
             texts.addView(detail);
         }
         return texts;
     }
 
-    static View.AccessibilityDelegate buttonDelegate(CharSequence description) {
-        return new View.AccessibilityDelegate() {
-            @Override public void onInitializeAccessibilityNodeInfo(View host, AccessibilityNodeInfo info) {
-                super.onInitializeAccessibilityNodeInfo(host, info);
-                info.setClassName(Button.class.getName());
-                info.setContentDescription(description);
-            }
-        };
-    }
 
     /** 「我的」页面共用的图标导航行，支持副标题、尾部值和可选点击行为。 */
     static LinearLayout iconNavRow(Context context, @DrawableRes int icon, CharSequence title,
             @Nullable CharSequence subtitle, @Nullable CharSequence value, @Nullable Runnable action) {
-        LinearLayout row = Ui.row(context);
+        LinearLayout row = LayoutPolicy.row(context);
         ViewPolicy.setCenteredVertically(row);
-        Ui.setMinimumHeightDp(row, context,
+        ViewPolicy.setMinimumHeightDp(context, row,
             subtitle == null ? Ui.COMPACT_ROW_MIN_HEIGHT : Ui.ROW_MIN_HEIGHT);
-        Ui.setRowPadding(row, context);
+        ViewPolicy.setRowPadding(context, row);
 
-        ImageView glyph = Ui.decorativeIcon(context, icon, Ui.subText(context));
-        LinearLayout.LayoutParams glyphParams = Ui.squareParams(context, 22);
-        glyphParams.setMarginEnd(Ui.dp(context, 18));
+        ImageView glyph = ImageViewPolicy.decorative(context, icon, ThemeColorPolicy.subText(context));
+        LinearLayout.LayoutParams glyphParams = LayoutPolicy.squareParams(context, 22);
+        glyphParams.setMarginEnd(DimensionPolicy.pixels(context, 18));
         row.addView(glyph, glyphParams);
 
-        LinearLayout texts = Ui.column(context);
-        TextView heading = Ui.styledLabel(context, title, Ui.TEXT_ROW_TITLE, 400, Ui.text(context));
+        LinearLayout texts = LayoutPolicy.column(context);
+        TextView heading = ViewPolicy.styledLabel(context, title, Ui.TEXT_ROW_TITLE, 400, ThemeColorPolicy.text(context));
         texts.addView(heading);
         if (subtitle != null) {
-            TextView detail = Ui.styledLabel(context, subtitle, 12, 400, Ui.subText(context));
+            TextView detail = ViewPolicy.styledLabel(context, subtitle, 12, 400, ThemeColorPolicy.subText(context));
             texts.addView(detail);
         }
-        row.addView(texts, Ui.weightWrap(1f));
+        row.addView(texts, LayoutPolicy.weightedWrapParams(1f));
 
         if (value != null && value.length() > 0) {
-            TextView trailing = Ui.trailingValue(context, value, Ui.TEXT_ROW_SUBTITLE, Ui.subText(context));
-            LinearLayout.LayoutParams valueParams = Ui.rowGapParams(context);
+            TextView trailing = ViewPolicy.trailingValue(context, value, Ui.TEXT_ROW_SUBTITLE, ThemeColorPolicy.subText(context));
+            LinearLayout.LayoutParams valueParams = LayoutPolicy.rowGapParams(context, Ui.ROW_GAP);
             row.addView(trailing, valueParams);
         }
         if (action != null) {
-            ImageView chevron = Ui.chevron(context);
-            LinearLayout.LayoutParams chevronParams = Ui.squareParams(context, Ui.CHEVRON_SIZE);
-            chevronParams.setMarginStart(Ui.dp(context, 6));
+            ImageView chevron = ImageViewPolicy.chevron(context, ThemeColorPolicy.subText(context));
+            LinearLayout.LayoutParams chevronParams = LayoutPolicy.squareParams(context, Ui.CHEVRON_SIZE);
+            chevronParams.setMarginStart(DimensionPolicy.pixels(context, 6));
             row.addView(chevron, chevronParams);
-            Ui.makeClickable(row, context, action);
+            ViewPolicy.makeClickable(row, context, action);
         }
         return row;
     }
 
-    /** 构造详情卡片行尾的 tonal 胶囊按钮；调用方只需绑定业务点击行为。 */
-    static TextView tonalButton(Context context, CharSequence label, CharSequence description, int weight) {
-        TextView button = Ui.pillButton(context, label, Ui.TEXT_BUTTON_SMALL, weight,
-            Ui.accentSoft(context), Ui.accent(context), Ui.BUTTON_PADDING_H, Ui.BUTTON_PADDING_V,
-            Ui.COMPACT_BUTTON_MIN_HEIGHT, 0);
-        button.setAccessibilityDelegate(buttonDelegate(description));
-        ViewPolicy.setPoliteLiveRegion(button);
-        return button;
-    }
-
-    /** 构造并绑定详情卡片行尾的 tonal 胶囊按钮。 */
-    static TextView tonalButton(Context context, CharSequence label, CharSequence description, int weight,
-            Runnable action) {
-        TextView button = tonalButton(context, label, description, weight);
-        ViewPolicy.bindClick(button, action);
-        return button;
-    }
 }

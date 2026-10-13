@@ -43,15 +43,15 @@ public final class NineKeySidebarPolicy {
         int index = 0;
         while (index <= text.length()) {
             int codePoint = index < text.length() ? text.codePointAt(index) : ' ';
-            if (Character.isWhitespace(codePoint) || Character.isSpaceChar(codePoint)) {
+            if (TextPolicy.isSpace(codePoint)) {
                 if (token.length() > 0) {
                     symbols.add(token.toString());
                     token.setLength(0);
                 }
             } else {
-                if (Character.isISOControl(codePoint)) return null;
+                if (TextPolicy.isControl(codePoint)) return null;
                 token.appendCodePoint(codePoint);
-                if (token.codePointCount(0, token.length()) > MAX_SYMBOL_CODE_POINTS) return null;
+                if (TextPolicy.codePointLength(token.toString()) > MAX_SYMBOL_CODE_POINTS) return null;
             }
             index += index < text.length() ? Character.charCount(codePoint) : 1;
         }
@@ -106,15 +106,15 @@ public final class NineKeySidebarPolicy {
      */
     public static int rowHeight(int railHeight, int count, int minRowHeight) {
         if (railHeight <= 0) return 0;
-        int rows = Math.min(count, VISIBLE_ROWS);
-        if (minRowHeight > 0) rows = Math.min(rows, railHeight / minRowHeight);
-        return railHeight / Math.max(1, rows);
+        int rows = BoundsPolicy.atMost(count, VISIBLE_ROWS);
+        if (minRowHeight > 0) rows = BoundsPolicy.atMost(rows, railHeight / minRowHeight);
+        return railHeight / BoundsPolicy.atLeast(rows, 1);
     }
 
     /** 列出时给设置页显示的摘要：最多前 `limit` 个符号，后面用「等 N 个」收尾。 */
     public static String summary(List<String> symbols, int limit) {
         if (symbols.size() <= limit) return String.join(" ", symbols);
-        List<String> head = new ArrayList<>(symbols.subList(0, Math.max(0, limit)));
+        List<String> head = new ArrayList<>(symbols.subList(0, BoundsPolicy.nonNegative(limit)));
         return String.join(" ", head) + " 等 " + symbols.size() + " 个";
     }
 }

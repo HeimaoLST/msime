@@ -4,6 +4,10 @@
  * panel launchers, and the desktop window chrome.
  */
 
+import { compactFieldLabel } from "../core/form-style";
+import { inlineItems } from "../core/row-style";
+import { mutedText } from "../core/text-style";
+
 /*
  * The window each platform draws around the pages. The `--p-*` tokens the root's `data-platform` selects (see `theme/platform-tokens.ts`) carry the colours and type the platforms share a name for; the `win:` / `mac:` / `linux:` / `hm2:` variants declared in styles.css reach the rest -- widths, paddings and the few surfaces the design colours for one platform only.
  */
@@ -37,6 +41,17 @@ export const sliderControl =
   "block w-40 max-phone:w-32 harmony:flex harmony:h-[30px] harmony:w-[110px] harmony:items-center";
 /** A slider row's track with its current value read out after it, as the reference window's slider rows show it. */
 export const sliderWithValue = "flex items-center gap-3 harmony:gap-2.5";
+/** 整行宽的滑块（`SliderRow` 的 `wide`）：HarmonyOS 手机上标题独占一行，轨道在下一行铺满，数值跟在轨道右侧。 */
+export const sliderControlWide =
+  "block min-w-0 flex-1 harmony:flex harmony:h-[30px] harmony:items-center";
+export const sliderWithValueWide = `${sliderWithValue} w-full`;
+/** HarmonyOS 手机键盘页「尺寸」组顶部的预览：不带「预览」标签，底下一行拖动提示，和它调的滑块在同一张卡片里。 */
+export const phoneKeyboardPreview = groupBlock;
+export const phoneKeyboardPreviewHint =
+  "m-0 mt-2.5 text-center [font-size:var(--p-sub-fs)] [color:var(--p-sub)]";
+/** 一张卡片末尾整行居中的警示文字按钮，例如「恢复默认」：不再另写标题和说明。 */
+export const centeredDangerRow =
+  "flex min-h-[var(--p-row-h)] w-full cursor-pointer items-center justify-center border-0 bg-transparent [padding:var(--p-row-pad)] [font-size:var(--p-row-fs)] text-[var(--danger-text)] active:bg-[var(--p-hover)] disabled:cursor-default disabled:opacity-50";
 /** 滑块后的数值：宽到能放下两位数字，数值变化时轨道不会移动。HarmonyOS 用次要颜色以 13px 显示在固定 46px 宽的列中，足以放下 18px 这样带单位的值。 */
 export const sliderValue =
   "min-w-[2ch] text-right tabular-nums harmony:w-[46px] harmony:shrink-0 harmony:text-[13px] harmony:text-[var(--p-sub)]";
@@ -50,10 +65,10 @@ export const externalHeading =
   "mx-1 mt-7 mb-3 flex items-start justify-between gap-[18px] [&>div]:min-w-0";
 export const externalActions =
   "flex shrink-0 grow-0 basis-auto gap-2 [&>button]:mt-0.5 [&>button]:h-[30px] [&>button]:shrink-0 [&>button]:grow-0 [&>button]:basis-auto";
-export const externalDirectory = "mt-1.5 block font-mono text-xs break-anywhere text-muted";
-export const externalMeta = "mt-1 text-xs break-anywhere text-muted";
+export const externalDirectory = "mt-1.5 block font-mono text-xs wrap-anywhere text-muted";
+export const externalMeta = "mt-1 text-xs wrap-anywhere text-muted";
 export const externalDiagnostics =
-  "mx-1 mt-2.5 text-xs break-anywhere text-muted [&>summary]:cursor-pointer [&>ul]:mt-[7px] [&>ul]:mb-0 [&>ul]:pl-5";
+  "mx-1 mt-2.5 text-xs wrap-anywhere text-muted [&>summary]:cursor-pointer [&>ul]:mt-[7px] [&>ul]:mb-0 [&>ul]:pl-5";
 export const externalResourceNote = "px-6 pt-0 pb-3";
 
 /** The theme page shows one card at a time: a horizontal scroll-snap track, so a trackpad or touch swipe moves between cards as well as the arrows do. */
@@ -64,16 +79,17 @@ export const themeCarouselSlide = "w-full shrink-0 snap-start p-1";
 export const themeCarouselNav = "mt-2 flex items-center justify-center gap-3";
 export const themeCarouselArrow =
   "flex size-7 items-center justify-center rounded-full border border-edge bg-[var(--p-group-bg)] p-0 text-lg leading-none text-muted hover:text-body disabled:opacity-40 disabled:hover:text-muted";
-export const themeCarouselDots = "flex items-center gap-1.5";
+export const themeCarouselDots = inlineItems;
 export const themeCarouselDot = (active: boolean, edge = false) =>
   `${edge ? "size-1.5" : "size-2"} shrink-0 rounded-full border-0 p-0 ${active ? "bg-accent" : "bg-[var(--toggle-off-bg)] hover:bg-edge-strong"}`;
 export const themeCarouselCount =
   "min-w-10 shrink-0 text-center text-xs whitespace-nowrap text-muted tabular-nums";
+/** 皮肤卡片。Linux 下去掉卡片的模糊阴影，只留边框和选中时的强调色外圈：装了 NVIDIA 专有驱动时设置窗口在那里关着 WebKit 合成，带模糊的阴影让每一步滚动的重绘慢好几倍（#6403，见 platform-tokens.ts 的 linux 分组阴影）。 */
 export const skinCard = (selected: boolean) =>
   `block overflow-hidden rounded-[var(--p-group-r)] border bg-[var(--p-group-bg)] p-0 focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-accent hover:border-edge-strong ${
     selected
-      ? "border-accent shadow-[0_0_0_1px_var(--accent-color),var(--card-shadow)]"
-      : "border-edge shadow-card"
+      ? "border-accent shadow-[0_0_0_1px_var(--accent-color),var(--card-shadow)] linux:shadow-[0_0_0_1px_var(--accent-color)]"
+      : "border-edge shadow-card linux:shadow-none"
   }`;
 /** The design's 使用中 mark on the selected card. */
 export const skinCardInUse = "ml-2 text-xs font-normal text-accent";
@@ -160,9 +176,9 @@ export const managerBlock = "flex min-w-0 flex-col gap-3 [padding:var(--p-row-pa
 export const managerNote = "m-0 leading-relaxed [font-size:var(--p-sub-fs)] [color:var(--p-sub)]";
 export const managerActions = "flex flex-wrap gap-1.5 [&_.secondary]:mt-0 [&_.primary]:mt-0";
 export const importPreview =
-  "flex max-h-70 flex-col gap-[7px] overflow-y-auto rounded-lg border border-edge bg-raised px-3 py-2.5 [&>span]:text-xs [&>span]:text-muted [&>div]:flex [&>div]:flex-col [&>div]:gap-0.5 [&>div]:border-t [&>div]:border-[var(--divider-color)] [&>div]:pt-[7px] [&>div_span]:break-anywhere [&_code]:text-[11px] [&_code]:text-muted";
+  "flex max-h-70 flex-col gap-[7px] overflow-y-auto rounded-lg border border-edge bg-raised px-3 py-2.5 [&>span]:text-xs [&>span]:text-muted [&>div]:flex [&>div]:flex-col [&>div]:gap-0.5 [&>div]:border-t [&>div]:border-[var(--divider-color)] [&>div]:pt-[7px] [&>div_span]:wrap-anywhere [&_code]:text-[11px] [&_code]:text-muted";
 
-export const field = "flex flex-col gap-[5px] text-xs text-secondary";
+export const field = compactFieldLabel;
 export const fieldInput =
   "min-w-25 rounded-md border border-edge bg-[var(--dropdown-bg)] px-2 py-1.5 text-body";
 export const fieldSelect = `${fieldInput} min-w-[150px]`;
@@ -173,14 +189,14 @@ export const keyHint = "text-[11px] text-muted";
 export const bundledBadge =
   "rounded border border-edge px-1 py-px text-[11px] leading-none text-muted";
 const listRow =
-  "flex items-center justify-between gap-3 border-t border-[var(--divider-color)] pt-2 [&>span:first-child]:min-w-0 [&>span:first-child]:break-anywhere [&_.secondary]:mt-0 [&_.secondary]:px-[9px] [&_.secondary]:py-1";
+  "flex items-center justify-between gap-3 border-t border-[var(--divider-color)] pt-2 [&>span:first-child]:min-w-0 [&>span:first-child]:wrap-anywhere [&_.secondary]:mt-0 [&_.secondary]:px-[9px] [&_.secondary]:py-1";
 export const phraseList =
   "mt-3.5 mb-0 flex max-h-[clamp(180px,calc(100vh-350px),550px)] list-none flex-col gap-2 overflow-x-hidden overflow-y-auto p-0 [scrollbar-gutter:stable]";
 export const phraseListItem = listRow;
 export const failures =
   "mt-3.5 rounded-lg border border-edge-strong bg-raised px-3 py-2.5 [&>p]:m-0 [&>p]:text-xs [&>p]:text-danger [&>ul]:mt-2 [&>ul]:mb-0 [&>ul]:flex [&>ul]:list-none [&>ul]:flex-col [&>ul]:gap-2 [&>ul]:p-0";
 export const failureItem = `${listRow} [&>span:first-child]:flex [&>span:first-child]:flex-col [&>span:first-child]:gap-0.5 [&_small]:text-muted [&>button]:mt-0 [&>button]:px-[9px] [&>button]:py-1`;
-export const empty = "text-muted";
+export const empty = mutedText;
 
 // ---- panel launchers ----
 
@@ -224,9 +240,10 @@ export const windowIcon =
   "block size-[9px] h-2.5 object-contain [pointer-events:none] light-theme:[filter:invert(1)_brightness(0.2)] linux:size-2 linux:h-2";
 
 /*
- * macOS has no caption of its own here: the traffic lights sit over the top of the sidebar, and the page names itself in a 52px toolbar that stays at the top of the content as it scrolls, over a blurred copy of what passes beneath. Both are drag regions. The lights keep the toolbar's left edge clear when the window is narrow enough to drop the sidebar.
+ * macOS has no caption of its own here: the traffic lights sit over the top of the sidebar, and the page names itself in a 52px toolbar that stays at the top of the content as it scrolls, over a blurred copy of what passes beneath. Both are drag regions. The lights keep the toolbar's left edge clear when the window is narrow enough to drop the sidebar. The sidebar itself scrolls, so pin its drag row or navigation slides under the traffic lights (#7186).
  */
-export const macosDragRow = "-mx-3 h-[52px] shrink-0";
+export const macosDragRow =
+  "sticky top-0 z-10 -mx-3 h-[52px] shrink-0 bg-[rgba(46,46,48,0.96)] light-theme:bg-[rgba(232,232,234,0.96)]";
 export const macosToolbar =
   "sticky top-0 z-10 flex h-[52px] shrink-0 items-center gap-3.5 border-b border-[rgba(255,255,255,0.08)] bg-[rgba(31,31,33,0.82)] px-5 backdrop-blur-[20px] backdrop-saturate-[1.8] select-none light-theme:border-[rgba(0,0,0,0.07)] light-theme:bg-[rgba(242,242,244,0.82)] max-phone:pl-[88px] [&>h1]:m-0 [&>h1]:min-w-0 [&>h1]:truncate [&>h1]:text-[15px] [&>h1]:font-bold";
 
@@ -281,10 +298,12 @@ export const body =
   "flex min-h-0 min-w-0 flex-1 overflow-hidden max-phone:flex-col ipad:grid ipad:grid-cols-[320px_minmax(0,1fr)] ipad:grid-rows-[minmax(0,1fr)_auto]";
 
 /*
- * Windows 11 seats the pages on a lighter layer inset from the Mica, rounded at its top-left corner where the caption and sidebar meet it; macOS fills behind the toolbar; GNOME uses the window background; HarmonyOS 2-in-1 continues the sidebar's tone with no seam.
+ * Windows 11 把页面放在比 Mica 略亮、四周内缩的一层上，在标题栏与侧栏交汇的左上角做圆角；macOS 在工具栏下方铺底色；GNOME 用窗口背景；HarmonyOS 2-in-1 延续侧栏的色调，不留接缝。
+ *
+ * `relative` 让这个滚动容器成为页面里绝对定位元素的包含块（HarmonyOS 选择行背后 `sr-only` 的原生控件、视觉隐藏的单选框）。没有它，这些元素按它们在滚动内容里的位置相对文档定位，文档被撑得比窗口高；在「语音输入」这样的长页面上，滚到这个容器底部后继续上滑会接着滚动文档，把整个应用滑出屏幕，只剩下 body 的底色。
  */
 export const content =
-  "min-h-0 min-w-0 flex-1 overflow-y-auto [scrollbar-gutter:stable] win:rounded-tl-lg win:border-t win:border-l win:border-[rgba(0,0,0,0.1)] win:bg-[#1c1c1c] win:light-theme:border-[rgba(0,0,0,0.06)] win:light-theme:bg-[rgba(255,255,255,0.5)] mac:bg-[#1f1f21] mac:light-theme:bg-[#f2f2f4] linux:bg-[var(--p-bg)] hm2:bg-[#121212] hm2:light-theme:bg-[#f1f3f5] max-phone:win:rounded-none max-phone:win:border-l-0";
+  "relative min-h-0 min-w-0 flex-1 overflow-y-auto [scrollbar-gutter:stable] win:rounded-tl-lg win:border-t win:border-l win:border-[rgba(0,0,0,0.1)] win:bg-[#1c1c1c] win:light-theme:border-[rgba(0,0,0,0.06)] win:light-theme:bg-[rgba(255,255,255,0.5)] mac:bg-[#1f1f21] mac:light-theme:bg-[#f2f2f4] linux:bg-[var(--p-bg)] hm2:bg-[#121212] hm2:light-theme:bg-[#f1f3f5] max-phone:win:rounded-none max-phone:win:border-l-0";
 /** 页面列：Windows 在图层内 36/56/48，macOS 24/48/44 且不限宽，GNOME 24/32/28 最宽 680，HarmonyOS 2-in-1 8/28/28 最宽 760，iPad 详情页 16/28/28 最宽 720，HarmonyOS 手机 4/16/24。 */
 export const contentColumn =
   "mx-auto w-full max-w-[900px] px-7 pt-3.5 pb-6 max-phone:px-3 max-phone:py-3 win:px-14 win:pt-9 win:pb-12 mac:max-w-none mac:px-12 mac:pt-6 mac:pb-11 linux:max-w-[680px] linux:px-8 linux:pt-6 linux:pb-7 hm2:max-w-[760px] hm2:px-7 hm2:pt-2 hm2:pb-7 ipad:max-w-[720px] ipad:px-7 ipad:pt-4 ipad:pb-7 max-phone:win:px-4 max-phone:win:pt-5 max-phone:mac:px-4 max-phone:linux:px-4 max-phone:hm2:px-4 max-phone:harmony:px-4 max-phone:harmony:pt-1 max-phone:harmony:pb-6";
@@ -298,6 +317,9 @@ export const pageHeaderTabRoot =
 export const pageHeaderHome =
   "max-phone:harmony:px-1 max-phone:harmony:pt-1.5 max-phone:harmony:pb-5";
 /** HarmonyOS 手机上从推入标签页的页面返回的方式：标题前一个 40px 的圆形按钮，向列的边距伸出 10px、向标题靠 6px，让箭头与内容对齐。 */
+/** 收起的标题栏里的返回按钮：标题栏本身不接收点按，只有它接收。 */
+export const collapsedBackButton =
+  "pointer-events-auto absolute top-1/2 left-2 flex size-10 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border-0 bg-transparent p-0 text-[var(--p-text)] active:bg-[var(--p-press)] focus-visible:outline-2 focus-visible:outline-accent";
 export const pageBackButton =
   "-mr-1.5 -ml-2.5 flex size-10 shrink-0 cursor-pointer items-center justify-center rounded-full border-0 bg-transparent p-0 text-[var(--p-text)] active:bg-[var(--p-press)] focus-visible:outline-2 focus-visible:outline-accent";
 /** The way back from a sub-page (AI 对话, 背单词, 帮助) to the page it opens from, above the title. */
@@ -308,7 +330,7 @@ export const subViewHeader = "flex min-w-0 flex-col items-start gap-1";
 /** A stack of groups inside a page's own stack, spaced as the page spaces them. */
 export const subViewStack = "flex min-w-0 flex-col gap-6";
 export const subViewTitle =
-  "m-0 text-[20px] leading-tight font-semibold [color:var(--p-text)] break-anywhere";
+  "m-0 text-[20px] leading-tight font-semibold [color:var(--p-text)] wrap-anywhere";
 export const pageTitle =
   "m-0 text-[length:var(--p-title-fs)] leading-tight [font-weight:var(--p-title-w)]";
 /**
@@ -322,10 +344,10 @@ export const collapsedTitle = (shown: boolean) =>
 // ---- the phone tab bar ----
 
 /*
- * The four bottom tabs of a touch host, shown below phone width and, on an iPad, under the split at every width. iOS and iPadOS float them in a glass capsule clear of the screen edges; Android is Material 3's 80px navigation bar; HarmonyOS is a flat 76px bar. The bottom inset clears the gesture area on each.
+ * 触屏宿主的底部标签栏（设置、对话、统计、我的），手机宽度以下显示，iPad 上在任何宽度都显示在分栏下方。各列按标签个数均分，不写死列数：宿主不提供 AI 对话时没有「对话」这一格，写死的四列会让三个标签挤在左边。iOS 和 iPadOS 把它浮在离开屏幕边缘的玻璃胶囊里；Android 是 Material 3 的 80px 导航栏；HarmonyOS 是平铺的 76px 栏。底部留出各自的手势区域。
  */
 export const mobileTabBar =
-  "hidden max-phone:order-2 max-phone:grid max-phone:shrink-0 max-phone:grid-cols-4 ios:mx-5 ios:mb-[max(0.5rem,env(safe-area-inset-bottom,0px))] ios:rounded-full ios:bg-[rgba(40,40,42,0.78)] ios:p-[5px] ios:shadow-[0_0_0_0.5px_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.5)] ios:backdrop-blur-[20px] ios:backdrop-saturate-[1.8] ios:light-theme:bg-[rgba(255,255,255,0.78)] ios:light-theme:shadow-[0_0_0_0.5px_rgba(0,0,0,0.06),0_8px_24px_rgba(0,0,0,0.12)] android:min-h-20 android:bg-[#1d201d] android:pt-3 android:pb-[env(safe-area-inset-bottom,0px)] android:light-theme:bg-[#ebefe7] harmony:min-h-[76px] harmony:bg-[#141414] harmony:pt-2 harmony:pb-[env(safe-area-inset-bottom,0px)] harmony:light-theme:bg-[#f1f3f5] ipad:col-span-2 ipad:row-start-2 ipad:mx-5 ipad:mb-[max(0.5rem,env(safe-area-inset-bottom,0px))] ipad:grid ipad:grid-cols-4 ipad:rounded-full ipad:bg-[rgba(40,40,42,0.78)] ipad:p-[5px] ipad:shadow-[0_0_0_0.5px_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.5)] ipad:backdrop-blur-[20px] ipad:backdrop-saturate-[1.8] ipad:light-theme:bg-[rgba(255,255,255,0.78)] ipad:light-theme:shadow-[0_0_0_0.5px_rgba(0,0,0,0.06),0_8px_24px_rgba(0,0,0,0.12)]";
+  "hidden max-phone:order-2 max-phone:grid max-phone:shrink-0 max-phone:grid-flow-col max-phone:auto-cols-fr ios:mx-5 ios:mb-[max(0.5rem,env(safe-area-inset-bottom,0px))] ios:rounded-full ios:bg-[rgba(40,40,42,0.78)] ios:p-[5px] ios:shadow-[0_0_0_0.5px_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.5)] ios:backdrop-blur-[20px] ios:backdrop-saturate-[1.8] ios:light-theme:bg-[rgba(255,255,255,0.78)] ios:light-theme:shadow-[0_0_0_0.5px_rgba(0,0,0,0.06),0_8px_24px_rgba(0,0,0,0.12)] android:min-h-20 android:bg-[#1d201d] android:pt-3 android:pb-[env(safe-area-inset-bottom,0px)] android:light-theme:bg-[#ebefe7] harmony:min-h-[76px] harmony:bg-[#141414] harmony:pt-2 harmony:pb-[env(safe-area-inset-bottom,0px)] harmony:light-theme:bg-[#f1f3f5] ipad:col-span-2 ipad:row-start-2 ipad:mx-5 ipad:mb-[max(0.5rem,env(safe-area-inset-bottom,0px))] ipad:grid ipad:grid-flow-col ipad:auto-cols-fr ipad:rounded-full ipad:bg-[rgba(40,40,42,0.78)] ipad:p-[5px] ipad:shadow-[0_0_0_0.5px_rgba(255,255,255,0.12),0_8px_24px_rgba(0,0,0,0.5)] ipad:backdrop-blur-[20px] ipad:backdrop-saturate-[1.8] ipad:light-theme:bg-[rgba(255,255,255,0.78)] ipad:light-theme:shadow-[0_0_0_0.5px_rgba(0,0,0,0.06),0_8px_24px_rgba(0,0,0,0.12)]";
 /** A tab: the accent when selected (Android keeps the text colour and lets the indicator carry it), the secondary text colour otherwise. iOS fills the selected tab's pill. */
 export const mobileTab = (selected: boolean) =>
   `flex min-w-0 cursor-pointer flex-col items-center border-0 bg-transparent p-0 font-medium ios:gap-px ios:rounded-full ios:pt-[5px] ios:pb-1 ios:text-[10px] android:gap-1 android:text-xs harmony:gap-0.5 harmony:text-[10px] ipad:gap-px ipad:rounded-full ipad:pt-[5px] ipad:pb-1 ipad:text-[10px] ${
@@ -341,3 +363,7 @@ export const mobileTabPill = (selected: boolean) =>
 /** The glyph, masked out of the text colour; `--tab-icon` carries the image. HarmonyOS draws it at 24, the others at 22. */
 export const mobileTabIcon =
   "block size-[22px] bg-current [mask-image:var(--tab-icon)] [mask-position:center] [mask-repeat:no-repeat] [mask-size:contain] [-webkit-mask-image:var(--tab-icon)] [-webkit-mask-position:center] [-webkit-mask-repeat:no-repeat] [-webkit-mask-size:contain] harmony:size-6";
+
+/** 桌面设置页的顶部功能标签，沿用当前平台的分段控件配色。 */
+export const candidateTabs =
+  "grid grid-flow-col auto-cols-fr gap-0.5 rounded-[var(--p-seg-r)] bg-[var(--p-seg-bg)] p-0.5 [border:var(--p-seg-border)] [&>button]:min-h-9 [&>button]:rounded-[var(--p-seg-item-r)] [&>button]:border-0 [&>button]:bg-transparent [&>button]:px-2 [&>button]:text-sm [&>button]:[color:var(--p-text)] [&>button[aria-selected=true]]:bg-[var(--p-seg-on)] [&>button[aria-selected=true]]:[color:var(--p-seg-on-fg)] [&>button[aria-selected=true]]:[box-shadow:var(--p-seg-on-shadow)] [&>button:focus-visible]:outline-2 [&>button:focus-visible]:outline-offset-1 [&>button:focus-visible]:outline-accent";

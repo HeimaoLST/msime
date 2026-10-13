@@ -10,6 +10,18 @@ extension BackendAccountClient {
     let data: [Model]
     let default_model: String
   }
+  func chatModels(session: BackendAccountSession, matchingUserID expected: String? = nil,
+                  matchingSessionID expectedSessionID: UUID? = nil) async throws -> ChatModels {
+    let identity = try await session.credentials(matchingUserID: expected, matchingSessionID: expectedSessionID)
+    let catalog = try await session.authenticated(matchingUserID: identity.userID,
+                                                   matchingSessionID: identity.sessionID) { token in
+      try await chatModels(token: token)
+    }.value
+    try await session.requireSession(matchingUserID: identity.userID, matchingSessionID: identity.sessionID)
+    try Task.checkCancellation()
+    return catalog
+  }
+
   func chatModels(token: String) async throws -> ChatModels {
     let catalog: ChatModels = try await json("GET", "/v1/models", token: token)
     guard !catalog.data.isEmpty, catalog.data.count <= 33,
@@ -19,13 +31,28 @@ extension BackendAccountClient {
           Set(catalog.data.map(\.id)).count == catalog.data.count else { throw Failure(status: 0) }
     return catalog
   }
-  func chat(messages: [ChatMessage], model: String, token: String) async throws -> String {
-    struct Body: Encodable { let messages: [ChatMessage]; let model: String; let max_tokens = 2048; let stream = false }
+  /// `model` 为 `nil` 时请求体不带 `model`，由后端用它配置的默认模型；需要指定模型的调用方照旧传 id。
+  func chat(messages: [ChatMessage], model: String? = nil, session: BackendAccountSession,
+            matchingUserID expected: String? = nil,
+            matchingSessionID expectedSessionID: UUID? = nil) async throws -> String {
+    let identity = try await session.credentials(matchingUserID: expected, matchingSessionID: expectedSessionID)
+    let reply = try await session.authenticated(matchingUserID: identity.userID,
+                                                 matchingSessionID: identity.sessionID) { token in
+      try await chat(messages: messages, model: model, token: token)
+    }.value
+    try await session.requireSession(matchingUserID: identity.userID, matchingSessionID: identity.sessionID)
+    try Task.checkCancellation()
+    return reply
+  }
+
+  func chat(messages: [ChatMessage], model: String? = nil, token: String) async throws -> String {
+    // 合成的 Encodable 对可选属性用 encodeIfPresent，`model` 为 nil 时整个键不出现在请求体里。
+    struct Body: Encodable { let messages: [ChatMessage]; let model: String?; let max_tokens = 2048; let stream = false }
     struct Response: Decodable {
       struct Choice: Decodable { let message: ChatMessage }
       let choices: [Choice]
     }
-    guard Self.validChatModelID(model), (1...16).contains(messages.count),
+    guard model.map(Self.validChatModelID) ?? true, (1...16).contains(messages.count),
           messages.allSatisfy({ ["user", "assistant", "system"].contains($0.role) && Self.validChatMessageContent($0.content) })
     else { throw Failure(status: 400) }
     let body = try JSONEncoder().encode(Body(messages: messages, model: model))
@@ -59,6 +86,17 @@ extension BackendAccountClient {
 extension BackendAccountClient {
   /// Translate one visible candidate page in order. The backend owns the provider and credentials;
   /// the keyboard only receives bounded display strings and never sends the user's raw keystrokes.
+  func translate(texts: [String], target: String, session: BackendAccountSession) async throws -> [String] {
+    let identity = try await session.credentials()
+    let result = try await session.authenticated(matchingUserID: identity.userID,
+                                                 matchingSessionID: identity.sessionID) { token in
+      try await translate(texts: texts, target: target, token: token)
+    }.value
+    try await session.requireSession(matchingUserID: identity.userID, matchingSessionID: identity.sessionID)
+    try Task.checkCancellation()
+    return result
+  }
+
   func translate(texts: [String], target: String, token: String) async throws -> [String] {
     struct Body: Encodable { let texts: [String]; let source_lang = "ZH"; let target_lang: String }
     struct Response: Decodable { let code: Int; let data: [String] }

@@ -13,6 +13,6 @@ public final class VietnameseInputPolicy {
 
     /** Whether the Engine composes Vietnamese: the Vietnamese scheme outside dedicated English. Vietnamese has no local modes. */
     public static boolean active(int scheme, boolean dedicatedEnglish) {
-        return scheme == VIETNAMESE_SCHEME && !dedicatedEnglish;
+        return InputSchemeTraits.active(scheme, VIETNAMESE_SCHEME, dedicatedEnglish);
     }
 }

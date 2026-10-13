@@ -17,13 +17,31 @@ using MSIMEInputSourceCopier = TISInputSourceRef (*)(void);
 @end
 
 bool MSIMEShouldRegisterInputSource(int argc, const char *argv[]);
+/// 本登录会话的输入源注册表里有没有这个 bundle 的可启用输入源。查法与 MSIMERegisterAndEnableInputSources 登记后的那次查找相同，Missing 正对应它返回的 fnfErr。
+typedef NS_ENUM(NSInteger, MSIMEInputSourceRegistryState) {
+    /// 没有 bundle 标识或查询函数，无从判断。
+    MSIMEInputSourceRegistryStateUnknown,
+    MSIMEInputSourceRegistryStateListed,
+    MSIMEInputSourceRegistryStateMissing,
+};
+/// `--input-source-registered`：只读地查注册表并以退出码报告，不登记、不启用任何东西。设置应用据此分辨「装好了但这次登录看不到」。
+bool MSIMEShouldReportInputSourceRegistration(int argc, const char *argv[]);
+MSIMEInputSourceRegistryState MSIMEInputSourceRegistryStateFor(NSString *bundleIdentifier, MSIMEInputSourceLister lister);
+/// `--input-source-registered` 的退出码：Listed 为 0，Missing 为 3，Unknown 为 1。apps/desktop/src-tauri 的 macos_input_source.rs 按同样的值解读，两边要一起改。
+int MSIMEInputSourceRegistryExitCode(MSIMEInputSourceRegistryState state);
+/// `--enabled-input-modes`：只读地列出本 bundle 已启用的输入模式标识符，每行一个，退出码 0；无从判断时退出码 1。设置应用的「菜单栏入口」据此说还差哪几个模式：系统设置的偏好列表只记用户亲手加的模式，随输入法一起默认启用的模式（中、双、五、日、韩、英）不在里面，单看它会把这些也报成没加。
+bool MSIMEShouldReportEnabledInputModes(int argc, const char *argv[]);
+/// 本 bundle 已启用的输入模式：TIS 列出的全部已装输入源里，标识符以 bundle 标识加「.」开头、`kTISPropertyInputSourceIsEnabled` 为真的那些；没有 bundle 标识、查询函数或列表时为 nil。
+NSArray<NSString *> *MSIMEEnabledInputModeIDs(NSString *bundleIdentifier, MSIMEInputSourceLister lister,
+                                              MSIMEInputSourcePropertyGetter propertyGetter);
 OSStatus MSIMERegisterInputSource(NSURL *bundleURL, MSIMEInputSourceRegistrar registrar);
+/// 登记前已有输入源时保留启用状态；首次安装只启用主模式和存在时的顶层输入源。
 OSStatus MSIMERegisterAndEnableInputSources(NSURL *bundleURL, NSString *bundleIdentifier,
                                             MSIMEInputSourceRegistrar registrar,
                                             MSIMEInputSourceLister lister,
                                             MSIMEInputSourcePropertyGetter propertyGetter,
                                             MSIMEInputSourceEnabler enabler);
-/// 把 bundle 里 `offered` 还没列出的输入模式各启用一次，返回加上这些模式后的 `offered`，由调用方持久化。经更新只替换 bundle 时不会重新登记，新版本加的模式会一直关着，除非用户自己去系统设置的「添加」对话框里找——而那里按每个模式声明的语言分组，新模式不一定和其它模式排在一起。已经记录的模式不再动，用户移除的模式保持移除。`offered` 为 nil 时，从此前每次安装都会启用的那几个模式开始。按需模式（MSIMEOptInInputModeIDs）只记录不启用，已经启用的也不关掉：那多半是用户刚在系统设置里加的，见实现里的说明。
+/// 将本次发现的模式加入 offered 记录，由调用方持久化；启动不启用或关闭模式，避免补回用户删除的输入源。保留函数名与参数以兼容现有调用方。
 NSArray<NSString *> *MSIMEEnableNewInputModes(NSString *bundleIdentifier, NSArray<NSString *> *offered,
                                               MSIMEInputSourceLister lister,
                                               MSIMEInputSourcePropertyGetter propertyGetter,

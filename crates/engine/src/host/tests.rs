@@ -19,9 +19,11 @@ fn options(root: &Path) -> EngineOptions {
         user_data: path("user"),
         cache: path("cache"),
         dictionaries: path("dictionaries"),
+        first_page_rows: crate::types::DEFAULT_FIRST_PAGE_ROWS,
         scheme: 0,
         enabled_schemes: crate::types::SchemeSet::ALL,
         shuangpin_profile: 0,
+        shuangpin_custom_profile: None,
         shuangpin_preedit_uses_raw: true,
         single_character_only: false,
         learning: false,
@@ -43,6 +45,7 @@ fn options(root: &Path) -> EngineOptions {
         english_minimum_prefix: 5,
         mixed_emoji: false,
         mixed_kaomoji: false,
+        mixed_japanese: false,
         local_unicode: true,
         local_date_time: true,
         local_quick_phrase: true,
@@ -54,6 +57,9 @@ fn options(root: &Path) -> EngineOptions {
         local_expression: false,
         local_command: false,
         local_mention: false,
+        local_chaizi: false,
+        local_shift_letter_entry: true,
+        chaizi_traditional_output: false,
         command_table: Vec::new(),
         mention_entries: Vec::new(),
         quick_phrase_table: Vec::new(),
@@ -487,6 +493,55 @@ fn english_phonetics_refuse_another_kind_version_or_a_missing_file() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn english_phonetics_rejects_a_linked_database() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let external = outside.path().join("en-phonetic.db");
+    pronunciation_database(&external, "en_phonetic", 1);
+    let linked = directory.path().join("en-phonetic.db");
+    symlink(&external, &linked).unwrap();
+
+    assert!(english_phonetics(linked.to_str().unwrap(), &["love".to_owned()]).is_err());
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn english_phonetics_rejects_a_hard_linked_database() {
+    let directory = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let external = outside.path().join("en-phonetic.db");
+    pronunciation_database(&external, "en_phonetic", 1);
+    let linked = directory.path().join("en-phonetic.db");
+    std::fs::hard_link(&external, &linked).unwrap();
+    // 别的用户也能写的目录里，多链接文件可能是他们放的；Windows 上多链接一律拒绝。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    }
+
+    assert!(english_phonetics(linked.to_str().unwrap(), &["love".to_owned()]).is_err());
+}
+
+/// 发音库是只读的随包资源；Nix 的 store 去重把它合并成硬链接后，所在目录只有属主能写，照常查询（#6386）。
+#[cfg(unix)]
+#[test]
+fn english_phonetics_reads_a_hard_linked_database_in_a_closed_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    // 只有属主能写；临时目录的权限取决于 umask。
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let original = directory.path().join("en-phonetic.db");
+    pronunciation_database(&original, "en_phonetic", 1);
+    std::fs::hard_link(&original, directory.path().join("deduplicated.db")).unwrap();
+
+    assert!(english_phonetics(original.to_str().unwrap(), &["love".to_owned()]).is_ok());
+}
+
 #[test]
 fn reset_learned_data_restores_packaged_dictionaries_and_clears_journal() {
     // Both an ASCII root and one carrying Chinese characters: the reset derives temporary, backup and SQLite sidecar names from these paths, and on Windows a narrow conversion of the second either mangles it or throws after files are already published.
@@ -604,6 +659,8 @@ fn prepared_options_disable_quanpin_autocorrect_by_default() {
     assert!(!prepared.autocorrect_transposition);
     assert!(!prepared.autocorrect_neighbor);
     assert_eq!(prepared.english_minimum_prefix, 5);
+    // 日文混输是实验选项，产品默认关。
+    assert!(!prepared.mixed_japanese);
     assert_eq!(
         Path::new(&prepared.dictionaries),
         root.path()
@@ -664,13 +721,15 @@ fn helpcode_settings_reach_the_real_engine() {
         "shouyouplus",
         "xiaohe",
         "jiajia",
+        "wubi86",
     ] {
         value.helpcode_schema = schema.into();
         for enabled in [false, true] {
             value.helpcode = enabled;
             let mut session = Session::new(&value).unwrap();
             type_text(&mut session, b"ni");
-            assert_eq!(session.character(b'H', true).unwrap().handled, enabled);
+            assert!(session.character(b'H', true).unwrap().handled);
+            assert_eq!(session.snapshot().unwrap().preedit, "niH");
         }
     }
     value.helpcode_schema = "unknown".into();
@@ -782,6 +841,142 @@ fn microsoft_profile_accepts_semicolon_as_an_ing_final() {
         assert_eq!(snapshot.editing_text, if profile == 3 { "b;" } else { "b" });
         assert_eq!(snapshot.microsoft_shuangpin, profile == 3);
     }
+}
+
+/// 小鹤的键位，zh 换到 a，ing 换到 `;`，零声母改用 o 引导。
+fn custom_table() -> crate::types::ShuangpinCustomTable {
+    let pairs = |entries: &[(&str, &str)]| -> Vec<(String, String)> {
+        entries
+            .iter()
+            .map(|(unit, key)| ((*unit).to_owned(), (*key).to_owned()))
+            .collect()
+    };
+    crate::types::ShuangpinCustomTable {
+        initials: pairs(&[("zh", "a"), ("ch", "i"), ("sh", "u")]),
+        finals: pairs(&[
+            ("iu", "q"),
+            ("ei", "w"),
+            ("e", "e"),
+            ("uan", "r"),
+            ("ue", "t"),
+            ("ve", "t"),
+            ("un", "y"),
+            ("u", "u"),
+            ("i", "i"),
+            ("uo", "o"),
+            ("o", "o"),
+            ("ie", "p"),
+            ("a", "a"),
+            ("ong", "s"),
+            ("iong", "s"),
+            ("ai", "d"),
+            ("en", "f"),
+            ("eng", "g"),
+            ("ang", "h"),
+            ("an", "j"),
+            ("uai", "k"),
+            ("ing", ";"),
+            ("uang", "l"),
+            ("iang", "l"),
+            ("ou", "z"),
+            ("ua", "x"),
+            ("ia", "x"),
+            ("ao", "c"),
+            ("ui", "v"),
+            ("v", "v"),
+            ("in", "b"),
+            ("iao", "n"),
+            ("ian", "m"),
+        ]),
+        zero_initials: pairs(&[
+            ("a", "oa"),
+            ("ai", "od"),
+            ("an", "oj"),
+            ("ang", "oh"),
+            ("ao", "oc"),
+            ("e", "oe"),
+            ("ei", "ow"),
+            ("en", "of"),
+            ("eng", "og"),
+            ("er", "or"),
+            ("o", "oo"),
+            ("ou", "oz"),
+        ]),
+    }
+}
+
+#[test]
+fn custom_profile_runs_the_users_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = options(dir.path());
+    options.scheme = 1;
+    options.shuangpin_profile = 4;
+    options.shuangpin_custom_profile = Some(custom_table());
+    options.shuangpin_preedit_uses_raw = false;
+    let mut session = Session::new(&options).unwrap();
+    type_text(&mut session, b"ahx;oa");
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(snapshot.shuangpin_profile, "custom");
+    // `;` 上有韵母，宿主要把它当字母键送进来。
+    assert!(snapshot.microsoft_shuangpin);
+    assert_eq!(snapshot.editing_text, "ahx;oa");
+    assert_eq!(snapshot.segment_raw_boundaries, vec![0, 2, 4, 6]);
+    assert_eq!(snapshot.preedit, "zhang'xing'a");
+    // 偶数位置上的 `;` 不是一个音节的第二个键，不收。
+    let mut session = Session::new(&options).unwrap();
+    type_text(&mut session, b"ah;");
+    assert_eq!(session.snapshot().unwrap().editing_text, "ah");
+}
+
+/// 韵母都不在 `;` 上、只有零声母编码用 `;` 做第二个键时，会话照样收 `;`，并告诉宿主把它当字母键送进来。
+#[test]
+fn custom_profile_accepts_semicolon_used_only_by_a_zero_initial_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut table = custom_table();
+    for (unit, key) in &mut table.finals {
+        if unit == "ing" {
+            *key = "k".to_owned();
+        }
+    }
+    for (unit, key) in &mut table.zero_initials {
+        if unit == "a" {
+            *key = "o;".to_owned();
+        }
+    }
+    let mut options = options(dir.path());
+    options.scheme = 1;
+    options.shuangpin_profile = 4;
+    options.shuangpin_custom_profile = Some(table);
+    options.shuangpin_preedit_uses_raw = false;
+    let mut session = Session::new(&options).unwrap();
+    type_text(&mut session, b"xko;");
+    let snapshot = session.snapshot().unwrap();
+    assert!(snapshot.microsoft_shuangpin);
+    assert_eq!(snapshot.editing_text, "xko;");
+    assert_eq!(snapshot.preedit, "xing'a");
+}
+
+#[test]
+fn custom_profile_needs_a_valid_table_only_when_shuangpin_is_enabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = options(dir.path());
+    options.shuangpin_profile = 4;
+    let message = |value: &EngineOptions| Session::new(value).err().unwrap().to_string();
+    assert_eq!(
+        message(&options),
+        "Invalid custom shuangpin profile: no table"
+    );
+    let mut table = custom_table();
+    table.finals.retain(|(unit, _)| unit != "iong");
+    options.shuangpin_custom_profile = Some(table);
+    assert_eq!(
+        message(&options),
+        "Invalid custom shuangpin profile: finals unit \"iong\" has no key"
+    );
+    // 没有双拼的会话用不上这份设置，按小鹤建起来。
+    options.enabled_schemes = crate::types::SchemeSet::of(&[crate::types::SchemeType::Quanpin]);
+    let session = Session::new(&options).unwrap();
+    assert_eq!(session.snapshot().unwrap().shuangpin_profile, "xiaohe");
 }
 
 #[test]
@@ -955,6 +1150,39 @@ fn real_engine_exposes_nine_key_mode_and_spelling_choices() {
     assert!(!session.snapshot().unwrap().nine_key);
 }
 
+/// 14 键：快照的 `nine_key` 只表示九键，`key_grid` 说出是哪种网格；组码只从 `grid_key` 进来，硬件字母照常走全拼。
+#[test]
+fn real_engine_reports_the_fourteen_key_grid_apart_from_nine_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = Session::new(&options(dir.path())).unwrap();
+    assert_eq!(session.snapshot().unwrap().key_grid, None);
+    session
+        .set_key_grid(Some(crate::KeyGrid::FourteenKey))
+        .unwrap();
+    let snapshot = session.snapshot().unwrap();
+    assert!(!snapshot.nine_key);
+    assert_eq!(snapshot.key_grid, Some(crate::KeyGrid::FourteenKey));
+    assert!(session.character(b'q', false).unwrap().handled);
+    assert_eq!(session.snapshot().unwrap().editing_text, "q");
+    assert!(!session.grid_key(b'n').unwrap().handled);
+    session.command(Command::Cancel).unwrap();
+    assert!(session.grid_key(b'n').unwrap().handled);
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(snapshot.editing_text, "b");
+    assert!(!snapshot.nine_key_spellings.is_empty());
+    session.command(Command::Cancel).unwrap();
+
+    session.set_nine_key_enabled(true).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    assert!(snapshot.nine_key);
+    assert_eq!(snapshot.key_grid, Some(crate::KeyGrid::NineKey));
+    assert!(!session.grid_key(b'n').unwrap().handled);
+    session.set_key_grid(None).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    assert!(!snapshot.nine_key);
+    assert_eq!(snapshot.key_grid, None);
+}
+
 #[test]
 fn real_engine_cycles_the_last_japanese_kana_variant() {
     let dir = tempfile::tempdir().unwrap();
@@ -969,6 +1197,41 @@ fn real_engine_cycles_the_last_japanese_kana_variant() {
     assert_eq!(session.snapshot().unwrap().reading, "が");
     assert!(session.command(Command::CycleKanaVariant).unwrap().handled);
     assert_eq!(session.snapshot().unwrap().reading, "か");
+}
+
+/// 末尾单个 `n` 在宿主画出的读音里还是字母（#6997）：只打一个 `n` 不会立刻变成ん，`nn` 退格一次能看到变化；`reading` 仍是确定时上屏的读音。
+#[test]
+fn japanese_display_reading_keeps_a_trailing_lone_n() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut value = options(dir.path());
+    value.scheme = 3;
+    let mut session = Session::new(&value).unwrap();
+    let readings = |session: &Session| {
+        let snapshot = session.snapshot().unwrap();
+        (snapshot.display_reading, snapshot.reading)
+    };
+    assert!(session.character(b'n', false).unwrap().handled);
+    assert_eq!(readings(&session), ("n".to_owned(), "ん".to_owned()));
+    assert!(session.character(b'n', false).unwrap().handled);
+    assert_eq!(readings(&session), ("ん".to_owned(), "ん".to_owned()));
+    assert!(session.command(Command::Backspace).unwrap().handled);
+    assert_eq!(readings(&session), ("n".to_owned(), "ん".to_owned()));
+    assert!(session.command(Command::Backspace).unwrap().handled);
+    assert_eq!(readings(&session), (String::new(), String::new()));
+    type_text(&mut session, b"kan");
+    assert_eq!(readings(&session), ("かn".to_owned(), "かん".to_owned()));
+    let committed = session.command(Command::CommitReading).unwrap();
+    assert!(committed.has_commit);
+    assert_eq!(committed.commit, "かん");
+
+    // 其他方案画的读音不变。
+    let mut value = options(dir.path());
+    value.scheme = 4;
+    let mut korean = Session::new(&value).unwrap();
+    type_text(&mut korean, b"gks");
+    let snapshot = korean.snapshot().unwrap();
+    assert!(!snapshot.reading.is_empty());
+    assert_eq!(snapshot.display_reading, snapshot.reading);
 }
 
 /// 录制器的单词条日文模型（读音 かな，词 甲），与 golden 场景 `ri_japanese_model_a` 同一份字节。
@@ -1318,9 +1581,9 @@ fn commit_raw_applies_windows_english_learning_policy() {
     assert_eq!(learned, "hello");
 }
 
-// The shipped msime-english.db weighs its words by Google unigram counts while the pinyin tables use their own scale, so an English weight says nothing about a Chinese one. Mixed input therefore never seats an English word ahead of the leading Chinese candidate: not on its shipped weight, not after it is committed, not after it is pinned. Pinning only reorders it among the English words.
+// 随包的 msime-english.db 按 Google unigram 计数给权重，拼音词库用的是自己的尺度，英文权重说明不了中文权重的高低（#1040、#1063 两次按权重提英文都撤回了）。所以输入能切成完整音节时（这里的 `ni`），混输从不让英文领先拼音的首选：不凭随包权重，不因为上屏过，也不因为置顶过；置顶只在英文词之间调顺序。英文只在拼音拆不开、英文完全匹配整段输入，或者用户把它固定在第一位时才领先，那条规则不比较权重，见 `CandidateQueries::mixed`。
 #[test]
-fn mixed_english_never_takes_the_first_seat_from_chinese() {
+fn mixed_english_never_outranks_chinese_on_complete_pinyin() {
     const ENGLISH: u8 = 4;
     let dir = tempfile::tempdir().unwrap();
     let mut value = options(dir.path());
@@ -1463,6 +1726,32 @@ fn incomplete_pinyin_raw_commit_is_learned_as_an_english_word() {
     assert_eq!(result.commit, "xyz");
     assert_eq!(result.diagnostic, "");
     assert_eq!(english_word_count(&value, "xyz"), 1);
+}
+
+/// 九宫格组字时回车上屏的不是用户逐个打出的字母：九键是数字，14 键是结束组字后的首选（没有候选时是组码 `bugao`），都不学成英文词，也不报学不进去。
+#[test]
+fn grid_raw_commit_is_not_learned_as_an_english_word() {
+    let dir = tempfile::tempdir().unwrap();
+    let value = options(dir.path());
+    let mut session = Session::new(&value).unwrap();
+    session.set_nine_key_enabled(true).unwrap();
+    type_text(&mut session, b"64426");
+    let result = session.command(Command::CommitRaw).unwrap();
+    assert_eq!(result.commit, "64426");
+    assert_eq!(result.diagnostic, "");
+
+    session
+        .set_key_grid(Some(crate::KeyGrid::FourteenKey))
+        .unwrap();
+    for letter in b"nihao" {
+        assert!(session.grid_key(*letter).unwrap().handled);
+    }
+    let result = session.command(Command::CommitRaw).unwrap();
+    assert!(result.has_commit);
+    assert_eq!(result.diagnostic, "");
+    assert!(session.snapshot().unwrap().editing_text.is_empty());
+    assert_eq!(english_word_count(&value, &result.commit), 0);
+    assert_eq!(english_word_count(&value, "bugao"), 0);
 }
 
 /// bridge.cpp:1332-1359: Enter in any local mode learns the committed letters as an English word. Local modes are entered only from the pinyin schemes, whose segmentation is empty while one is active, so the incomplete-pinyin rule would learn the word too; this pins the outcome the two rules share.
@@ -1618,6 +1907,7 @@ fn session_options_map_every_host_field() {
     value.english_minimum_prefix = 7;
     value.mixed_emoji = true;
     value.mixed_kaomoji = true;
+    value.mixed_japanese = true;
     value.local_date_time = false;
     value.local_temporary_japanese = false;
     value.sentence_association.neural_keyboard = true;
@@ -1660,6 +1950,7 @@ fn session_options_map_every_host_field() {
     assert!(!mapped.english.mixed_candidates);
     assert_eq!(mapped.english.minimum_prefix, 7);
     assert!(mapped.expressive.emoji_candidates && mapped.expressive.kaomoji_candidates);
+    assert!(mapped.japanese_mixing);
     assert!(!mapped.local_modes.date_time && !mapped.local_modes.temporary_japanese);
     assert!(mapped.local_modes.unicode && mapped.local_modes.temporary_english);
     assert!(mapped.sentence_association.neural_keyboard);
@@ -1720,6 +2011,29 @@ fn translation_sidecar_prefers_the_user_file_and_is_removed_without_one() {
     std::fs::remove_file(&resource).unwrap();
     Session::new(&value).unwrap();
     assert!(!target.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn translation_sidecar_publication_keeps_open_readers_on_complete_old_content() {
+    use std::io::Read;
+
+    let dir = tempfile::tempdir().unwrap();
+    let value = options(dir.path());
+    let target = Path::new(&value.dictionaries).join("custom_translations.txt");
+    let resource = Path::new(&value.resources).join("custom_translations.txt");
+    let user = Path::new(&value.user_data).join("custom_translations.txt");
+    std::fs::write(&resource, b"fixture\told\n").unwrap();
+    super::options::prepare_translation_sidecar(&value).unwrap();
+    let mut previous = std::fs::File::open(&target).unwrap();
+
+    std::fs::write(&user, b"fixture\tnew\n").unwrap();
+    super::options::prepare_translation_sidecar(&value).unwrap();
+
+    let mut old_contents = String::new();
+    previous.read_to_string(&mut old_contents).unwrap();
+    assert_eq!(old_contents, "fixture\told\n");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "fixture\tnew\n");
 }
 
 #[test]
@@ -1899,6 +2213,8 @@ fn gloss_keys_follow_the_bridge_rules() {
     );
     assert_eq!(candidate_gloss_key("天气", 6), None);
     assert_eq!(candidate_gloss_key("天气", 7), None);
+    // 日文混输行的汉字是日文，不当中文查释义。
+    assert_eq!(candidate_gloss_key("私", 13), None);
     assert_eq!(candidate_gloss_key("- '", 4), None);
     assert_eq!(candidate_gloss_key("123", 0), None);
     assert_eq!(candidate_gloss_key("〇", 0), None);
@@ -2591,7 +2907,10 @@ fn generated_local_modes_publish_their_spelling_symbols_and_rows() {
         .unwrap();
     session.character(b'/', false).unwrap();
     type_text(&mut session, b"y");
-    assert_eq!(session.snapshot().unwrap().candidates, ["哟"]);
+    // 内置的农历命令 `yinli` 也以 y 开头，排在指令表之后；它的文字随真实时钟变，只核对触发词。
+    let view = session.snapshot().unwrap();
+    assert_eq!(view.candidates[0], "哟");
+    assert_eq!(view.candidate_codes, ["yo", "yinli"]);
 }
 
 /// Enter in the expression, command and mention modes commits what was typed, and unlike the other local modes learns none of it as an English word: arithmetic, a trigger or a mention key is not a word the user spelled.
@@ -2635,15 +2954,54 @@ fn generated_rows_carry_no_helpcode() {
 }
 
 #[test]
+fn chaizi_rows_show_readings_and_never_a_helpcode() {
+    let root = tempfile::tempdir().unwrap();
+    // 𢰩（才 子）在 Unihan 里没有读音，𢱆 读 zī；辅助码表给了两者编码，拆字行也不能拿辅助码补上注释或替换读音。
+    let mut options = helpcode_fixture(root.path(), "", "𢰩=ab\n𢱆=ab\n焱=cd\n");
+    assert!(!options.local_chaizi);
+    options.local_chaizi = true;
+    let mut session = Session::new(&options).unwrap();
+    assert!(session.character(b'C', true).unwrap().handled);
+    type_text(&mut session, b"caizi");
+    let view = session.snapshot().unwrap();
+    assert_eq!(view.local_mode, "chaizi");
+    assert_eq!(view.candidates[..2], ["𢰩".to_owned(), "𢱆".to_owned()]);
+    assert_eq!(
+        view.candidate_annotations[..2],
+        ["".to_owned(), "zī".to_owned()]
+    );
+    session.command(Command::Cancel).unwrap();
+    session.character(b'C', true).unwrap();
+    type_text(&mut session, b"huohuohuo");
+    let view = session.snapshot().unwrap();
+    assert_eq!(view.candidates[0], "焱");
+    assert_eq!(view.candidate_annotations[0], "yàn");
+}
+
+#[test]
+fn chaizi_options_map_into_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut value = options(dir.path());
+    let off = super::options::session_options(&value).unwrap();
+    assert!(!off.local_modes.chaizi && !off.chaizi_traditional_output);
+    value.local_chaizi = true;
+    value.chaizi_traditional_output = true;
+    let on = super::options::session_options(&value).unwrap();
+    assert!(on.local_modes.chaizi && on.chaizi_traditional_output);
+}
+
+#[test]
 fn only_generated_modes_are_left_out_of_typing_statistics() {
     for mode in ["expression", "command", "mention"] {
         assert!(!local_mode_counts_as_typing(mode), "{mode}");
     }
+    // 拆字上屏的字是用户挑出来的，和 E、J 一样计入打字统计。
     for mode in [
         "none",
         "unicode",
         "date_time",
         "temporary_english",
+        "chaizi",
         "unknown",
         "",
     ] {
@@ -2798,4 +3156,275 @@ fn schemes_without_the_main_dictionary_run_on_english_alone() {
             .is_empty());
         assert!(!dictionaries.join("msime-pinyin.db").exists());
     }
+}
+
+/// `z` 临时拼音反查的码表：全拼有词组和单字，五笔 86 与 98 各有编码。
+const PINYIN_LOOKUP_SQL: &str = "CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+     INSERT INTO tbl_1_n VALUES('ni','n','你',100);
+     CREATE TABLE tbl_1_h(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+     INSERT INTO tbl_1_h VALUES('hao','h','好',100);
+     INSERT INTO wubi86 VALUES('wqvb','你好',300),('wq','你',200),('wqiy','你',100),('vbg','好',100);
+     CREATE TABLE wubi98(key TEXT,value TEXT,weight INTEGER);
+     INSERT INTO wubi98 VALUES('abcd','你好',300);";
+
+fn pinyin_lookup_options(root: &Path) -> EngineOptions {
+    let mut options = helpcode_fixture(root, PINYIN_LOOKUP_SQL, "");
+    options.scheme = SchemeType::Wubi as u8;
+    options.wubi_mixed_pinyin = false;
+    options.show_helpcode = false;
+    options
+}
+
+fn annotation_of(view: &EngineSnapshot, word: &str) -> String {
+    let index = view
+        .candidates
+        .iter()
+        .position(|candidate| candidate == word)
+        .unwrap_or_else(|| panic!("{word} missing from {:?}", view.candidates));
+    view.candidate_annotations[index].clone()
+}
+
+#[test]
+fn z_opens_a_pinyin_lookup_annotated_with_wubi_codes() {
+    let root = tempfile::tempdir().unwrap();
+    let options = pinyin_lookup_options(root.path());
+    let mut session = Session::new(&options).unwrap();
+    for character in b"znihao" {
+        assert!(session.character(*character, false).unwrap().handled);
+    }
+    let view = session.snapshot().unwrap();
+    assert_eq!(view.preedit, "znihao");
+    assert_eq!(view.local_mode, "none");
+    // 反查只出拼音候选，不查五笔码表。
+    assert!(view.answered_by_pinyin_fallback);
+    assert!(!view.wubi_unique_four_code);
+    assert!(annotation_of(&view, "你好").contains("wqvb"));
+    // 单字显示全码，不是简码。
+    let single = annotation_of(&view, "你");
+    assert!(single.contains("wqiy"), "{single}");
+    assert!(!single.split(' ').any(|code| code == "wq"), "{single}");
+}
+
+#[test]
+fn the_pinyin_lookup_follows_the_wubi_profile() {
+    let root = tempfile::tempdir().unwrap();
+    let mut options = pinyin_lookup_options(root.path());
+    options.wubi_profile = 1;
+    let mut session = Session::new(&options).unwrap();
+    type_text(&mut session, b"znihao");
+    let view = session.snapshot().unwrap();
+    let annotation = annotation_of(&view, "你好");
+    assert!(annotation.contains("abcd"), "{annotation}");
+    assert!(!annotation.contains("wqvb"), "{annotation}");
+}
+
+#[test]
+fn the_pinyin_lookup_is_entered_and_left_without_touching_wubi_codes() {
+    let root = tempfile::tempdir().unwrap();
+    let options = pinyin_lookup_options(root.path());
+    let mut session = Session::new(&options).unwrap();
+
+    // 只打 `z`：进入反查，还没有拼音，也就没有候选。
+    assert!(session.character(b'z', false).unwrap().handled);
+    let view = session.snapshot().unwrap();
+    assert_eq!(view.preedit, "z");
+    assert!(view.candidates.is_empty());
+    // 退格删掉 `z` 就离开反查。
+    assert!(session.command(Command::Backspace).unwrap().handled);
+    assert_eq!(session.snapshot().unwrap().preedit, "");
+
+    // 单独的 `z` 回车什么也不上屏；没有候选时选词上屏的是拼音，不带 `z`。
+    type_text(&mut session, b"z");
+    assert_eq!(session.command(Command::CommitRaw).unwrap().commit, "");
+    assert_eq!(session.snapshot().unwrap().preedit, "");
+    type_text(&mut session, b"zq");
+    assert!(session.snapshot().unwrap().candidates.is_empty());
+    assert_eq!(session.finish(0).unwrap().commit, "q");
+    assert_eq!(session.snapshot().unwrap().preedit, "");
+
+    // 离开后照常是五笔码。
+    type_text(&mut session, b"wqvb");
+    let view = session.snapshot().unwrap();
+    assert_eq!(view.candidates.first().map(String::as_str), Some("你好"));
+    assert!(!view.answered_by_pinyin_fallback);
+    session.command(Command::Cancel).unwrap();
+
+    // 取消同样结束反查，下一个码不受影响；五笔码中间的 `z` 仍交回宿主。
+    type_text(&mut session, b"zni");
+    session.command(Command::Cancel).unwrap();
+    type_text(&mut session, b"wq");
+    assert!(!session.character(b'z', false).unwrap().handled);
+    assert_eq!(session.snapshot().unwrap().preedit, "wq");
+}
+
+#[test]
+fn a_mixed_pinyin_session_has_no_z_lookup() {
+    let root = tempfile::tempdir().unwrap();
+    let mut options = pinyin_lookup_options(root.path());
+    options.wubi_mixed_pinyin = true;
+    let mut session = Session::new(&options).unwrap();
+    type_text(&mut session, b"znihao");
+    // 混输里 `z` 是拼音字母：`znihao` 不是一个拼音，没有 `你好`。
+    let view = session.snapshot().unwrap();
+    assert!(!view.candidates.iter().any(|word| word == "你好"));
+}
+
+#[test]
+fn committing_from_the_pinyin_lookup_keeps_the_rest_in_the_lookup() {
+    let root = tempfile::tempdir().unwrap();
+    let options = pinyin_lookup_options(root.path());
+    let mut session = Session::new(&options).unwrap();
+    type_text(&mut session, b"znihao");
+    let view = session.snapshot().unwrap();
+    let index = view
+        .candidates
+        .iter()
+        .position(|word| word == "你")
+        .unwrap();
+    let result = session.select(index).unwrap();
+    assert_eq!(result.commit, "你");
+    // 剩下的 `hao` 仍是反查，不会被当成五笔码 `hao`。
+    let view = session.snapshot().unwrap();
+    assert_eq!(view.preedit, "zhao");
+    assert!(annotation_of(&view, "好").contains("vbg"));
+    let index = view
+        .candidates
+        .iter()
+        .position(|word| word == "好")
+        .unwrap();
+    assert_eq!(session.select(index).unwrap().commit, "好");
+    assert_eq!(session.snapshot().unwrap().preedit, "");
+
+    // 回车上屏的是拼音本身，引导键 `z` 不上屏。
+    type_text(&mut session, b"zhello");
+    let result = session.command(Command::CommitRaw).unwrap();
+    assert_eq!(result.commit, "hello");
+}
+
+#[test]
+fn the_pinyin_lookup_learns_nothing() {
+    let journal_rows = |options: &EngineOptions| -> i64 {
+        let path = Path::new(&options.user_data).join("msime_user.db");
+        if !path.exists() {
+            return 0;
+        }
+        Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM user_dictionary_operations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0)
+    };
+    let pick_second = |options: &EngineOptions| {
+        let mut session = Session::new(options).unwrap();
+        type_text(&mut session, b"znihao");
+        let view = session.snapshot().unwrap();
+        let index = view
+            .candidates
+            .iter()
+            .position(|word| word == "拟好")
+            .unwrap();
+        assert!(index > 0, "{:?}", view.candidates);
+        assert_eq!(session.select(index).unwrap().commit, "拟好");
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let mut options = pinyin_lookup_options(root.path());
+    options.learning = true;
+    pick_second(&options);
+    pick_second(&options);
+    assert_eq!(journal_rows(&options), 0);
+    // 五笔码照旧，拼音的排序也没被反查里的选择改动。
+    let mut session = Session::new(&options).unwrap();
+    type_text(&mut session, b"wqvb");
+    assert_eq!(session.snapshot().unwrap().candidates, vec!["你好"]);
+    session.command(Command::Cancel).unwrap();
+    type_text(&mut session, b"znihao");
+    let view = session.snapshot().unwrap();
+    let first = view
+        .candidates
+        .iter()
+        .position(|word| word == "你好")
+        .unwrap();
+    let second = view
+        .candidates
+        .iter()
+        .position(|word| word == "拟好")
+        .unwrap();
+    assert!(first < second, "{:?}", view.candidates);
+
+    // 对照：混输里同样的选择会学习，说明上面的零确实是反查没有学，而不是测不到。
+    let control_root = tempfile::tempdir().unwrap();
+    let mut control = pinyin_lookup_options(control_root.path());
+    control.learning = true;
+    control.wubi_mixed_pinyin = true;
+    let mut session = Session::new(&control).unwrap();
+    type_text(&mut session, b"nihao");
+    let view = session.snapshot().unwrap();
+    let index = view
+        .candidates
+        .iter()
+        .position(|word| word == "拟好")
+        .unwrap();
+    session.select(index).unwrap();
+    drop(session);
+    assert!(journal_rows(&control) > 0);
+}
+
+#[test]
+fn a_multi_pick_in_the_pinyin_lookup_creates_no_phrase() {
+    // `你号` 不在码表里：分两次选出它时，打开学习的会话会把它当新词写进拼音词库。
+    let phrase_options = |root: &Path, mixed_pinyin: bool| {
+        let mut options = pinyin_lookup_options(root);
+        for directory in [&options.resources, &options.dictionaries] {
+            Connection::open(Path::new(directory).join("msime-pinyin.db"))
+                .unwrap()
+                .execute("INSERT INTO tbl_1_h VALUES('hao','h','号',50)", [])
+                .unwrap();
+        }
+        options.learning = true;
+        options.wubi_mixed_pinyin = mixed_pinyin;
+        options
+    };
+    let pick_in_two = |options: &EngineOptions, typed: &[u8]| {
+        let mut session = Session::new(options).unwrap();
+        type_text(&mut session, typed);
+        for word in ["你", "号"] {
+            let view = session.snapshot().unwrap();
+            let index = view
+                .candidates
+                .iter()
+                .position(|candidate| candidate == word)
+                .unwrap_or_else(|| panic!("{word} missing from {:?}", view.candidates));
+            assert_eq!(session.select(index).unwrap().commit, word);
+        }
+        assert_eq!(session.snapshot().unwrap().preedit, "");
+    };
+    let created_rows = |options: &EngineOptions| -> i64 {
+        let path = Path::new(&options.user_data).join("msime_user.db");
+        if !path.exists() {
+            return 0;
+        }
+        Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM user_dictionary_operations WHERE value='你号' AND user_inserted=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0)
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let options = phrase_options(root.path(), false);
+    pick_in_two(&options, b"znihao");
+    assert_eq!(created_rows(&options), 0);
+
+    // 对照：混输里同样分两次选，会造出 `你号`，说明上面的零是反查没有造词，而不是这条路径走不到。
+    let control_root = tempfile::tempdir().unwrap();
+    let control = phrase_options(control_root.path(), true);
+    pick_in_two(&control, b"nihao");
+    assert_eq!(created_rows(&control), 1);
 }

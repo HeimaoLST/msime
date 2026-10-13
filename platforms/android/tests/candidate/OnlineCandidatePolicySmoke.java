@@ -1,3 +1,4 @@
+import app.msime.android.JsonPolicy;
 import app.msime.android.OnlineCandidatePolicy;
 import java.util.Arrays;
 import java.util.List;
@@ -6,8 +7,10 @@ import java.net.URL;
 public final class OnlineCandidatePolicySmoke {
     static void check(boolean condition) { if (!condition) throw new AssertionError(); }
 
-    private static String signature(boolean cloud, String assistant) {
-        return OnlineCandidatePolicy.signature(7, "ni'hao", "fixture", cloud, assistant);
+    private static String signature(boolean cloud, boolean cloudEligible, boolean aiEligible,
+                                   String assistant) {
+        return OnlineCandidatePolicy.signature(7, "ni'hao", "fixture", cloud, cloudEligible,
+            aiEligible, assistant);
     }
 
     public static void main(String[] args) throws Exception {
@@ -38,30 +41,37 @@ public final class OnlineCandidatePolicySmoke {
         check(OnlineCandidatePolicy.aiCandidateLimit(-1) == 0);
         check(OnlineCandidatePolicy.aiCandidateLimit(11) == 0);
 
-        check("text".equals(OnlineCandidatePolicy.strictText("text")));
-        check(OnlineCandidatePolicy.strictText(42) == null);
-        check(OnlineCandidatePolicy.strictText(true) == null);
+        check("text".equals(JsonPolicy.strictString("text")));
+        check(JsonPolicy.strictString(42) == null);
+        check(JsonPolicy.strictString(true) == null);
 
         // The same composition is asked about once; a changed AI configuration asks again.
-        check(signature(true, "{\"model\":\"a\"}").equals(signature(true, "{\"model\":\"a\"}")));
-        check(!signature(true, "{\"model\":\"a\"}").equals(signature(true, "{\"model\":\"b\"}")));
-        check(!signature(true, "{\"model\":\"a\"}").equals(signature(false, "{\"model\":\"a\"}")));
+        check(signature(true, true, true, "{\"model\":\"a\"}").equals(
+            signature(true, true, true, "{\"model\":\"a\"}")));
+        check(!signature(true, true, true, "{\"model\":\"a\"}").equals(
+            signature(true, true, true, "{\"model\":\"b\"}")));
+        check(!signature(true, true, true, "{\"model\":\"a\"}").equals(
+            signature(false, true, true, "{\"model\":\"a\"}")));
+        check(!signature(true, true, true, "{\"model\":\"a\"}").equals(
+            signature(true, false, true, "{\"model\":\"a\"}")));
+        check(!signature(true, true, true, "{\"model\":\"a\"}").equals(
+            signature(true, true, false, "{\"model\":\"a\"}")));
         // A disabled assistant contributes nothing, so its settings must not re-ask on their own.
-        check(signature(true, "").equals(signature(true, null)));
-        check(!OnlineCandidatePolicy.signature(7, "ni'hao", "fixture", true, "")
-            .equals(OnlineCandidatePolicy.signature(8, "ni'hao", "fixture", true, "")));
-        check(!OnlineCandidatePolicy.signature(7, "ni'hao", "fixture", true, "")
-            .equals(OnlineCandidatePolicy.signature(7, "ni'hao'ma", "fixture", true, "")));
-        check(!OnlineCandidatePolicy.signature(7, "ni'hao", "fixture", true, "")
-            .equals(OnlineCandidatePolicy.signature(7, "ni'hao", "other", true, "")));
-        check(!OnlineCandidatePolicy.signature(7, "a:b", "c", true, "")
-            .equals(OnlineCandidatePolicy.signature(7, "a", "b:c", true, "")));
+        check(signature(true, true, true, "").equals(signature(true, true, true, null)));
+        check(!OnlineCandidatePolicy.signature(7, "ni'hao", "fixture", true, true, true, "")
+            .equals(OnlineCandidatePolicy.signature(8, "ni'hao", "fixture", true, true, true, "")));
+        check(!OnlineCandidatePolicy.signature(7, "ni'hao", "fixture", true, true, true, "")
+            .equals(OnlineCandidatePolicy.signature(7, "ni'hao'ma", "fixture", true, true, true, "")));
+        check(!OnlineCandidatePolicy.signature(7, "ni'hao", "fixture", true, true, true, "")
+            .equals(OnlineCandidatePolicy.signature(7, "ni'hao", "other", true, true, true, "")));
+        check(!OnlineCandidatePolicy.signature(7, "a:b", "c", true, true, true, "")
+            .equals(OnlineCandidatePolicy.signature(7, "a", "b:c", true, true, true, "")));
 
         // 失败请求只有仍属于当前会话和代次时才能重试；迟到失败不能清除新请求的签名。
-        String failed = signature(true, "");
+        String failed = signature(true, true, true, "");
         check(OnlineCandidatePolicy.shouldReleaseAfterFailure(failed, failed, 4, 4, 7, 7));
         check(!OnlineCandidatePolicy.shouldReleaseAfterFailure(failed,
-            signature(true, "{\"model\":\"new\"}"), 4, 4, 7, 7));
+            signature(true, true, true, "{\"model\":\"new\"}"), 4, 4, 7, 7));
         check(!OnlineCandidatePolicy.shouldReleaseAfterFailure(failed, failed, 3, 4, 7, 7));
         check(!OnlineCandidatePolicy.shouldReleaseAfterFailure(failed, failed, 4, 4, 8, 7));
 

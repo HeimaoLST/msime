@@ -34,6 +34,12 @@ public final class InputSchemeTraitsSmoke {
         table("locksCaret", InputSchemeTraits::locksCaret, Set.of(4, 6, 7, 8));
         table("known", InputSchemeTraits::known, Set.of(0, 1, 2, 3, 4, 5, 6, 7, 8, 9));
         table("letterComposition", InputSchemeTraits::letterComposition, Set.of(4, 7, 8));
+        check(InputSchemeTraits.active(4, InputSchemeTraits.KOREAN, false),
+            "matching scheme is active outside dedicated English");
+        check(!InputSchemeTraits.active(4, InputSchemeTraits.KOREAN, true),
+            "dedicated English disables the scheme gate");
+        check(!InputSchemeTraits.active(3, InputSchemeTraits.KOREAN, false),
+            "a different scheme is inactive");
         System.out.println("Android scheme traits: ordinals and the Engine predicate table passed");
     }
 }

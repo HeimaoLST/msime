@@ -1,5 +1,20 @@
 import SwiftUI
 
+@MainActor
+func runCommunityAction(
+  busy: Binding<Bool>,
+  message: Binding<String?>,
+  action: @escaping @MainActor () async throws -> Void
+) {
+  guard !busy.wrappedValue else { return }
+  busy.wrappedValue = true
+  Task {
+    defer { busy.wrappedValue = false }
+    do { try await action() }
+    catch { message.wrappedValue = error.localizedDescription }
+  }
+}
+
 struct CommunitySearchField: View {
   @Binding var text: String
   let placeholder: String
@@ -21,9 +36,8 @@ struct CommunityAuthorLabel: View {
   let name: String
   var body: some View {
     HStack(spacing: 5) {
-      Text(String(name.prefix(1))).font(.system(size: 9, weight: .semibold))
-        .foregroundStyle(MetasequoiaTheme.accent).frame(width: 19, height: 19)
-        .background(MetasequoiaTheme.accentSoft, in: Circle())
+      DesignInitialTile(text: String(name.prefix(1)), size: 19, fontSize: 9,
+        fontWeight: .semibold, shape: .circle)
       Text(name).font(.caption).foregroundStyle(.secondary).lineLimit(1)
     }
   }
@@ -73,40 +87,11 @@ struct CommunityResourceCard: View {
   }
 }
 
-/// 社区皮肤卡片（获取 / 使用 / 使用中）和资源行（添加 / 已添加）上的色调胶囊：可执行操作时用 accentSoft 和 accent，无事可做后用 segBg 和 sub。
-struct CommunityPillLabel: View {
-  enum Size {
-    /// 皮肤卡片：内边距 4/12，12pt。
-    case card
-    /// 资源行：内边距 5/14，13pt。
-    case row
-  }
-  let title: String
-  /// 为 false 时绘制已完成的样式（使用中、已添加）。
-  var offersAction = true
-  var size: Size = .card
-  var body: some View {
-    Text(title)
-      .font(.system(size: size == .card ? 12 : 13, weight: .semibold))
-      .lineLimit(1).fixedSize()
-      .foregroundStyle(offersAction ? MetasequoiaTheme.accent : MetasequoiaTheme.sub)
-      .padding(.vertical, size == .card ? 4 : 5)
-      .padding(.horizontal, size == .card ? 12 : 14)
-      .background(offersAction ? MetasequoiaTheme.accentSoft : MetasequoiaTheme.segBg, in: Capsule())
-      .contentShape(Capsule())
-  }
-}
-
 /// 词库或回复行前面的 40pt 徽标：在 accentSoft 圆角方块上用 accent 色显示名称的第一个字。
 struct CommunityGlyphTile: View {
   let name: String
   var body: some View {
-    Text(String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1)))
-      .font(.system(size: 16, weight: .bold))
-      .foregroundStyle(MetasequoiaTheme.accent)
-      .frame(width: 40, height: 40)
-      .background(MetasequoiaTheme.accentSoft, in: RoundedRectangle(cornerRadius: MetasequoiaTheme.tabCardRadius, style: .continuous))
-      .accessibilityHidden(true)
+    DesignInitialTile(text: String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1)))
   }
 }
 

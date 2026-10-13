@@ -1,4 +1,5 @@
 import app.msime.android.CloudApi;
+import app.msime.android.JsonPolicy;
 import app.msime.android.SkinJobsApi;
 import java.util.List;
 import java.util.concurrent.FutureTask;
@@ -7,17 +8,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** AI 设计皮肤的失败分类与提示文案；请求本身走 org.json，在 check-host 的桩 classpath 下跑不了，留给设备上验证。 */
 public final class SkinJobsApiSmoke {
     public static void main(String[] arguments) throws Exception {
-        try {
-            java.lang.reflect.Method strictBoolean = SkinJobsApi.class.getDeclaredMethod(
-                "strictBoolean", Object.class);
-            strictBoolean.setAccessible(true);
-            check(Boolean.TRUE.equals(strictBoolean.invoke(null, Boolean.TRUE)),
-                "skin jobs responses accept JSON booleans");
-            check(strictBoolean.invoke(null, "true") == null,
-                "skin jobs responses reject boolean strings instead of coercing them");
-        } catch (ReflectiveOperationException error) {
-            throw new AssertionError("skin jobs response policy missing", error);
-        }
+        check(Boolean.TRUE.equals(JsonPolicy.strictBoolean(Boolean.TRUE)),
+            "skin jobs responses accept JSON booleans");
+        check(JsonPolicy.strictBoolean("true") == null,
+            "skin jobs responses reject boolean strings instead of coercing them");
         check(SkinJobsApi.strictArtworkDimension(512L) == 512,
             "artwork dimensions accept JSON integers");
         check(SkinJobsApi.strictArtworkDimension(1.5d) == null,

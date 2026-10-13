@@ -5,7 +5,7 @@ use reqwest::blocking::{Client, Response};
 use reqwest::{Method, StatusCode, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -39,23 +39,29 @@ pub(crate) fn valid_model_catalog<'a>(
     maximum_models: usize,
     maximum_id_bytes: usize,
 ) -> bool {
-    let mut ids = Vec::with_capacity(maximum_models);
-    ids.extend(models);
-    !ids.is_empty()
-        && ids.len() <= maximum_models
-        && !default_model.is_empty()
-        && crate::text::is_bounded_text(default_model, maximum_id_bytes)
-        && ids.contains(&default_model)
-        && ids
-            .iter()
-            .all(|id| !id.is_empty() && crate::text::is_bounded_text(id, maximum_id_bytes))
-        && {
-            let mut unique = std::collections::HashSet::with_capacity(ids.len());
-            for id in &ids {
-                unique.insert(id);
-            }
-            unique.len() == ids.len()
+    if maximum_models == 0
+        || default_model.is_empty()
+        || !crate::text::is_bounded_text(default_model, maximum_id_bytes)
+    {
+        return false;
+    }
+    let mut ids = HashSet::new();
+    let mut default_present = false;
+    for id in models {
+        if id.is_empty() || !crate::text::is_bounded_text(id, maximum_id_bytes) {
+            return false;
         }
+        if ids.len() >= maximum_models || !ids.insert(id) {
+            return false;
+        }
+        if id == default_model {
+            default_present = true;
+        }
+        if ids.len() == 1 {
+            ids.reserve(maximum_models.saturating_sub(ids.len()));
+        }
+    }
+    default_present && !ids.is_empty()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -96,17 +102,73 @@ pub struct AccountProfile {
     pub identities: Vec<AccountProfileIdentity>,
 }
 
+/// 云剪贴板里解密后的一条，形状与 `docs/cloud-clipboard-e2e.md` 里驱动 `add` 的结果相同。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AccountClipboardItem {
     pub id: String,
     pub text: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub pinned: bool,
+    /// 写入这条的设备名，由驱动清理过控制字符和长度。
+    #[serde(default)]
+    pub device: String,
 }
 
+/// 本机能不能读写云剪贴板。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountClipboardE2eStatus {
+    /// 本机持有当前的剪贴板密钥。
+    Ready,
+    /// 本机已登记，等待一台已批准的设备点「允许」。
+    Pending,
+    /// 账号关闭了云剪贴板。
+    Disabled,
+}
+
+/// 驱动 `list` 结果里的 `e2e` 对象。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AccountClipboardE2e {
+    pub status: AccountClipboardE2eStatus,
+    /// 本机的核对码，16 位数字每 4 位一组。
+    pub code: String,
+    /// 等待本机批准的设备数。
+    pub pending_devices: usize,
+    /// 解不开而被略去的条目数。
+    pub undecryptable: usize,
+}
+
+/// 驱动 `list` 的结果：解密并在本机搜索过的条目。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AccountClipboardPage {
     pub enabled: bool,
+    #[serde(default)]
+    pub retention_days: i64,
     pub items: Vec<AccountClipboardItem>,
+    pub e2e: AccountClipboardE2e,
+}
+
+/// 账号下登记的一台云剪贴板设备。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AccountClipboardDevice {
+    pub device_id: String,
+    pub name: String,
+    pub created_at: String,
+    pub approved: bool,
+    /// 是否就是本机。
+    pub current: bool,
+    pub code: String,
+}
+
+/// 驱动 `status`、`approve`、`reject`、`remove`、`reset` 的结果。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AccountClipboardDevices {
+    pub enabled: bool,
+    pub status: AccountClipboardE2eStatus,
+    pub device_id: String,
+    pub code: String,
+    pub devices: Vec<AccountClipboardDevice>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -313,6 +375,9 @@ pub struct AccountTokens {
 pub struct SavedAccountSession {
     pub tokens: AccountTokens,
     pub expires_at_unix_ms: u64,
+    /// 刷新时保持不变；每次登录都会取得新 ID，即使用户相同。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<uuid::Uuid>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -359,6 +424,24 @@ impl AccountError {
             Self::BlockedContent => "account_blocked_content",
             Self::ScreeningUnavailable => "account_screening_unavailable",
             Self::Banned => "account_banned",
+        }
+    }
+
+    /// 社区页面认的错误码：与 [`Self::code`] 不同，`forbidden` 和 `not_found` 各有自己的码，因为社区页面要分别说「不是你的作品」和「作品已不存在」。共享应用（Tauri）的社区命令和 `msime_client_community` 都用它。
+    pub fn community_code(&self) -> &'static str {
+        match self {
+            Self::Invalid => "community_invalid",
+            Self::Unauthorized => "community_unauthorized",
+            Self::Forbidden => "community_forbidden",
+            Self::NotFound => "community_not_found",
+            Self::RateLimited => "community_rate_limited",
+            Self::Cancelled => "community_cancelled",
+            Self::Storage => "community_storage",
+            Self::Conflict => "community_conflict",
+            Self::Unavailable => "community_unavailable",
+            Self::BlockedContent => "community_blocked_content",
+            Self::ScreeningUnavailable => "community_screening_unavailable",
+            Self::Banned => "community_account_banned",
         }
     }
 
@@ -420,20 +503,24 @@ mod anonymous;
 mod api;
 mod avatar;
 mod client;
+mod clipboard;
 mod file_storage;
 mod google;
+/// 账号页读到的脱敏响应，Tauri 的账号命令和原生设置窗口的 C 接口共用。
+pub mod page;
 mod session;
 /// 本地偏好与账号设置同步文档之间的映射，Tauri 和安卓原生宿主共用。
 pub mod settings_sync;
 mod validate;
 
 pub use anonymous::{
-    ensure_anonymous_account, AnonymousSessionStorage, ANONYMOUS_ACCOUNT_FILE,
-    ANONYMOUS_SESSION_FILE,
+    ensure_anonymous_account, shared_access_token, AnonymousSessionStorage, SharedAccessToken,
+    ANONYMOUS_ACCOUNT_FILE, ANONYMOUS_SESSION_FILE,
 };
 pub use api::*;
 pub use avatar::*;
 pub use client::*;
+pub use clipboard::*;
 pub use file_storage::*;
 pub use google::*;
 pub use session::*;

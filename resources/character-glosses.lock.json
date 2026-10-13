@@ -13,5 +13,19 @@
     "retrieved_from": "https://www.unicode.org/license.txt",
     "sha256": "e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96"
   },
-  "outputs": ["zh-en.db", "character-glosses-NOTICE.txt"]
+  "outputs": ["zh-en.db", "character-glosses-NOTICE.txt"],
+  "built": [
+    {
+      "name": "zh-en.db",
+      "url": "https://github.com/metasequoiaime/chinese-ime-lm/releases/download/character-glosses-unihan-17.0.0/zh-en.db",
+      "sha256": "14f23668919984bb6d581d078d8102417fead9b51a7a1931c0f0ed56c8471ff0",
+      "size": 1245184
+    },
+    {
+      "name": "character-glosses-NOTICE.txt",
+      "url": "https://github.com/metasequoiaime/chinese-ime-lm/releases/download/character-glosses-unihan-17.0.0/character-glosses-NOTICE.txt",
+      "sha256": "17586a69ae8ce787890496922f413194950bbc504ed67ce8745a74fe3e2bdaa8",
+      "size": 2189
+    }
+  ]
 }

@@ -42,15 +42,15 @@ struct CustomKeyboardSkin: Codable, Equatable, Hashable, Sendable {
     result.keyForeground &= 0xFFFFFF
     result.accent &= 0xFFFFFF
     result.actionBackground &= 0xFFFFFF
-    result.cornerRadius = cornerRadius.isFinite ? min(20, max(0, cornerRadius)) : 8
-    result.borderWidth = borderWidth.isFinite ? min(2, max(0, borderWidth)) : 0
-    result.shadow = shadow.isFinite ? min(0.4, max(0, shadow)) : 0
-    result.keyOpacity = keyOpacity.map { $0.isFinite ? min(1, max(0.25, $0)) : 1 }
+    result.cornerRadius = cornerRadius.isFinite ? SharedNumber.clamped(cornerRadius, to: 0...20) : 8
+    result.borderWidth = borderWidth.isFinite ? SharedNumber.clamped(borderWidth, to: 0...2) : 0
+    result.shadow = shadow.isFinite ? SharedNumber.clamped(shadow, to: 0...0.4) : 0
+    result.keyOpacity = keyOpacity.map { $0.isFinite ? SharedNumber.clamped($0, to: 0.25...1) : 1 }
     result.gradientEnd = gradientEnd.map { $0 & 0xFFFFFF }
     result.customBorderColor = customBorderColor.map { $0 & 0xFFFFFF }
-    result.patternOpacity = patternOpacity.map { $0.isFinite ? min(0.5, max(0, $0)) : 0.15 }
-    result.photoShade = photoShade.map { $0.isFinite ? min(0.8, max(0, $0)) : 0.25 }
-    result.photoPosition = photoPosition.map { $0.isFinite ? min(1, max(0, $0)) : 0.5 }
+    result.patternOpacity = patternOpacity.map { $0.isFinite ? SharedNumber.clamped($0, to: 0...0.5) : 0.15 }
+    result.photoShade = photoShade.map { $0.isFinite ? SharedNumber.clamped($0, to: 0...0.8) : 0.25 }
+    result.photoPosition = photoPosition.map { $0.isFinite ? SharedNumber.clamped($0, to: 0...1) : 0.5 }
     if let photo, photo.count > 512_000 { result.photo = nil }
     result.pattern = (0...3).contains(pattern) ? pattern : 0
     return result
@@ -64,9 +64,9 @@ struct CustomKeyboardSkin: Codable, Equatable, Hashable, Sendable {
   static func rgb(_ color: UIColor) -> UInt32 {
     var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
     guard color.getRed(&r, green: &g, blue: &b, alpha: &a) else { return 0 }
-    return UInt32((min(1, max(0, r)) * 255).rounded()) << 16
-      | UInt32((min(1, max(0, g)) * 255).rounded()) << 8
-      | UInt32((min(1, max(0, b)) * 255).rounded())
+    return UInt32((SharedNumber.clamped(r, to: 0...1) * 255).rounded()) << 16
+      | UInt32((SharedNumber.clamped(g, to: 0...1) * 255).rounded()) << 8
+      | UInt32((SharedNumber.clamped(b, to: 0...1) * 255).rounded())
   }
 
   static func luminance(_ rgb: UInt32) -> Double {
@@ -103,9 +103,14 @@ enum CustomKeyboardSkinStore {
   static var stored: CustomKeyboardSkin? {
     KeyboardFeedbackPreference.defaults.data(forKey: key) == nil ? nil : cache.load()
   }
+  /// 保存当前设计；内容变了时记一次设置改动，云同步下一轮上传。把共享文档里的设计抄过来（`GlobalThemePreference.mirror`）不是用户的改动，它在 `CloudSyncState.suppressingMarks` 里调用。
   static func save(_ skin: CustomKeyboardSkin) {
-    guard let data = try? JSONEncoder().encode(skin.normalized) else { return }
+    let skin = skin.normalized
+    guard let data = try? JSONEncoder().encode(skin) else { return }
+    // Compared as designs, not bytes: the encoding of the same design is not byte-stable.
+    let changed = stored != skin
     KeyboardFeedbackPreference.defaults.set(data, forKey: key)
+    if changed { CloudSyncState.shared.markDirty(.settings) }
   }
 
   private final class Cache: @unchecked Sendable {
@@ -138,8 +143,8 @@ struct SavedKeyboardSkin: Codable, Identifiable, Equatable {
 enum CustomSkinLibrary {
   // Keep the multi-photo library out of preferences, which the keyboard reads on each key.
   private static func file(in directory: URL? = nil) -> URL {
-    let root = directory ?? FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: InputSchemePreference.appGroupIdentifier)
-      ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    let root = directory ?? IOSSharedPaths.sharedContainerOrApplicationSupport(
+      for: InputSchemePreference.appGroupIdentifier)
     return root.appendingPathComponent("CustomSkins", isDirectory: true).appendingPathComponent("library.json")
   }
   private static func rejectsSymlinkAncestors(_ path: URL) -> Bool {

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { ControlledCheckbox } from "../core/controlled-checkbox";
 import * as style from "./community-style";
 
 export interface CommunityRightsAgreementProps {
@@ -21,13 +22,12 @@ export function CommunityRightsAgreement({
 }: CommunityRightsAgreementProps) {
   return (
     <label className={style.agreement}>
-      <input
+      <ControlledCheckbox
         className={checkboxClassName}
-        type="checkbox"
         aria-label={ariaLabel}
         checked={checked}
         disabled={disabled}
-        onChange={(event) => onChange(event.target.checked)}
+        onChange={onChange}
       />
       {agreementText}
     </label>

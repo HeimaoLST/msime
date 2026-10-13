@@ -49,7 +49,7 @@ struct WelcomeFlowView: View {
         }
       }
       // 两种呈现方式都用季节页面色；iPad 卡片就是画在 480pt 模态框里的同一个页面。
-      .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+      .designCanvasBackground()
       .toolbar(.hidden, for: .navigationBar)
       .simultaneousGesture(swipe)
       .accessibilityAction(named: "上一步") { if page > 0 { page -= 1 } }
@@ -128,7 +128,7 @@ struct WelcomeFlowView: View {
           HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
               Text(choice.title).font(.system(size: 16, weight: .semibold)).foregroundStyle(.primary)
-              Text(choice.detail).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+              Text(choice.detail).designSubtext()
             }
             Spacer()
             radio(selected: scheme == choice.scheme)
@@ -179,7 +179,7 @@ struct WelcomeFlowView: View {
           .accessibilityIdentifier("welcomeGlossToggle")
       }
       if glossSaveFailed {
-        Text("设置没有保存，键盘可能正在写入同一份设置，请再试一次。").font(.footnote).foregroundStyle(.red)
+        Text(SettingsSaveFailure.message).font(.footnote).foregroundStyle(.red)
       }
       NavigationLink(destination: KeyboardTryoutView()) {
         Text("先试试键盘").font(.system(size: 15))

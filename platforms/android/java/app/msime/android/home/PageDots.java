@@ -1,5 +1,9 @@
 package app.msime.android.home;
 
+import app.msime.android.DimensionPolicy;
+import app.msime.android.PagerDotsRenderer;
+
+import app.msime.android.ThemeColorPolicy;
 import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Canvas;
@@ -11,6 +15,7 @@ import androidx.annotation.Nullable;
 import app.msime.android.ColorPolicy;
 import app.msime.android.BoundsPolicy;
 import app.msime.android.KeyboardGeometry;
+import app.msime.android.ViewPolicy;
 
 /**
  * 分页指示点：6dp 高、圆角 3，未选中 6dp 宽、选中拉长到 16dp 并换成 accent，切换时宽度和颜色在 0.2 秒里过渡。
@@ -36,15 +41,15 @@ public final class PageDots extends View {
 
     public PageDots(Context context, @Nullable AttributeSet attrs) {
         super(context, attrs);
-        dot = Ui.dp(context, Ui.DOT_SIZE);
-        active = Ui.dp(context, Ui.DOT_ACTIVE_WIDTH);
-        gap = Ui.dp(context, Ui.DOT_GAP);
-        setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
+        dot = DimensionPolicy.pixels(context, Ui.DOT_SIZE);
+        active = DimensionPolicy.pixels(context, Ui.DOT_ACTIVE_WIDTH);
+        gap = DimensionPolicy.pixels(context, Ui.DOT_GAP);
+        ViewPolicy.setImportantForAccessibility(this, IMPORTANT_FOR_ACCESSIBILITY_YES);
     }
 
     public void setCount(int count) {
         this.count = BoundsPolicy.nonNegative(count);
-        selected = KeyboardGeometry.bounded(selected, 0, BoundsPolicy.nonNegative(this.count - 1));
+        selected = BoundsPolicy.bounded(selected, 0, BoundsPolicy.nonNegative(this.count - 1));
         previous = selected;
         progress = 1f;
         updateDescription();
@@ -66,7 +71,7 @@ public final class PageDots extends View {
         }
         animator = ValueAnimator.ofFloat(0f, 1f);
         animator.setDuration(Ui.DOT_MILLIS);
-        animator.setInterpolator(Ui.emphasized());
+        animator.setInterpolator(MotionCurves.EMPHASIZED);
         animator.addUpdateListener(animation -> {
             progress = (float) animation.getAnimatedValue();
             invalidate();
@@ -88,19 +93,13 @@ public final class PageDots extends View {
         super.onDraw(canvas);
         if (count == 0) return;
         Context context = getContext();
-        int accent = Ui.accent(context);
-        int rest = Ui.withAlpha(Ui.text(context), 0.12f);
+        int accent = ThemeColorPolicy.accent(context);
+        int rest = ColorPolicy.withAlpha(ThemeColorPolicy.text(context), 0.12f);
         float total = active + (count - 1) * (dot + gap);
         float x = getPaddingLeft() + (getWidth() - getPaddingLeft() - getPaddingRight() - total) / 2f;
         float top = getPaddingTop() + (getHeight() - getPaddingTop() - getPaddingBottom() - dot) / 2f;
-        for (int i = 0; i < count; i++) {
-            float weight = i == selected ? progress : i == previous ? 1f - progress : 0f;
-            float width = dot + (active - dot) * weight;
-            rect.set(x, top, x + width, top + dot);
-            paint.setColor(ColorPolicy.blend(rest, accent, weight));
-            canvas.drawRoundRect(rect, dot / 2f, dot / 2f, paint);
-            x += width + gap;
-        }
+        PagerDotsRenderer.draw(canvas, paint, rect, count, selected, previous, progress,
+            dot, active, gap, rest, accent, x, top);
     }
 
     @Override protected void onDetachedFromWindow() {

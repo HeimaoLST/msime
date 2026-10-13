@@ -90,6 +90,54 @@ export const touchKeyboardRows: PreviewKey[][] = [
   ],
 ];
 
+/** HarmonyOS 手机键盘上画出的几种中文键盘，键名取 `HarmonyKeyboardLayout`。 */
+export type HarmonyTouchLayout =
+  | "twenty_six_key"
+  | "fourteen_key"
+  | "nine_key"
+  | "japanese_nine_key";
+
+// HarmonyOS 26 键和 14 键共用的底排（`KeyboardView.ets` 的 `designActionRow`）：123、逗号、空格、句号、中/英、回车。
+const harmonyActionRow = [
+  key("123", 1.25),
+  key("，", 1),
+  key("空格", 4),
+  key("。", 1),
+  key("中/英", 1.05),
+  key("↵", 1.9),
+];
+
+/**
+ * HarmonyOS 手机上「尺寸」预览按当前的中文键盘画，键位和列宽照原生键盘：26 键见 `KeyboardView.ets` 的 `typingFace`，14 键是 `FourteenKeyLayout.ts`，9 键是 `NineKeyLayout.ts` 的触屏网格（左列标点、3 × 3 字母格、右列删除 / 分词 / 感叹号，`NINE_KEY_SIDE_SHARE` 1.15、每格 2），日语 9 键是 `JapaneseNineKeyLayout.ts` 的 4 × 3 假名格。日语 9 键的底排是按 vp 定宽的经典底排，这里按宽度折成比例。
+ */
+export const harmonyTouchKeyboardRows: Record<HarmonyTouchLayout, PreviewKey[][]> = {
+  twenty_six_key: [
+    letters("qwertyuiop"),
+    [key("", 0.5), ...letters("asdfghjkl"), key("", 0.5)],
+    [key("⇧", 1.4, "ShiftLeft"), ...letters("zxcvbnm"), key("⌫", 1.4, "Backspace")],
+    harmonyActionRow,
+  ],
+  fourteen_key: [
+    ["QW", "ER", "TY", "UI", "OP"].map((label) => key(label)),
+    ["AS", "DF", "GH", "JK", "L"].map((label) => key(label)),
+    [key("符", 1.4), ...["ZX", "CV", "BN", "M"].map((label) => key(label)), key("⌫", 1.4)],
+    harmonyActionRow,
+  ],
+  nine_key: [
+    [key("，", 1.15), key("@#", 2), key("ABC", 2), key("DEF", 2), key("⌫", 1.15)],
+    [key("。", 1.15), key("GHI", 2), key("JKL", 2), key("MNO", 2), key("分词", 1.15)],
+    [key("？", 1.15), key("PQRS", 2), key("TUV", 2), key("WXYZ", 2), key("！", 1.15)],
+    [key("123", 1.25), key("空格", 4.2), key("0", 1.05), key("中/英", 1.05), key("↵", 1.6)],
+  ],
+  japanese_nine_key: [
+    [key("あ"), key("か"), key("さ")],
+    [key("た"), key("な"), key("は")],
+    [key("ま"), key("や"), key("ら")],
+    [key("小゛゜"), key("わ"), key("、")],
+    [key("123", 1.25), key("符", 1.15), key("空白", 4.5), key("中", 0.9), key("↵", 1.55)],
+  ],
+};
+
 /** The nine-key pinyin grid, each cell named by the digit printed on it; `Nine1` is the punctuation and separator cell. */
 export const nineKeyHeatmapRows: PreviewKey[][] = [
   [key("1 ，。", 1, "Nine1"), key("2 ABC", 1, "Nine2"), key("3 DEF", 1, "Nine3")],

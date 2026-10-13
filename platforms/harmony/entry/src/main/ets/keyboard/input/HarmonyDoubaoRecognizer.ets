@@ -6,7 +6,7 @@ import { KeyboardLog, describeError } from '../KeyboardLog';
 import { VoiceRecognitionPolicy } from './VoiceRecognitionPolicy';
 import { HarmonyVoiceCaptureDevices } from './HarmonyVoiceCaptureDevices';
 import { VoiceOutcome, VoiceResponsePolicy } from './VoiceResponsePolicy';
-import { VoiceInputConfiguration } from './VoiceInputConfiguration';
+import { DoubaoCredentialPolicy, VoiceInputConfiguration } from './VoiceInputConfiguration';
 import { TextPolicy } from '../TextPolicy';
 import { DoubaoHeaderPolicy } from './DoubaoHeaderPolicy';
 
@@ -389,7 +389,7 @@ export class HarmonyDoubaoRecognizer {
 
   private headers(config: VoiceInputConfiguration): webSocket.WebSocketRequestOptions {
     const requestId: string = util.generateRandomUUID(false);
-    const token: string = config.asr_token.trim();
+    const token: string = DoubaoCredentialPolicy.token(config);
     const resourceId: string = config.asr_resource_id.trim();
     const appKey: string = config.asr_app_key.trim();
     if (config.doubao_auth_mode === 'legacy') {
@@ -404,7 +404,7 @@ export class HarmonyDoubaoRecognizer {
     return TextPolicy.validAuthority(config.asr_endpoint, ['wss://'])
       && DoubaoHeaderPolicy.validConfiguration(
         config.doubao_auth_mode,
-        config.asr_token,
+        DoubaoCredentialPolicy.token(config),
         config.asr_resource_id,
         config.asr_app_key,
       );

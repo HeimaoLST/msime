@@ -1,4 +1,6 @@
 #import "TypingEffectPanel.h"
+#import "../candidate/CandidatePlacement.h"
+#import "../candidate/CandidateWindowLevel.h"
 
 #import <QuartzCore/QuartzCore.h>
 
@@ -61,9 +63,7 @@ CGImageRef SparkImage(void) {
 }
 
 NSScreen *ScreenContaining(NSPoint point) {
-    for (NSScreen *screen in NSScreen.screens)
-        if (NSPointInRect(point, screen.frame)) return screen;
-    return NSScreen.mainScreen;
+    return MSIMEScreenForPoint(point);
 }
 }
 
@@ -143,8 +143,8 @@ NSColor *MSIMETypingEffectColor(id value) {
                                 backing:NSBackingStoreBuffered defer:YES];
     if (!self) return nil;
     self.floatingPanel = YES;
-    // Just under the candidate window, so sparks never cover a candidate.
-    self.level = NSPopUpMenuWindowLevel - 1;
+    // 紧贴在候选窗之下，火花不会盖住候选；也就和候选窗一起高过截图工具的遮罩（#7326）。
+    self.level = MSIMECandidateWindowLevel() - 1;
     self.becomesKeyOnlyIfNeeded = YES;
     self.hidesOnDeactivate = NO;
     self.opaque = NO;

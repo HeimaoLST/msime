@@ -1,6 +1,7 @@
 {
  "name": "wubi_select_and_gates",
  "source": "tests/src/test_wubi_input_session.cpp:68-74; test_input_session.cpp:775-782 gates",
+ "note": "2026-10-11（#6789）起，混输关闭时组字开头的 `z` 打开临时拼音反查，所以 `z` 的拒绝改在五笔码中间检验：`wqb` 之后的 `z` 仍交回宿主，组字不变。",
  "covers": [
   "wubi"
  ],
@@ -23,12 +24,16 @@
    "arg": 0
   },
   {
+   "op": "type",
+   "arg": "wqb"
+  },
+  {
    "op": "char",
    "arg": "z"
   },
   {
-   "op": "type",
-   "arg": "wqbb"
+   "op": "char",
+   "arg": "b"
   },
   {
    "op": "char",

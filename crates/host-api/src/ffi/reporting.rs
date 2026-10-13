@@ -1,4 +1,4 @@
-//! Usage reporting and notices for native hosts: the telemetry queue, the notice feed and the Markdown renderer of `msime_client_core::telemetry` and `msime_client_core::notices`.
+//! 面向原生宿主的使用情况上报、公告和检查更新：`msime_client_core::telemetry` 与 `msime_client_core::notices` 提供的上报队列、公告源和 Markdown 渲染，以及 `msime_client_core::update_check`。
 //!
 //! Part of the C ABI; see the parent module for what these shims guarantee. Every request is a small JSON document so a host builds it with the JSON library it already has, and a field added later does not change a signature.
 
@@ -7,6 +7,7 @@ use crate::*;
 use msime_client_core::account::BackendAccountClient;
 use msime_client_core::notices::{fetch_notices, markdown_to_html, NoticeChannel, NoticeStore};
 use msime_client_core::telemetry::{TelemetryApp, TelemetryStore};
+use msime_client_core::update_check::{check_for_update, UpdateCheckRequest};
 use std::time::SystemTime;
 
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
@@ -262,6 +263,22 @@ pub unsafe extern "C" fn msime_client_notices(request: *const u8, length: usize)
             })
             .collect();
         Ok(json!({ "items": items }))
+    })
+}
+
+/// 把宿主所在平台最新的已发布版本与当前运行的版本号比较，结果为 `{status:"available"|"current", update:{version:{display,parts}, release_url, installer_name, installer_sha256, signed}}`；该平台还没有发布时为 `{status:"none"}`。请求为 `{platform, current_version, edition?, arch?}`。会在网络上阻塞最多十秒，不要在 UI 线程或输入线程上调用。
+/// # Safety
+/// `request` 指向 `length` 个可读的 UTF-8 JSON 字节。传入空指针会被拒绝。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_update_check(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        // SAFETY: 由文档写明的调用方契约保证。
+        let request: UpdateCheckRequest = unsafe { document(request, length, MAX_REQUEST_BYTES)? };
+        let check = check_for_update(&request).map_err(|error| error.to_string())?;
+        serde_json::to_value(check).map_err(|error| error.to_string())
     })
 }
 

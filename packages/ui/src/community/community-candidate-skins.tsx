@@ -4,18 +4,22 @@ import type { SkinCatalog } from "../skin/external-skins";
 import type { SkinImageReader } from "../skin/skin-image";
 import { notifySkinCatalogChanged } from "../skin/skin-catalog-changes";
 import { CandidateSkinPublishDialog } from "./candidate-skin-publish-dialog";
+import { useCandidateSkinSync } from "./candidate-skin-sync";
 import {
   candidateSkinMessage,
   communityLicenseLine,
   communityNeedsSignIn,
   communityPublishLoginAction,
 } from "./community-helpers";
-import { useCommunityGallery, type CommunityGalleryClient } from "./community-gallery";
-import { CommunityDetailStatus } from "./community-detail-status";
+import {
+  createCommunityGalleryClient,
+  useCommunityGallery,
+  type CommunityGalleryClient,
+} from "./community-gallery";
+import { CommunityDetailSummary } from "./community-detail-summary";
 import { CommunityDetailFrame } from "./community-detail-frame";
-import { CommunityDetailHeader } from "./community-detail-header";
 import * as style from "./community-style";
-import { CommunitySearchForm } from "./community-search-form";
+import { CommunityGalleryHeader } from "./community-gallery-header";
 import { CommunityScopeButtons } from "./community-scope-buttons";
 import { CommunityModerationSection } from "./community-moderation-section";
 import {
@@ -27,16 +31,15 @@ import { CommunityCardMetrics } from "./community-card-metrics";
 import { CommunityCardAuthor } from "./community-card-author";
 import { CommunityCard } from "./community-card";
 import { CommunityMetrics } from "./community-metrics";
-import { CommunityInstallButton } from "./community-install-button";
-import { CommunityReplaceConfirmation } from "./community-replace-confirmation";
+import { CommunityInstallActions } from "./community-install-actions";
 import { CommunityGalleryLoadMore } from "./community-gallery-load-more";
 import { CommunityGalleryFeedback } from "./community-gallery-feedback";
 import { CommunityActionNotice } from "./community-action-notice";
-import { CommunityGalleryHeading } from "./community-gallery-heading";
 import { CommunityGalleryGrid } from "./community-gallery-grid";
 import { CommunityPageShell } from "./community-page-shell";
 import { CommunityNotice } from "./community-notice";
 import { useCommunityInstallState } from "./community-install-state";
+import { communityInstallPreflight } from "./community-install-preflight";
 import { useAsyncGeneration } from "../settings/use-async-generation";
 import { ActionButton } from "../core/action-button";
 import {
@@ -249,7 +252,6 @@ export function CommunityCandidateSkinsPage({
   openSkinDirectory,
   readSkinImage,
   onOpenSkinPage,
-  onInstalled,
   onLogin,
 }: {
   client: CandidateSkinCommunityClient;
@@ -259,30 +261,21 @@ export function CommunityCandidateSkinsPage({
   readSkinImage?: SkinImageReader;
   /** Returns to 我的皮肤 on 主题, where an installed package is enabled; the community page sits outside the settings form and never writes preferences itself. */
   onOpenSkinPage?: () => void;
-  /** 皮肤装进外部皮肤目录之后调用，社区页用它把目录和云端皮肤库同步一次。列出目录的界面不靠它重扫，装入时已经发出 `notifySkinCatalogChanged`。 */
-  onInstalled?: () => void;
   onLogin?: () => void;
 }) {
+  const sync = useCandidateSkinSync(client, notifySkinCatalogChanged);
   const categoryFilter = useCommunitySkinCategoryFilter();
   const categoryRequest = categoryFilter.request;
   const galleryClient = useMemo<CommunityGalleryClient<CommunityCandidateSkin>>(
-    () => ({
-      list: async (offset, search, mine) => {
-        const page = await client.list(offset, search, mine ?? false, categoryRequest.current);
-        return { items: page.skins, has_more: page.has_more };
-      },
-      detail: client.detail,
-      rate: async (id, stars) => {
-        await client.rate(id, stars);
-      },
-      unpublish: async (id) => {
-        await client.unpublish(id);
-      },
-      ...(client.report && {
-        report: (id: string, reason: CommunityReportReason, detail: string) =>
-          client.report!(id, reason, detail),
-      }),
-    }),
+    () =>
+      createCommunityGalleryClient(
+        client,
+        async (offset, search, mine) => {
+          const page = await client.list(offset, search, mine ?? false, categoryRequest.current);
+          return { items: page.skins, has_more: page.has_more };
+        },
+        (id) => client.unpublish(id),
+      ),
     [client, categoryRequest],
   );
   const gallery = useCommunityGallery({
@@ -304,12 +297,13 @@ export function CommunityCandidateSkinsPage({
     confirmUnpublish,
     activeSearch,
     setActionNotice,
-    setMineOnly,
+    changeMineOnly,
     setConfirmUnpublish,
     requestList,
     open,
     closeDetail: closeGalleryDetail,
     rateSelected,
+    updateSelected,
     unpublishSelected,
     reportSelected,
     runAction,
@@ -353,9 +347,13 @@ export function CommunityCandidateSkinsPage({
       async (currentClient) => {
         // Asking before the download spares a ~3 MB transfer the user may be about to refuse. The scan is only a courtesy: when it fails the install's own `candidate_skin_exists` still stops an overwrite.
         if (!replace && localSkins) {
-          const catalog = await localSkins().catch(() => null);
-          if (!gallery.isCurrent(currentClient)) return;
-          if (catalog?.packages.some((item) => item.id === target.package_id)) {
+          const preflight = await communityInstallPreflight(
+            localSkins,
+            () => gallery.isCurrent(currentClient),
+            (catalog) => catalog.packages.some((item) => item.id === target.package_id),
+          );
+          if (preflight === "stale") return;
+          if (preflight === "conflict") {
             setConfirmReplace(true);
             return;
           }
@@ -366,7 +364,6 @@ export function CommunityCandidateSkinsPage({
         if (!gallery.isCurrent(currentClient)) return;
         setConfirmReplace(false);
         setInstalled(true);
-        onInstalled?.();
       },
       {
         clearNotice: true,
@@ -379,34 +376,18 @@ export function CommunityCandidateSkinsPage({
   };
 
   const changeVisibility = async (visibility: CandidateSkinVisibility) => {
-    if (!selected) return;
-    const target = selected;
-    await runAction(
-      async (currentClient) => {
-        const updated = await client.setVisibility(target.id, visibility);
-        if (!gallery.isCurrent(currentClient)) return;
-        gallery.replaceSelected(updated);
-        setActionNotice(
-          visibility === "public"
-            ? "已公开，其他用户现在可以下载这款皮肤。"
-            : "已设为私有，只有你能看到这款皮肤。",
-        );
-      },
-      { clearNotice: true },
+    await updateSelected(
+      (id) => client.setVisibility(id, visibility),
+      visibility === "public"
+        ? "已公开，其他用户现在可以下载这款皮肤。"
+        : "已设为私有，只有你能看到这款皮肤。",
     );
   };
 
   const changeOwnCategory = async (next: CandidateSkinCategory) => {
-    if (!selected) return;
-    const target = selected;
-    await runAction(
-      async (currentClient) => {
-        const updated = await client.setCategory(target.id, next);
-        if (!gallery.isCurrent(currentClient)) return;
-        gallery.replaceSelected(updated);
-        setActionNotice(`已改为「${candidateSkinCategoryLabels[next]}」分类。`);
-      },
-      { clearNotice: true },
+    await updateSelected(
+      (id) => client.setCategory(id, next),
+      `已改为「${candidateSkinCategoryLabels[next]}」分类。`,
     );
   };
 
@@ -441,18 +422,18 @@ export function CommunityCandidateSkinsPage({
           load={loadPreview}
           className={style.detailStage}
         />
-        <CommunityDetailHeader
+        <CommunityDetailSummary
           title={selected.name}
-          note={[selectedCategory, selected.author, selected.version && `v${selected.version}`]
-            .filter(Boolean)
-            .join(" · ")}
+          noteParts={[
+            selectedCategory,
+            selected.author,
+            selected.version && `v${selected.version}`,
+          ]}
           owned={selected.owned}
           moderation={selected.moderation}
           ownedLabel={selected.visibility === "private" ? "私有" : "我的作品"}
           description={selected.description}
-        />
-        {license && <CommunityMetrics>{license}</CommunityMetrics>}
-        <CommunityDetailStatus
+          metrics={license && <CommunityMetrics>{license}</CommunityMetrics>}
           downloads={selected.downloads}
           ratingCount={selected.rating_count}
           ratingAverage={selected.rating_average}
@@ -461,34 +442,28 @@ export function CommunityCandidateSkinsPage({
           actionNotice={actionNotice}
           loadingText="正在读取皮肤详情…"
         />
-        {installed ? (
-          <>
-            <CommunityActionNotice>已安装到外部皮肤。</CommunityActionNotice>
-            {onOpenSkinPage && (
-              <ActionButton
-                action={onOpenSkinPage}
-                className={`primary ${style.action}`}
-                label="去启用"
-              />
-            )}
-          </>
-        ) : (
-          <CommunityInstallButton
-            actionBusy={actionBusy}
-            detailBusy={detailBusy}
-            confirmReplace={confirmReplace}
-            onInstall={() => void install(false)}
-          />
-        )}
-        {confirmReplace && (
-          <CommunityReplaceConfirmation
-            ariaLabel="确认替换皮肤"
-            message={<>已存在同名皮肤“{selected.package_id}”，安装会整体替换它。</>}
-            actionBusy={actionBusy}
-            onConfirm={() => void install(true)}
-            onCancel={() => setConfirmReplace(false)}
-          />
-        )}
+        <CommunityInstallActions
+          installed={installed}
+          installedContent={
+            <>
+              <CommunityActionNotice>已安装到外部皮肤。</CommunityActionNotice>
+              {onOpenSkinPage && (
+                <ActionButton
+                  action={onOpenSkinPage}
+                  className={`primary ${style.action}`}
+                  label="去启用"
+                />
+              )}
+            </>
+          }
+          actionBusy={actionBusy}
+          detailBusy={detailBusy}
+          confirmReplace={confirmReplace}
+          replaceAriaLabel="确认替换皮肤"
+          replaceMessage={<>已存在同名皮肤“{selected.package_id}”，安装会整体替换它。</>}
+          onInstall={(replace) => void install(replace)}
+          onCancelReplace={() => setConfirmReplace(false)}
+        />
         {selected.owned && (
           <ActionButton
             action={() =>
@@ -528,13 +503,11 @@ export function CommunityCandidateSkinsPage({
 
   return (
     <CommunityPageShell>
-      <CommunitySearchForm
-        label="搜索候选窗口皮肤"
-        value={search}
-        onChange={setSearch}
-        onSubmit={() => void requestList(search, false)}
-      />
-      <CommunityGalleryHeading
+      <CommunityGalleryHeader
+        searchLabel="搜索候选窗口皮肤"
+        search={search}
+        onSearchChange={setSearch}
+        onSearchSubmit={() => void requestList(search, false)}
         title="社区皮肤"
         note="为输入候选窗口换一身新装，安装后在「我的皮肤」中启用"
       >
@@ -543,10 +516,7 @@ export function CommunityCandidateSkinsPage({
           mineOnly={mineOnly}
           allLabel="全部"
           mineLabel="我的作品"
-          onMineOnlyChange={(nextMineOnly) => {
-            setMineOnly(nextMineOnly);
-            void requestList(activeSearch, false, nextMineOnly);
-          }}
+          onMineOnlyChange={changeMineOnly}
         />
         {localSkins && (
           <ActionButton
@@ -555,7 +525,31 @@ export function CommunityCandidateSkinsPage({
             label="发布我的皮肤"
           />
         )}
-      </CommunityGalleryHeading>
+        <ActionButton
+          action={sync.run}
+          label={sync.busy ? "正在同步皮肤库…" : "同步我的皮肤库"}
+          disabled={sync.busy}
+          ariaBusy={sync.busy}
+        />
+      </CommunityGalleryHeader>
+      <p className="text-xs [color:var(--p-sub)]">
+        手动同步会下载云端个人皮肤、上传本机皮肤，并同步已记录的删除。
+      </p>
+      <CommunityGalleryFeedback
+        error={sync.error ? candidateSkinMessage(sync.error) : undefined}
+        signInRequired={communityNeedsSignIn(sync.error)}
+        onLogin={onLogin}
+        notice={
+          sync.report && (
+            <CommunityActionNotice>
+              {sync.report.stopped ? "同步已暂停" : "同步已完成"}：下载{" "}
+              {sync.report.downloaded.length} 款，上传 {sync.report.uploaded.length} 款，本机删除{" "}
+              {sync.report.deleted_local.length} 款，云端删除 {sync.report.deleted_cloud.length}{" "}
+              款，跳过 {sync.report.skipped.length} 款。
+            </CommunityActionNotice>
+          )
+        }
+      />
       <CommunitySkinCategoryFilter
         ariaLabel="候选窗口皮肤分类"
         value={categoryFilter.category}

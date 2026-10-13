@@ -1,11 +1,10 @@
 import SwiftUI
 
-/// 词库页：已安装的词库、导入入口、可添加的社区词库、学习开关，以及进入「背单词」和「词库信息」的链接。「学习」保存在共享偏好文档里（见 InputHabitPreference），键盘下次出现时重新读取；手机和 iPad 显示同一个页面。
+/// 词库页：已安装的词库、导入入口、可添加的社区词库和进入完整词库社区的「浏览更多词库」、学习开关，以及进入「背单词」和「词库信息」的链接。「学习」保存在共享偏好文档里（见 InputHabitPreference），键盘下次出现时重新读取；手机和 iPad 显示同一个页面。
 struct DictionarySettingsView: View {
-  /// 设计稿最多列出这么多社区词库；完整列表在「社区」标签页。
+  /// 设计稿最多列出这么多社区词库；完整列表（搜索、详情、收藏、评分、举报和发布）在「浏览更多词库」推入的词库社区里。
   private static let discoverLimit = 8
 
-  @Environment(\.scenePhase) private var scenePhase
   @State private var habits = InputHabitPreference.mirrored
   @State private var saveFailed = false
   @State private var dictionary: PersonalDictionaryState?
@@ -56,19 +55,10 @@ struct DictionarySettingsView: View {
       .padding(.top, 12)
       .padding(.bottom, 32)
     }
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .navigationTitle("词库")
     .navigationBarTitleDisplayMode(.inline)
-    .onAppear(perform: reload)
-    .onChange(of: scenePhase) { _, phase in if phase == .active { reload() } }
-    .task { await loadDiscover() }
-    .refreshable { await loadDiscover() }
-    .sheet(isPresented: $importing, onDismiss: reload) {
-      PersonalDictionaryImportView { words in
-        try store.enqueueImport(words)
-        ToastCenter.shared.show("已加入导入队列")
-      }
-    }
+    .reloadOnAppearAndActive(reload)
     .alert("导入这版词库到本机？", isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
            presenting: confirming) { item in
       Button("取消", role: .cancel) {}
@@ -107,6 +97,12 @@ struct DictionarySettingsView: View {
     } else {
       DictionaryNoteRow(text: discoverFailed ? "暂时无法加载社区词库" : "正在读取社区词库…")
     }
+    DesignDivider(leading: 0)
+    NavigationLink(destination: CommunityResourcesView(kind: .dictionary)) {
+      DesignNavRowLabel(title: "浏览更多词库")
+    }
+    .buttonStyle(PressFillButtonStyle())
+    .accessibilityIdentifier("dictionaryCommunityLink")
   }
 
   private func discoverRow(_ item: CommunityResource) -> some View {
@@ -115,12 +111,8 @@ struct DictionarySettingsView: View {
     var meta = item.author.isEmpty ? [] : ["@\(item.author)"]
     if let count = item.content.entries?.count { meta.append("\(count) 条") }
     return HStack(spacing: 12) {
-      Text(item.name.first.map(String.init) ?? "词")
-        .font(.system(size: 15, weight: .bold))
-        .foregroundStyle(MetasequoiaTheme.accent)
-        .frame(width: 36, height: 36)
-        .background(MetasequoiaTheme.accentSoft, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .accessibilityHidden(true)
+      DesignInitialTile(text: item.name.first.map(String.init) ?? "词",
+        size: 36, fontSize: 15, fontWeight: .bold, cornerRadius: 8)
       VStack(alignment: .leading, spacing: 2) {
         Text(item.name).font(.system(size: 15, weight: .semibold)).foregroundStyle(.primary).lineLimit(1)
         if !meta.isEmpty {
@@ -129,13 +121,8 @@ struct DictionarySettingsView: View {
       }
       Spacer(minLength: 8)
       Button { confirming = item } label: {
-        Text(isAdded ? "已添加" : isAdding ? "添加中" : "添加")
-          .font(.system(size: 13, weight: .semibold))
-          .foregroundStyle(isAdded ? MetasequoiaTheme.sub : MetasequoiaTheme.accent)
-          .padding(.vertical, 5)
-          .padding(.horizontal, 14)
-          .background(isAdded ? MetasequoiaTheme.segBg : MetasequoiaTheme.accentSoft, in: Capsule())
-          .contentShape(Capsule())
+        DesignPillLabel(title: isAdded ? "已添加" : isAdding ? "添加中" : "添加",
+          style: isAdded ? .neutral : .tonal, size: .regular)
       }
       .buttonStyle(.plain)
       .disabled(isAdded || isAdding)
@@ -208,7 +195,7 @@ struct DictionarySettingsView: View {
       .opacity(stepEnabled ? 1 : 0.45)
     if saveFailed {
       DesignDivider(leading: 20)
-      Text("设置没有保存，键盘可能正在写入同一份设置，请再试一次。")
+      Text(SettingsSaveFailure.message)
         .font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.danger)
         .fixedSize(horizontal: false, vertical: true)
         .padding(.vertical, 12)
@@ -254,22 +241,15 @@ private struct DictionaryPackRowLabel: View {
 
   var body: some View {
     HStack(spacing: 12) {
-      Text(initial)
-        .font(.system(size: 15, weight: .semibold))
-        .foregroundStyle(MetasequoiaTheme.accent)
-        .frame(width: 30, height: 30)
-        .background(MetasequoiaTheme.accentSoft, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .accessibilityHidden(true)
+      DesignInitialTile(text: initial, size: 30, fontSize: 15, fontWeight: .semibold, cornerRadius: 8)
       VStack(alignment: .leading, spacing: 1) {
         Text(title).font(.system(size: 17)).foregroundStyle(.primary)
         if let meta {
-          Text(meta).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+          Text(meta).designSubtext()
         }
       }
       Spacer(minLength: 8)
-      Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
-        .foregroundStyle(MetasequoiaTheme.sub.opacity(0.6))
-        .accessibilityHidden(true)
+      DesignChevron(opacity: 0.6)
     }
     .padding(.leading, 16)
     .padding(.trailing, 12)
@@ -365,7 +345,7 @@ private struct DictionaryInfoView: View {
       .padding(.top, 12)
       .padding(.bottom, 32)
     }
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .navigationTitle("词库信息")
     .navigationBarTitleDisplayMode(.inline)
   }
@@ -384,7 +364,7 @@ private struct DictionaryInfoText: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 4) {
       if let title { Text(title).font(.system(size: 17)).foregroundStyle(.primary) }
-      Text(detail).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+      Text(detail).designSubtext()
         .fixedSize(horizontal: false, vertical: true)
     }
     .padding(.vertical, 12)

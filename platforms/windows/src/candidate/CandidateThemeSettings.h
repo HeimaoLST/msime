@@ -6,6 +6,8 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace msime::windows {
 // The preference fields the card, the toolbar and the menus are coloured from: the light/dark modes, the global theme and what a custom theme is made of. The custom keyboard design (which may carry a photo) colours nothing drawn here, so it is left behind rather than copied across threads.
@@ -38,19 +40,25 @@ inline bool candidate_theme_dark(const nlohmann::json &values,
   const auto global = values.value("theme", std::string("dark"));
   return global == "system" ? system_dark : global != "light";
 }
-// The external package the selected theme draws, or empty. Only a custom theme names one; the skin root is watched for it so an edited package is redrawn.
-inline std::string candidate_theme_package(const nlohmann::json &values) {
+// 所选主题可能绘制的外部皮肤包：自定义主题浅色槽位 `candidate_skin` 与深色槽位 `candidate_skin_dark` 指名的包，去重，最多两个；其他主题一个也没有。候选窗、工具条、语音浮层和菜单各按自己的明暗解析主题，会画到其中任一个，所以皮肤根目录下这两个包都要监视，任一个被编辑都重新绘制。
+inline std::vector<std::string>
+candidate_theme_packages(const nlohmann::json &values) {
+  std::vector<std::string> packages;
   if (!values.contains("global_theme") || values.at("global_theme") != "custom" ||
       !values.contains("custom_theme") || !values.at("custom_theme").is_object())
-    return {};
+    return packages;
   const auto &custom = values.at("custom_theme");
-  if (!custom.contains("candidate_skin") ||
-      !custom.at("candidate_skin").is_string())
-    return {};
-  auto id = custom.at("candidate_skin").get<std::string>();
-  return valid_candidate_skin_id(id) ? id : std::string{};
+  for (const char *slot : {"candidate_skin", "candidate_skin_dark"}) {
+    if (!custom.contains(slot) || !custom.at(slot).is_string())
+      continue;
+    auto id = custom.at(slot).get<std::string>();
+    if (valid_candidate_skin_id(id) &&
+        (packages.empty() || packages.front() != id))
+      packages.push_back(std::move(id));
+  }
+  return packages;
 }
-// The msime_client_resolve_theme request for one surface. `dark` is that surface's own mode and `horizontal` the candidate layout being drawn. The skin root is sent whenever it is absolute; the shared layer only reads it for a custom theme that names a package.
+// 一个界面的 msime_client_resolve_theme 请求。`dark` 是这个界面自己的明暗，`horizontal` 是正在绘制的候选布局。`custom_theme` 原样传过去，`candidate_skin_dark` 也在其中；皮肤根目录只要是绝对路径就发送，共享层只在自定义主题的当前明暗槽位指名皮肤包时才读它（深色取 `candidate_skin_dark`，没设时取 `candidate_skin`），宿主自己不挑包。
 inline nlohmann::json
 candidate_theme_request(const nlohmann::json &values, bool dark,
                         bool horizontal,
@@ -162,6 +170,32 @@ inline std::string theme_catalog_title(const nlohmann::json &response,
     return title.size() <= 64 ? title : std::string{};
   }
   return {};
+}
+// 托盘主题页列出的主题：msime_client_theme_catalog 回答里本平台的主题 id 和标题，按选择器顺序。id 要写进偏好，只收短的小写 ASCII 标识；标题和 theme_catalog_title 一样不收空的或过长的。回答不是目录时为空。
+inline std::vector<std::pair<std::string, std::string>>
+theme_catalog_entries(const nlohmann::json &response) {
+  std::vector<std::pair<std::string, std::string>> entries;
+  if (!response.is_object() || !response.contains("ok") ||
+      response.at("ok") != true || !response.contains("value") ||
+      !response.at("value").is_object())
+    return entries;
+  const auto &value = response.at("value");
+  if (!value.contains("themes") || !value.at("themes").is_array())
+    return entries;
+  for (const auto &theme : value.at("themes")) {
+    if (!theme.is_object() || !theme.contains("id") || !theme.at("id").is_string() ||
+        !theme.contains("title") || !theme.at("title").is_string())
+      continue;
+    auto id = theme.at("id").get<std::string>();
+    auto title = theme.at("title").get<std::string>();
+    if (id.empty() || id.size() > 64 ||
+        id.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-_") !=
+            std::string::npos ||
+        title.empty() || title.size() > 64)
+      continue;
+    entries.emplace_back(std::move(id), std::move(title));
+  }
+  return entries;
 }
 // Only the small display projection crosses the preference/UI thread boundary.
 class CandidateThemeMailbox {

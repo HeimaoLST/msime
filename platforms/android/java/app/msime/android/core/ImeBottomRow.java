@@ -1,5 +1,8 @@
 package app.msime.android;
 
+import app.msime.android.LayoutPolicy;
+
+
 import android.os.SystemClock;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -10,7 +13,7 @@ import app.msime.android.KeyboardGeometry;
 import android.widget.LinearLayout;
 
 /**
- * 键盘底行：按 {@link KeyboardActionRow#designEntries} 排布 123 | 中 | ， | 空格 | 。 | ↵（地球键只在系统允许切换输入法时插在中之后），空格键的长按语音与拖动移光标，回车键始终 accent 填充。
+ * 键盘底行：按 {@link KeyboardActionRow#designEntries} 排布 123 | ， | 空格 | 。 | 中 | ↵（地球键只在系统允许切换输入法时插在 123 之后），空格键的长按语音与拖动移光标，回车键始终 accent 填充。
  *
  * <p>空格与回车换成画图标的 {@link SpaceKeyFace} / {@link KeyboardIconKey}：SVC 建的原按钮留作点击的执行者（它带着计数、反馈与动作），新键点一下就让原按钮 performClick，所以 SVC 里的动作不必搬动；节点 text 照旧由 SVC 设置（「空格」、「换行/确认/…」）。
  */
@@ -51,10 +54,11 @@ final class ImeBottomRow {
                 new KeyboardIconKey(s, KeyboardIconKey.Kind.RETURN), "Enter");
             // 组词时 SVC 把 text 设成「确认」（日语「確定」），这时按文字画；其他动作文字一律画 ↵。
             key.setTextFaces(java.util.Set.of("确认", "確定"));
-            KeyboardGeometry.setKeyTextSize(key, 15);
+            KeyboardTypographyPolicy.setKeyTextSize(key, 15);
             ViewPolicy.setTypefaceStyle(key, android.graphics.Typeface.BOLD);
             key.setKeyboardRole(KeyboardKeyRole.RETURN);
             s.imeStyler.styleButton(key, KeyboardKeyRole.RETURN, s.skin);
+            s.bindReturnTranslationHold(key);
             s.enterButton = key;
         }
     }
@@ -171,7 +175,7 @@ final class ImeBottomRow {
                     // 组字中或关了长按语音时不武装长按：这次按压保持普通空格与拖动移光标，与 develop 一致；否则慢一点的空格会被吞掉、停顿后的拖动也移不了光标。
                     boolean voice = touchPreference(AndroidLocalSettings.SPACE_VOICE) && s.voiceInsertionReady();
                     press.gesture.down(SystemClock.uptimeMillis(),
-                        KeyboardGeometry.fromPixels(s, event.getX()), voice);
+                        DimensionPolicy.fromPixels(s, event.getX()), voice);
                     press.cancelLongPress();
                     if (voice) {
                         press.longPress = () -> {
@@ -190,7 +194,7 @@ final class ImeBottomRow {
                         float horizontal = event.getX() - origin[0];
                         float vertical = event.getY() - origin[1];
                         press.gesture.move(SystemClock.uptimeMillis(),
-                            KeyboardGeometry.fromPixels(s, event.getX()));
+                            DimensionPolicy.fromPixels(s, event.getX()));
                         SpaceGesturePolicy.State state = press.gesture.state();
                         if (state == SpaceGesturePolicy.State.VOICE) {
                             // VOICE is only reachable when long-press voice was on at ACTION_DOWN.
@@ -292,7 +296,7 @@ final class ImeBottomRow {
     private Button periodButton() {
         if (periodButton == null) {
             periodButton = s.keyId(s.keyboardKey(".", "句号", () -> s.type('.')), "Period");
-            KeyboardGeometry.setKeyTextSize(periodButton, 22);
+            KeyboardTypographyPolicy.setKeyTextSize(periodButton, 22);
         }
         return periodButton;
     }
@@ -342,6 +346,12 @@ final class ImeBottomRow {
         // Visibility is re-asserted every time: the reply surface hides this row and restores it
         // without the surface itself having changed.
         ViewPolicy.setVisible(s.actionRow, !entries.isEmpty());
+        // 中/英紧挨回车时，回车把键帽左边几 dp 让给中/英。每次都重设：回车键换成图标键后是另一个视图。
+        if (s.actionRow instanceof KeyboardKeyArea area) {
+            boolean yield = KeyboardActionRow.languageBesideReturn(entries);
+            area.setYield(yield ? s.enterButton : null, yield ? s.languageButton : null,
+                DimensionPolicy.floatPixels(s, KeyboardActionRow.RETURN_YIELD_DP));
+        }
         if (signature.equals(s.actionRowSignature)) {
             if (!ownBottom) s.updateQuickPunctuation();
             return;
@@ -362,14 +372,14 @@ final class ImeBottomRow {
             };
             if (key instanceof KeyboardPressButton press) press.setKeyboardRole(role);
             // 123、中/英、逗号由通用的 button() 建出来，没有经过键帽工厂；放进底行时才知道它们是键帽。
-            KeyboardGeometry.normalizeKeyCap(key);
+            KeyboardTypographyPolicy.normalizeKeyCap(key);
             s.imeStyler.styleButton(key, role, s.skin);
             if (entry.slot() == KeyboardActionRow.DesignSlot.COMMA)
-                KeyboardGeometry.setKeyTextSize(key, 22);
+                KeyboardTypographyPolicy.setKeyTextSize(key, 22);
             else if (role == KeyboardKeyRole.ACCENT)
-                KeyboardGeometry.setKeyTextSize(key, 15);
+                KeyboardTypographyPolicy.setKeyTextSize(key, 15);
             ViewPolicy.show(key);
-            s.actionRow.addView(key, KeyboardGeometry.weightedMatchParentParams(entry.weight()));
+            s.actionRow.addView(key, LayoutPolicy.weightedMatchParentParams(entry.weight()));
         }
         // The quick punctuation key hides itself when the scheme has no punctuation to offer, and
         // the loop above just told every slot it was visible.

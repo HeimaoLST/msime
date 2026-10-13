@@ -53,8 +53,10 @@ private func msimeClientShuangpinKeyHints(_ profile: UnsafePointer<MSIMEByte>?, 
 private func msimeClientChooseNineKeySpelling(_ session: UInt64, _ generation: UInt64, _ index: UInt) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("msime_client_set_nine_key_filter")
 private func msimeClientSetNineKeyFilter(_ session: UInt64, _ singleCharacter: Bool, _ strokes: UnsafePointer<MSIMEByte>?, _ length: UInt) -> UnsafeMutablePointer<CChar>?
-@_silgen_name("msime_client_set_nine_key_mode")
-private func msimeClientSetNineKeyMode(_ session: UInt64, _ enabled: Bool) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("msime_client_set_key_grid")
+private func msimeClientSetKeyGrid(_ session: UInt64, _ grid: UInt8) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("msime_client_grid_key")
+private func msimeClientGridKey(_ session: UInt64, _ letter: MSIMEByte) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("msime_client_set_chinese_punctuation")
 private func msimeClientSetChinesePunctuation(_ session: UInt64, _ enabled: Bool) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("msime_client_set_ai_credential")
@@ -127,8 +129,14 @@ private func msimeClientApplyOnlineCandidates(
   _ session: UInt64, _ query: UnsafePointer<MSIMEByte>?, _ queryLength: UInt,
   _ candidates: UnsafePointer<MSIMEByte>?, _ candidatesLength: UInt, _ source: UInt8
 ) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("msime_client_resolve_online_candidates")
+private func msimeClientResolveOnlineCandidates(
+  _ session: UInt64, _ query: UnsafePointer<MSIMEByte>?, _ queryLength: UInt, _ source: UInt8
+) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("msime_client_dictionary")
 private func msimeClientDictionary(_ request: UnsafePointer<MSIMEByte>?, _ length: UInt) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("msime_client_plugins")
+private func msimeClientPlugins(_ request: UnsafePointer<MSIMEByte>?, _ length: UInt) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("msime_client_snapshot_version")
 private func msimeClientSnapshotVersion(_ options: UnsafePointer<MSIMEByte>?, _ length: UInt) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("msime_client_snapshot_activate")
@@ -172,7 +180,7 @@ struct MetasequoiaInputSnapshot: Equatable, Sendable {
   /// paying for that several times over.
   let localMode: String
   let nineKeySpellings: [String]
-  /// 全拼九键组字时首选候选覆盖的数字写成拼音（`ning'bai`），给读音行显示；其他情况为空，这时照旧显示 `preedit`（全拼九键下仍是数字）。
+  /// 全拼九键和 14 键组字时首选候选覆盖的按键写成拼音（`ning'bai`；首选是英文词时是这个词的字母），给读音行显示；其他情况为空，这时照旧显示 `preedit`（九键下是数字，14 键下是组码字母）。
   let nineKeyReading: String
   /// 九键候选当前的筛选：只留单字，以及首字笔顺前缀（`hspnz`，空表示不按笔画）。组字结束时 Engine 把两者都清掉。
   let nineKeySingleCharacter: Bool
@@ -242,6 +250,8 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   private var handle: UInt64 = 0
   private var options: [String: Any]
   private var stateRoot: String?
+  /// The session reads the App Group document rather than a test's own directory, so its writes are the user's settings changes that cloud sync uploads.
+  private let sharesStateRoot: Bool
   private var initializationDiagnostic: String?
   private var revision: UInt64 = 0
   /// The shared document's revision as this bridge last saw it.
@@ -250,9 +260,14 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   private var documentRevision: UInt64 = 0
   private var appliedFuzzyPinyinRules: UInt32?
   private var suspended = false
-  // Nine-key lives on the session, not in the preferences the options carry, so a rebuilt session
-  // starts back on the 26-key layout unless it is told again.
-  private var nineKeyEnabled = false
+  /// 引擎的组码网格，取值与 `msime_client_set_key_grid` 的 `grid` 相同：0 不用网格（26 键），1 九键，2 全拼 14 键。
+  enum KeyGrid: UInt8 {
+    case none = 0
+    case nineKey = 1
+    case fourteenKey = 2
+  }
+  // 网格（九键或 14 键）是会话状态，不在选项带的偏好里，所以重建的会话要再告诉一次，否则会回到 26 键。
+  private var keyGrid = KeyGrid.none
   // The width, like nine-key, is session state the options do not carry, so a rebuilt session is told it again.
   private var fullwidth = false
   /// The keyboard's 中文标点 switch; nil until it is first set, so a rebuilt session keeps the document's value.
@@ -265,6 +280,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   init(resources: URL? = nil, stateRoot: URL? = nil) {
     options = [:]
     self.stateRoot = nil
+    sharesStateRoot = stateRoot == nil
     self.appliedFuzzyPinyinRules = nil
     do {
       let bootstrap = Self.bootstrapOptions(resources: resources, stateRoot: stateRoot)
@@ -367,14 +383,21 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     "shuangpin_preedit_uses_raw",
     // 输入页的「只出单字」：同样在会话空闲时重建 Engine。
     "single_character_only",
+    // 标点页的「中英文之间加空格」：会话在上屏时读最新请求的偏好，交给活着的会话后下一次上屏就生效。
+    "chinese_english_spacing",
     // Whole objects: the app merges single fields into them, and the document's copy is the one it wrote.
     "quanpin", "mixed_input", "quanpin_helpcode", "shuangpin_helpcode", "local_modes",
     // 整句联想 on the 输入 page: the session attaches or drops the keyboard sentence model once idle, so turning 增强 off stops it in the keyboard that is already open.
     "sentence_association",
+    // 输入页五笔组的混拼与四码唯一自动上屏：都是引擎字段，会话空闲时重建 Engine 应用它，所以要交给活着的会话，而不等键盘扩展被杀掉后重建会话。
+    "wubi_mixed_pinyin",
+    "wubi_auto_commit_unique",
     // Laid over the document by `hostOverrides` from the iOS switch, so a change to that switch reaches the live session too.
     "cloud_candidates",
     // Laid over the document from the iOS page size, like cloud candidates; the session applies it once idle, so an open composition keeps its page.
     "candidate_page_size",
+    // 辅助码页选用导入的码表（#7176）写的是 `plugins.helpcode_pack_*`：会话空闲时用新选择重建 Engine，聚焦时再按插件目录的戳换表，所以要交给活着的会话。iOS 键盘自己不写 `plugins` 里的任何键，整个对象以文档为准。
+    "plugins",
   ]
 
   /// Hand the reloaded app-edited fields to the session, leaving every other field as the session has it. The session queues the change behind an open composition, so this never interrupts typing.
@@ -389,9 +412,8 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
 
   var fuzzyPinyinRulesApplied: UInt32? { appliedFuzzyPinyinRules }
 
-  /// The latest canonical PreferencesStore document, exposed as a read-only
-  /// value for native UI settings that still use App Group compatibility keys.
-  /// Callers must remain on the session's owning thread when reading it.
+  /// 最新的规范 PreferencesStore 文档，只读地暴露给键盘自己的读取（五笔剩余编码提示）和原生设置。
+  /// 读取时调用方必须留在会话所属的线程上。
   var sharedPreferences: [String: Any]? {
     options["preferences"] as? [String: Any]
   }
@@ -427,9 +449,9 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
                               heightAdjustment: Double? = nil,
                               voiceEnabled: Bool? = nil) -> ((inout [String: Any]) -> Void)? {
     guard [keySpacing, rowSpacing, heightAdjustment].allSatisfy({ $0?.isFinite ?? true }) else { return nil }
-    let keySpacingTenths = keySpacing.map { Int((min(6, max(3, $0)) * 10).rounded()) }
-    let rowSpacingTenths = rowSpacing.map { Int((min(10, max(4, $0)) * 10).rounded()) }
-    let clampedHeight = heightAdjustment.map { Int(min(48, max(-12, $0)).rounded()) }
+    let keySpacingTenths = keySpacing.map { Int((SharedNumber.clamped($0, to: 3...6) * 10).rounded()) }
+    let rowSpacingTenths = rowSpacing.map { Int((SharedNumber.clamped($0, to: 4...10) * 10).rounded()) }
+    let clampedHeight = heightAdjustment.map { Int(SharedNumber.clamped($0, to: -12...48).rounded()) }
     return { preferences in
       if let keySpacingTenths { preferences["touch_key_spacing_tenths"] = keySpacingTenths }
       if let rowSpacingTenths { preferences["touch_row_spacing_tenths"] = rowSpacingTenths }
@@ -469,6 +491,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     let layout: String
     switch selected {
     case .nineKey, .japaneseNineKey: layout = "nine_key"
+    case .fourteenKey: layout = "fourteen_key"
     case .handwriting: layout = "handwriting"
     default: layout = "twenty_six_key"
     }
@@ -519,7 +542,8 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   @discardableResult
   private func persistSharedPreferences(_ mutate: (inout [String: Any]) -> Void) -> Bool {
     guard let stateRoot,
-          let revision = Self.persistSharedPreferences(stateRoot: stateRoot, mutate) else { return false }
+          let revision = Self.persistSharedPreferences(stateRoot: stateRoot, marksCloudSync: sharesStateRoot, mutate)
+    else { return false }
     self.revision = max(self.revision, revision)
     documentRevision = max(documentRevision, revision)
     return true
@@ -540,7 +564,34 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   @discardableResult
   static func updateSharedPreferences(stateRoot: URL? = nil,
                                       _ mutate: (inout [String: Any]) -> Void) -> Bool {
-    persistSharedPreferences(stateRoot: sharedStateRoot(stateRoot), mutate) != nil
+    persistSharedPreferences(stateRoot: sharedStateRoot(stateRoot), marksCloudSync: stateRoot == nil, mutate) != nil
+  }
+
+  /// `msime_client_plugins` 失败时的失败码和 client-core 给的原因（码表不合格时带文件名和行号），见 `include/msime_client.h`。
+  struct PluginFailure: Error, Equatable {
+    let code: String
+    var detail: String? = nil
+  }
+
+  /// 插件目录的一次操作（`msime_client_plugins`），给设置 App 导入、列出和删除辅助码表用，不建输入会话。
+  ///
+  /// `state_root` 是 App Group 里的共享状态目录，键盘的 `preferences_directory` 就是它，所以这里装进 `<state_root>/plugins` 的包键盘读得到。会读写文件，导入时还要校验整张码表：调用方放到主线程之外。`stateRoot` 只给测试用。
+  static func plugins(_ action: [String: Any], stateRoot: URL? = nil) -> Result<Any, PluginFailure> {
+    let root = sharedStateRoot(stateRoot)
+    let request: [String: Any] = ["state_root": root, "sound_packs": NSNull(), "action": action]
+    guard !root.isEmpty, JSONSerialization.isValidJSONObject(request),
+          let data = try? JSONSerialization.data(withJSONObject: request) else {
+      return .failure(PluginFailure(code: "invalid"))
+    }
+    let pointer = data.withUnsafeBytes { bytes in
+      msimeClientPlugins(bytes.bindMemory(to: MSIMEByte.self).baseAddress, UInt(data.count))
+    }
+    guard let pointer else { return .failure(PluginFailure(code: "unavailable")) }
+    defer { msimeClientStringFree(pointer) }
+    guard let envelope = (try? JSONSerialization.jsonObject(with: Data(bytes: pointer, count: strlen(pointer))))
+      as? [String: Any] else { return .failure(PluginFailure(code: "invalid_response")) }
+    if envelope["ok"] as? Bool == true { return .success(envelope["value"] ?? NSNull()) }
+    return .failure(PluginFailure(code: envelope["error"] as? String ?? "", detail: envelope["detail"] as? String))
   }
 
   /// `msime_client_save_preferences`'s snapshot bound: large enough for a custom skin's photo.
@@ -554,7 +605,9 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   }
 
   /// Returns the revision the document is at afterwards, or nil when nothing was written.
-  private static func persistSharedPreferences(stateRoot: String,
+  ///
+  /// Every write that changes the App Group document (`marksCloudSync`) is a settings change, from the settings app or from the keyboard, so it marks the settings section for the next cloud sync. A mutation that leaves the document as it was writes nothing and marks nothing; cloud sync applying the cloud's settings runs inside `CloudSyncState.suppressingMarks`.
+  private static func persistSharedPreferences(stateRoot: String, marksCloudSync: Bool,
                                                _ mutate: (inout [String: Any]) -> Void) -> UInt64? {
     let directory = Data(stateRoot.utf8)
     guard !directory.isEmpty, directory.count <= 16_384 else { return nil }
@@ -588,6 +641,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     } catch {
       return nil
     }
+    if marksCloudSync { CloudSyncState.shared.markDirty(.settings) }
     return Self.strictUInt64(saved["revision"]) ?? storedRevision
   }
 
@@ -960,6 +1014,22 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     }
   }
 
+  /// AI 回答为空、失败或被拒时调用（`source` 只认 1）：AI 座位上的占位行换成「—」，留到组字变化为止。Returns `{applied, view}`.
+  func resolveOnlineCandidates(query: Data, source: UInt8) throws -> [String: Any] {
+    guard handle != 0 else { throw InputBridgeFailure.unavailable }
+    guard !query.isEmpty, query.count <= 16_384, source <= 1 else {
+      throw InputBridgeFailure.invalidResponse
+    }
+    return try query.withUnsafeBytes { queryBytes in
+      guard let dictionary = try Self.decode(msimeClientResolveOnlineCandidates(
+        handle, queryBytes.bindMemory(to: MSIMEByte.self).baseAddress, UInt(query.count), source))
+        as? [String: Any] else {
+        throw InputBridgeFailure.invalidResponse
+      }
+      return dictionary
+    }
+  }
+
   func snapshot(from value: [String: Any]) throws -> MetasequoiaInputSnapshot {
     try Self.snapshot(value)
   }
@@ -995,10 +1065,6 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     return applied
   }
 
-  func setWubiMixedPinyin(_ enabled: Bool) {
-    _ = updatePreferences { $0["wubi_mixed_pinyin"] = enabled }
-  }
-
   @discardableResult func setFrequencyAdjustmentMode(_ mode: MetasequoiaFrequencyAdjustmentMode,
                                                       triggerCount: Int, linearStep: Int) -> Bool {
     let names = ["pin", "halve", "linear", "promote", "disabled"]
@@ -1013,10 +1079,22 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   func `switch`(toShuangpinProfile profile: String) -> MetasequoiaInputSnapshot {
     switchScheme("shuangpin", profile: profile)
   }
-  func switchToNineKey() -> MetasequoiaInputSnapshot {
-    guard updatePreferences({ $0["scheme"] = "quanpin" }) else { return diagnostic("九键模式切换失败") }
-    nineKeyEnabled = true
-    return dispatch { msimeClientSetNineKeyMode(handle, true) }
+  func switchToNineKey() -> MetasequoiaInputSnapshot { switchToKeyGrid(.nineKey) }
+  /// 全拼 14 键：方案是全拼，按键经 `gridKey` 送组码。
+  func switchToFourteenKey() -> MetasequoiaInputSnapshot { switchToKeyGrid(.fourteenKey) }
+
+  /// 先把方案切到全拼，再开网格：引擎只给全拼开九键和 14 键，方案改变时还会丢掉宿主之前设下的网格。只在组字结束后调用。
+  private func switchToKeyGrid(_ grid: KeyGrid) -> MetasequoiaInputSnapshot {
+    guard updatePreferences({ $0["scheme"] = "quanpin" }) else {
+      return diagnostic(grid == .fourteenKey ? "14 键模式切换失败" : "九键模式切换失败")
+    }
+    keyGrid = grid
+    return dispatch { msimeClientSetKeyGrid(handle, grid.rawValue) }
+  }
+
+  /// 14 键的一键：`letter` 是这一组的首字母（q e t u o a d g j l z c b m），引擎把整组当作一个组码。不在 14 键下、在本地模式里或 26 键正在组字时引擎不处理（`isHandled` 为 false），会话不变。
+  func gridKey(_ letter: String) -> MetasequoiaInputSnapshot {
+    dispatch { Self.ascii(letter).flatMap { msimeClientGridKey(handle, $0) } }
   }
   /// Tell the runtime the width it commits in; from then on every commit it completes arrives already converted.
   @discardableResult func setCharacterWidth(fullwidth: Bool) -> MetasequoiaInputSnapshot {
@@ -1157,10 +1235,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
 
   /// Create and focus a session, then restore the state the prepared options do not carry.
   ///
-  /// Nine-key lives on the session, so every path that destroys and rebuilds one has to set it
-  /// again. Dictionary maintenance and snapshot activation rebuild as often as resuming does:
-  /// leaving the replay to the caller left the host drawing the nine-key layout over a 26-key
-  /// engine after the first personal-dictionary refresh of a keyboard appearance.
+  /// 九键和 14 键的网格在会话上，所以每条销毁再重建会话的路径都要把它再设一次。词库维护和快照激活与恢复一样频繁地重建会话：把重放留给调用方时，键盘出现后第一次刷新个人词库，宿主画的还是九键，引擎却已经回到 26 键。
   private func createFocusedSession() throws {
     // 选中只吃掉部分输入的候选时，让运行时把已选的那一段留在组字里而不是立刻上屏：用户还在打后
     // 半截，前半截已经进了文档的话，搜索框会拿半个词去搜，编辑器为它记一次撤销。键盘把它画在候选
@@ -1168,7 +1243,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     var requested = options
     requested["phrase_preedit"] = true
     handle = try Self.callCreateFocused(requested)
-    if nineKeyEnabled { _ = dispatch { msimeClientSetNineKeyMode(handle, true) } }
+    if keyGrid != .none { _ = dispatch { msimeClientSetKeyGrid(handle, keyGrid.rawValue) } }
     if fullwidth { _ = dispatch { msimeClientSetCharacterWidth(handle, true) } }
     if let chinesePunctuation { _ = dispatch { msimeClientSetChinesePunctuation(handle, chinesePunctuation) } }
     if aiCredential != nil { _ = applyAICredential() }
@@ -1244,6 +1319,17 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     guard (result["applied"] as? Bool) == true else { throw InputBridgeFailure.response("个人词条未能应用") }
   }
 
+  /// 五笔查码（#6789）：`text` 里每个不同汉字（以及整段作为一个词）在 86 和 98 码表里的编码。给设置 App 用，不建输入会话：经 `msime_client_prepare_host` 解析出选项后发词库请求 `wubi_codes`，host-api 只读打开会话用的同一份五笔码表，不拿词库维护租约，键盘开着也能查。
+  ///
+  /// `resources` 默认是 `PersonalDictionaryBridge.packagedResources`：App 自己不带词库，它找到的是键盘扩展包里的 `EngineResources`，和键盘准备宿主时是同一个目录，所以状态目录里的资源校验标记两边一致，查一次码不会让键盘下次启动重新哈希整套词库。在磁盘上读码表，调用方放到主线程之外。
+  static func wubiCodes(_ text: String, resources: URL? = PersonalDictionaryBridge.packagedResources,
+                        stateRoot: URL? = nil) throws -> WubiCodeLookup {
+    guard let resources else { throw InputBridgeFailure.unavailable }
+    let options = try callOptions(msimeClientPrepareHost, bootstrapOptions(resources: resources, stateRoot: stateRoot))
+    let action: [String: Any] = ["operation": "wubi_codes", "text": text]
+    return try WubiCodeLookup.decode(callOptions(msimeClientDictionary, ["options": options, "action": action]))
+  }
+
   /// One page of the dictionary. Without a kind it is the user's own words; a code prefix within one kind, or the quick phrases, is looked up in the dictionary itself, so bundled rows come back marked `source: bundled` and can be re-weighted or deleted through the queue.
   func personalEntries(atOffset offset: UInt, kind: PersonalWordKind? = nil, query: String = "") throws -> [String: Any] {
     var action: [String: Any] = ["operation": "list", "offset": offset, "limit": 100]
@@ -1308,8 +1394,8 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
       if let profile { prefs["shuangpin_profile"] = profile }
     }
     guard updated else { return diagnostic("输入方案切换失败") }
-    nineKeyEnabled = false
-    return dispatch { msimeClientSetNineKeyMode(handle, false) }
+    keyGrid = .none
+    return dispatch { msimeClientSetKeyGrid(handle, KeyGrid.none.rawValue) }
   }
 
   private func command(_ value: UInt32) -> MetasequoiaInputSnapshot {
@@ -1375,9 +1461,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   }
 
   private static func bootstrapOptions(resources resourceOverride: URL?, stateRoot stateOverride: URL?) -> [String: Any] {
-    let fm = FileManager.default
-    let group = fm.containerURL(forSecurityApplicationGroupIdentifier: MSIMEAppEdition.appGroupIdentifier)
-      ?? fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    let group = IOSSharedPaths.sharedContainerOrApplicationSupport(for: MSIMEAppEdition.appGroupIdentifier)
     let root = stateOverride ?? group.appendingPathComponent("MSIME", isDirectory: true)
     let resources = resourceOverride
       ?? Bundle.main.resourceURL?.appendingPathComponent("EngineResources", isDirectory: true)
@@ -1461,10 +1545,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
 
   private static func strictInt(_ value: Any?, fallback: Int, range: ClosedRange<Int>) throws -> Int {
     guard let value else { return fallback }
-    guard let number = value as? NSNumber,
-          CFGetTypeID(number) != CFBooleanGetTypeID(),
-          let integer = Int(number.stringValue),
-          NSNumber(value: integer).compare(number) == .orderedSame,
+    guard let integer = SharedNumber.strictInt(value),
           range.contains(integer) else { throw InputBridgeFailure.invalidResponse }
     return integer
   }

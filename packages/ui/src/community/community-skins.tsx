@@ -9,14 +9,17 @@ import {
   communityNeedsSignIn,
   communityPublishLoginAction,
 } from "./community-helpers";
-import { useCommunityGallery, type CommunityGalleryClient } from "./community-gallery";
+import {
+  createCommunityGalleryClient,
+  useCommunityGallery,
+  type CommunityGalleryClient,
+} from "./community-gallery";
 import { CommunityDialogActions, CommunityDialogFrame } from "./community-dialog";
-import { CommunityDetailStatus } from "./community-detail-status";
+import { CommunityDetailSummary } from "./community-detail-summary";
 import { StatusMessage } from "../core/status-message";
 import { CommunityDetailFrame } from "./community-detail-frame";
-import { CommunityDetailHeader } from "./community-detail-header";
 import * as style from "./community-style";
-import { CommunitySearchForm, type CommunitySearchFormProps } from "./community-search-form";
+import type { CommunitySearchFormProps } from "./community-search-form";
 import { CommunityScopeButtons } from "./community-scope-buttons";
 import {
   CommunityReportSection,
@@ -33,7 +36,7 @@ import { CommunityCardAuthor } from "./community-card-author";
 import { CommunityCard } from "./community-card";
 import { CommunityGalleryLoadMore } from "./community-gallery-load-more";
 import { CommunityGalleryFeedback } from "./community-gallery-feedback";
-import { CommunityGalleryHeading } from "./community-gallery-heading";
+import { CommunityGalleryHeader } from "./community-gallery-header";
 import { CommunityGalleryGrid } from "./community-gallery-grid";
 import { CommunityPageShell } from "./community-page-shell";
 import { CommunityLoadMoreButton } from "./community-gallery-controls";
@@ -44,6 +47,7 @@ import { boundedGraphemes } from "../core/text";
 import { updateCustomKeyboard } from "../settings/theme-selection-updates";
 import type { Preferences } from "../index";
 import { useAsyncActionRunner } from "../core/use-async-action";
+import { useAsyncGeneration } from "../settings/use-async-generation";
 import { useCommunityPublicationDraft } from "./use-community-publication-draft";
 import { useCommunityDetailHistory } from "./use-community-detail-history";
 import { communityPublishFields } from "./community-publish-validation";
@@ -464,6 +468,7 @@ export function CommunitySkinsPage({
   preferences,
   onApplyPreferences,
   onSkinApplied,
+  historyPage = "community",
 }: {
   client: CommunitySkinClient;
   theme: "light" | "dark";
@@ -480,23 +485,21 @@ export function CommunitySkinsPage({
   onApplyPreferences?: (next: Preferences) => void | Promise<void>;
   /** 「使用」刚把某个皮肤用到键盘上时，以该皮肤的社区 id 调用。 */
   onSkinApplied?: (id: string) => void;
+  /** 手机上打开详情时压入的历史记录所属的设置页。触屏宿主在「皮肤」页里打开这个图库，记录要留在那一页，返回手势才会先关详情、再关图库；缺省是桌面的「社区」页。 */
+  historyPage?: string;
 }) {
   const categoryFilter = useCommunitySkinCategoryFilter();
   const categoryRequest = categoryFilter.request;
   const galleryClient = useMemo<CommunityGalleryClient<CommunitySkin>>(
-    () => ({
-      list: async (offset, search, mine) => {
-        const page = await client.list(offset, search, mine ?? false, categoryRequest.current);
-        return { items: page.skins, has_more: page.has_more };
-      },
-      detail: client.detail,
-      rate: client.rate,
-      unpublish: client.unpublish,
-      ...(client.report && {
-        report: (id: string, reason: CommunityReportReason, detail: string) =>
-          client.report!(id, reason, detail),
-      }),
-    }),
+    () =>
+      createCommunityGalleryClient(
+        client,
+        async (offset, search, mine) => {
+          const page = await client.list(offset, search, mine ?? false, categoryRequest.current);
+          return { items: page.skins, has_more: page.has_more };
+        },
+        (id) => client.unpublish(id),
+      ),
     [client, categoryRequest],
   );
   const gallery = useCommunityGallery({
@@ -519,14 +522,14 @@ export function CommunitySkinsPage({
     confirmUnpublish,
     activeSearch,
     setSelected,
-    replaceSelected,
     setActionNotice,
-    setMineOnly,
+    changeMineOnly,
     setConfirmUnpublish,
     requestList,
     open: openGallery,
     closeDetail: closeGalleryDetail,
     rateSelected,
+    updateSelected,
     unpublishSelected,
     reportSelected,
     runAction,
@@ -567,22 +570,24 @@ export function CommunitySkinsPage({
   }, [client]);
   // 网格重新显示时就重新读取：详情里的「下载并试用」也会把设计收进皮肤库。
   const browsing = selected === null;
+  const libraryLoadGeneration = useAsyncGeneration(harmony, browsing, localSkinLibrary);
   useEffect(() => {
     if (!harmony || !browsing || !localSkinLibrary) return;
-    let current = true;
-    const generation = libraryGeneration.current;
+    const current = libraryLoadGeneration.current;
+    const mutationGeneration = libraryGeneration.current;
     void localSkinLibrary.load().then(
       (items) => {
-        if (!current || generation !== libraryGeneration.current) return;
+        if (
+          libraryLoadGeneration.current !== current ||
+          mutationGeneration !== libraryGeneration.current
+        )
+          return;
         setLibrary(new Map(items.map((item) => [skinKey(item.id), item])));
       },
       // 皮肤库读不出来时所有卡片都停在「获取」，与 Android 一致；再次获取同一设计会按同一 id 重新归档，不会多出一份。
       () => undefined,
     );
-    return () => {
-      current = false;
-    };
-  }, [harmony, browsing, localSkinLibrary]);
+  }, [harmony, browsing, localSkinLibrary, libraryLoadGeneration]);
 
   const closeDetail = async (fromHistory = false) => {
     if (actionBusy) return;
@@ -611,7 +616,7 @@ export function CommunitySkinsPage({
   const open = (skin: CommunitySkin) => {
     if (mobile && typeof window !== "undefined") {
       pushMobileSettingsState({
-        page: "community",
+        page: historyPage,
         communityDetail: { kind: "skin", id: skin.id },
       });
     }
@@ -656,16 +661,9 @@ export function CommunitySkinsPage({
     categoryFilter.change(next, () => requestList(activeSearch, false));
 
   const changeOwnCategory = async (next: CommunitySkinCategory) => {
-    if (!selected) return;
-    const target = selected;
-    await runAction(
-      async (currentClient) => {
-        const updated = await client.setCategory(target.id, next);
-        if (!gallery.isCurrent(currentClient)) return;
-        replaceSelected(updated);
-        setActionNotice(`已改为「${communitySkinCategoryLabels[next]}」分类。`);
-      },
-      { clearNotice: true },
+    await updateSelected(
+      (id) => client.setCategory(id, next),
+      `已改为「${communitySkinCategoryLabels[next]}」分类。`,
     );
   };
 
@@ -759,16 +757,12 @@ export function CommunitySkinsPage({
         <div className={style.detailStage}>
           <ScreenKeyboardPreview theme={theme} skin="custom" customDesign={selected.design} />
         </div>
-        <CommunityDetailHeader
+        <CommunityDetailSummary
           title={selected.name}
-          note={[communitySkinCategoryLabel(selected.category), selected.author]
-            .filter(Boolean)
-            .join(" · ")}
+          noteParts={[communitySkinCategoryLabel(selected.category), selected.author]}
           owned={selected.owned}
           moderation={selected.moderation}
           description={selected.description}
-        />
-        <CommunityDetailStatus
           downloads={selected.downloads}
           ratingCount={selected.rating_count}
           ratingAverage={selected.rating_average}
@@ -880,9 +874,7 @@ export function CommunitySkinsPage({
             className={style.harmonyChipAction}
             aria-pressed={mineOnly}
             onClick={() => {
-              const nextMineOnly = !mineOnly;
-              setMineOnly(nextMineOnly);
-              void requestList(activeSearch, false, nextMineOnly);
+              changeMineOnly(!mineOnly);
             }}
           >
             我的作品
@@ -943,13 +935,11 @@ export function CommunitySkinsPage({
 
   return (
     <CommunityPageShell>
-      <CommunitySearchForm
-        label="搜索皮肤设计"
-        value={search}
-        onChange={setSearch}
-        onSubmit={() => void requestList(search, false)}
-      />
-      <CommunityGalleryHeading
+      <CommunityGalleryHeader
+        searchLabel="搜索皮肤设计"
+        search={search}
+        onSearchChange={setSearch}
+        onSearchSubmit={() => void requestList(search, false)}
         title={mineOnly ? "你的公开设计" : "换个心情，从键盘开始"}
         note={mineOnly ? "管理你发布到社区的皮肤" : "发现创作者的配色与巧思，找到你的那一款"}
       >
@@ -958,10 +948,7 @@ export function CommunitySkinsPage({
           mineOnly={mineOnly}
           allLabel="全部皮肤"
           mineLabel="我的作品"
-          onMineOnlyChange={(nextMineOnly) => {
-            setMineOnly(nextMineOnly);
-            void requestList(activeSearch, false, nextMineOnly);
-          }}
+          onMineOnlyChange={changeMineOnly}
         />
         {localSkinLibrary && (
           <ActionButton
@@ -970,7 +957,7 @@ export function CommunitySkinsPage({
             label="发布我的设计"
           />
         )}
-      </CommunityGalleryHeading>
+      </CommunityGalleryHeader>
       <CommunitySkinCategoryFilter
         ariaLabel="键盘皮肤分类"
         value={categoryFilter.category}

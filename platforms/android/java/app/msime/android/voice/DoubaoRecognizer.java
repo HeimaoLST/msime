@@ -1,8 +1,6 @@
 package app.msime.android;
 
-import android.media.AudioFormat;
 import android.media.AudioRecord;
-import android.media.MediaRecorder;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -115,7 +113,7 @@ public final class DoubaoRecognizer {
             return null;
         } finally {
             if (recorder != null) {
-                stopRecording(recorder);
+                VoicePcmRecorder.stopIfRecording(recorder);
                 recorder.release();
             }
             transport = null;
@@ -144,7 +142,7 @@ public final class DoubaoRecognizer {
             if (cancelled.get()) return null;
             boolean last = stopped.get() || sent >= limit;
             // Release the microphone before waiting on the final answer.
-            if (last) stopRecording(recorder);
+            if (last) VoicePcmRecorder.stopIfRecording(recorder);
             int requested = last ? 0 : VoiceCapturePolicy.readLength(limit, sent, chunk.length);
             int read = requested == 0 ? 0 : recorder.read(chunk, 0, requested);
             if (read < 0) return null;
@@ -231,16 +229,16 @@ public final class DoubaoRecognizer {
         try {
             JSONObject response = new JSONObject(NativeClient.doubaoDecodeFrame(payload));
             if (!JsonPolicy.strictTrue(response.opt("ok"))) return null;
-            JSONObject value = response.optJSONObject("value");
+            JSONObject value = JsonPolicy.objectValue(response);
             if (value == null) return null;
             // An error frame ends the session; the code is the provider's and is not shown.
             if (value.has("error_code")) return null;
-            String payloadText = DoubaoAsrPolicy.strictPayload(value.opt("payload"));
+            String payloadText = JsonPolicy.strictString(value.opt("payload"));
             if (payloadText == null) return null;
             JSONObject document = new JSONObject(payloadText);
             JSONObject result = document.optJSONObject("result");
-            String text = result == null ? "" : DoubaoAsrPolicy.strictText(result.opt("text"));
-            Boolean last = DoubaoAsrPolicy.strictBoolean(value.opt("last"));
+            String text = result == null ? "" : HttpAsrPolicy.strictText(result.opt("text"));
+            Boolean last = JsonPolicy.strictBoolean(value.opt("last"));
             return last == null ? null : new Update(text, last);
         } catch (JSONException error) {
             return null;
@@ -312,15 +310,11 @@ public final class DoubaoRecognizer {
     }
 
     private AudioRecord record() {
-        int minimum = AudioRecord.getMinBufferSize(WavAudio.SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+        int minimum = VoicePcmRecorder.minimumBufferBytes();
         if (minimum <= 0) return null;
         AudioRecord recorder;
         try {
-            recorder = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                WavAudio.SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                BoundsPolicy.atLeast(CHUNK_BYTES * 4, minimum));
+            recorder = VoicePcmRecorder.create(BoundsPolicy.atLeast(CHUNK_BYTES * 4, minimum));
         } catch (IllegalArgumentException | SecurityException error) {
             return null;
         }
@@ -339,16 +333,6 @@ public final class DoubaoRecognizer {
             return null;
         }
         return recorder;
-    }
-
-    private static void stopRecording(AudioRecord recorder) {
-        try {
-            if (recorder.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) {
-                recorder.stop();
-            }
-        } catch (IllegalStateException ignored) {
-            // Already stopped; releasing the microphone is what matters.
-        }
     }
 
     private void send(OutputStream out, byte[] payload) throws IOException {

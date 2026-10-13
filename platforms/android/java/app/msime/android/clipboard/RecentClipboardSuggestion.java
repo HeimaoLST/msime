@@ -4,6 +4,8 @@ package app.msime.android;
  * 工具栏上的「最近复制」（#5692）：刚复制的一段文字在键盘顶部那一行显示一会儿，点一下就粘贴，省去打开剪贴板面板。
  *
  * <p>这里只管状态：哪一条、复制了多久、用户是不是已经用过或关掉了它。显示多久是 {@link #WINDOW_MS}；用过（点了粘贴）、关掉（点 ×）或开始打字之后，同一条不再出现，复制一条新的才会再出现。读系统剪贴板、隐私判断和画按钮都在服务里。
+ *
+ * <p>复制的是一张图片时（#6781）同样由这里记着：只记身份和图片类型，不记 URI 也不碰图片内容，发送时服务重新读剪贴板、核对身份。文字和图片同一时刻至多一条，后到的替换先到的。
  */
 public final class RecentClipboardSuggestion {
     /** 复制之后显示多久。 */
@@ -13,6 +15,8 @@ public final class RecentClipboardSuggestion {
 
     private String identity;
     private String text;
+    /** 当前这一条是图片时的类型（`image/png` 这种）；是文字时为 null。 */
+    private String imageMimeType;
     private long copiedAtMs;
     private String dismissedIdentity;
 
@@ -36,20 +40,39 @@ public final class RecentClipboardSuggestion {
         if (identity.equals(dismissedIdentity)) return;
         this.identity = identity;
         this.text = text;
+        this.imageMimeType = null;
         this.copiedAtMs = copiedAtMs;
     }
 
-    /** 现在该显示的文字；没有、已经过了显示窗口时为 null。 */
+    /** 系统剪贴板里有一张刚复制的图片，`mimeType` 是它的具体类型。用过或关掉的那一条同样不再提供。 */
+    public void offerImage(String identity, String mimeType, long copiedAtMs) {
+        if (identity == null || mimeType == null || mimeType.isBlank()) return;
+        if (identity.equals(dismissedIdentity)) return;
+        this.identity = identity;
+        this.text = null;
+        this.imageMimeType = mimeType;
+        this.copiedAtMs = copiedAtMs;
+    }
+
+    /** 现在该显示的文字；没有、是图片、已经过了显示窗口时为 null。 */
     public String text(long nowMs) {
-        if (text == null) return null;
-        // 复制时刻比现在还晚（系统时钟被往回调过）时按刚复制处理，窗口仍从复制时刻算起。
-        return nowMs - copiedAtMs <= WINDOW_MS ? text : null;
+        return live(nowMs) ? text : null;
+    }
+
+    /** 现在该显示的图片的类型；没有、是文字、已经过了显示窗口时为 null。 */
+    public String imageMimeType(long nowMs) {
+        return live(nowMs) ? imageMimeType : null;
+    }
+
+    /** 当前这一条的身份（还没过期时）；发送图片前服务用它核对剪贴板里还是不是同一张。 */
+    public String identity(long nowMs) {
+        return live(nowMs) ? identity : null;
     }
 
     /** 离过期还有多久；没有可显示的内容时为 0。 */
     public long remainingMs(long nowMs) {
-        if (text(nowMs) == null) return 0;
-        return Math.max(0, copiedAtMs + WINDOW_MS - nowMs);
+        if (!live(nowMs)) return 0;
+        return BoundsPolicy.nonNegative(copiedAtMs + WINDOW_MS - nowMs);
     }
 
     /** 用户用过或关掉了这一条：收起，同一条不再出现。 */
@@ -57,6 +80,13 @@ public final class RecentClipboardSuggestion {
         if (identity != null) dismissedIdentity = identity;
         identity = null;
         text = null;
+        imageMimeType = null;
+    }
+
+    private boolean live(long nowMs) {
+        if (identity == null || (text == null && imageMimeType == null)) return false;
+        // 复制时刻比现在还晚（系统时钟被往回调过）时按刚复制处理，窗口仍从复制时刻算起。
+        return nowMs - copiedAtMs <= WINDOW_MS;
     }
 
     /** 工具栏上的预览：连续的空白（含换行）并成一个空格，去掉首尾空白，太长时截断加省略号。 */
@@ -69,7 +99,7 @@ public final class RecentClipboardSuggestion {
         for (int offset = 0; offset < trimmed.length(); ) {
             int codePoint = trimmed.codePointAt(offset);
             offset += Character.charCount(codePoint);
-            if (Character.isWhitespace(codePoint) || Character.isSpaceChar(codePoint)) {
+            if (TextPolicy.isSpace(codePoint)) {
                 space = true;
                 continue;
             }

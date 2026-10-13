@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { ControlledInput } from "../core/controlled-input";
 import { SettingField } from "./setting-field";
 
 export interface PasswordSettingFieldProps {
@@ -21,13 +22,13 @@ export function PasswordSettingField({
 }: PasswordSettingFieldProps) {
   return (
     <SettingField label={label} description={description}>
-      <input
+      <ControlledInput
         aria-label={inputLabel}
         type="password"
         autoComplete="off"
         value={value}
         disabled={disabled}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={onChange}
       />
     </SettingField>
   );

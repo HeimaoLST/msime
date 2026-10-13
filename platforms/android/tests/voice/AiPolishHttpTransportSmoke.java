@@ -26,11 +26,11 @@ public final class AiPolishHttpTransportSmoke {
         check(!compatible.containsKey("x-api-key"),
             "Compatible polish requests must not send an Anthropic key header");
 
-        check("polished".equals(AiPolishHttpTransport.strictContent("polished")),
+        check("polished".equals(JsonPolicy.strictStringOrEmpty("polished")),
             "AI polish accepts string content");
-        check("".equals(AiPolishHttpTransport.strictContent(42)),
+        check("".equals(JsonPolicy.strictStringOrEmpty(42)),
             "AI polish rejects numeric content instead of coercing it");
-        check("".equals(AiPolishHttpTransport.strictContent(null)),
+        check("".equals(JsonPolicy.strictStringOrEmpty(null)),
             "AI polish rejects null content instead of displaying it");
         System.out.println("Android AI polish authentication passed");
     }

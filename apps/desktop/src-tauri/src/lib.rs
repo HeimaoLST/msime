@@ -5,8 +5,6 @@
 ))]
 mod ai;
 mod clipboard_history;
-#[cfg(not(target_os = "android"))]
-mod dictionary_import;
 // Only the two hosts that have to replay input into another window build this.
 // macOS delivers through the input method itself and needs none of it.
 mod notices;
@@ -15,6 +13,7 @@ mod panel_input;
 mod panel_window;
 mod platform;
 mod shared;
+mod update_check;
 mod vocabulary;
 mod voice;
 
@@ -41,6 +40,10 @@ use panel_input::{send_panel_key_windows, send_panel_text_windows, windows_panel
 
 #[cfg(target_os = "android")]
 use platform::android::android_account;
+#[cfg(any(target_os = "ios", target_os = "android", target_os = "windows"))]
+use platform::community_resources;
+#[cfg(windows)]
+use platform::desktop::desktop_cloud_dictionary;
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 use platform::desktop::{
     desktop_account, desktop_candidate_skin_community, desktop_community_report,
@@ -63,7 +66,7 @@ use platform::mobile::mobile_account_helpers::parse_cloud_dictionary_request;
 #[cfg(any(target_os = "ios", target_os = "android"))]
 use platform::mobile::mobile_community;
 #[cfg(windows)]
-use platform::windows::{windows_account, windows_voice};
+use platform::windows::{windows_account, windows_settings_sync, windows_voice};
 
 use msime_client_core::clipboard::ClipboardHistoryStore;
 use msime_client_core::host_surface::{HostCapabilities, HostPlatform, SurfaceRoute};
@@ -79,7 +82,9 @@ use msime_client_core::skin::custom_library::{
 use msime_client_core::skin::keyboard_trial::KeyboardSkinTrialStore;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use msime_client_core::typing_statistics::TypingSource;
-use msime_client_core::typing_statistics::{TypingStatistics, TypingStatisticsStore};
+use msime_client_core::typing_statistics::{
+    TypingStatistics, TypingStatisticsStatus, TypingStatisticsStore,
+};
 #[cfg(target_os = "android")]
 use msime_tauri_mobile_platform::{AndroidVoicePlatform, AndroidVoicePolishRequest};
 // Both mobile hosts build the same transcription request; only the transport differs.
@@ -221,6 +226,7 @@ fn host_capabilities(app: tauri::AppHandle) -> HostCapabilities {
     capabilities.os_version = macos_product_version();
     capabilities.arch = Some(std::env::consts::ARCH.to_owned());
     capabilities.candidate_panel_limit = linux_candidate_panel_limit();
+    fill_linux_environment(&mut capabilities);
     let host_options = app
         .try_state::<DictionaryHostOptions>()
         .and_then(|options| options.snapshot().ok());
@@ -322,10 +328,46 @@ fn drop_unpinned_language_schemes(capabilities: &mut HostCapabilities) {
 /// What the running Linux host found about the desktop's candidate panel. Only the host knows which panel draws its list - GNOME Shell's popup, a Fcitx5 theme the user picked, the desktop's Kimpanel - so it writes that finding to a per-session file and the page reads it here instead of guessing from the desktop name.
 #[cfg(target_os = "linux")]
 fn linux_candidate_panel_limit() -> Option<msime_client_core::host_surface::CandidatePanelLimit> {
+    msime_client_core::host_surface::CandidatePanelLimit::from_host_status(
+        &linux_candidate_panel_status_document()?,
+    )
+}
+
+/// 运行中的 Linux 宿主写的候选面板状态文件（`{"host": ..., "limit": ...}`）的内容；宿主没在运行或还没写过时为 `None`。
+#[cfg(target_os = "linux")]
+fn linux_candidate_panel_status_document() -> Option<String> {
     use msime_client_core::host_surface::CandidatePanelLimit;
     let file = CandidatePanelLimit::status_file(std::env::var_os("XDG_RUNTIME_DIR").as_deref())?;
-    CandidatePanelLimit::from_host_status(&read_candidate_panel_status(&file)?)
+    read_candidate_panel_status(&file)
 }
+
+/// 「关于」页系统信息里 Linux 才有的几项：发行版、内核、桌面会话、输入法框架和设备型号。都是几个小文件和环境变量，不起进程；读不到的项留空，页面就不列它。解析与清洗在 `host_surface::environment`。
+#[cfg(target_os = "linux")]
+fn fill_linux_environment(capabilities: &mut HostCapabilities) {
+    use msime_client_core::host_surface::environment;
+    let read = |path: &str| std::fs::read_to_string(path).ok();
+    capabilities.os_version = read("/etc/os-release")
+        .or_else(|| read("/usr/lib/os-release"))
+        .as_deref()
+        .and_then(environment::os_release_name);
+    capabilities.kernel_version = read("/proc/sys/kernel/osrelease")
+        .as_deref()
+        .and_then(environment::kernel_release);
+    capabilities.desktop_session = environment::desktop_session(
+        std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+        std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+    );
+    capabilities.input_method_framework = linux_candidate_panel_status_document()
+        .as_deref()
+        .and_then(environment::input_method_framework_from_host_status);
+    capabilities.device_model = environment::device_model(
+        read("/sys/class/dmi/id/sys_vendor").as_deref(),
+        read("/sys/class/dmi/id/product_name").as_deref(),
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn fill_linux_environment(_capabilities: &mut HostCapabilities) {}
 
 #[cfg(any(target_os = "linux", test))]
 const CANDIDATE_PANEL_STATUS_READ_LIMIT: u64 = 4096;
@@ -454,21 +496,9 @@ async fn list_voice_capture_devices() -> Result<Value, CommandError> {
             .map_err(|_| CommandError {
                 code: "audio_devices",
             })?;
-        serde_json::to_value(
-            devices
-                .into_iter()
-                .map(|(id, label)| {
-                    serde_json::json!({
-                        "backend": "windows",
-                        "id": id,
-                        "label": label
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|_| CommandError {
-            code: "audio_devices",
-        })
+        Ok(Value::Array(msime_host_api::voice_capture_device_values(
+            "windows", devices,
+        )))
     }
     #[cfg(target_os = "macos")]
     {
@@ -477,21 +507,9 @@ async fn list_voice_capture_devices() -> Result<Value, CommandError> {
             .map_err(|_| CommandError {
                 code: "audio_devices",
             })?;
-        serde_json::to_value(
-            devices
-                .into_iter()
-                .map(|(id, label)| {
-                    serde_json::json!({
-                        "backend": "macos",
-                        "id": id,
-                        "label": label
-                    })
-                })
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|_| CommandError {
-            code: "audio_devices",
-        })
+        Ok(Value::Array(msime_host_api::voice_capture_device_values(
+            "macos", devices,
+        )))
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     Err(CommandError {
@@ -556,34 +574,14 @@ struct VocabularyState(
     Option<std::path::PathBuf>,
 );
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TypingStatisticsStatus {
-    statistics: TypingStatistics,
-    availability: &'static str,
-    last_written_ms: Option<u64>,
-}
-
+// 状态的组装在 client-core（`TypingStatisticsStore::status`），Windows 原生设置窗口经 host-api 读到同样的字段。
 fn typing_statistics_status(
     store: &TypingStatisticsStore,
     statistics: TypingStatistics,
 ) -> Result<TypingStatisticsStatus, CommandError> {
-    let last_written = store
-        .last_written()
-        .map_err(|_| CommandError { code: "storage" })?;
-    Ok(TypingStatisticsStatus {
-        statistics,
-        availability: if last_written.is_some() {
-            "ready"
-        } else {
-            "neverWritten"
-        },
-        last_written_ms: last_written.and_then(|time| {
-            time.duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-        }),
-    })
+    store
+        .status(statistics)
+        .map_err(|_| CommandError { code: "storage" })
 }
 
 #[tauri::command]
@@ -841,9 +839,25 @@ async fn read_skin_stylesheet(
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SkinImageResponse {
+struct SkinResourceResponse {
     content_type: &'static str,
     bytes: Vec<u8>,
+}
+
+type SkinImageResponse = SkinResourceResponse;
+type SkinFontResponse = SkinResourceResponse;
+
+fn read_skin_resource_at(
+    root: PathBuf,
+    id: &str,
+    relative: &str,
+) -> Result<SkinResourceResponse, CommandError> {
+    let resource = msime_client_core::skin::catalog::read_resource(root, id, relative)
+        .map_err(|_| CommandError { code: "storage" })?;
+    Ok(SkinResourceResponse {
+        content_type: resource.content_type,
+        bytes: resource.bytes,
+    })
 }
 
 fn read_skin_image_at(
@@ -851,17 +865,13 @@ fn read_skin_image_at(
     id: &str,
     relative: &str,
 ) -> Result<SkinImageResponse, CommandError> {
-    let resource = msime_client_core::skin::catalog::read_resource(root, id, relative)
-        .map_err(|_| CommandError { code: "storage" })?;
+    let resource = read_skin_resource_at(root, id, relative)?;
     if !resource.content_type.starts_with("image/") {
         return Err(CommandError {
             code: "invalid_resource",
         });
     }
-    Ok(SkinImageResponse {
-        content_type: resource.content_type,
-        bytes: resource.bytes,
-    })
+    Ok(resource)
 }
 
 #[tauri::command]
@@ -876,29 +886,18 @@ async fn read_skin_image(
         .map_err(|_| CommandError { code: "storage" })?
 }
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SkinFontResponse {
-    content_type: &'static str,
-    bytes: Vec<u8>,
-}
-
 fn read_skin_font_at(
     root: PathBuf,
     id: &str,
     relative: &str,
 ) -> Result<SkinFontResponse, CommandError> {
-    let resource = msime_client_core::skin::catalog::read_resource(root, id, relative)
-        .map_err(|_| CommandError { code: "storage" })?;
+    let resource = read_skin_resource_at(root, id, relative)?;
     if !resource.content_type.starts_with("font/") {
         return Err(CommandError {
             code: "invalid_resource",
         });
     }
-    Ok(SkinFontResponse {
-        content_type: resource.content_type,
-        bytes: resource.bytes,
-    })
+    Ok(resource)
 }
 
 #[tauri::command]
@@ -1038,10 +1037,10 @@ fn resolve_theme_at(
     use msime_client_core::skin::theme::{self, GlobalTheme, ThemePackage};
     request.custom_theme.validate()?;
     let global_theme = request.global_theme;
+    // 按请求的明暗取槽位：深色模式先取 `candidate_skin_dark`，与 `msime_client_resolve_theme` 相同。
     let package = request
         .custom_theme
-        .candidate_skin
-        .as_deref()
+        .candidate_skin_for(request.dark)
         .filter(|_| global_theme == GlobalTheme::Custom)
         .and_then(|id| msime_client_core::skin::catalog::load_package(root, id).ok())
         .map(|summary| ThemePackage::from(&summary));
@@ -1064,6 +1063,22 @@ async fn resolve_theme(
     tauri::async_runtime::spawn_blocking(move || resolve_theme_at(&root, request))
         .await
         .map_err(|_| CommandError { code: "storage" })?
+}
+
+/// `SettingsClient.validateShuangpinCustomProfile`：编辑中的自定义双拼表有什么问题，能用时是 `null`。与 MCP 保存前的校验结论相同，但不在设置进程里留下任何东西，页面每改一个键都可以问。
+#[tauri::command]
+fn validate_shuangpin_custom_profile(
+    profile: msime_client_core::preferences::ShuangpinCustomProfile,
+) -> Option<msime_host_api::ShuangpinCustomProblem> {
+    msime_host_api::custom_shuangpin_profile_problem(&profile)
+}
+
+/// `SettingsClient.builtinShuangpinTable`：内置双拼方案的键位表，编辑自定义方案时从它开始；`custom` 没有内置的表，是 `null`。
+#[tauri::command]
+fn builtin_shuangpin_table(
+    name: msime_client_core::preferences::ShuangpinProfile,
+) -> Option<msime_client_core::preferences::ShuangpinCustomProfile> {
+    msime_host_api::builtin_shuangpin_custom_profile(name)
 }
 
 #[derive(Clone)]
@@ -1250,6 +1265,8 @@ impl From<PreferencesError> for CommandError {
                 PreferencesError::ConflictingKeyBindings => "key_conflict",
                 PreferencesError::InvalidPlugins => "plugins_invalid",
                 PreferencesError::InvalidGameCompatibility => "game_compatibility_invalid",
+                PreferencesError::InvalidAppInputModeRules => "app_input_mode_rules_invalid",
+                PreferencesError::InvalidCloudClipboardRelay => "cloud_clipboard_relay_invalid",
                 PreferencesError::UnsupportedFormat | PreferencesError::Json(_) => "format",
                 _ => "storage",
             },
@@ -1474,17 +1491,9 @@ fn ios_keyboard_ai_preferences(
         _ => "custom",
     }
     .to_owned();
-    let endpoint = preferences.endpoint.trim();
     // 来源键与设置页一致：https 不限主机，http 只认本机或局域网（`ai::endpoint`）。
-    let token = msime_client_core::ai::endpoint::credential_origin(endpoint)
-        .and_then(|origin| {
-            preferences
-                .tokens
-                .get(&preferences.provider)
-                .or_else(|| preferences.tokens.get(&origin))
-                .or_else(|| (!preferences.token.is_empty()).then_some(&preferences.token))
-                .cloned()
-        })
+    let token = msime_client_core::ai::credential_for_endpoint(preferences)
+        .map(str::to_owned)
         .unwrap_or_default();
     let enabled = preferences.enabled
         && !preferences.endpoint.trim().is_empty()
@@ -1661,36 +1670,9 @@ async fn test_api_credential(
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         let _ = runtime;
+        // The same checks the native Windows settings window runs through `msime_client_test_api_credential`.
         let result = tauri::async_runtime::spawn_blocking(move || {
-            if service == "voice.asr" {
-                if config.get("provider").and_then(Value::as_str) == Some("doubao") {
-                    return msime_client_core::credential::doubao::test(
-                        &config,
-                        &msime_client_core::credential::doubao::WebSocketTransport,
-                    );
-                }
-                return msime_client_core::credential::asr::test(
-                    &config,
-                    &msime_client_core::credential::asr::HttpTransport,
-                );
-            }
-            if service.starts_with("translation.") {
-                let milliseconds = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
-                    .unwrap_or(0);
-                return msime_client_core::credential::translation::test(
-                    &service,
-                    &config,
-                    milliseconds,
-                    &msime_client_core::credential::translation::HttpTransport,
-                );
-            }
-            msime_client_core::credential::probe::test_chat(
-                &service,
-                &config,
-                &msime_client_core::credential::probe::ChatProbeTransport,
-            )
+            msime_client_core::credential::test_service(&service, &config)
         })
         .await
         .map_err(|_| CommandError {
@@ -1858,9 +1840,9 @@ fn linux_runtime_options_bytes(document: &Value) -> Result<Vec<u8>, RuntimeOptio
     Ok(bytes)
 }
 
-/// Serialize `document` with the installed skins, scanned from `root`, as `candidate_skin_catalog`, dropping packages from the end until the document fits within `LINUX_RUNTIME_OPTIONS_CATALOG_BUDGET`.
+/// 把 `document` 连同从 `root` 扫描到的已安装皮肤一起序列化，皮肤目录写在 `candidate_skin_catalog` 里；放不进 `LINUX_RUNTIME_OPTIONS_CATALOG_BUDGET` 时从末尾逐个丢掉皮肤包，直到放得下。
 ///
-/// The currently selected skin is dropped last, since its colours are the ones on screen. When not even an empty catalog fits, the key is left out, so the catalog never becomes the reason a document the hosts could read no longer loads; a document too large for the hosts even without it is refused.
+/// 自定义主题选中的皮肤（浅色、深色两个槽位）最后才丢，因为屏幕上画的是它们的颜色。连空目录都放不下时整个键不写，免得宿主原本能读的文档因为皮肤目录读不了；去掉目录后仍超出宿主上限的文档直接拒绝。
 #[cfg(target_os = "linux")]
 fn runtime_options_with_skin_catalog(
     document: &mut Value,
@@ -1871,10 +1853,14 @@ fn runtime_options_with_skin_catalog(
         serde_json::to_vec_pretty(document)
             .map_err(|error| std::io::Error::other(error.to_string()))
     };
-    let selected = document["preferences"]["custom_theme"]["candidate_skin"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
+    let custom_theme = &document["preferences"]["custom_theme"];
+    let selected: Vec<String> = ["candidate_skin", "candidate_skin_dark"]
+        .into_iter()
+        .filter_map(|slot| custom_theme[slot].as_str())
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let selected: Vec<&str> = selected.iter().map(String::as_str).collect();
     let mut published =
         msime_client_core::skin::catalog::host_candidate_catalog(catalog, root, &selected);
     loop {
@@ -1891,7 +1877,11 @@ fn runtime_options_with_skin_catalog(
         }
         let dropped = packages
             .iter()
-            .rposition(|package| package["id"] != selected.as_str())
+            .rposition(|package| {
+                !package["id"]
+                    .as_str()
+                    .is_some_and(|id| selected.contains(&id))
+            })
             .unwrap_or(packages.len() - 1);
         packages.remove(dropped);
     }
@@ -1991,51 +1981,6 @@ fn start_desktop_preferences_monitor(
         });
 }
 
-/// Keep the host's reason instead of flattening every failure to "storage".
-///
-/// The host distinguishes three things the user can actually act on - the
-/// dictionary is locked by another process, the edit itself was refused, and
-/// the store could not be opened - and the page used to print one identical
-/// sentence for all of them.
-fn dictionary_error_code(reason: &str) -> &'static str {
-    match reason {
-        "dictionary maintenance busy" => "dictionary_busy",
-        // A request over the host's 64 KiB, which the batched desktop import only gives for a file over its own bound or a single line too long for any request. The shared parser's own "dictionary import is too large" is deliberately not mapped here: only Android, which sends the whole file in one request, reaches it, and there the limit is 64 KiB rather than the 32 MB this code's message names.
-        "invalid dictionary buffer" => "dictionary_too_large",
-        "dictionary import rejected" => "dictionary_import_rejected",
-        "dictionary read rejected" => "dictionary_read_rejected",
-        "dictionary pinyin unavailable" => "dictionary_pinyin_unavailable",
-        "dictionary access unavailable" => "dictionary_unavailable",
-        "learned-data reset rejected" => "dictionary_reset_rejected",
-        "bundled dictionary entry is read-only" => "dictionary_bundled_readonly",
-        // The host appends which rule the entry broke. The page words a code refusal per dictionary kind, so a word or weight refusal must not share that code, or it would send the user to fix a code that is already valid.
-        reason if reason == msime_host_api::INVALID_DICTIONARY_ENTRY => "dictionary_invalid_entry",
-        reason => match reason
-            .strip_prefix(msime_host_api::INVALID_DICTIONARY_ENTRY)
-            .and_then(|rest| rest.strip_prefix(": "))
-        {
-            Some(rule) if invalid_entry_rule_is_about_word(rule) => "dictionary_invalid_word",
-            Some(_) => "dictionary_invalid_entry",
-            None => "storage",
-        },
-    }
-}
-
-/// Does a refusal reason name the word or the weight rather than the code? These are the host's `validate_entry` rules (`word ...`, `weight ...`) and the Engine's own sentences for the same rules in `validate_personal_dictionary_entry`.
-fn invalid_entry_rule_is_about_word(rule: &str) -> bool {
-    rule.starts_with("word ")
-        || rule.starts_with("weight ")
-        || rule == "Weight must be between 1 and 100000000"
-        || rule == "The word contains an unsupported control character"
-}
-
-fn dictionary_action_requires_quiesce(action: &Value) -> bool {
-    matches!(
-        action.get("operation").and_then(Value::as_str),
-        Some("edit" | "import" | "reset")
-    )
-}
-
 #[cfg(any(target_os = "ios", test))]
 fn ios_personal_dictionary_action(action: &Value) -> bool {
     matches!(
@@ -2086,11 +2031,6 @@ async fn dictionary_request(
     let options = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let options = options.snapshot()?;
-        let requires_quiesce = dictionary_action_requires_quiesce(&action);
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-        let _ = requires_quiesce;
-        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-        let user_data = options["user_data"].as_str().map(str::to_owned);
         let request = serde_json::json!({ "options": options, "action": action });
         #[cfg(target_os = "ios")]
         if ios_personal_dictionary_action(&request["action"]) {
@@ -2102,65 +2042,48 @@ async fn dictionary_request(
                 serde_json::to_vec(&request).map_err(|_| CommandError { code: "storage" })?;
             return msime_host_api::personal_dictionary_request_json(&bytes).map_err(|reason| {
                 CommandError {
-                    code: dictionary_error_code(&reason),
+                    code: msime_host_api::settings_dictionary::error_code(&reason),
                 }
             });
         }
+        // The input hosts are released before a write, an import is batched and a refusal becomes the page's code in the host API, where the native Windows settings window gets the same through msime_client_settings_dictionary. The macOS input method is also told at once over a distributed notification when the release first goes up.
         #[cfg(not(target_os = "android"))]
         {
-            // One request to the host. An import too large for one request is several, each through this, so whatever releases the input sessions below stays in force until the last of them.
-            let host = |bytes: &[u8]| msime_host_api::dictionary_request_json(bytes);
-            // The input hosts are asked to let go and the lock failure is retried until they have. On Linux and macOS that is a lease the hosts find on their timers, with the macOS input method also told at once over a distributed notification when the lease first goes up; on Windows the Server is asked over its pipe and answers once its sessions are gone. Either is renewed before each later request, so a large import that runs past the 30 second bound keeps the hosts released, and let go when `hosts` goes, after the last request, whatever the outcome.
-            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-            let mut hosts = msime_client_core::dictionary::quiesce::QuiescedHosts::new(
-                user_data.as_deref(),
+            msime_host_api::settings_dictionary::request(
+                &request["options"],
+                &request["action"],
                 || {
                     #[cfg(target_os = "macos")]
                     msime_host_macos::quiesce_input_sessions();
                 },
-            );
-            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-            let send = |bytes: &[u8]| {
-                if requires_quiesce {
-                    hosts.run(|| host(bytes))
-                } else {
-                    host(bytes)
-                }
-            };
-            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-            let send = host;
-            let result = dictionary_import::send_dictionary_action(
-                &request["options"],
-                &request["action"],
-                send,
-            );
-            result.map_err(|reason| CommandError {
-                code: dictionary_error_code(&reason),
-            })
+            )
+            .map_err(|code| CommandError { code })
         }
     })
     .await
     .map_err(|_| CommandError { code: "storage" })?
 }
 
-/// Where a desktop cloud clipboard request is served, in order of precedence: a provider socket named in the host options or the environment, the session of the macOS input method that launched this panel, a provider socket discovered in the user's runtime directory, and otherwise the account this shell is signed in to.
+/// 桌面端一个云剪贴板请求由谁来答，按优先级依次是：宿主选项或环境变量里指定的 provider socket、共享偏好里配置的自建中继（`docs/cloud-clipboard-relay.md`）、打开这个面板的 macOS 输入法的原生会话、在用户运行时目录里发现的 provider socket，都没有时是这个外壳登录的水杉账号。
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, PartialEq)]
-enum CloudClipboardRoute<N> {
+enum CloudClipboardRoute<N, R> {
+    #[cfg_attr(not(unix), allow(dead_code))]
     Provider(PathBuf),
+    Relay(R),
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Native(N),
     Account,
 }
 
-/// Picks the [`CloudClipboardRoute`] for one request. A configured socket wins outright, and one that is not an absolute path is an error rather than a reason to fall through: the user asked for that provider, so the account must not answer in its place. The native session and discovery are only consulted when nothing is configured.
+/// 为一个请求选出 [`CloudClipboardRoute`]。显式配置的 socket 直接胜出，不是绝对路径时报错而不是往下找：用户点名要那个 provider，就不能由账号代答。中继在用户显式配置的 socket 之后、输入法原生会话之前：配置了中继就只走中继，读不出中继配置时同样报错而不退回账号。两者都没有配置时才看原生会话和自动发现的 socket。
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-#[cfg_attr(not(unix), allow(dead_code))]
-fn cloud_clipboard_route<N>(
+fn cloud_clipboard_route<N, R>(
     configured: Option<String>,
+    relay: impl FnOnce() -> Result<Option<R>, CommandError>,
     native: impl FnOnce() -> Option<N>,
     discover: impl FnOnce() -> Option<PathBuf>,
-) -> Result<CloudClipboardRoute<N>, CommandError> {
+) -> Result<CloudClipboardRoute<N, R>, CommandError> {
     if let Some(configured) = configured {
         let path = PathBuf::from(configured);
         return if path.is_absolute() {
@@ -2171,12 +2094,34 @@ fn cloud_clipboard_route<N>(
             })
         };
     }
+    if let Some(relay) = relay()? {
+        return Ok(CloudClipboardRoute::Relay(relay));
+    }
     if let Some(result) = native() {
         return Ok(CloudClipboardRoute::Native(result));
     }
     Ok(discover()
         .filter(|path| path.is_absolute())
         .map_or(CloudClipboardRoute::Account, CloudClipboardRoute::Provider))
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn cloud_clipboard_route_for_action<N, R>(
+    action: &Value,
+    configured: Option<String>,
+    relay: impl FnOnce() -> Result<Option<R>, CommandError>,
+    native: impl FnOnce() -> Option<N>,
+    discover: impl FnOnce() -> Option<PathBuf>,
+) -> Result<CloudClipboardRoute<N, R>, CommandError> {
+    let invalid = || CommandError { code: "invalid" };
+    msime_host_api::cloud_clipboard::validate_relay_request(action).map_err(|_| invalid())?;
+    if msime_host_api::cloud_clipboard::validate_request(action).is_err() {
+        if configured.is_some() {
+            return Err(invalid());
+        }
+        return relay()?.map(CloudClipboardRoute::Relay).ok_or_else(invalid);
+    }
+    cloud_clipboard_route(configured, relay, native, discover)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -2188,67 +2133,97 @@ async fn cloud_clipboard_request(
     account: tauri::State<'_, desktop_account::AccountState>,
     action: Value,
 ) -> Result<Value, CommandError> {
-    msime_host_api::cloud_clipboard::validate_request(&action)
+    msime_host_api::cloud_clipboard::validate_relay_request(&action)
         .map_err(|_| CommandError { code: "invalid" })?;
-    // Windows has no provider socket or native session, so every request goes to the account.
-    #[cfg(unix)]
-    {
-        let options = options.inner().clone();
-        let label = window.label().to_owned();
-        let provider_action = action.clone();
-        let served = tauri::async_runtime::spawn_blocking(move || {
-            let _ = (&app, &label);
-            let document = options.snapshot()?;
-            let configured = document
-                .get("cloud_clipboard_provider_socket")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .or_else(|| {
-                    std::env::var_os("MSIME_CLOUD_CLIPBOARD_PROVIDER_SOCKET")
-                        .and_then(|value| value.into_string().ok())
-                });
-            #[cfg(target_os = "macos")]
-            let native = || {
-                app.state::<macos_cloud_clipboard::CloudState>()
-                    .request(&label, &provider_action)
-            };
-            #[cfg(not(target_os = "macos"))]
-            let native = || None::<Result<Value, CommandError>>;
-            match cloud_clipboard_route(configured, native, || {
-                discover_session_provider("cloud-clipboard.sock")
-            })? {
-                CloudClipboardRoute::Provider(path) => UnixSocketProvider::new(path)
-                    .cloud_clipboard(provider_action)
-                    .map(Some)
-                    .ok_or(CommandError {
-                        code: "unavailable",
-                    }),
-                CloudClipboardRoute::Native(result) => result.map(Some),
-                CloudClipboardRoute::Account => Ok(None),
+    let options = options.inner().clone();
+    let label = window.label().to_owned();
+    let relay_directory = account.directory.clone();
+    let routed_action = action.clone();
+    let served = tauri::async_runtime::spawn_blocking(move || {
+        let _ = (&label, &options);
+        // Windows 没有 provider socket，那里只剩中继和水杉账号两条路。
+        #[cfg(unix)]
+        let configured = options
+            .snapshot()?
+            .get("cloud_clipboard_provider_socket")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                std::env::var_os("MSIME_CLOUD_CLIPBOARD_PROVIDER_SOCKET")
+                    .and_then(|value| value.into_string().ok())
+            });
+        #[cfg(not(unix))]
+        let configured = None::<String>;
+        let relay = || match app.try_state::<std::sync::Arc<PreferencesStore>>() {
+            Some(store) => platform::cloud_clipboard::configured_relay(store.inner()),
+            None => Ok(None),
+        };
+        #[cfg(target_os = "macos")]
+        let native = || {
+            app.state::<macos_cloud_clipboard::CloudState>()
+                .request(&label, &routed_action)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let native = || None::<Result<Value, CommandError>>;
+        #[cfg(unix)]
+        let discover = || discover_session_provider("cloud-clipboard.sock");
+        #[cfg(not(unix))]
+        let discover = || None::<PathBuf>;
+        match cloud_clipboard_route_for_action(&routed_action, configured, relay, native, discover)?
+        {
+            #[cfg(unix)]
+            CloudClipboardRoute::Provider(path) => UnixSocketProvider::new(path)
+                .cloud_clipboard(routed_action)
+                .map(Some)
+                .ok_or(CommandError {
+                    code: "unavailable",
+                }),
+            #[cfg(not(unix))]
+            CloudClipboardRoute::Provider(_) => Err(CommandError {
+                code: "unavailable",
+            }),
+            CloudClipboardRoute::Relay(config) => {
+                platform::cloud_clipboard::relay_cloud_clipboard_request(
+                    config,
+                    &relay_directory,
+                    &routed_action,
+                )
+                .map(Some)
             }
-        })
-        .await
-        .map_err(|_| CommandError {
-            code: "unavailable",
-        })??;
-        if let Some(value) = served {
-            return Ok(value);
+            CloudClipboardRoute::Native(result) => result.map(Some),
+            CloudClipboardRoute::Account => Ok(None),
         }
+    })
+    .await
+    .map_err(|_| CommandError {
+        code: "unavailable",
+    })??;
+    if let Some(value) = served {
+        return Ok(value);
     }
-    #[cfg(not(unix))]
-    let _ = (app, window, options);
     platform::cloud_clipboard::cloud_clipboard_request(&account.session, action).await
 }
 
 #[cfg(any(target_os = "ios", target_os = "android"))]
 #[tauri::command]
 async fn cloud_clipboard_request(
+    app: tauri::AppHandle,
     state: tauri::State<'_, platform::mobile::MobileAccountState>,
     action: Value,
 ) -> Result<Value, CommandError> {
     msime_host_api::cloud_clipboard::validate_request(&action).map_err(|_| CommandError {
         code: "invalid_cloud_clipboard",
     })?;
+    // 设置页的「发到云剪贴板」和云剪贴板面板都经这里。用户在原生设置里选了自建中继时，这里只能经账号答，所以拒绝而不是发往水杉账号。
+    let store = app
+        .try_state::<std::sync::Arc<PreferencesStore>>()
+        .map(|store| std::sync::Arc::clone(store.inner()))
+        .ok_or(CommandError { code: "storage" })?;
+    tauri::async_runtime::spawn_blocking(move || {
+        platform::cloud_clipboard::require_no_relay(&store)
+    })
+    .await
+    .map_err(|_| CommandError { code: "storage" })??;
     platform::cloud_clipboard::cloud_clipboard_request(state.session(), action).await
 }
 
@@ -2282,10 +2257,21 @@ async fn cloud_dictionary_request(
         .map_err(|_| CommandError { code: "invalid" })?;
     msime_host_api::cloud_dictionary::validate_cloud_request(&request)
         .map_err(|_| CommandError { code: "invalid" })?;
-    let options = options.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        #[cfg(unix)]
-        {
+    // Windows 没有 provider socket，也没有输入法交来的原生会话：面板的每个请求都由设置应用用自己登录的账号会话完成，完整快照的「应用到本机」也在本进程里做（见 desktop_cloud_dictionary）。
+    #[cfg(not(unix))]
+    {
+        let _ = action;
+        let document = options.snapshot()?;
+        let account = app.state::<desktop_account::AccountState>();
+        let snapshots = app.state::<desktop_cloud_dictionary::CloudDictionaryState>();
+        desktop_cloud_dictionary::request(&account.session, snapshots.inner(), document, request)
+            .await
+    }
+    #[cfg(unix)]
+    {
+        let _ = request;
+        let options = options.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
             let document = options.snapshot()?;
             let configured = document
                 .get("cloud_dictionary_provider_socket")
@@ -2316,19 +2302,12 @@ async fn cloud_dictionary_request(
                 .ok_or(CommandError {
                     code: "unavailable",
                 })
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (options, action);
-            Err(CommandError {
-                code: "unavailable",
-            })
-        }
-    })
-    .await
-    .map_err(|_| CommandError {
-        code: "unavailable",
-    })?
+        })
+        .await
+        .map_err(|_| CommandError {
+            code: "unavailable",
+        })?
+    }
 }
 
 #[cfg(target_os = "ios")]
@@ -2759,7 +2738,7 @@ async fn install_input_source(app: tauri::AppHandle) -> Result<(), HostActionErr
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone, serde::Serialize)]
 struct InputSourceStartupStatus {
-    /// `installed`, `updated`, `up_to_date`, `not_installed` (a first install, left for the user to start from the install window), `login_required` (installed, but the source list only picks it up after the next login) or `failed`.
+    /// `installed`, `updated`, `up_to_date`, `not_installed` (a first install, left for the user to start from the install window), `login_required` (installed, but the source list only picks it up after the next login; reported by a first install whose registration found nothing, and by a later launch in the same login session that finds the input method missing from the registry, see `input_source_status_now`) or `failed`.
     action: &'static str,
     /// Whether the input source is in the System Settings list at the time of the request (see `input_source_status_now`); absent when that list could not be read.
     enabled: Option<bool>,
@@ -2777,6 +2756,19 @@ struct InputSourceStartupState {
     finished: std::sync::Condvar,
     /// Whether the main window opened as the first-install window and the user has not left it yet.
     first_install_window: std::sync::atomic::AtomicBool,
+    /// 本次运行里已经查明的「输入法在不在本登录会话的输入源注册表里」，见 `input_source_status_now`。一个登录会话里它不会自己变（进了注册表就一直在，新标识符要到下次登录才进），而设置页等用户添加时每 3 秒问一次状态，所以只查一次；`finish` 换了启动结果时清掉。
+    registered: Mutex<RegistryAnswer>,
+    /// 同一时刻只让一个状态请求去拉起输入法查注册表。设置页挂载时的 `refresh()` 和窗口 `focus` 几乎同时发请求，不串行的话两个请求都看到缓存为空、各拉起最多 3 次输入法。单独用一把锁而不是在查询期间一直拿着 `registered`，是为了不让 `finish` 等一次最长十几秒的查询。
+    registry_probe: Mutex<()>,
+}
+
+/// `InputSourceStartupState::registered` 的内容：查明的结论，以及它属于第几个启动结果。
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct RegistryAnswer {
+    /// 每次 `finish` 加一。查询开始前记下它，写回时不一致就丢掉结论：查询期间安装窗口换了启动结果，旧结论不能挂到新结果上。
+    generation: u64,
+    registered: Option<bool>,
 }
 
 #[cfg(target_os = "macos")]
@@ -2786,6 +2778,14 @@ impl InputSourceStartupState {
             .result
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = Some(status);
+        {
+            let mut answer = self
+                .registered
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            answer.generation = answer.generation.wrapping_add(1);
+            answer.registered = None;
+        }
         self.finished.notify_all();
     }
 
@@ -2827,7 +2827,7 @@ fn run_input_source_startup(
                 .map(|version| version.label().to_string()),
         },
         Err(macos_input_source::InstallError::SourceUnavailable) => return None,
-        // A failed install or registration has already restored the previous bundle, so the installed version reported is the one still in place; a first install whose registration waits for the next login keeps the new bundle, so that is the one reported.
+        // A failed install or registration has already restored the previous bundle, so the installed version reported is the one still in place; a first install whose registration waits for the next login keeps the new bundle, so that is the one reported. 更新时替换前就查到这次登录的注册表里没有它（首次安装后还没重新登录），同样留下新版本、报 `login_required`。
         Err(error) => InputSourceStartupStatus {
             action: if matches!(error, macos_input_source::InstallError::RegistrationPending) {
                 "login_required"
@@ -2850,15 +2850,48 @@ fn run_input_source_startup(
 }
 
 /// The start-time result with `enabled` and `system_bundles` read at the time of the call rather than when that check ran. The settings page may ask again at any time, so this must stay cheap: it never copies or registers anything, only waits for the one start-time check, reads the input source list and looks for a few paths.
+///
+/// `up_to_date` 而输入法不在输入法列表里时，再用 `registered` 查一次它在不在本登录会话的输入源注册表里，不在就改报 `login_required`：首次安装后同一次登录里重新打开设置应用就是这样，启动检查看到已装版本与内嵌版本相同，只能报 `up_to_date`，而设置页对 `up_to_date` 会叫用户去系统设置添加一个这次登录根本列不出来的输入法。`installed`、`updated` 不查：这次启动刚替换过 bundle，登记后有一段分钟级的注册表空窗（platforms/macos/README.md），这时查不到不说明什么。查明的结果在本次运行里只查一次。
 #[cfg(target_os = "macos")]
 fn input_source_status_now(
     state: &InputSourceStartupState,
     timeout: std::time::Duration,
     enabled: impl FnOnce() -> Option<bool>,
     system_bundles: impl FnOnce() -> Vec<std::path::PathBuf>,
+    registered: impl FnOnce() -> Option<bool>,
 ) -> Option<InputSourceStartupStatus> {
     let mut status = state.wait(timeout)?;
     status.enabled = enabled();
+    if status.action == "up_to_date" && status.enabled == Some(false) {
+        // 后来的请求在这里等前一个查完，再读它存下的结论，不重复拉起输入法。
+        let _probe = state
+            .registry_probe
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (generation, known) = {
+            let answer = state
+                .registered
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            (answer.generation, answer.registered)
+        };
+        let answer = known.or_else(|| {
+            let answer = registered();
+            if answer.is_some() {
+                let mut stored = state
+                    .registered
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                if stored.generation == generation {
+                    stored.registered = answer;
+                }
+            }
+            answer
+        });
+        if answer == Some(false) {
+            status.action = "login_required";
+        }
+    }
     status.system_bundles = system_bundles()
         .into_iter()
         .map(|path| path.display().to_string())
@@ -2879,6 +2912,7 @@ async fn input_source_startup_status(
             std::time::Duration::from_secs(120),
             macos_input_source::input_source_enabled,
             macos_input_source::system_bundles,
+            macos_input_source::input_source_registered,
         )
     })
     .await
@@ -2906,6 +2940,7 @@ async fn run_first_input_source_install(
             std::time::Duration::ZERO,
             macos_input_source::input_source_enabled,
             macos_input_source::system_bundles,
+            macos_input_source::input_source_registered,
         )
     })
     .await
@@ -3002,11 +3037,9 @@ fn macos_input_method_defaults_domain() -> &'static str {
     macos_input_source::input_source_bundle_id()
 }
 
+// 「输入时显示双拼键位提示」升级前的本机存放处。开关现在是共享偏好 `shuangpin_keymap_hint`，设置页只在文档还没有这一项时读这里，好显示输入法实际沿用的旧选择；写入一律走共享偏好。
 #[cfg(target_os = "macos")]
 const MACOS_SHUANGPIN_KEYMAP_DEFAULTS_KEY: &str = "MSIMEClientShuangpinKeymap";
-
-#[cfg(target_os = "macos")]
-const MACOS_WUBI_AUTO_COMMIT_UNIQUE_DEFAULTS_KEY: &str = "MSIMEClientWubiAutoCommitUnique";
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
@@ -3035,91 +3068,6 @@ async fn load_macos_shuangpin_keymap() -> Result<bool, HostActionError> {
                 code: "unavailable",
             }),
         }
-    })
-    .await
-    .map_err(|_| HostActionError {
-        code: "unavailable",
-    })?
-}
-
-#[cfg(target_os = "macos")]
-#[tauri::command]
-async fn save_macos_shuangpin_keymap(enabled: bool) -> Result<(), HostActionError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let status = std::process::Command::new("defaults")
-            .args([
-                "write",
-                macos_input_method_defaults_domain(),
-                MACOS_SHUANGPIN_KEYMAP_DEFAULTS_KEY,
-                "-bool",
-                if enabled { "true" } else { "false" },
-            ])
-            .status()
-            .map_err(|_| HostActionError {
-                code: "unavailable",
-            })?;
-        status.success().then_some(()).ok_or(HostActionError {
-            code: "unavailable",
-        })
-    })
-    .await
-    .map_err(|_| HostActionError {
-        code: "unavailable",
-    })?
-}
-
-#[cfg(target_os = "macos")]
-#[tauri::command]
-async fn load_macos_wubi_auto_commit_unique() -> Result<bool, HostActionError> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let output = std::process::Command::new("defaults")
-            .args([
-                "read",
-                macos_input_method_defaults_domain(),
-                MACOS_WUBI_AUTO_COMMIT_UNIQUE_DEFAULTS_KEY,
-            ])
-            .output()
-            .map_err(|_| HostActionError {
-                code: "unavailable",
-            })?;
-        if !output.status.success() {
-            // NSUserDefaults.boolForKey: also treats an unset value as false.
-            return Ok(false);
-        }
-        let value = String::from_utf8_lossy(&output.stdout);
-        match value.trim() {
-            "1" | "true" | "TRUE" => Ok(true),
-            "0" | "false" | "FALSE" => Ok(false),
-            _ => Err(HostActionError {
-                code: "unavailable",
-            }),
-        }
-    })
-    .await
-    .map_err(|_| HostActionError {
-        code: "unavailable",
-    })?
-}
-
-#[cfg(target_os = "macos")]
-#[tauri::command]
-async fn save_macos_wubi_auto_commit_unique(enabled: bool) -> Result<(), HostActionError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let status = std::process::Command::new("defaults")
-            .args([
-                "write",
-                macos_input_method_defaults_domain(),
-                MACOS_WUBI_AUTO_COMMIT_UNIQUE_DEFAULTS_KEY,
-                "-bool",
-                if enabled { "true" } else { "false" },
-            ])
-            .status()
-            .map_err(|_| HostActionError {
-                code: "unavailable",
-            })?;
-        status.success().then_some(()).ok_or(HostActionError {
-            code: "unavailable",
-        })
     })
     .await
     .map_err(|_| HostActionError {
@@ -3203,6 +3151,135 @@ async fn pick_voice_model_path(app: tauri::AppHandle) -> Result<Option<String>, 
         code: "unavailable",
     })?;
     received.recv().map_err(|_| HostActionError {
+        code: "unavailable",
+    })
+}
+
+// 与 macOS 同样的理由：本地语音模型是按路径加载的已安装目录，网页的文件输入只交回内容，所以由宿主弹出系统的选择文件夹对话框，只选已有的目录。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn pick_voice_model_path(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<Option<String>, HostActionError> {
+    use tauri_plugin_dialog::DialogExt;
+    // 对话框在主线程上运行，这个工作线程只等结果。
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("选择本地语音模型目录")
+            .blocking_pick_folder()
+    })
+    .await
+    .map_err(|_| HostActionError {
+        code: "unavailable",
+    })?;
+    picked
+        .map(|picked| {
+            picked
+                .into_path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .map_err(|_| HostActionError {
+                    code: "unavailable",
+                })
+        })
+        .transpose()
+}
+
+/// 应用例外里选中的应用：`id` 是规则用的标识（macOS 的 Bundle ID，Windows 的程序文件名），`name` 是给人看的名称。
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+struct PickedApplication {
+    id: String,
+    name: String,
+}
+
+// 应用例外不能让用户手填 Bundle ID：没人知道它，也不该去查。和原生设置窗口的「添加应用…」一样，由宿主弹出只能选应用程序的面板，从所选应用读出 Bundle ID 和名称；AppKit 只在主线程上弹面板。
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn pick_application(
+    app: tauri::AppHandle,
+) -> Result<Option<PickedApplication>, HostActionError> {
+    let (send, received) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let _ = send.send(msime_host_macos::pick_application());
+    })
+    .map_err(|_| HostActionError {
+        code: "unavailable",
+    })?;
+    let Some(path) = received.recv().map_err(|_| HostActionError {
+        code: "unavailable",
+    })?
+    else {
+        return Ok(None);
+    };
+    // 面板只给应用程序包，没有 Bundle ID 的只可能是损坏的包，规则无从写起。
+    let id = msime_host_macos::bundle_identifier_at(&path).ok_or(HostActionError {
+        code: "not_application",
+    })?;
+    let name = msime_host_macos::display_name_at(&path).unwrap_or_else(|| id.clone());
+    Ok(Some(PickedApplication { id, name }))
+}
+
+// Windows 的规则按进程基名记，所以选一个 .exe，取它的文件名。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn pick_application(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<Option<PickedApplication>, HostActionError> {
+    use tauri_plugin_dialog::DialogExt;
+    // 对话框在主线程上运行，这个工作线程只等结果。
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_parent(&window)
+            .set_title("选择应用程序")
+            .add_filter("应用程序", &["exe"])
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|_| HostActionError {
+        code: "unavailable",
+    })?;
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(|_| HostActionError {
+        code: "unavailable",
+    })?;
+    picked_windows_application(&path)
+        .map(Some)
+        .ok_or(HostActionError {
+            code: "not_application",
+        })
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn picked_windows_application(path: &std::path::Path) -> Option<PickedApplication> {
+    let id = path.file_name()?.to_str()?.to_owned();
+    if !id.to_ascii_lowercase().ends_with(".exe") {
+        return None;
+    }
+    let name = path.file_stem()?.to_str()?.to_owned();
+    Some(PickedApplication { id, name })
+}
+
+/// 应用例外列表里每条规则的显示名称：本机装着的应用按 Bundle ID 查到名称，没装的不返回，列表就照旧显示 Bundle ID。
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn application_names(ids: Vec<String>) -> Result<HashMap<String, String>, HostActionError> {
+    // 偏好库最多收 32 条规则；多给的只可能来自坏掉的页面，不替它查。
+    const MAX_NAMES: usize = 64;
+    tauri::async_runtime::spawn_blocking(move || {
+        ids.into_iter()
+            .take(MAX_NAMES)
+            .filter_map(|id| msime_host_macos::application_name(&id).map(|name| (id, name)))
+            .collect()
+    })
+    .await
+    .map_err(|_| HostActionError {
         code: "unavailable",
     })
 }
@@ -3644,7 +3721,7 @@ fn remember_input_target(
         {
             let _ = window;
             let target = msime_host_macos::capture_launch_target().ok_or(HostActionError {
-                code: "unavailable",
+                code: "no_input_target",
             })?;
             *state.0.lock().map_err(|_| HostActionError {
                 code: "unavailable",
@@ -3716,11 +3793,8 @@ async fn send_key(
         tauri::async_runtime::spawn_blocking(move || {
             received
                 .recv()
-                .unwrap_or(false)
-                .then_some(())
-                .ok_or(HostActionError {
-                    code: "unavailable",
-                })
+                .unwrap_or(Err("unavailable"))
+                .map_err(|code| HostActionError { code })
         })
         .await
         .map_err(|_| HostActionError {
@@ -4043,6 +4117,20 @@ fn discover_packaged_file(relative: &str, beside_executable: &str) -> Option<Pat
         .find(|path| path.is_absolute() && path.is_file())
 }
 
+/// 手写面板能否直接输入；设置中打开且没有原生会话时只提供识别和复制。
+#[tauri::command]
+fn handwriting_can_input(app: tauri::AppHandle, window: tauri::WebviewWindow) -> bool {
+    #[cfg(target_os = "macos")]
+    return app
+        .state::<macos_panel_session::PanelState>()
+        .can_submit_handwriting(requested_surface_route(), window.label());
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, window);
+        true
+    }
+}
+
 #[tauri::command]
 async fn submit_handwriting_candidate(
     app: tauri::AppHandle,
@@ -4071,13 +4159,19 @@ async fn submit_handwriting_candidate(
     // produce candidates and then refuse to insert the one the user picked.
     #[cfg(target_os = "windows")]
     {
-        // Windows panels inject through the host rather than the runtime, so
-        // they do not pass through the typing counter, matching send_text.
-        let _ = (&app, &typing_statistics);
+        // Windows 面板经宿主注入而不经运行时，计数器看不到这段文字，所以注入成功后在这里按手写来源计数，与 Linux 和 macOS 原生手写一致；注入的按键带面板标记，tip 不会再把它当作直通字符记一次。
+        let _ = &app;
         msime_client_core::panels::validate_candidate(&candidate).map_err(|_| HostActionError {
             code: "invalid_text",
         })?;
-        send_panel_text_windows(&state, &candidate)
+        send_panel_text_windows(&state, &candidate)?;
+        panel_input::record_windows_panel_typing_statistics(
+            &typing_statistics.0,
+            &candidate,
+            TypingSource::Handwriting,
+        )
+        .await;
+        Ok(())
     }
     #[cfg(target_os = "macos")]
     return macos_panel_session::submit(app, window, candidate).await;
@@ -4105,9 +4199,17 @@ async fn send_text(
     if window.label() == CLOUD_CLIPBOARD_PANEL {
         return panel_input::send_cloud_clipboard_text(app, &typing_statistics, text).await;
     }
+    // Windows 面板的文字经宿主注入，注入成功后在这里计数，来源与 macOS 面板提交一致记为本地输入。
     #[cfg(target_os = "windows")]
     if window.label() == CLOUD_CLIPBOARD_PANEL {
-        return panel_input::send_cloud_clipboard_text_windows(&app, &text);
+        panel_input::send_cloud_clipboard_text_windows(&app, &text)?;
+        panel_input::record_windows_panel_typing_statistics(
+            &typing_statistics.0,
+            &text,
+            TypingSource::Local,
+        )
+        .await;
+        return Ok(());
     }
     #[cfg(target_os = "linux")]
     return send_panel_text(
@@ -4120,7 +4222,16 @@ async fn send_text(
     )
     .await;
     #[cfg(target_os = "windows")]
-    return send_panel_text_windows(&state, &text);
+    {
+        send_panel_text_windows(&state, &text)?;
+        panel_input::record_windows_panel_typing_statistics(
+            &typing_statistics.0,
+            &text,
+            TypingSource::Local,
+        )
+        .await;
+        Ok(())
+    }
     #[cfg(target_os = "macos")]
     return macos_panel_session::submit(app, window, text).await;
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
@@ -4147,6 +4258,7 @@ async fn paste_clipboard_text(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     state: tauri::State<'_, PanelInputState>,
+    typing_statistics: tauri::State<'_, TypingStatisticsState>,
     text: String,
 ) -> Result<(), HostActionError> {
     #[cfg(target_os = "linux")]
@@ -4203,12 +4315,16 @@ async fn paste_clipboard_text(
                     code: "unavailable",
                 })?
         };
+        let statistics = typing_statistics.0.clone();
         return tauri::async_runtime::spawn_blocking(move || {
             msime_host_windows::paste_text(target, &text)
                 .then_some(())
                 .ok_or(HostActionError {
                     code: "unavailable",
-                })
+                })?;
+            // 与 macOS 剪贴板面板一致，粘贴成功后按本地输入计数；粘贴走 Ctrl+V，tip 不会把它当作直通字符再记一次。
+            record_panel_typing_statistics(&statistics, &text, TypingSource::Local);
+            Ok(())
         })
         .await
         .map_err(|_| HostActionError {
@@ -4502,6 +4618,36 @@ fn open_third_party_licenses(app: tauri::AppHandle) -> Result<(), HostActionErro
             code: "unavailable",
         })?;
     status.success().then_some(()).ok_or(HostActionError {
+        code: "unavailable",
+    })
+}
+
+// 安装器把 THIRD_PARTY_NOTICES.txt 装在安装目录下，MSIME.exe 在它的 server 子目录里，所以是可执行文件所在目录的上一级；原生设置窗口按同一条规则找它（platforms/windows/settings/SettingsDocumentFile.h）。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn open_third_party_licenses() -> Result<(), HostActionError> {
+    let notices = std::env::current_exe()
+        .ok()
+        .and_then(|executable| {
+            Some(
+                executable
+                    .parent()?
+                    .parent()?
+                    .join("THIRD_PARTY_NOTICES.txt"),
+            )
+        })
+        .ok_or(HostActionError {
+            code: "unavailable",
+        })?;
+    // 与 open_directory 一样在单独的线程里调用 shell，不沿用运行时工作线程的 COM 套间。
+    let opened = tauri::async_runtime::spawn_blocking(move || {
+        std::thread::spawn(move || msime_host_windows::open_file(&notices))
+            .join()
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+    opened.then_some(()).ok_or(HostActionError {
         code: "unavailable",
     })
 }
@@ -5210,8 +5356,6 @@ pub fn run() {
             // 偏好、安装登记和 HostOptions 都已就位（提供哪些资源包要看随包的模型），在后台补齐已保存偏好需要的资源包。
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             desktop_resource_packs::ensure_saved_packs(app.handle().clone());
-            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-            desktop_candidate_skin_community::start_sync(app.handle());
             #[cfg(target_os = "macos")]
             app.manage(DataDirectorySelectionState::default());
             #[cfg(target_os = "linux")]
@@ -5273,6 +5417,7 @@ pub fn run() {
             host_capabilities,
             notices::notices_list,
             notices::notice_dismiss,
+            update_check::update_check,
             list_voice_capture_devices,
             capture_voice_pcm,
             supports_font_catalog,
@@ -5319,6 +5464,12 @@ pub fn run() {
             desktop_plugins::load_plugin_mentions,
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             desktop_plugins::save_plugin_mentions,
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            desktop_plugins::script_grants,
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            desktop_plugins::set_script_grant,
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            desktop_plugins::reorder_scripts,
             vocabulary::load_vocabulary_review,
             vocabulary::answer_vocabulary_card,
             vocabulary::set_vocabulary_settings,
@@ -5333,6 +5484,8 @@ pub fn run() {
             scan_skin_catalog,
             list_helpcode_schemas,
             resolve_theme,
+            validate_shuangpin_custom_profile,
+            builtin_shuangpin_table,
             read_skin_image,
             read_skin_font,
             read_skin_stylesheet,
@@ -5373,6 +5526,8 @@ pub fn run() {
             voice::stop_voice,
             voice::local_models::voice_local_models,
             voice::local_models::voice_local_model_install,
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            voice::local_models::voice_local_model_import,
             voice::local_models::voice_local_model_cancel,
             voice::local_models::voice_local_model_remove,
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -5381,9 +5536,10 @@ pub fn run() {
             desktop_resource_packs::resource_pack_install,
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             desktop_resource_packs::resource_pack_cancel,
+            handwriting_can_input,
             submit_handwriting_candidate,
             open_external_url,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             open_third_party_licenses,
             panel_window::open_keyboard_panel,
             panel_window::open_handwriting_panel,
@@ -5428,19 +5584,17 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             load_macos_shuangpin_keymap,
             #[cfg(target_os = "macos")]
-            save_macos_shuangpin_keymap,
-            #[cfg(target_os = "macos")]
-            load_macos_wubi_auto_commit_unique,
-            #[cfg(target_os = "macos")]
-            save_macos_wubi_auto_commit_unique,
-            #[cfg(target_os = "macos")]
             on_device_translation_downloadable_languages,
             #[cfg(target_os = "macos")]
             open_translation_language_settings,
             #[cfg(target_os = "macos")]
             uninstall_input_source,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             pick_voice_model_path,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            pick_application,
+            #[cfg(target_os = "macos")]
+            application_names,
             #[cfg(target_os = "android")]
             android_account::account_status,
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -5509,6 +5663,14 @@ pub fn run() {
             android_account::account_forget,
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             desktop_account::account_forget,
+            #[cfg(target_os = "windows")]
+            windows_settings_sync::account_preferences_schema,
+            #[cfg(target_os = "windows")]
+            windows_settings_sync::account_preferences_load,
+            #[cfg(target_os = "windows")]
+            windows_settings_sync::account_preferences_upload,
+            #[cfg(target_os = "windows")]
+            windows_settings_sync::account_preferences_apply,
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             desktop_candidate_skin_community::candidate_skin_community_list,
             #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -5643,20 +5805,20 @@ pub fn run() {
             mobile_community::ai_skin_generate,
             #[cfg(any(target_os = "ios", target_os = "android"))]
             mobile_community::ai_skin_cancel,
-            #[cfg(any(target_os = "ios", target_os = "android"))]
-            mobile_community::community_resource_list,
-            #[cfg(any(target_os = "ios", target_os = "android"))]
-            mobile_community::community_resource_detail,
-            #[cfg(any(target_os = "ios", target_os = "android"))]
-            mobile_community::community_resource_publish,
-            #[cfg(any(target_os = "ios", target_os = "android"))]
-            mobile_community::community_resource_apply,
-            #[cfg(any(target_os = "ios", target_os = "android"))]
-            mobile_community::community_resource_save,
-            #[cfg(any(target_os = "ios", target_os = "android"))]
-            mobile_community::community_resource_rate,
-            #[cfg(any(target_os = "ios", target_os = "android"))]
-            mobile_community::community_resource_unpublish,
+            #[cfg(any(target_os = "ios", target_os = "android", target_os = "windows"))]
+            community_resources::community_resource_list,
+            #[cfg(any(target_os = "ios", target_os = "android", target_os = "windows"))]
+            community_resources::community_resource_detail,
+            #[cfg(any(target_os = "ios", target_os = "android", target_os = "windows"))]
+            community_resources::community_resource_publish,
+            #[cfg(any(target_os = "ios", target_os = "android", target_os = "windows"))]
+            community_resources::community_resource_apply,
+            #[cfg(any(target_os = "ios", target_os = "android", target_os = "windows"))]
+            community_resources::community_resource_save,
+            #[cfg(any(target_os = "ios", target_os = "android", target_os = "windows"))]
+            community_resources::community_resource_rate,
+            #[cfg(any(target_os = "ios", target_os = "android", target_os = "windows"))]
+            community_resources::community_resource_unpublish,
             #[cfg(any(target_os = "ios", target_os = "android"))]
             mobile_community::community_resource_store_reply,
             #[cfg(any(target_os = "ios", target_os = "android"))]

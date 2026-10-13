@@ -313,11 +313,7 @@ public final class CommonPhrasesStore {
      */
     public static boolean validText(String text) {
         if (text == null || text.isBlank() || text.length() > MAX_PHRASE_UNITS) return false;
-        for (int index = 0; index < text.length(); index++) {
-            char character = text.charAt(index);
-            if (character != '\n' && Character.isISOControl(character)) return false;
-        }
-        return true;
+        return !TextPolicy.hasControlExceptNewline(text);
     }
 
     /** 把 client-core 的错误码换成可直接展示的话；不认识的码一律按通用失败处理，不把内部信息漏给用户。 */
@@ -359,13 +355,13 @@ public final class CommonPhrasesStore {
                 if (pack == null) continue;
                 String id = JsonPolicy.strictString(pack.opt("id"));
                 String name = JsonPolicy.strictString(pack.opt("name"));
-                Integer revision = nonNegativeInteger(pack.opt("revision"));
+                Integer revision = JsonPolicy.nonNegativeInteger(pack.opt("revision"));
                 if (id == null || name == null || revision == null) continue;
                 packs.add(new Pack(id, name, revision));
             }
         }
         return new Document(ListPolicy.copyOrEmpty(phrases), ListPolicy.copyOrEmpty(packs),
-            nonNegativeInteger(value.opt("skipped"), 0));
+            JsonPolicy.nonNegativeInteger(value.opt("skipped"), 0));
     }
 
     private static Result perform(Context context, JSONObject action, boolean writes) {
@@ -383,7 +379,7 @@ public final class CommonPhrasesStore {
             JSONObject root = new JSONObject(response == null ? "" : response);
             if (!JsonPolicy.strictTrue(root.opt("ok")))
                 return Result.failed(failureMessage(JsonPolicy.strictStringOrEmpty(root.opt("error"))));
-            JSONObject value = root.optJSONObject("value");
+            JSONObject value = JsonPolicy.objectValue(root);
             if (value == null) return Result.failed(failureMessage(""));
             Document document = parse(value);
             if (writes) SyncSignals.markDirty(context, SyncSwitch.PHRASES);
@@ -401,35 +397,9 @@ public final class CommonPhrasesStore {
         }
     }
 
-    /** Native response status must remain a JSON boolean; reject org.json string coercion. */
-    static Boolean strictBoolean(Object value) {
-        return JsonPolicy.strictBoolean(value);
-    }
-
-    /** Persisted response fields must retain their JSON string type. */
-    public static String strictString(Object value) {
-        return JsonPolicy.strictString(value);
-    }
-
-    /** Read a JSON integer without org.json's string or fractional coercion. */
-    public static Integer strictInteger(Object value) {
-        return JsonPolicy.strictInteger(value);
-    }
-
-    /** 常用语包修订号和跳过条数必须是非负 JSON 整数。 */
+    /** Compatibility entry point; the shared rule lives in {@link JsonPolicy}. */
     public static Integer nonNegativeInteger(Object value) {
-        Integer parsed = strictInteger(value);
-        return parsed == null || parsed < 0 ? null : parsed;
-    }
-
-    static int strictInteger(Object value, int fallback) {
-        Integer parsed = strictInteger(value);
-        return parsed == null ? fallback : parsed;
-    }
-
-    static int nonNegativeInteger(Object value, int fallback) {
-        Integer parsed = nonNegativeInteger(value);
-        return parsed == null ? fallback : parsed;
+        return JsonPolicy.nonNegativeInteger(value);
     }
 
     /** Bootstrap 写进 runtime-options.json 的偏好目录，首次设置之前为空串。两个进程都从这里读，所以不会各自用一份。 */

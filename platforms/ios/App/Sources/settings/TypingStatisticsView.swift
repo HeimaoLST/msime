@@ -4,7 +4,6 @@ import SwiftUI
 ///
 /// 统计只保留聚合计数，所以设计稿里的常用词和最常打错两张卡片没有做：它们需要用户打过的词本身。
 struct TypingStatisticsView: View {
-  @Environment(\.scenePhase) private var scenePhase
   @Environment(\.horizontalSizeClass) private var horizontalSizeClass
   @State private var statistics = TypingStatistics()
   /// 统计文档是否至少读到过一次，这样关闭提示说的是存储里的开关，而不是空的默认值。
@@ -39,20 +38,10 @@ struct TypingStatisticsView: View {
     }
   }
 
-  // 旧文案无条件要求开启完全访问，不管问题是不是出在这个设置上都说同一句话，等于没有信息。这里每种情况都是对「为什么是空的」的不同回答，正常运行时则什么都不说。
+  // 旧文案无条件要求开启完全访问，不管问题是不是出在这个设置上都说同一句话，等于没有信息。每种情况都是对「为什么是空的」的不同回答，正常运行时则什么都不说；文案与取舍见 `TypingStatisticsStore.emptyStatisticsAdvice`。
   private var storageAdvice: String? {
-    switch availability {
-    case .containerUnavailable:
-      return "无法访问共享存储，键盘与本 app 之间没有可用的数据通道。重装水杉输入法可以重建它。"
-    case .neverWritten:
-      return "键盘从未写入过统计。请在系统设置 → 通用 → 键盘 → 键盘 → 水杉输入法中开启“允许完全访问”，"
-        + "然后用水杉键盘输入几个字再回来刷新。未开启时仍可正常打字，只是不记录统计。"
-    case .ready(let lastWritten):
-      guard statistics.total == 0 else { return nil }
-      guard let lastWritten else { return "统计文件存在但还没有计数，请用水杉键盘输入几个字再刷新。" }
-      return "统计文件最后写入于 \(lastWritten.formatted(.dateTime.month().day().hour().minute()))，但计数为零。"
-        + "若此前清空过统计，这是正常的；否则请附上这条信息反馈。"
-    }
+    TypingStatisticsStore.emptyStatisticsAdvice(availability, recordingOff: loaded && !statistics.enabled,
+                                                total: statistics.total)
   }
 
   /// 最近七个本地日，今天排最后：按键热力图的时间窗口，和按键小卡片一致。
@@ -92,15 +81,14 @@ struct TypingStatisticsView: View {
       .frame(maxWidth: horizontalSizeClass == .regular ? 760 : .infinity)
       .frame(maxWidth: .infinity)
     }
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .navigationTitle("统计").navigationBarTitleDisplayMode(.large)
     .toolbar {
       ToolbarItem(placement: .navigationBarTrailing) { menu }
     }
     .navigationDestination(isPresented: $showsDailyDetail) { TypingDailyDetailView(statistics: statistics) }
     .sheet(isPresented: $showsAbout) { about }
-    .onAppear { reload() }
-    .onChange(of: scenePhase) { _, phase in if phase == .active { reload() } }
+    .reloadOnAppearAndActive(reload)
     .alert("清空所有打字统计？", isPresented: $confirmsReset) {
       Button("取消", role: .cancel) {}
       Button("清空", role: .destructive) { update { try $0.reset() } }
@@ -213,7 +201,7 @@ struct TypingStatisticsView: View {
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
       }
-      .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+      .designCanvasBackground()
       .navigationTitle("关于统计").navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .confirmationAction) { Button("完成") { showsAbout = false } }
@@ -236,7 +224,7 @@ struct TypingStatisticsView: View {
     VStack(alignment: .leading, spacing: 22) {
       VStack(alignment: .leading, spacing: 18) {
         VStack(alignment: .leading, spacing: 4) {
-          Text("近 7 天共输入").font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+          Text("近 7 天共输入").designSubtext()
           HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(TypingSummaryText.grouped(overview.weekTotal))
               .font(.system(size: 40, weight: .bold)).monospacedDigit().tracking(-0.8)

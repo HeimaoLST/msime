@@ -11,7 +11,9 @@ struct AISkinGenerationView: View {
   @State private var busy = false
   @State private var completed = 0
   @State private var message: String?
-  @State private var request: Task<Void, Never>?
+  @State private var pending: Task<Void, Never>?
+  /// 让离开页面后仍在取消中的旧请求不能释放新页面的忙碌状态或覆盖新数据。
+  @State private var request = ViewRequestGeneration()
   var body: some View {
     NavigationView {
       ScrollView {
@@ -29,12 +31,12 @@ struct AISkinGenerationView: View {
             .accessibilityIdentifier("generateAISkins")
           Text("AI 随机搭配插画、键帽造型与材质。抽到的皮肤可以继续编辑、保存或分享。")
             .font(.caption).foregroundStyle(.secondary)
-          if busy { HStack { ProgressView(); Text("主题插画已完成 \(completed)/3，可能需要几分钟…"); Button("取消") { request?.cancel() } } }
+          if busy { HStack { ProgressView(); Text("主题插画已完成 \(completed)/3，可能需要几分钟…"); Button("取消") { ViewRequestTask.cancel(task: $pending) } } }
           if let message { Text(message).font(.callout).foregroundStyle(.secondary) }
           ForEach(proposals) { proposal in
             VStack(alignment: .leading, spacing: 12) {
-              Text(proposal.name).font(.headline)
-              Text(proposal.description).font(.caption).foregroundStyle(.secondary)
+              SettingsOptionLabel(title: proposal.name, detail: proposal.description,
+                                  titleFont: .headline, detailFont: .caption, spacing: 12)
               CommunityDesignPreview(design: proposal.design).frame(height: 210)
               HStack {
                 Button("使用并继续编辑") { useDesign(proposal.design); dismiss() }
@@ -48,7 +50,13 @@ struct AISkinGenerationView: View {
       }.navigationTitle("AI 皮肤抽卡").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement:.cancellationAction) { Button("完成") { dismiss() } } }
     }
-    .onDisappear { request?.cancel() }
+    .onAppear { request.appear() }
+    .onDisappear {
+      ViewRequestTask.disappear(request: $request, pending: $pending)
+      busy = false
+      proposals = []
+      completed = 0
+    }
     .sheet(item: $publishing) { item in CommunityPublishView(onPublished: { publishing = nil }, selectedSkinID: item.id) }
     .sheet(isPresented: $login) { AccountLoginSheet() }
   }
@@ -74,27 +82,41 @@ struct AISkinGenerationView: View {
     }.padding(.vertical, 12).accessibilityHidden(true)
   }
   private func generate() {
-    guard !busy else { return }; busy = true; message = nil; completed = 0
+    guard request.isVisible, !busy else { return }
+    completed = 0
     let description = AISkinService.drawPrompt()
-    request = Task {
-      defer { busy = false; request = nil }
-      do {
-        let values: [AISkinProposal]
-        #if DEBUG && targetEnvironment(simulator)
-        if ProcessInfo.processInfo.arguments.contains("-aiSkinPreview") {
-          try await Task.sleep(nanoseconds: ProcessInfo.processInfo.arguments.contains("-skinGenerationSlowFixture") ? 3_600_000_000_000 : 100_000_000)
-          values = CustomKeyboardSkin.templates.prefix(3).enumerated().map {
-            AISkinProposal(name: "AI 测试 \($0.offset + 1)", description: "仅用于界面自动化的合成设计", design: $0.element.1)
-          }
-        } else { values = try await AISkinService.generate(description) { completed = $0 } }
-        #else
-        values = try await AISkinService.generate(description) { completed = $0 }
-        #endif
-        try Task.checkCancellation(); proposals = values
-      } catch is CancellationError { }
-      catch let failure as BackendAccountClient.Failure where failure.status == 401 {
-        message = "请先登录，再来抽取皮肤。"; login = true
-      } catch { if !Task.isCancelled { message = error.localizedDescription } }
+    ViewRequestTask.run(request: $request, busy: $busy, message: $message,
+                        pending: $pending) { id in
+      await performGeneration(requestID: id, description: description)
+    }
+  }
+  private func performGeneration(requestID id: UUID, description: String) async {
+    guard request.isCurrent(id) else { return }
+    do {
+      let values: [AISkinProposal]
+      #if DEBUG && targetEnvironment(simulator)
+      if ProcessInfo.processInfo.arguments.contains("-aiSkinPreview") {
+        try await Task.sleep(nanoseconds: ProcessInfo.processInfo.arguments.contains("-skinGenerationSlowFixture") ? 3_600_000_000_000 : 100_000_000)
+        values = CustomKeyboardSkin.templates.prefix(3).enumerated().map {
+          AISkinProposal(name: "AI 测试 \($0.offset + 1)", description: "仅用于界面自动化的合成设计", design: $0.element.1)
+        }
+      } else {
+        values = try await AISkinService.generate(description) { if request.isCurrent(id) { completed = $0 } }
+      }
+      #else
+      values = try await AISkinService.generate(description) { if request.isCurrent(id) { completed = $0 } }
+      #endif
+      try request.checkCurrent(id)
+      proposals = values
+    } catch is CancellationError {
+      guard request.isCurrent(id) else { return }
+    }
+    catch let failure as BackendAccountClient.Failure where failure.status == 401 {
+      guard request.isCurrent(id) else { return }
+      message = "请先登录，再来抽取皮肤。"; login = true
+    } catch {
+      guard request.isCurrent(id), !Task.isCancelled else { return }
+      message = error.localizedDescription
     }
   }
   private func save(_ proposal: AISkinProposal) -> SavedKeyboardSkin? {

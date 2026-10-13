@@ -44,6 +44,9 @@ constexpr bool CancelRestoresRaw(int scheme) { return scheme == Vietnamese || sc
 // A choice from the list fixes one reading and keeps the conversion composing in the TIP's own host session, which a row picked or a page turned by the mouse in the Server's candidate window would leave behind, so the list is driven from the keyboard only. A Korean Hanja click ends the syllable on both sides and stays clickable.
 constexpr bool KeyboardOnlyCandidateList(int scheme) { return scheme == Zhuyin; }
 
+// 整句改字（MSIME_CONVERSION_LEFT / MSIME_CONVERSION_RIGHT）只在全拼和双拼里有：不带修饰键的左右键交给引擎的改字命令，Ctrl+左右一个字母一个字母地编辑拼音（MSIME_MOVE_LEFT / MSIME_MOVE_RIGHT），其他方案里 Ctrl+左右照旧按分段移动。引擎在进不了改字时把改字命令当作字母光标命令，所以宿主只按方案区分。
+constexpr bool EditsSentence(int scheme) { return scheme == Quanpin || scheme == Shuangpin; }
+
 // Stroke's five stroke keys, the Engine's STROKES (crates/engine/src/stroke/mod.rs): h 横, s 竖, p 撇, n 点, z 折. Only they start a composition; the wildcard x only extends one.
 inline constexpr std::string_view kStrokeKeys = "hspnz";
 inline constexpr wchar_t kStrokeWildcard = L'x';
@@ -113,9 +116,15 @@ constexpr bool ShowsGlosses(int scheme) { return scheme == Quanpin || scheme == 
 // `detects_urls`：组字中键入 `www.`、`http:` 这类触发词会进入网址模式。TIP 把全拼、双拼、五笔都记成 quanpin（mode_scheme），三者都检测网址，所以 TIP 用 InputModeScheme 判断不会看错。
 constexpr bool DetectsUrls(int scheme) { return scheme == Quanpin || scheme == Shuangpin || scheme == Wubi; }
 
+// `opens_local_modes`: Shift+letter opens the local modes other than K (U, T, E, M, J, Y, R, V) while nothing is composed; of them the TIP routes only V's keys, as the expression flag of LocalModeTriggersChanged. K and the `/` and `@` keys follow `opens_table_modes`. The Server decides it from the scheme that runs (apply_local_mode_switches in src/ipc/ReplyCodec.h); the TIP must not, because it keys Wubi as quanpin (mode_scheme) and this is false for Wubi.
+constexpr bool OpensLocalModes(int scheme) { return scheme == Quanpin || scheme == Shuangpin; }
+
+// `opens_table_modes`: Shift+K and the `/` and `@` keys open the quick phrase, command and mention modes while nothing is composed, so the Server sends the command and mention flags of LocalModeTriggersChanged on only here. In every other scheme the symbols a view lists outside a local mode are the scheme's own spelling.
+constexpr bool OpensTableModes(int scheme) { return scheme == Quanpin || scheme == Shuangpin || scheme == Wubi; }
+
 // ---- The input mode the Server tells the TIP about ----
 
-// The scheme family the TIP has to know before its host session answers a key, carried as one character in FanyImeWorkerReplyType::InputModeChanged (shared/contracts/windows_ipc.h). The three pinyin and shape schemes share Chinese: the TIP keys them alike. Stroke has a code of its own: its traits are not quanpin's (ScriptConversionApplies, ShowsGlosses) and the TIP hands most letters to the application while it is idle (LetterPassesWhileIdle). The values are the wire codes and never change; a DLL that predates a mode compares against '1' and '2' only, so it reads a newer code as Chinese.
+// TIP 在会话回答按键之前就要知道的方案类别，作为 FanyImeWorkerReplyType::InputModeChanged（shared/contracts/windows_ipc.h）里的一个字符传过去。全拼是 Chinese。双拼和五笔各有一个码（'8'、'9'），只为让任务栏的语言栏图标显示 双 和 五（tsf/LanguageBar/ModeIconPolicy.h）：TIP 仍把它们当全拼来键入（mode_scheme），比它们早的 DLL 把这两个码读成 Chinese，和以前一样。笔画有自己的码：它的 trait 与全拼不同（ScriptConversionApplies、ShowsGlosses），空闲时 TIP 把大多数字母交给应用（LetterPassesWhileIdle）。这些值就是线上的码，永远不改；比某个模式早的 DLL 只和 '1'、'2' 比较，所以把更新的码读成 Chinese。
 enum class InputMode : wchar_t
 {
     Chinese = L'0',
@@ -126,6 +135,8 @@ enum class InputMode : wchar_t
     Vietnamese = L'5',
     Tibetan = L'6',
     Stroke = L'7',
+    Shuangpin = L'8',
+    Wubi = L'9',
 };
 
 // 一个模式写的语言。日文、韩文、越南文和藏文各是独立的输入语言；粤拼、注音和笔画是中文方案，切到它们时和其他中文方案一样更新 `last_chinese_scheme`。
@@ -151,6 +162,8 @@ constexpr InputLanguage input_language(InputMode mode)
     case InputMode::Tibetan:
         return InputLanguage::Tibetan;
     case InputMode::Chinese:
+    case InputMode::Shuangpin:
+    case InputMode::Wubi:
     case InputMode::Cantonese:
     case InputMode::Zhuyin:
     case InputMode::Stroke:
@@ -164,6 +177,10 @@ constexpr InputMode input_mode(int scheme)
 {
     switch (scheme)
     {
+    case Shuangpin:
+        return InputMode::Shuangpin;
+    case Wubi:
+        return InputMode::Wubi;
     case Japanese:
         return InputMode::Japanese;
     case Korean:
@@ -301,6 +318,55 @@ constexpr int effective_scheme(std::string_view scheme_name, std::string_view la
     return offered.fallback;
 }
 
+// Ctrl+Shift+J 在中文和日语之间切换只在版本同时提供日语和至少一个中文方案时有意义（full 版）。拼音、五笔和各语言版不吃这个组合键，交给应用。
+constexpr bool offers_japanese_toggle(OfferedSchemes offered = edition_schemes())
+{
+    if (!offered.offers(Japanese))
+        return false;
+    for (int scheme = Quanpin; scheme <= Stroke; ++scheme)
+        if (IsChinese(scheme) && offered.offers(scheme))
+            return true;
+    return false;
+}
+
+// Ctrl+Shift+J 的目标方案，-1 表示不切换。`running` 是 Engine 实际运行的方案（effective_scheme 的结果）：它是中文方案时去日语；是日语、韩文、越南文或藏文时回到 `last_chinese_scheme`，它在这个版本里跑不起来时依次退到版本的默认方案和第一个跑得起来的中文方案，和 effective_scheme 的回退一致。调用方在切到日语时把 `running` 记进 `last_chinese_scheme`。
+constexpr int japanese_toggle_target(int running, std::string_view last_chinese_scheme,
+                                     LanguageDictionaryPresence installed, OfferedSchemes offered = edition_schemes())
+{
+    if (!offers_japanese_toggle(offered))
+        return -1;
+    if (IsChinese(running))
+        return Japanese;
+    const int last = scheme_from_name(last_chinese_scheme);
+    if (IsChinese(last) && offered.offers(last) && scheme_installed(last, installed))
+        return last;
+    if (IsChinese(offered.fallback) && offered.offers(offered.fallback) && scheme_installed(offered.fallback, installed))
+        return offered.fallback;
+    for (int scheme = Quanpin; scheme <= Stroke; ++scheme)
+        if (IsChinese(scheme) && offered.offers(scheme) && scheme_installed(scheme, installed))
+            return scheme;
+    return -1;
+}
+
+// Ctrl+Shift+J 写回存储的两项，-1 表示不切换、什么都不写。
+struct JapaneseToggleWrite
+{
+    int scheme = -1;
+    int last_chinese_scheme = -1;
+};
+
+// 从存储里的 `scheme` 和 `last_chinese_scheme` 算出 Ctrl+Shift+J 要写回的两项：先按 effective_scheme 得出 Engine 实际运行的方案，再由 japanese_toggle_target 得出目标。离开中文时把实际运行的中文方案记进 `last_chinese_scheme`，回到中文时目标本身就是它。和托盘的 store_input_scheme 一样维护这一项，只是记的是实际运行的方案，不是存储里可能跑不起来的那个。
+constexpr JapaneseToggleWrite japanese_toggle_write(std::string_view scheme_name, std::string_view last_chinese_scheme,
+                                                    LanguageDictionaryPresence installed,
+                                                    OfferedSchemes offered = edition_schemes())
+{
+    const int running = effective_scheme(scheme_name, last_chinese_scheme, installed, offered);
+    const int target = japanese_toggle_target(running, last_chinese_scheme, installed, offered);
+    if (target < 0)
+        return {};
+    return {target, IsChinese(running) ? running : target};
+}
+
 // The mode of a configured `scheme` preference. An unknown name is Chinese: host-api falls back to quanpin for it.
 constexpr InputMode input_mode(std::string_view scheme_name) { return input_mode(scheme_from_name(scheme_name)); }
 
@@ -326,6 +392,10 @@ constexpr InputMode input_mode_from_code(wchar_t code)
         return InputMode::Tibetan;
     case static_cast<wchar_t>(InputMode::Stroke):
         return InputMode::Stroke;
+    case static_cast<wchar_t>(InputMode::Shuangpin):
+        return InputMode::Shuangpin;
+    case static_cast<wchar_t>(InputMode::Wubi):
+        return InputMode::Wubi;
     default:
         return InputMode::Chinese;
     }
@@ -339,7 +409,7 @@ constexpr bool is_input_mode_payload(const wchar_t *data, std::size_t size)
     return size >= 2 && data[0] != L'\0' && data[1] == L'\0';
 }
 
-// The representative scheme number of a mode, for the scheme traits above. Chinese stands for quanpin: the three schemes it covers answer every trait alike.
+// 一个模式的代表方案号，供上面的方案 trait 使用。Chinese、Shuangpin 和 Wubi 都代表全拼：这三个方案除 OpensLocalModes 外每个 trait 都相同，而 OpensLocalModes 只由 Server 按正在运行的方案读，所以 TIP 照旧键入它们。
 constexpr int mode_scheme(InputMode mode)
 {
     switch (mode)
@@ -359,6 +429,8 @@ constexpr int mode_scheme(InputMode mode)
     case InputMode::Stroke:
         return Stroke;
     case InputMode::Chinese:
+    case InputMode::Shuangpin:
+    case InputMode::Wubi:
         break;
     }
     return Quanpin;

@@ -2,7 +2,6 @@ import SwiftUI
 
 struct SkinCommunityView: View {
   var onlyMine = false
-  var embedded = false
   private var visibleSkins: [CommunitySkin] { onlyMine ? skins.filter(\.owned) : skins }
   @State private var skins: [CommunitySkin] = []
   @State private var more = false
@@ -14,11 +13,16 @@ struct SkinCommunityView: View {
   @State private var category: CommunitySkinCategory?
   @State private var showPublish = false
   @State private var showAccount = false
-  @State private var requestID = UUID()
+  @State private var pending: Task<Void, Never>?
+  @State private var request = ViewRequestGeneration()
+  @State private var accountTask: Task<Void, Never>?
+  @State private var accountGeneration = OperationGeneration()
   /// 本地皮肤库（12 个槽位），每次画廊显示时重新读取，这样在详情页领取的皮肤在卡片上会显示 使用。
   @State private var library: [SavedKeyboardSkin] = []
   /// 正在下载 获取 的 id。
   @State private var taking: Set<String> = []
+  @State private var takeTasks: [String: Task<Void, Never>] = [:]
+  @State private var takeGeneration = OperationGeneration()
   // 两个键都只用来重绘胶囊按钮：主题决定键盘上是否显示自定义设计，设计决定显示哪一个。
   @AppStorage(GlobalThemePreference.key, store: KeyboardFeedbackPreference.defaults) private var globalTheme = GlobalThemeCatalog.systemId
   @AppStorage(CustomKeyboardSkinStore.key, store: KeyboardFeedbackPreference.defaults) private var storedDesign: Data?
@@ -37,7 +41,7 @@ struct SkinCommunityView: View {
     let active = activeDesign
     return ScrollView {
       VStack(alignment: .leading, spacing: 16) {
-        CommunitySearchField(text: $search, placeholder: "搜索皮肤设计") { run { try await load() } }
+        CommunitySearchField(text: $search, placeholder: "搜索皮肤设计") { startLoad() }
         categoryChips
         if visibleSkins.isEmpty && !busy {
           Text(onlyMine ? (more ? "当前页没有你的作品，继续加载查看更多。" : "还没有已发布的作品，分享你的第一款设计吧。")
@@ -49,12 +53,12 @@ struct SkinCommunityView: View {
             CommunitySkinCard(skin: skin, state: state(of: skin, active: active)) { pill(skin) }
           }
         }
-        if more { Button("加载更多") { run { try await load(append: true) } }.disabled(busy).frame(maxWidth: .infinity) }
+        if more { Button("加载更多") { startLoad(append: true) }.disabled(busy).frame(maxWidth: .infinity) }
         if busy { ProgressView().frame(maxWidth: .infinity) }
       }.communityPageContent(regular: regular)
     }
     .background(MetasequoiaTheme.canvas)
-    .onAppear { library = CustomSkinLibrary.designs }
+    .onAppear { request.appear(); library = CustomSkinLibrary.designs }
   }
 
   private func state(of skin: CommunitySkin, active: CustomKeyboardSkin?) -> CommunitySkinCard.PillState {
@@ -76,14 +80,23 @@ struct SkinCommunityView: View {
     }
     guard !taking.contains(skin.id) else { return }
     taking.insert(skin.id)
-    Task { @MainActor in
-      defer { taking.remove(skin.id) }
+    let generation = takeGeneration.current()
+    let task = Task { @MainActor in
+      defer {
+        if takeGeneration.isCurrent(generation) {
+          taking.remove(skin.id)
+          takeTasks[skin.id] = nil
+        }
+      }
       do {
         _ = try await CommunitySkinInstall.take(skin)
+        try ensureTakeCurrent(generation)
         library = CustomSkinLibrary.designs
         ToastCenter.shared.show("已获取「\(skin.name)」，点「使用」换上")
-      } catch { message = error.localizedDescription }
+      } catch is CancellationError { }
+      catch { if request.isVisible, takeGeneration.isCurrent(generation) { message = error.localizedDescription } }
     }
+    takeTasks[skin.id] = task
   }
   /// 横向滚动的分类筛选，「全部」在最前。切换后从第一页重新读取；加载中禁用，避免切换被 `run` 的忙碌保护吞掉。
   private var categoryChips: some View {
@@ -100,13 +113,7 @@ struct SkinCommunityView: View {
       guard !selected else { return }
       let previous = category
       category = value
-      run {
-        do { try await load() }
-        catch {
-          category = CommunitySkinCategorySelectionPolicy.afterFailedLoad(previous: previous)
-          throw error
-        }
-      }
+      startLoad { category = CommunitySkinCategorySelectionPolicy.afterFailedLoad(previous: previous) }
     } label: {
       Text(title).font(.system(size: 13, weight: selected ? .semibold : .regular))
         .foregroundStyle(selected ? MetasequoiaTheme.accent : Color.secondary)
@@ -119,52 +126,97 @@ struct SkinCommunityView: View {
   var body: some View {
     gallery
     .toolbar {
-      ToolbarItem(placement: .navigationBarTrailing) { if !embedded {
-        Button { if signedIn { showPublish = true } else { showAccount = true } } label: {
+      ToolbarItem(placement: .navigationBarTrailing) {
+        Button { if opensPublisher { showPublish = true } else { showAccount = true } } label: {
           Label("发布", systemImage: "plus")
         }.accessibilityLabel("发布我的设计").accessibilityIdentifier("publishCommunitySkin")
       }
-      }
     }
-    .navigationTitle(onlyMine ? "我发布的皮肤" : (embedded ? "社区" : "皮肤社区"))
-    // Embedded is the 社区 tab's own list, which carries the tab's large title.
-    .navigationBarTitleDisplayMode(embedded ? .large : .inline)
-    .refreshable { do { try await load() } catch { message = error.localizedDescription } }
+    .navigationTitle(onlyMine ? "我发布的皮肤" : "皮肤社区")
+    .navigationBarTitleDisplayMode(.inline)
+    .refreshable {
+      do { try await load() }
+      catch is CancellationError { }
+      catch { }
+    }
     .task {
-      signedIn = (try? await api.signedIn()) ?? false
-      run { try await load() }
+      request.appear()
+      let state = (try? await api.signedIn()) ?? false
+      guard request.isVisible, !Task.isCancelled else { return }
+      signedIn = state
+      startLoad()
     }
-    .onChange(of: signedIn) { _ in
-      Task { do { try await load() } catch { message = error.localizedDescription } }
-    }
-    .sheet(isPresented: $showPublish) { CommunityPublishView { run { try await load() } } }
+    .onChange(of: signedIn) { _ in startLoad() }
+    .sheet(isPresented: $showPublish) { CommunityPublishView { startLoad() } }
     .sheet(isPresented: $showAccount, onDismiss: {
-      Task {
-        signedIn = (try? await api.signedIn()) ?? false
+      let id = accountGeneration.begin()
+      accountTask?.cancel()
+      accountTask = Task { @MainActor in
+        defer { if accountGeneration.isCurrent(id) { accountTask = nil } }
+        let state = (try? await api.signedIn()) ?? false
+        guard request.isVisible, !Task.isCancelled, accountGeneration.isCurrent(id) else { return }
+        signedIn = state
         if signedIn { showPublish = true }
       }
     }) { AccountLoginSheet() }
+    .onDisappear {
+      ViewRequestTask.disappear(request: $request, pending: $pending)
+      accountTask?.cancel()
+      accountTask = nil
+      accountGeneration.invalidate()
+      takeGeneration.invalidate()
+      takeTasks.values.forEach { $0.cancel() }
+      takeTasks.removeAll()
+      taking.removeAll()
+      busy = false
+    }
     .alert("皮肤社区", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
       Button("好", role: .cancel) {}
     } message: { Text(message ?? "") }
   }
-  @MainActor private func load(append: Bool = false) async throws {
-    let id = UUID()
-    requestID = id
-    let page: CommunityPage
-    do { page = try await api.list(offset: append ? skins.count : 0, search: search, mine: onlyMine, category: category) }
+  /// 登录后才能发布。模拟器上的社区预览没有账号，直接打开发布表单，好让 UI 测试走到它。
+  private var opensPublisher: Bool {
+    #if DEBUG && targetEnvironment(simulator)
+    if CommunityPreviewFixtures.enabled { return true }
+    #endif
+    return signedIn
+  }
+  @MainActor private func load(append: Bool = false, id scheduledID: UUID? = nil) async throws {
+    guard request.isVisible else { throw CancellationError() }
+    let id = scheduledID ?? request.begin()
+    guard request.isCurrent(id) else { throw CancellationError() }
+    busy = true
+    defer {
+      if request.isCurrent(id) {
+        busy = false
+        if scheduledID == nil { pending = nil }
+      }
+    }
+    do {
+      let page = try await api.list(offset: append ? skins.count : 0, search: search, mine: onlyMine, category: category)
+      try request.checkCurrent(id)
+      if append { skins += CommunityUnseenItems.filter(existing: skins, incoming: page.skins) }
+      else { skins = page.skins }
+      more = page.has_more
+    } catch is CancellationError { throw CancellationError() }
     catch {
-      guard requestID == id else { return }
+      if request.isCurrent(id) { message = error.localizedDescription }
       throw error
     }
-    guard requestID == id else { return }
-    if append { let ids = Set(skins.map(\.id)); skins += page.skins.filter { !ids.contains($0.id) } }
-    else { skins = page.skins }
-    more = page.has_more
   }
-  private func run(_ action: @escaping @MainActor () async throws -> Void) {
-    guard !busy else { return }; busy = true
-    Task { defer { busy = false }; do { try await action() } catch { message = error.localizedDescription } }
+
+  @MainActor private func startLoad(append: Bool = false, onFailure: (() -> Void)? = nil) {
+    guard !busy else { return }
+    ViewRequestTask.startLoad(request: $request, pending: $pending) { id in
+      do { try await load(append: append, id: id) }
+      catch is CancellationError { }
+      catch { if request.isCurrent(id) { onFailure?() } }
+    }
+  }
+
+  @MainActor private func ensureTakeCurrent(_ generation: UUID) throws {
+    try Task.checkCancellation()
+    guard request.isVisible, takeGeneration.isCurrent(generation) else { throw CancellationError() }
   }
 }
 
@@ -186,7 +238,8 @@ private struct CommunitySkinCard: View {
   let action: () -> Void
 
   private var pillLabel: some View {
-    CommunityPillLabel(title: state.title, offersAction: state != .inUse).opacity(state == .taking ? 0.6 : 1)
+    DesignPillLabel(title: state.title, style: state == .inUse ? .neutral : .tonal)
+      .opacity(state == .taking ? 0.6 : 1)
   }
 
   var body: some View {
@@ -276,10 +329,7 @@ enum CommunitySkinInstall {
 private struct CommunitySkinCategoryTag: View {
   let category: CommunitySkinCategory
   var body: some View {
-    Text(category.label).font(.system(size: 10, weight: .medium)).lineLimit(1).fixedSize()
-      .foregroundStyle(MetasequoiaTheme.accent)
-      .padding(.horizontal, 6).padding(.vertical, 2)
-      .background(MetasequoiaTheme.accentSoft, in: Capsule())
+    DesignPillLabel(title: category.label, size: .micro)
       .accessibilityLabel("分类：\(category.label)")
   }
 }
@@ -291,6 +341,8 @@ struct CommunitySkinDetail: View {
   @State private var message: String?
   @State private var confirmsRemoval = false
   @State private var trial: KeyboardSkinTrial?
+  @State private var pending: Task<Void, Never>?
+  @State private var request = ViewRequestGeneration()
   @Environment(\.dismiss) private var dismiss
   private var skin: CommunitySkin { updated ?? initial }
   var body: some View {
@@ -308,19 +360,25 @@ struct CommunitySkinDetail: View {
         Text(skin.description)
         Text("\(skin.downloads) 人下载 · \(skin.rating_average, specifier: "%.1f") 分 · \(skin.rating_count) 人评分")
           .font(.subheadline).foregroundStyle(.secondary)
-        Button { run {
+        Button { run { id in
           let design = try await CommunitySkinInstall.take(skin)
+          try request.checkCurrent(id)
           trial = try KeyboardSkinTrialStore().begin(name: skin.name, design: design)
-          updated = try? await SkinCommunityAPI.shared.detail(skin.id)
+          let latest = try? await SkinCommunityAPI.shared.detail(skin.id)
+          try request.checkCurrent(id)
+          updated = latest
         } } label: { Label("下载并试用", systemImage: "arrow.down.circle.fill").frame(maxWidth: .infinity) }
           .buttonStyle(.borderedProminent).disabled(busy).accessibilityIdentifier("downloadCommunitySkin")
         if !skin.owned {
           Text("我的评分（下载后可评，可重新选择）").font(.subheadline)
           HStack {
             ForEach(1...5, id: \.self) { stars in
-              Button { run {
+              Button { run { id in
                 try await SkinCommunityAPI.shared.rate(skin.id, stars: stars)
-                updated = try await SkinCommunityAPI.shared.detail(skin.id)
+                try request.checkCurrent(id)
+                let latest = try await SkinCommunityAPI.shared.detail(skin.id)
+                try request.checkCurrent(id)
+                updated = latest
               } } label: { Image(systemName: stars <= skin.my_rating ? "star.fill" : "star").frame(width: 44, height: 44) }
                 .accessibilityLabel("评 \(stars) 星").disabled(busy)
             }
@@ -329,8 +387,9 @@ struct CommunitySkinDetail: View {
         } else {
           Menu {
             ForEach(CommunitySkinCategory.allCases) { category in
-              Button { run {
+              Button { run { id in
                 var changed = try await SkinCommunityAPI.shared.setCategory(skin.id, category: category)
+                try request.checkCurrent(id)
                 changed.moderation = changed.moderation ?? skin.moderation
                 updated = changed
               } } label: {
@@ -346,18 +405,33 @@ struct CommunitySkinDetail: View {
         if busy { ProgressView() }
       }.padding()
     }.navigationTitle("皮肤详情").navigationBarTitleDisplayMode(.inline)
-      .task { run { updated = try await SkinCommunityAPI.shared.detail(initial.id) } }
+      .task {
+        request.appear()
+        run { id in
+          let latest = try await SkinCommunityAPI.shared.detail(initial.id)
+          try request.checkCurrent(id)
+          updated = latest
+        }
+      }
       .sheet(item: $trial, onDismiss: {
         do { try KeyboardSkinTrialStore().restorePending() } catch { message = error.localizedDescription }
       }) { CommunitySkinTrialView(trial: $0) }
       .confirmationDialog("下架后其他用户无法再下载，已下载的本地皮肤会保留。", isPresented: $confirmsRemoval, titleVisibility: .visible) {
-        Button("下架", role: .destructive) { run { try await SkinCommunityAPI.shared.unpublish(skin.id); dismiss() } }
+        Button("下架", role: .destructive) { run { id in
+          try await SkinCommunityAPI.shared.unpublish(skin.id)
+          try request.checkCurrent(id)
+          dismiss()
+        } }
       }
       .alert("皮肤社区", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) { Button("好", role: .cancel) {} } message: { Text(message ?? "") }
+      .onAppear { request.appear() }
+      .onDisappear {
+        ViewRequestTask.disappear(request: $request, pending: $pending)
+        busy = false
+      }
   }
-  private func run(_ action: @escaping @MainActor () async throws -> Void) {
-    guard !busy else { return }; busy = true
-    Task { defer { busy = false }; do { try await action() } catch { message = error.localizedDescription } }
+  private func run(_ action: @escaping @MainActor (UUID) async throws -> Void) {
+    ViewRequestTask.run(request: $request, busy: $busy, message: $message, pending: $pending, action: action)
   }
 }
 
@@ -374,6 +448,8 @@ struct CommunityPublishView: View {
   @State private var agrees = false
   @State private var busy = false
   @State private var message: String?
+  @State private var pending: Task<Void, Never>?
+  @State private var request = ViewRequestGeneration()
   private var design: CustomKeyboardSkin? { library.first { $0.id == selected }?.design }
 
   /// The library is stored in an App Group JSON file, so returning from the editor needs an explicit refresh.
@@ -421,25 +497,31 @@ struct CommunityPublishView: View {
           Toggle("我拥有发布所用素材的权利，并同意其他用户免费下载使用", isOn: $agrees)
           Text("发布后，设计及照片壁纸将上传并公开。请勿包含私人照片或敏感信息。作者可随时下架。").font(.caption).foregroundStyle(.secondary)
         }
-        Button("发布到社区") {
-          guard let design else { return }; busy = true
-          Task {
-            defer { busy = false }
-            do {
-              try await SkinCommunityAPI.shared.publish(id: publicationID, name: name, description: description, design: design, category: category)
-              onPublished(); dismiss()
-            } catch { message = error.localizedDescription }
-          }
-        }.disabled(busy || !agrees || design == nil || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        Button("发布到社区") { startPublish() }
+          .disabled(busy || !agrees || design == nil || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
           .accessibilityIdentifier("confirmCommunitySkinPublication")
         if busy { ProgressView() }
       }.disabled(busy)
         .navigationTitle("发布皮肤")
         .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() }.disabled(busy) } }
-        .onAppear { refreshLibrary(preferring: selectedSkinID) }
+        .onAppear { request.appear(); refreshLibrary(preferring: selectedSkinID) }
         .alert("发布失败", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) { Button("好", role: .cancel) {} } message: { Text(message ?? "") }
+        .onDisappear {
+          ViewRequestTask.disappear(request: $request, pending: $pending)
+          busy = false
+        }
     }.interactiveDismissDisabled(busy)
   }
+
+  @MainActor private func startPublish() {
+    guard request.isVisible, !busy, let design else { return }
+    ViewRequestTask.run(request: $request, busy: $busy, message: $message, pending: $pending) { id in
+      try await SkinCommunityAPI.shared.publish(id: publicationID, name: name, description: description, design: design, category: category)
+      try request.checkCurrent(id)
+      onPublished(); dismiss()
+    }
+  }
+
 }
 
 // A value-based preview must not change the user's active custom skin while browsing.
@@ -521,9 +603,10 @@ struct CommunityDesignPreview: View {
         miniRow([MiniKey(symbol: "shift", weight: 1.4, role: .function)]
                 + Array("zxcvbnm").map { MiniKey(text: String($0)) }
                 + [MiniKey(symbol: "delete.left", weight: 1.4, role: .function)], width: Self.rowWidth)
-        miniRow([MiniKey(text: "123", weight: 1.25, role: .function), MiniKey(text: "中", weight: 1.05, role: .function),
+        miniRow([MiniKey(text: "123", weight: 1.25, role: .function),
                  MiniKey(text: "，"), MiniKey(text: "全拼", symbol: "mic", weight: 4, role: .space),
-                 MiniKey(text: "。"), MiniKey(symbol: "return", weight: 1.9, role: .action)], width: Self.rowWidth)
+                 MiniKey(text: "。"), MiniKey(text: "中", weight: 1.05, role: .function),
+                 MiniKey(symbol: "return", weight: 1.9, role: .action)], width: Self.rowWidth)
       }
       Capsule().fill(foreground.opacity(0.85)).frame(width: 134, height: 5).frame(maxHeight: .infinity)
     }
@@ -549,17 +632,8 @@ struct CommunityDesignPreview: View {
     let accent = CustomKeyboardSkin.color(design.accent)
     let disc = AppThemePalette.mix(accent, 14, CustomKeyboardSkin.color(design.keyBackground))
     let frame = AppThemePalette.mix(accent, 82, .black)
-    let markSize: CGFloat = 16
-    let scale = MSIMELogo.scale(for: CGRect(x: 0, y: 0, width: markSize, height: markSize))
-    return ZStack {
-      Circle().fill(Color(uiColor: disc))
-      ZStack {
-        MSIMELogoFrame().fill(Color(uiColor: frame))
-        MSIMELogoStroke().stroke(.white, style: StrokeStyle(lineWidth: MSIMELogo.strokeWidth * scale, lineCap: .round, lineJoin: .round))
-      }
-      .frame(width: markSize, height: markSize)
-    }
-    .frame(width: 26, height: 26)
+    return LogoDisc(diameter: 26, markSize: 16,
+                    discFill: Color(uiColor: disc), frameFill: Color(uiColor: frame))
   }
 
   /// 一行按键，宽度按各自权重分配，与 MiniKb 的弹性行一致。

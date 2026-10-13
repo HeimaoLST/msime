@@ -11,8 +11,10 @@ use crate::account::{
     BackendAccountClient, BackendAccountSession,
 };
 use crate::cloud::dictionary::percent_encode;
+use crate::community::write_actions::{delete_community_item, rate_community_item};
 use crate::community::{
-    valid_author, valid_description, valid_name, valid_query, valid_rating, CommunityModeration,
+    suggested_publication_fields, valid_author, valid_description, valid_name, valid_query,
+    valid_rating, CommunityDeletionResponse, CommunityModeration, CommunityRatingResponse,
     MAXIMUM_JAVASCRIPT_INTEGER, MAXIMUM_PAGE_ITEMS, MODERATION_FIELDS,
 };
 use crate::skin::catalog::safe_id;
@@ -21,6 +23,7 @@ use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+#[cfg(test)]
 use std::fs;
 use std::io::{Cursor, Write};
 use std::path::Path;
@@ -28,11 +31,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-/// The kinds the library accepts. An effect pack is a few parameters for a style built into every host, so there is nothing in it worth sharing as a file.
-pub const PUBLISHABLE_KINDS: [PluginKind; 7] = [
+/// 社区库接受的类型：全部八种数据类插件。桌面上的脚本插件（`script`）不在其中，只能本地导入。特效包除了清单不带任何文件，但它挑的样式、颜色和节奏仍是值得分享的作品，服务端也早已接受并校验 `effect`。以后给 [`PluginKind`] 加的类型，只有列进这里、并在 [`KINDS_DECLARATION`] 里声明之后才会分享。
+pub const PUBLISHABLE_KINDS: [PluginKind; 8] = [
     PluginKind::Sound,
     PluginKind::Music,
     PluginKind::CommandTable,
+    PluginKind::Effect,
     PluginKind::PhraseTable,
     PluginKind::Helpcode,
     PluginKind::Wordbook,
@@ -63,20 +67,7 @@ const MISMATCH: &str = "plugin_community_mismatch";
 const STORAGE: &str = "storage";
 
 fn write_private_archive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    let mut file = options.open(path)?;
+    let mut file = crate::file_lock::create_private_file(path)?;
     file.write_all(bytes)?;
     file.sync_all()
 }
@@ -114,7 +105,7 @@ pub struct CommunityPlugin {
 pub struct CommunityPluginPage {
     pub plugins: Vec<CommunityPlugin>,
     pub has_more: bool,
-    /// How many items of a kind this client cannot install (an effect pack) the server listed on this page and [`validate_page`] left out. The gallery adds them to the next offset so 加载更多 resumes after them. Only the client sets it: a server response that carries it is refused.
+    /// How many items of a kind this client cannot install (one newer than this client, or a legacy one it no longer lists in [`PUBLISHABLE_KINDS`]) the server listed on this page and [`decode_page`] or [`validate_page`] left out. The gallery adds them to the next offset so 加载更多 resumes after them. Only the client sets it: a server response that carries it is refused.
     #[serde(default, skip_deserializing)]
     pub skipped: usize,
 }
@@ -190,18 +181,6 @@ impl CommunityPluginPublishRequest {
             archive: BASE64.encode(&packed.archive),
         }
     }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CommunityPluginRating {
-    stars: u8,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CommunityPluginDeleteResponse {
-    deleted: bool,
 }
 
 pub trait CommunityPluginApi: Send + Sync + 'static {
@@ -332,41 +311,15 @@ impl CommunityPluginApi for BackendAccountClient {
     }
 
     fn rate_community_plugin(&self, id: Uuid, stars: u8, token: &str) -> Result<(), AccountError> {
-        if id.is_nil() || !(1..=5).contains(&stars) {
-            return Err(AccountError::Invalid);
-        }
-        #[derive(Serialize)]
-        struct RatingRequest {
-            stars: u8,
-        }
-        let path = format!("/v1/community/plugins/{}/rating", id.hyphenated());
-        let result = self.json::<CommunityPluginRating, _>(
-            Method::PUT,
-            &path,
-            Some(token),
-            Some(&RatingRequest { stars }),
-        )?;
-        if result.stars != stars {
-            return Err(AccountError::Unavailable);
-        }
-        Ok(())
+        rate_community_item("/v1/community/plugins", id, stars, |path, request| {
+            self.json::<CommunityRatingResponse, _>(Method::PUT, path, Some(token), Some(request))
+        })
     }
 
     fn delete_community_plugin(&self, id: Uuid, token: &str) -> Result<(), AccountError> {
-        if id.is_nil() {
-            return Err(AccountError::Invalid);
-        }
-        let path = format!("/v1/community/plugins/{}", id.hyphenated());
-        let result = self.json::<CommunityPluginDeleteResponse, ()>(
-            Method::DELETE,
-            &path,
-            Some(token),
-            None,
-        )?;
-        if !result.deleted {
-            return Err(AccountError::Unavailable);
-        }
-        Ok(())
+        delete_community_item("/v1/community/plugins", id, |path| {
+            self.json::<CommunityDeletionResponse, ()>(Method::DELETE, path, Some(token), None)
+        })
     }
 }
 
@@ -446,6 +399,66 @@ where
             api.delete_community_plugin(id, token.ok_or(AccountError::Unauthorized)?)
         })
     }
+
+    /// Pack the pack `plugin_id` of `kind` installed under the plugins root `root` and publish it as the publication `id`. The archive is deterministic, so a retry with the same id after a lost response carries identical content and the server answers with the item it already stored. Pack rules fail with their own codes and details, account failures with [`AccountError::community_code`].
+    pub fn publish_installed(
+        &self,
+        root: &Path,
+        kind: PluginKind,
+        plugin_id: &str,
+        id: Uuid,
+        name: String,
+        description: String,
+    ) -> Result<CommunityPlugin, PluginFailure> {
+        let packed = pack(root, kind, plugin_id)?;
+        let request = CommunityPluginPublishRequest::new(id, name, description, &packed);
+        self.publish(&request).map_err(community_failure)
+    }
+
+    /// Download the publication `id` and [`install`] it under the plugins root `root`, replacing an installed pack of the same kind and id whole. `kind` and `plugin_id` are the listing's, the pack the user confirmed; a download naming any other pack is refused.
+    pub fn install_publication(
+        &self,
+        root: &Path,
+        id: Uuid,
+        kind: PluginKind,
+        plugin_id: &str,
+    ) -> Result<PluginSummary, PluginFailure> {
+        let download = self.download(id).map_err(community_failure)?;
+        install(root, &download, kind, plugin_id)
+    }
+}
+
+/// An account or request failure in the vocabulary the pack operations answer with.
+fn community_failure(error: AccountError) -> PluginFailure {
+    PluginFailure::code(error.community_code())
+}
+
+/// What [`pack`] made of an installed pack before anything is uploaded, so a publish dialog can show a refusal, or the archive's size against the limit, before the user fills in the form. Serialized in the page's camelCase.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommunityPluginPackPreview {
+    pub suggested_name: String,
+    pub suggested_description: String,
+    pub version: String,
+    pub license: String,
+    pub file_count: usize,
+    pub size: usize,
+}
+
+/// Check the pack `id` of `kind` installed under `root` against the sharing rules without uploading it.
+pub fn pack_preview(
+    root: &Path,
+    kind: PluginKind,
+    id: &str,
+) -> Result<CommunityPluginPackPreview, PluginFailure> {
+    pack(root, kind, id).map(|packed| CommunityPluginPackPreview {
+        size: packed.archive.len(),
+        file_count: packed.file_count,
+        version: packed.version,
+        license: packed.license,
+        suggested_name: packed.suggested_name,
+        suggested_description: packed.suggested_description,
+    })
 }
 
 fn publishable(kind: PluginKind) -> bool {
@@ -503,7 +516,7 @@ fn validate_publish(request: &CommunityPluginPublishRequest) -> Result<(), Accou
     Ok(())
 }
 
-/// 检查一页列表，去掉本客户端不能安装的类型（特效包）。服务端会列出它接受的每种类型，所以这样的一条不能让整页读不出来；去掉的条目连同 [`decode_page`] 已跳过的未知类型一起计入 `skipped`，让翻页与服务端的 offset 对齐。
+/// 检查一页列表，去掉本客户端认识却不在 [`PUBLISHABLE_KINDS`] 里的类型。现在每种已知类型都可以发布，这一步什么也不去掉；留着它，是因为服务端不论声明与否总会返回冻结的旧类型集合，哪天其中一种从 [`PUBLISHABLE_KINDS`] 里拿掉，这样的条目也只会被跳过，不会让整页读不出来。去掉的条目连同 [`decode_page`] 已跳过的未知类型一起计入 `skipped`，让翻页与服务端的 offset 对齐。
 fn validate_page(mut page: CommunityPluginPage) -> Result<CommunityPluginPage, AccountError> {
     let listed = page.plugins.len() + page.skipped;
     if listed > MAXIMUM_PAGE_ITEMS || (page.has_more && listed == 0) {
@@ -610,26 +623,8 @@ pub fn pack(root: &Path, kind: PluginKind, id: &str) -> Result<PackedPlugin, Plu
     if checked.kind() != kind || checked.id != summary.id || checked.version != summary.version {
         return Err(PluginFailure::code(MISMATCH));
     }
-    let suggested: String = summary.name.chars().take(32).collect();
-    let suggested = suggested.trim();
-    let suggested_name = if valid_name(suggested) {
-        suggested.to_owned()
-    } else {
-        summary.id.chars().take(32).collect()
-    };
-    let description: String = summary
-        .description
-        .as_deref()
-        .unwrap_or_default()
-        .chars()
-        .take(280)
-        .collect();
-    let description = description.trim();
-    let suggested_description = if valid_description(description) {
-        description.to_owned()
-    } else {
-        String::new()
-    };
+    let (suggested_name, suggested_description) =
+        suggested_publication_fields(&summary.name, summary.description.as_deref(), &summary.id);
     Ok(PackedPlugin {
         kind,
         plugin_id: summary.id,

@@ -19,7 +19,7 @@ final class AISkinDesignModel: ObservableObject {
   @Published var loginNeeded = false
 
   private var request: Task<Void, Never>?
-  private var generation = UUID()
+  private var generation = OperationGeneration()
   /// 方案 id 到它在我的皮肤里保存时所用 id 的映射，这样重试「使用此皮肤」不会再存一份。
   private var saved: [UUID: UUID] = [:]
 
@@ -41,9 +41,9 @@ final class AISkinDesignModel: ObservableObject {
     let text = trimmedPrompt
     guard !busy, (1...Self.maximumPromptLength).contains(text.count) else { return }
     busy = true; completed = 0; message = nil
-    let id = UUID(); generation = id
+    let id = generation.begin()
     request = Task {
-      defer { if generation == id { busy = false; request = nil } }
+      defer { if generation.isCurrent(id) { busy = false; request = nil } }
       do {
         let values: [AISkinProposal]
         if fixture {
@@ -53,30 +53,29 @@ final class AISkinDesignModel: ObservableObject {
           }
         } else {
           guard try await BackendAccountSession.shared.user() != nil else {
-            if generation == id { loginNeeded = true }
+            if generation.isCurrent(id) { loginNeeded = true }
             return
           }
           values = try await AISkinService.generate(text) { count in
-            if self.generation == id { self.completed = count }
+            if self.generation.isCurrent(id) { self.completed = count }
           }
         }
         try Task.checkCancellation()
-        guard generation == id else { return }
+        guard generation.isCurrent(id) else { return }
         proposals = values; chosen = 0; saved.removeAll()
       } catch is CancellationError {
       } catch let failure as BackendAccountClient.Failure where failure.status == 401 {
-        guard generation == id else { return }
+        guard generation.isCurrent(id) else { return }
         message = "请先登录，再来设计皮肤。"; loginNeeded = true
       } catch {
         // 429 和 503 直接用后端客户端自带的文案（操作过于频繁… / 此服务暂不可用…）。
-        if generation == id && !Task.isCancelled { message = error.localizedDescription }
+        if generation.isCurrent(id) && !Task.isCancelled { message = error.localizedDescription }
       }
     }
   }
 
   func cancel() {
-    generation = UUID()
-    request?.cancel(); request = nil
+    generation.cancel(task: &request)
     busy = false; completed = 0
   }
 
@@ -149,7 +148,7 @@ struct AISkinDesignView: View {
       .padding(.bottom, 16)
     }
     .scrollDismissesKeyboard(.interactively)
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .navigationTitle("AI 设计皮肤")
     .navigationBarTitleDisplayMode(.inline)
     .safeAreaInset(edge: .bottom, spacing: 0) { actionBar }
@@ -229,7 +228,7 @@ struct AISkinDesignView: View {
     let theme = previewTheme
     let colors = [theme.background, theme.keyBackground, theme.functionKeyBackground, theme.keyForeground, theme.actionBackground]
     return HStack(spacing: 8) {
-      Text("配色").font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+      Text("配色").designSubtext()
       HStack(spacing: 6) {
         ForEach(colors.indices, id: \.self) { index in
           Circle()
@@ -263,9 +262,7 @@ struct AISkinDesignView: View {
 
   private var describeGroup: some View {
     VStack(alignment: .leading, spacing: 7) {
-      Text("描述").font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.groupTitle)
-        .padding(.horizontal, 20)
-        .accessibilityAddTraits(.isHeader)
+      SettingsGroupHeader(title: "描述").padding(.horizontal, 20)
       VStack(alignment: .leading, spacing: 0) {
         ZStack(alignment: .topLeading) {
           if model.prompt.isEmpty {

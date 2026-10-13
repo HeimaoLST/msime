@@ -14,6 +14,18 @@
  * a request actually sends is still whatever is stored in preferences.
  */
 import { fillProviderDefaults, known, swapTokenSlot, type TokenMap } from "./provider-helpers";
+import {
+  deepseekChatEndpoint,
+  deepseekDocumentationUrl,
+  dashScopeChatEndpoint,
+  everyApiModelsUrl,
+  groqChatEndpoint,
+  groqDocumentationUrl,
+  openAiChatEndpoint,
+  openAiModelsDocumentationUrl,
+  siliconFlowChatEndpoint,
+  siliconFlowTextDocumentationUrl,
+} from "../core/provider-resources";
 
 export type ProviderDefaults = {
   endpoint: string;
@@ -29,6 +41,7 @@ export const ASR_SERVICE_PROVIDER_IDS: readonly string[] = [
   "groq",
   "everyapi",
   "mistral",
+  "bailian",
   "doubao",
 ];
 
@@ -76,9 +89,9 @@ export const ASR_PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
   },
   everyapi: {
     endpoint: "https://api.everyapi.ai/v1/audio/transcriptions",
-    model: "openai/whisper-large-v3-turbo",
-    models: ["openai/whisper-large-v3-turbo", "volc.seedasr.sauc.duration"],
-    documentation: "https://everyapi.ai/models",
+    model: "volc.seedasr.sauc.duration",
+    models: ["volc.seedasr.sauc.duration"],
+    documentation: everyApiModelsUrl,
   },
   mistral: {
     endpoint: "https://api.mistral.ai/v1/audio/transcriptions",
@@ -86,32 +99,39 @@ export const ASR_PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
     models: ["voxtral-mini-latest"],
     documentation: "https://docs.mistral.ai/studio/audio/speech_to_text/offline_transcription",
   },
+  // 阿里云百炼的 Qwen3-ASR 整句识别：OpenAI 兼容的 Chat Completions，录音作为 input_audio 上传（请求格式 chat_audio）。地址也可以换成控制台给出的业务空间专属地址。
+  bailian: {
+    endpoint: dashScopeChatEndpoint,
+    model: "qwen3-asr-flash",
+    models: ["qwen3-asr-flash", "qwen3-asr-flash-2026-02-10"],
+    documentation: "https://help.aliyun.com/zh/model-studio/qwen-speech-recognition",
+  },
 };
 
 export const POLISH_PROVIDER_DEFAULTS: Record<string, ProviderDefaults> = {
   siliconflow: {
-    endpoint: "https://api.siliconflow.cn/v1/chat/completions",
+    endpoint: siliconFlowChatEndpoint,
     model: "Qwen/Qwen3-8B",
     models: ["Qwen/Qwen3-8B", "Qwen/Qwen3.6-27B"],
-    documentation: "https://docs.siliconflow.cn/docs/userguide/capabilities/text-generation",
+    documentation: siliconFlowTextDocumentationUrl,
   },
   openai: {
-    endpoint: "https://api.openai.com/v1/chat/completions",
+    endpoint: openAiChatEndpoint,
     model: "gpt-4o-mini",
     models: ["gpt-4o-mini", "gpt-4.1-mini"],
-    documentation: "https://developers.openai.com/api/docs/models/gpt-4.1-mini",
+    documentation: openAiModelsDocumentationUrl,
   },
   deepseek: {
-    endpoint: "https://api.deepseek.com/chat/completions",
+    endpoint: deepseekChatEndpoint,
     model: "deepseek-v4-flash",
     models: ["deepseek-v4-flash", "deepseek-v4-pro"],
-    documentation: "https://api-docs.deepseek.com/",
+    documentation: deepseekDocumentationUrl,
   },
   groq: {
-    endpoint: "https://api.groq.com/openai/v1/chat/completions",
+    endpoint: groqChatEndpoint,
     model: "llama-3.3-70b-versatile",
     models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
-    documentation: "https://console.groq.com/docs/quickstart",
+    documentation: groqDocumentationUrl,
   },
 };
 

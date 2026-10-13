@@ -29,9 +29,8 @@ struct ClipboardHistoryStore {
   let file: URL
 
   init(directory: URL? = nil) {
-    root = directory ?? FileManager.default.containerURL(
-      forSecurityApplicationGroupIdentifier: InputSchemePreference.appGroupIdentifier)
-      ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    root = directory ?? IOSSharedPaths.sharedContainerOrApplicationSupport(
+      for: InputSchemePreference.appGroupIdentifier)
     file = root.appendingPathComponent("MSIME/clipboard_history.json")
   }
 
@@ -55,10 +54,7 @@ struct ClipboardHistoryStore {
 
   /// The shared store writes a non-negative JSON `u64`; reject NSNumber's boolean and lossy conversions.
   static func strictTimestampMilliseconds(_ value: NSNumber) -> UInt64? {
-    guard CFGetTypeID(value) != CFBooleanGetTypeID(),
-          let integer = UInt64(value.stringValue),
-          NSNumber(value: integer).compare(value) == .orderedSame else { return nil }
-    return integer
+    SharedNumber.strictUInt64(value)
   }
 
   func add(_ text: String) throws {
@@ -111,12 +107,7 @@ struct ClipboardHistoryStore {
 
   private func protectSharedState() {
     let directory = file.deletingLastPathComponent()
-    if FileManager.default.fileExists(atPath: directory.path) {
-      var protectedDirectory = directory
-      var values = URLResourceValues()
-      values.isExcludedFromBackup = true
-      try? protectedDirectory.setResourceValues(values)
-    }
+    IOSSharedPaths.excludeFromBackup(directory)
     if FileManager.default.fileExists(atPath: file.path) {
       try? FileManager.default.setAttributes(
         [.protectionKey: FileProtectionType.complete], ofItemAtPath: file.path)

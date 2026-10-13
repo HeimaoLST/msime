@@ -1,3 +1,7 @@
+import { subtleMeta } from "../core/row-style";
+import { mobileGroupSurface } from "../core/platform-controls-style";
+import { standardStack } from "../core/page-style";
+
 /**
  * The prose pages -- about, the guides, feedback -- and the AI skin generator's cards.
  *
@@ -21,7 +25,7 @@ export const note = "flex flex-col gap-[5px] text-secondary [&>span]:text-xs [&>
  * each card with a single row, rules it off, and runs the rest together; the first row is the one
  * that carries the whole card, so it gets the air.
  */
-export const guide = "flex flex-col gap-3";
+export const guide = standardStack;
 export const guideRow =
   "grid grid-cols-[minmax(0,170px)_minmax(0,1fr)] items-baseline gap-5 max-narrow:grid-cols-1 max-narrow:gap-1";
 export const guideLead = "border-b border-[var(--divider-color)] pb-3.5";
@@ -40,7 +44,7 @@ export const versionRow = "cursor-default items-start hover:bg-[var(--p-row-bg)]
 export const updateButton = "mt-0 shrink-0 grow-0 basis-auto";
 export const updateStatus = "mt-[5px]! mb-0! text-xs";
 export const updateResult =
-  "[padding:var(--p-row-pad)] [color:var(--p-sub)] [&>p]:mt-0 [&>p]:mb-2 [&>p]:text-xs [&_code]:inline-block [&_code]:max-w-full [&_code]:break-anywhere";
+  "[padding:var(--p-row-pad)] [color:var(--p-sub)] [&>p]:mt-0 [&>p]:mb-2 [&>p]:text-xs [&_code]:inline-block [&_code]:max-w-full [&_code]:wrap-anywhere";
 export const updateWarning = "text-danger!";
 
 // ---- HarmonyOS 的「关于」和「反馈」页 ----
@@ -53,7 +57,7 @@ export const appHeroCircle =
 export const appHeroText = "flex min-w-[160px] flex-1 flex-col gap-[3px]";
 export const appHeroTitle = "text-[18px] font-bold [color:var(--p-text)]";
 export const appHeroVersion = "text-[13px] [color:var(--p-sub)]";
-export const appHeroCopyright = "text-[12px] [color:var(--p-sub)]";
+export const appHeroCopyright = subtleMeta;
 export const appHeroStatus = "m-0 text-[12px] [color:var(--p-sub)]";
 /** 检查更新胶囊：强调色底配强调色上的前景文字；检查发现当前已是最新版本后改为无底色的强调色文字。检查期间保持完整颜色，此时禁用只是为了防止重复点击。 */
 export const updatePill = (latest: boolean) =>
@@ -66,8 +70,12 @@ export const updatePill = (latest: boolean) =>
 export const rowButton =
   "shrink-0 cursor-pointer rounded-[var(--p-r-ctl)] px-3.5 py-[5px] text-[13px] whitespace-nowrap [background:var(--p-btn-bg)] [border:var(--p-btn-border)] [color:var(--p-btn-fg)] [font-family:inherit] active:opacity-60 disabled:cursor-default disabled:opacity-50";
 
+/** 「系统信息」行尾的值：次要文字色，右对齐，长的发行版名或设备型号在行内折行，可以选中复制。 */
+export const systemInfoValue =
+  "max-w-[min(35ch,45vw)] text-right [overflow-wrap:anywhere] select-text [font-size:var(--p-sub-fs)] [color:var(--p-sub)]";
+
 /** 「描述」卡片：用分组的底色和圆角包住一个无边框的 textarea。 */
-export const feedbackTextCard = "overflow-hidden rounded-[20px] bg-[var(--p-group-bg)]";
+export const feedbackTextCard = mobileGroupSurface;
 export const feedbackTextarea =
   "block min-h-[150px] w-full resize-none border-0 bg-transparent px-4 py-3.5 text-[17px] leading-normal outline-none [color:var(--p-text)] [font-family:inherit] placeholder:[color:var(--p-sub)]";
 export const feedbackCounter = "px-4 text-[12px] [color:var(--p-sub)]";
@@ -86,7 +94,7 @@ export const feedbackCard =
 export const feedbackIcon =
   "flex size-[38px] items-center justify-center rounded-[10px] border [border-color:var(--p-hair)]";
 export const feedbackBody =
-  "min-w-0 [&>p]:mt-[3px] [&>p]:mb-[5px] [&>p]:[font-size:var(--p-sub-fs)] [&>p]:[color:var(--p-sub)] [&_code]:block [&_code]:break-anywhere [&_code]:text-xs [&_code]:[color:var(--p-sub)]";
+  "min-w-0 [&>p]:mt-[3px] [&>p]:mb-[5px] [&>p]:[font-size:var(--p-sub-fs)] [&>p]:[color:var(--p-sub)] [&_code]:block [&_code]:wrap-anywhere [&_code]:text-xs [&_code]:[color:var(--p-sub)]";
 export const feedbackTitle = "[font-size:var(--p-row-fs)] font-semibold [color:var(--p-text)]";
 
 // ---- the AI skin generator ----

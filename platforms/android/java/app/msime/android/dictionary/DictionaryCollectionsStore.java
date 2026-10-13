@@ -109,7 +109,7 @@ public final class DictionaryCollectionsStore {
         }
         JSONObject value = value(response);
         if (value == null) return Result.failed(failureMessage(errorOf(response)));
-        Integer sent = nonNegativeInteger(value.opt("sent"));
+        Integer sent = JsonPolicy.nonNegativeInteger(value.opt("sent"));
         return Result.of(sent == null ? 0 : sent);
     }
 
@@ -206,7 +206,7 @@ public final class DictionaryCollectionsStore {
         try {
             JSONObject value = dictionary(context, action("count").put("kind", kind));
             if (value == null) return Result.failed(failureMessage(""));
-            Long count = strictLong(value.opt("count"));
+            Long count = JsonPolicy.strictLong(value.opt("count"));
             return Result.of(count == null || count < 0 ? 0L : count);
         } catch (JSONException error) {
             return Result.failed(failureMessage(""));
@@ -222,7 +222,7 @@ public final class DictionaryCollectionsStore {
     public static Result<WordPage> words(Context context, String kind, String query, int offset, int limit) {
         try {
             JSONObject request = action("list").put("kind", kind).put("offset", BoundsPolicy.nonNegative(offset))
-                .put("limit", KeyboardGeometry.bounded(limit, 1, 1000));
+                .put("limit", BoundsPolicy.bounded(limit, 1, 1000));
             if (query != null && !query.isEmpty()) request.put("query", query);
             JSONObject value = dictionary(context, request);
             if (value == null) return Result.failed(failureMessage(""));
@@ -242,11 +242,11 @@ public final class DictionaryCollectionsStore {
                 JSONObject value = dictionary(context, action("export").put("kind", kind).put("format", "standard")
                     .put("offset", offset).put("limit", EXPORT_PAGE));
                 if (value == null) return Result.failed(failureMessage(""));
-                String page = exportPage(value.opt("text"));
+                String page = JsonPolicy.strictString(value.opt("text"));
                 if (page == null) return Result.failed(failureMessage(""));
                 int nextBytes = exportBytesAfterPage(bytes, page);
                 if (nextBytes < 0) return Result.failed(failureMessage("collections_too_large"));
-                if (text == null) text = new StringBuilder(Math.max(16, page.length()));
+                if (text == null) text = new StringBuilder(BoundsPolicy.atLeast(page.length(), 16));
                 text.append(page);
                 bytes = nextBytes;
                 Object rawHasMore = value.opt("has_more");
@@ -281,7 +281,7 @@ public final class DictionaryCollectionsStore {
             JSONObject value = value(response);
             if (value == null) return Result.failed(failureMessage(errorOf(response)));
             SyncSignals.markDirty(context, SyncSwitch.DICTIONARY);
-            Integer pending = nonNegativeInteger(value.opt("pending_count"));
+            Integer pending = JsonPolicy.nonNegativeInteger(value.opt("pending_count"));
             return Result.of(pending == null ? 0 : pending);
         } catch (JSONException | RuntimeException | LinkageError error) {
             return Result.failed(failureMessage(""));
@@ -312,7 +312,7 @@ public final class DictionaryCollectionsStore {
         }
         JSONObject value = value(response);
         if (value == null) return Result.failed(failureMessage(errorOf(response)));
-        Integer queued = nonNegativeInteger(value.opt("queued"));
+        Integer queued = JsonPolicy.nonNegativeInteger(value.opt("queued"));
         return Result.of(queued == null ? 0 : queued);
     }
 
@@ -320,10 +320,7 @@ public final class DictionaryCollectionsStore {
     public static boolean validName(String name) {
         if (name == null || name.isEmpty() || !name.equals(TextPolicy.stripped(name))) return false;
         if (!TextPolicy.withinCodePoints(name, MAX_NAME_CHARS)) return false;
-        for (int index = 0; index < name.length(); index++) {
-            if (Character.isISOControl(name.charAt(index))) return false;
-        }
-        return true;
+        return !TextPolicy.hasControl(name);
     }
 
     /** 拼音编码能否作为新词的编码：小写字母，音节之间可以用撇号分隔，不以撇号开头或结尾。 */
@@ -352,11 +349,6 @@ public final class DictionaryCollectionsStore {
     /** 编码的展示写法：音节之间用排版撇号（`pin’yin`），与设计一致。 */
     public static String displayCode(String code) {
         return code == null ? "" : code.replace('\'', '’');
-    }
-
-    /** 条数的展示写法，例如 `128,406 条`。 */
-    public static String countLabel(long count) {
-        return NumberPolicy.grouped(BoundsPolicy.nonNegative(count)) + " 条";
     }
 
     /** 从文件名得到新词库的名字：去掉扩展名（`.dict.yaml` 算一个），截到 32 个字，收不出来时用「导入的词库」。 */
@@ -448,8 +440,8 @@ public final class DictionaryCollectionsStore {
                 String name = JsonPolicy.strictString(item.opt("name"));
                 String kind = JsonPolicy.strictString(item.opt("kind"));
                 Boolean enabled = JsonPolicy.strictBoolean(item.opt("enabled"));
-                Integer entryCount = nonNegativeInteger(item.opt("entry_count"));
-                Integer pending = nonNegativeInteger(item.opt("pending"));
+                Integer entryCount = JsonPolicy.nonNegativeInteger(item.opt("entry_count"));
+                Integer pending = JsonPolicy.nonNegativeInteger(item.opt("pending"));
                 String type = source == null ? "user" : JsonPolicy.strictString(source.opt("type"));
                 String resource = source == null || !source.has("resource_id")
                     ? "" : JsonPolicy.strictString(source.opt("resource_id"));
@@ -470,8 +462,10 @@ public final class DictionaryCollectionsStore {
         }
         JSONObject report = value.optJSONObject("import");
         ImportReport importReport = report == null ? null : new ImportReport(
-            nonNegativeInteger(report.opt("imported"), 0), nonNegativeInteger(report.opt("duplicates"), 0),
-            nonNegativeInteger(report.opt("failed"), 0), JsonPolicy.strictTrue(report.opt("truncated")));
+            JsonPolicy.nonNegativeInteger(report.opt("imported"), 0),
+            JsonPolicy.nonNegativeInteger(report.opt("duplicates"), 0),
+            JsonPolicy.nonNegativeInteger(report.opt("failed"), 0),
+            JsonPolicy.strictTrue(report.opt("truncated")));
         return new View(ListPolicy.copyOrEmpty(collections), ListPolicy.copyOrEmpty(formats), importReport);
     }
 
@@ -486,7 +480,7 @@ public final class DictionaryCollectionsStore {
                 String kind = JsonPolicy.strictString(item.opt("kind"));
                 String key = JsonPolicy.strictString(item.opt("key"));
                 String word = JsonPolicy.strictString(item.opt("value"));
-                Long weight = strictLong(item.opt("weight"));
+                Long weight = JsonPolicy.strictLong(item.opt("weight"));
                 String source = JsonPolicy.strictString(item.opt("source"));
                 if (kind == null || key == null || word == null || weight == null || source == null) continue;
                 words.add(new Word(kind, key, word, weight, source));
@@ -550,44 +544,15 @@ public final class DictionaryCollectionsStore {
         if (response == null) return null;
         try {
             JSONObject root = new JSONObject(response);
-            return JsonPolicy.strictTrue(root.opt("ok"))
-                ? root.optJSONObject("value") : null;
+            return JsonPolicy.objectValue(root);
         } catch (JSONException error) {
             return null;
         }
     }
 
-    /** JSON response flags must remain booleans; org.json otherwise coerces strings. */
-    static Boolean strictBoolean(Object value) {
-        return JsonPolicy.strictBoolean(value);
-    }
-
-    public static String strictString(Object value) {
-        return JsonPolicy.strictString(value);
-    }
-
-    /** Export pages are text from the native response; do not let org.json coerce malformed values. */
-    public static String exportPage(Object value) {
-        return strictString(value);
-    }
-
-    public static Integer strictInteger(Object value) {
-        return JsonPolicy.strictInteger(value);
-    }
-
-    /** 词库计数必须是非负 JSON 整数；非法值按调用方的缺省值处理。 */
+    /** Compatibility entry point; the shared rule lives in {@link JsonPolicy}. */
     public static Integer nonNegativeInteger(Object value) {
-        Integer parsed = strictInteger(value);
-        return parsed == null || parsed < 0 ? null : parsed;
-    }
-
-    static int nonNegativeInteger(Object value, int fallback) {
-        Integer parsed = nonNegativeInteger(value);
-        return parsed == null ? fallback : parsed;
-    }
-
-    public static Long strictLong(Object value) {
-        return JsonPolicy.strictLong(value);
+        return JsonPolicy.nonNegativeInteger(value);
     }
 
     private static String errorOf(String response) {

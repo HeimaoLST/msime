@@ -49,19 +49,17 @@ import {
 } from "../entry/src/main/ets/keyboard/candidate/CandidateGlossLayoutPolicy";
 import {
   KeyboardScheme,
+  KeyGrid,
   SchemeDefinition,
   PreferenceMapping,
 } from "../entry/src/main/ets/keyboard/KeyboardScheme";
+import { FourteenKeyLayout } from "../entry/src/main/ets/keyboard/input/FourteenKeyLayout";
 import { AppEdition } from "../entry/src/main/ets/keyboard/AppEdition";
 import { ReplyKeyboardPolicy } from "../entry/src/main/ets/keyboard/ReplyKeyboardPolicy";
 import { ReplyContextPolicy } from "../entry/src/main/ets/keyboard/ReplyContextPolicy";
 import { CommunityReplyLibraryPolicy } from "../entry/src/main/ets/keyboard/CommunityReplyLibraryPolicy";
 import { TextPolicy } from "../entry/src/main/ets/keyboard/TextPolicy";
-import {
-  NineKeyLayout,
-  NineKey,
-  NumberKeypadOrder,
-} from "../entry/src/main/ets/keyboard/input/NineKeyLayout";
+import { NineKeyLayout, NineKey } from "../entry/src/main/ets/keyboard/input/NineKeyLayout";
 import {
   NineKeyPanelBackspace,
   NineKeyPanelMode,
@@ -208,7 +206,11 @@ import { ShuangpinKeyHintPolicy } from "../entry/src/main/ets/keyboard/input/Shu
 import { EditorPolicy, EditorTraits } from "../entry/src/main/ets/keyboard/input/EditorPolicy";
 import { EditEchoLedger } from "../entry/src/main/ets/keyboard/input/EditEchoLedger";
 import { KeyboardSkin } from "../entry/src/main/ets/keyboard/skin/KeyboardSkin";
-import { GlobalTheme, KeyboardThemePalette } from "../entry/src/main/ets/keyboard/skin/GlobalTheme";
+import {
+  GlobalTheme,
+  KeyboardThemePalette,
+  ResolvedTheme,
+} from "../entry/src/main/ets/keyboard/skin/GlobalTheme";
 import { AppThemePalette, AppThemeSeed } from "../entry/src/main/ets/keyboard/skin/AppThemePalette";
 import { AppThemeStore } from "../entry/src/main/ets/keyboard/skin/AppThemeStore";
 import {
@@ -249,6 +251,7 @@ import {
 } from "../entry/src/main/ets/keyboard/input/HandwritingRecognitionQueue";
 import { KeyboardFormFactorPolicy } from "../entry/src/main/ets/keyboard/KeyboardFormFactorPolicy";
 import { SettingsFormFactorCapabilities } from "../entry/src/main/ets/keyboard/settings/SettingsFormFactorCapabilities";
+import { VocabularyReviewRequest } from "../entry/src/main/ets/keyboard/settings/VocabularyReviewRequest";
 import { SymbolPanelPolicy } from "../entry/src/main/ets/keyboard/input/SymbolPanelPolicy";
 import {
   BackspaceHoldAction,
@@ -268,20 +271,27 @@ import {
   DEFAULT_VOICE_INPUT_CONFIGURATION,
   VoiceInputConfiguration,
   VoiceInputConfigurationPolicy,
+  DoubaoCredentialPolicy,
 } from "../entry/src/main/ets/keyboard/input/VoiceInputConfiguration";
 import {
   AccountCloudBridge,
   AccountSessionStore,
   AccountTransport,
   AccountTransportResponse,
+  CloudClipboardE2eHost,
   MAX_DICTIONARY_EXPORT_BYTES,
   MAX_SNAPSHOT_DOWNLOAD_BYTES,
   COMMUNITY_REPORT_REASONS,
   dictionaryChangePageChanged,
   parseResponseContentLength,
   accountReplyValue,
+  storedSessionUserId,
   strictAccountOk,
 } from "../entry/src/main/ets/account/AccountCloudBridge";
+import {
+  retryAccountRequest,
+  staleConnectionFailure,
+} from "../entry/src/main/ets/account/AccountRetryPolicy";
 import {
   CrashDestination,
   CrashReport,
@@ -297,6 +307,7 @@ import {
   CLOUD_CLIPBOARD_EMPTY,
   CLOUD_CLIPBOARD_FAILED,
   CLOUD_CLIPBOARD_LOADING,
+  CLOUD_CLIPBOARD_PENDING,
   CLOUD_CLIPBOARD_SEND,
   CLOUD_CLIPBOARD_SEND_FAILED,
   CLOUD_CLIPBOARD_SENT,
@@ -324,6 +335,7 @@ import {
   applyAccountPreferences,
   localAccountPreferences,
   mergeAccountPreferences,
+  snapshotWithPreferences,
 } from "../entry/src/main/ets/account/AccountPreferencePlan";
 import { TypingStatisticsPolicy } from "../entry/src/main/ets/keyboard/TypingStatisticsPolicy";
 import {
@@ -515,6 +527,30 @@ console.log("KeyboardGeometry");
 
 console.log("DictionaryMaintenancePolicy");
 
+console.log("VocabularyReviewRequest");
+group("vocabulary review request carries resources and gates plugins", () => {
+  const mobile = VocabularyReviewRequest.build(
+    "/synthetic/state",
+    "/synthetic/resources",
+    "2026-01-02",
+    { operation: "load" },
+    false,
+  );
+  check(mobile.directory === "/synthetic/state", "request keeps the state directory");
+  check(mobile.resources === "/synthetic/resources", "request carries the resource directory");
+  check(mobile.day === "2026-01-02", "request keeps the caller's local day");
+  check(mobile.plugins === undefined, "mobile request does not expose plugin storage");
+
+  const desktop = VocabularyReviewRequest.build(
+    "/synthetic/state",
+    "/synthetic/resources",
+    "2026-01-02",
+    { operation: "load" },
+    true,
+  );
+  check(desktop.plugins === "/synthetic/state/plugins", "desktop request exposes plugin storage");
+});
+
 console.log("HandwritingStrokePolicy");
 
 console.log("KeyboardFormFactorPolicy");
@@ -523,32 +559,46 @@ console.log("VoiceRecognitionPolicy");
 
 group("maps Harmony commits to shared typing-statistics sources", () => {
   check(
-    TypingStatisticsPolicy.source("quanpin", "xiaohe", false, false, "none") === "quanpin",
+    TypingStatisticsPolicy.source("quanpin", "xiaohe", false, KeyGrid.NONE, "none") === "quanpin",
     "quanpin uses the shared source id",
   );
   check(
-    TypingStatisticsPolicy.source("quanpin", "xiaohe", false, true, "none") === "nineKey",
+    TypingStatisticsPolicy.source("quanpin", "xiaohe", false, KeyGrid.NINE_KEY, "none") ===
+      "nineKey",
     "nine-key quanpin has its own source id",
   );
   check(
-    TypingStatisticsPolicy.source("shuangpin", "microsoft", false, false, "none") === "microsoft",
+    TypingStatisticsPolicy.source("quanpin", "xiaohe", false, KeyGrid.FOURTEEN_KEY, "none") ===
+      "fourteenKey" &&
+      TypingStatisticsPolicy.source("quanpin", "xiaohe", true, KeyGrid.FOURTEEN_KEY, "none") ===
+        "english",
+    "全拼 14 键记在 fourteenKey 名下，英文时仍记英文",
+  );
+  check(
+    TypingStatisticsPolicy.source("shuangpin", "microsoft", false, KeyGrid.NONE, "none") ===
+      "microsoft",
     "shuangpin profile is retained",
   );
   check(
-    TypingStatisticsPolicy.source("wubi", "xiaohe", false, false, "none") === "wubi",
+    TypingStatisticsPolicy.source("wubi", "xiaohe", false, KeyGrid.NONE, "none") === "wubi",
     "wubi uses the shared source id",
   );
   check(
-    TypingStatisticsPolicy.source("quanpin", "xiaohe", true, false, "none") === "english",
+    TypingStatisticsPolicy.source("quanpin", "xiaohe", true, KeyGrid.NONE, "none") === "english",
     "dedicated English takes precedence",
   );
   check(
-    TypingStatisticsPolicy.source("quanpin", "xiaohe", false, false, "emoji") === "local",
+    TypingStatisticsPolicy.source("quanpin", "xiaohe", false, KeyGrid.NONE, "emoji") === "local",
     "local modes are attributed as local input",
   );
   check(
-    TypingStatisticsPolicy.source("quanpin", "xiaohe", false, false, "temporary_japanese") ===
-      "japanese",
+    TypingStatisticsPolicy.source(
+      "quanpin",
+      "xiaohe",
+      false,
+      KeyGrid.NONE,
+      "temporary_japanese",
+    ) === "japanese",
     "temporary Japanese retains its language source",
   );
   check(
@@ -569,7 +619,7 @@ group("maps Harmony commits to shared typing-statistics sources", () => {
 
 group("names keys with the shared key heatmap ids and nothing else", () => {
   const knownKeyId = (id: string): boolean => KEY_IDS.includes(id);
-  check(KEY_IDS.length === 127, "the whitelist has the shared store's 127 ids");
+  check(KEY_IDS.length === 141, "the whitelist has the shared store's 141 ids");
   check(new Set(KEY_IDS).size === KEY_IDS.length, "no id is listed twice");
   for (const id of [
     KeyIdPolicy.SPACE,
@@ -829,6 +879,28 @@ group("bounds and deduplicates asynchronous online AI candidates", () => {
   check(
     OnlineCandidatePolicy.acceptsCloudBody("你".repeat(128 * 1024)) === false,
     "oversized UTF-8 cloud responses are rejected by byte size",
+  );
+});
+
+group("online candidate identity changes with provider eligibility", () => {
+  const query = {
+    generation: 1,
+    session_id: 7,
+    identity: "fixture",
+    cache_key: "ni'hao",
+    cloud_eligible: true,
+    ai_eligible: true,
+    cloud_candidates: true,
+    ai_assistant: { enabled: true, model: "fixture", candidate_limit: 2 },
+  };
+  const original = OnlineCandidatePolicy.signature(query);
+  check(
+    OnlineCandidatePolicy.signature({ ...query, cloud_eligible: false }) !== original,
+    "cloud eligibility invalidates an online request while AI remains eligible",
+  );
+  check(
+    OnlineCandidatePolicy.signature({ ...query, ai_eligible: false }) !== original,
+    "AI eligibility invalidates an online request while cloud remains eligible",
   );
 });
 
@@ -1280,6 +1352,80 @@ group("describes the configured voice provider accurately", () => {
   );
 });
 
+group(
+  "an untouched Doubao default stays on the system recognizer, a partial one says what is missing",
+  () => {
+    const doubao = { ...DEFAULT_VOICE_INPUT_CONFIGURATION, asr_provider: "doubao" };
+    // The shipped default is doubao with no credential at all: that is "not configured", not an error.
+    check(
+      !DoubaoCredentialPolicy.attempted(doubao),
+      "the shipped default does not route to Doubao",
+    );
+    check(DoubaoCredentialPolicy.missing(doubao) === null, "the shipped default raises no error");
+    check(
+      VoiceInputConfigurationPolicy.description(doubao).includes("暂用 HarmonyOS 系统语音识别"),
+      "the voice panel says the system recognizer is in use",
+    );
+    check(
+      !DoubaoCredentialPolicy.attempted({
+        ...DEFAULT_VOICE_INPUT_CONFIGURATION,
+        asr_provider: "system",
+        asr_token: "synthetic-token",
+      }),
+      "another provider never routes to Doubao",
+    );
+
+    const keyed = { ...doubao, asr_token: " synthetic-token " };
+    check(
+      DoubaoCredentialPolicy.attempted(keyed) && DoubaoCredentialPolicy.missing(keyed) === null,
+      "a key alone is a complete API-key configuration",
+    );
+    check(DoubaoCredentialPolicy.token(keyed) === "synthetic-token", "the key is trimmed");
+    const slotted = { ...doubao, asr_tokens: { doubao: "slot-token" } };
+    check(
+      DoubaoCredentialPolicy.attempted(slotted) &&
+        DoubaoCredentialPolicy.token(slotted) === "slot-token",
+      "a key kept in the per-provider slot counts, as in the shared resolver",
+    );
+    check(
+      DoubaoCredentialPolicy.token({ ...slotted, asr_token: "box-token" }) === "box-token",
+      "the current box wins over the slot",
+    );
+    check(
+      VoiceInputConfigurationPolicy.description(keyed).includes("豆包实时语音识别"),
+      "a configured Doubao is described as Doubao",
+    );
+
+    const appOnly = { ...doubao, asr_app_key: "synthetic-app" };
+    check(
+      DoubaoCredentialPolicy.attempted(appOnly),
+      "an App ID alone means the user is setting up Doubao",
+    );
+    check(
+      DoubaoCredentialPolicy.missing(appOnly) === "豆包缺少 API Key，请在设置中填写",
+      "a missing API key is named instead of silently using the system recognizer",
+    );
+    check(
+      DoubaoCredentialPolicy.missing({ ...appOnly, doubao_auth_mode: "legacy" }) ===
+        "豆包缺少 Access Token，请在设置中填写",
+      "legacy mode names its access token",
+    );
+    check(
+      DoubaoCredentialPolicy.missing({ ...keyed, doubao_auth_mode: "legacy" }) ===
+        "豆包旧版鉴权缺少 App ID，请在设置中填写",
+      "legacy mode without an App ID names it",
+    );
+    check(
+      DoubaoCredentialPolicy.missing({
+        ...keyed,
+        doubao_auth_mode: "legacy",
+        asr_app_key: "synthetic-app",
+      }) === null,
+      "a complete legacy configuration has nothing missing",
+    );
+  },
+);
+
 group("keeps desktop-only chrome off touch devices", () => {
   check(KeyboardFormFactorPolicy.isDesktop("2in1"), "a 2-in-1 gets the desktop candidate window");
   check(!KeyboardFormFactorPolicy.isDesktop("phone"), "a phone keeps the touch keyboard");
@@ -1530,6 +1676,11 @@ group("allows reads during composition without restarting the session", () => {
   const decision = DictionaryMaintenancePolicy.decide("list", true);
   check(decision.allowed, "dictionary reads remain available while composing");
   check(!decision.maintenance, "dictionary reads do not request maintenance");
+  // 设置页的五笔查码只读码表：组字时也能查，不停掉键盘会话，也不进个人词库队列。
+  const lookup = DictionaryMaintenancePolicy.decide("wubi_codes", true);
+  check(lookup.allowed, "wubi_codes is answered while composing");
+  check(!lookup.maintenance, "wubi_codes does not request maintenance");
+  check(!lookup.queued, "wubi_codes goes to the Engine, not the queue");
 });
 
 group("opens an exclusive window for idle mutations", () => {
@@ -1629,8 +1780,8 @@ group("polishing acts on what is in front of the caret, and only if it still is"
   check(AiPolishPolicy.replacement("", result, "") === null, "an empty source replaces nothing");
 
   // Counted in code points, not UTF-16 units: an emoji is one thing the user sees deleted and two
-  // units of JavaScript string. The unit `deleteBackwardSync` takes is the one open question here,
-  // which is why the re-read above stands between a wrong answer and a corrupted message.
+  // units of JavaScript string. On the device `deleteForwardSync(1)` removes a whole 😀, so the unit
+  // is not UTF-16; the re-read above still stands between any other surprise and a corrupted message.
   const withEmoji = "今天天气不错🙂";
   check(withEmoji.length === 8, "the source is eight UTF-16 units");
   check(codePointLength(withEmoji) === 7, "and seven code points");
@@ -1948,6 +2099,56 @@ group("a key's touch region reaches into half of each gap and no further", () =>
   );
 });
 
+group("the language key takes the ambiguous touches between it and the return key", () => {
+  const languageWidth = 35;
+  const returnWidth = 64;
+  const height = 42;
+  const halfKey = 3;
+  const halfRow = 3.5;
+  const gap = halfKey * 2;
+  const yieldVp = KeyboardGeometry.RETURN_YIELD_VP;
+  check(
+    yieldVp > 0 && yieldVp < returnWidth / 4,
+    "the return key yields a few vp, not a large part of itself",
+  );
+  // 中/英向右伸过整个键距再加让出的那段；回车整体右移同样的量。回车键帽的左边缘在 languageWidth + gap。
+  const language = KeyboardGeometry.hitOffsets(halfKey, halfRow, gap + yieldVp, halfRow);
+  const returnKey = KeyboardGeometry.shiftedHitOffsets(yieldVp, halfRow, halfRow);
+  const returnLeft = languageWidth + gap;
+  let owned = true;
+  for (let x = languageWidth - 2; x < returnLeft + returnWidth / 2; x += 0.25) {
+    const inLanguage = inHitRegion(language, languageWidth, height, x, height / 2);
+    const inReturn = inHitRegion(returnKey, returnWidth, height, x - returnLeft, height / 2);
+    const expectLanguage = x < returnLeft + yieldVp;
+    // 两块区域在分界点上各自包含边界，只在那一个点上同时命中。
+    if (x !== returnLeft + yieldVp && (inLanguage === inReturn || inLanguage !== expectLanguage)) {
+      owned = false;
+    }
+  }
+  check(
+    owned,
+    "every point from the language key to mid-return belongs to one key, split inside the return key",
+  );
+  check(
+    inHitRegion(returnKey, returnWidth, height, returnWidth + yieldVp, height / 2),
+    "the return key's region reaches past its right edge into the keyboard's margin",
+  );
+  check(
+    inHitRegion(returnKey, returnWidth, height, returnWidth / 2, -halfRow) &&
+      inHitRegion(returnKey, returnWidth, height, returnWidth / 2, height + halfRow),
+    "and still reaches half a row gap above and below",
+  );
+  const negative = KeyboardGeometry.shiftedHitOffsets(-4, 0, 0);
+  check(
+    negative.length === 1 && negative[0].x === 0,
+    "a negative shift never moves the key's region to the left",
+  );
+  check(
+    KeyboardGeometry.shiftedHitOffsets(Number.NaN, 0, 0)[0].x === 0,
+    "a non-finite shift is no shift",
+  );
+});
+
 group("the height bar's drag resizes one vp for one vp", () => {
   check(
     KeyboardLayoutDragPolicy.height(0, -12) === 12,
@@ -2078,8 +2279,8 @@ group("enabled schemes keep the fixed order and never resolve to nothing", () =>
   );
   check(
     KeyboardScheme.enabledFromPreferenceIds(null) === KeyboardScheme.DEFAULT_ENABLED &&
-      KeyboardScheme.DEFAULT_ENABLED.length === KeyboardScheme.SCHEMES.length - 5,
-    "a null list means every scheme but the five the user turns on",
+      KeyboardScheme.DEFAULT_ENABLED.length === KeyboardScheme.SCHEMES.length - 6,
+    "a null list means every scheme but the six the user turns on",
   );
 });
 
@@ -2103,6 +2304,67 @@ group("selection prefers the shared choice, then the applied one", () => {
   check(
     KeyboardScheme.resolveEnabledSelection(null, null, []) === KeyboardScheme.QUANPIN,
     "an empty enabled set still yields a usable keyboard",
+  );
+});
+
+group("输入方式面板里双拼只留用户设置的那一种（#6450）", () => {
+  const all: SchemeDefinition[] = KeyboardScheme.SCHEMES;
+  const only = (kept: SchemeDefinition): SchemeDefinition[] =>
+    all.filter(
+      (value: SchemeDefinition): boolean => value.shuangpinProfile === null || value === kept,
+    );
+  const same = (actual: SchemeDefinition[], expected: SchemeDefinition[]): boolean =>
+    actual.length === expected.length &&
+    actual.every((value: SchemeDefinition, index: number): boolean => value === expected[index]);
+  check(
+    same(
+      KeyboardScheme.pickerSchemes(all, KeyboardScheme.QUANPIN, undefined),
+      only(KeyboardScheme.XIAOHE),
+    ) &&
+      same(
+        KeyboardScheme.pickerSchemes(all, KeyboardScheme.QUANPIN, "future"),
+        only(KeyboardScheme.XIAOHE),
+      ),
+    "没设置过或值不认识时按小鹤",
+  );
+  check(
+    KeyboardScheme.pickerSchemes(all, KeyboardScheme.QUANPIN, null).indexOf(
+      KeyboardScheme.HANDWRITING,
+    ) < 7,
+    "手写回到第一页的八格之内（英文占第三格）",
+  );
+  check(
+    same(
+      KeyboardScheme.pickerSchemes(all, KeyboardScheme.WUBI, "microsoft"),
+      only(KeyboardScheme.MICROSOFT),
+    ),
+    "设置的是哪一种就留哪一种，位置不变",
+  );
+  check(
+    same(
+      KeyboardScheme.pickerSchemes(all, KeyboardScheme.SHOUDAO, "ziranma"),
+      only(KeyboardScheme.SHOUDAO),
+    ),
+    "选中的双拼总留在面板里",
+  );
+  const partial: SchemeDefinition[] = [
+    KeyboardScheme.QUANPIN,
+    KeyboardScheme.ZIRANMA,
+    KeyboardScheme.SHOUDAO,
+    KeyboardScheme.HANDWRITING,
+  ];
+  check(
+    same(KeyboardScheme.pickerSchemes(partial, KeyboardScheme.XIAOHE, "xiaohe"), [
+      KeyboardScheme.QUANPIN,
+      KeyboardScheme.ZIRANMA,
+      KeyboardScheme.HANDWRITING,
+    ]),
+    "设置的那一种不在列表里时留列表里第一种双拼",
+  );
+  const none: SchemeDefinition[] = [KeyboardScheme.QUANPIN, KeyboardScheme.WUBI];
+  check(
+    same(KeyboardScheme.pickerSchemes(none, null, "microsoft"), none),
+    "没有双拼的列表原样返回",
   );
 });
 
@@ -2348,6 +2610,18 @@ group("a runtime selection that changes nothing produces no update", () => {
 
 console.log("NineKeyLayout");
 
+group("TextPolicy.characters splits by code point, not by UTF-16 code unit", () => {
+  // 鸿蒙的 ArkTS 运行时上 Array.from 和展开都按码元拆，emoji 会变成两个落单的代理项；这个函数用 for...of，在那里也按字符拆。
+  const parts = TextPolicy.characters("a😊b");
+  check(parts.length === 3 && parts[1] === "😊", "an emoji is one character");
+  check(TextPolicy.characters("").length === 0, "an empty string has no characters");
+  check(!TextPolicy.hasControl("你好👋"), "an emoji is not a control character");
+  check(
+    TextPolicy.validMultiline("第一行\n😊", 100, true),
+    "a multi-line text with an emoji is valid",
+  );
+});
+
 group("the quanpin grid is three by three and sends characters, not labels", () => {
   const rows: NineKey[][] = NineKeyLayout.rows();
   check(rows.length === 3, "three rows");
@@ -2387,43 +2661,6 @@ group("the digit layer re-labels the grid instead of handing over ten across", (
       (symbol: string) => !NineKeyLayout.punctuation().includes(symbol),
     ),
     "and offers marks the letter layer does not already carry",
-  );
-});
-
-group("the digit layer can be laid out like a calculator", () => {
-  const faces = (rows: NineKey[][]): string =>
-    rows
-      .flat()
-      .map((key: NineKey) => key.label)
-      .join("");
-  check(
-    faces(NineKeyLayout.digits(NumberKeypadOrder.CALCULATOR)) === "789456123",
-    "calculator order puts 7 8 9 on top and 1 2 3 at the bottom",
-  );
-  check(
-    faces(NineKeyLayout.digits(NumberKeypadOrder.PHONE)) === "123456789",
-    "phone order is the default telephone grid",
-  );
-  check(faces(NineKeyLayout.digits()) === "123456789", "no order given is the phone order");
-  check(
-    faces(NineKeyLayout.digits("abacus")) === "123456789",
-    "an order this build does not know falls back to the phone grid",
-  );
-  check(
-    NineKeyLayout.digits(NumberKeypadOrder.CALCULATOR)
-      .flat()
-      .every((key: NineKey) => key.input === key.label),
-    "every calculator cell still sends the digit it prints",
-  );
-  check(
-    NineKeyLayout.rows()[0][1].label === "ABC" && NineKeyLayout.rows()[2][2].label === "WXYZ",
-    "the letter layer keeps its order whatever the digit layer does",
-  );
-  check(
-    NumberKeypadOrder.normalized(undefined) === NumberKeypadOrder.PHONE &&
-      NumberKeypadOrder.normalized(null) === NumberKeypadOrder.PHONE &&
-      NumberKeypadOrder.normalized("calculator") === NumberKeypadOrder.CALCULATOR,
-    "an older document without the key reads as the phone order",
   );
 });
 
@@ -2530,6 +2767,164 @@ group("a long press exposes the literal digit and letters", () => {
   );
 });
 
+console.log("FourteenKeyLayout");
+
+group("全拼 14 键的键表与引擎的组码表是同一张", () => {
+  const rows = FourteenKeyLayout.rows();
+  check(
+    rows.map((row) => row.map((key) => key.label).join(" ")).join(" / ") ===
+      "QW ER TY UI OP / AS DF GH JK L / ZX CV BN M",
+    "三行依次是 QW ER TY UI OP、AS DF GH JK L、ZX CV BN M",
+  );
+  const keys = rows.reduce((all, row) => all.concat(row), rows[0].slice(0, 0));
+  check(keys.length === 14, "一共 14 个键");
+  check(
+    keys.map((key) => key.letters).join("") === "qwertyuiopasdfghjklzxcvbnm",
+    "26 个字母按 QWERTY 顺序各出现一次",
+  );
+  // 与引擎 `FOURTEEN_KEYPAD` 比对：a 到 z 各自落在哪一组，组码是这一组的首字母。
+  let codes = "";
+  for (let letter = 0x61; letter <= 0x7a; letter++) {
+    const owner = keys.find((key) => key.letters.includes(String.fromCharCode(letter)));
+    codes += owner === undefined ? "?" : owner.input;
+  }
+  check(codes === "abcdedggujjlmbooqeatucqztz", "组码表等于引擎的 abcdedggujjlmbooqeatucqztz");
+  check(
+    keys.map((key) => key.input).join(" ") === "q e t u o a d g j l z c b m",
+    "送给引擎的是每组首字母 q e t u o a d g j l z c b m",
+  );
+  check(
+    keys[0].description === "按键 Q W" &&
+      keys[9].description === "字母 L" &&
+      keys[13].description === "字母 M",
+    "读屏说「按键 Q W」，单字母键说「字母 L」",
+  );
+  check(
+    FourteenKeyLayout.holdOptions(keys[0]).join(",") === "q,w" &&
+      FourteenKeyLayout.holdOptions(keys[12]).join(",") === "b,n",
+    "长按弹出这一键的两个字母",
+  );
+  check(
+    FourteenKeyLayout.holdOptions(keys[9]).length === 0 &&
+      FourteenKeyLayout.holdOptions(keys[13]).length === 0,
+    "L、M 只有一个字母，长按不弹",
+  );
+  for (const key of keys) {
+    const id = KeyIdPolicy.fourteenKey(key.letters);
+    check(id === `Fourteen${key.label}` && KEY_IDS.includes(id), `${key.label} 记在 ${id} 上`);
+  }
+  check(
+    KeyIdPolicy.fourteenKey("q") === null && KeyIdPolicy.fourteenKey("ab") === null,
+    "不是 14 键键面的字母不计",
+  );
+});
+
+group("全拼 14 键是追加在最后的一张卡，只给全拼，默认不启用", () => {
+  const fourteen: SchemeDefinition = KeyboardScheme.QUANPIN_FOURTEEN_KEY;
+  check(
+    KeyboardScheme.SCHEMES[16] === fourteen && KeyboardScheme.SCHEMES.length === 17,
+    "按 append-only 排在笔画之后",
+  );
+  check(
+    fourteen.preferenceId === "fourteen_key" &&
+      fourteen.engineScheme === "quanpin" &&
+      fourteen.shuangpinProfile === null &&
+      fourteen.touchKeyboardLayout === "fourteen_key" &&
+      fourteen.title === "全拼 14 键" &&
+      fourteen.glyph === "拼" &&
+      fourteen.badge === "14",
+    "preferenceId 和布局都是 fourteen_key，卡片「拼」、角标「14」",
+  );
+  check(KeyboardScheme.fromPreferenceId("fourteen_key") === fourteen, "选择器 id 是 fourteen_key");
+  check(
+    KeyboardScheme.fromPreferences("quanpin", null, "fourteen_key") === fourteen,
+    "全拼加 fourteen_key 是 14 键",
+  );
+  check(
+    KeyboardScheme.fromPreferences("quanpin", null, "twenty_six_key") === KeyboardScheme.QUANPIN,
+    "全拼 26 键不会落到 14 键上",
+  );
+  check(
+    KeyboardScheme.fromPreferences("wubi", null, "fourteen_key") === KeyboardScheme.WUBI &&
+      KeyboardScheme.fromPreferences("shuangpin", "ziranma", "fourteen_key") ===
+        KeyboardScheme.ZIRANMA,
+    "别的方案带着 fourteen_key 仍是各自的 26 键",
+  );
+  check(
+    !KeyboardScheme.DEFAULT_ENABLED.includes(fourteen) &&
+      !KeyboardScheme.defaultEnabled(
+        AppEdition.of("pinyin", ["quanpin", "shuangpin"], "quanpin"),
+      ).includes(fourteen),
+    "新装和没存过列表的设备都不启用 14 键",
+  );
+  check(
+    KeyboardScheme.defaultEnabled(AppEdition.of("pinyin", ["quanpin"], "quanpin")).includes(
+      fourteen,
+    ),
+    "只有全拼一个方案的版本照 client-core 启用它提供的全部入口，14 键也在内",
+  );
+  check(
+    !KeyboardScheme.offeredBy(fourteen, AppEdition.of("wubi", ["wubi"], "wubi")),
+    "不提供全拼的版本没有 14 键",
+  );
+  const enabled = KeyboardScheme.enabledFromPreferenceIds(["fourteen_key", "quanpin"]);
+  check(
+    enabled.length === 2 && enabled[0] === KeyboardScheme.QUANPIN && enabled[1] === fourteen,
+    "启用后按声明顺序排在最后",
+  );
+  const mapping: PreferenceMapping = KeyboardScheme.mapping(fourteen, "wubi", "ziranma");
+  check(
+    mapping.scheme === "quanpin" &&
+      mapping.touchKeyboardLayout === "fourteen_key" &&
+      mapping.lastChineseScheme === "quanpin" &&
+      mapping.shuangpinProfile === "ziranma",
+    "选中时写全拼、fourteen_key，双拼配置保持不变",
+  );
+  check(
+    KeyboardScheme.pickerSchemes([KeyboardScheme.QUANPIN, fourteen], fourteen, null).includes(
+      fourteen,
+    ),
+    "输入方式面板照常列出 14 键",
+  );
+});
+
+group("14 键的网格与键面", () => {
+  check(
+    KeyboardScheme.keyGrid("fourteen_key", "quanpin", false) === KeyGrid.FOURTEEN_KEY &&
+      KeyboardScheme.keyGrid("nine_key", "quanpin", false) === KeyGrid.NINE_KEY &&
+      KeyboardScheme.keyGrid("twenty_six_key", "quanpin", false) === KeyGrid.NONE,
+    "全拼的 14 键、九键各开各的网格，26 键不开",
+  );
+  check(
+    KeyboardScheme.keyGrid("fourteen_key", "quanpin", true) === KeyGrid.NONE &&
+      KeyboardScheme.keyGrid("nine_key", "quanpin", true) === KeyGrid.NINE_KEY,
+    "2in1 不开 14 键网格（同步过来的 fourteen_key 画 26 键），九键不受影响",
+  );
+  check(
+    KeyboardScheme.keyGrid("nine_key", "japanese", false) === KeyGrid.NONE &&
+      KeyboardScheme.keyGrid("fourteen_key", "wubi", false) === KeyGrid.NONE,
+    "日语九键和其他方案不开引擎网格",
+  );
+  check(
+    KeyGrid.NONE === 0 && KeyGrid.NINE_KEY === 1 && KeyGrid.FOURTEEN_KEY === 2,
+    "取值与 msime_client_set_key_grid 的 0、1、2 相同",
+  );
+  check(KeyboardScheme.usesFourteenKeyFace(true, false, "none"), "14 键布局画 14 键键面");
+  check(
+    !KeyboardScheme.usesFourteenKeyFace(true, true, "none"),
+    "英文画 26 键 QWERTY，布局不变，切回中文恢复 14 键",
+  );
+  check(
+    !KeyboardScheme.usesFourteenKeyFace(true, false, "unicode") &&
+      !KeyboardScheme.usesFourteenKeyFace(false, false, "none"),
+    "本地模式和别的布局不画 14 键",
+  );
+  check(
+    NineKeyPanelPolicy.threeColumn(true, SchemeTraits.QUANPIN, true),
+    "14 键组字时展开候选也是九键的三栏面板",
+  );
+});
+
 group(
   "the touch grid follows the design: @# first, the separator and the marks in the side columns",
   () => {
@@ -2566,14 +2961,12 @@ group(
   },
 );
 
-group("only a cell that spells a digit prints it in its corner", () => {
+group("九键字母层显示长按数字，包括符号入口的 1", () => {
   const rows: NineKey[][] = NineKeyLayout.touchRows();
   check(NineKeyLayout.digitHint(rows[0][1]) === "2", "ABC prints 2");
   check(NineKeyLayout.digitHint(rows[2][2]) === "9", "WXYZ prints 9");
-  check(
-    NineKeyLayout.digitHint(rows[0][0]) === "",
-    "@# sends no digit, so prints none (Android leaves it bare)",
-  );
+  check(NineKeyLayout.digitHint(rows[0][0]) === "1", "符号入口显示 1，短按仍打开符号面板");
+  check(NineKeyLayout.holdOptions(rows[0][0]).join("") === "1", "符号入口长按只提供数字 1");
   check(NineKeyLayout.digitHint(NineKeyLayout.separator()) === "", "the separator prints none");
   check(
     NineKeyLayout.digitHint(NineKeyLayout.digits()[0][1]) === "",
@@ -2962,6 +3355,13 @@ group("community reply templates accept only bounded reply entries", () => {
     ).length === 0,
     "rejects control text",
   );
+  const multiline = CommunityReplyLibraryPolicy.parse(
+    '[{"id":"multiline","kind":"reply","name":"多行模板","content":{"prompt":"第一条\\n第二条\\t带缩进"}}]',
+  );
+  check(
+    multiline.length === 1 && multiline[0].prompt === "第一条\n第二条\t带缩进",
+    "keeps line breaks and tabs allowed by the community prompt contract",
+  );
   check(
     CommunityReplyLibraryPolicy.parse(
       JSON.stringify([
@@ -3046,12 +3446,20 @@ group("the wubi hint shows only the untyped suffix", () => {
 
 group("the letter face and the engine input are decided separately", () => {
   check(
-    LetterKeyFacePolicy.face("a", true, false, false) === "A",
-    "Chinese mode prints uppercase faces while still sending lowercase",
+    LetterKeyFacePolicy.face("a", true, false, false) === "a",
+    "Chinese mode draws lowercase faces, as the design, Android and iOS do",
+  );
+  check(
+    LetterKeyFacePolicy.face("a", true, false, true) === "A",
+    "a Chinese key that will type uppercase helpcode draws it",
   );
   check(
     LetterKeyFacePolicy.face("a", true, true, false) === "a",
-    "a local mode drops back to the lowercase face",
+    "a local mode keeps the lowercase face",
+  );
+  check(
+    LetterKeyFacePolicy.face("a", true, true, true) === "a",
+    "a Chinese local mode keeps the lowercase face under Shift",
   );
   check(
     LetterKeyFacePolicy.face("a", false, false, false) === "a",
@@ -3066,6 +3474,14 @@ group("the letter face and the engine input are decided separately", () => {
   check(
     LetterKeyFacePolicy.accessibilityLabel("a", true, false, false) === "字母 A",
     "a Chinese key announces the letter",
+  );
+  check(
+    LetterKeyFacePolicy.accessibilityLabel("a", true, false, true) === "大写 A",
+    "a Chinese key that will type uppercase helpcode announces it",
+  );
+  check(
+    LetterKeyFacePolicy.accessibilityLabel("a", true, true, true) === "字母 A",
+    "a Chinese local mode is not announced as uppercase",
   );
   check(
     LetterKeyFacePolicy.accessibilityLabel(null, true, false, false) === "字母",
@@ -3482,6 +3898,53 @@ group("resolves external candidate skin tokens without trusting missing fields",
       [0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0, 0, 0, 0x01],
     ) === 2,
     "PNG dimensions preserve the decoration aspect ratio",
+  );
+});
+
+group("a theme with a fixed mode is offered and drawn only in that mode", () => {
+  const theme = (id: string, appearance: string | null) => ({
+    id,
+    title: id,
+    appearance,
+    preview: null,
+    candidate: null,
+    keyboard: null,
+  });
+  const catalog = [
+    theme("system", null),
+    theme("shuishan", "dark"),
+    theme("light", "light"),
+    theme("night", "dark"),
+    theme("custom", null),
+  ];
+  const offered = (dark: boolean) =>
+    catalog
+      .filter((entry) => GlobalTheme.fitsMode(entry.appearance, dark))
+      .map((entry) => entry.id);
+  check(
+    offered(false).join() === "system,light,custom",
+    `light mode offers no dark themes: ${offered(false).join()}`,
+  );
+  check(
+    offered(true).join() === "system,shuishan,night,custom",
+    `dark mode offers no light themes: ${offered(true).join()}`,
+  );
+  check(
+    GlobalTheme.effectiveId(catalog, "night", false) === "system",
+    "夜青 draws as system in light mode",
+  );
+  check(
+    GlobalTheme.effectiveId(catalog, "night", true) === "night",
+    "夜青 draws itself in dark mode",
+  );
+  check(
+    GlobalTheme.effectiveId(catalog, "light", true) === "system",
+    "浅色 draws as system in dark mode",
+  );
+  check(GlobalTheme.effectiveId(catalog, "custom", false) === "custom", "custom has no fixed mode");
+  check(
+    GlobalTheme.effectiveId(catalog, "unknown", true) === "unknown",
+    "an id outside the catalog is left alone",
   );
 });
 
@@ -3945,6 +4408,9 @@ group("keeps candidate source badges bounded to known Engine sources", () => {
   check(CandidatePresentationPolicy.badge(2) === " ☁️", "cloud candidates get a cloud badge");
   check(CandidatePresentationPolicy.badge(3) === " 🤖", "AI candidates get a robot badge");
   check(CandidatePresentationPolicy.badge(0) === "", "local candidates stay unbadged");
+  check(CandidatePresentationPolicy.badge(12) === "", "the AI placeholder carries no badge");
+  check(CandidatePresentationPolicy.aiPlaceholder(12), "source 12 is the AI placeholder");
+  check(!CandidatePresentationPolicy.aiPlaceholder(3), "a real AI candidate is not a placeholder");
 });
 
 group("offers all fixed candidate slots and checks the active one", () => {
@@ -4168,6 +4634,32 @@ group("expanded candidates stay on one line and inside their row", () => {
     rows.join(",") === "0,0,1,2,2,3",
     "spans pack into rows of whole columns, a long candidate starting a row of its own",
   );
+  const describe = (cells: { index: number; span: number }[][]): string =>
+    cells.map((row) => row.map((cell) => `${cell.index}:${cell.span}`).join(" ")).join(" | ");
+  check(
+    describe(ExpandedCandidateLayout.rows([0, 1, 2, 3, 4, 5], [1, 1, 2, 2, 2, 1], 5)) ===
+      "0:1 1:1 2:3 | 3:2 4:2 5:1",
+    "the cell before a wrap stretches to the end of its row, so no row ends in empty columns",
+  );
+  check(
+    describe(ExpandedCandidateLayout.rows([7, 8], [1, 1], 4)) === "7:1 8:1",
+    "the last row is not stretched",
+  );
+  check(
+    describe(ExpandedCandidateLayout.rows([0, 1, 2], [2, 3, 1], 5)) === "0:2 1:3 | 2:1",
+    "a row that is already full keeps its spans",
+  );
+  check(
+    describe(
+      ExpandedCandidateLayout.rows(
+        spans.map((_, index) => index),
+        spans,
+        5,
+      ),
+    ) === "0:1 1:4 | 2:5 | 3:2 4:3 | 5:2",
+    "rows match CandidateWrapPolicy.rows while filling each wrapped row",
+  );
+  check(ExpandedCandidateLayout.rows([], [], 5).length === 0, "an empty list has no rows");
 });
 
 group("a candidate with a gloss offers the gloss as something to type", () => {
@@ -5098,7 +5590,16 @@ group("traditional output never loses text when conversion fails", () => {
 });
 
 group("local modes are addressable by trigger and by preference key", () => {
-  check(LocalInputMode.MODES.length === 8, "eight local modes");
+  check(LocalInputMode.MODES.length === 9, "nine local modes");
+  const chaizi = LocalInputMode.fromTrigger("C");
+  check(
+    chaizi !== null && chaizi.preferenceKey === "chaizi" && chaizi.title === "拆字",
+    "C enters 拆字, named as the Engine names it",
+  );
+  check(
+    LocalInputMode.MODES[LocalInputMode.MODES.length - 1] === chaizi,
+    "拆字 is the last touch tile, after the eight from the reference",
+  );
   const unicode = LocalInputMode.fromTrigger("U");
   check(unicode !== null && unicode.preferenceKey === "unicode", "U enters Unicode code points");
   const emoji = LocalInputMode.fromPreferenceKey("emoji");
@@ -5121,7 +5622,7 @@ group("local modes are addressable by trigger and by preference key", () => {
   check(LocalInputMode.fromTrigger("@")?.preferenceKey === "mention", "@ enters the mention mode");
   check(
     LocalInputMode.MODES.every((entry) => LocalInputMode.HARDWARE_MODES.indexOf(entry) < 0),
-    "the touch tiles stay the eight they were",
+    "no hardware-only mode is offered as a touch tile",
   );
   const all = LocalInputMode.MODES.concat(LocalInputMode.HARDWARE_MODES);
   check(
@@ -7168,7 +7669,7 @@ group("only a streaming provider gets the listening face, whose stop is a pause"
       `${provider || "the default"} streams words as they are heard`,
     );
   }
-  for (const provider of ["openai", "siliconflow", "groq", "everyapi", "mistral"]) {
+  for (const provider of ["openai", "siliconflow", "groq", "everyapi", "mistral", "bailian"]) {
     check(
       !VoiceRecordingBehaviourPolicy.streamsPartialResults({ ...base, asr_provider: provider }),
       `${provider} answers only after a stop, so it keeps 停止录音`,
@@ -7513,6 +8014,15 @@ group("a batch transcription reply is judged before it is parsed", () => {
     VoiceResponsePolicy.batchResult(200, JSON.stringify({ text: "" })).failure.length > 0,
     "an empty transcription says so rather than committing nothing",
   );
+  const chat: VoiceOutcome = VoiceResponsePolicy.batchResult(
+    200,
+    JSON.stringify({ choices: [{ message: { role: "assistant", content: "百炼" } }] }),
+  );
+  check(chat.text === "百炼" && chat.failure === "", "a chat_audio reply is read from its message");
+  check(
+    VoiceResponsePolicy.batchResult(200, JSON.stringify({ choices: [] })).failure.length > 0,
+    "a chat reply without a choice is not a transcript",
+  );
   // Judged on the raw body: a provider answering with a megabyte is not one to parse first.
   const huge: string = JSON.stringify({ text: "x".repeat(2 * 1024 * 1024) });
   check(
@@ -7644,66 +8154,93 @@ group("the mode badge is the floating toolbar's size", () => {
 console.log("ShuangpinKeyHintPolicy");
 
 group("hints appear only for a shuangpin composition", () => {
-  check(ShuangpinKeyHintPolicy.visible(false, 1, "none") === true, "shuangpin shows hints");
-  check(ShuangpinKeyHintPolicy.visible(false, 0, "none") === false, "quanpin has no key units");
-  check(ShuangpinKeyHintPolicy.visible(true, 1, "none") === false, "dedicated English shows none");
-  check(ShuangpinKeyHintPolicy.visible(false, 1, "emoji") === false, "a local mode owns the keys");
+  check(ShuangpinKeyHintPolicy.visible(false, 1, "none", true) === true, "shuangpin shows hints");
   check(
-    ShuangpinKeyHintPolicy.hint("xiaohe", "q", true, 1, "none") === "",
+    ShuangpinKeyHintPolicy.visible(false, 0, "none", true) === false,
+    "quanpin has no key units",
+  );
+  check(
+    ShuangpinKeyHintPolicy.visible(true, 1, "none", true) === false,
+    "dedicated English shows none",
+  );
+  check(
+    ShuangpinKeyHintPolicy.visible(false, 1, "emoji", true) === false,
+    "a local mode owns the keys",
+  );
+  check(
+    ShuangpinKeyHintPolicy.hint("xiaohe", "q", true, 1, "none", true) === "",
     "an invisible context yields no hint",
   );
-  check(ShuangpinKeyHintPolicy.hint("xiaohe", null, false, 1, "none") === "", "a null key is safe");
   check(
-    ShuangpinKeyHintPolicy.hint("nonsense", "q", false, 1, "none") === "",
+    ShuangpinKeyHintPolicy.hint("xiaohe", null, false, 1, "none", true) === "",
+    "a null key is safe",
+  );
+  check(
+    ShuangpinKeyHintPolicy.hint("nonsense", "q", false, 1, "none", true) === "",
     "an unknown profile yields no hint rather than a wrong one",
+  );
+});
+
+group("the user's switch turns every hint off and nothing else on", () => {
+  check(
+    ShuangpinKeyHintPolicy.visible(false, 1, "none", false) === false,
+    "turned off, shuangpin shows no hints",
+  );
+  check(
+    ShuangpinKeyHintPolicy.hint("xiaohe", "U", false, 1, "none", false) === "",
+    "so the key gets no hint text, and the key face drops the hint line",
+  );
+  check(
+    ShuangpinKeyHintPolicy.visible(false, 0, "none", true) === false,
+    "turned on, quanpin still has none",
   );
 });
 
 group("the key hint pairs the initial with the finals", () => {
   check(
-    ShuangpinKeyHintPolicy.hint("xiaohe", "U", false, 1, "none") === "sh / u",
+    ShuangpinKeyHintPolicy.hint("xiaohe", "U", false, 1, "none", true) === "sh / u",
     "u carries both an initial and a final, separated",
   );
   check(
-    ShuangpinKeyHintPolicy.hint("xiaohe", "u", false, 1, "none") === "sh / u",
+    ShuangpinKeyHintPolicy.hint("xiaohe", "u", false, 1, "none", true) === "sh / u",
     "the lookup is case-insensitive",
   );
   check(
-    ShuangpinKeyHintPolicy.hint("xiaohe", "W", false, 1, "none") === "ei",
+    ShuangpinKeyHintPolicy.hint("xiaohe", "W", false, 1, "none", true) === "ei",
     "a key with only a final shows just the final",
   );
 });
 
 group("v is printed as u-umlaut, which is what the user is looking for", () => {
-  const v = ShuangpinKeyHintPolicy.hint("xiaohe", "V", false, 1, "none");
+  const v = ShuangpinKeyHintPolicy.hint("xiaohe", "V", false, 1, "none", true);
   check(v.includes("ü"), `xiaohe v should print u-umlaut, got "${v}"`);
   check(!v.includes("v="), "the raw table spelling never reaches the label");
-  const t = ShuangpinKeyHintPolicy.hint("xiaohe", "T", false, 1, "none");
+  const t = ShuangpinKeyHintPolicy.hint("xiaohe", "T", false, 1, "none", true);
   check(t.includes("ü"), `xiaohe t carries ue and ve, so it shows u-umlaut too, got "${t}"`);
 });
 
 group("finals sharing a key are listed in a stable order", () => {
-  const s = ShuangpinKeyHintPolicy.hint("xiaohe", "S", false, 1, "none");
+  const s = ShuangpinKeyHintPolicy.hint("xiaohe", "S", false, 1, "none", true);
   check(s === "iong ong", `two finals sort rather than following table order, got "${s}"`);
-  const l = ShuangpinKeyHintPolicy.hint("xiaohe", "L", false, 1, "none");
+  const l = ShuangpinKeyHintPolicy.hint("xiaohe", "L", false, 1, "none", true);
   check(l === "iang uang", `and so do these, got "${l}"`);
 });
 
 group("each profile has its own table", () => {
-  const xiaohe = ShuangpinKeyHintPolicy.hint("xiaohe", "W", false, 1, "none");
-  const ziranma = ShuangpinKeyHintPolicy.hint("ziranma", "W", false, 1, "none");
+  const xiaohe = ShuangpinKeyHintPolicy.hint("xiaohe", "W", false, 1, "none", true);
+  const ziranma = ShuangpinKeyHintPolicy.hint("ziranma", "W", false, 1, "none", true);
   check(xiaohe !== ziranma, "the same key means different things in different profiles");
   check(ziranma === "ia ua", `ziranma w carries ia and ua, got "${ziranma}"`);
   check(
-    ShuangpinKeyHintPolicy.hint("microsoft", ";", false, 1, "none") === "ing",
+    ShuangpinKeyHintPolicy.hint("microsoft", ";", false, 1, "none", true) === "ing",
     "microsoft is the profile that uses the semicolon key",
   );
   check(
-    ShuangpinKeyHintPolicy.hint("xiaohe", ";", false, 1, "none") === "",
+    ShuangpinKeyHintPolicy.hint("xiaohe", ";", false, 1, "none", true) === "",
     "xiaohe leaves the semicolon unassigned",
   );
   check(
-    ShuangpinKeyHintPolicy.hint("shoudao", "E", false, 1, "none") === "sh / e",
+    ShuangpinKeyHintPolicy.hint("shoudao", "E", false, 1, "none", true) === "sh / e",
     "shoudao puts sh on e rather than on u",
   );
 });
@@ -8076,6 +8613,38 @@ group("a fixed appearance decides every surface's mode", () => {
   check(GlobalTheme.surfaceDark("light", true) === false, "a light theme is light");
   check(GlobalTheme.surfaceDark(null, true) === true, "otherwise the surface's own rule");
   check(GlobalTheme.surfaceDark(null, false) === false, "in both directions");
+});
+
+group("两种明暗的解析一致时主题才固定明暗", () => {
+  const resolved = (appearance: string | null, skin: string | null): ResolvedTheme => ({
+    id: "custom",
+    source: "custom",
+    appearance: appearance,
+    candidate: null,
+    keyboard: null,
+    candidate_skin: skin,
+  });
+  check(
+    GlobalTheme.fixedAppearance(resolved("dark", null), resolved("dark", null)) === "dark",
+    "内置主题或固定底的自定义主题两次都是同一明暗，照旧固定",
+  );
+  // 浅色槽位放浅色底的皮肤、深色槽位放深色底的皮肤：浅色那次解析是 light，深色那次是 dark。
+  const light = resolved("light", "sakura");
+  const dark = resolved("dark", "dusk");
+  check(
+    GlobalTheme.fixedAppearance(light, dark) === null,
+    "两个槽位各画自己明暗的皮肤时不固定明暗",
+  );
+  const candidateDark = GlobalTheme.surfaceDark(GlobalTheme.fixedAppearance(light, dark), true);
+  check(
+    candidateDark && (candidateDark ? dark : light).candidate_skin === "dusk",
+    "系统深色时候选窗画深色槽位的皮肤",
+  );
+  check(
+    GlobalTheme.fixedAppearance(resolved("light", "sakura"), resolved(null, null)) === null,
+    "只设浅色皮肤时深色模式跟随系统，不被浅色皮肤钉成浅色",
+  );
+  check(GlobalTheme.fixedAppearance(null, resolved("dark", null)) === null, "解析被拒时不固定明暗");
 });
 
 group("the platform accent", () => {
@@ -9616,6 +10185,30 @@ group("account native success envelopes require a value", () => {
 });
 
 group("account and cloud clipboard bridge keeps secrets native", () => {
+  const sessionFor = (id: string): string =>
+    JSON.stringify({
+      access_token: "a".repeat(64),
+      refresh_token: "b".repeat(64),
+      token_type: "Bearer",
+      expires_at: Date.now() + 600_000,
+      user: { id, display_name: "Synthetic", created_at: "2026-01-01" },
+    });
+  check(
+    storedSessionUserId(sessionFor("old-account")) === "old-account",
+    "the keyboard sees the saved account owner",
+  );
+  check(
+    storedSessionUserId(sessionFor("new-account")) === "new-account",
+    "a fresh read sees the replacement account",
+  );
+  check(
+    storedSessionUserId(null) === null && storedSessionUserId("not json") === null,
+    "missing or malformed sessions have no owner",
+  );
+  check(
+    storedSessionUserId(JSON.stringify({ user: { id: "forged" } })) === null,
+    "an unvalidated user id cannot own a snapshot",
+  );
   let oversizedCleared = false;
   const oversizedStore: AccountSessionStore = {
     load: () => "x".repeat(64 * 1024 + 1),
@@ -9805,6 +10398,42 @@ group("account and cloud clipboard bridge keeps secrets native", () => {
         "dictionary offsets are bounded before transport",
       );
     });
+});
+
+group("a rejected account session cancels its snapshot before clearing storage", () => {
+  let saved: string | null = JSON.stringify({
+    access_token: "a".repeat(64),
+    refresh_token: "b".repeat(64),
+    token_type: "Bearer",
+    expires_at: Date.now() + 600_000,
+    user: { id: "synthetic-owner", display_name: "Synthetic", created_at: "2026-01-01" },
+  });
+  const events: string[] = [];
+  const store: AccountSessionStore & { beforeClear(accountId: string): void } = {
+    load: () => saved,
+    save: (value: string) => {
+      saved = value;
+    },
+    beforeClear: (accountId: string) => {
+      events.push(`cancel:${accountId}`);
+    },
+    clear: () => {
+      events.push("clear");
+      saved = null;
+    },
+  };
+  const bridge = new AccountCloudBridge(
+    { request: async () => ({ status: 401, body: "{}" }) },
+    store,
+  );
+  void bridge.handle('{"operation":"profile"}').then((reply) => {
+    check(JSON.parse(reply).error === "account_unauthorized", "the refused session is rejected");
+    check(
+      JSON.stringify(events) === '["cancel:synthetic-owner","clear"]',
+      "the snapshot owner is cancelled before the session disappears",
+    );
+    check(saved === null, "the refused session is removed");
+  });
 });
 
 group("a failed login save preserves the last committed session", () => {
@@ -10713,12 +11342,23 @@ group("cloud clipboard text follows the shared clipboard bounds", () => {
 
 group("cloud clipboard listings are read whole", () => {
   const id = (digit: string) => digit.repeat(64);
-  const page = (items: unknown[], enabled = true) =>
-    JSON.stringify({ ok: true, value: { enabled, items } });
+  // 端到端加密驱动 `list` 的结果形状，见 docs/cloud-clipboard-e2e.md 的「结果」。
+  const page = (items: unknown[], enabled = true, status = enabled ? "ready" : "disabled") =>
+    JSON.stringify({
+      ok: true,
+      value: {
+        enabled,
+        retention_days: 0,
+        items,
+        e2e: { status, code: "0421 9873 5530 1176", pending_devices: 0, undecryptable: 0 },
+      },
+    });
   const item = (digit: string, text: string) => ({
     id: id(digit),
     text,
     updated_at: "2026-10-01T08:00:00Z",
+    pinned: false,
+    device: "Synthetic Laptop",
   });
 
   const ready = CloudClipboardPolicy.parseList(
@@ -10731,6 +11371,25 @@ group("cloud clipboard listings are read whole", () => {
       ready.items[1].text === "两行\n文本" &&
       ready.items[0].updatedAt === "2026-10-01T08:00:00Z",
     "items keep their order, id, text and time",
+  );
+  check(
+    ready.items[0].pinned === false && ready.items[0].device === "Synthetic Laptop",
+    "and say whether they are pinned and which device wrote them",
+  );
+  const pending = CloudClipboardPolicy.parseList(page([], true, "pending"));
+  check(
+    pending.state === CloudClipboardState.PENDING && pending.items.length === 0,
+    "a device waiting for approval reads as pending with nothing to show",
+  );
+  check(
+    CloudClipboardPolicy.parseList(page([item("a", "hidden")], true, "disabled")).state ===
+      CloudClipboardState.DISABLED,
+    "the driver's disabled status hides items too",
+  );
+  check(
+    CloudClipboardPolicy.parseList(page([{ ...item("a", "无设备名"), device: "" }])).items[0]
+      .device === "",
+    "an item may come without a device name",
   );
   check(
     CloudClipboardPolicy.parseList(page([])).state === CloudClipboardState.READY &&
@@ -10765,6 +11424,13 @@ group("cloud clipboard listings are read whole", () => {
     page([{ id: id("a"), text: "long time", updated_at: "9".repeat(129) }]),
     page([item("a", "fine"), null]),
     page(Array.from({ length: 51 }, (_unused, index) => item("c", `item ${index}`))),
+    '{"ok":true,"value":{"enabled":true,"items":[]}}',
+    page([], true, "unknown"),
+    page([{ ...item("a", "no pinned"), pinned: undefined }]),
+    page([{ ...item("a", "string pinned"), pinned: "false" }]),
+    page([{ ...item("a", "no device"), device: undefined }]),
+    page([{ ...item("a", "control in device"), device: "Lap\ntop" }]),
+    page([{ ...item("a", "long device"), device: "设".repeat(65) }]),
   ]) {
     const listing = CloudClipboardPolicy.parseList(failure);
     check(
@@ -10793,6 +11459,22 @@ group("cloud clipboard items stay out of password fields and stale editors", () 
     !CloudClipboardPolicy.current(Number.NaN, Number.NaN),
     "a non-integer generation is refused",
   );
+  check(
+    CloudClipboardPolicy.canUseRows(true, CloudClipboardState.READY, "session-a", "session-a"),
+    "cloud rows remain usable for the loaded account session",
+  );
+  check(
+    !CloudClipboardPolicy.canUseRows(true, CloudClipboardState.READY, "session-a", "session-b"),
+    "stale cloud rows are unusable after an account session change",
+  );
+  check(
+    !CloudClipboardPolicy.canUseRows(true, CloudClipboardState.FAILED, "session-a", "session-a"),
+    "failed cloud listings never make rows usable",
+  );
+  check(
+    !CloudClipboardPolicy.canUseRows(false, CloudClipboardState.READY, "session-a", "session-a"),
+    "cloud rows are unusable when the editor no longer permits them",
+  );
   check(CloudClipboardPolicy.sendCurrent(4, 4), "the active send result is current");
   check(!CloudClipboardPolicy.sendCurrent(4, 5), "a cancelled send result is dropped");
   check(!CloudClipboardPolicy.sendCurrent(-1, -1), "an invalid send generation is dropped");
@@ -10817,6 +11499,15 @@ group("sending to the cloud clipboard needs a signed-in account with the clipboa
     "an unreadable clipboard is not written to",
   );
   check(
+    CloudClipboardPolicy.sendBlock(CloudClipboardState.PENDING, "hello") ===
+      CLOUD_CLIPBOARD_PENDING,
+    "a device waiting for approval does not upload",
+  );
+  check(
+    !CLOUD_CLIPBOARD_PENDING.includes("\n") && CLOUD_CLIPBOARD_PENDING.includes("允许"),
+    "the pending hint is one line that says where to approve",
+  );
+  check(
     CloudClipboardPolicy.sendBlock(CloudClipboardState.READY, "hello") === null,
     "ready and valid may be sent",
   );
@@ -10838,8 +11529,17 @@ group("sending to the cloud clipboard needs a signed-in account with the clipboa
   );
   check(
     CloudClipboardPolicy.parseSend('{"ok":false,"error":"account_invalid"}') ===
-      CloudClipboardSendOutcome.INVALID,
+      CloudClipboardSendOutcome.INVALID &&
+      CloudClipboardPolicy.parseSend('{"ok":false,"error":"invalid_clipboard_text"}') ===
+        CloudClipboardSendOutcome.INVALID,
     "refused text is named",
+  );
+  check(
+    CloudClipboardPolicy.parseSend('{"ok":false,"error":"clipboard_device_pending"}') ===
+      CloudClipboardSendOutcome.PENDING &&
+      CloudClipboardPolicy.sendNotice(CloudClipboardSendOutcome.PENDING) ===
+        CLOUD_CLIPBOARD_PENDING,
+    "a refusal while waiting for approval says so",
   );
   check(
     CloudClipboardPolicy.parseSend('{"ok":false,"error":"account_unavailable"}') ===
@@ -10870,7 +11570,31 @@ group("sending to the cloud clipboard needs a signed-in account with the clipboa
       CloudClipboardPolicy.notice(CloudClipboardState.DISABLED, false, 0) === "云剪贴板未开启",
     "signed-out and disabled use the shared wording",
   );
+  check(
+    CloudClipboardPolicy.notice(CloudClipboardState.PENDING, false, 0) === CLOUD_CLIPBOARD_PENDING,
+    "a pending device shows the approval hint instead of an empty clipboard",
+  );
 });
+
+/** 记下每次开始的操作、对每次开始都直接给出结果的假驱动；只给那些只关心桥接怎样开始操作的测试用，完整的往返在 cloud-clipboard-e2e.test.ts。 */
+function startRecordingClipboardDriver(
+  starts: Record<string, unknown>[],
+  firstStep: Record<string, unknown> = { done: {}, keystore: "v1.synthetic" },
+): CloudClipboardE2eHost {
+  return {
+    drive: (document) => {
+      const input = JSON.parse(document) as { start?: Record<string, unknown> };
+      if (input.start !== undefined) starts.push(input.start);
+      return JSON.stringify(
+        input.start !== undefined ? { ok: true, value: firstStep } : { ok: false, error: "done" },
+      );
+    },
+    loadKeystore: () => "v1.synthetic",
+    saveKeystore: () => {},
+    clearKeystore: () => {},
+    deviceName: () => "Synthetic",
+  };
+}
 
 group("the account bridge sends multi-line clipboard text the shared client accepts", () => {
   let stored: string | null = JSON.stringify({
@@ -10880,17 +11604,9 @@ group("the account bridge sends multi-line clipboard text the shared client acce
     expires_at: Date.now() + 600_000,
     user: { id: "synthetic-user", display_name: "Test", created_at: "2026-01-01" },
   });
-  const bodies: (Record<string, unknown> | undefined)[] = [];
+  const starts: Record<string, unknown>[] = [];
   const bridge = new AccountCloudBridge(
-    {
-      request: async (_method, _path, _token, body) => {
-        bodies.push(body);
-        return {
-          status: 200,
-          body: JSON.stringify({ id: "e".repeat(64), text: body?.text, updated_at: "2026-10-01" }),
-        };
-      },
-    },
+    { request: async () => ({ status: 200, body: "{}" }) },
     {
       load: () => stored,
       save: (value) => {
@@ -10900,6 +11616,8 @@ group("the account bridge sends multi-line clipboard text the shared client acce
         stored = null;
       },
     },
+    undefined,
+    startRecordingClipboardDriver(starts),
   );
   void bridge
     .handle(
@@ -10911,7 +11629,7 @@ group("the account bridge sends multi-line clipboard text the shared client acce
     )
     .then((reply) => {
       check(JSON.parse(reply).ok === true, "a copied paragraph is accepted");
-      check(bodies[0]?.text === "第一行\n第二行", "and sent with its line break");
+      check(starts[0]?.text === "第一行\n第二行", "and handed to the driver with its line break");
     });
   void bridge
     .handle(
@@ -10919,23 +11637,58 @@ group("the account bridge sends multi-line clipboard text the shared client acce
     )
     .then((reply) => {
       check(JSON.parse(reply).error === "account_invalid", "a C1 control is refused locally");
+      check(starts.length <= 1, "and never reaches the driver");
     });
 });
 
-group("the account bridge accepts the shared clipboard search bound", () => {
-  let stored: string | null = JSON.stringify({
-    access_token: "a".repeat(64),
-    refresh_token: "b".repeat(64),
-    token_type: "Bearer",
-    expires_at: Date.now() + 600_000,
-    user: { id: "synthetic-user", display_name: "Test", created_at: "2026-01-01" },
-  });
+group("a keyboard bridge rejects a replaced stored login", () => {
+  const session = (user: string, refresh: string): string =>
+    JSON.stringify({
+      access_token: "a".repeat(64),
+      refresh_token: refresh.repeat(64),
+      token_type: "Bearer",
+      expires_at: Date.now() + 600_000,
+      user: { id: user, display_name: "Test", created_at: "2026-01-01" },
+    });
+  let stored: string | null = session("synthetic-A", "b");
+  const store: AccountSessionStore = {
+    load: () => stored,
+    save: (value) => {
+      stored = value;
+    },
+    clear: () => {
+      stored = null;
+    },
+  };
+  const bridge = new AccountCloudBridge(
+    { request: async () => ({ status: 200, body: "{}" }) },
+    store,
+  );
+  check(bridge.matchesStoredSession(), "the bridge initially matches its stored login");
+  stored = session("synthetic-B", "c");
+  check(!bridge.matchesStoredSession(), "a different account invalidates the bridge");
+  stored = session("synthetic-A", "d");
+  check(!bridge.matchesStoredSession(), "relogging into the same account also invalidates it");
+  stored = null;
+  check(!bridge.matchesStoredSession(), "signing out invalidates it");
+});
+
+group("a keyboard send refuses a same-account login adopted during refresh", () => {
+  const session = (refresh: string, expires: number): string =>
+    JSON.stringify({
+      access_token: "a".repeat(64),
+      refresh_token: refresh.repeat(64),
+      token_type: "Bearer",
+      expires_at: expires,
+      user: { id: "synthetic-A", display_name: "Test", created_at: "2026-01-01" },
+    });
+  let stored: string | null = session("b", Date.now() - 1);
   const paths: string[] = [];
   const bridge = new AccountCloudBridge(
     {
       request: async (_method, path) => {
         paths.push(path);
-        return { status: 200, body: '{"enabled":true,"items":[]}' };
+        return { status: 200, body: "{}" };
       },
     },
     {
@@ -10946,7 +11699,50 @@ group("the account bridge accepts the shared clipboard search bound", () => {
       clear: () => {
         stored = null;
       },
+      exclusive: async (body) => {
+        stored = session("c", Date.now() + 600_000);
+        return await body();
+      },
     },
+    undefined,
+    startRecordingClipboardDriver([], {
+      request: {
+        method: "GET",
+        path: `/v1/users/me/clipboard/keys?device_id=${"d".repeat(32)}`,
+        body: null,
+      },
+      state: {},
+      keystore: "v1.synthetic",
+    }),
+  );
+  void bridge.addClipboardForCurrentSession("synthetic clipboard text").then((reply) => {
+    check(JSON.parse(reply).error === "account_cancelled", "the adopted login cancels the send");
+    check(paths.length === 0, "no clipboard upload reaches the transport");
+  });
+});
+
+group("the account bridge accepts the shared clipboard search bound", () => {
+  let stored: string | null = JSON.stringify({
+    access_token: "a".repeat(64),
+    refresh_token: "b".repeat(64),
+    token_type: "Bearer",
+    expires_at: Date.now() + 600_000,
+    user: { id: "synthetic-user", display_name: "Test", created_at: "2026-01-01" },
+  });
+  const starts: Record<string, unknown>[] = [];
+  const bridge = new AccountCloudBridge(
+    { request: async () => ({ status: 200, body: "{}" }) },
+    {
+      load: () => stored,
+      save: (value) => {
+        stored = value;
+      },
+      clear: () => {
+        stored = null;
+      },
+    },
+    undefined,
+    startRecordingClipboardDriver(starts),
   );
   const accepted = "你".repeat(341) + "a";
   void bridge
@@ -10955,7 +11751,11 @@ group("the account bridge accepts the shared clipboard search bound", () => {
     )
     .then((reply) => {
       check(JSON.parse(reply).ok === true, "a 1,024-byte UTF-8 clipboard search is accepted");
-      check(paths.length === 1, "the accepted search reaches the account service");
+      // 服务端不再搜索：搜索词交给驱动，在本机解密后匹配。
+      check(
+        starts.length === 1 && starts[0].search === accepted,
+        "the accepted search reaches the driver",
+      );
       return bridge.handle(
         JSON.stringify({
           operation: "clipboard",
@@ -10969,7 +11769,7 @@ group("the account bridge accepts the shared clipboard search bound", () => {
         JSON.parse(reply).error === "account_invalid",
         "a search over 1,024 UTF-8 bytes is refused",
       );
-      check(paths.length === 1, "the oversized search never reaches the account service");
+      check(starts.length === 1, "the oversized search never reaches the driver");
     });
 });
 
@@ -11384,8 +12184,10 @@ function fullPreferenceSchema(): AccountPreferenceSchema {
       "platform.harmony.custom_keyboard_skin",
       "platform.harmony.theme",
       "platform.harmony.custom_candidate_skin",
+      "platform.harmony.custom_candidate_skin_dark",
       "platform.harmony.haptic_strength",
       "platform.harmony.number_keypad_order",
+      "platform.harmony.twenty_six_key_number_layout",
     ],
     "string",
   );
@@ -11396,7 +12198,9 @@ function fullPreferenceSchema(): AccountPreferenceSchema {
       "input.smart_punctuation",
       "input.paired_punctuation",
       "input.wubi_code_hint",
+      "input.wubi_auto_commit_unique",
       "platform.harmony.voice_shortcut",
+      "platform.harmony.shuangpin_key_hints",
       "platform.harmony.sound_enabled",
       "platform.harmony.haptics_enabled",
     ],
@@ -11427,7 +12231,12 @@ group("the account settings sync maps this host's document, not another's", () =
     chinese_punctuation: false,
     touch_keyboard_layout: "nine_key",
     global_theme: "night",
-    custom_theme: { base: "paper", candidate_skin: "harbour", keyboard: { background: 1 } },
+    custom_theme: {
+      base: "paper",
+      candidate_skin: "harbour",
+      candidate_skin_dark: "dusk",
+      keyboard: { background: 1 },
+    },
     touch_key_spacing_tenths: 40,
   };
   const values = localAccountPreferences(local, syncFeedback);
@@ -11439,6 +12248,10 @@ group("the account settings sync maps this host's document, not another's", () =
   check(
     values["platform.harmony.custom_candidate_skin"] === "harbour",
     "and the custom theme's candidate package",
+  );
+  check(
+    values["platform.harmony.custom_candidate_skin_dark"] === "dusk",
+    "and the dark-mode package beside it",
   );
   // Not platform.android: the two are separate devices with separate keyboards, and sharing the
   // namespace would let a HarmonyOS phone overwrite the skin on the user's Android keyboard.
@@ -11475,11 +12288,36 @@ group("the account settings sync maps this host's document, not another's", () =
     "no design travels as an empty string",
   );
   check(sparse["platform.harmony.custom_candidate_skin"] === "", "and so does no package");
+  check(sparse["platform.harmony.custom_candidate_skin_dark"] === "", "and no dark-mode package");
   const retired = localAccountPreferences({ global_theme: "midnight" }, syncFeedback);
   check(
     retired["platform.harmony.global_theme"] === "system",
     "a retired skin id is never uploaded",
   );
+  check(
+    sparse["platform.harmony.keyboard_layout"] === "twenty_six_key",
+    "an absent layout uploads as the default 26-key",
+  );
+  // 14 键这一版先不上传：省略这个键等于保留云端原值，写成 26 键会把同账号的其他设备切回去。
+  for (const layout of ["fourteen_key", "future_layout"]) {
+    const omitted = localAccountPreferences(
+      { scheme: "quanpin", touch_keyboard_layout: layout },
+      syncFeedback,
+    );
+    check(
+      !("platform.harmony.keyboard_layout" in omitted) && omitted["input.schema"] === "quanpin",
+      `a local ${layout} layout is left out of the upload rather than rewritten`,
+    );
+    const merged = mergeAccountPreferences(
+      { revision: 2, settings: { "platform.harmony.keyboard_layout": "nine_key" } },
+      omitted,
+      fullPreferenceSchema(),
+    );
+    check(
+      merged.settings["platform.harmony.keyboard_layout"] === "nine_key",
+      `so the cloud keeps its layout when this device is on ${layout}`,
+    );
+  }
 });
 
 group("uploading keeps what other devices wrote", () => {
@@ -11656,6 +12494,75 @@ group("the digit order and 跟随系统 travel with the account", () => {
   check(refused, "an order nobody defined is refused rather than mapped");
 });
 
+group("the 26-key digit layer choice travels with the account", () => {
+  const schema = fullPreferenceSchema();
+  const uploaded = localAccountPreferences(
+    { touch_twenty_six_key_number_layout: "nine_key" },
+    syncFeedback,
+  );
+  check(
+    uploaded["platform.harmony.twenty_six_key_number_layout"] === "nine_key",
+    "the nine-key digit layer is uploaded",
+  );
+  check(
+    localAccountPreferences({}, syncFeedback)["platform.harmony.twenty_six_key_number_layout"] ===
+      "row",
+    "a document from before the setting uploads the row",
+  );
+  check(
+    localAccountPreferences({ touch_twenty_six_key_number_layout: "grid" }, syncFeedback)[
+      "platform.harmony.twenty_six_key_number_layout"
+    ] === "row",
+    "an unknown local layout is never uploaded",
+  );
+  const applied = applyAccountPreferences(
+    {},
+    { revision: 2, settings: { "platform.harmony.twenty_six_key_number_layout": "nine_key" } },
+    schema,
+    syncFeedback,
+  );
+  check(
+    applied.preferences.touch_twenty_six_key_number_layout === "nine_key",
+    "the layout is written into the document",
+  );
+  check(applied.feedback === null, "and the feedback file is left alone");
+  let refused = false;
+  try {
+    applyAccountPreferences(
+      {},
+      { revision: 3, settings: { "platform.harmony.twenty_six_key_number_layout": "grid" } },
+      schema,
+      syncFeedback,
+    );
+  } catch (error) {
+    refused = error instanceof AccountPreferenceError && error.message === "account_invalid";
+  }
+  check(refused, "a layout nobody defined is refused rather than mapped");
+});
+
+group("the shuangpin key hint switch travels with the account", () => {
+  check(
+    localAccountPreferences({}, syncFeedback)["platform.harmony.shuangpin_key_hints"] === true,
+    "a document from before the switch uploads the hints as shown",
+  );
+  check(
+    localAccountPreferences({ touch_shuangpin_key_hints: false }, syncFeedback)[
+      "platform.harmony.shuangpin_key_hints"
+    ] === false,
+    "turning them off is uploaded",
+  );
+  const applied = applyAccountPreferences(
+    {},
+    { revision: 2, settings: { "platform.harmony.shuangpin_key_hints": false } },
+    fullPreferenceSchema(),
+    syncFeedback,
+  );
+  check(
+    applied.preferences.touch_shuangpin_key_hints === false,
+    "the switch is written into the document",
+  );
+});
+
 group("applying writes only what the schema declares", () => {
   const schema = fullPreferenceSchema();
   const local = { scheme: "quanpin", learning: true, frequency: { mode: "promote" } };
@@ -11667,6 +12574,7 @@ group("applying writes only what the schema declares", () => {
       "input.frequency_trigger_count": 5,
       "platform.harmony.global_theme": "paper",
       "platform.harmony.custom_candidate_skin": "harbour",
+      "platform.harmony.custom_candidate_skin_dark": "dusk",
     },
   };
   const applied = applyAccountPreferences(local, cloud, schema, syncFeedback);
@@ -11685,11 +12593,16 @@ group("applying writes only what the schema declares", () => {
     (applied.preferences.custom_theme as Record<string, unknown>).candidate_skin === "harbour",
     "and the package lands inside the custom theme",
   );
+  check(
+    (applied.preferences.custom_theme as Record<string, unknown>).candidate_skin_dark === "dusk",
+    "and so does the dark-mode package",
+  );
   const cleared = applyAccountPreferences(
     {
       custom_theme: {
         base: "ink",
         candidate_skin: "harbour",
+        candidate_skin_dark: "dusk",
         candidate_colors: { text: "#112233" },
       },
     },
@@ -11698,6 +12611,7 @@ group("applying writes only what the schema declares", () => {
       settings: {
         "platform.harmony.custom_theme_base": "system",
         "platform.harmony.custom_candidate_skin": "",
+        "platform.harmony.custom_candidate_skin_dark": "",
         "platform.harmony.custom_keyboard_skin": "",
       },
     },
@@ -11710,8 +12624,22 @@ group("applying writes only what the schema declares", () => {
     "a system base is written by omitting it, as the shared document does",
   );
   check(
-    !("candidate_skin" in clearedTheme) && !("keyboard" in clearedTheme),
-    "empty strings clear the package and the design",
+    !("candidate_skin" in clearedTheme) &&
+      !("candidate_skin_dark" in clearedTheme) &&
+      !("keyboard" in clearedTheme),
+    "empty strings clear both packages and the design",
+  );
+  // 只带浅色槽位的云端文档（上传它的设备还不认识深色槽位）不动本机的深色槽位。
+  const lightOnly = applyAccountPreferences(
+    { custom_theme: { candidate_skin: "harbour", candidate_skin_dark: "dusk" } },
+    { revision: 5, settings: { "platform.harmony.custom_candidate_skin": "sakura" } },
+    schema,
+    syncFeedback,
+  );
+  const lightOnlyTheme = lightOnly.preferences.custom_theme as Record<string, unknown>;
+  check(
+    lightOnlyTheme.candidate_skin === "sakura" && lightOnlyTheme.candidate_skin_dark === "dusk",
+    "a cloud document without the dark slot leaves the local dark slot alone",
   );
   check(
     (clearedTheme.candidate_colors as Record<string, unknown>).text === "#112233",
@@ -11722,6 +12650,8 @@ group("applying writes only what the schema declares", () => {
     ["platform.harmony.custom_theme_base", "custom"],
     ["platform.harmony.custom_candidate_skin", "ink"],
     ["platform.harmony.custom_candidate_skin", "../escape"],
+    ["platform.harmony.custom_candidate_skin_dark", "night"],
+    ["platform.harmony.custom_candidate_skin_dark", "../escape"],
   ]) {
     let refused = false;
     try {
@@ -11779,6 +12709,35 @@ group("applying writes only what the schema declares", () => {
     check(kept.preferences.scheme === "wubi", `an unknown scheme ${unknown} keeps the local one`);
     check(kept.preferences.learning === false, `and the rest of the sync applies past ${unknown}`);
   }
+
+  // 布局同理：14 键照常写入，不认得的布局只跳过这个键，不拒绝整份文档。
+  const fourteen = applyAccountPreferences(
+    { ...local, touch_keyboard_layout: "nine_key" },
+    { revision: 1, settings: { "platform.harmony.keyboard_layout": "fourteen_key" } },
+    schema,
+    syncFeedback,
+  );
+  check(
+    fourteen.preferences.touch_keyboard_layout === "fourteen_key",
+    "a cloud fourteen_key layout is written",
+  );
+  const futureLayout = applyAccountPreferences(
+    { ...local, touch_keyboard_layout: "nine_key" },
+    {
+      revision: 1,
+      settings: { "platform.harmony.keyboard_layout": "future_layout", "input.learning": false },
+    },
+    schema,
+    syncFeedback,
+  );
+  check(
+    futureLayout.preferences.touch_keyboard_layout === "nine_key",
+    "an unknown layout keeps the local one",
+  );
+  check(
+    futureLayout.preferences.learning === false,
+    "and the rest of the sync applies past the unknown layout",
+  );
 
   let refusedMismatch = false;
   try {
@@ -12892,6 +13851,112 @@ group("community skin categories filter, publish and change through the bridge",
     });
 });
 
+// 对话请求在传输层就失败（断网、连接被重置）时，鸿蒙抛的是 BusinessError 对象而不是 Error：它要变成页面不认识的 account_network，对话页写「连接失败」，而不是「聊天服务暂不可用」。
+group("a chat request that fails in transport reads as a network failure", () => {
+  let stored: string | null = null;
+  const store: AccountSessionStore = {
+    load: () => stored,
+    save: (value) => {
+      stored = value;
+    },
+    clear: () => {
+      stored = null;
+    },
+  };
+  let offline = false;
+  const transport: AccountTransport = {
+    request: async (_method, path) => {
+      if (path === "/v1/auth/login")
+        return {
+          status: 200,
+          body: JSON.stringify({
+            access_token: "a".repeat(64),
+            refresh_token: "b".repeat(64),
+            token_type: "Bearer",
+            expires_in: 3600,
+            user: { id: "u1", display_name: "Test", created_at: "2026-01-01" },
+          }),
+        };
+      if (offline) throw { code: 2300056, message: "Failure when receiving data from the peer" };
+      return { status: 404, body: "{}" };
+    },
+  };
+  const bridge = new AccountCloudBridge(transport, store);
+  void bridge
+    .handle('{"operation":"login","challenge_id":"challenge","credential":"123456"}')
+    .then(() => {
+      offline = true;
+      void bridge.handle('{"operation":"chat","chat_operation":"models"}').then((result) => {
+        check(
+          JSON.parse(result).error === "account_network",
+          "a dropped connection is a network failure",
+        );
+      });
+    });
+});
+
+// 「我的」页的资料请求在传输层失败时同样是网络失败，页面写「网络连接失败」，不写「账号服务暂不可用」。
+group("an account request that fails in transport reads as a network failure", () => {
+  let stored: string | null = null;
+  const store: AccountSessionStore = {
+    load: () => stored,
+    save: (value) => {
+      stored = value;
+    },
+    clear: () => {
+      stored = null;
+    },
+  };
+  let offline = false;
+  const transport: AccountTransport = {
+    request: async (_method, path) => {
+      if (path === "/v1/auth/login")
+        return {
+          status: 200,
+          body: JSON.stringify({
+            access_token: "a".repeat(64),
+            refresh_token: "b".repeat(64),
+            token_type: "Bearer",
+            expires_in: 3600,
+            user: { id: "u1", display_name: "Test", created_at: "2026-01-01" },
+          }),
+        };
+      if (offline) throw { code: 2300056, message: "Failure when receiving data from the peer" };
+      return { status: 404, body: "{}" };
+    },
+  };
+  const bridge = new AccountCloudBridge(transport, store);
+  void bridge
+    .handle('{"operation":"login","challenge_id":"challenge","credential":"123456"}')
+    .then(() => {
+      offline = true;
+      void bridge.handle('{"operation":"profile"}').then((result) => {
+        check(
+          JSON.parse(result).error === "account_network",
+          "a dropped connection on the profile is a network failure",
+        );
+      });
+    });
+});
+
+// 复用的连接已被对端关掉时（curl 52、55、56），幂等的请求换新连接再发一次，只发一次；POST、PATCH 不重发，连不上和超时也不重发。
+group("only an idempotent request on a dead reused connection is sent again, once", () => {
+  const dead = { code: 2300056, message: "Failure when receiving data from the peer" };
+  check(staleConnectionFailure(dead), "a receive failure is a dead connection");
+  check(staleConnectionFailure({ code: 2300052 }), "so is an empty reply");
+  check(staleConnectionFailure({ code: 2300055 }), "and a send failure");
+  check(!staleConnectionFailure({ code: 2300028 }), "a timeout is not");
+  check(!staleConnectionFailure({ code: 2300007 }), "nor is a refused connection");
+  check(!staleConnectionFailure(new Error("account_invalid")), "nor an Error from the bridge");
+  check(!staleConnectionFailure(null), "nor nothing at all");
+  check(retryAccountRequest("GET", 0, dead), "a first GET is sent again");
+  check(retryAccountRequest("PUT", 0, dead), "so is a PUT");
+  check(retryAccountRequest("DELETE", 0, dead), "and a DELETE");
+  check(!retryAccountRequest("GET", 1, dead), "but only once");
+  check(!retryAccountRequest("POST", 0, dead), "a POST may already have been handled");
+  check(!retryAccountRequest("PATCH", 0, dead), "and so may a PATCH");
+});
+
 group("the account assistant answers with a model list and one reply", () => {
   let stored: string | null = null;
   const store: AccountSessionStore = {
@@ -12910,8 +13975,13 @@ group("the account assistant answers with a model list and one reply", () => {
     timeoutMs?: number;
   }[] = [];
   let models = '{"data":[{"id":"fast"},{"id":"careful"}],"default_model":"careful"}';
+  // MiniMax-M3 这样的回复：带 emoji，message 里还有一个 reasoning_content。鸿蒙的 ArkTS 运行时把 emoji 按码元拆成两个落单的代理项，逐字符校验曾因此把整条回复拒掉、页面显示「聊天服务暂不可用」。
   let completion = JSON.stringify({
-    choices: [{ message: { role: "assistant", content: "第一行\n第二行" } }],
+    choices: [
+      {
+        message: { role: "assistant", content: "第一行\n第二行 👋😊", reasoning_content: "想一想" },
+      },
+    ],
   });
   const transport: AccountTransport = {
     request: async (method, path, _token, body, timeoutMs) => {
@@ -12965,7 +14035,10 @@ group("the account assistant answers with a model list and one reply", () => {
         check(reply.ok === true, "a completion is accepted");
         // A conversation is written in paragraphs. The bridge's other validators reject control
         // characters, which would have refused every multi-line answer the assistant gives.
-        check(reply.value.content === "第一行\n第二行", "newlines in a reply are content");
+        check(
+          reply.value.content === "第一行\n第二行 👋😊",
+          "newlines and emoji in a reply are content",
+        );
         const sent = calls.find((call) => call.path === "/v1/chat/completions");
         check(sent?.body?.max_tokens === 2048, "the shared request shape is sent");
         check(sent?.body?.stream === false, "and it does not ask for a stream");
@@ -13186,7 +14259,7 @@ group("a malformed enumeration is not trusted", () => {
 });
 
 group("setup has two steps and they fail separately", () => {
-  const own = "app.msime.harmony";
+  const own = "app.msime.hmos";
   check(
     OnboardingStatePolicy.required({
       enabled: ImeEnabledState.DISABLED,
@@ -13231,7 +14304,7 @@ group("an unanswerable setup query does not send anyone back to a welcome screen
     OnboardingStatePolicy.required({
       enabled: null,
       currentBundle: "",
-      ownBundle: "app.msime.harmony",
+      ownBundle: "app.msime.hmos",
     }) === false,
     "an unreadable enablement state opens settings",
   );
@@ -13239,7 +14312,7 @@ group("an unanswerable setup query does not send anyone back to a welcome screen
     OnboardingStatePolicy.required({
       enabled: ImeEnabledState.FULL_EXPERIENCE_MODE,
       currentBundle: "",
-      ownBundle: "app.msime.harmony",
+      ownBundle: "app.msime.hmos",
     }) === false,
     "an unreadable current keyboard opens settings",
   );
@@ -13247,7 +14320,7 @@ group("an unanswerable setup query does not send anyone back to a welcome screen
   check(
     OnboardingStatePolicy.required({
       enabled: ImeEnabledState.FULL_EXPERIENCE_MODE,
-      currentBundle: "app.msime.harmony",
+      currentBundle: "app.msime.hmos",
       ownBundle: "",
     }) === false,
     "an unreadable own bundle opens settings",
@@ -13256,7 +14329,7 @@ group("an unanswerable setup query does not send anyone back to a welcome screen
     OnboardingStatePolicy.describe({
       enabled: ImeEnabledState.FULL_EXPERIENCE_MODE,
       currentBundle: "com.example.other",
-      ownBundle: "app.msime.harmony",
+      ownBundle: "app.msime.hmos",
     }) === "enabled but not current, opening welcome flow",
     "the reason the window opened where it did is recorded, not inferred afterwards",
   );
@@ -14204,7 +15277,7 @@ group("a refused preferences write carries the code the page has a sentence for"
     "a stale revision is a conflict",
   );
   check(
-    PreferencesErrorCode.of("candidate page size must be between 1 and 9") === "invalid",
+    PreferencesErrorCode.of("candidate page size must be between 1 and 10") === "invalid",
     "an out-of-range page size is invalid",
   );
   check(
@@ -14470,6 +15543,51 @@ group("AI model catalogs filter capabilities and paginate safely", () => {
   );
 });
 
+group("Harmony batch transcription picks the request by its format", () => {
+  for (const provider of ["openai", "siliconflow", "groq", "everyapi", "mistral"]) {
+    check(
+      HttpAsrConfigurationPolicy.requestFormat(provider) === "multipart",
+      `${provider} is a multipart upload`,
+    );
+  }
+  check(
+    HttpAsrConfigurationPolicy.requestFormat("bailian") === "chat_audio",
+    "Bailian is a chat completion with audio input",
+  );
+  check(
+    ["doubao", "local", "system", ""].every(
+      (provider: string) => HttpAsrConfigurationPolicy.requestFormat(provider) === "",
+    ),
+    "streaming, on-device and system recognition are not uploads",
+  );
+  const body = JSON.parse(HttpAsrConfigurationPolicy.chatAudioBody("qwen3-asr-flash", "UklGRg=="));
+  check(
+    body.model === "qwen3-asr-flash" &&
+      body.stream === false &&
+      body.messages.length === 1 &&
+      body.messages[0].role === "user" &&
+      body.messages[0].content[0].type === "input_audio" &&
+      body.messages[0].content[0].input_audio.data === "data:audio/wav;base64,UklGRg==",
+    "the chat body carries the recording as a data URL in one user message",
+  );
+  const bailian: VoiceInputConfiguration = {
+    ...DEFAULT_VOICE_INPUT_CONFIGURATION,
+    asr_provider: "bailian",
+    asr_endpoint: "",
+    asr_model: "",
+    asr_token: "",
+    asr_tokens: { bailian: "synthetic-bailian-key" },
+  };
+  check(
+    HttpAsrConfigurationPolicy.endpoint(bailian) ===
+      "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions" &&
+      HttpAsrConfigurationPolicy.model(bailian) === "qwen3-asr-flash" &&
+      HttpAsrConfigurationPolicy.token(bailian) === "synthetic-bailian-key" &&
+      HttpAsrConfigurationPolicy.valid(bailian),
+    "Bailian resolves to the DashScope compatible endpoint and can record",
+  );
+});
+
 group("Harmony batch transcription accepts every shared cloud preset", () => {
   const everyapi: VoiceInputConfiguration = {
     ...DEFAULT_VOICE_INPUT_CONFIGURATION,
@@ -14485,7 +15603,7 @@ group("Harmony batch transcription accepts every shared cloud preset", () => {
     "EveryAPI resolves to its transcription endpoint",
   );
   check(
-    HttpAsrConfigurationPolicy.model(everyapi) === "openai/whisper-large-v3-turbo",
+    HttpAsrConfigurationPolicy.model(everyapi) === "volc.seedasr.sauc.duration",
     "EveryAPI resolves to its shared default model",
   );
   check(
@@ -14734,8 +15852,8 @@ group("Korean draws the syllable, not the key letters behind it", () => {
 
 group("the Korean scheme is one more card, and remembers the Chinese scheme it replaced", () => {
   check(
-    KeyboardScheme.SCHEMES[10] === KeyboardScheme.KOREAN && KeyboardScheme.SCHEMES.length === 16,
-    "appended after the first ten, as the shared sixteen-entry picker has it",
+    KeyboardScheme.SCHEMES[10] === KeyboardScheme.KOREAN && KeyboardScheme.SCHEMES.length === 17,
+    "appended after the first ten, as the shared seventeen-entry picker has it",
   );
   check(
     KeyboardScheme.fromPreferenceId("korean") === KeyboardScheme.KOREAN,
@@ -14765,7 +15883,7 @@ group("the Korean scheme is one more card, and remembers the Chinese scheme it r
     "Korean offers no dictionary actions",
   );
   check(
-    TypingStatisticsPolicy.source("korean", "xiaohe", false, false, "none") === "korean",
+    TypingStatisticsPolicy.source("korean", "xiaohe", false, KeyGrid.NONE, "none") === "korean",
     "Korean typing counts under its own source",
   );
   check(
@@ -15958,6 +17076,44 @@ group("LocalVoiceModelPolicy", () => {
     "an install names its model",
   );
   check(
+    LocalVoiceModelPolicy.action('{"operation":"import","id":"sense-voice-small"}')?.operation ===
+      "import",
+    "an import names its model",
+  );
+  check(
+    LocalVoiceModelPolicy.errorCode("local_model_import_missing: silero_vad.onnx") ===
+      "local_model_import_missing",
+    "a missing import file keeps its code and drops the file name",
+  );
+  check(
+    LocalVoiceModelPolicy.errorCode("local_model_import_unreadable: permission denied") ===
+      "local_model_import_unreadable",
+    "an unreadable import file keeps its code",
+  );
+  const catalog = JSON.stringify({
+    ok: true,
+    value: {
+      models: [
+        { id: "x-asr-zh-en-streaming", import_files: [{ size: 133895136 }] },
+        { id: "sense-voice-small", import_files: [{ size: 163002883 }, { size: 643854 }, {}] },
+      ],
+    },
+  });
+  check(
+    LocalVoiceModelPolicy.importSizes(catalog, "sense-voice-small").join(",") ===
+      "163002883,643854",
+    "an import copies only files as long as one the model needs",
+  );
+  check(
+    LocalVoiceModelPolicy.importSizes(catalog, "unknown").length === 0 &&
+      LocalVoiceModelPolicy.importSizes("{", "sense-voice-small").length === 0 &&
+      LocalVoiceModelPolicy.importSizes(
+        JSON.stringify({ ok: false, error: "invalid local model root" }),
+        "sense-voice-small",
+      ).length === 0,
+    "an unknown model or an unreadable list copies nothing",
+  );
+  check(
     LocalVoiceModelPolicy.action('{"operation":"remove"}') === null &&
       LocalVoiceModelPolicy.action('{"operation":"format","id":"x"}') === null &&
       LocalVoiceModelPolicy.action("[") === null,
@@ -17028,7 +18184,7 @@ group(
   "Cantonese, Zhuyin and Vietnamese are three more cards, Cantonese and Zhuyin needing a dictionary",
   () => {
     check(
-      KeyboardScheme.SCHEMES.length === 16 &&
+      KeyboardScheme.SCHEMES.length === 17 &&
         KeyboardScheme.SCHEMES[10] === KeyboardScheme.KOREAN &&
         KeyboardScheme.SCHEMES[11] === KeyboardScheme.CANTONESE &&
         KeyboardScheme.SCHEMES[12] === KeyboardScheme.ZHUYIN &&
@@ -17111,9 +18267,11 @@ group(
       "and a Japanese switch remembers either",
     );
     check(
-      TypingStatisticsPolicy.source("cantonese", "xiaohe", false, false, "none") === "cantonese" &&
-        TypingStatisticsPolicy.source("zhuyin", "xiaohe", false, false, "none") === "zhuyin" &&
-        TypingStatisticsPolicy.source("vietnamese", "xiaohe", false, false, "none") ===
+      TypingStatisticsPolicy.source("cantonese", "xiaohe", false, KeyGrid.NONE, "none") ===
+        "cantonese" &&
+        TypingStatisticsPolicy.source("zhuyin", "xiaohe", false, KeyGrid.NONE, "none") ===
+          "zhuyin" &&
+        TypingStatisticsPolicy.source("vietnamese", "xiaohe", false, KeyGrid.NONE, "none") ===
           "vietnamese",
       "each counts under its own typing source",
     );
@@ -17198,7 +18356,7 @@ group("the Dachen keys wear their bopomofo and send their ASCII key", () => {
 
 group("Stroke is one more card, opt-in and needing msime-stroke.db", () => {
   check(
-    KeyboardScheme.SCHEMES.length === 16 &&
+    KeyboardScheme.SCHEMES.length === 17 &&
       KeyboardScheme.SCHEMES[14] === KeyboardScheme.TIBETAN &&
       KeyboardScheme.SCHEMES[15] === KeyboardScheme.STROKE,
     "appended after Tibetan, as the shared TouchKeyboardScheme::ALL appends it",
@@ -17280,9 +18438,9 @@ group("Stroke is one more card, opt-in and needing msime-stroke.db", () => {
     "Stroke is itself the Chinese scheme 中文 goes back to, and a non-Chinese switch remembers it",
   );
   check(
-    TypingStatisticsPolicy.source("stroke", "xiaohe", false, false, "none") === "stroke" &&
-      TypingStatisticsPolicy.source("stroke", "xiaohe", true, false, "none") === "english" &&
-      TypingStatisticsPolicy.source("stroke", "xiaohe", false, false, "emoji") === "local",
+    TypingStatisticsPolicy.source("stroke", "xiaohe", false, KeyGrid.NONE, "none") === "stroke" &&
+      TypingStatisticsPolicy.source("stroke", "xiaohe", true, KeyGrid.NONE, "none") === "english" &&
+      TypingStatisticsPolicy.source("stroke", "xiaohe", false, KeyGrid.NONE, "emoji") === "local",
     "it counts under its own typing source, and English or a local mode under theirs",
   );
   check(
@@ -17755,8 +18913,8 @@ group("藏文是第九个方案：按 EWTS 威利转写组字，不是中文方�
     "藏文保留原来的中文方案，「中文」回到它",
   );
   check(
-    TypingStatisticsPolicy.source("tibetan", "xiaohe", false, false, "none") === "tibetan" &&
-      TypingStatisticsPolicy.source("tibetan", "xiaohe", true, false, "none") === "english",
+    TypingStatisticsPolicy.source("tibetan", "xiaohe", false, KeyGrid.NONE, "none") === "tibetan" &&
+      TypingStatisticsPolicy.source("tibetan", "xiaohe", true, KeyGrid.NONE, "none") === "english",
     "打字统计记在 tibetan 名下，英文模式下仍记英文",
   );
   check(
@@ -18284,4 +19442,27 @@ group("community reports, moderation state and refusals reach the page by name",
       result = await skins({ community_operation: "list", scope: "saved", offset: 0, search: "" });
       check(JSON.parse(result).error === "community_invalid", "skins have no other scope");
     });
+});
+
+// 「下载并应用云端设置」写回本机时交给 savePreferences 的是整份快照：只给里面那层偏好会被原生接口当成格式不对的快照拒掉，应用一直报存储失败。
+group("applying cloud settings saves a whole preferences snapshot", () => {
+  const local = {
+    format_version: 1,
+    revision: 7,
+    preferences: { scheme: "quanpin", learning: true },
+  };
+  const saved = JSON.parse(
+    snapshotWithPreferences(local, { scheme: "shuangpin", learning: false }),
+  ) as Record<string, unknown>;
+  check(saved["format_version"] === 1, "the format version is kept");
+  check(saved["revision"] === 7, "and so is the revision the save is checked against");
+  check(
+    JSON.stringify(saved["preferences"]) ===
+      JSON.stringify({ scheme: "shuangpin", learning: false }),
+    "the preferences are the applied ones",
+  );
+  check(
+    JSON.stringify(local.preferences) === JSON.stringify({ scheme: "quanpin", learning: true }),
+    "the local snapshot is not changed in place",
+  );
 });

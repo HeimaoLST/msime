@@ -1,4 +1,6 @@
+import app.msime.android.DigestPolicy;
 import app.msime.android.UpdateApi;
+import app.msime.android.JsonPolicy;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
@@ -20,6 +22,7 @@ public final class UpdateApiSmoke {
         // 只允许 https 与白名单主机。
         check(UpdateApi.allowedUrl("https://msime.app/api/releases?platform=android"), "msime.app allowed");
         check(UpdateApi.allowedUrl("https://release-assets.githubusercontent.com/a/b"), "asset host allowed");
+        check(UpdateApi.allowedUrl(UpdateApi.MIRROR_PREFIX + "https://github.com/metasequoiaime/msime/releases/download/android-v1.1.0/msime-android.apk"), "mirror allowed");
         check(!UpdateApi.allowedUrl("http://github.com/x"), "plain http refused");
         check(!UpdateApi.allowedUrl("https://evil.example/x"), "other hosts refused");
         check(!UpdateApi.allowedUrl("https://github.com.evil.example/x"), "suffix tricks refused");
@@ -44,6 +47,12 @@ public final class UpdateApiSmoke {
         check(UpdateApi.pick(releases, UpdateApi.Channel.STABLE, "1.1.0") == null, "up to date");
         check(UpdateApi.Channel.fromId("nonsense") == UpdateApi.Channel.STABLE, "unknown channel is stable");
 
+        List<UpdateApi.Release> malformedTags = List.of(
+            new UpdateApi.Release("android-v1.1.0", "1.1.0", false),
+            new UpdateApi.Release("android bad tag", "9.0.0", false));
+        check("android-v1.1.0".equals(UpdateApi.pick(malformedTags, UpdateApi.Channel.STABLE, "1.0.0").tag()),
+            "invalid release tags must not hide a usable update");
+
         UpdateApi.Update update = UpdateApi.update(releases.get(0), "full");
         check(update.apkUrl().equals("https://github.com/metasequoiaime/msime/releases/download/android-v1.1.0/msime-android.apk"), "apk url");
         check(update.checksumUrl().equals(update.apkUrl() + ".sha256"), "checksum url");
@@ -52,16 +61,14 @@ public final class UpdateApiSmoke {
         String digest = "ab".repeat(32);
         check(digest.equals(UpdateApi.parseChecksum(digest.toUpperCase(Locale.ROOT) + "  msime-android.apk\n")), "sha256sum format");
         check(UpdateApi.parseChecksum("not-a-digest") == null, "malformed checksum");
-        java.lang.reflect.Method strictString = UpdateApi.class.getDeclaredMethod("strictString", Object.class);
-        strictString.setAccessible(true);
-        check("v9.0.0".equals(strictString.invoke(null, "v9.0.0")),
+        check("v9.0.0".equals(JsonPolicy.strictString("v9.0.0")),
             "release metadata accepts JSON strings");
-        check(strictString.invoke(null, 7) == null,
+        check(JsonPolicy.strictString(7) == null,
             "numeric release metadata must not be coerced into update paths");
 
         // 下载：每一跳都过白名单，校验通过才留下文件。
         byte[] apk = "apk-bytes".getBytes(StandardCharsets.US_ASCII);
-        String good = hex(MessageDigest.getInstance("SHA-256").digest(apk));
+        String good = DigestPolicy.hex(MessageDigest.getInstance("SHA-256").digest(apk));
         Map<String, UpdateApi.Exchange> routes = new HashMap<>();
         List<String> seen = new ArrayList<>();
         UpdateApi api = new UpdateApi(url -> {
@@ -77,6 +84,72 @@ public final class UpdateApiSmoke {
         File downloaded = api.download(update, cache, null);
         check(downloaded.isFile() && downloaded.getName().equals("msime-android.apk"), "verified file kept");
         check(downloaded.getParentFile().getName().equals("updates"), "stored under cache/updates");
+        check(seen.indexOf(UpdateApi.MIRROR_PREFIX + update.checksumUrl()) >= 0
+                && seen.indexOf(update.checksumUrl()) > seen.indexOf(UpdateApi.MIRROR_PREFIX + update.checksumUrl())
+                && seen.indexOf(update.apkUrl()) > seen.indexOf(update.checksumUrl()),
+            "the mirror checksum is tried first, then the GitHub checksum and APK");
+
+        // 镜像能用时完全不碰 GitHub。
+        List<String> mirrorSeen = new ArrayList<>();
+        UpdateApi mirrored = new UpdateApi(url -> {
+            mirrorSeen.add(url);
+            if (url.equals(UpdateApi.MIRROR_PREFIX + update.checksumUrl())) return body(good + "  msime-android.apk\n");
+            if (url.equals(UpdateApi.MIRROR_PREFIX + update.apkUrl())) return new UpdateApi.Exchange(200, null, apk.length, new ByteArrayInputStream(apk));
+            return new UpdateApi.Exchange(404, null, 0, new ByteArrayInputStream(new byte[0]));
+        });
+        File mirroredCache = Files.createTempDirectory("update-smoke-mirror").toFile();
+        check(good.equals(DigestPolicy.sha256Hex(mirrored.download(update, mirroredCache, null))), "the mirror alone delivers a verified APK");
+        check(mirrorSeen.stream().allMatch(url -> url.startsWith(UpdateApi.MIRROR_PREFIX)), "GitHub is not contacted when the mirror works");
+
+        // 镜像给的包摘要不符：删掉，换 GitHub 再下一次。
+        byte[] corrupt = "apk-bytez".getBytes(StandardCharsets.US_ASCII);
+        UpdateApi corrupted = new UpdateApi(url -> {
+            if (url.equals(UpdateApi.MIRROR_PREFIX + update.checksumUrl())) return body(good + "  msime-android.apk\n");
+            if (url.equals(UpdateApi.MIRROR_PREFIX + update.apkUrl())) return new UpdateApi.Exchange(200, null, corrupt.length, new ByteArrayInputStream(corrupt));
+            if (url.equals(update.checksumUrl())) return body(good + "  msime-android.apk\n");
+            if (url.equals(update.apkUrl())) return new UpdateApi.Exchange(200, null, apk.length, new ByteArrayInputStream(apk));
+            return new UpdateApi.Exchange(404, null, 0, new ByteArrayInputStream(new byte[0]));
+        });
+        File corruptedCache = Files.createTempDirectory("update-smoke-corrupt").toFile();
+        check(good.equals(DigestPolicy.sha256Hex(corrupted.download(update, corruptedCache, null))), "a corrupt mirror copy falls back to GitHub");
+        check(!new File(corruptedCache, "updates/msime-android.apk.part").exists(), "the corrupt copy is not left behind");
+
+        // 镜像的校验文件过期时，GitHub 的 APK 必须用 GitHub 自己的校验文件核对。
+        List<String> staleChecksumSeen = new ArrayList<>();
+        UpdateApi staleChecksum = new UpdateApi(url -> {
+            staleChecksumSeen.add(url);
+            if (url.equals(UpdateApi.MIRROR_PREFIX + update.checksumUrl()))
+                return body("cd".repeat(32) + "  msime-android.apk\n");
+            if (url.equals(UpdateApi.MIRROR_PREFIX + update.apkUrl()) || url.equals(update.apkUrl()))
+                return new UpdateApi.Exchange(200, null, apk.length, new ByteArrayInputStream(apk));
+            if (url.equals(update.checksumUrl())) return body(good + "  msime-android.apk\n");
+            return new UpdateApi.Exchange(404, null, 0, new ByteArrayInputStream(new byte[0]));
+        });
+        File staleChecksumCache = Files.createTempDirectory("update-smoke-stale-checksum").toFile();
+        check(good.equals(DigestPolicy.sha256Hex(staleChecksum.download(update, staleChecksumCache, null))),
+            "GitHub APK is checked against its own checksum after mirror mismatch");
+        check(staleChecksumSeen.contains(update.checksumUrl()), "GitHub checksum is requested for GitHub APK");
+        check(!new File(staleChecksumCache, "updates/msime-android.apk.part").exists(),
+            "mirror checksum mismatch leaves no partial APK");
+
+        // 镜像 APK 不可用时，也不能拿镜像的 SHA 接受 GitHub 上不匹配的 APK。
+        UpdateApi mismatchedGithub = new UpdateApi(url -> {
+            if (url.equals(UpdateApi.MIRROR_PREFIX + update.checksumUrl()))
+                return body(good + "  msime-android.apk\n");
+            if (url.equals(update.checksumUrl()))
+                return body("cd".repeat(32) + "  msime-android.apk\n");
+            if (url.equals(update.apkUrl()))
+                return new UpdateApi.Exchange(200, null, apk.length, new ByteArrayInputStream(apk));
+            return new UpdateApi.Exchange(404, null, 0, new ByteArrayInputStream(new byte[0]));
+        });
+        File mismatchedGithubCache = Files.createTempDirectory("update-smoke-github-mismatch").toFile();
+        try {
+            mismatchedGithub.download(update, mismatchedGithubCache, null);
+            throw new AssertionError("GitHub APK must not use the mirror checksum");
+        } catch (UpdateApi.Failure expected) {
+            check(!new File(mismatchedGithubCache, "updates/msime-android.apk").exists(),
+                "GitHub APK is not kept with a mismatched GitHub checksum");
+        }
 
         // Cancelling from the progress callback must remove the partial APK.
         File cancelledCache = Files.createTempDirectory("update-smoke-cancelled").toFile();
@@ -120,6 +193,20 @@ public final class UpdateApiSmoke {
         File symlinkTarget = new File(symlinkDirectory, "msime-android.apk");
         check(!Files.isSymbolicLink(symlinkTarget.toPath()), "update target must not be a symlink");
 
+        // NOFOLLOW_LINKS 不防硬链接：预先放置的 .part 不得截断更新目录之外的文件。
+        File hardlinkCache = Files.createTempDirectory("update-smoke-hardlink").toFile();
+        File hardlinkDirectory = new File(hardlinkCache, "updates");
+        check(hardlinkDirectory.mkdirs(), "hard-link test directory created");
+        File hardlinkExternal = new File(hardlinkCache, "outside.apk");
+        Files.writeString(hardlinkExternal.toPath(), "sentinel");
+        Files.createLink(new File(hardlinkDirectory, "msime-android.apk.part").toPath(),
+            hardlinkExternal.toPath());
+        try {
+            symlinkApi.download(update, hardlinkCache, null);
+        } catch (UpdateApi.Failure expected) { }
+        check("sentinel".equals(Files.readString(hardlinkExternal.toPath())),
+            "update download must not follow a partial-file hard link");
+
         // The updates directory itself must not redirect writes outside the cache.
         File directorySymlinkCache = Files.createTempDirectory("update-smoke-directory-link").toFile();
         File directoryOutside = Files.createTempDirectory("update-smoke-directory-outside").toFile();
@@ -151,9 +238,30 @@ public final class UpdateApiSmoke {
         File two = second.get();
         pool.shutdown();
         check(one.equals(two) && one.isFile(), "concurrent downloads end with the same verified file");
-        check(good.equals(UpdateApi.sha256Hex(one)), "the shared file is intact");
+        check(good.equals(DigestPolicy.sha256Hex(one)), "the shared file is intact");
         check(apkFetches.get() == 1, "the second download reuses the verified file");
         check(!new File(raceCache, "updates/msime-android.apk.part").exists(), "no partial file is left behind");
+
+        java.nio.file.Path digestRoot = Files.createTempDirectory("digest-policy-smoke");
+        try {
+            java.nio.file.Path digestSource = digestRoot.resolve("source.bin");
+            Files.writeString(digestSource, "synthetic");
+            java.nio.file.Path digestLink = digestRoot.resolve("linked.bin");
+            Files.createLink(digestLink, digestSource);
+            try {
+                DigestPolicy.sha256Hex(digestLink.toFile());
+                throw new AssertionError("hard-linked digest input must be refused");
+            } catch (java.io.IOException expected) {
+                // Private digest inputs must have one directory entry.
+            }
+        } finally {
+            try (java.util.stream.Stream<java.nio.file.Path> paths = Files.walk(digestRoot)) {
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach(path -> {
+                    try { Files.deleteIfExists(path); }
+                    catch (Exception error) { throw new IllegalStateException(error); }
+                });
+            }
+        }
 
         routes.put("https://release-assets.githubusercontent.com/sum", body("cd".repeat(32) + "  msime-android.apk\n"));
         routes.put(update.apkUrl(), new UpdateApi.Exchange(200, null, apk.length, new ByteArrayInputStream(apk)));
@@ -178,12 +286,6 @@ public final class UpdateApiSmoke {
     private static UpdateApi.Exchange body(String text) {
         byte[] bytes = text.getBytes(StandardCharsets.US_ASCII);
         return new UpdateApi.Exchange(200, null, bytes.length, new ByteArrayInputStream(bytes));
-    }
-
-    private static String hex(byte[] bytes) {
-        StringBuilder out = new StringBuilder();
-        for (byte value : bytes) out.append(String.format(Locale.ROOT, "%02x", value & 0xff));
-        return out.toString();
     }
 
     private static void rejects(Runnable action, String message) {

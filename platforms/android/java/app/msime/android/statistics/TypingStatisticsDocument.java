@@ -60,20 +60,15 @@ public final class TypingStatisticsDocument {
             // The shared Rust store defaults a missing field to false. Keep old or partially
             // written documents opt-in on Android as well; showing them as enabled would expose
             // statistics the user never turned on.
-            booleanValue(root.opt("enabled"), false),
-            BoundsPolicy.nonNegative(KeyboardGeometry.strictLong(root.opt("total"), 0)),
+            JsonPolicy.strictBoolean(root.opt("enabled"), false),
+            BoundsPolicy.nonNegative(NumberPolicy.strictLong(root.opt("total"), 0)),
             root.optString("retention", "forever"),
             counts(root.optJSONObject("days")),
             MapPolicy.copyOrEmpty(detail == null ? null : counts(detail.optJSONObject("characters"))),
             MapPolicy.copyOrEmpty(detail == null ? null : counts(detail.optJSONObject("sources"))),
-            Map.copyOf(dailyCharacters),
-            Map.copyOf(dailySources),
-            Map.copyOf(dailyKeys));
-    }
-
-    /** Persisted flags are typed JSON booleans; reject org.json's string coercion. */
-    public static boolean booleanValue(Object value, boolean fallback) {
-        return JsonPolicy.strictBoolean(value, fallback);
+            MapPolicy.copyOrEmpty(dailyCharacters),
+            MapPolicy.copyOrEmpty(dailySources),
+            MapPolicy.copyOrEmpty(dailyKeys));
     }
 
     private static Map<String, Long> counts(JSONObject value) {
@@ -81,9 +76,9 @@ public final class TypingStatisticsDocument {
         Map<String, Long> result = new LinkedHashMap<>(value.length());
         for (Iterator<String> keys = value.keys(); keys.hasNext();) {
             String key = keys.next();
-            long count = KeyboardGeometry.strictLong(value.opt(key), 0);
+            long count = NumberPolicy.strictLong(value.opt(key), 0);
             if (count > 0) result.put(key, count);
         }
-        return Map.copyOf(result);
+        return MapPolicy.copyOrEmpty(result);
     }
 }

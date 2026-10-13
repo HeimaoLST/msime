@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
-import { Row } from "../core/platform-controls";
-import { SurfaceThemeSelect, type SurfaceTheme } from "./surface-theme-select";
+import { SelectRow } from "./select-row";
+import { surfaceThemeOptions, type SurfaceTheme } from "./surface-theme-select";
 
 export interface SurfaceThemeRowProps {
   title: string;
@@ -9,11 +9,17 @@ export interface SurfaceThemeRowProps {
   onChange: (value: SurfaceTheme) => void;
 }
 
-/** A settings row for a surface-specific light/dark override. */
+/** 某个界面单独的明暗覆盖。HarmonyOS 手机上整行点开选择面板，与其他 `SelectRow` 一致。 */
 export function SurfaceThemeRow({ title, description, value, onChange }: SurfaceThemeRowProps) {
   return (
-    <Row title={title} description={description}>
-      <SurfaceThemeSelect label={title} value={value ?? "follow"} onChange={onChange} />
-    </Row>
+    <SelectRow
+      title={title}
+      description={description}
+      aria-label={title}
+      value={value ?? "follow"}
+      onChange={(event) => onChange(event.target.value as SurfaceTheme)}
+    >
+      {surfaceThemeOptions()}
+    </SelectRow>
   );
 }

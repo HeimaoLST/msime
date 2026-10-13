@@ -19,6 +19,10 @@ pub enum CandidateSource {
     Fallback = 9,
     /// A lattice path the keyboard (speed) sentence model picked.
     NeuralKeyboard = 11,
+    /// AI 候选的占位行（#6888）：会话开着 AI、当前组字可以问 AI 时，先占住 AI 候选的座位，回答到了由第一条 AI 候选替换；回答为空或失败时文字换成「—」，留到组字变化为止。它不能上屏、不学习、不计入统计，宿主把它画成暗色。
+    AiPending = 12,
+    /// 日文混输（实验选项，默认关）混进全拼、双拼候选的那一行：整段输入按罗马字转换出的最佳日文。它不属于下面任何一个谓词，所以选中时整段上屏并结束组字（与混输英文同一条路），不调词频、不记整句、不进个人上下文，也不能置顶、固定或删除；宿主不对它做简繁转换。
+    MixedJapanese = 13,
 }
 
 impl CandidateSource {
@@ -35,12 +39,24 @@ impl CandidateSource {
             8 => Self::Generated,
             9 => Self::Fallback,
             11 => Self::NeuralKeyboard,
+            12 => Self::AiPending,
+            13 => Self::MixedJapanese,
             _ => return None,
         })
     }
 
     pub fn is_online(self) -> bool {
         matches!(self, Self::CloudSuggestion | Self::AiSuggestion)
+    }
+
+    /// 坐 AI 座位的行：AI 候选和它的占位行。
+    pub fn holds_ai_seat(self) -> bool {
+        matches!(self, Self::AiSuggestion | Self::AiPending)
+    }
+
+    /// 由在线座位规则摆放的行：云候选、AI 候选和 AI 占位行。
+    pub fn takes_online_seat(self) -> bool {
+        self.is_online() || self == Self::AiPending
     }
 
     pub fn is_generated_or_fallback(self) -> bool {
@@ -217,12 +233,26 @@ impl SchemeType {
         }
     }
 
-    /// Shift+letter and the `/` and `@` keys open local modes while nothing is composed.
+    /// Shift+字母打开除 K 以外的本地模式；K、`/` 和 `@` 由 `opens_table_modes` 单独判断。
     pub const fn opens_local_modes(self) -> bool {
         match self {
             Self::Quanpin | Self::Shuangpin => true,
             Self::Wubi
             | Self::JapaneseRomaji
+            | Self::Korean
+            | Self::Vietnamese
+            | Self::Tibetan
+            | Self::Cantonese
+            | Self::Stroke
+            | Self::Zhuyin => false,
+        }
+    }
+
+    /// 没有组字时，Shift+K 打开短语模式，`/` 和 `@` 打开指令和提及模式；五笔也提供这些只查本地表的入口。
+    pub const fn opens_table_modes(self) -> bool {
+        match self {
+            Self::Quanpin | Self::Shuangpin | Self::Wubi => true,
+            Self::JapaneseRomaji
             | Self::Korean
             | Self::Vietnamese
             | Self::Tibetan
@@ -565,6 +595,8 @@ pub enum ShuangpinProfileKind {
     Ziranma = 1,
     Shoudao = 2,
     Microsoft = 3,
+    /// 用户自定义的键位，表在 [`ShuangpinCustomTable`] 里（`EngineOptions::shuangpin_custom_profile`、`SessionOptions::shuangpin_custom_profile`），没有内置的表。
+    Custom = 4,
 }
 
 impl ShuangpinProfileKind {
@@ -574,6 +606,7 @@ impl ShuangpinProfileKind {
             1 => Self::Ziranma,
             2 => Self::Shoudao,
             3 => Self::Microsoft,
+            4 => Self::Custom,
             _ => return None,
         })
     }
@@ -585,6 +618,7 @@ impl ShuangpinProfileKind {
             "ziranma" => Self::Ziranma,
             "shoudao" => Self::Shoudao,
             "microsoft" => Self::Microsoft,
+            "custom" => Self::Custom,
             _ => return None,
         })
     }
@@ -595,8 +629,75 @@ impl ShuangpinProfileKind {
             Self::Ziranma => "ziranma",
             Self::Shoudao => "shoudao",
             Self::Microsoft => "microsoft",
+            Self::Custom => "custom",
         }
     }
+}
+
+/// 用户自定义双拼方案的键位表（共享偏好 `shuangpin_custom_profile`）。三张表与内置方案同构：`initials` 只写三个多字母声母 `zh` `ch` `sh`，单字母声母仍在自己的字母键上；`finals` 把 33 个韵母各放到一个键上；`zero_initials` 给 12 个零声母音节各一个两键编码。键是小写字母或 `;`，`ü` 写作 `v`。表合不合法由 Engine 判定（见 `shuangpin::custom`），顺序无关。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ShuangpinCustomTable {
+    pub initials: Vec<(String, String)>,
+    pub finals: Vec<(String, String)>,
+    pub zero_initials: Vec<(String, String)>,
+}
+
+/// 九键双拼方案（#6572）。序号是宿主 ABI 值，名字是共享偏好 `nine_key_shuangpin_profile` 的取值。内置方案只收录能找到完整、前后一致的公开描述的那几个，来源见 `.agents/notes/implemented/feature/2026-10-10-nine-key-shuangpin.md`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u8)]
+pub enum NineKeyShuangpinKind {
+    /// 米旮旯 2。
+    Migala2 = 0,
+    /// 米旮旯 3（用 0 键的那一版）。
+    #[default]
+    Migala3 = 1,
+    /// 辜氏 2 低重码。
+    Gushi2Low = 2,
+    /// 用户自己的表，在 [`NineKeyShuangpinTable`] 里，没有内置的表。
+    Custom = 3,
+}
+
+impl NineKeyShuangpinKind {
+    /// 有内置表的方案，按序号。
+    pub const BUILTIN: [Self; 3] = [Self::Migala2, Self::Migala3, Self::Gushi2Low];
+
+    pub fn from_u8(value: u8) -> Option<Self> {
+        Some(match value {
+            0 => Self::Migala2,
+            1 => Self::Migala3,
+            2 => Self::Gushi2Low,
+            3 => Self::Custom,
+            _ => return None,
+        })
+    }
+
+    /// 只认确切的名字，不认识的名字返回 `None`，由调用方决定怎么处理。
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "migala2" => Self::Migala2,
+            "migala3" => Self::Migala3,
+            "gushi2_low" => Self::Gushi2Low,
+            "custom" => Self::Custom,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Migala2 => "migala2",
+            Self::Migala3 => "migala3",
+            Self::Gushi2Low => "gushi2_low",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+/// 九键双拼的键位表（共享偏好 `nine_key_shuangpin_custom_profile`），形状与 [`ShuangpinCustomTable`] 相同，键换成数字：`initials` 给 23 个声母（含 `zh` `ch` `sh`）各一个数字，`finals` 给 33 个韵母各一个数字，`zero_initials` 给 12 个零声母音节各一个两位数字编码。数字可以是 `0`–`9`，`ü` 写作 `v`。表合不合法由 Engine 判定（见 `nine_key_shuangpin`），顺序无关。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NineKeyShuangpinTable {
+    pub initials: Vec<(String, String)>,
+    pub finals: Vec<(String, String)>,
+    pub zero_initials: Vec<(String, String)>,
 }
 
 /// 五笔码表版本。序号即宿主 ABI 值（`EngineOptions::wubi_profile`）。
@@ -762,6 +863,29 @@ impl Default for SentenceAssociationOptions {
     }
 }
 
+/// 默认的首页候选行数：宿主每页候选数（`client-core` 的 `candidate_page_size`）的缺省值。引擎只把它当「第一页能放几行」用。
+pub const DEFAULT_FIRST_PAGE_ROWS: usize = 6;
+
+/// 一次请求带的首页行数。`QueryRequest` 派生 `Default`，裸 `usize` 会默认成 0 从而把补全词整组关掉，所以用带默认值的新类型；`new` 把 0 归一成 1。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstPageRows(usize);
+
+impl FirstPageRows {
+    pub const fn new(rows: usize) -> Self {
+        Self(if rows == 0 { 1 } else { rows })
+    }
+
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl Default for FirstPageRows {
+    fn default() -> Self {
+        Self(DEFAULT_FIRST_PAGE_ROWS)
+    }
+}
+
 /// What a scheme turns its composition into for the providers. Built fresh on every refresh; providers never mutate it.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct QueryRequest {
@@ -776,12 +900,15 @@ pub struct QueryRequest {
     pub segmentation: String,
     pub enable_shuangpin_helpcode: bool,
     pub enable_quanpin_helpcode: bool,
+    /// 会话的「拼音纠错」开关。名字带 quanpin 是历史原因：双拼也按它决定是否给纠错整句。
     pub enable_quanpin_autocorrect_transposition: bool,
     pub enable_quanpin_autocorrect_neighbor: bool,
     pub fuzzy_pinyin: FuzzyPinyinOptions,
     /// Hand back every whole-sentence reading rather than only the best.
     pub sentence_alternatives: bool,
     pub sentence_association: SentenceAssociationOptions,
+    /// 首页能放下的行数：全长度组的精确同音词够这么多就不再并入更长的补全词。
+    pub first_page_rows: FirstPageRows,
     /// Committed text the neural sentence models condition on.
     pub rescoring_context: String,
     /// Korean only: the Hanja list of the composing syllable is open, so the request is answered with its Hanja.
@@ -827,6 +954,10 @@ pub enum Command {
     CommitReading = 10,
     /// Open the active scheme's candidate list, or close it when it is open: the composing syllable's Hanja in Korean, the conversion's alternatives in Zhuyin. Schemes without an openable list leave it unhandled. The name stays for the wire and the goldens.
     ConvertHanja = 11,
+    /// 整句改字的光标左移一个字：组字的首选是一个字对一个音节的全拼或双拼整句时，第一次进入改字、光标停在最后一个字前，之后每次左移一个字；进不了改字时与 `MoveLeft` 相同。
+    ConversionLeft = 12,
+    /// 整句改字的光标右移一个字，最远到句末；不在改字里时与 `MoveRight` 相同。
+    ConversionRight = 13,
 }
 
 impl Command {
@@ -844,6 +975,8 @@ impl Command {
             9 => Self::CycleKanaVariant,
             10 => Self::CommitReading,
             11 => Self::ConvertHanja,
+            12 => Self::ConversionLeft,
+            13 => Self::ConversionRight,
             _ => return None,
         })
     }
@@ -862,11 +995,13 @@ impl Command {
             Self::CycleKanaVariant => "CycleKanaVariant",
             Self::CommitReading => "CommitReading",
             Self::ConvertHanja => "ConvertHanja",
+            Self::ConversionLeft => "ConversionLeft",
+            Self::ConversionRight => "ConversionRight",
         }
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
-        (0..=11)
+        (0..=13)
             .filter_map(Self::from_u8)
             .find(|command| command.name() == name)
     }
@@ -933,6 +1068,8 @@ pub enum LocalInputMode {
     Mention,
     /// 在全拼、双拼、五笔的组字中键入 `www.`、`http:` 等之后：原样输入的 ASCII 网址。
     Url,
+    /// `C`：拆字反查，按部件的拼音找字（`huohuohuo` 得 焱）。
+    Chaizi,
 }
 
 impl LocalInputMode {
@@ -952,6 +1089,7 @@ impl LocalInputMode {
             Self::Command => "command",
             Self::Mention => "mention",
             Self::Url => "url",
+            Self::Chaizi => "chaizi",
         }
     }
 
@@ -971,6 +1109,7 @@ impl LocalInputMode {
             Self::Command,
             Self::Mention,
             Self::Url,
+            Self::Chaizi,
         ]
         .into_iter()
         .find(|mode| mode.name() == name)
@@ -989,6 +1128,14 @@ impl LocalInputMode {
     /// Whether the mode's rows are text the engine generated rather than words the user spelled. Their commits are never learned and never counted as typing.
     pub fn generates_text(self) -> bool {
         matches!(self, Self::Expression | Self::Command | Self::Mention)
+    }
+
+    /// 候选注释由 Engine 自己给出、不补辅助码的模式：V、`/`、`@` 的行不是按拼音拼出来的，辅助码说明不了它们；拆字的行注释的是字的读音，用户正是不会读这个字才来查，辅助码夹在读音里只会添乱。和 `generates_text` 分开，是因为拆字上屏的字是用户挑出来的，照常计入打字统计。
+    pub fn annotates_rows(self) -> bool {
+        matches!(
+            self,
+            Self::Expression | Self::Command | Self::Mention | Self::Chaizi
+        )
     }
 }
 
@@ -1045,7 +1192,7 @@ impl Default for FrequencyAdjustmentOptions {
     }
 }
 
-/// Which local modes may be entered. The Shift+letter modes of the reference are on by default; expression (`V`), command (`/`) and mention (`@`) are off, because entering them takes a key that used to reach the host as text.
+/// Which local modes may be entered. The Shift+letter modes of the reference are on by default; expression (`V`), command (`/`), mention (`@`) and 拆字 (`C`) are off, because entering them takes a key that used to reach the host as text. 拆字的默认值由宿主按形态决定：host-api 在触屏宿主上打开它，桌面宿主等用户在设置里打开。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalModeOptions {
     pub unicode: bool,
@@ -1059,6 +1206,10 @@ pub struct LocalModeOptions {
     pub expression: bool,
     pub command: bool,
     pub mention: bool,
+    /// `C`：拆字反查。
+    pub chaizi: bool,
+    /// 总开关：没有组字时 Shift+字母（U/T/K/E/M/J/Y/R/V/C）能否进入对应的快捷模式。关掉后这些键照常打出大写字母，各模式自己的开关不变；`/` 和 `@` 不经过它。
+    pub shift_letter_entry: bool,
 }
 
 impl Default for LocalModeOptions {
@@ -1075,6 +1226,8 @@ impl Default for LocalModeOptions {
             expression: false,
             command: false,
             mention: false,
+            chaizi: false,
+            shift_letter_entry: true,
         }
     }
 }
@@ -1251,7 +1404,26 @@ impl Default for PersonalDictionaryEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::{SchemeSet, SchemeType};
+    use super::{CandidateSource, SchemeSet, SchemeType};
+
+    /// 线上的来源编号按值往返；10 空着（原 `NeuralDesktop`，未发布就删了）。日文混输行（13）不属于任何谓词：上屏走整段结束组字的路，不学习，不坐在线座位。
+    #[test]
+    fn candidate_sources_round_trip_and_mixed_japanese_matches_no_predicate() {
+        for value in 0..=u8::MAX {
+            match CandidateSource::from_u8(value) {
+                Some(source) => assert_eq!(source as u8, value),
+                None => assert!(value == 10 || value > 13, "{value}"),
+            }
+        }
+        let japanese = CandidateSource::MixedJapanese;
+        assert_eq!(CandidateSource::from_u8(13), Some(japanese));
+        assert!(!japanese.is_dictionary());
+        assert!(!japanese.is_generated_or_fallback());
+        assert!(!japanese.is_sentence_learning());
+        assert!(!japanese.is_online());
+        assert!(!japanese.takes_online_seat());
+        assert!(!japanese.holds_ai_seat());
+    }
 
     type Row = (&'static str, fn(SchemeType) -> bool, [bool; 5]);
     type Named = (&'static str, fn(SchemeType) -> bool);
@@ -1436,7 +1608,8 @@ mod tests {
                 LocalInputMode::Expression => LocalInputMode::Command,
                 LocalInputMode::Command => LocalInputMode::Mention,
                 LocalInputMode::Mention => LocalInputMode::Url,
-                LocalInputMode::Url => return None,
+                LocalInputMode::Url => LocalInputMode::Chaizi,
+                LocalInputMode::Chaizi => return None,
             })
         }
         let mut names = Vec::new();
@@ -1450,8 +1623,9 @@ mod tests {
             names.push(current.name());
             mode = next(current);
         }
-        assert_eq!(names.len(), 13);
+        assert_eq!(names.len(), 14);
         assert!(names.contains(&"url"));
+        assert!(names.contains(&"chaizi"));
         assert_eq!(LocalInputMode::from_name("unknown"), None);
     }
 

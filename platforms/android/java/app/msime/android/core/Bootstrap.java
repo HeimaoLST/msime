@@ -88,15 +88,26 @@ public final class Bootstrap {
     static boolean existingConfiguration(File file) throws java.io.IOException {
         if (file == null) throw new java.io.IOException("Runtime options unavailable");
         java.nio.file.Path path = file.toPath();
-        if (Files.isSymbolicLink(path)
-                || (Files.exists(path, LinkOption.NOFOLLOW_LINKS)
-                    && !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)))
+        if (!privateConfiguration(path))
             throw new java.io.IOException("Runtime options are not a regular file");
         return Files.exists(path, LinkOption.NOFOLLOW_LINKS);
     }
 
+    static boolean privateConfiguration(java.nio.file.Path path) {
+        return path != null
+            && (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)
+                || (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+                    && SafePaths.isSingleLink(path)));
+    }
+
     static void ensureSafeDirectory(java.nio.file.Path directory) throws java.io.IOException {
         SafePaths.ensureDirectory(directory);
+    }
+
+    /** Only a single ASCII asset component may be appended beneath a bootstrap directory. */
+    static void requireAssetName(String name) {
+        if (name == null || !name.matches("[A-Za-z0-9_.-]+") || name.contains(".."))
+            throw new IllegalArgumentException("Invalid asset name");
     }
 
     /**
@@ -117,7 +128,7 @@ public final class Bootstrap {
             ensureSafeDirectory(staging.toPath());
             String[] names = context.getAssets().list("offline-glosses");
             for (String name : names == null ? new String[0] : names) {
-                if (!name.matches("[A-Za-z0-9_.-]+") || name.contains("..")) throw new IllegalArgumentException("Invalid asset name");
+                requireAssetName(name);
                 try (InputStream input = context.getAssets().open("offline-glosses/" + name)) {
                     copyAsset(input, new File(staging, name).toPath());
                 }
@@ -147,7 +158,7 @@ public final class Bootstrap {
             ensureSafeDirectory(destination.toPath());
             String[] names = context.getAssets().list("helpcodes");
             for (String name : names == null ? new String[0] : names) {
-                if (!name.matches("[A-Za-z0-9_.-]+") || name.contains("..")) throw new IllegalArgumentException("Invalid asset name");
+                requireAssetName(name);
                 try (InputStream input = context.getAssets().open("helpcodes/" + name)) {
                     copyAsset(input, new File(destination, name).toPath());
                 }
@@ -177,7 +188,7 @@ public final class Bootstrap {
             ensureSafeDirectory(staging.toPath());
             String[] names = context.getAssets().list("language-dictionaries");
             for (String name : names == null ? new String[0] : names) {
-                if (!name.matches("[A-Za-z0-9_.-]+") || name.contains("..")) throw new IllegalArgumentException("Invalid asset name");
+                requireAssetName(name);
                 try (InputStream input = context.getAssets().open("language-dictionaries/" + name)) {
                     copyAsset(input, new File(staging, name).toPath());
                 }
@@ -210,13 +221,13 @@ public final class Bootstrap {
             ensureSafeDirectory(staging.toPath());
             String[] packs = context.getAssets().list("sound-packs");
             for (String pack : packs == null ? new String[0] : packs) {
-                if (!pack.matches("[A-Za-z0-9_.-]+") || pack.contains("..")) throw new IllegalArgumentException("Invalid asset name");
+                requireAssetName(pack);
                 String[] names = context.getAssets().list("sound-packs/" + pack);
                 if (names == null || names.length == 0) continue;
                 File directory = new File(staging, pack);
                 ensureSafeDirectory(directory.toPath());
                 for (String name : names) {
-                    if (!name.matches("[A-Za-z0-9_.-]+") || name.contains("..")) throw new IllegalArgumentException("Invalid asset name");
+                    requireAssetName(name);
                     try (InputStream input = context.getAssets().open("sound-packs/" + pack + "/" + name)) {
                         copyAsset(input, new File(directory, name).toPath());
                     }
@@ -270,7 +281,7 @@ public final class Bootstrap {
         java.util.Set<String> names = new java.util.HashSet<>(artifacts.length());
         for (int index = 0; index < artifacts.length(); index++) {
             String name = artifacts.getJSONObject(index).getString("name");
-            if (!name.matches("[A-Za-z0-9_.-]+") || name.contains("..")) throw new IllegalArgumentException("Invalid asset name");
+            requireAssetName(name);
             names.add(name);
         }
         return names;
@@ -390,6 +401,8 @@ public final class Bootstrap {
 
     /** 配置里记录的 `resources`；超过 1 MiB 或读不出来时为 `null`。按块读并限长，文件在检查之后变大也不会无界分配。 */
     private static String readConfiguredResources(File configuration) throws Exception {
+        if (!privateConfiguration(configuration.toPath()))
+            throw new java.io.IOException("Runtime options are not a private regular file");
         try (InputStream input = Files.newInputStream(configuration.toPath(), LinkOption.NOFOLLOW_LINKS)) {
             byte[] bytes = HttpBodyPolicy.readBounded(input, 1024 * 1024);
             if (bytes == null) return null;

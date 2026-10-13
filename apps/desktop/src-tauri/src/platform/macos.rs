@@ -17,6 +17,11 @@ pub(crate) fn cloud_clipboard_error(error: CloudClipboardError) -> crate::Comman
             CloudClipboardError::Unavailable => "unavailable",
             CloudClipboardError::OutcomeUnknown => "outcome_unknown",
             CloudClipboardError::Conflict => "conflict",
+            // 云剪贴板驱动的错误码原样交给面板；不认识的仍按服务不可用处理。
+            CloudClipboardError::Service(code) => {
+                msime_client_core::account::cloud_clipboard_error_code(&code)
+                    .unwrap_or("unavailable")
+            }
         },
     }
 }

@@ -1,4 +1,34 @@
 export type CloudClipboardItemShape = { id: string; text: string };
+/** 云剪贴板端到端加密的本机状态：`ready` 可读写，`pending` 等待另一台设备允许，`disabled` 账号关闭了云剪贴板。 */
+export type CloudClipboardE2eStatus = "ready" | "pending" | "disabled";
+/** `list` 结果里的 `e2e` 对象，见 `docs/cloud-clipboard-e2e.md`。 */
+export type CloudClipboardE2eShape = {
+  status: CloudClipboardE2eStatus;
+  /** 本机的核对码，16 位数字每 4 位一组。 */
+  code: string;
+  /** 等待本机允许的设备数。 */
+  pending_devices: number;
+  /** 本机解不开而被略去的条目数。 */
+  undecryptable: number;
+};
+/** 账号下登记的一台云剪贴板设备。 */
+export type CloudClipboardDeviceShape = {
+  device_id: string;
+  name: string;
+  created_at: string;
+  approved: boolean;
+  /** 是否就是本机。 */
+  current: boolean;
+  code: string;
+};
+/** `devices`、`approve`、`reject`、`remove`、`reset` 的结果。 */
+export type CloudClipboardDeviceStatusShape = {
+  enabled: boolean;
+  status: CloudClipboardE2eStatus;
+  device_id: string;
+  code: string;
+  devices: CloudClipboardDeviceShape[];
+};
 export type CloudDictionaryEntryShape = {
   id: string;
   kind: string;
@@ -50,6 +80,51 @@ export function cloudClipboardItems(value: { items?: unknown }): CloudClipboardI
           typeof (item as CloudClipboardItemShape).text === "string",
       )
     : [];
+}
+
+function cloudClipboardStatus(value: unknown): value is CloudClipboardE2eStatus {
+  return value === "ready" || value === "pending" || value === "disabled";
+}
+
+/** 读出 `list` 结果里的 `e2e`；宿主没给或形状不对时为 `null`，面板按原来的方式只显示条目。 */
+export function cloudClipboardE2e(value: { e2e?: unknown }): CloudClipboardE2eShape | null {
+  const e2e = value.e2e as Partial<CloudClipboardE2eShape> | null | undefined;
+  if (!e2e || typeof e2e !== "object" || !cloudClipboardStatus(e2e.status)) return null;
+  const count = (field: unknown) => (cloudResponseInteger(field) && field >= 0 ? field : 0);
+  return {
+    status: e2e.status,
+    code: typeof e2e.code === "string" ? e2e.code : "",
+    pending_devices: count(e2e.pending_devices),
+    undecryptable: count(e2e.undecryptable),
+  };
+}
+
+/** 读出设备管理动作的结果；形状不对时为 `null`。 */
+export function cloudClipboardDeviceStatus(value: {
+  status?: unknown;
+  devices?: unknown;
+  device_id?: unknown;
+  code?: unknown;
+  enabled?: unknown;
+}): CloudClipboardDeviceStatusShape | null {
+  if (!cloudClipboardStatus(value.status) || !Array.isArray(value.devices)) return null;
+  return {
+    enabled: value.enabled !== false,
+    status: value.status,
+    device_id: typeof value.device_id === "string" ? value.device_id : "",
+    code: typeof value.code === "string" ? value.code : "",
+    devices: value.devices.filter(
+      (device): device is CloudClipboardDeviceShape =>
+        Boolean(device) &&
+        typeof device === "object" &&
+        typeof (device as CloudClipboardDeviceShape).device_id === "string" &&
+        typeof (device as CloudClipboardDeviceShape).name === "string" &&
+        typeof (device as CloudClipboardDeviceShape).created_at === "string" &&
+        typeof (device as CloudClipboardDeviceShape).approved === "boolean" &&
+        typeof (device as CloudClipboardDeviceShape).current === "boolean" &&
+        typeof (device as CloudClipboardDeviceShape).code === "string",
+    ),
+  };
 }
 
 export function cloudDictionaryEntries<

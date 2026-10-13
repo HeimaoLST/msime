@@ -8,8 +8,10 @@ use crate::account::{
     BackendAccountClient, BackendAccountSession,
 };
 use crate::cloud::dictionary::percent_encode;
+use crate::community::write_actions::{delete_community_item, rate_community_item};
 use crate::community::{
-    valid_author, valid_description, valid_name, valid_query, valid_rating, CommunityModeration,
+    valid_author, valid_description, valid_name, valid_query, valid_rating,
+    CommunityDeletionResponse, CommunityModeration, CommunityRatingResponse,
     MAXIMUM_JAVASCRIPT_INTEGER, MAXIMUM_PAGE_ITEMS, MODERATION_FIELDS,
 };
 use crate::preferences::TouchKeyboardSkinDesign;
@@ -53,12 +55,6 @@ struct CommunitySkinDownload {
     design: TouchKeyboardSkinDesign,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CommunitySkinRating {
-    stars: u8,
-}
-
 #[derive(Serialize)]
 struct CommunitySkinPublishRequest<'a> {
     id: Uuid,
@@ -74,12 +70,6 @@ struct CommunitySkinPublishRequest<'a> {
 #[serde(deny_unknown_fields)]
 struct CommunitySkinPublishResponse {
     id: Uuid,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CommunitySkinUnpublishResponse {
-    deleted: bool,
 }
 
 pub trait CommunitySkinApi: Send + Sync + 'static {
@@ -181,24 +171,9 @@ impl CommunitySkinApi for BackendAccountClient {
     }
 
     fn rate_community_skin(&self, id: Uuid, stars: u8, token: &str) -> Result<(), AccountError> {
-        if id.is_nil() || !(1..=5).contains(&stars) {
-            return Err(AccountError::Invalid);
-        }
-        #[derive(Serialize)]
-        struct RatingRequest {
-            stars: u8,
-        }
-        let path = format!("/v1/community/skins/{}/rating", id.hyphenated());
-        let result = self.json::<CommunitySkinRating, _>(
-            Method::PUT,
-            &path,
-            Some(token),
-            Some(&RatingRequest { stars }),
-        )?;
-        if result.stars != stars {
-            return Err(AccountError::Unavailable);
-        }
-        Ok(())
+        rate_community_item("/v1/community/skins", id, stars, |path, request| {
+            self.json::<CommunityRatingResponse, _>(Method::PUT, path, Some(token), Some(request))
+        })
     }
 
     fn publish_community_skin(
@@ -231,20 +206,9 @@ impl CommunitySkinApi for BackendAccountClient {
     }
 
     fn unpublish_community_skin(&self, id: Uuid, token: &str) -> Result<(), AccountError> {
-        if id.is_nil() {
-            return Err(AccountError::Invalid);
-        }
-        let path = format!("/v1/community/skins/{}", id.hyphenated());
-        let result = self.json::<CommunitySkinUnpublishResponse, ()>(
-            Method::DELETE,
-            &path,
-            Some(token),
-            None,
-        )?;
-        if !result.deleted {
-            return Err(AccountError::Unavailable);
-        }
-        Ok(())
+        delete_community_item("/v1/community/skins", id, |path| {
+            self.json::<CommunityDeletionResponse, ()>(Method::DELETE, path, Some(token), None)
+        })
     }
 
     fn set_community_skin_category(
@@ -643,6 +607,7 @@ mod tests {
         *storage.0.lock().unwrap() = Some(SavedAccountSession {
             tokens: tokens(b'a', b'b'),
             expires_at_unix_ms: valid_future_expiry(),
+            session_id: None,
         });
         let api = FakeApi::default();
         let calls = Arc::clone(&api.skin_calls);
@@ -684,6 +649,7 @@ mod tests {
         *storage.0.lock().unwrap() = Some(SavedAccountSession {
             tokens: tokens(b'a', b'b'),
             expires_at_unix_ms: valid_future_expiry(),
+            session_id: None,
         });
         let session = Arc::new(BackendAccountSession::new(api.clone(), storage));
         let service = BackendCommunitySkinService::new(api.clone(), session);
@@ -966,6 +932,7 @@ mod tests {
         *storage.0.lock().unwrap() = Some(SavedAccountSession {
             tokens: tokens(b'a', b'b'),
             expires_at_unix_ms: valid_future_expiry(),
+            session_id: None,
         });
         let session = Arc::new(BackendAccountSession::new(api.clone(), storage));
         let service = BackendCommunitySkinService::new(api.clone(), session);

@@ -7,6 +7,7 @@ mod chain;
 mod clock;
 mod commit;
 mod composition;
+mod conversion;
 mod editing;
 mod glide;
 mod input;
@@ -16,23 +17,27 @@ pub mod options;
 #[cfg(test)]
 mod tests;
 
+use std::sync::Arc;
+
 use crate::diagnostics;
 use crate::error::{EngineError, Result};
-use crate::nine_key::NineKeySession;
+use crate::nine_key::{KeyGrid, NineKeySession};
 use crate::pinyin::glide::{GlideKeyboard, GlidePoint};
 use crate::types::{
     CandidateEdge, CandidateSource, Command, CommandTableEntry, CommandTranslationQuery, KeyResult,
     LocalInputMode, MentionEntry, OnlineQuery, QuickPhraseEntry, SchemeType,
 };
 
-pub use clock::Clock;
+use crate::types::FirstPageRows;
+pub use clock::{Clock, LocalClock};
 use input::InputSession;
 pub use options::{SessionOptions, SessionSnapshot};
 
 pub struct Session {
     input: InputSession,
     nine_key: NineKeySession,
-    nine_key_enabled: bool,
+    /// 触屏的组码网格：九键的数字从 `character` 进来，14 键的字母从 `grid_key` 进来；`None` 是不用网格。
+    key_grid: Option<KeyGrid>,
     shuangpin_preedit_uses_raw: bool,
 }
 
@@ -52,27 +57,54 @@ impl Session {
         );
         nine_key.set_stroke_dictionary(options.stroke_dictionary.clone());
         nine_key.set_mixed_expressive(options.expressive);
+        nine_key.set_inline_date_time(
+            options
+                .local_modes
+                .date_time
+                .then(|| Arc::clone(&input.clock.local)),
+        );
+        // 九键的整句与 26 键遵守同一组句子联想设置（#6059）。
+        nine_key.set_sentence_options(options.sentence_association, options.sentence_alternatives);
+        nine_key.set_first_page_rows(FirstPageRows::new(options.first_page_rows));
+        nine_key.set_rescoring_context(&options.rescoring_context);
+        // 九键选中的词记进同一个个人上下文模型，开关与 26 键相同（#6185）。
+        nine_key.set_personal_context_enabled(options.personal_context);
         Ok(Session {
             input,
             nine_key,
-            nine_key_enabled: false,
+            key_grid: None,
             shuangpin_preedit_uses_raw: options.shuangpin_preedit_uses_raw,
         })
     }
 
+    /// 会话建立时定下的双拼方案（内置的表，或校验过的用户表）。
+    pub(crate) fn shuangpin_layout(&self) -> &'static crate::shuangpin::ShuangpinProfile {
+        self.input.profile
+    }
+
     /// Replace the steady and local clocks, so tests can cross the 3 s / 8 s / 10 s personal-learning windows and the date/time mode can be pinned.
     pub fn set_clock(&mut self, clock: Clock) {
+        if self.input.local_mode_options.date_time {
+            self.nine_key
+                .set_inline_date_time(Some(Arc::clone(&clock.local)));
+        }
         self.input.clock = clock;
     }
 
-    /// One ASCII character; `shift_only` is a bare Shift+letter (local mode entry). 全拼下九键开启且没有别的组字时，数字 2-9 交给九宫格会话；注音九键的数字由注音编辑器自己处理。
+    /// One ASCII character; `shift_only` is a bare Shift+letter (local mode entry). 全拼下九键开启且没有别的组字时，数字 2-9 交给九宫格会话；九键双拼交的是方案用到的数字（可以有 1 和 0）；注音九键的数字由注音编辑器自己处理。
     pub fn character(&mut self, value: u8, shift_only: bool) -> KeyResult {
-        // English is a mode rather than a scheme, so the grid stays available in it: the same digits spell words instead of syllables. A local mode still takes the keys, and the scheme underneath must be quanpin: 拼音九宫格只认得全拼音节，注音九键走注音编辑器。
-        if self.nine_key_enabled
+        // English is a mode rather than a scheme, so the grid stays available in it: the same digits spell words instead of syllables. A local mode still takes the keys, and the scheme underneath must be quanpin: 拼音九宫格只认得全拼音节，注音九键走注音编辑器。九键双拼没有英文九键，专用英文里数字照常是数字。
+        let grid_digit = match self.key_grid {
+            Some(KeyGrid::NineKey) => (b'2'..=b'9').contains(&value),
+            Some(grid @ KeyGrid::NineKeyShuangpin(_)) => {
+                !self.input.dedicated_english && grid.is_code(value)
+            }
+            _ => false,
+        };
+        if grid_digit
             && self.input.scheme() == SchemeType::Quanpin
             && self.input.local_mode == LocalInputMode::None
             && self.input.preedit().is_empty()
-            && (b'2'..=b'9').contains(&value)
         {
             let result = self.nine_key.character(value);
             return self.after_nine_key(result);
@@ -96,13 +128,46 @@ impl Session {
         self.input.glide(keyboard, points)
     }
 
-    /// Cancels any nine-key digits first. Call with nothing composing when the keyboard layout changes. 同时切换注音编辑器的九键模式（注音组字会被丢掉）。
+    /// 九宫格（九键或 14 键）正在组字：这时的快照、命令和上屏都来自九宫格会话。
+    pub fn grid_composing(&self) -> bool {
+        self.nine_key.active()
+    }
+
+    /// `set_key_grid` 的九键开关：开是九键，关是不用网格。
     pub fn set_nine_key_enabled(&mut self, enabled: bool) {
+        self.set_key_grid(enabled.then_some(KeyGrid::NineKey));
+    }
+
+    /// 换触屏的组码网格，先丢掉网格里的组字，所以在换键盘布局、没有组字时调用。英文九键和注音九键只在九键下打开（注音组字会被丢掉）：14 键的英文模式画全键盘，注音没有 14 键。
+    pub fn set_key_grid(&mut self, grid: Option<KeyGrid>) {
         self.nine_key.command(Command::Cancel);
-        self.nine_key_enabled = enabled;
+        if let Some(grid) = grid {
+            self.nine_key.set_grid(grid);
+        }
+        self.key_grid = grid;
+        let nine_key = grid == Some(KeyGrid::NineKey);
         self.nine_key
-            .set_english_only(enabled && self.input.dedicated_english);
-        self.input.set_zhuyin_nine_key(enabled);
+            .set_english_only(nine_key && self.input.dedicated_english);
+        self.input.set_zhuyin_nine_key(nine_key);
+    }
+
+    /// 14 键的一键：`letter` 是这一组里的任一字母，由 `KeyGrid::code_of` 归成组码交给九宫格会话，宿主约定送这一组的首字母。不复用 `character`，因为硬件键盘的字母也走 `character`，物理 q 不能变成有歧义的 QW 组。只在 14 键、全拼、没有本地模式、不在专用英文里、26 键没有组字（或九宫格正在组字）时处理 `a`–`z`，其余不处理，状态不变。
+    pub fn grid_key(&mut self, letter: u8) -> KeyResult {
+        let Some(grid @ KeyGrid::FourteenKey) = self.key_grid else {
+            return KeyResult::unhandled();
+        };
+        let Some(code) = grid.code_of(letter) else {
+            return KeyResult::unhandled();
+        };
+        if self.input.scheme() != SchemeType::Quanpin
+            || self.input.local_mode != LocalInputMode::None
+            || self.input.dedicated_english
+            || !(self.input.preedit().is_empty() || self.nine_key.active())
+        {
+            return KeyResult::unhandled();
+        }
+        let result = self.nine_key.character(code);
+        self.after_nine_key(result)
     }
 
     /// 九宫格会话活跃时选它的拼写；否则在注音里钉目标音节的读音。
@@ -124,10 +189,24 @@ impl Session {
 
     pub fn command(&mut self, command: Command) -> KeyResult {
         if self.nine_key.active() {
+            // 九宫格没有整句改字，改字的光标键就是它的光标键。
+            let command = match command {
+                Command::ConversionLeft => Command::MoveLeft,
+                Command::ConversionRight => Command::MoveRight,
+                other => other,
+            };
             let result = self.nine_key.command(command);
             return self.after_nine_key(result);
         }
         self.input.handle_command(command)
+    }
+
+    /// 整句改字的左移，进入改字时从第 `index` 个候选（宿主高亮的那一行）开始；已在改字里时与 `command(ConversionLeft)` 相同。九宫格和进不了改字时按 `MoveLeft` 处理。
+    pub fn conversion_left_from(&mut self, index: usize) -> KeyResult {
+        if self.nine_key.active() {
+            return self.command(Command::MoveLeft);
+        }
+        self.input.conversion_left_from(index)
     }
 
     /// `1`..`9` select the first nine candidates.
@@ -276,15 +355,17 @@ impl Session {
         self.input.set_dedicated_english_mode(enabled);
         // The grid's digits mean letters in English and syllables outside it, so whichever of the two switches moves last has to tell it.
         self.nine_key
-            .set_english_only(self.nine_key_enabled && enabled);
+            .set_english_only(self.key_grid == Some(KeyGrid::NineKey) && enabled);
     }
 
     pub fn set_wubi_mixed_pinyin(&mut self, enabled: bool) {
         self.input.set_wubi_mixed_pinyin(enabled);
     }
 
+    /// 宿主的清缓存动作（维护快捷键、iOS 键盘扩展的内存告警）：清掉本会话各方案的候选缓存，并放掉进程级缓存里的日文模型，让不再用它的进程能交还前缀索引和映射；本会话若正持有模型，照常用到会话结束。
     pub fn reset_cache(&mut self) {
         self.input.reset_cache();
+        crate::japanese::decoder::JapaneseDictionary::release_shared();
     }
 
     /// Replace the `/` mode's command table; rows it cannot use are dropped. A diagnostic only if the open command list could not be refreshed.
@@ -315,11 +396,20 @@ impl Session {
     /// Disabling also ends the current context.
     pub fn set_personal_context_enabled(&mut self, enabled: bool) {
         self.input.set_personal_context_enabled(enabled);
+        self.nine_key.set_personal_context_enabled(enabled);
     }
 
     /// The committed text the neural sentence models condition on, updated without rebuilding the session. Only the last 64 characters matter.
     pub fn set_rescoring_context(&mut self, context: &str) {
         self.input.set_rescoring_context(context);
+        self.nine_key.set_rescoring_context(context);
+    }
+
+    /// 首页行数只决定词库要不要并入补全词。`Runtime::set_page_size` 在宿主改每页候选数时调它，
+    /// 因此引擎的首屏门槛和分页始终同源，不必等下一次因别的偏好变化重建引擎。
+    pub fn set_first_page_rows(&mut self, rows: FirstPageRows) {
+        self.input.set_first_page_rows(rows);
+        self.nine_key.set_first_page_rows(rows);
     }
 
     /// Hand over the candidates withheld from a single-letter query; whether the list grew.
@@ -361,14 +451,15 @@ impl Session {
         }
         let input = &self.input;
         let candidates = input.candidates().to_vec();
-        let mut preedit = input.preedit();
-        if !self.shuangpin_preedit_uses_raw
+        let preedit = if !self.shuangpin_preedit_uses_raw
             && input.scheme() == SchemeType::Shuangpin
             && input.local_mode == LocalInputMode::None
             && !input.dedicated_english
         {
-            preedit = input.pinyin_segmentation_with_cases();
-        }
+            input.pinyin_segmentation_with_cases().into_owned()
+        } else {
+            input.preedit()
+        };
         SessionSnapshot {
             scheme: input.scheme(),
             local_mode: input.local_mode,
@@ -385,17 +476,28 @@ impl Session {
             nine_key_strokes: String::new(),
             answered_by_pinyin_fallback: input.answered_by_pinyin_fallback(),
             wubi_unique_four_code: input.wubi_unique_four_code(),
-            shuangpin_profile: input.profile.name().to_owned(),
+            shuangpin_profile: input.profile.kind.name().to_owned(),
             candidate_sources: candidates.iter().map(|item| item.source).collect(),
             candidate_annotations: input.candidate_annotations(),
-            // `pinyin` rather than `canonical_pinyin`: the former is what composition advancement consumes, which is the question being asked.
+            // 纠错候选按原始按键长度消费；普通候选仍按 `pinyin`，两者都由组字推进判断。
             candidate_answers_key: candidates
                 .iter()
                 .map(|item| {
-                    input.selection_completes_composition(&item.pinyin, &item.word, item.scheme)
+                    // AI 占位行不回答按键：重排模型不能把它提到前面。
+                    item.source != CandidateSource::AiPending
+                        && input.selection_completes_composition(item)
                 })
                 .collect(),
             candidate_list_open: input.candidate_list_open(),
+            conversion: input
+                .conversion
+                .as_ref()
+                .map(|edit| edit.text())
+                .unwrap_or_default(),
+            conversion_focus: input
+                .conversion
+                .as_ref()
+                .map_or((0, 0), |edit| edit.focus_span()),
             candidates,
         }
     }
@@ -464,6 +566,23 @@ impl Session {
     /// Remove one online provider's rows from cached and visible candidates.
     pub fn clear_online_candidates(&mut self, source: CandidateSource) {
         self.input.clear_online_candidates(source);
+    }
+
+    /// 宿主为这个会话打开或关掉 AI 候选；打开时可以问 AI 的组字先在 AI 座位上放占位行（`CandidateSource::AiPending`），回答到达时由第一条 AI 候选替换，前后的候选都不挪位（#6888）。返回开关是否变了。
+    pub fn set_ai_seat(&mut self, enabled: bool) -> bool {
+        self.input.set_ai_seat(enabled)
+    }
+
+    /// AI 回答为空或失败：当前查询的占位行换成「—」，留到组字变化为止。返回显示的列表是否变了；过期查询、云候选和九宫格组字都返回 false。
+    pub fn resolve_online_candidates(
+        &mut self,
+        query: &OnlineQuery,
+        source: CandidateSource,
+    ) -> bool {
+        if self.nine_key.active() {
+            return false;
+        }
+        self.input.resolve_online_candidates(query, source)
     }
 
     pub fn apply_online_candidate(

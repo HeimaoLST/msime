@@ -3,13 +3,10 @@ package app.msime.android.home;
 import app.msime.android.TextPolicy;
 
 import android.content.Context;
-import android.content.Intent;
-import android.net.Uri;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.widget.LinearLayout;
 import android.widget.TextView;
-import app.msime.android.core.NoticeFieldPolicy;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
@@ -53,16 +50,15 @@ final class NoticeBanner {
                 .put("platform", "android")
                 .put("channel", "app");
             JSONObject root = new JSONObject(NativeClient.notices(request.toString()));
-            JSONObject value = JsonPolicy.strictTrue(root.opt("ok"))
-                ? root.optJSONObject("value") : null;
+            JSONObject value = JsonPolicy.objectValue(root);
             JSONArray items = value == null ? null : value.optJSONArray("items");
             List<Notice> notices = new ArrayList<>(items == null ? 0 : items.length());
             for (int index = 0; items != null && index < items.length(); index++) {
                 JSONObject item = items.optJSONObject(index);
                 if (item == null) continue;
-                String id = NoticeFieldPolicy.strictString(item.opt("id"));
-                String title = NoticeFieldPolicy.strictString(item.opt("title"));
-                String body = NoticeFieldPolicy.strictString(item.opt("body"));
+                String id = JsonPolicy.strictString(item.opt("id"));
+                String title = JsonPolicy.strictString(item.opt("title"));
+                String body = JsonPolicy.strictString(item.opt("body"));
                 if (id == null || title == null || body == null) continue;
                 title = TextPolicy.trimmed(title);
                 if (id.isEmpty() || title.isEmpty()) continue;
@@ -125,14 +121,6 @@ final class NoticeBanner {
     }
 
     private static void open(Context context, String link) {
-        Uri uri = Uri.parse(link);
-        String scheme = TextPolicy.lowercase(uri.getScheme());
-        if (!scheme.equals("https") && !scheme.equals("http") && !scheme.equals("mailto")) return;
-        try {
-            context.startActivity(new Intent(Intent.ACTION_VIEW, uri)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-        } catch (RuntimeException error) {
-            // No browser: the link stays text, which is all a notice link is.
-        }
+        LinkActions.openMarkdown(context, link);
     }
 }

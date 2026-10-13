@@ -21,10 +21,13 @@ let package = Package(
         "content/BackendCommunityResourceClient.swift",
         "content/BackendDictionaryClient.swift",
         "clients/BackendPreferencesClient.swift",
+        "clients/BackendPhrasesClient.swift",
         "clients/BackendSnapshotClient.swift",
         "clients/BackendSkinArtworkClient.swift",
         "storage/IOSPreferencePlan.swift",
+        "storage/BackendSyncPolicy.swift",
         "storage/BackendLocalStore.swift",
+        "storage/BackendBoundedFileReader.swift",
       ]
     ),
     .testTarget(

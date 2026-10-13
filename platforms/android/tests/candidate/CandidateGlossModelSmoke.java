@@ -1,4 +1,5 @@
 import app.msime.android.CandidateGlossPolicy;
+import app.msime.android.JsonPolicy;
 
 public final class CandidateGlossModelSmoke {
     public static void main(String[] args) throws Exception {
@@ -7,10 +8,26 @@ public final class CandidateGlossModelSmoke {
             "gloss display");
         check(CandidateGlossPolicy.accessibilitySuffix("", "hello", true).contains("英文释义"),
             "accessible gloss");
-        check(CandidateGlossPolicy.annotation("nihao", "hello", true).equals("nihao"),
-            "Engine annotation has priority");
-        check(CandidateGlossPolicy.accessibilitySuffix("nihao", "hello", true).contains("提示"),
-            "accessible Engine annotation");
+        // #6997：双拼辅助码这类 Engine 注释和释义同在一行，释义不再被挤到只有长按才看得到；第二目标语言的释义仍各占一行，候选条行数和只有释义时一样。
+        check(CandidateGlossPolicy.annotation("(ab)", "my; mine", true).equals("(ab) · my; mine"),
+            "a gloss follows the Engine annotation on the same row");
+        check(CandidateGlossPolicy.annotation("(ab)", "my", false).equals("(ab)"),
+            "the Engine annotation shows alone with glosses off");
+        check(CandidateGlossPolicy.annotation("(ab)", "my\nmon", true).equals("(ab) · my\nmon"),
+            "a second-language gloss keeps its own row after the Engine annotation");
+        check(CandidateGlossPolicy.annotation("(ab)", "x".repeat(4097), true).equals("(ab)"),
+            "an oversized gloss is hidden after the Engine annotation");
+        check(CandidateGlossPolicy.annotation(null, null, true).isEmpty(),
+            "a candidate with neither has no hint");
+        check(CandidateGlossPolicy.accessibilitySuffix("(ab)", "my; mine", true)
+                .equals("，提示：(ab)，英文释义：my; mine"), "accessible Engine annotation and gloss");
+        check(CandidateGlossPolicy.accessibilitySuffix("(ab)", "my", false).equals("，提示：(ab)"),
+            "accessible Engine annotation with glosses off");
+        check(CandidateGlossPolicy.accessibilitySuffix("", "my", true).equals("，英文释义：my"),
+            "accessible gloss alone");
+        check(CandidateGlossPolicy.glossAccessibilitySuffix("my", true).equals("，英文释义：my")
+                && CandidateGlossPolicy.glossAccessibilitySuffix("my", false).isEmpty(),
+            "the gloss part of the spoken suffix follows the gloss switch");
         check(CandidateGlossPolicy.annotation("", "x".repeat(4097), true).isEmpty(),
             "oversized gloss hidden");
 
@@ -56,9 +73,9 @@ public final class CandidateGlossModelSmoke {
             "strict fallback rejects booleans");
         check(CandidateGlossPolicy.strictString("hello").equals("hello"),
             "JSON strings are accepted");
-        check(Boolean.TRUE.equals(CandidateGlossPolicy.strictBoolean(Boolean.TRUE)),
+        check(Boolean.TRUE.equals(JsonPolicy.strictBoolean(Boolean.TRUE)),
             "JSON booleans are accepted");
-        check(CandidateGlossPolicy.strictBoolean("true") == null,
+        check(JsonPolicy.strictBoolean("true") == null,
             "boolean strings are rejected instead of coerced");
         check(CandidateGlossPolicy.isApplied(Boolean.TRUE),
             "translation application accepts a JSON true flag");

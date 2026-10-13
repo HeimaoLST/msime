@@ -46,19 +46,33 @@ import {
 } from '../keyboard/settings/AiModelCatalogPolicy';
 import { SettingsFormFactorCapabilities, SettingsFormFactorProjection }
   from '../keyboard/settings/SettingsFormFactorCapabilities';
+import { VocabularyAction, VocabularyReviewRequest } from '../keyboard/settings/VocabularyReviewRequest';
 import { LocalVoiceModelAction, LocalVoiceModelPolicy } from '../keyboard/settings/LocalVoiceModelPolicy';
+import { HTTP_ASR_CHAT_AUDIO, HttpAsrConfigurationPolicy } from '../keyboard/input/HttpAsrConfigurationPolicy';
 import { AiAuthenticationPolicy } from '../keyboard/settings/AiAuthenticationPolicy';
 import { AiEndpointPolicy } from '../keyboard/settings/AiEndpointPolicy';
+import {
+  CustomTranslationProbeDescriptor,
+  CustomTranslationProbePolicy,
+  CustomTranslationProbeRequest
+} from '../keyboard/settings/CustomTranslationProbePolicy';
 import { HarmonyTelemetry } from '../telemetry/Telemetry';
 import { TelemetryPolicy } from '../telemetry/TelemetryPolicy';
 import { NoticeItem, NoticePolicy } from '../notices/NoticePolicy';
+import { HarmonySharedSandboxPolicy } from '../keyboard/HarmonySharedSandboxPolicy';
+import { SharedStateMirror } from '../keyboard/SharedStateMirror';
+import { SharedStateSync } from '../keyboard/SharedStateSync';
 
-/** `{root}` for the list, `{root, id, mirror}` for an install, `{root, id}` for a removal, `{id}` for a cancel. */
+/** `{root}` for the list, `{root, id, mirror}` for an install, `{root, id, files}` for an import from local files, `{root, id}` for a removal, `{id}` for a cancel. */
 interface LocalVoiceModelRequest {
   root?: string;
   id?: string;
   mirror?: string;
+  files?: string[];
 }
+
+/** 「从文件导入」一次最多让用户选几个文件；目录里的模型最多要两个。 */
+const MAX_VOICE_MODEL_IMPORT_PICKS: number = 8;
 
 /** One key-feedback operation from the page: load, save or preview. */
 interface KeyboardFeedbackAction {
@@ -78,6 +92,21 @@ interface ExportSaveRequest {
   contents: string;
 }
 
+/** 「关于」页随 `update_check` 发来的内容：当前运行的版本号，以及页面知道时的版本 id 和架构。 */
+interface UpdateCheckPayload {
+  current_version: string;
+  edition?: string;
+  arch?: string;
+}
+
+/** `msime_client_update_check` 的请求；平台始终是本宿主的。 */
+interface UpdateCheckRequest {
+  platform: string;
+  current_version: string;
+  edition?: string;
+  arch?: string;
+}
+
 interface TextReply {
   ok: boolean;
   value: string;
@@ -91,6 +120,16 @@ interface RevisionValue {
 interface RevisionReply {
   ok: boolean;
   value?: RevisionValue;
+}
+
+/** What `repairPreferences` answers; only the repaired snapshot's revision is read here. */
+interface RepairValue {
+  snapshot: RevisionValue;
+}
+
+interface RepairReply {
+  ok: boolean;
+  value?: RepairValue;
 }
 
 interface OnboardingReply {
@@ -203,6 +242,8 @@ const BRIDGE_NAME: string = 'msimeHarmony';
 const PLATFORM: string = 'harmony';
 /** 欢迎开屏是否已播放过的标记，与应用主题文件同在状态目录。 */
 const SPLASH_SEEN_FILE: string = 'welcome-splash.json';
+// 页面一直没报告第一帧上屏时，启动画面最多盖这么久。
+const LAUNCH_COVER_LIMIT_MS: number = 4000;
 /** The settings page and native save bridge hold one complete export in memory. */
 const MAX_DICTIONARY_EXPORT_BYTES: number = 32 * 1024 * 1024;
 
@@ -327,26 +368,6 @@ interface PluginImportCall {
   action: PluginImportAction;
 }
 
-/** 背单词 request, as `msime_client_vocabulary_review` reads it. */
-interface VocabularyRequest {
-  directory: string;
-  day: string;
-  action: VocabularyAction;
-  /** 插件目录：其中的单词本插件列进书目。只在声明了 `wordbook_packs` 的形态（2in1）上传，手机不传。 */
-  plugins?: string;
-}
-
-interface VocabularyAction {
-  operation: string;
-  word?: string;
-  known?: boolean;
-  wordbook?: string;
-  new_per_day?: number;
-  session_limit?: number;
-  name?: string;
-  text?: string;
-}
-
 interface TypingStatisticsDocument {
   enabled: boolean;
   total: number;
@@ -451,25 +472,14 @@ interface ApiCredentialReply {
   value: ApiCredentialResult;
 }
 
-interface TranslationBody {
-  text: string;
-  source_lang: string;
-  target_lang: string;
+interface CustomTranslationProbeDescriptorReply {
+  ok: boolean;
+  value?: CustomTranslationProbeDescriptor | null;
 }
 
-interface TranslationValue {
-  text?: string;
-  translation?: string;
-  data?: string;
-}
-
-interface TranslationDocument {
-  code?: number | string;
-  error?: Object;
-  data?: string | TranslationValue | TranslationValue[];
-  translation?: string | TranslationValue | TranslationValue[];
-  result?: string | TranslationValue | TranslationValue[];
-  translations?: TranslationValue[];
+interface CustomTranslationProbeGlossReply {
+  ok: boolean;
+  value?: string | null;
 }
 
 interface ChatCredentialBody {
@@ -505,12 +515,6 @@ interface NiuTransDocument {
 
 interface ThinkingOptions {
   type: string;
-}
-
-interface CredentialHeaders {
-  Accept: string;
-  'Content-Type': string;
-  Authorization?: string;
 }
 
 interface AiModelHeaders {
@@ -574,6 +578,8 @@ struct Settings {
   @State noticeHeld: boolean = true;
   // 页面上次要求状态栏采用的颜色，即页面自己的背景（应用主题下为当季背景）；页面提出前为空，此时由资源默认值代替。通知卡片背后的列也用这个颜色，让卡片边距露出的是页面，而不是另一种灰色的色带。
   @State pageBackground: string = '';
+  // 页面第一帧上屏之前盖在网页上的启动画面，见 `launchCoverView`。
+  @State launchCover: boolean = true;
   /** Bumped for every notice fetch and when the page disappears, so late answers cannot repaint it. */
   private noticeRequest: number = 0;
 
@@ -586,18 +592,29 @@ struct Settings {
     this.bridge.onPageBackground = (colour: string): void => {
       this.pageBackground = colour;
     };
+    this.bridge.onLaunchPainted = (): void => {
+      this.launchCover = false;
+    };
+    // 页面没能报告（脚本出错、桥接没连上）时也不能一直盖着：几秒后撤掉，露出页面自己的错误说明。走桥接的同一个入口，盖着期间存下的系统栏颜色也一并补上。
+    setTimeout((): void => {
+      this.bridge.launchPainted();
+    }, LAUNCH_COVER_LIMIT_MS);
     // Started here rather than on demand: the page reads the answer synchronously, and the reply
     // carries whether it is ready so the page waits instead of acting on a default.
     this.bridge.refreshSetupState();
     this.bridge.watchSetup();
     this.loadNotices();
     EntryAbility.onActivated = (): void => {
+      this.bridge.syncShared();
       this.bridge.refreshPreferencesIfChanged();
       this.loadNotices();
       // 从系统的输入法界面返回就是设置状态改变的途径，所以在这里重新读取，与 Android 的 `ImeSetup` 在获得焦点时重新检查一样。
       this.bridge.refreshSetupState();
       // 每次返回都重新解析而不是靠定时器：水杉四季跟随月份，跨月一直开着的窗口不应保留上个月的颜色。
       this.bridge.notifyAppThemeChanged();
+    };
+    EntryAbility.onDeactivated = (): void => {
+      this.bridge.publishShared();
     };
     EntryAbility.onOpenPage = (page: string): void => {
       this.bridge.openPage(page);
@@ -742,45 +759,72 @@ struct Settings {
     this.bridge.unwatchSetup();
   }
 
+  /**
+   * 冷启动时盖在网页上的启动画面，和系统启动窗画的是同一个画面：启动窗底色上一个圆盘，盘里是水杉标志（`start_window_icon`）。底色和圆盘取资源（`start_window_background`、`launch_disc`），浅色和深色各一份，跟随系统外观；标志两种外观相同。页面报告设置已经画出来（`launchPainted`）后撤掉它，所以从点图标到设置页是同一个画面淡出，中间不露出还没画出东西的网页，也不露出「正在读取设置」。
+   *
+   * 它和首次启动的网页开屏一样按网页区域居中，尺寸照开屏换算：圆盘 180vp，标志是 100vp 标志框里按 116 × 132 等比放下的 `launch_logo.svg`，87.9 × 100vp。
+   */
+  @Builder
+  launchCoverView() {
+    Stack() {
+      Circle().width(180).height(180).fill($r('app.color.launch_disc'))
+      // 同步解码：异步加载时盖板第一帧没有标志，从启动窗接过来会闪一下空圆盘。
+      Image($r('app.media.launch_logo')).width(87.9).height(100).syncLoad(true)
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor($r('app.color.start_window_background'))
+    .transition(TransitionEffect.OPACITY.animation({ duration: 120 }))
+  }
+
   build() {
     Column() {
       if (this.notices.length > 0 && !this.noticeHeld) {
         this.noticeCard()
       }
-      Web({ src: $rawfile('settings/index.html'), controller: this.controller })
-        .javaScriptAccess(true)
-        .domStorageAccess(true)
-        .fileAccess(true)
-        // 页面按 `prefers-color-scheme` 自己绘制深色主题。`WebDarkMode.Auto` 把系统的模式传给这个媒体查询；强制深色保持关闭，因为反转一个本就有深色配色的页面会把它反转回浅色。
-        .darkMode(WebDarkMode.Auto)
-        .forceDarkAccess(false)
-        .onPageEnd((event: OnPageEndEvent): void => {
-          this.bridge.pageLoaded();
-        })
-        // Registered through the controller rather than the attribute: the attribute form takes an
-        // async list but never settles the promises it hands the page, which is worse than the bug
-        // it was meant to fix — the page hangs on its startup screen instead of quietly receiving
-        // nothing. onControllerAttached runs before the first load, so the page still finds the
-        // object already there rather than racing it.
-        .onControllerAttached(() => {
-          try {
-            this.controller.registerJavaScriptProxy(this.bridge, BRIDGE_NAME,
-              ['loadPreferences', 'savePreferences', 'hostCapabilities', 'appVersion',
-                'scanSkinCatalog', 'readSkinImage', 'readSkinFont', 'readSkinToolbarCss',
-                'dictionaryManifest', 'dictionary', 'cloudDictionaryDownload',
-                'typingStatistics', 'openExternalUrl', 'copyText',
-                'openSystemKeyboardSettings', 'listVoiceCaptureDevices', 'listFontFamilies',
-                'keyboardFeedback', 'onboardingStatus',
-                'showInputMethodPicker', 'importSkinFolder', 'startRequest', 'plugins',
-                'setupStatus', 'appTheme', 'setSystemBars', 'splashSeen', 'markSplashSeen',
-                'onboardingStarted', 'onboardingFinished', 'pendingPage'],
-              []);
-          } catch (error) {
-            KeyboardLog.error(`settings bridge not registered: ${describeError(error)}`);
-          }
-        })
-        .width('100%')
-        .layoutWeight(1)
+      Stack() {
+        Web({ src: $rawfile('settings/index.html'), controller: this.controller })
+          .javaScriptAccess(true)
+          .domStorageAccess(true)
+          .fileAccess(true)
+          // 页面按 `prefers-color-scheme` 自己绘制深色主题。`WebDarkMode.Auto` 把系统的模式传给这个媒体查询；强制深色保持关闭，因为反转一个本就有深色配色的页面会把它反转回浅色。
+          .darkMode(WebDarkMode.Auto)
+          .forceDarkAccess(false)
+          // Web 组件自己的底色和背后的页面一样：页面画出第一帧之前不再先闪一下 WebView 默认的白色（冷启动时它夹在深色启动窗和开屏之间）。
+          .backgroundColor(this.pageBackground.length > 0 ? this.pageBackground : $r('app.color.settings_page_background'))
+          .onPageEnd((event: OnPageEndEvent): void => {
+            this.bridge.pageLoaded();
+          })
+          // Registered through the controller rather than the attribute: the attribute form takes an
+          // async list but never settles the promises it hands the page, which is worse than the bug
+          // it was meant to fix — the page hangs on its startup screen instead of quietly receiving
+          // nothing. onControllerAttached runs before the first load, so the page still finds the
+          // object already there rather than racing it.
+          .onControllerAttached(() => {
+            try {
+              this.controller.registerJavaScriptProxy(this.bridge, BRIDGE_NAME,
+                ['loadPreferences', 'savePreferences', 'hostCapabilities', 'appVersion',
+                  'scanSkinCatalog', 'readSkinImage', 'readSkinFont', 'readSkinToolbarCss',
+                  'dictionaryManifest', 'dictionary', 'cloudDictionaryDownload',
+                  'typingStatistics', 'openExternalUrl', 'copyText',
+                  'openSystemKeyboardSettings', 'listVoiceCaptureDevices', 'listFontFamilies',
+                  'keyboardFeedback', 'onboardingStatus',
+                  'showInputMethodPicker', 'importSkinFolder', 'startRequest', 'plugins',
+                  'setupStatus', 'refreshSetupStatus', 'appTheme', 'setSystemBars', 'splashSeen', 'markSplashSeen',
+                  'onboardingStarted', 'onboardingFinished', 'pendingPage', 'launchPainted'],
+                []);
+            } catch (error) {
+              KeyboardLog.error(`settings bridge not registered: ${describeError(error)}`);
+            }
+          })
+          .width('100%')
+          .height('100%')
+        if (this.launchCover) {
+          this.launchCoverView()
+        }
+      }
+      .width('100%')
+      .layoutWeight(1)
     }
     .width('100%')
     .height('100%')
@@ -797,6 +841,10 @@ struct Settings {
  */
 class SettingsBridge {
   private stateDirectory: string = '';
+  private sharedSandboxAvailable: boolean = false;
+  // 与键盘交换状态的共享沙箱镜像，拿不到共享目录时为 null；`sharedPublishTimer` 合并短时间内的多次改动，只发布一次。
+  private sharedMirror: SharedStateMirror | null = null;
+  private sharedPublishTimer: number = -1;
   // What the page was last handed, so an activation can tell a changed document from an unchanged
   // one. -1 until the page has loaded once, which never compares equal to a real revision.
   private observedRevision: number = -1;
@@ -816,6 +864,11 @@ class SettingsBridge {
   onNoticeHold: ((held: boolean) => void) | undefined = undefined;
   // 由页面组件设置：告知网页绘制的背景，即页面随系统栏颜色最后一次发来的值。
   onPageBackground: ((colour: string) => void) | undefined = undefined;
+  // 由页面组件设置：页面第一帧已上屏，撤掉启动画面。
+  onLaunchPainted: (() => void) | undefined = undefined;
+  // 启动画面还盖着网页。这期间页面发来的系统栏颜色先存着，撤掉时再上：页面一挂载就给系统栏换成自己的颜色，盖板却要两帧后才撤，状态栏会先变色，和下面的启动画面错开一条色带。
+  private launchCovered: boolean = true;
+  private heldSystemBars: string | undefined = undefined;
   // 系统当前键盘改变时重新读取设置状态；在系统键盘对话框里选择键盘就会这样改变，而窗口始终没有离开前台。
   private imeChanged: (property: inputMethod.InputMethodProperty, subtype: InputMethodSubtype) => void =
     (property: inputMethod.InputMethodProperty, subtype: InputMethodSubtype): void => {
@@ -828,6 +881,9 @@ class SettingsBridge {
   private accountBridge: HarmonyAccountCloudBridge | undefined = undefined;
   private aiSkins: HarmonyAiSkins | undefined = undefined;
   private cloudDownloadRequest: number = 0;
+  // 「从文件导入」从打开选择器到安装结束的模型 id。复制进缓存的那段时间原生安装还没登记，原生取消找不到它，所以取消先记在 voiceImportsCancelled 里，由导入流程在复制每个文件前和开始安装前检查。
+  private voiceImportsPending: Set<string> = new Set<string>();
+  private voiceImportsCancelled: Set<string> = new Set<string>();
 
   useWebview(controller: web_webview.WebviewController): void {
     this.webview = controller;
@@ -836,6 +892,16 @@ class SettingsBridge {
   attach(context: common.UIAbilityContext): void {
     this.context = context;
     this.stateDirectory = `${context.filesDir}/state`;
+    SharedStateMirror.resolve(context).then((groupDir: string | null): void => {
+      const sharedSandbox = HarmonySharedSandboxPolicy.status(groupDir);
+      this.sharedSandboxAvailable = sharedSandbox.available;
+      if (!sharedSandbox.available) {
+        KeyboardLog.warn(`shared sandbox unavailable: ${sharedSandbox.reason}`);
+        return;
+      }
+      this.sharedMirror = new SharedStateMirror(sharedSandbox.directory, context.filesDir);
+      this.syncShared();
+    });
     this.accountBridge = new HarmonyAccountCloudBridge(context);
     this.aiSkins = this.accountBridge.aiSkins();
     // The same copy the keyboard makes, by the same rule. The page reaches the dictionary through
@@ -846,6 +912,44 @@ class SettingsBridge {
     StagedResources.stageLanguageDictionaries(context.resourceDir, context.filesDir);
   }
 
+
+  /**
+   * 设置窗口回到前台：先把自己的改动发布给键盘，再导入键盘在完整体验模式下发布的改动（键盘里改的偏好、刷新过的账号会话、打字统计）。导入的偏好由随后的 `refreshPreferencesIfChanged` 交给页面。
+   */
+  syncShared(): void {
+    if (this.sharedMirror === null) {
+      return;
+    }
+    SharedStateSync.settingsSync(this.sharedMirror, this.stateDirectory);
+  }
+
+  /** 立即把设置应用管的条目发布给键盘：窗口退到后台时调用，用户接下来多半要去别的应用打字。 */
+  publishShared(): void {
+    if (this.sharedPublishTimer !== -1) {
+      clearTimeout(this.sharedPublishTimer);
+      this.sharedPublishTimer = -1;
+    }
+    if (this.sharedMirror === null) {
+      return;
+    }
+    SharedStateSync.settingsPublish(this.sharedMirror, this.stateDirectory);
+  }
+
+  /**
+   * 改完设置后稍后发布给键盘。同步的桥接方法在开头调用它：发布在方法返回、改动落盘之后才执行。用户在设置页里点开一个输入框时键盘就会导入，所以不能只在窗口退到后台时发布。
+   */
+  private schedulePublish(): void {
+    if (this.sharedMirror === null) {
+      return;
+    }
+    if (this.sharedPublishTimer !== -1) {
+      clearTimeout(this.sharedPublishTimer);
+    }
+    this.sharedPublishTimer = setTimeout((): void => {
+      this.sharedPublishTimer = -1;
+      this.publishShared();
+    }, 300);
+  }
 
   loadPreferences(): string {
     const reply: string = client.loadPreferences(this.stateDirectory);
@@ -926,7 +1030,9 @@ class SettingsBridge {
    * forever. The panel's own rescan is what shows the result.
    */
   importSkinFolder(): string {
-    this.runSkinImport().catch((error: Object): void => {
+    this.runSkinImport().then((): void => {
+      this.schedulePublish();
+    }).catch((error: Object): void => {
       KeyboardLog.error(`skin import failed: ${describeError(error)}`);
     });
     return JSON.stringify({ ok: true, value: '', error: '' } as TextReply);
@@ -1028,6 +1134,13 @@ class SettingsBridge {
       this.customSkinLibrary(payload).then(deliver).catch(failed);
     } else if (kind === 'vocabulary_review') {
       this.vocabularyReview(payload).then(deliver).catch(failed);
+    } else if (kind === 'repair_preferences') {
+      this.repairPreferences().then(deliver).catch(failed);
+    } else if (kind === 'dictionary_collections') {
+      this.dictionaryCollections(payload).then(deliver).catch((error: Object): void => {
+        KeyboardLog.error(`dictionary collections request failed: ${describeError(error)}`);
+        deliver(JSON.stringify({ ok: false, error: 'collections_io' }));
+      });
     } else if (kind === 'typing_statistics') {
       this.typingStatisticsOnWorker(payload).then(deliver).catch(failed);
     } else if (kind === 'cloud_dictionary_snapshot') {
@@ -1048,6 +1161,11 @@ class SettingsBridge {
         KeyboardLog.error(`plugin import failed: ${describeError(error)}`);
         deliver(JSON.stringify({ ok: false, error: 'storage' }));
       });
+    } else if (kind === 'update_check') {
+      this.updateCheck(payload).then(deliver).catch((error: Object): void => {
+        KeyboardLog.error(`update check failed: ${describeError(error)}`);
+        deliver(JSON.stringify({ ok: false, error: 'update_check_unavailable' }));
+      });
     } else if (kind === 'save_export') {
       this.saveExport(payload).then(deliver).catch((error: Object): void => {
         KeyboardLog.error(`export save failed: ${describeError(error)}`);
@@ -1058,6 +1176,29 @@ class SettingsBridge {
       this.deliverReply(id, JSON.stringify({ ok: false, error: 'unknown_request' }));
     }
     return JSON.stringify({ ok: true, value: '', error: '' } as TextReply);
+  }
+
+  /**
+   * 「关于」页的检查更新，由原生工作线程上的 `msime_client_update_check` 回答，最多等 GitHub 十秒。平台在这里填，不取页面传来的值，页面只能问本宿主的发行版。
+   */
+  private async updateCheck(document: string): Promise<string> {
+    let payload: UpdateCheckPayload;
+    try {
+      payload = JSON.parse(document) as UpdateCheckPayload;
+    } catch {
+      return JSON.stringify({ ok: false, error: 'update_check_invalid' });
+    }
+    if (typeof payload.current_version !== 'string') {
+      return JSON.stringify({ ok: false, error: 'update_check_invalid' });
+    }
+    const request: UpdateCheckRequest = { platform: 'harmony', current_version: payload.current_version };
+    if (typeof payload.edition === 'string') {
+      request.edition = payload.edition;
+    }
+    if (typeof payload.arch === 'string') {
+      request.arch = payload.arch;
+    }
+    return await client.updateCheck(JSON.stringify(request));
   }
 
   /**
@@ -1146,7 +1287,13 @@ class SettingsBridge {
     }
     if (action.operation === 'cancel') {
       const request: LocalVoiceModelRequest = { id: id };
-      return LocalVoiceModelPolicy.rewrite(client.voiceLocalModelCancel(JSON.stringify(request)));
+      const reply: string = LocalVoiceModelPolicy.rewrite(client.voiceLocalModelCancel(JSON.stringify(request)));
+      if (!this.voiceImportsPending.has(id)) {
+        return reply;
+      }
+      // 导入还在复制文件，原生安装没开始：记下取消，复制循环看到后不再安装。
+      this.voiceImportsCancelled.add(id);
+      return JSON.stringify({ ok: true, value: true } as FlagReply);
     }
     if (action.operation === 'remove') {
       const request: LocalVoiceModelRequest = { root: root, id: id };
@@ -1156,11 +1303,98 @@ class SettingsBridge {
     if (!fs.accessSync(root)) {
       fs.mkdirSync(root, true);
     }
+    if (action.operation === 'import') {
+      this.voiceImportsPending.add(id);
+      this.voiceImportsCancelled.delete(id);
+      try {
+        return await this.importVoiceModel(root, id);
+      } finally {
+        this.voiceImportsPending.delete(id);
+        this.voiceImportsCancelled.delete(id);
+      }
+    }
     const mirror: string = LocalVoiceModelPolicy.mirror(client.loadPreferences(this.stateDirectory));
     const request: LocalVoiceModelRequest = { root: root, id: id, mirror: mirror };
     const reply: string = await client.voiceLocalModelInstall(JSON.stringify(request),
       (progress: string): void => this.deliverVoiceModelProgress(progress));
     return LocalVoiceModelPolicy.installReply(reply);
+  }
+
+  /**
+   * 「从文件导入」：用系统选择器让用户多选自己下载好的模型文件，不联网安装。
+   *
+   * 选择器给的是原生库打不开的文档 URI，所以先把文件复制进私有缓存目录，用固定的序号作文件名，再把这些路径交给和下载同一个 `msime_client_voice_local_model_install`（带 `files`），由 client-core 按长度和 SHA-256 认文件、校验、解压并发布，和其他宿主完全相同。长度和目录里任何一个需要的文件都对不上的选择不复制。缓存副本不论成败都在安装结束后删掉。用户关掉选择器时回答 null，不算失败。
+   */
+  private async importVoiceModel(root: string, id: string): Promise<string> {
+    const context: common.UIAbilityContext | undefined = this.context;
+    if (context === undefined) {
+      return LocalVoiceModelPolicy.refusal('local_model_failed');
+    }
+    let picked: string[] = [];
+    try {
+      const options: picker.DocumentSelectOptions = new picker.DocumentSelectOptions();
+      options.selectMode = picker.DocumentSelectMode.FILE;
+      options.maxSelectNumber = MAX_VOICE_MODEL_IMPORT_PICKS;
+      picked = await new picker.DocumentViewPicker(context).select(options);
+    } catch (error) {
+      KeyboardLog.error(`voice model picker refused: ${describeError(error)}`);
+      return LocalVoiceModelPolicy.refusal('local_model_failed');
+    }
+    if (picked.length === 0) {
+      return JSON.stringify({ ok: true, value: null, error: '' });
+    }
+    if (this.voiceImportsCancelled.has(id)) {
+      return LocalVoiceModelPolicy.refusal('local_model_cancelled');
+    }
+    const listRequest: LocalVoiceModelRequest = { root: root };
+    const sizes: number[] = LocalVoiceModelPolicy.importSizes(
+      client.voiceLocalModels(JSON.stringify(listRequest)), id);
+    const importRoot: string = `${context.cacheDir}/voice-model-import`;
+    const staging: string = `${importRoot}/${util.generateRandomUUID(false)}`;
+    try {
+      if (!this.safeDirectory(context.cacheDir)) {
+        return LocalVoiceModelPolicy.refusal('local_model_io');
+      }
+      if (!fs.accessSync(importRoot)) fs.mkdirSync(importRoot, true);
+      if (!this.safeDirectory(importRoot)) {
+        return LocalVoiceModelPolicy.refusal('local_model_io');
+      }
+      fs.mkdirSync(staging, true);
+      if (!this.safeDirectory(staging)) {
+        return LocalVoiceModelPolicy.refusal('local_model_io');
+      }
+      const files: string[] = [];
+      for (const uri of picked) {
+        if (this.voiceImportsCancelled.has(id)) {
+          return LocalVoiceModelPolicy.refusal('local_model_cancelled');
+        }
+        const file: fs.File = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+        try {
+          const opened: fs.Stat = fs.statSync(file.fd);
+          if (!opened.isFile() || !sizes.includes(opened.size)) {
+            continue;
+          }
+          const copy: string = `${staging}/${files.length}`;
+          await fs.copyFile(file.fd, copy);
+          files.push(copy);
+        } finally {
+          fs.closeSync(file);
+        }
+      }
+      if (this.voiceImportsCancelled.has(id)) {
+        return LocalVoiceModelPolicy.refusal('local_model_cancelled');
+      }
+      const request: LocalVoiceModelRequest = { root: root, id: id, files: files };
+      const reply: string = await client.voiceLocalModelInstall(JSON.stringify(request),
+        (progress: string): void => this.deliverVoiceModelProgress(progress));
+      return LocalVoiceModelPolicy.installReply(reply);
+    } finally {
+      try {
+        StagedResources.removeDirectory(staging);
+      } catch (error) {
+        KeyboardLog.error(`voice model import staging not removed: ${describeError(error)}`);
+      }
+    }
   }
 
   private deliverVoiceModelProgress(progress: string): void {
@@ -1176,6 +1410,8 @@ class SettingsBridge {
 
   /** Hands one reply back to the page, under the number it was asked with. */
   private deliverReply(id: number, reply: string): void {
+    // 异步请求（账号、社区皮肤、设置同步等）都经这里交回结果，它们可能改了要发布给键盘的文件。
+    this.schedulePublish();
     if (this.webview === undefined) {
       return;
     }
@@ -1191,6 +1427,7 @@ class SettingsBridge {
    * The 插件 page's pack store and @ name list: `catalog`, `remove`, `load_mentions` and `save_mentions`, answered by `msime_client_plugins` with the same rules and failure codes the desktop shell answers with. The page never names a path: the state root and the bundle's built-in sound packs are filled in here, and an import, which has to wait for the system picker, arrives through `startRequest` as `plugin_import` instead.
    */
   plugins(actionDocument: string): string {
+    this.schedulePublish();
     const refused: string = JSON.stringify({ ok: false, error: 'invalid' });
     if (this.context === undefined) {
       return refused;
@@ -1573,7 +1810,25 @@ class SettingsBridge {
    * is on disk and refuses the save if the keyboard changed something in between, which is the whole
    * point of having one.
    */
+  /**
+   * 设置页的「修复配置文件…」：只在用户点了之后才做。读不了的文件（多半是更新的版本写的）先原样备份在旁边，再按本版本认得的设置重写，其余取默认。修复后的文档和读取一样记下版本号，页面拿到的就是新的那份。
+   */
+  private async repairPreferences(): Promise<string> {
+    const reply: string = await client.repairPreferences(this.stateDirectory);
+    try {
+      const parsed: RepairReply = JSON.parse(reply) as RepairReply;
+      if (parsed.ok === true && parsed.value !== undefined) {
+        this.observedRevision = PreferenceRevisionPolicy.observe(this.observedRevision,
+          parsed.value.snapshot.revision);
+      }
+    } catch (error) {
+      KeyboardLog.error(`preference repair reply unreadable: ${describeError(error)}`);
+    }
+    return PreferencesErrorCode.rewrite(reply);
+  }
+
   savePreferences(expectedRevision: number, document: string): string {
+    this.schedulePublish();
     const reply: string = client.savePreferences(this.stateDirectory, expectedRevision, document);
     this.rememberRevision(reply);
     // Turning usage reporting off drops what is queued at once rather than at the next start; the keyboard's running session goes with it.
@@ -1636,6 +1891,7 @@ class SettingsBridge {
       value['typing_effects'] = projection.typingEffects;
       value['wordbook_packs'] = projection.wordbookPacks;
       value['symbol_set_packs'] = projection.symbolSetPacks;
+      value['harmony_shared_sandbox'] = this.sharedSandboxAvailable;
       if (release !== null) {
         value['os_version'] = release;
       }
@@ -1659,6 +1915,15 @@ class SettingsBridge {
       return JSON.stringify({ ok: false, error: 'settings context unavailable' });
     }
     return KeyboardSession.shared.dictionary(action, `${this.context.filesDir}/engine`,
+      this.stateDirectory);
+  }
+
+  /** 词库页的命名词库：建、删、启停、加词、导入、装社区词库。导入可达 16 MiB，所以走 startRequest 在原生工作线程上做。 */
+  private dictionaryCollections(action: string): Promise<string> {
+    if (this.context === undefined) {
+      return Promise.resolve(JSON.stringify({ ok: false, error: 'collections_io' }));
+    }
+    return KeyboardSession.shared.dictionaryCollections(action, `${this.context.filesDir}/engine`,
       this.stateDirectory);
   }
 
@@ -1763,18 +2028,19 @@ class SettingsBridge {
       if (!['load', 'answer', 'set_settings', 'import', 'remove', 'reset'].includes(action.operation)) {
         return JSON.stringify({ ok: false, error: 'invalid vocabulary review request' });
       }
+      if (this.context === undefined) {
+        return JSON.stringify({ ok: false, error: 'vocabulary review failed' });
+      }
       const now: Date = new Date();
       const month: string = `${now.getMonth() + 1}`.padStart(2, '0');
       const date: string = `${now.getDate()}`.padStart(2, '0');
-      const request: VocabularyRequest = {
-        directory: this.stateDirectory,
-        day: `${now.getFullYear()}-${month}-${date}`,
-        action: action,
-      };
-      // 与设置页拿到的 `wordbook_packs` 能力同一个来源：没有这项能力的形态不列单词本插件。
-      if (SettingsFormFactorCapabilities.resolve(deviceInfo.deviceType).wordbookPacks) {
-        request.plugins = `${this.stateDirectory}/plugins`;
-      }
+      const request = VocabularyReviewRequest.build(
+        this.stateDirectory,
+        this.context.resourceDir,
+        `${now.getFullYear()}-${month}-${date}`,
+        action,
+        SettingsFormFactorCapabilities.resolve(deviceInfo.deviceType).wordbookPacks,
+      );
       return await client.vocabularyReview(JSON.stringify(request));
     } catch (error) {
       KeyboardLog.error(`vocabulary review failed: ${describeError(error)}`);
@@ -1803,6 +2069,11 @@ class SettingsBridge {
       }));
       const reply: TypingStatisticsReply = JSON.parse(raw) as TypingStatisticsReply;
       if (reply.ok !== true) return raw;
+      // 开关、保留期和清空都要告诉键盘：统计由键盘记录，设置应用这里只是一份副本。
+      if (action.operation !== 'load' && this.sharedMirror !== null) {
+        SharedStateSync.writeStatisticsSwitch(this.stateDirectory, action.operation === 'reset');
+        this.schedulePublish();
+      }
       if (reply.value === undefined || reply.value === null) {
         return JSON.stringify({ ok: false, error: 'invalid typing statistics response' });
       }
@@ -1812,7 +2083,8 @@ class SettingsBridge {
       try {
         if (fs.accessSync(file)) {
           available = true;
-          lastWrittenMs = fs.statSync(file).mtime;
+          // `Stat.mtime` 是秒，页面要毫秒；直接传秒会被当成 1970 年 1 月的某一刻。
+          lastWrittenMs = fs.statSync(file).mtime * 1000;
         }
       } catch {
         available = false;
@@ -2062,30 +2334,39 @@ class SettingsBridge {
     if (endpoint === null || (apiKey.length > 0 && !this.validCredentialSecret(apiKey, 4096))) {
       return this.credentialReply(false, '请填写有效的翻译接口地址和 API Key。');
     }
-    const body: TranslationBody = { text: '测试', source_lang: 'ZH', target_lang: 'EN' };
-    const headers: CredentialHeaders = {
-      Accept: 'application/json', 'Content-Type': 'application/json'
-    };
-    if (apiKey.length > 0) headers.Authorization = `Bearer ${apiKey}`;
+    // 与键盘同一个共享描述器：DeepL 官方地址换成 DeepL 的鉴权和正文，其余按 DeepLX 兼容格式，测试与实际翻译不会各说各的。
+    const probe: CustomTranslationProbeRequest = CustomTranslationProbePolicy.request(endpoint, apiKey);
+    let descriptor: CustomTranslationProbeDescriptor | null = null;
+    try {
+      const reply: CustomTranslationProbeDescriptorReply = JSON.parse(
+        client.customTranslationHttpRequest(JSON.stringify(probe))) as CustomTranslationProbeDescriptorReply;
+      descriptor = reply.ok === true && reply.value !== undefined ? reply.value : null;
+    } catch {
+      descriptor = null;
+    }
+    if (descriptor === null || this.validCredentialEndpoint(descriptor.url, true) === null) {
+      return this.credentialReply(false, '请填写有效的翻译接口地址和 API Key。');
+    }
+    const deepl: boolean = CustomTranslationProbePolicy.isDeepL(descriptor);
+    const headers: Record<string, string> = CustomTranslationProbePolicy.headers(descriptor);
     const request = http.createHttp();
     installNoRedirectGuard(request);
     try {
-      const response: http.HttpResponse = await request.request(endpoint, {
+      const response: http.HttpResponse = await request.request(descriptor.url, {
         method: http.RequestMethod.POST,
         header: headers,
         connectTimeout: 5000,
         readTimeout: 15000,
-        extraData: JSON.stringify(body)
+        extraData: JSON.stringify(descriptor.body)
       });
-      if (response.responseCode < 200 || response.responseCode >= 300
-        || typeof response.result !== 'string' || utf8Length(response.result) > 256 * 1024) {
-        return this.credentialReply(false, '测试失败：翻译服务未返回有效译文。');
+      if (!CustomTranslationProbePolicy.acceptsResponse(response.responseCode, response.result)) {
+        return this.credentialReply(false, CustomTranslationProbePolicy.failureMessage(deepl, response.responseCode));
       }
-      const document: TranslationDocument = JSON.parse(response.result) as TranslationDocument;
-      const translated: string | null = this.translationText(document);
-      return translated === null
-        ? this.credentialReply(false, '测试失败：翻译服务未返回有效译文。')
-        : this.credentialReply(true, '连接成功，翻译服务配置有效。');
+      const parsed: CustomTranslationProbeGlossReply = JSON.parse(
+        client.parseCustomTranslationResponse(response.result as string)) as CustomTranslationProbeGlossReply;
+      const translated: string | null = parsed.ok === true && typeof parsed.value === 'string' ? parsed.value : null;
+      if (translated !== null) return this.credentialReply(true, CustomTranslationProbePolicy.SUCCESS);
+      return this.credentialReply(false, CustomTranslationProbePolicy.failureMessage(deepl, response.responseCode));
     } catch (error) {
       KeyboardLog.error(`translation credential unavailable: ${describeError(error)}`);
       return this.credentialReply(false, '连接失败，请检查翻译接口地址、API Key 和网络。');
@@ -2099,7 +2380,7 @@ class SettingsBridge {
     const secretKey: string = (config.secret_key ?? '').trim();
     const region: string = (config.region ?? '').trim();
     if (!this.validCredentialSecret(secretId, 4096) || !this.validCredentialSecret(secretKey, 4096)
-      || region.length > 64 || Array.from(region).some((character: string): boolean => {
+      || region.length > 64 || TextPolicy.characters(region).some((character: string): boolean => {
         return !(/[A-Za-z0-9-]/.test(character));
       })) {
       return this.credentialReply(false, '请填写有效的腾讯云 SecretId、SecretKey 和地域。');
@@ -2244,20 +2525,26 @@ class SettingsBridge {
     const endpoint: string | null = this.validCredentialEndpoint(config.endpoint ?? '', false);
     const token: string = (config.token ?? '').trim();
     const model: string = (config.model ?? '').trim();
-    if (!['openai', 'siliconflow', 'groq', 'everyapi', 'mistral'].includes(provider) || endpoint === null
+    const format: string = HttpAsrConfigurationPolicy.requestFormat(provider);
+    if (format.length === 0 || endpoint === null
       || !this.validCredentialSecret(token, 8192) || model.length === 0
       || utf8Length(model) > 256 || TextPolicy.hasControl(model)) {
       return this.credentialReply(false, '请填写有效的 HTTPS 转写接口地址、API Key 和模型名。');
     }
     const boundary: string = '----MSIMEHarmonyCredentialProbe';
-    const body: ArrayBuffer = this.silentMultipart(boundary, model);
+    // 按请求格式拼一秒静音：chat_audio 是 JSON，其余是 multipart。
+    const chat: boolean = format === HTTP_ASR_CHAT_AUDIO;
+    const body: ArrayBuffer | string = chat
+      ? HttpAsrConfigurationPolicy.chatAudioBody(model,
+        new util.Base64Helper().encodeToStringSync(this.silentWav()))
+      : this.silentMultipart(boundary, model);
     const request = http.createHttp();
     installNoRedirectGuard(request);
     try {
       const response: http.HttpResponse = await request.request(endpoint, {
         method: http.RequestMethod.POST,
         header: { Accept: 'application/json', Authorization: `Bearer ${token}`,
-          'Content-Type': `multipart/form-data; boundary=${boundary}` },
+          'Content-Type': chat ? 'application/json' : `multipart/form-data; boundary=${boundary}` },
         connectTimeout: 5000,
         readTimeout: 15000,
         extraData: body
@@ -2394,6 +2681,19 @@ class SettingsBridge {
 
   private silentMultipart(boundary: string, model: string): ArrayBuffer {
     const encoder: util.TextEncoder = util.TextEncoder.create('utf-8');
+    const wav: Uint8Array = this.silentWav();
+    const prefix: Uint8Array = encoder.encode(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="credential-test.wav"\r\nContent-Type: audio/wav\r\n\r\n`);
+    const modelPart: Uint8Array = encoder.encode(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n${model}\r\n--${boundary}--\r\n`);
+    const output: ArrayBuffer = new ArrayBuffer(prefix.length + wav.length + modelPart.length);
+    const bytes: Uint8Array = new Uint8Array(output);
+    bytes.set(prefix, 0);
+    bytes.set(wav, prefix.length);
+    bytes.set(modelPart, prefix.length + wav.length);
+    return output;
+  }
+
+  /** 一秒 16 kHz 单声道 16 位静音 WAV，凭据测试用。 */
+  private silentWav(): Uint8Array {
     const wav: Uint8Array = new Uint8Array(44 + 32000);
     this.writeAscii(wav, 0, 'RIFF');
     this.writeU32(wav, 4, 32036);
@@ -2407,14 +2707,7 @@ class SettingsBridge {
     this.writeU16(wav, 34, 16);
     this.writeAscii(wav, 36, 'data');
     this.writeU32(wav, 40, 32000);
-    const prefix: Uint8Array = encoder.encode(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="credential-test.wav"\r\nContent-Type: audio/wav\r\n\r\n`);
-    const modelPart: Uint8Array = encoder.encode(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n${model}\r\n--${boundary}--\r\n`);
-    const output: ArrayBuffer = new ArrayBuffer(prefix.length + wav.length + modelPart.length);
-    const bytes: Uint8Array = new Uint8Array(output);
-    bytes.set(prefix, 0);
-    bytes.set(wav, prefix.length);
-    bytes.set(modelPart, prefix.length + wav.length);
-    return output;
+    return wav;
   }
 
   private writeAscii(bytes: Uint8Array, offset: number, value: string): void {
@@ -2434,29 +2727,6 @@ class SettingsBridge {
     bytes[offset + 3] = (value >>> 24) & 0xff;
   }
 
-  private translationText(document: TranslationDocument): string | null {
-    if (document.error !== undefined) return null;
-    if (document.code !== undefined && document.code !== 200 && document.code !== '200') return null;
-    const values: Array<string | TranslationValue | TranslationValue[]> = [];
-    if (document.data !== undefined) values.push(document.data);
-    if (document.translation !== undefined) values.push(document.translation);
-    if (document.result !== undefined) values.push(document.result);
-    if (document.translations !== undefined) values.push(document.translations);
-    for (const value of values) {
-      if (typeof value === 'string' && value.trim().length > 0) return value.trim();
-      if (Array.isArray(value) && value.length > 0) {
-        const first: TranslationValue = value[0];
-        const text: string | undefined = first.text ?? first.translation ?? first.data;
-        if (text !== undefined && text.trim().length > 0) return text.trim();
-      } else if (typeof value === 'object' && value !== null) {
-        const objectValue: TranslationValue = value as TranslationValue;
-        const text: string | undefined = objectValue.text ?? objectValue.translation ?? objectValue.data;
-        if (text !== undefined && text.trim().length > 0) return text.trim();
-      }
-    }
-    return null;
-  }
-
   private validCredentialEndpoint(value: string, allowHttp: boolean): string | null {
     const endpoint: string = value.trim();
     if (!TextPolicy.validSecureAuthority(endpoint, allowHttp)) return null;
@@ -2474,7 +2744,7 @@ class SettingsBridge {
   private validCredentialSecret(value: string, maxBytes: number): boolean {
     return value.length > 0 && utf8Length(value) <= maxBytes && !TextPolicy.hasControl(value)
       && !value.startsWith('<') && !value.startsWith('FAKESECRET_')
-      && !Array.from(value).every((character: string): boolean => character === '*');
+      && !TextPolicy.characters(value).every((character: string): boolean => character === '*');
   }
 
   /** AI 接口地址：https 不限主机，http 只能指向本机或局域网（AiEndpointPolicy）。 */
@@ -2524,6 +2794,7 @@ class SettingsBridge {
    * The settings page is a second writer of the same file the keyboard reads. 键盘每次聚焦编辑框时重读它（`KeyboardSession.refreshFeedback`），所以这里的改动在下一次弹出键盘时生效，不必等输入法进程重启。
    */
   keyboardFeedback(request: string): string {
+    this.schedulePublish();
     let action: KeyboardFeedbackAction;
     try {
       action = JSON.parse(request) as KeyboardFeedbackAction;
@@ -2646,6 +2917,11 @@ class SettingsBridge {
   setupStatus(): string {
     const reply: SetupStatusReply = { ok: true, ready: this.onboardingReady, value: this.setup };
     return JSON.stringify(reply);
+  }
+
+  /** 页面请求现在重读一次设置状态。从键盘的 🌐 菜单切换输入法不会触发 `imeChange`，页面的「设为默认」引导打开期间靠它轮询；读到变化时照常推给页面。 */
+  refreshSetupStatus(): void {
+    this.refreshSetupState();
   }
 
   /** 页面的欢迎流程已结束（完成或跳过），通知卡片可以回来。 */
@@ -2793,6 +3069,7 @@ class SettingsBridge {
    * `load` 和 `save` 读写状态目录里的设备本地选择，键盘也读这个文件；`resolve` 把存储的选择转成本月的颜色以及页面的浅色或深色模式；`catalog` 列出可选项。两个原生回复原样返回，页面读到的结构与每个宿主一致。
    */
   appTheme(request: string): string {
+    this.schedulePublish();
     const refused: string = JSON.stringify({ ok: false, error: 'invalid app theme request' } as AppThemeReply);
     if (request.length === 0 || request.length > 4096) {
       return refused;
@@ -2869,6 +3146,10 @@ class SettingsBridge {
       return;
     }
     this.onPageBackground?.(bars.background);
+    if (this.launchCovered) {
+      this.heldSystemBars = document;
+      return;
+    }
     if (this.context === undefined) {
       return;
     }
@@ -2879,9 +3160,15 @@ class SettingsBridge {
       navigationBarColor: bars.navigationBar,
       navigationBarContentColor: content
     };
-    window.getLastWindow(this.context).then((main: window.Window): Promise<void> =>
-      main.setWindowSystemBarProperties(properties)
-    ).catch((error: Object): void => {
+    window.getLastWindow(this.context).then((main: window.Window): Promise<void> => {
+      // 页面避开了底部手势条那一块，露出来的是窗口自己的底色（默认白色），导航栏颜色画不到那里：开屏时底部一条白，设置页标签栏下面也一条白。窗口底色取导航栏的颜色，那一块就和标签栏或开屏连成一片。
+      try {
+        main.setWindowBackgroundColor(bars.navigationBar);
+      } catch (error) {
+        KeyboardLog.error(`window background not applied: ${describeError(error)}`);
+      }
+      return main.setWindowSystemBarProperties(properties);
+    }).catch((error: Object): void => {
       KeyboardLog.error(`system bar colours not applied: ${describeError(error)}`);
     });
   }
@@ -2898,6 +3185,20 @@ class SettingsBridge {
   markSplashSeen(): void {
     if (!this.writeStateFile(SPLASH_SEEN_FILE, '{"seen":true}')) {
       KeyboardLog.error('splash flag not saved');
+    }
+  }
+
+  /** 页面的第一帧已经上屏（或宿主等够了时限），撤掉盖在网页上的启动画面，并补上盖着期间页面要的系统栏颜色。 */
+  launchPainted(): void {
+    if (!this.launchCovered) {
+      return;
+    }
+    this.launchCovered = false;
+    this.onLaunchPainted?.();
+    const held: string | undefined = this.heldSystemBars;
+    this.heldSystemBars = undefined;
+    if (held !== undefined) {
+      this.setSystemBars(held);
     }
   }
 

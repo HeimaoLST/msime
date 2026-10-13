@@ -144,7 +144,13 @@ pub(crate) fn open_private_fd(directory: &OwnedFd, name: &OsStr) -> io::Result<F
 /// Remove a private file relative to its opened parent directory. Opening the
 /// parent with `O_NOFOLLOW` keeps a concurrent replacement of the final
 /// directory component from redirecting cleanup through a symlink.
-#[cfg(any(target_os = "ios", target_os = "android", target_os = "linux", test))]
+#[cfg(any(
+    target_os = "ios",
+    target_os = "android",
+    target_os = "linux",
+    target_os = "windows",
+    test
+))]
 pub(crate) fn remove_private(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -423,7 +429,8 @@ mod private_open_tests {
     #[test]
     fn private_remove_refuses_a_symlinked_parent() {
         use super::remove_private;
-        use std::os::unix::fs::symlink;
+        // 以 root 运行时（Linux 测试容器）普通 `symlink` 建出的链接会被 `msime_path_trust::is_root_only_link` 当成受信任的系统链接，测不到拒绝行为；`untrusted_symlink` 那时把属主交给 `nobody`。
+        use msime_path_trust::untrusted_symlink as symlink;
 
         let outside = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();

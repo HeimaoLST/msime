@@ -1,3 +1,4 @@
+import { ControlledCheckbox } from "../core/controlled-checkbox";
 import * as settings from "./settings-style";
 import { SettingsRowStack } from "./settings-row-stack";
 import { SettingsManagerBlock } from "./settings-manager-block";
@@ -37,11 +38,7 @@ export function UninstallSection({
             卸载水杉输入法
             <small>输入源会移到废纸篓；默认保留词库、学习记录和偏好，重新安装后可继续使用。</small>
             <label>
-              <input
-                type="checkbox"
-                checked={removeUserData}
-                onChange={(event) => onRemoveUserDataChange(event.target.checked)}
-              />{" "}
+              <ControlledCheckbox checked={removeUserData} onChange={onRemoveUserDataChange} />{" "}
               同时删除词库、偏好与语音密钥
             </label>
           </span>

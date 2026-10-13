@@ -2,10 +2,11 @@ import AudioToolbox
 import SwiftUI
 import UIKit
 
-/// 皮肤：设计稿里键盘缩略图的两列网格（dc.html 主题页），每个目录主题一格，外加 AI 设计皮肤一格，下面是一个短分组，放自定义设计器、社区和外观页。
+/// 皮肤：设计稿里键盘缩略图的两列网格（dc.html 主题页），每个目录主题一格，外加 AI 设计皮肤一格；接着是同样排成两列的社区皮肤和进入完整皮肤社区的「浏览更多皮肤」，最下面是一个短分组，放自定义设计器和外观页。社区不再单独占一个标签页，皮肤社区的搜索、分类、详情、评分、举报和发布都在「浏览更多皮肤」推入的列表里。
 struct SkinSettingsView: View {
-  @EnvironmentObject private var navigation: AppNavigation
-  @Environment(\.scenePhase) private var scenePhase
+  /// 皮肤页直接列出的社区皮肤数，两列排两行；其余在「浏览更多皮肤」里。
+  private static let communityLimit = 4
+
   @Environment(\.colorScheme) private var colorScheme
   @AppStorage(CustomKeyboardSkinStore.key, store: KeyboardFeedbackPreference.defaults)
   private var customSkinData = Data()
@@ -14,8 +15,18 @@ struct SkinSettingsView: View {
   /// 目录里的每个主题都按共享文档的配置给出，好让自定义那一格显示自定义主题的基础主题和设计。
   @State private var themeCards: [KeyboardTheme] = GlobalThemeCatalog.ids.map { KeyboardTheme.resolve($0, document: nil) }
   @State private var customBase = GlobalThemeCatalog.systemId
+  /// 「键盘明暗」偏好；跟随时键盘的明暗取应用外观，与 `CandidatePreviewCard` 相同。
+  @State private var keyboardStyle = UIUserInterfaceStyle.unspecified
   @State private var savedDesigns = CustomSkinLibrary.designs.count
   @State private var skinSaveFailed = false
+  /// 社区列表的第一页的前几款；nil 表示还没读到。
+  @State private var communitySkins: [CommunitySkin]?
+  @State private var communityFailed = false
+  /// 本地皮肤库（「我的设计」），用来判断一款社区皮肤是否已经领取过。
+  @State private var library: [SavedKeyboardSkin] = CustomSkinLibrary.designs
+  /// 正在下载的社区皮肤 id。
+  @State private var taking: Set<String> = []
+  @State private var communityMessage: String?
 
   private static let columns = [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)]
   /// 设计稿中的键盘缩略图是 390 × 292。
@@ -25,11 +36,10 @@ struct SkinSettingsView: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 28) {
         VStack(alignment: .leading, spacing: 7) {
-          Text("皮肤").font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.groupTitle)
-            .padding(.horizontal, 20)
-            .accessibilityAddTraits(.isHeader)
+          SettingsGroupHeader(title: "皮肤").padding(.horizontal, 20)
           LazyVGrid(columns: Self.columns, spacing: 18) {
-            ForEach(themeCards, id: \.id) { themeTile($0) }
+            // 只列键盘当前明暗下的主题：浅色键盘不提供深色主题，反之亦然。
+            ForEach(themeCards.filter { GlobalThemeCatalog.fits($0.id, dark: keyboardDark) }, id: \.id) { themeTile($0) }
             aiTile
           }
           .padding(4)
@@ -39,6 +49,17 @@ struct SkinSettingsView: View {
               .padding(.horizontal, 20)
           }
         }
+        VStack(alignment: .leading, spacing: 7) {
+          SettingsGroupHeader(title: "社区皮肤").padding(.horizontal, 20)
+          communitySkinGrid
+          DesignCard {
+            NavigationLink(destination: SkinCommunityView()) {
+              DesignNavRowLabel(title: "浏览更多皮肤", subtitle: "搜索、分类、评分和发布")
+            }
+            .buttonStyle(PressFillButtonStyle())
+            .accessibilityIdentifier("skinCommunityLink")
+          }
+        }
         DesignGroup {
           NavigationLink(destination: CustomSkinEditorView()) {
             DesignNavRowLabel(title: "设计我的皮肤",
@@ -46,10 +67,6 @@ struct SkinSettingsView: View {
           }
           .buttonStyle(PressFillButtonStyle())
           .accessibilityIdentifier("customSkinEditorLink")
-          DesignDivider()
-          Button { navigation.discoverSkins() } label: { DesignNavRowLabel(title: "去社区找皮肤") }
-            .buttonStyle(PressFillButtonStyle())
-            .accessibilityIdentifier("skinCommunityLink")
           DesignDivider()
           NavigationLink(destination: SkinAppearanceSettingsView()) {
             DesignNavRowLabel(title: "明暗与候选颜色")
@@ -62,18 +79,132 @@ struct SkinSettingsView: View {
       .padding(.top, 16)
       .padding(.bottom, 32)
     }
-    .background(MetasequoiaTheme.canvas.ignoresSafeArea())
+    .designCanvasBackground()
     .navigationTitle("皮肤")
     .navigationBarTitleDisplayMode(.inline)
-    .onAppear { savedDesigns = CustomSkinLibrary.designs.count; reloadThemes() }
-    .onChange(of: scenePhase) { _, phase in
-      if phase == .active { savedDesigns = CustomSkinLibrary.designs.count; reloadThemes() }
+    .reloadOnAppearAndActive({ reloadLibrary(); reloadThemes() })
+    .task { await loadCommunitySkins() }
+    .refreshable { await loadCommunitySkins() }
+    .alert("皮肤社区", isPresented: Binding(get: { communityMessage != nil }, set: { if !$0 { communityMessage = nil } })) {
+      Button("好", role: .cancel) {}
+    } message: { Text(communityMessage ?? "") }
+  }
+
+  // MARK: - 社区皮肤
+
+  @ViewBuilder private var communitySkinGrid: some View {
+    if let communitySkins, !communitySkins.isEmpty {
+      let active = activeDesign
+      LazyVGrid(columns: Self.columns, spacing: 18) {
+        ForEach(communitySkins) { communityTile($0, active: active) }
+      }
+      .padding(4)
+    } else {
+      Text(communitySkins == nil ? (communityFailed ? "暂时无法加载社区皮肤" : "正在读取社区皮肤…") : "社区里还没有皮肤。")
+        .font(.system(size: 14)).foregroundStyle(MetasequoiaTheme.sub)
+        .padding(.horizontal, 20).padding(.vertical, 8)
+        .accessibilityIdentifier("communitySkinStatus")
     }
+  }
+
+  /// 键盘当前绘制的设计；键盘绘制内置主题时为 nil。
+  private var activeDesign: CustomKeyboardSkin? {
+    guard skin == GlobalThemeCatalog.customId, !customSkinData.isEmpty else { return nil }
+    return CustomKeyboardSkinStore.stored
+  }
+
+  /// 一款社区皮肤：和主题格一样的缩略图与名字，正在键盘上的那款外圈描强调色。点一下就换上，还没领取过的先下载进「我的设计」。
+  private func communityTile(_ item: CommunitySkin, active: CustomKeyboardSkin?) -> some View {
+    let saved = CommunitySkinInstall.saved(item, in: library)
+    let selected = saved != nil && saved?.design == active
+    let pending = taking.contains(item.id)
+    let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+    return Button { useCommunitySkin(item) } label: {
+      VStack(spacing: 8) {
+        CommunityDesignPreview(design: item.design, style: .card)
+          .aspectRatio(Self.tileAspect, contentMode: .fit)
+          .clipShape(shape)
+          .overlay {
+            if selected {
+              shape.inset(by: -1).stroke(MetasequoiaTheme.canvas, lineWidth: 2)
+              shape.inset(by: -3).stroke(MetasequoiaTheme.accent, lineWidth: 2)
+            } else {
+              shape.strokeBorder(MetasequoiaTheme.hair, lineWidth: 1)
+            }
+          }
+          .overlay { if pending { ProgressView() } }
+        HStack(spacing: 4) {
+          if selected { Image(systemName: "checkmark").font(.system(size: 13, weight: .semibold)) }
+          Text(item.name).font(.system(size: 15, weight: selected ? .semibold : .regular)).lineLimit(1)
+        }
+        .foregroundStyle(selected ? MetasequoiaTheme.accent : Color.primary)
+      }
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(SkinTilePressStyle())
+    .disabled(pending)
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(item.name)
+    .accessibilityHint(saved == nil ? "\(item.author) 的社区皮肤，获取到我的设计并换上" : "\(item.author) 的社区皮肤，换上")
+    .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+    .accessibilityIdentifier("communitySkinTile-\(item.id)")
+    .accessibilityValue(pending ? "获取中" : selected ? "已选择" : "未选择")
+  }
+
+  /// 皮肤社区里要先点「获取」再点「使用」，这里合成一次点按，与上面的主题格一样点了就换上：还没领取过的先用 `CommunitySkinInstall.take` 下载进皮肤库（计入下载次数），再用 `CommunitySkinInstall.apply` 放到键盘上；已经在用的不做任何事。
+  private func useCommunitySkin(_ item: CommunitySkin) {
+    guard !taking.contains(item.id) else { return }
+    if let saved = CommunitySkinInstall.saved(item, in: library) {
+      applyCommunitySkin(saved.design, statisticID: saved.id.uuidString, name: item.name)
+      return
+    }
+    taking.insert(item.id)
+    Task { @MainActor in
+      defer { taking.remove(item.id) }
+      do {
+        let design = try await CommunitySkinInstall.take(item)
+        reloadLibrary()
+        let statisticID = CommunitySkinInstall.saved(item, in: library)?.id.uuidString ?? item.id
+        applyCommunitySkin(design, statisticID: statisticID, name: item.name)
+      } catch { communityMessage = error.localizedDescription }
+    }
+  }
+
+  private func applyCommunitySkin(_ design: CustomKeyboardSkin, statisticID: String, name: String) {
+    guard design != activeDesign else { return }
+    guard CommunitySkinInstall.apply(design) else {
+      communityMessage = "没能换上「\(name)」，请稍后重试。"
+      return
+    }
+    // 换装达人：与皮肤社区里「使用」记录的是同一个皮肤库槽位 id。
+    TypingStatisticsExtras.recordSkin(statisticID)
+    skinSaveFailed = false
+    reloadThemes()
+    ToastCenter.shared.show("已换上「\(name)」")
+  }
+
+  @MainActor private func loadCommunitySkins() async {
+    do {
+      let page = try await SkinCommunityAPI.shared.list()
+      communitySkins = Array(page.skins.prefix(Self.communityLimit))
+      communityFailed = false
+    } catch is CancellationError {
+      return
+    } catch {
+      // 已经加载过的列表保留下来；刷新失败只替换加载提示。
+      if communitySkins == nil { communityFailed = true }
+    }
+  }
+
+  private func reloadLibrary() {
+    library = CustomSkinLibrary.designs
+    savedDesigns = library.count
   }
 
   /// 一格：主题的键盘缩略图（带空闲状态的工具栏），选中时外圈描强调色，名字在下方。
   private func themeTile(_ option: KeyboardTheme) -> some View {
-    let selected = skin == option.id
+    // 所选主题属于另一种明暗时键盘按跟随系统画，选中态也落在跟随系统上。
+    let selected = GlobalThemeCatalog.effectiveId(skin, dark: keyboardDark) == option.id
     let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
     return Button {
       skinSaveFailed = !GlobalThemePreference.save(option.id)
@@ -145,6 +276,8 @@ struct SkinSettingsView: View {
     .accessibilityIdentifier("aiSkinDesignTile")
   }
 
+  private var keyboardDark: Bool { keyboardStyle == .unspecified ? colorScheme == .dark : keyboardStyle == .dark }
+
   /// 固定模式的主题按该模式预览；`system` 和没有基础主题的自定义主题跟随应用外观。
   private func tileScheme(_ option: KeyboardTheme) -> ColorScheme {
     switch option.appearance {
@@ -156,6 +289,7 @@ struct SkinSettingsView: View {
 
   private func description(_ theme: KeyboardTheme) -> String {
     if theme.id == GlobalThemeCatalog.systemId { return "跟随系统明暗和应用主题的季节配色" }
+    if theme.isNative { return "iOS 自带键盘的样子，跟随系统明暗，不跟季节" }
     if theme.isCustom {
       let base = GlobalThemeCatalog.title(customBase)
       return theme.design == nil ? "以「\(base)」为底，候选颜色在「明暗与候选颜色」里调整" : "我的键盘设计，以「\(base)」为底"
@@ -167,6 +301,7 @@ struct SkinSettingsView: View {
     guard let preferences = MetasequoiaInputSessionBridge.loadSharedPreferences() else { return }
     themeCards = GlobalThemeCatalog.ids.map { KeyboardTheme.resolve($0, document: preferences) }
     customBase = GlobalThemePreference.base(in: preferences)
+    keyboardStyle = KeyboardAppearancePreference.style(KeyboardAppearancePreference.keyboardKey, in: preferences)
   }
 }
 
@@ -201,7 +336,7 @@ struct ServiceSettingsView: View {
   @State private var status = ""
   @State private var busy = false
   @State private var operation: Task<Void, Never>?
-  @State private var requestID = UUID()
+  @State private var request = ViewRequestGeneration()
   @State private var voiceGeneration: UInt64 = 0
   @State private var voiceSettings = VoicePolishSettings(MetasequoiaInputSessionBridge.loadSharedPreferences())
   @State private var voiceSettingsSaveFailed = false
@@ -270,6 +405,7 @@ struct ServiceSettingsView: View {
           Button(busy ? "正在处理…" : "发送并润色") { send() }
             .disabled(busy || input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
+        CommunityReplyTemplatesSection()
       } else {
         Section {
           Button(recorder.isRecording ? "停止录音" : "开始录音") {
@@ -282,19 +418,25 @@ struct ServiceSettingsView: View {
               }
               let live = streamsLive || onDevice
               if live { guard save() else { return } }
+              guard request.isVisible else { return }
+              let recordingID = request.begin()
               operation = Task {
                 // The recording session silences system sounds, so the start cue has to finish before it opens.
                 if voiceSettings.soundEnabled && voiceSettings.startSound { await VoiceCue.playStart() }
                 do {
+                  try request.checkCurrent(recordingID)
                   if live {
                     if let pcm = try await recorder.startStreaming(quietensOthers: voiceSettings.muteOthers) {
+                      try request.checkCurrent(recordingID)
                       if onDevice { recognizeOnDevice(pcm) } else { recognizeLive(pcm) }
                     }
                   } else {
                     try await recorder.start(quietensOthers: voiceSettings.muteOthers)
                   }
                 }
-                catch is CancellationError {} catch { status = error.localizedDescription }
+                catch is CancellationError {} catch {
+                  if request.isCurrent(recordingID) && !Task.isCancelled { status = error.localizedDescription }
+                }
               }
             }
           }
@@ -407,7 +549,8 @@ struct ServiceSettingsView: View {
         do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { break }
       }
     }
-    .onDisappear { cancelAndClear() }
+    .onAppear { request.appear() }
+    .onDisappear { request.disappear(); cancelAndClear() }
     .onChange(of: scenePhase) { phase in
       if phase == .background { cancelAndClear() }
       if phase == .active && kind == .voice { refreshVoiceTransfer() }
@@ -442,7 +585,7 @@ struct ServiceSettingsView: View {
         ? "系统语音识别按这里的语言识别；选“普通话 + 英语”时使用 iPhone 的首选语言。开始和结束录音时各有一声系统提示音，可以分别关掉。打开“录音时暂停其他声音”会让正在播放的音乐和视频在录音期间停下；关着时它们继续播放，但声音可能被一起录进去。"
         : configuration.voiceProvider == .doubao
         ? "豆包自动判断语言，不使用这里的选择。边说边识别时录音同步发给豆包，结果随说随显示，停止录音即得到结果；关掉则录完再发送。开始和结束录音时各有一声系统提示音，可以分别关掉。打开“录音时暂停其他声音”会让正在播放的音乐和视频在录音期间停下；关着时它们继续播放，但声音可能被一起录进去。"
-        : configuration.voiceProvider == .siliconFlow
+        : configuration.voiceProvider == .siliconFlow || configuration.voiceProvider.usesChatAudio
         ? "当前服务自动判断语言，不使用这里的选择。开始和结束录音时各有一声系统提示音，可以分别关掉。打开“录音时暂停其他声音”会让正在播放的音乐和视频在录音期间停下；关着时它们继续播放，但声音可能被一起录进去。"
         : "识别语言随录音一起发送；选“普通话 + 英语”时由服务判断。开始和结束录音时各有一声系统提示音，可以分别关掉。打开“录音时暂停其他声音”会让正在播放的音乐和视频在录音期间停下；关着时它们继续播放，但声音可能被一起录进去。")
     }
@@ -709,7 +852,8 @@ struct ServiceSettingsView: View {
     output = ""
   }
 
-  private func fetchModels() {
+  @MainActor private func fetchModels() {
+    guard request.isVisible, !busy else { return }
     if kind == .voice && configuration.voiceProvider == .doubao {
       modelStatus = "豆包语音模型由当前接口固定提供。"
       return
@@ -721,30 +865,25 @@ struct ServiceSettingsView: View {
       let key = try enteredKey.isEmpty ? ServiceTokenStore.read(kind, url: url) : enteredKey
       guard !key.isEmpty else { modelStatus = "请先填写 API Key，或使用已保存的密钥。"; return }
       UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-      busy = true
-      fetchingModels = true
-      modelStatus = ""
-      requestID = UUID()
-      let id = requestID
-      operation = Task {
-        do {
-          let models = try await ModelCatalogClient.fetch(configuration: config, kind: kind, token: key)
-          try Task.checkCancellation()
-          guard requestID == id else { return }
-          fetchedModels = models
-          if !models.contains(configuration.model) { configuration.model = models[0] }
-          editsCustomModel = false
-          modelStatus = "已获取 \(models.count) 个模型。请选择支持当前功能的模型。"
-        } catch {
-          if requestID == id && !Task.isCancelled { modelStatus = error.localizedDescription }
-        }
-        if requestID == id { busy = false; fetchingModels = false }
+      ViewRequestTask.run(request: $request, busy: $busy, pending: $operation,
+                          prepare: { fetchingModels = true; modelStatus = "" },
+                          onError: { error in
+                            if !Task.isCancelled { modelStatus = error.localizedDescription }
+                          }) { id in
+        defer { if request.isCurrent(id) { fetchingModels = false } }
+        let models = try await ModelCatalogClient.fetch(configuration: config, kind: kind, token: key)
+        try request.checkCurrent(id)
+        fetchedModels = models
+        if !models.contains(configuration.model) { configuration.model = models[0] }
+        editsCustomModel = false
+        modelStatus = "已获取 \(models.count) 个模型。请选择支持当前功能的模型。"
       }
     } catch { modelStatus = error.localizedDescription }
   }
 
   /// Check the endpoint, model and key as typed, before saving, the way the desktop settings page does. A key left blank uses the saved one.
-  private func testConnection() {
+  @MainActor private func testConnection() {
+    guard request.isVisible, !busy else { return }
     let config = configuration
     let doubao = kind == .voice && config.voiceProvider == .doubao
     do {
@@ -757,21 +896,15 @@ struct ServiceSettingsView: View {
         transport: DoubaoWebSocketTransport(),
         codec: DoubaoHostFrameCodec.make(enableITN: config.doubaoEnableITN, punctuation: config.doubaoEnablePunctuation,
                                          DDC: config.doubaoEnableDDC, boostingTable: config.doubaoBoostingTableID)) : nil
-      busy = true
-      testingConnection = true
-      modelStatus = ""
-      requestID = UUID()
-      let id = requestID
-      operation = Task {
-        do {
-          try await CustomServiceClient.test(kind: kind, configuration: config, token: key, doubaoClient: client)
-          try Task.checkCancellation()
-          if requestID == id { modelStatus = "连接成功，API Key 和模型配置有效。" }
-        } catch is CancellationError {
-        } catch {
-          if requestID == id && !Task.isCancelled { modelStatus = "测试失败：\(error.localizedDescription)" }
-        }
-        if requestID == id { busy = false; testingConnection = false }
+      ViewRequestTask.run(request: $request, busy: $busy, pending: $operation,
+                          prepare: { testingConnection = true; modelStatus = "" },
+                          onError: { error in
+                            if !Task.isCancelled { modelStatus = "测试失败：\(error.localizedDescription)" }
+                          }) { id in
+        defer { if request.isCurrent(id) { testingConnection = false } }
+        try await CustomServiceClient.test(kind: kind, configuration: config, token: key, doubaoClient: client)
+        try request.checkCurrent(id)
+        modelStatus = "连接成功，API Key 和模型配置有效。"
       }
     } catch { modelStatus = error.localizedDescription }
   }
@@ -802,7 +935,8 @@ struct ServiceSettingsView: View {
       return true
     } catch { status = error.localizedDescription; return false }
   }
-  private func send() {
+  @MainActor private func send() {
+    guard request.isVisible, !busy else { return }
     if recognizesOnDevice {
       // A recording whose on-device pass failed is recognized again from the saved audio.
       guard let pcm = recorder.pcmAudio, save() else { return }
@@ -838,9 +972,9 @@ struct ServiceSettingsView: View {
       generation = 0
       doubaoClient = nil
     }
-    requestID = UUID()
-    let id = requestID
+    let id = request.begin()
     operation = Task {
+      defer { if request.isCurrent(id) { busy = false } }
       do {
         let tokenURL = try config.validatedURL(
           allowWebSocket: kind == .voice && config.voiceProvider == .doubao, allowsLocalHTTP: kind == .ai)
@@ -848,31 +982,31 @@ struct ServiceSettingsView: View {
         let result = try await CustomServiceClient.request(kind: kind, configuration: config,
           text: text, wav: audio, pcm: pcm, token: savedToken, language: language,
           generation: generation, doubaoClient: doubaoClient)
-        try Task.checkCancellation()
-        guard requestID == id else { return }
+        try request.checkCurrent(id)
         if kind == .voice { recordVoiceDuration(result) }
         try await deliver(result, polish: polish, id: id)
       } catch is CancellationError {
-        if requestID == id { status = "已取消" }
+        if request.isCurrent(id) { status = "已取消" }
       } catch {
-        if requestID == id && !Task.isCancelled { status = error.localizedDescription }
+        if request.isCurrent(id) && !Task.isCancelled { status = error.localizedDescription }
       }
-      if requestID == id { busy = false }
     }
   }
   /// Shows a recognized result, polished first when the voice page asks for it.
-  private func deliver(_ result: String, polish: VoicePolishSettings?, id: UUID) async throws {
+  @MainActor private func deliver(_ result: String, polish: VoicePolishSettings?, id: UUID) async throws {
     if let polish, !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
       transcript = result
       output = result
       status = "识别完成，正在润色…"
       do {
-        output = try await Self.polish(result, settings: polish)
+        let polished = try await Self.polish(result, settings: polish)
+        try request.checkCurrent(id)
+        output = polished
         status = "已完成"
       } catch is CancellationError {
         throw CancellationError()
       } catch {
-        guard requestID == id else { return }
+        guard request.isCurrent(id), !Task.isCancelled else { return }
         status = "润色失败，已保留识别原文：\(error.localizedDescription)"
       }
     } else {
@@ -882,7 +1016,7 @@ struct ServiceSettingsView: View {
   }
 
   /// 动口不动手：一段录音转成文字后，把它的时长计入统计，每段录音只计一次，与 Android 记录已插入语音输入时长的做法相同。隐私模式下这里同样不记。
-  private func recordVoiceDuration(_ result: String) {
+  @MainActor private func recordVoiceDuration(_ result: String) {
     // 实时识别器可能在用户点停止录音之前就给出结果；调用方随后反正会丢弃这段录音，所以录音在这里结束，时长也就确定了。
     if recorder.isRecording { recorder.stop() }
     guard !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -898,7 +1032,8 @@ struct ServiceSettingsView: View {
   }
 
   /// Recognizes while the user is still speaking. A failed request leaves the recording in place once it stops, so it can still be sent the ordinary way.
-  private func recognizeLive(_ pcm: AsyncStream<Data>) {
+  @MainActor private func recognizeLive(_ pcm: AsyncStream<Data>) {
+    guard request.isVisible else { return }
     let config = configuration
     let polish = voiceSettings.polishEnabled ? voiceSettings : nil
     voiceGeneration &+= 1
@@ -906,24 +1041,29 @@ struct ServiceSettingsView: View {
     let client = DoubaoVoiceClient(transport: DoubaoWebSocketTransport(), codec: DoubaoHostFrameCodec.make(
       enableITN: config.doubaoEnableITN, punctuation: config.doubaoEnablePunctuation,
       DDC: config.doubaoEnableDDC, boostingTable: config.doubaoBoostingTableID))
-    requestID = UUID()
-    let id = requestID
+    let id = request.begin()
     output = ""
     transcript = ""
     status = ""
     liveText = ""
     recognizesLive = true
     operation = Task {
+      defer {
+        if request.isCurrent(id) {
+          recognizesLive = false
+          liveText = ""
+          busy = false
+        }
+      }
       do {
         let url = try config.validatedURL(requiresModel: false, allowWebSocket: true)
         let token = try ServiceTokenStore.read(.voice, url: url)
         let result = try await CustomServiceClient.streamDoubao(
           configuration: config, token: token, generation: generation, client: client, pcm: pcm
         ) { text in
-          Task { @MainActor in if requestID == id && recognizesLive { liveText = text } }
+          Task { @MainActor in if request.isCurrent(id) && recognizesLive { liveText = text } }
         }
-        try Task.checkCancellation()
-        guard requestID == id else { return }
+        try request.checkCurrent(id)
         recognizesLive = false
         liveText = ""
         recordVoiceDuration(result)
@@ -932,14 +1072,9 @@ struct ServiceSettingsView: View {
         busy = true
         try await deliver(result, polish: polish, id: id)
       } catch is CancellationError {
-        if requestID == id { status = "已取消" }
+        if request.isCurrent(id) { status = "已取消" }
       } catch {
-        if requestID == id && !Task.isCancelled { status = "实时识别失败，可停止录音后改为发送录音：\(error.localizedDescription)" }
-      }
-      if requestID == id {
-        recognizesLive = false
-        liveText = ""
-        busy = false
+        if request.isCurrent(id) && !Task.isCancelled { status = "实时识别失败，可停止录音后改为发送录音：\(error.localizedDescription)" }
       }
     }
   }
@@ -950,21 +1085,28 @@ struct ServiceSettingsView: View {
   }
 
   /// Recognizes on the phone while the user is still speaking, showing the running transcript. A failure leaves the recording in place once it stops, so it can be recognized again.
-  private func recognizeOnDevice(_ pcm: AsyncStream<Data>) {
+  @MainActor private func recognizeOnDevice(_ pcm: AsyncStream<Data>) {
+    guard request.isVisible else { return }
     let provider = configuration.voiceProvider
     let language = voiceSettings.language
     let polish = voiceSettings.polishEnabled ? voiceSettings : nil
     let model = localModels.selectedDirectory
-    requestID = UUID()
-    let id = requestID
+    let id = request.begin()
     output = ""
     transcript = ""
     status = ""
     liveText = ""
     recognizesLive = true
     operation = Task {
+      defer {
+        if request.isCurrent(id) {
+          recognizesLive = false
+          liveText = ""
+          busy = false
+        }
+      }
       let partial: (String) -> Void = { text in
-        Task { @MainActor in if requestID == id && recognizesLive { liveText = text } }
+        Task { @MainActor in if request.isCurrent(id) && recognizesLive { liveText = text } }
       }
       do {
         let result: String
@@ -981,8 +1123,7 @@ struct ServiceSettingsView: View {
         } else {
           result = try await SystemSpeechRecognizer.transcribe(pcm: pcm, language: language, partial: partial)
         }
-        try Task.checkCancellation()
-        guard requestID == id else { return }
+        try request.checkCurrent(id)
         recognizesLive = false
         liveText = ""
         recordVoiceDuration(result)
@@ -991,17 +1132,12 @@ struct ServiceSettingsView: View {
         busy = true
         try await deliver(result, polish: polish, id: id)
       } catch is CancellationError {
-        if requestID == id { status = "已取消" }
+        if request.isCurrent(id) { status = "已取消" }
       } catch {
-        if requestID == id && !Task.isCancelled {
+        if request.isCurrent(id) && !Task.isCancelled {
           if recorder.isRecording { recorder.stop() }
           status = "识别失败：\(error.localizedDescription)"
         }
-      }
-      if requestID == id {
-        recognizesLive = false
-        liveText = ""
-        busy = false
       }
     }
   }
@@ -1017,8 +1153,8 @@ struct ServiceSettingsView: View {
     return trimmed
   }
 
-  private func cancelRequest() {
-    requestID = UUID()
+  @MainActor private func cancelRequest() {
+    request.invalidate()
     operation?.cancel()
     // Live recognition owns the microphone until the recorder finishes its stream. Cancelling the
     // task alone does not finish an AsyncStream producer, so the send side can remain suspended
@@ -1031,7 +1167,7 @@ struct ServiceSettingsView: View {
     recognizesLive = false
     liveText = ""
   }
-  private func cancelAndClear() {
+  @MainActor private func cancelAndClear() {
     cancelRequest()
     recorder.discard()
     // A resident model holds hundreds of megabytes; nothing on this page needs it once the page is gone.

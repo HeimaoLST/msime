@@ -274,6 +274,11 @@ pub struct DictionaryCollectionsStore {
     personal: PersonalDictionaryStore,
 }
 
+struct CollectionsLock {
+    directory: crate::file_lock::PrivateDirectory,
+    _lock: File,
+}
+
 impl DictionaryCollectionsStore {
     pub fn new(preferences_directory: impl AsRef<Path>, personal: PersonalDictionaryStore) -> Self {
         Self {
@@ -331,8 +336,8 @@ impl DictionaryCollectionsStore {
     }
 
     pub fn load(&self) -> Result<DictionaryCollectionsView> {
-        let _lock = self.lock()?;
-        let state = self.read_state()?;
+        let lock = self.lock()?;
+        let state = self.read_state(&lock.directory)?;
         Ok(state.view())
     }
 
@@ -431,8 +436,8 @@ impl DictionaryCollectionsStore {
                     .ok_or(DictionaryCollectionsError::InvalidName)?,
             )?;
         }
-        let _lock = self.lock()?;
-        let mut state = self.read_state()?;
+        let lock = self.lock()?;
+        let mut state = self.read_state(&lock.directory)?;
         let existing: HashSet<String> = match target {
             Some(id) => {
                 if state.metadata(id)?.kind != request.kind {
@@ -484,7 +489,7 @@ impl DictionaryCollectionsStore {
                 )?;
             }
         }
-        self.commit(&mut state)?;
+        self.commit(&lock.directory, &mut state)?;
         let mut view = state.view();
         view.import = Some(report);
         Ok(view)
@@ -553,17 +558,21 @@ impl DictionaryCollectionsStore {
         if words.len() > MAX_QUEUED_WORDS {
             return Err(DictionaryCollectionsError::Invalid);
         }
-        let _lock = self.lock()?;
-        let mut state = self.read_state()?;
+        let lock = self.lock()?;
+        let mut state = self.read_state(&lock.directory)?;
         let mut queued = 0;
         for word in words {
             if valid_new_word(&word, word.kind).is_err() {
                 continue;
             }
+            let identity = word.identity();
+            let was_absent = state.outbox.get(&identity).is_none();
             state.outbox.queue(OutboxKind::Add, UNOWNED_WORDS, word);
-            queued += 1;
+            if was_absent && state.outbox.get(&identity).is_some() {
+                queued += 1;
+            }
         }
-        self.commit(&mut state)?;
+        self.commit(&lock.directory, &mut state)?;
         let mut view = state.view();
         view.queued = Some(queued);
         Ok(view)
@@ -571,12 +580,12 @@ impl DictionaryCollectionsStore {
 
     /// 把待发送队列里的增删在个人词库队列有空位时送进去，返回这次送出的条数。个人词库正忙（键盘持有它的锁）或队列已满时什么也不送，等下次再来。
     pub fn flush(&self) -> Result<DictionaryCollectionsView> {
-        let _lock = self.lock()?;
-        let mut state = self.read_state()?;
-        let (sent, failure) = self.flush_locked(&mut state);
+        let lock = self.lock()?;
+        let mut state = self.read_state(&lock.directory)?;
+        let (sent, failure) = self.flush_locked(&lock.directory, &mut state);
         // 已经送出的部分先落盘，再报告送后面那部分时遇到的错误，免得下次重复送。
         if sent > 0 || state.outbox_dirty {
-            self.write_outbox(&state.outbox)?;
+            self.write_outbox(&lock.directory, &state.outbox)?;
         }
         if let Some(error) = failure {
             return Err(error);
@@ -590,15 +599,19 @@ impl DictionaryCollectionsStore {
         &self,
         action: impl FnOnce(&mut State) -> Result<()>,
     ) -> Result<DictionaryCollectionsView> {
-        let _lock = self.lock()?;
-        let mut state = self.read_state()?;
+        let lock = self.lock()?;
+        let mut state = self.read_state(&lock.directory)?;
         action(&mut state)?;
-        self.commit(&mut state)?;
+        self.commit(&lock.directory, &mut state)?;
         Ok(state.view())
     }
 
     /// 写回改过的文件，再顺手送一批。送这一批失败不影响已经写好的修改：集合和待发送队列都已落盘，`flush` 操作会如实报告个人词库的错误。
-    fn commit(&self, state: &mut State) -> Result<()> {
+    fn commit(
+        &self,
+        directory: &crate::file_lock::PrivateDirectory,
+        state: &mut State,
+    ) -> Result<()> {
         for id in state.dirty.iter().filter(|id| !state.deleted.contains(id)) {
             let entries = state
                 .entries
@@ -606,7 +619,8 @@ impl DictionaryCollectionsStore {
                 .ok_or(DictionaryCollectionsError::NotFound)?;
             let kind = state.metadata(*id)?.kind;
             self.write_json(
-                &self.collection_path(*id),
+                directory,
+                std::ffi::OsStr::new(&format!("{}.json", id.hyphenated())),
                 &CollectionFile {
                     id: *id,
                     kind,
@@ -615,47 +629,46 @@ impl DictionaryCollectionsStore {
                 MAX_COLLECTION_BYTES,
             )?;
         }
-        self.write_outbox(&state.outbox)?;
+        self.write_outbox(directory, &state.outbox)?;
         self.write_json(
-            &self.directory.join(INDEX_FILE),
+            directory,
+            std::ffi::OsStr::new(INDEX_FILE),
             &state.index,
             MAX_INDEX_BYTES,
         )?;
         for id in &state.deleted {
-            match self.remove_collection_file(*id) {
+            match self.remove_collection_file(directory, *id) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
         }
         state.prune_preexisting();
-        self.write_preexisting(state)?;
-        let (sent, _) = self.flush_locked(state);
+        self.write_preexisting(directory, state)?;
+        let (sent, _) = self.flush_locked(directory, state);
         if sent > 0 || state.outbox_dirty {
-            self.write_outbox(&state.outbox)?;
+            self.write_outbox(directory, &state.outbox)?;
         }
         Ok(())
     }
 
-    fn remove_collection_file(&self, id: Uuid) -> std::io::Result<()> {
-        #[cfg(unix)]
-        {
-            let directory = crate::storage::open_private_directory(&self.directory)?;
-            rustix::fs::unlinkat(
-                &directory,
-                std::ffi::OsStr::new(&format!("{}.json", id.hyphenated())),
-                rustix::fs::AtFlags::empty(),
-            )
-            .map_err(std::io::Error::from)
-        }
-        #[cfg(not(unix))]
-        {
-            fs::remove_file(self.collection_path(id))
-        }
+    fn remove_collection_file(
+        &self,
+        directory: &crate::file_lock::PrivateDirectory,
+        id: Uuid,
+    ) -> std::io::Result<()> {
+        crate::file_lock::remove_private_file_at(
+            directory,
+            std::ffi::OsStr::new(&format!("{}.json", id.hyphenated())),
+        )
     }
 
     /// 收回执、送一批，返回送出的条数和送后面那部分时遇到的错误（个人词库正忙或队列已满不算错误）。送出的条目和不再送的「删除」已经从内存里的待发送队列拿掉，调用方负责把它写回；`preexisting.json` 在这里写好。
-    fn flush_locked(&self, state: &mut State) -> (usize, Option<DictionaryCollectionsError>) {
+    fn flush_locked(
+        &self,
+        directory: &crate::file_lock::PrivateDirectory,
+        state: &mut State,
+    ) -> (usize, Option<DictionaryCollectionsError>) {
         if state.outbox.is_empty() {
             return (0, None);
         }
@@ -671,7 +684,7 @@ impl DictionaryCollectionsStore {
                     state.preexisting_dirty = true;
                 }
             }
-            if let Err(error) = self.write_preexisting(state) {
+            if let Err(error) = self.write_preexisting(directory, state) {
                 return (0, Some(error));
             }
             match self.personal.acknowledge_already_present(&receipts) {
@@ -696,7 +709,7 @@ impl DictionaryCollectionsStore {
         }
         let failure = self.send_locked(state, &queue);
         state.prune_preexisting();
-        match self.write_preexisting(state) {
+        match self.write_preexisting(directory, state) {
             Ok(()) => failure,
             Err(error) => (failure.0, failure.1.or(Some(error))),
         }
@@ -793,22 +806,25 @@ impl DictionaryCollectionsStore {
         (sent, None)
     }
 
-    fn collection_path(&self, id: Uuid) -> PathBuf {
-        self.directory.join(format!("{}.json", id.hyphenated()))
-    }
-
-    fn lock(&self) -> Result<File> {
+    fn lock(&self) -> Result<CollectionsLock> {
         if !crate::storage::create_directory_and_check(&self.directory)? {
             return Err(DictionaryCollectionsError::Corrupt);
         }
-        let lock = file_lock::open_lock_file(self.directory.join("index.json.lock"))?;
+        let directory = file_lock::open_private_directory(&self.directory)?;
+        let lock = file_lock::open_private_lock_file_at(
+            &directory,
+            std::ffi::OsStr::new("index.json.lock"),
+        )?;
         file_lock::exclusive(&lock)?;
-        Ok(lock)
+        Ok(CollectionsLock {
+            directory,
+            _lock: lock,
+        })
     }
 
-    fn read_state(&self) -> Result<State> {
+    fn read_state(&self, directory: &crate::file_lock::PrivateDirectory) -> Result<State> {
         let index: CollectionIndex = self
-            .read_json(&self.directory.join(INDEX_FILE), MAX_INDEX_BYTES)?
+            .read_json(directory, std::ffi::OsStr::new(INDEX_FILE), MAX_INDEX_BYTES)?
             .unwrap_or(CollectionIndex {
                 version: 1,
                 collections: Vec::new(),
@@ -817,17 +833,29 @@ impl DictionaryCollectionsStore {
         let mut entries = HashMap::with_capacity(index.collections.len());
         for metadata in &index.collections {
             let file: CollectionFile = self
-                .read_json(&self.collection_path(metadata.id), MAX_COLLECTION_BYTES)?
+                .read_json(
+                    directory,
+                    std::ffi::OsStr::new(&format!("{}.json", metadata.id.hyphenated())),
+                    MAX_COLLECTION_BYTES,
+                )?
                 .ok_or(DictionaryCollectionsError::Corrupt)?;
             validate_collection(metadata, &file)?;
             entries.insert(metadata.id, file.entries);
         }
         let outbox: OutboxFile = self
-            .read_json(&self.directory.join(OUTBOX_FILE), MAX_OUTBOX_BYTES)?
+            .read_json(
+                directory,
+                std::ffi::OsStr::new(OUTBOX_FILE),
+                MAX_OUTBOX_BYTES,
+            )?
             .unwrap_or_default();
         let outbox = Outbox::from_file(outbox)?;
         let preexisting: PreexistingFile = self
-            .read_json(&self.directory.join(PREEXISTING_FILE), MAX_OUTBOX_BYTES)?
+            .read_json(
+                directory,
+                std::ffi::OsStr::new(PREEXISTING_FILE),
+                MAX_OUTBOX_BYTES,
+            )?
             .unwrap_or_default();
         if preexisting.identities.iter().any(String::is_empty) {
             return Err(DictionaryCollectionsError::Corrupt);
@@ -846,17 +874,15 @@ impl DictionaryCollectionsStore {
 
     fn read_json<T: serde::de::DeserializeOwned>(
         &self,
-        path: &Path,
+        directory: &crate::file_lock::PrivateDirectory,
+        name: &std::ffi::OsStr,
         maximum: u64,
     ) -> Result<Option<T>> {
-        let file = match crate::storage::open_private_file_in(path) {
+        let file = match crate::file_lock::open_private_file_at(directory, name) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(DictionaryCollectionsError::Corrupt),
         };
-        if file.metadata()?.len() > maximum {
-            return Err(DictionaryCollectionsError::Corrupt);
-        }
         let bytes = crate::bounded_io::read_bounded_file(file, maximum, || {
             DictionaryCollectionsError::Corrupt
         })?;
@@ -865,14 +891,19 @@ impl DictionaryCollectionsStore {
             .map_err(|_| DictionaryCollectionsError::Corrupt)
     }
 
-    fn write_preexisting(&self, state: &mut State) -> Result<()> {
+    fn write_preexisting(
+        &self,
+        directory: &crate::file_lock::PrivateDirectory,
+        state: &mut State,
+    ) -> Result<()> {
         if !state.preexisting_dirty {
             return Ok(());
         }
         let mut identities: Vec<String> = state.preexisting.iter().cloned().collect();
         identities.sort_unstable();
         self.write_json(
-            &self.directory.join(PREEXISTING_FILE),
+            directory,
+            std::ffi::OsStr::new(PREEXISTING_FILE),
             &PreexistingFile { identities },
             MAX_OUTBOX_BYTES,
         )?;
@@ -880,9 +911,14 @@ impl DictionaryCollectionsStore {
         Ok(())
     }
 
-    fn write_outbox(&self, outbox: &Outbox) -> Result<()> {
+    fn write_outbox(
+        &self,
+        directory: &crate::file_lock::PrivateDirectory,
+        outbox: &Outbox,
+    ) -> Result<()> {
         self.write_json(
-            &self.directory.join(OUTBOX_FILE),
+            directory,
+            std::ffi::OsStr::new(OUTBOX_FILE),
             &OutboxFile {
                 operations: outbox.operations().cloned().collect(),
             },
@@ -890,18 +926,20 @@ impl DictionaryCollectionsStore {
         )
     }
 
-    fn write_json<T: Serialize>(&self, path: &Path, value: &T, maximum: u64) -> Result<()> {
+    fn write_json<T: Serialize>(
+        &self,
+        directory: &crate::file_lock::PrivateDirectory,
+        name: &std::ffi::OsStr,
+        value: &T,
+        maximum: u64,
+    ) -> Result<()> {
         let bytes = serde_json::to_vec(value).map_err(|_| DictionaryCollectionsError::Invalid)?;
         if bytes.len() as u64 > maximum {
             return Err(DictionaryCollectionsError::TooLarge);
         }
         #[cfg(unix)]
         {
-            let directory = crate::storage::open_private_directory(&self.directory)?;
-            let name = path
-                .file_name()
-                .ok_or(DictionaryCollectionsError::Corrupt)?;
-            crate::storage::write_private_file_at(&directory, name, &bytes)?;
+            crate::file_lock::write_private_file_at(directory, name, &bytes)?;
             Ok(())
         }
         #[cfg(not(unix))]
@@ -909,7 +947,9 @@ impl DictionaryCollectionsStore {
             let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
             temporary.write_all(&bytes)?;
             temporary.as_file().sync_all()?;
-            temporary.persist(path).map_err(|error| error.error)?;
+            temporary
+                .persist(self.directory.join(name))
+                .map_err(|error| error.error)?;
             Ok(())
         }
     }

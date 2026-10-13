@@ -1,8 +1,10 @@
 //! `BackendAccountClient`: one HTTPS call per account operation, over the
 //! transport the host injected.
 
+use super::clipboard::{CLIPBOARD_PATH, MAX_CLIPBOARD_RESPONSE_BYTES};
 use super::validate::*;
 use super::*;
+use crate::cloud::clipboard_e2e::{HttpRequest, HttpResponse};
 
 #[derive(Clone)]
 pub struct BackendAccountClient {
@@ -105,6 +107,24 @@ impl BackendAccountClient {
         timeout: Duration,
         accept: &str,
     ) -> Result<Vec<u8>, AccountError> {
+        let response = self
+            .prepare(method, path, token, body, maximum_request_bytes, accept)?
+            .timeout(timeout)
+            .send()
+            .map_err(|_| AccountError::Unavailable)?;
+        read_bounded_response(response, maximum_response_bytes)
+    }
+
+    /// 校验路径、凭据和请求体后组装请求；请求只会发往构造时给定的源站。
+    fn prepare(
+        &self,
+        method: Method,
+        path: &str,
+        token: Option<&str>,
+        body: Option<Vec<u8>>,
+        maximum_request_bytes: usize,
+        accept: &str,
+    ) -> Result<reqwest::blocking::RequestBuilder, AccountError> {
         if !path.starts_with("/v1/") || path.contains('\\') {
             return Err(AccountError::Invalid);
         }
@@ -137,11 +157,7 @@ impl BackendAccountClient {
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(body);
         }
-        let response = request
-            .timeout(timeout)
-            .send()
-            .map_err(|_| AccountError::Unavailable)?;
-        read_bounded_response(response, maximum_response_bytes)
+        Ok(request)
     }
 
     pub(crate) fn json<T: DeserializeOwned, B: Serialize>(
@@ -272,23 +288,6 @@ impl BackendAccountClient {
         self.request(method, path, token, body).map(|_| ())
     }
 
-    pub fn clipboard(
-        &self,
-        search: &str,
-        access_token: &str,
-    ) -> Result<AccountClipboardPage, AccountError> {
-        validate_clipboard_search(search)?;
-        let encoded = crate::cloud::dictionary::percent_encode(search);
-        let page = self.json::<AccountClipboardPage, ()>(
-            Method::GET,
-            &format!("/v1/users/me/clipboard?q={encoded}"),
-            Some(access_token),
-            None,
-        )?;
-        validate_clipboard_page(&page)?;
-        Ok(page)
-    }
-
     pub fn set_clipboard_enabled(
         &self,
         enabled: bool,
@@ -306,24 +305,52 @@ impl BackendAccountClient {
         )
     }
 
-    pub fn add_clipboard(
+    /// 发出云剪贴板驱动要求的请求，状态码和正文原样交回（见 [`AccountApi::clipboard_e2e`]）。只接受云剪贴板自己的路径，响应上限放宽到 [`MAX_CLIPBOARD_RESPONSE_BYTES`]，装得下 50 条最长的密文。
+    pub fn clipboard_e2e(
         &self,
-        text: &str,
+        request: &HttpRequest,
         access_token: &str,
-    ) -> Result<AccountClipboardItem, AccountError> {
-        validate_clipboard_text(text)?;
-        #[derive(Serialize)]
-        struct Body<'a> {
-            text: &'a str,
+    ) -> Result<HttpResponse, AccountError> {
+        let method = match request.method.as_str() {
+            "GET" => Method::GET,
+            "PUT" => Method::PUT,
+            "POST" => Method::POST,
+            "DELETE" => Method::DELETE,
+            _ => return Err(AccountError::Invalid),
+        };
+        let path = request.path.as_str();
+        let in_scope = path == CLIPBOARD_PATH
+            || path
+                .strip_prefix(CLIPBOARD_PATH)
+                .is_some_and(|rest| rest.starts_with('/'));
+        if !in_scope || path.contains("..") {
+            return Err(AccountError::Invalid);
         }
-        let item = self.json(
-            Method::POST,
-            "/v1/users/me/clipboard",
-            Some(access_token),
-            Some(&Body { text }),
-        )?;
-        validate_clipboard_item(&item)?;
-        Ok(item)
+        let body = request.body.as_ref().map(|body| body.as_bytes().to_vec());
+        let response = self
+            .prepare(
+                method,
+                path,
+                Some(access_token),
+                body,
+                MAX_JSON_BYTES,
+                "application/json",
+            )?
+            .timeout(Duration::from_secs(30))
+            .send()
+            .map_err(|_| AccountError::Unavailable)?;
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            // 错误正文只用来读 `error.code`，和其他账号请求一样只读开头几 KiB；读不出来时驱动按状态码处理。
+            let body = crate::bounded_io::read_bounded(response, MAX_ERROR_BODY_BYTES)
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or_default();
+            return Ok(HttpResponse { status, body });
+        }
+        let bytes = read_bounded_response(response, MAX_CLIPBOARD_RESPONSE_BYTES)?;
+        let body = String::from_utf8(bytes).map_err(|_| AccountError::Unavailable)?;
+        Ok(HttpResponse { status, body })
     }
 
     pub fn delete_clipboard(
@@ -1282,24 +1309,16 @@ impl AccountApi for BackendAccountClient {
         Ok(updated)
     }
 
-    fn clipboard(
+    fn clipboard_e2e(
         &self,
-        search: &str,
+        request: &HttpRequest,
         access_token: &str,
-    ) -> Result<AccountClipboardPage, AccountError> {
-        self.clipboard(search, access_token)
+    ) -> Result<HttpResponse, AccountError> {
+        self.clipboard_e2e(request, access_token)
     }
 
     fn set_clipboard_enabled(&self, enabled: bool, access_token: &str) -> Result<(), AccountError> {
         self.set_clipboard_enabled(enabled, access_token)
-    }
-
-    fn add_clipboard(
-        &self,
-        text: &str,
-        access_token: &str,
-    ) -> Result<AccountClipboardItem, AccountError> {
-        self.add_clipboard(text, access_token)
     }
 
     fn delete_clipboard(&self, id: Option<&str>, access_token: &str) -> Result<(), AccountError> {

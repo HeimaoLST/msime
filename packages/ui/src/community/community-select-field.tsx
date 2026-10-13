@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { ControlledSelect } from "../core/controlled-select";
 import { CommunityField } from "./community-field";
 import * as style from "./community-style";
 
@@ -22,15 +23,15 @@ export function CommunitySelectField({
 }: CommunitySelectFieldProps) {
   return (
     <CommunityField label={label}>
-      <select
+      <ControlledSelect
         className={style.fieldControl}
         aria-label={ariaLabel}
         value={value}
         disabled={disabled}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={onChange}
       >
         {children}
-      </select>
+      </ControlledSelect>
     </CommunityField>
   );
 }

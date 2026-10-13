@@ -137,10 +137,12 @@ test("the pickers draw over the package and derived slots follow the package, as
         },
       ],
     });
+  // paper 底的皮肤是浅色皮肤，只在浅色模式下画。
+  const light = { ...preferences, candidate_theme: "light" as const };
   const view = render(
     <AppearanceCandidatePreview
       preferences={{
-        ...preferences,
+        ...light,
         custom_theme: { candidate_skin: "sample", candidate_colors: { text: "#ff0000" } },
       }}
       scan={packaged({ text: "#112233" })}
@@ -150,10 +152,67 @@ test("the pickers draw over the package and derived slots follow the package, as
   expect(drawn(view.container, "--cand-num")).toBe("#FF00009D");
   view.unmount();
   const accent = render(
-    <AppearanceCandidatePreview preferences={preferences} scan={packaged({ accent: "#AA0000" })} />,
+    <AppearanceCandidatePreview preferences={light} scan={packaged({ accent: "#AA0000" })} />,
   );
   await waitFor(() => expect(drawn(accent.container, "--cand-selected")).toBe("#AA000024"));
   expect(drawn(accent.container, "--accent-strong")).toBe("#AA0000");
+});
+
+// 预览按当前明暗取槽位：浅色模式画 `candidate_skin`，深色模式画 `candidate_skin_dark`；只设了浅色皮肤时深色模式不画它，画底和取色器。
+test("the preview draws the skin of the previewed mode's slot", async () => {
+  const scan = vi.fn().mockResolvedValue({
+    ...catalog,
+    packages: [
+      {
+        ...catalog.packages[0],
+        id: "paperish",
+        base: "paper",
+        themes: ["light"],
+        candidate: { dark: {}, light: { surface: "#abcdef" } },
+      },
+      {
+        ...catalog.packages[0],
+        id: "nightish",
+        base: "night",
+        themes: ["dark"],
+        candidate: { dark: { surface: "#123456" }, light: {} },
+      },
+    ],
+  });
+  const slots = {
+    ...preferences,
+    custom_theme: {
+      base: "night" as const,
+      candidate_skin: "paperish",
+      candidate_skin_dark: "nightish",
+    },
+  };
+  const view = render(
+    <AppearanceCandidatePreview preferences={{ ...slots, candidate_theme: "light" }} scan={scan} />,
+  );
+  await waitFor(() => expect(drawn(view.container, "--cand-bg")).toBe("#ABCDEF"));
+  view.rerender(
+    <AppearanceCandidatePreview preferences={{ ...slots, candidate_theme: "dark" }} scan={scan} />,
+  );
+  await waitFor(() => expect(drawn(view.container, "--cand-bg")).toBe("#123456"));
+  view.unmount();
+
+  const lightOnly = render(
+    <AppearanceCandidatePreview
+      preferences={{
+        ...preferences,
+        candidate_theme: "dark",
+        custom_theme: { base: "paper", candidate_skin: "paperish" },
+      }}
+      scan={scan}
+    />,
+  );
+  await screen.findByText("所选皮肤是浅色皮肤，深色模式下不使用它。");
+  // 设过皮肤、这个模式却没有可画的包：paper 不属于深色，底按 `system` 画，不画浅色皮肤的配色。
+  const plain = lightOnly.container.querySelector<HTMLElement>(".appearance-candidate-preview")!;
+  expect(plain.getAttribute("data-preview-theme")).toBe("dark");
+  expect(plain.style.getPropertyValue("--cand-bg")).not.toBe("#ABCDEF");
+  expect(lightOnly.container.querySelector(".skin-decoration-image")).toBeNull();
 });
 
 test("a host with a theme call previews its own resolve() answer", async () => {
@@ -319,4 +378,121 @@ test("image failures retain palette and report the limitation", async () => {
   await screen.findByText(/皮肤图片加载失败/);
   expect(view.container.querySelectorAll(".cand")).toHaveLength(4);
   expect(drawn(view.container, "--cand-bg")).toBe("#123456");
+});
+
+test("切换横竖排和保存后的后台重扫保留皮肤、配色及图片节点", async () => {
+  let finishScan!: (value: SkinCatalog) => void;
+  let finishTheme!: (value: typeof theme) => void;
+  const theme = {
+    id: "custom" as const,
+    source: "custom" as const,
+    appearance: null,
+    candidate: { surface: "#010203" },
+    keyboard: null,
+    candidate_skin: "sample",
+  };
+  const scan = vi
+    .fn()
+    .mockResolvedValueOnce(catalog)
+    .mockImplementation(
+      () =>
+        new Promise<SkinCatalog>((done) => {
+          finishScan = done;
+        }),
+    );
+  const resolveTheme = vi
+    .fn()
+    .mockResolvedValueOnce(theme)
+    .mockImplementation(
+      () =>
+        new Promise<typeof theme>((done) => {
+          finishTheme = done;
+        }),
+    );
+  const readImage = vi.fn().mockResolvedValue(image);
+  const view = render(
+    <AppearanceCandidatePreview
+      preferences={preferences}
+      scan={scan}
+      readImage={readImage}
+      resolveTheme={resolveTheme}
+      revision={3}
+    />,
+  );
+  await waitFor(() => expect(drawn(view.container, "--cand-bg")).toBe("#010203"));
+  await waitFor(() =>
+    expect(view.container.querySelector(".skin-decoration-image")).not.toBeNull(),
+  );
+  const surface = view.container.querySelector(".appearance-candidate-preview");
+  const decoration = view.container.querySelector(".skin-decoration-image");
+  const horizontal = { ...preferences, candidate_layout: "horizontal" as const };
+  view.rerender(
+    <AppearanceCandidatePreview
+      preferences={horizontal}
+      scan={scan}
+      readImage={readImage}
+      resolveTheme={resolveTheme}
+      revision={3}
+    />,
+  );
+  expect(view.container.querySelector(".appearance-candidate-preview")).toBe(surface);
+  expect(drawn(view.container, "--cand-bg")).toBe("#010203");
+  await act(async () => finishTheme(theme));
+  view.rerender(
+    <AppearanceCandidatePreview
+      preferences={horizontal}
+      scan={scan}
+      readImage={readImage}
+      resolveTheme={resolveTheme}
+      revision={4}
+    />,
+  );
+  expect(scan).toHaveBeenCalledTimes(2);
+  expect(screen.queryByText("正在读取所选皮肤。")).toBeNull();
+  expect(view.container.querySelector(".appearance-candidate-preview")).toBe(surface);
+  expect(view.container.querySelector(".skin-decoration-image")).toBe(decoration);
+  await act(async () => finishScan(catalog));
+  expect(view.container.querySelector(".appearance-candidate-preview")).toBe(surface);
+  expect(view.container.querySelector(".skin-decoration-image")).toBe(decoration);
+  expect(readImage).toHaveBeenCalledTimes(1);
+});
+
+test("外部皮肤预览的 logo 开关与主预览一致，不重新加载图片", async () => {
+  const scan = vi.fn().mockResolvedValue(catalog);
+  const readImage = vi.fn().mockResolvedValue(image);
+  const view = render(
+    <AppearanceCandidatePreview
+      preferences={preferences}
+      scan={scan}
+      readImage={readImage}
+      brand={false}
+    />,
+  );
+  await waitFor(() =>
+    expect(view.container.querySelector(".skin-decoration-image")).not.toBeNull(),
+  );
+  const decoration = view.container.querySelector(".skin-decoration-image");
+  expect(view.container.querySelector(".candidate-brand")).toBeNull();
+  view.rerender(
+    <AppearanceCandidatePreview
+      preferences={preferences}
+      scan={scan}
+      readImage={readImage}
+      brand
+    />,
+  );
+  expect(view.container.querySelector(".candidate-brand")).not.toBeNull();
+  view.rerender(
+    <AppearanceCandidatePreview
+      preferences={{ ...preferences, candidate_preedit_style: "empty" }}
+      scan={scan}
+      readImage={readImage}
+      brand={false}
+    />,
+  );
+  expect(view.container.querySelector(".candidate-brand-row")).toBeNull();
+  expect(view.container.querySelector(".candidate-brand")).toBeNull();
+  expect(view.container.querySelector(".skin-decoration-image")).toBe(decoration);
+  expect(scan).toHaveBeenCalledTimes(1);
+  expect(readImage).toHaveBeenCalledTimes(1);
 });

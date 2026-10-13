@@ -1,5 +1,11 @@
 package app.msime.android.home;
 
+import app.msime.android.DimensionPolicy;
+
+import app.msime.android.DrawablePolicy;
+import app.msime.android.ThemeColorPolicy;
+import app.msime.android.LayoutPolicy;
+
 import android.app.Activity;
 import android.content.Context;
 import android.view.Gravity;
@@ -7,7 +13,9 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import app.msime.android.ContextPolicy;
 import app.msime.android.ViewPolicy;
+import app.msime.android.KeyboardGeometry;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 
@@ -22,7 +30,7 @@ public final class MsToast {
     private MsToast() {}
 
     public static void show(Context context, CharSequence text) {
-        Activity activity = Ui.activityOf(context);
+        Activity activity = ContextPolicy.activity(context);
         ViewGroup content = activity == null ? null : activity.findViewById(android.R.id.content);
         if (!(content instanceof FrameLayout frame)) {
             android.widget.Toast.makeText(context.getApplicationContext(), text,
@@ -35,21 +43,22 @@ public final class MsToast {
             frame.removeView(previous);
         }
 
-        TextView toast = Ui.styledLabel(activity, text, Ui.TEXT_TOAST, 400,
-            Ui.color(activity, com.google.android.material.R.attr.colorOnSurfaceInverse));
+        TextView toast = ViewPolicy.centeredLabel(activity, text, Ui.TEXT_TOAST, 400,
+            ThemeColorPolicy.color(activity, com.google.android.material.R.attr.colorOnSurfaceInverse));
         toast.setTag(TAG);
-        ViewPolicy.setCentered(toast);
         ViewPolicy.setMaxLines(toast, 3);
-        ViewPolicy.setBackground(toast, Ui.pill(Ui.color(activity, com.google.android.material.R.attr.colorSurfaceInverse)));
-        Ui.setSymmetricPaddingDp(toast, activity, 20, 10);
-        toast.setElevation(Ui.dp(activity, 6));
+        ViewPolicy.setBackground(toast, DrawablePolicy.pill(ThemeColorPolicy.color(activity, com.google.android.material.R.attr.colorSurfaceInverse)));
+        ViewPolicy.setSymmetricPaddingDp(activity, toast, 20, 10);
+        ViewPolicy.setElevation(toast, DimensionPolicy.pixels(activity, 6));
         ViewPolicy.setPoliteLiveRegion(toast);
 
-        FrameLayout.LayoutParams params = Ui.frameWrap(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        int side = Ui.dp(activity, 32);
+        FrameLayout.LayoutParams params = LayoutPolicy.frameParamsPx(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        int side = DimensionPolicy.pixels(activity, 32);
         params.leftMargin = side;
         params.rightMargin = side;
-        params.bottomMargin = Ui.dp(activity, Ui.TOAST_BOTTOM) + navigationInset(frame);
+        params.bottomMargin = DimensionPolicy.pixels(activity, Ui.TOAST_BOTTOM) + navigationInset(frame);
         toast.setAlpha(0f);
         frame.addView(toast, params);
         toast.animate().alpha(1f).setDuration(Ui.FADE_MILLIS).withEndAction(() ->

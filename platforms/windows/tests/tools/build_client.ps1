@@ -69,7 +69,7 @@ try {
     $desktopCall = @($global:ClientBuildCalls | Where-Object { $_.Name -eq 'pnpm' -and $_.Values -contains 'tauri' })[0]
     $desktopArgs = $desktopCall.Values
     $configIndex = [Array]::IndexOf($desktopArgs, '--config')
-    if ($configIndex -lt 0 -or (Get-Content -LiteralPath $desktopArgs[$configIndex + 1] -Raw | ConvertFrom-Json).version -ne '2026.9.1') {
+    if ($configIndex -lt 0 -or (Get-Content -LiteralPath $desktopArgs[$configIndex + 1] -Raw -Encoding UTF8 | ConvertFrom-Json).version -ne '2026.9.1') {
         throw 'Tauri version override missing or incorrect'
     }
     foreach ($arch in @('x86', 'x64')) {
@@ -171,6 +171,8 @@ try {
         $calls[19].Values -notcontains '-restore' -or
         $calls[19].Values -notcontains '/p:TargetName=msime-client-settings' -or
         $calls[15].Values -notcontains 'RelWithDebInfo') { throw 'Build target mismatch' }
+    # 设置窗口显示这个版本号，并以它为准检查更新。
+    if ($calls[19].Values -notcontains '/p:MsimeVersion=2026.9.1') { throw 'Settings window built without the target version' }
     # With -RustOutputs, as each release edition runs, nothing is compiled by cargo or pnpm and every Rust input comes from that directory.
     $prebuilt = Join-Path $fixture 'prebuilt rust'
     New-Item -ItemType Directory -Force -Path $prebuilt | Out-Null
@@ -216,6 +218,8 @@ try {
     & $entry -RepoRoot $fixture -X64Dependencies $x64 -X86Dependencies $x86
     # 不传 TargetVersion 时，桌面构建（第 7 条，pnpm tauri build）不带版本覆盖。
     if ($global:ClientBuildCalls[7].Values -notcontains 'tauri' -or $global:ClientBuildCalls[7].Values -contains '--config') { throw 'Development version was overridden' }
+    # 设置窗口同样不带版本覆盖，由工程读取 version.txt。
+    if (@($global:ClientBuildCalls | Where-Object { $_.Name -eq 'msbuild' -and @($_.Values | Where-Object { $_ -like '/p:MsimeVersion=*' }).Count -ne 0 }).Count -ne 0) { throw 'Development settings version was overridden' }
     $global:ClientBuildCalls.Clear()
     Remove-Item -LiteralPath $desktopSymbols
     $rejected = $false

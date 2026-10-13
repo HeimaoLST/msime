@@ -6,12 +6,11 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
 import java.net.URL;
-import java.time.Instant;
 import java.time.LocalDate;
-import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CancellationException;
 import javax.net.ssl.HttpsURLConnection;
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -104,7 +103,17 @@ public final class DeviceDataApi {
     public DeviceDataApi(Context context) {
         Context application = context.getApplicationContext();
         this.cloud = new CloudApi(application);
-        this.account = rejected -> new BackendAccount(application).currentAccessToken(rejected);
+        this.account = CloudApi.accountTokens(application);
+        this.downloader = DeviceDataApi::httpDownload;
+    }
+
+    /** A device list is owned by the login that supplied it, including its later revoke action. */
+    public DeviceDataApi(Context context, String expectedSessionId) {
+        Context application = context.getApplicationContext();
+        if (expectedSessionId == null || expectedSessionId.isEmpty())
+            throw new IllegalArgumentException("account session id required");
+        this.account = CloudApi.accountTokens(application, expectedSessionId);
+        this.cloud = new CloudApi(application, this.account);
         this.downloader = DeviceDataApi::httpDownload;
     }
 
@@ -112,6 +121,10 @@ public final class DeviceDataApi {
         this.cloud = cloud;
         this.account = account;
         this.downloader = downloader;
+    }
+
+    public String currentAccountSessionId() throws CloudApi.Failure {
+        return cloud.currentAccountSessionId();
     }
 
     // ---- 个人资料 ----
@@ -173,10 +186,13 @@ public final class DeviceDataApi {
         for (int index = 0; index < rows.length(); index++) {
             JSONObject row = rows.optJSONObject(index);
             if (row == null) continue;
-            String id = string(row, "id");
+            String id = JsonPolicy.strictStringOrEmpty(row.opt("id"));
             if (!validSessionId(id)) continue;
-            sessions.add(new Session(id, string(row, "platform"), string(row, "name"), string(row, "app_version"),
-                instant(string(row, "created_at")), instant(string(row, "last_active")),
+            sessions.add(new Session(id, JsonPolicy.strictStringOrEmpty(row.opt("platform")),
+                JsonPolicy.strictStringOrEmpty(row.opt("name")),
+                JsonPolicy.strictStringOrEmpty(row.opt("app_version")),
+                instant(JsonPolicy.strictStringOrEmpty(row.opt("created_at"))),
+                instant(JsonPolicy.strictStringOrEmpty(row.opt("last_active"))),
                 JsonPolicy.strictTrue(row.opt("current"))));
         }
         return ListPolicy.copyOrEmpty(sessions);
@@ -200,8 +216,9 @@ public final class DeviceDataApi {
         if (rows != null) {
             for (int index = 0; index < rows.length(); index++) {
                 JSONObject row = rows.optJSONObject(index);
-                if (row == null || string(row, "id").isEmpty()) continue;
-                sections.add(new DataSection(string(row, "id"), strictCount(row.opt("bytes")),
+                if (row == null || JsonPolicy.strictStringOrEmpty(row.opt("id")).isEmpty()) continue;
+                sections.add(new DataSection(JsonPolicy.strictStringOrEmpty(row.opt("id")),
+                    strictCount(row.opt("bytes")),
                     strictCount(row.opt("items"))));
             }
         }
@@ -209,20 +226,22 @@ public final class DeviceDataApi {
     }
 
     /**
-     * 把一次性导出的 zip 流式写进 `out`（每用户每天 3 次，超出时是 429）。令牌被拒时换一枚新的只重试一次，与 CloudApi 相同。
+     * 把一次性导出的 zip 流式写进 `out`（每用户每天 3 次，超出时是 429）。令牌被拒时只在同一登录内重试一次；失败时调用方须丢弃已写入的临时文件。
      *
      * @return 写入的字节数
      */
     public long exportData(OutputStream out) throws CloudApi.Failure {
         String rejected = null;
+        String sessionId = null;
         for (int attempt = 0; ; attempt++) {
-            String token;
-            try {
-                token = account.token(rejected);
-            } catch (Exception unavailable) {
-                throw new CloudApi.Failure(0, "session_unavailable", unavailable.getMessage(), 0);
-            }
+            CloudApi.TokenSnapshot session = accountSnapshot(rejected);
+            if (sessionId != null && !sessionId.equals(session.sessionId())) throw sessionChanged();
+            String token = session.token();
             if (token == null || token.isEmpty()) throw new CloudApi.Failure(401, "signed_out", "not signed in", 0);
+            if (session.sessionId() == null || session.sessionId().isEmpty())
+                throw new CloudApi.Failure(0, "session_unavailable", "account identity unavailable", 0);
+            if (sessionId == null) sessionId = session.sessionId();
+            ensureCurrentLogin(sessionId);
             CountingStream counted = new CountingStream(out);
             Download result;
             try {
@@ -230,6 +249,7 @@ public final class DeviceDataApi {
             } catch (IOException offline) {
                 throw new CloudApi.Failure(0, "network", offline.getMessage(), 0);
             }
+            ensureCurrentLogin(sessionId);
             if (result.status() / 100 == 2) return counted.count;
             if (result.status() == 401 && attempt == 0) {
                 rejected = token;
@@ -238,6 +258,26 @@ public final class DeviceDataApi {
             throw CloudApi.failure(new CloudApi.Exchange(result.status(), "application/json", result.retryAfter(),
                 result.errorBody()));
         }
+    }
+
+    private CloudApi.TokenSnapshot accountSnapshot(String rejected) throws CloudApi.Failure {
+        try {
+            return account.snapshot(rejected);
+        } catch (CloudApi.Failure failure) {
+            throw failure;
+        } catch (CancellationException changed) {
+            throw sessionChanged();
+        } catch (Exception unavailable) {
+            throw new CloudApi.Failure(0, "session_unavailable", unavailable.getMessage(), 0);
+        }
+    }
+
+    private void ensureCurrentLogin(String expectedId) throws CloudApi.Failure {
+        if (!expectedId.equals(accountSnapshot(null).sessionId())) throw sessionChanged();
+    }
+
+    private static CloudApi.Failure sessionChanged() {
+        return new CloudApi.Failure(409, "session_changed", "account session changed", 0);
     }
 
     /** 只删数据、保留账号：删掉 `sections`（{@link #DELETABLE_SECTIONS} 的子集）。要求最近登录。 */
@@ -283,13 +323,7 @@ public final class DeviceDataApi {
 
     /** 会话 id 只拼进路径，所以只认 1–128 个字母、数字、`-`、`_`。 */
     public static boolean validSessionId(String id) {
-        if (id == null || id.isEmpty() || id.length() > 128) return false;
-        for (int index = 0; index < id.length(); index++) {
-            char c = id.charAt(index);
-            boolean allowed = c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_';
-            if (!allowed) return false;
-        }
-        return true;
+        return TextPolicy.validAsciiToken(id, 1, 128);
     }
 
     /** 数组长度检查独立出来供无 `org.json` 的宿主冒烟测试覆盖。 */
@@ -321,13 +355,7 @@ public final class DeviceDataApi {
 
     /** 给人看的相对时间：一分钟内「刚刚」，然后「N 分钟前」「N 小时前」「N 天前」；时间未知（0）时为空字符串。 */
     public static String relativeTime(long nowMillis, long thenMillis) {
-        if (thenMillis <= 0) return "";
-        long minutes = BoundsPolicy.nonNegative(nowMillis - thenMillis) / 60_000L;
-        if (minutes < 1) return "刚刚";
-        if (minutes < 60) return minutes + " 分钟前";
-        long hours = minutes / 60;
-        if (hours < 24) return hours + " 小时前";
-        return (hours / 24) + " 天前";
+        return RelativeTimePolicy.millisAgo(nowMillis, thenMillis);
     }
 
     /** 导出文件名，与服务端 `Content-Disposition` 的写法一致。 */
@@ -337,17 +365,12 @@ public final class DeviceDataApi {
 
     /** RFC 3339 时间转 Unix 毫秒；读不出时为 0。 */
     static long instant(String value) {
-        if (value == null || value.isEmpty()) return 0L;
-        try {
-            return Instant.parse(value).toEpochMilli();
-        } catch (DateTimeParseException malformed) {
-            return 0L;
-        }
+        return RelativeTimePolicy.isoMillis(value);
     }
 
     private static Profile parseProfile(JSONObject root) throws CloudApi.Failure {
         JSONObject user = root.optJSONObject("user");
-        if (user == null || string(user, "id").isEmpty()) {
+        if (user == null || JsonPolicy.strictStringOrEmpty(user.opt("id")).isEmpty()) {
             throw new CloudApi.Failure(500, "invalid_response", "user missing", 0);
         }
         JSONArray identities = root.optJSONArray("identities");
@@ -358,25 +381,21 @@ public final class DeviceDataApi {
         if (identities != null) {
             for (int index = 0; index < identities.length(); index++) {
                 JSONObject identity = identities.optJSONObject(index);
-                String provider = identity == null ? "" : string(identity, "provider");
+                String provider = identity == null ? ""
+                    : JsonPolicy.strictStringOrEmpty(identity.opt("provider"));
                 if (!provider.isEmpty() && !providers.contains(provider)) providers.add(provider);
             }
         }
-        return new Profile(string(user, "id"), string(user, "display_name"), string(user, "email"),
-            string(user, "avatar_url"), ListPolicy.copyOrEmpty(providers));
-    }
-
-    private static String string(JSONObject object, String key) {
-        Object value = object.opt(key);
-        return JsonPolicy.strictStringOrEmpty(value);
+        return new Profile(JsonPolicy.strictStringOrEmpty(user.opt("id")),
+            JsonPolicy.strictStringOrEmpty(user.opt("display_name")),
+            JsonPolicy.strictStringOrEmpty(user.opt("email")),
+            JsonPolicy.strictStringOrEmpty(user.opt("avatar_url")), ListPolicy.copyOrEmpty(providers));
     }
 
     /** Data summary counters are JSON integers; reject coercion and negative values. */
     public static long strictCount(Object value) throws CloudApi.Failure {
-        if (!(value instanceof Integer) && !(value instanceof Long))
-            throw new CloudApi.Failure(500, "invalid_response", "invalid data count", 0);
-        long count = ((Number) value).longValue();
-        if (count < 0) throw new CloudApi.Failure(500, "invalid_response", "invalid data count", 0);
+        Long count = JsonPolicy.nonNegativeLong(value);
+        if (count == null) throw new CloudApi.Failure(500, "invalid_response", "invalid data count", 0);
         return count;
     }
 
@@ -403,16 +422,16 @@ public final class DeviceDataApi {
     private static Download httpDownload(String path, String token, OutputStream out) throws IOException {
         HttpsURLConnection connection = (HttpsURLConnection) new URL(CloudApi.ORIGIN + path).openConnection();
         try {
-            connection.setInstanceFollowRedirects(false);
+            HttpConnectionPolicy.rejectRedirects(connection);
             connection.setRequestMethod("GET");
-            connection.setConnectTimeout(CloudApi.CONNECT_TIMEOUT_MILLIS);
             // 导出在服务端现拼，给它比普通请求长的读超时。
-            connection.setReadTimeout(CloudApi.READ_TIMEOUT_MILLIS * 4);
+            HttpConnectionPolicy.setTimeouts(connection, CloudApi.CONNECT_TIMEOUT_MILLIS,
+                    CloudApi.READ_TIMEOUT_MILLIS * 4);
             connection.setRequestProperty("Accept", "application/zip");
             connection.setRequestProperty("User-Agent", CloudApi.USER_AGENT);
             connection.setRequestProperty("Authorization", "Bearer " + token);
             int status = connection.getResponseCode();
-            if (status / 100 == 2) {
+            if (HttpConnectionPolicy.isSuccessful(status)) {
                 try (InputStream input = connection.getInputStream()) {
                     HttpBodyPolicy.copy(input, out);
                 }

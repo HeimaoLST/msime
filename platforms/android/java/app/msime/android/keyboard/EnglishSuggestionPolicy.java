@@ -1,5 +1,7 @@
 package app.msime.android.keyboard;
 
+import app.msime.android.TextPolicy;
+
 /** Pure text boundaries for direct English completion in the Android host. */
 public final class EnglishSuggestionPolicy {
     private EnglishSuggestionPolicy() {}
@@ -19,17 +21,12 @@ public final class EnglishSuggestionPolicy {
     }
 
     private static int normalizeLetter(int codePoint) {
-        if (isAsciiLetter(codePoint)) return codePoint;
+        if (TextPolicy.isAsciiLetter(codePoint)) return codePoint;
         if ((codePoint >= 0xff21 && codePoint <= 0xff3a)
                 || (codePoint >= 0xff41 && codePoint <= 0xff5a)) {
             return codePoint - 0xfee0;
         }
         return -1;
-    }
-
-    private static boolean isAsciiLetter(int codePoint) {
-        return (codePoint >= 'A' && codePoint <= 'Z')
-            || (codePoint >= 'a' && codePoint <= 'z');
     }
 
     public static Replacement replacement(String typed, String candidate, boolean startedCapitalized) {

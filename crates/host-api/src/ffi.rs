@@ -34,6 +34,7 @@ pub(crate) fn absolute_path(value: &str) -> bool {
     Path::new(value).is_absolute()
 }
 
+#[cfg(unix)]
 pub(crate) fn parse_absolute_socket_path(bytes: &[u8]) -> Result<&str, String> {
     parse_absolute_path(
         bytes,
@@ -127,7 +128,10 @@ pub(crate) fn sentence_model(
                 Err(error) => {
                     // A corrupt or mismatched model is worth saying out loud: the input method keeps
                     // working without it, so nothing else would ever reveal that it is not running.
-                    eprintln!("msime: ignoring {}: {error}", path.display());
+                    crate::diagnostics::report(
+                        "sentence model ignored",
+                        &format!("{}: {error}", path.display()),
+                    );
                     None
                 }
             })
@@ -205,8 +209,12 @@ pub(crate) fn keyboard_reranker(
     sentence_model(&options.resources, configured).map(Reranker::new)
 }
 
+pub mod account;
 pub mod android_data;
 pub mod candidates;
+pub mod community;
+pub mod credentials;
+pub mod google;
 pub mod host;
 pub mod input;
 pub mod lifecycle;
@@ -224,6 +232,7 @@ pub mod voice;
 // below is for readers, not for callers, so each module is flattened back out.
 pub use android_data::*;
 pub use candidates::*;
+pub use credentials::*;
 pub use host::*;
 pub use input::*;
 pub use lifecycle::*;

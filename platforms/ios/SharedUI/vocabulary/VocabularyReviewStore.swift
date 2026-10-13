@@ -1,8 +1,4 @@
 import Foundation
-import CoreFoundation
-#if canImport(Darwin)
-import Darwin
-#endif
 
 private typealias MSIMEVocabularyByte = UInt8
 
@@ -72,7 +68,7 @@ struct VocabularyReviewStore {
     root = directory ?? FileManager.default.containerURL(
       forSecurityApplicationGroupIdentifier: InputSchemePreference.appGroupIdentifier)?
       .appendingPathComponent("MSIME", isDirectory: true)
-      ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+      ?? IOSSharedPaths.applicationSupport
     self.resources = resources ?? root
   }
 
@@ -105,32 +101,11 @@ struct VocabularyReviewStore {
 
   /// Read a picked wordbook without allocating more than the shared import limit.
   static func readWordbookData(from url: URL) throws -> Data {
-    let handle = try openReadableWordbook(url)
-    defer { try? handle.close() }
-    var data = Data()
-    data.reserveCapacity(min(maximumImportBytes, 64 * 1024))
-    while data.count <= maximumImportBytes {
-      let chunk = try handle.read(
-        upToCount: min(64 * 1024, maximumImportBytes + 1 - data.count)) ?? Data()
-      if chunk.isEmpty { return data }
-      data.append(chunk)
-    }
-    throw Failure.unreadableWordbook
-  }
-
-  private static func openReadableWordbook(_ url: URL) throws -> FileHandle {
-    #if canImport(Darwin)
-    let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
-    guard descriptor >= 0 else { throw Failure.unreadableWordbook }
-    var metadata = stat()
-    guard fstat(descriptor, &metadata) == 0, metadata.st_mode & S_IFMT == S_IFREG else {
-      close(descriptor)
+    do {
+      return try BoundedFileReader.read(from: url, maximumBytes: maximumImportBytes)
+    } catch {
       throw Failure.unreadableWordbook
     }
-    return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-    #else
-    return try FileHandle(forReadingFrom: url)
-    #endif
   }
 
   /// The device's local day, as the shared layer spells one.
@@ -185,19 +160,19 @@ struct VocabularyReviewStore {
         return VocabularyWordbook(
           id: id,
           name: book["name"] as? String ?? id,
-          total: integer(book["total"]) ?? 0,
+          total: SharedNumber.nonnegativeInt(book["total"]) ?? 0,
           builtin: book["builtin"] as? Bool ?? false)
       }
     }
     if let settings = value["settings"] as? [String: Any] {
       status.wordbook = settings["wordbook"] as? String ?? ""
-      status.newPerDay = integer(settings["newPerDay"]) ?? 0
-      status.sessionLimit = integer(settings["sessionLimit"]) ?? 0
+      status.newPerDay = SharedNumber.nonnegativeInt(settings["newPerDay"]) ?? 0
+      status.sessionLimit = SharedNumber.nonnegativeInt(settings["sessionLimit"]) ?? 0
     }
-    status.due = integer(value["due"]) ?? 0
-    status.answeredToday = integer(value["answeredToday"]) ?? 0
-    status.introducing = integer(value["introducing"]) ?? 0
-    status.remaining = integer(value["remaining"]) ?? 0
+    status.due = SharedNumber.nonnegativeInt(value["due"]) ?? 0
+    status.answeredToday = SharedNumber.nonnegativeInt(value["answeredToday"]) ?? 0
+    status.introducing = SharedNumber.nonnegativeInt(value["introducing"]) ?? 0
+    status.remaining = SharedNumber.nonnegativeInt(value["remaining"]) ?? 0
     if let cards = value["queue"] as? [[String: Any]] {
       status.queue = cards.compactMap { card in
         // A card with no word could never be answered: the answer is keyed by it.
@@ -211,21 +186,8 @@ struct VocabularyReviewStore {
     return status
   }
 
-  private static func integer(_ value: Any?) -> Int? {
-    guard let number = value as? NSNumber,
-          CFGetTypeID(number) != CFBooleanGetTypeID(),
-          let integer = Int(number.stringValue),
-          integer >= 0,
-          NSNumber(value: integer).compare(number) == .orderedSame else { return nil }
-    return integer
-  }
-
   private func protectSharedState() {
-    guard FileManager.default.fileExists(atPath: root.path) else { return }
-    var directory = root
-    var values = URLResourceValues()
-    values.isExcludedFromBackup = true
-    try? directory.setResourceValues(values)
+    IOSSharedPaths.excludeFromBackup(root)
   }
 
   enum Failure: Error, LocalizedError, Equatable {

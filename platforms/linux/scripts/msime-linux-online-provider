@@ -248,7 +248,13 @@ def select_ai_config(config, query):
     return config.get("profiles", {}).get(provider)
 
 
-def ai_cache_key(query):
+def ai_config_matches(options, config):
+    return isinstance(config, dict) and all(
+        options.get(key) == config.get(key)
+        for key in ("provider", "endpoint", "model"))
+
+
+def ai_cache_key(query, config):
     options = query.get("ai_assistant")
     segments = query.get("pinyin_segments")
     if (not isinstance(options, dict) or not options.get("enabled") or
@@ -260,20 +266,30 @@ def ai_cache_key(query):
         if not isinstance(value, str):
             return None
         identity[key] = value
+    token = config.get("token") if isinstance(config, dict) else None
+    if not isinstance(token, str):
+        return None
+    # A credential rotation must not reuse an answer generated under the
+    # previous credential. Keep only a digest in the in-memory key.
+    identity["credential_sha256"] = hashlib.sha256(token.encode("utf-8")).hexdigest()
     configured_limit = options.get("candidate_limit", 3)
     identity["candidate_limit"] = (configured_limit
                                     if type(configured_limit) is int and 1 <= configured_limit <= 10
                                     else 3)
     # Prompt settings change the model request, so they partition the cache.
     # Store only digests: custom prompts can contain private text and must not
-    # be retained in a cache key. Credentials, context, session and generation
-    # remain excluded so a successful result survives view refreshes without
-    # retaining request secrets.
+    # be retained in a cache key. Context changes the model request too, so
+    # keep only its digest; session and generation remain excluded so a result
+    # survives view refreshes without retaining private text.
     for key in ("prompt_id", "prompt_custom_1", "prompt_custom_2", "prompt_custom_3"):
         value = options.get(key, "")
         if not isinstance(value, str):
             return None
         identity[key + "_sha256"] = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    context = query.get("ai_context", "")
+    if not isinstance(context, str):
+        return None
+    identity["ai_context_sha256"] = hashlib.sha256(context.encode("utf-8")).hexdigest()
     identity["pinyin_segments"] = segments
     return json.dumps(identity, ensure_ascii=False, sort_keys=True,
                       separators=(",", ":"))
@@ -286,7 +302,10 @@ def configured_ai(query, path, cache=None, cache_lock=None):
         return None
     config = load_ai_config(path)
     selected = select_ai_config(config, query)
-    key = ai_cache_key(query)
+    options = query.get("ai_assistant")
+    if not ai_config_matches(options, selected):
+        return None
+    key = ai_cache_key(query, selected)
     if key is not None and cache is not None and cache_lock is not None:
         with cache_lock:
             cached = cache.get(key)
@@ -313,7 +332,7 @@ def ai(query, config):
         return None
     # Bind each credential to its configured endpoint; never send it to a URL
     # supplied by a socket request or an HTTP redirect.
-    if not config or any(options.get(key) != config.get(key) for key in ("provider", "endpoint", "model")):
+    if not ai_config_matches(options, config):
         return None
     segments = query.get("pinyin_segments")
     context = query.get("ai_context", "")
@@ -560,9 +579,47 @@ def anonymous_translation(texts, source, target, server):
             for index in range(len(texts))]
 
 
+# DeepL 官方 API 的两个主机，与 crates/client-core/src/translation.rs 的 custom_translation_request 一致：Free 密钥（以 :fx 结尾）走 api-free.deepl.com，其余走 api.deepl.com。
+DEEPL_PRO_HOST = "api.deepl.com"
+DEEPL_FREE_HOST = "api-free.deepl.com"
+# DeepL 的 target_lang 中英文要写变体，ZH、EN 只为兼容旧调用保留。
+DEEPL_TARGET_LANGUAGES = {"zh": "ZH-HANS", "en": "EN-US"}
+
+
+def is_deepl_api_endpoint(endpoint):
+    """https、默认端口、主机名恰好是 DeepL 官方 API 主机；只看主机名不看路径，自建 DeepLX 的 /v2/translate 不受影响。"""
+    try:
+        url = urllib.parse.urlsplit(endpoint)
+        return (url.scheme == "https" and url.hostname in (DEEPL_PRO_HOST, DEEPL_FREE_HOST) and
+                url.port in (None, 443))
+    except ValueError:
+        return False
+
+
+def custom_translation_request(config, text, source, target):
+    """返回 (url, headers, body)，DeepL 地址没有密钥时返回 None。用例在 shared/contracts/custom-translation/cases.json，与共享 Rust 实现逐条核对。"""
+    endpoint = config["endpoint"]
+    key = config.get("api_key") or ""
+    headers = {"Content-Type": "application/json"}
+    if is_deepl_api_endpoint(endpoint):
+        if not key:
+            return None
+        headers["Authorization"] = "DeepL-Auth-Key " + key
+        host = DEEPL_FREE_HOST if key.endswith(":fx") else DEEPL_PRO_HOST
+        return ("https://" + host + "/v2/translate", headers,
+                {"text": [text], "source_lang": source.upper(),
+                 "target_lang": DEEPL_TARGET_LANGUAGES.get(target.lower(), target.upper())})
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    return endpoint, headers, {"text": text, "source_lang": source.upper(), "target_lang": target.upper()}
+
+
 def custom_translation(config, text, source, target, timeout):
-    result = fetch(config["endpoint"], timeout, {
-        "text": text, "source_lang": source.upper(), "target_lang": target.upper()}, config.get("api_key"))
+    request = custom_translation_request(config, text, source, target)
+    if request is None:
+        return None
+    url, headers, body = request
+    result = fetch(url, timeout, body, None, headers)
     if not isinstance(result, dict) or ("code" in result and result["code"] not in (200, "200")):
         return None
     for key in ("data", "translation", "result", "translations"):

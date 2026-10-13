@@ -20,10 +20,10 @@ public final class KeyboardFeedbackStoreSmoke {
         check(defaults.soundEnabled());
         check(!defaults.hapticsEnabled());
         check(defaults.hapticStrength() == HapticStrength.MEDIUM);
-        check(KeyboardFeedbackStore.booleanValue("false", true));
-        check(!KeyboardFeedbackStore.booleanValue("true", false));
-        check(KeyboardFeedbackStore.booleanValue(Boolean.FALSE, true) == false);
-        check(KeyboardFeedbackStore.strictBoolean("true") == null);
+        check(JsonPolicy.strictBoolean("false", true));
+        check(!JsonPolicy.strictBoolean("true", false));
+        check(JsonPolicy.strictBoolean(Boolean.FALSE, true) == false);
+        check(JsonPolicy.strictBoolean("true") == null);
         KeyboardFeedbackStore.Settings wire = KeyboardFeedbackStore.fromValues(
             Boolean.FALSE, Boolean.TRUE, "strong");
         check(!wire.soundEnabled() && wire.hapticsEnabled()

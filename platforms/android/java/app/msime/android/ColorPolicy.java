@@ -9,8 +9,13 @@ public final class ColorPolicy {
 
     /** Multiply a colour's existing alpha by the supplied factor. */
     public static int withAlpha(int color, float alpha) {
-        int base = Color.alpha(color);
+        int base = (color >>> 24) & 0xFF;
         return (color & 0x00FFFFFF) | (Math.round(base * alpha) << 24);
+    }
+
+    /** 把 double 透明度限制在 0–1 后乘进颜色已有的 alpha。 */
+    public static int withAlpha(int color, double alpha) {
+        return withAlpha(color, (float) BoundsPolicy.bounded(alpha, 0d, 1d));
     }
 
     /** Replace a colour's alpha channel with an explicit 0–255 value. */
@@ -25,11 +30,24 @@ public final class ColorPolicy {
 
     /** Linearly interpolate each ARGB channel; callers provide an expected 0–1 amount. */
     public static int blend(int from, int to, float amount) {
-        int a = Math.round(((from >>> 24) & 0xFF) + (((to >>> 24) & 0xFF) - ((from >>> 24) & 0xFF)) * amount);
-        int r = Math.round(((from >> 16) & 0xFF) + (((to >> 16) & 0xFF) - ((from >> 16) & 0xFF)) * amount);
-        int g = Math.round(((from >> 8) & 0xFF) + (((to >> 8) & 0xFF) - ((from >> 8) & 0xFF)) * amount);
-        int b = Math.round((from & 0xFF) + ((to & 0xFF) - (from & 0xFF)) * amount);
+        int a = blendChannel(from >>> 24, to >>> 24, amount);
+        int r = blendChannel(from >> 16, to >> 16, amount);
+        int g = blendChannel(from >> 8, to >> 8, amount);
+        int b = blendChannel(from, to, amount);
         return (a << 24) | (r << 16) | (g << 8) | b;
+    }
+
+    private static int blendChannel(int from, int to, float amount) {
+        return Math.round((from & 0xFF) + ((to & 0xFF) - (from & 0xFF)) * amount);
+    }
+
+    /** Blend opaque RGB channels after clamping the mix amount to 0–1. */
+    public static int blendOpaque(int from, int to, float amount) {
+        float bounded = BoundsPolicy.bounded(amount, 0f, 1f);
+        return Color.rgb(
+            blendChannel(from, to, bounded),
+            blendChannel(from >> 8, to >> 8, bounded),
+            blendChannel(from >> 16, to >> 16, bounded));
     }
 
     /** Build a color state list while validating that each state has a matching color. */
@@ -56,10 +74,28 @@ public final class ColorPolicy {
             color.substring(color.length() - 6));
     }
 
+    /** 将不透明 RGB 整数格式化为稳定的大写 `#RRGGBB` 颜色串。 */
+    public static String hexRgb(int color) {
+        return String.format(java.util.Locale.ROOT, "#%06X", color & 0xFFFFFF);
+    }
+
+    /** 将 ARGB 整数格式化为稳定的大写 `#AARRGGBB` 颜色串。 */
+    public static String hexArgb(int color) {
+        return String.format(java.util.Locale.ROOT, "#%08X", color);
+    }
+
     /** Parse only the hexadecimal colour forms emitted by keyboard skin data. */
     public static int parseHex(String value, int fallback) {
         if (value == null || !value.matches("#[0-9a-fA-F]{6}|#[0-9a-fA-F]{8}")) return fallback;
         long parsed = Long.parseLong(value.substring(1), 16);
         return value.length() == 7 ? 0xff000000 | (int) parsed : (int) parsed;
+    }
+
+    /** Parse the shared contract's RGB or alpha-last RGBA string into Android ARGB. */
+    public static Integer contractArgb(String value) {
+        if (value == null || !value.matches("#[0-9a-fA-F]{6}|#[0-9a-fA-F]{8}")) return null;
+        long parsed = Long.parseLong(value.substring(1), 16);
+        if (value.length() == 7) return (int) (0xFF000000L | parsed);
+        return (int) (((parsed & 0xFF) << 24) | (parsed >>> 8));
     }
 }

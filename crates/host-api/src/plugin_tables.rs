@@ -1,6 +1,6 @@
 //! 从插件目录读进 Engine 选项的表：`/` 模式的指令表、K 模式的短语表、当前方案选中的辅助码表和 `@` 模式的名单。
 //!
-//! 它们都是设置页在输入进程运行期间写的文件：导入的指令表包、短语表包、辅助码表包和 `mentions.json`。 A session remembers the modification time and length of every file it read, checks them again when a field gains focus and when preferences are applied, and reads the files only when something moved. Nothing is read for a mode that is switched off.
+//! 它们都是设置页在输入进程运行期间写的文件：导入的指令表包、短语表包、辅助码表包和 `mentions.json`。会话记下读过的每个文件的修改时间、长度和（Unix 上的）inode，输入框获得焦点和偏好应用时再看一遍，有变动才重新读。关着的模式什么都不读。
 
 use msime_client_core::plugins::{
     command_table, helpcode_pack, kind_directory, mentions, phrase_table, PluginKind, MANIFEST_FILE,
@@ -15,12 +15,16 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-/// What a file looked like when it was read; `None` when it was not there.
-type FileStamp = Option<(Option<SystemTime>, u64)>;
+/// 读文件时它的样子：修改时间、长度和（Unix 上的）inode；文件不在时为 `None`。重新导入会把整个包目录换掉，新清单与旧清单可能长度相同、修改时间又落在同一个计时粒度里（秒级时间戳的文件系统），只有 inode 不同，与 `key_sound::PackStamp` 同理。
+type FileStamp = Option<(Option<SystemTime>, u64, u64)>;
 
 fn stamp(path: &Path) -> FileStamp {
     let metadata = std::fs::symlink_metadata(path).ok()?;
-    Some((metadata.modified().ok(), metadata.len()))
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&metadata);
+    #[cfg(not(unix))]
+    let inode = 0;
+    Some((metadata.modified().ok(), metadata.len(), inode))
 }
 
 /// 包目录里每个文件的名字和戳，按名字排序：数据文件的名字写在清单里，盖整个目录的戳就不必先读清单。目录不在时为空。
@@ -140,12 +144,16 @@ impl PluginTables {
             Ok(codes) => return Some(Arc::new(HelpcodeKeymap::from_codes(codes))),
             Err(error) => error,
         };
-        eprintln!("msime: helpcode pack {id} unavailable, falling back to {schema}: {error}");
+        crate::diagnostics::report(
+            "helpcode pack unavailable, falling back to the scheme's schema",
+            &format!("{id} -> {schema}: {error}"),
+        );
         match load_helpcode_keymap(Path::new(&options.resources), schema) {
             Ok(_) => None,
             Err(error) => {
-                eprintln!(
-                    "msime: helpcode schema {schema} unavailable, using an empty table: {error}"
+                crate::diagnostics::report(
+                    "helpcode schema unavailable, using an empty table",
+                    &format!("{schema}: {error}"),
                 );
                 Some(Arc::new(HelpcodeKeymap::default()))
             }

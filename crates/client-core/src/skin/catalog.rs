@@ -121,6 +121,8 @@ fn check_colors(table: &toml::map::Map<String, Value>, keys: &[&str]) -> Result<
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkinSummary {
+    /// 此皮肤包使用的清单版本。版本 1 禁用动画，版本 2 增加下面的有限原生动画契约。
+    pub schema_version: u8,
     pub id: String,
     pub name: String,
     pub version: String,
@@ -146,8 +148,75 @@ pub struct SkinSummary {
     pub toolbar_stylesheet: Option<String>,
     pub preview: Option<String>,
     pub candidate: CandidateColors,
+    /// 声明式动画预设。不支持动画的宿主保持自己的动态策略，候选语义仍然一致。
+    pub animation: SkinAnimation,
     /// Licence metadata the manifest declares for its code and assets. Informational only: nothing is enforced from it.
     pub license: Option<SkinLicense>,
+}
+
+/// 使用固定动画名称，不接受任意 CSS。这样共享皮肤可以安全同步，各原生宿主也能把相同的动效意图映射到自己的合成器原语。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SkinAnimationPreset {
+    #[default]
+    None,
+    Fade,
+    FadeScale,
+    SlideUp,
+    Spring,
+    Glow,
+}
+
+impl SkinAnimationPreset {
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Fade => "fade",
+            Self::FadeScale => "fade_scale",
+            Self::SlideUp => "slide_up",
+            Self::Spring => "spring",
+            Self::Glow => "glow",
+        }
+    }
+}
+
+/// 版本 2 的候选窗动效契约。扫描时限制时长，避免皮肤包让候选窗无限动画。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkinAnimation {
+    pub enter: SkinAnimationPreset,
+    pub exit: SkinAnimationPreset,
+    pub selection: SkinAnimationPreset,
+    pub duration_ms: u16,
+    pub stagger_ms: u16,
+}
+
+impl SkinAnimation {
+    pub const fn disabled() -> Self {
+        Self {
+            enter: SkinAnimationPreset::None,
+            exit: SkinAnimationPreset::None,
+            selection: SkinAnimationPreset::None,
+            duration_ms: 0,
+            stagger_ms: 0,
+        }
+    }
+
+    pub const fn lively() -> Self {
+        Self {
+            enter: SkinAnimationPreset::FadeScale,
+            exit: SkinAnimationPreset::Fade,
+            selection: SkinAnimationPreset::Spring,
+            duration_ms: 180,
+            stagger_ms: 14,
+        }
+    }
+}
+
+impl Default for SkinAnimation {
+    fn default() -> Self {
+        Self::disabled()
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -241,9 +310,11 @@ pub fn is_reserved(id: &str) -> bool {
         || id == WINDOWS_DEFAULTS_FOLDER
 }
 
-/// 偏好里保存的皮肤选择（`custom_theme.candidate_skin`）要满足的规则：文件夹名的形状，且不是全局主题 ID。它比 [`is_external_id`] 宽：被 msime-windows 内置外观或 `default` 占用的名字以前可以当皮肤文件夹，旧设置和其他设备同步来的设置可能还写着它们；它们仍是合法的设置值，只是目录里不会有这个包，自定义主题照常画它的 base。若按 `is_external_id` 校验，这样的设置会让整份偏好被拒绝。
+/// 偏好里保存的皮肤选择（`custom_theme.candidate_skin`）要满足的规则：文件夹名的形状，且不是全局主题 ID。它比 [`is_external_id`] 宽：被 msime-windows 内置外观或 `default` 占用的名字以前可以当皮肤文件夹，旧设置和其他设备同步来的设置可能还写着它们；它们仍是合法的设置值，只是目录里不会有这个包，自定义主题照常画它的 base。若按 `is_external_id` 校验，这样的设置会让整份偏好被拒绝。后加的全局主题 ID `native` 同理：加它之前 `native` 是合法的皮肤文件夹名，所以仍可保存。
 pub fn is_selectable_id(id: &str) -> bool {
-    safe_id(id) && super::theme::GlobalTheme::from_id(id).is_none()
+    safe_id(id)
+        && super::theme::GlobalTheme::from_id(id)
+            .is_none_or(|theme| theme == super::theme::GlobalTheme::Native)
 }
 
 /// 该名字能否作为外部皮肤的文件夹名。目录扫描只列出这样的文件夹，导入时按同一规则把关，免得拷进来一个扫描随后拒绝的皮肤。
@@ -372,9 +443,11 @@ fn load(root: &Path, folder: &str) -> Result<SkinSummary, String> {
         toml::from_str(std::str::from_utf8(&bytes).map_err(|_| "skin.toml is not UTF-8")?)
             .map_err(|_| "invalid TOML")?;
     let table = value.as_table().ok_or("manifest must be a table")?;
-    if table.get("schema_version").and_then(Value::as_integer) != Some(1) {
-        return Err("unsupported schema_version".into());
-    }
+    let schema_version = match table.get("schema_version").and_then(Value::as_integer) {
+        Some(1) => 1,
+        Some(2) => 2,
+        _ => return Err("unsupported schema_version".into()),
+    };
     let id = required_string(table, "id", 64)?;
     if id != folder || !safe_id(&id) {
         return Err("manifest id does not match folder".into());
@@ -488,6 +561,7 @@ fn load(root: &Path, folder: &str) -> Result<SkinSummary, String> {
         }
     }
     let mut candidate = read_colors(table)?;
+    let animation = read_animation(table, schema_version)?;
     if let Some(look) = &windows_look {
         windows_looks::fill_from_look(look, &mut candidate, &mut corner_radius, &mut toolbar);
     }
@@ -497,6 +571,7 @@ fn load(root: &Path, folder: &str) -> Result<SkinSummary, String> {
             .filter(|preview| decorated && is_image(preview))
     });
     let summary = SkinSummary {
+        schema_version: schema_version as u8,
         id,
         name,
         version,
@@ -516,6 +591,7 @@ fn load(root: &Path, folder: &str) -> Result<SkinSummary, String> {
         toolbar_stylesheet,
         preview,
         candidate,
+        animation,
         license,
     };
     validate_image_dimensions(&dir, &summary)?;
@@ -707,6 +783,75 @@ fn read_toolbar(table: &toml::map::Map<String, Value>) -> Result<SkinToolbar, St
         corner_radius_dip,
         dark: palette("dark")?,
         light: palette("light")?,
+    })
+}
+
+fn animation_preset(
+    value: Option<&Value>,
+    key: &str,
+    default: SkinAnimationPreset,
+) -> Result<SkinAnimationPreset, String> {
+    match value {
+        None => Ok(default),
+        Some(Value::String(value)) => match value.as_str() {
+            "none" => Ok(SkinAnimationPreset::None),
+            "fade" => Ok(SkinAnimationPreset::Fade),
+            "fade_scale" => Ok(SkinAnimationPreset::FadeScale),
+            "slide_up" => Ok(SkinAnimationPreset::SlideUp),
+            "spring" => Ok(SkinAnimationPreset::Spring),
+            "glow" => Ok(SkinAnimationPreset::Glow),
+            _ => Err(format!("invalid animation {key}")),
+        },
+        Some(_) => Err(format!("invalid animation {key}")),
+    }
+}
+
+/// 解析有限的 v2 动画表。版本 1 保持逐字节兼容，不会因未知字段意外启用动画。
+fn read_animation(
+    table: &toml::map::Map<String, Value>,
+    schema_version: i64,
+) -> Result<SkinAnimation, String> {
+    let Some(value) = table.get("animation") else {
+        return Ok(if schema_version == 2 {
+            SkinAnimation::lively()
+        } else {
+            SkinAnimation::disabled()
+        });
+    };
+    if schema_version < 2 {
+        return Err("animation requires schema_version 2".into());
+    }
+    let animation = value.as_table().ok_or("invalid animation")?;
+    let duration_ms = match animation.get("duration_ms") {
+        None => 180,
+        Some(value) => value
+            .as_integer()
+            .filter(|value| (40..=600).contains(value))
+            .map(|value| value as u16)
+            .ok_or("invalid animation duration_ms")?,
+    };
+    let stagger_ms = match animation.get("stagger_ms") {
+        None => 14,
+        Some(value) => value
+            .as_integer()
+            .filter(|value| (0..=80).contains(value))
+            .map(|value| value as u16)
+            .ok_or("invalid animation stagger_ms")?,
+    };
+    Ok(SkinAnimation {
+        enter: animation_preset(
+            animation.get("enter"),
+            "enter",
+            SkinAnimationPreset::FadeScale,
+        )?,
+        exit: animation_preset(animation.get("exit"), "exit", SkinAnimationPreset::Fade)?,
+        selection: animation_preset(
+            animation.get("selection"),
+            "selection",
+            SkinAnimationPreset::Spring,
+        )?,
+        duration_ms,
+        stagger_ms,
     })
 }
 
@@ -906,23 +1051,29 @@ pub const HOST_CATALOG_MAX_PACKAGES: usize = 32;
 ///
 /// Everything else in a package - the background image, the toolbar, other paths and stylesheets - stays out: the Linux hosts cannot draw them and every byte counts against the size limit of the document it reads, which is also why an undecorated package carries no decoration keys at all. A colour `normalized_color` cannot read is left out, as `resolve` ignores it. A palette is kept only for a theme the package declares, since every host drops an external skin for a layout or theme it does not support rather than drawing its colours there, and `resolve` does the same with the published `layouts` and themes. Ids and names are already bounded by `scan`; the hosts re-check both, and the decoration's bounds.
 ///
-/// At most `HOST_CATALOG_MAX_PACKAGES` are listed, in the catalog's order. The `selected` skin is always among them when installed, taking the last place if it falls beyond the cap, because its colours are the ones on screen.
+/// 最多列出 `HOST_CATALOG_MAX_PACKAGES` 个，按目录顺序。`selected` 是自定义主题选中的皮肤（浅色、深色两个槽位）：已安装的一律列出，落在上限之外时挤掉上限内最后几个没选中的，排到末尾，因为屏幕上画的是它们的颜色。
 pub fn host_candidate_catalog(
     catalog: &SkinCatalog,
     root: &Path,
-    selected: &str,
+    selected: &[&str],
 ) -> serde_json::Value {
-    let mut listed = Vec::with_capacity(HOST_CATALOG_MAX_PACKAGES + 1);
+    let is_selected = |package: &SkinSummary| selected.contains(&package.id.as_str());
+    let mut listed = Vec::with_capacity(HOST_CATALOG_MAX_PACKAGES + selected.len());
     listed.extend(
         catalog
             .packages
             .iter()
             .enumerate()
-            .filter(|(index, package)| *index < HOST_CATALOG_MAX_PACKAGES || package.id == selected)
+            .filter(|(index, package)| *index < HOST_CATALOG_MAX_PACKAGES || is_selected(package))
             .map(|(_, package)| package),
     );
-    if listed.len() > HOST_CATALOG_MAX_PACKAGES {
-        listed.remove(HOST_CATALOG_MAX_PACKAGES - 1);
+    while listed.len() > HOST_CATALOG_MAX_PACKAGES {
+        // 选中的比上限还多时（只有两个槽位，实际不会发生）按目录顺序截断，上限照样成立。
+        let Some(dropped) = listed.iter().rposition(|package| !is_selected(package)) else {
+            listed.truncate(HOST_CATALOG_MAX_PACKAGES);
+            break;
+        };
+        listed.remove(dropped);
     }
     let mut packages = Vec::with_capacity(HOST_CATALOG_MAX_PACKAGES);
     packages.extend(listed.into_iter().map(|package| {

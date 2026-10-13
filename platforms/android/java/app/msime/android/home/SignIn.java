@@ -2,21 +2,19 @@ package app.msime.android.home;
 
 import app.msime.android.TextPolicy;
 import android.app.Activity;
-import android.content.ActivityNotFoundException;
 import android.content.Context;
-import android.content.Intent;
-import android.net.Uri;
 import android.os.Handler;
-import android.os.Looper;
 import androidx.core.content.ContextCompat;
 import app.msime.android.AppEdition;
 import app.msime.android.AppleWebSignIn;
 import app.msime.android.BackendAccount;
 import app.msime.android.CloudApi;
 import app.msime.android.GoogleSignInFlow;
+import app.msime.android.MainThreadPolicy;
 import app.msime.android.R;
 import app.msime.android.SyncSwitch;
 import app.msime.android.DictionarySnapshotQueue;
+import app.msime.android.ThreadPolicy;
 import java.io.File;
 import app.msime.android.TextPolicy;
 import java.util.function.Consumer;
@@ -34,7 +32,7 @@ final class SignIn {
     /** 一次邮箱验证码请求的结果：成功时 `challenge` 非空，失败时 `failure` 是给人看的一句话。 */
     record EmailCode(BackendAccount.EmailChallenge challenge, String failure) {}
 
-    private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    private static final Handler MAIN = MainThreadPolicy.mainHandler();
     /** 等 Apple 回调的那个界面；回调到达时在主线程上收到空字符串（成功）或失败说明。只此一个，新流程覆盖旧流程。 */
     private static Consumer<String> appleWaiter;
 
@@ -71,12 +69,17 @@ final class SignIn {
 
     /** Google 的那一路：向后端要 nonce、拉起 Google 的账号选择、用 ID token 换会话。 */
     static void startGoogle(Activity activity, Consumer<String> finished) {
+        startGoogle(activity, "login", finished);
+    }
+
+    /** Google 登录或关联：link 流程始终绑定发起它的账号会话。 */
+    static void startGoogle(Activity activity, String purpose, Consumer<String> finished) {
         String clientId = activity.getString(R.string.google_server_client_id);
         Context context = activity.getApplicationContext();
         offMainThread(() -> {
             BackendAccount.Challenge challenge;
             try {
-                challenge = new BackendAccount(context).challenge("google", null);
+                challenge = new BackendAccount(context).challenge("google", null, purpose);
             } catch (Exception | LinkageError error) {
                 challenge = null;
             }
@@ -97,7 +100,7 @@ final class SignIn {
                                 try {
                                     synchronized (SyncSwitch.bindingLock()) {
                                         new BackendAccount(context).login(started, idToken, userAgent(context));
-                                        bind(context, "google");
+                                        if (!"link".equals(purpose)) bind(context, "google");
                                     }
                                     failure = "";
                                 } catch (Exception | LinkageError error) {
@@ -146,10 +149,7 @@ final class SignIn {
                     finished.accept(message);
                     return;
                 }
-                try {
-                    activity.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(address))
-                        .addCategory(Intent.CATEGORY_BROWSABLE));
-                } catch (ActivityNotFoundException absent) {
+                if (!LinkActions.openBrowsable(activity, address)) {
                     AppleWebSignIn.clearPending(context);
                     if (appleWaiter == finished) appleWaiter = null;
                     finished.accept("这台设备上没有可以打开 Apple 登录页的浏览器");
@@ -248,6 +248,19 @@ final class SignIn {
         GoogleSignInFlow.clearCredentialState(context);
     }
 
+    /** Clears the local login only when it is still the session that a page loaded. */
+    static boolean signOut(Context context, String expectedSessionId) {
+        synchronized (SyncSwitch.bindingLock()) {
+            try {
+                if (!expectedSessionId.equals(new BackendAccount(context).sessionId())) return false;
+                signOut(context);
+                return true;
+            } catch (Exception | LinkageError error) {
+                return false;
+            }
+        }
+    }
+
 
     /** 账号退出或替换时取消仍待激活的云端词库快照，避免下一位账号继承旧账号的词库。 */
     static void cancelPendingSnapshot(Context context, String accountId) {
@@ -274,6 +287,10 @@ final class SignIn {
         } catch (CloudApi.Failure | RuntimeException error) {
             id = "";
         }
+        String previousAccount = SyncSwitch.accountId(context);
+        if (!previousAccount.isEmpty() && !previousAccount.equals(id)) {
+            cancelPendingSnapshot(context, previousAccount);
+        }
         SyncSwitch.bindAccount(context, id, loginKind);
     }
 
@@ -290,6 +307,6 @@ final class SignIn {
     }
 
     private static void offMainThread(Runnable work) {
-        new Thread(work, "msime-sign-in").start();
+        ThreadPolicy.startNamedThread("msime-sign-in", work);
     }
 }

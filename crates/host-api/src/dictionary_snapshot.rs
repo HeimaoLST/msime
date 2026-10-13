@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
-    ffi::{c_char, c_void},
+    ffi::{c_char, c_void, OsStr, OsString},
     io::{self, BufRead, BufReader, Write},
     path::Path,
     sync::{
@@ -29,6 +29,7 @@ use std::{
     },
 };
 
+pub(crate) mod habits;
 mod record;
 
 const BUFFER_LIMIT: usize = 65536;
@@ -98,6 +99,7 @@ enum SnapshotQueueAction {
         directory: String,
         staging_root: String,
         options: HostOptions,
+        account_id: Option<String>,
     },
 }
 
@@ -297,8 +299,19 @@ pub(crate) fn inspect_snapshot(path: &Path) -> Result<SnapshotMetadata, &'static
         return Err("invalid snapshot file");
     }
     let file = open_snapshot_file(path).map_err(|_| "snapshot file unavailable")?;
-    let mut reader = BufReader::with_capacity(MAX_SNAPSHOT_LINE_BYTES, file);
-    let mut line = Vec::with_capacity(MAX_SNAPSHOT_LINE_BYTES);
+    inspect_snapshot_reader(file)
+}
+
+fn inspect_snapshot_bytes(bytes: &[u8]) -> Result<SnapshotMetadata, &'static str> {
+    if bytes.is_empty() || bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
+        return Err("invalid snapshot file");
+    }
+    inspect_snapshot_reader(bytes)
+}
+
+fn inspect_snapshot_reader(reader: impl io::Read) -> Result<SnapshotMetadata, &'static str> {
+    let mut reader = BufReader::with_capacity(MAX_SNAPSHOT_LINE_BYTES, reader);
+    let mut line = Vec::new();
     let mut body_digest = Sha256::new();
     let mut file_digest = Sha256::new();
     let mut total_bytes = 0u64;
@@ -457,15 +470,18 @@ pub(crate) fn inspect_snapshot(path: &Path) -> Result<SnapshotMetadata, &'static
 
 /// 把本机用户词库写成与 `GET /v1/users/me/dictionary/snapshot` 相同的 NDJSON（`msime-dictionary-snapshot` 第 1 版：header、每个词一条 `entry` 和一条同权重的 `overlay`、footer 带正文 SHA-256），写完再用 [`inspect_snapshot`] 按云端格式校验一遍，返回同样的元数据。
 ///
-/// 这是离线导出：不需要登录，修订号固定为 1。位置调整和选词计数是 Engine 内部的学习状态，没有只读接口，不导出。调用方已经持有词库的会话访问权。
+/// 这是离线导出：不需要登录，修订号固定为 1。调用方已经持有词库的会话访问权。
+///
+/// `include_learning` 为真时（本地备份用，云同步不用）在用户的词之后再写输入记录：Engine 日志里的学习调权和删除记录写成 `overlay`（学习调权 `user_inserted:false`，删除记录 `deleted:true`），固定位置写成 `position`，选词计数写成 `selection`，都是这个格式第 1 版本来就有的记录，旧版本恢复时照样认得。快照格式装不下的行（编码或词含换行、制表符，位置不在 1 到 5，总记录数超出上限）跳过并计入 `learning_skipped`，选词计数截到 0 到 10。返回值多出 `learning`（写进去的输入记录条数）和 `learning_skipped`。日志整体读不出来时只导出词，`learning` 为 0，原因在 `learning_error`。为假时输出与加这个参数之前逐字节相同。
 pub(crate) fn export_local_snapshot(
     options: &EngineOptions,
     destination: &Path,
+    include_learning: bool,
 ) -> Result<Value, &'static str> {
     use msime_engine::host::DictionaryKind;
     const REVISION: i64 = 1;
     const CHUNK: usize = 1000;
-    let parent = destination
+    destination
         .parent()
         .filter(|_| destination.is_absolute() && destination.file_name().is_some())
         .ok_or("invalid snapshot destination")?;
@@ -525,6 +541,24 @@ pub(crate) fn export_local_snapshot(
         }
     }
     rows.truncate(100_000);
+    // 输入记录读不出来（日志里有不是 UTF-8 的行、未知的词库种类或超长的行，`stream_dictionary_state` 会整体拒绝）时不让整份备份失败：照样导出词，`learning_error` 告诉宿主这份里没有输入记录。
+    let mut learning_error = None;
+    let learning = if include_learning {
+        Some(
+            learning_records(
+                options,
+                REVISION,
+                &updated_at,
+                MAX_SNAPSHOT_RECORDS - 1 - rows.len() * 2,
+            )
+            .unwrap_or_else(|error| {
+                learning_error = Some(error);
+                LearningRecords::default()
+            }),
+        )
+    } else {
+        None
+    };
     let mut body = Vec::new();
     let mut push = |line: Value| {
         body.extend_from_slice(line.to_string().as_bytes());
@@ -536,15 +570,7 @@ pub(crate) fn export_local_snapshot(
         "version": 1,
         "revision": REVISION,
     }));
-    let id = |kind: &str, code: &str, word: &str| {
-        let mut digest = Sha256::new();
-        digest.update(kind.as_bytes());
-        digest.update(b"\t");
-        digest.update(code.as_bytes());
-        digest.update(b"\t");
-        digest.update(word.as_bytes());
-        hex::encode(&digest.finalize()[..16])
-    };
+    let id = snapshot_record_id;
     for (kind, code, word, weight) in &rows {
         push(json!({"type": "entry", "data": {
             "id": id(kind, code, word),
@@ -568,7 +594,22 @@ pub(crate) fn export_local_snapshot(
             "user_inserted": true,
         }}));
     }
-    let records = 1 + rows.len() * 2;
+    let mut records = 1 + rows.len() * 2;
+    let learning_counts = learning
+        .as_ref()
+        .map(|learning| (learning.records(), learning.skipped));
+    if let Some(learning) = learning {
+        records += learning.records();
+        // 类别顺序是格式的一部分：overlay 在 position 之前，position 在 selection 之前。
+        for line in learning
+            .overlays
+            .into_iter()
+            .chain(learning.positions)
+            .chain(learning.selections)
+        {
+            push(line);
+        }
+    }
     let checksum = hex::encode(Sha256::digest(&body));
     body.extend_from_slice(
         json!({"type": "footer", "records": records, "sha256": checksum})
@@ -576,20 +617,180 @@ pub(crate) fn export_local_snapshot(
             .as_bytes(),
     );
     body.push(b'\n');
+    // 自检用的临时文件建在目标文件旁边，不用系统临时目录：Android 9 的应用进程没有可写的系统临时目录（`std::env::temp_dir` 落到应用写不了的 /data/local/tmp），在那里建文件会让每一次导出都失败。
+    let directory = destination.parent().ok_or("invalid snapshot destination")?;
     let mut temporary =
-        tempfile::NamedTempFile::new_in(parent).map_err(|_| "snapshot file unavailable")?;
+        tempfile::NamedTempFile::new_in(directory).map_err(|_| "snapshot file unavailable")?;
     temporary
         .write_all(&body)
         .and_then(|()| temporary.as_file().sync_all())
         .map_err(|_| "snapshot file unavailable")?;
     let metadata = inspect_snapshot(temporary.path())?;
-    temporary
-        .persist(destination)
-        .map_err(|_| "snapshot file unavailable")?;
+    publish_snapshot(destination, &body)?;
     let mut value = serde_json::to_value(metadata).map_err(|_| "snapshot file unavailable")?;
     value["path"] = json!(destination.to_string_lossy());
     value["skipped"] = json!(skipped);
+    if let Some((learning, learning_skipped)) = learning_counts {
+        value["learning"] = json!(learning);
+        value["learning_skipped"] = json!(learning_skipped);
+    }
+    if let Some(error) = learning_error {
+        value["learning_error"] = json!(error);
+    }
     Ok(value)
+}
+
+/// 快照里一个词的 `id`：种类、编码和词用制表符连起来的 SHA-256 前 16 字节。
+fn snapshot_record_id(kind: &str, code: &str, word: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(kind.as_bytes());
+    digest.update(b"\t");
+    digest.update(code.as_bytes());
+    digest.update(b"\t");
+    digest.update(word.as_bytes());
+    hex::encode(&digest.finalize()[..16])
+}
+
+/// [`export_local_snapshot`] 写进快照的输入记录，按类别分开放，写的时候按格式要求的顺序拼起来。
+#[derive(Default)]
+struct LearningRecords {
+    overlays: Vec<Value>,
+    positions: Vec<Value>,
+    selections: Vec<Value>,
+    skipped: usize,
+}
+
+impl LearningRecords {
+    fn records(&self) -> usize {
+        self.overlays.len() + self.positions.len() + self.selections.len()
+    }
+}
+
+/// 读出 Engine 日志里的输入记录（`stream_dictionary_state`），转成快照记录。用户自己的词（`user_inserted` 的 upsert）已经作为 `entry`/`overlay` 写过，这里跳过。最多收 `budget` 条，其余计入 `skipped`。
+fn learning_records(
+    options: &EngineOptions,
+    revision: i64,
+    updated_at: &str,
+    budget: usize,
+) -> Result<LearningRecords, &'static str> {
+    use msime_engine::host::{DictionaryKind, DictionaryStateRecord};
+    // 与 `inspect_snapshot_record` 对编码、词和上下文的要求相同，写出去的记录不会让自检失败。
+    let fits = |text: &str, maximum: usize| {
+        !text.is_empty() && text.len() <= maximum && snapshot_safe(text)
+    };
+    let fits_context = |context: &str, code: &str, word: &str| {
+        fits(context, 512)
+            && fits(code, 512)
+            && fits(word, 2048)
+            && context.len() + code.len() + word.len() <= 2048
+    };
+    let mut learning = LearningRecords::default();
+    msime_engine::host::stream_dictionary_state(options, &mut |record| {
+        if matches!(
+            record,
+            DictionaryStateRecord::Entry {
+                user_inserted: true,
+                deleted: false,
+                ..
+            }
+        ) {
+            return true;
+        }
+        if learning.records() >= budget {
+            learning.skipped += 1;
+            return true;
+        }
+        match record {
+            DictionaryStateRecord::Entry {
+                kind,
+                key,
+                value,
+                weight,
+                deleted,
+                user_inserted,
+                ..
+            } => {
+                let kind = match kind {
+                    DictionaryKind::Pinyin => "pinyin",
+                    DictionaryKind::Wubi => "wubi",
+                    DictionaryKind::Wubi98 => "wubi98",
+                    DictionaryKind::QuickPhrase => "quick",
+                    DictionaryKind::English => "english",
+                    // 快照格式只认上面这几种，Engine 以后加的种类装不下。
+                    _ => {
+                        learning.skipped += 1;
+                        return true;
+                    }
+                };
+                if !fits(key, 512) || !fits(value, 2048) {
+                    learning.skipped += 1;
+                    return true;
+                }
+                // 删除记录的权重没有意义，格式只允许它为 0 到上限；其余的权重至少为 1。
+                let weight = if *deleted {
+                    (*weight).clamp(0, 100_000_000)
+                } else {
+                    (*weight).clamp(1, 100_000_000)
+                };
+                learning
+                    .overlays
+                    .push(json!({"type": "overlay", "deleted": deleted, "data": {
+                        "id": snapshot_record_id(kind, key, value),
+                        "kind": kind,
+                        "code": key,
+                        "word": value,
+                        "weight": weight,
+                        "revision": revision,
+                        "updated_at": updated_at,
+                        "user_inserted": user_inserted,
+                    }}));
+            }
+            DictionaryStateRecord::Position {
+                context,
+                key,
+                value,
+                position,
+            } => {
+                if !fits_context(context, key, value) || !(1..=5).contains(position) {
+                    learning.skipped += 1;
+                    return true;
+                }
+                learning.positions.push(json!({"type": "position", "data": {
+                    "context": context,
+                    "code": key,
+                    "word": value,
+                    "position": position,
+                }}));
+            }
+            DictionaryStateRecord::Selection {
+                context,
+                key,
+                value,
+                count,
+            } => {
+                if !fits_context(context, key, value) {
+                    learning.skipped += 1;
+                    return true;
+                }
+                learning
+                    .selections
+                    .push(json!({"type": "selection", "data": {
+                        "context": context,
+                        "code": key,
+                        "word": value,
+                        "count": (*count).clamp(0, 10),
+                    }}));
+            }
+        }
+        true
+    })
+    .map_err(|_| "dictionary read rejected")?;
+    Ok(learning)
+}
+
+fn publish_snapshot(destination: &Path, bytes: &[u8]) -> Result<(), &'static str> {
+    msime_client_core::file_lock::replace_private_file(destination, bytes)
+        .map_err(|_| "snapshot file unavailable")
 }
 
 /// The same byte test `snapshot_validation::required_text` applies to a code or word, so an exported row is never one `inspect_snapshot` refuses.
@@ -597,6 +798,238 @@ fn snapshot_safe(text: &str) -> bool {
     !text
         .bytes()
         .any(|byte| matches!(byte, 0 | b'\t' | b'\n' | b'\r'))
+}
+
+/// 待合并的输入记录在 `preferences_directory` 下的文件名，见 [`queue_learning_merge`]。
+const PENDING_LEARNING_NAME: &str = "pending-learning-merge.ndjson";
+/// 键盘认领待合并的文件后改成的名字，见 [`merge_pending_learning`]。
+const CLAIMED_LEARNING_NAME: &str = "pending-learning-merge.claimed.ndjson";
+/// 认领的那份已经连续失败了几次，一个十进制数。
+const LEARNING_ATTEMPTS_NAME: &str = "pending-learning-merge.attempts";
+/// 连续失败这么多次就放弃认领的那份。
+const MAX_LEARNING_MERGE_ATTEMPTS: u32 = 3;
+
+/// 一份快照里的记录是不是输入记录：学习调权（`user_inserted:false` 的 overlay）、删除记录（`deleted:true` 的 overlay）、固定位置和选词计数。用户自己的词（`entry` 和与它配对的 overlay）不是。
+fn is_learning_record(map: &serde_json::Map<String, Value>) -> bool {
+    match map.get("type").and_then(Value::as_str) {
+        Some("position" | "selection") => true,
+        Some("overlay") => {
+            map.get("deleted").and_then(Value::as_bool) == Some(true)
+                || map
+                    .get("data")
+                    .and_then(|data| data.get("user_inserted"))
+                    .and_then(Value::as_bool)
+                    == Some(false)
+        }
+        _ => false,
+    }
+}
+
+/// 把 `source`（本地备份里的词库快照）中的输入记录挑出来，另存成一份只有这些记录的快照，放在 `preferences` 下等键盘合并：Android 上改工作词库要独占维护权，只有键盘没有会话时才拿得到，所以设置页不直接合并，而是由键盘收起后的空闲处理（[`merge_pending_learning`]）合并进去。还没被认领的一份会被替换。
+///
+/// `source` 先按云端格式完整校验；挑出来的文件写完再校验一遍。返回 `{queued, learning}`：快照里没有输入记录（旧版本导出的备份）时 `queued` 为假，什么也不写。
+pub(crate) fn queue_learning_merge(
+    preferences: &Path,
+    source: &Path,
+) -> Result<Value, &'static str> {
+    if !preferences.is_absolute() || !source.is_absolute() {
+        return Err("invalid snapshot path");
+    }
+    let metadata = inspect_snapshot(source)?;
+    let mut records = SnapshotFileRecords::open(source)?;
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        json!({
+            "type": "header",
+            "format": "msime-dictionary-snapshot",
+            "version": 1,
+            "revision": metadata.cloud_revision,
+        })
+        .to_string()
+        .as_bytes(),
+    );
+    body.push(b'\n');
+    let mut learning = 0usize;
+    while records
+        .read_line()
+        .map_err(|_| "snapshot file unavailable")?
+    {
+        let map = parse_strict_object(&records.line).map_err(|_| "invalid snapshot document")?;
+        if is_learning_record(&map) {
+            body.extend_from_slice(&records.line);
+            body.push(b'\n');
+            learning += 1;
+        }
+    }
+    if learning == 0 {
+        return Ok(json!({"queued": false, "learning": 0}));
+    }
+    let checksum = hex::encode(Sha256::digest(&body));
+    body.extend_from_slice(
+        json!({"type": "footer", "records": 1 + learning, "sha256": checksum})
+            .to_string()
+            .as_bytes(),
+    );
+    body.push(b'\n');
+    let pending = preferences.join(PENDING_LEARNING_NAME);
+    publish_learning_queue(&pending, &body)?;
+    Ok(json!({"queued": true, "learning": learning}))
+}
+
+fn publish_learning_queue(pending: &Path, body: &[u8]) -> Result<(), &'static str> {
+    inspect_snapshot_bytes(body)?;
+    msime_client_core::file_lock::replace_private_file(pending, body)
+        .map_err(|_| "snapshot file unavailable")
+}
+
+/// 有待合并的输入记录（[`queue_learning_merge`]）时把它合并进本机的日志和词库：本机已有的保留本机，选词计数取大（`msime_engine::host::merge_dictionary_state`）；接着用同样的认领方式合并待合并的输入习惯（[`habits::queue_habits_merge`]）。都没有待合并的文件时返回 `{merged:false}`，合并了输入记录返回 `{merged:true, entries, positions, selections, kept, skipped}`；处理过输入习惯时再多一个 `habits` 字段，是 `{merged:true, written, kept, trimmed}`，或失败时的 `{merged:false, error}`。输入记录合并失败时报它的错，输入习惯照样尝试。Android 键盘收起、会话销毁后在空闲时调用（与整份快照激活同一时机，排在它之后），不在建会话前的个人词库同步里做，免得一份大备份拖慢恢复后第一次弹出键盘。
+///
+/// 先拿独占维护权，拿不到（还有会话开着）时什么也不动，下次再试。拿到后把待合并的文件改名认领（[`CLAIMED_LEARNING_NAME`]），只合并、只删认领的那一份：合并期间设置页又排了一份新的，新的那份写在原来的名字下，不会被这边删掉，下次空闲时再合并。上次没合并完的认领文件还在时先合并它，新排的等下一次。
+///
+/// 文件格式不对（不是合法快照）时直接删掉。别的失败（读文件出错、写库出错）保留文件下次再试，但连续失败 [`MAX_LEARNING_MERGE_ATTEMPTS`] 次后放弃并删掉，报 `learning merge abandoned`，不会每次空闲都把整份合并再跑一遍再回滚。合并成功后删掉文件，删不掉也无妨：再合并一次时本机已有的都保留，结果不变。
+pub(crate) fn merge_pending_learning(
+    options: &EngineOptions,
+    preferences: &Path,
+) -> Result<Value, &'static str> {
+    let learning = merge_pending(options, preferences, &LEARNING_FILES, |claimed| {
+        let metadata = inspect_snapshot(claimed)?;
+        let stream = SnapshotFileRecords::open(claimed)?;
+        let merged = msime_engine::host::merge_dictionary_state(
+            options,
+            metadata.engine_records.max(1),
+            stream,
+        )
+        .map_err(|_| "learning merge rejected")?;
+        Ok(json!({
+            "merged": true,
+            "entries": merged.entries,
+            "positions": merged.positions,
+            "selections": merged.selections,
+            "kept": merged.kept,
+            "skipped": merged.skipped,
+        }))
+    });
+    let habits = merge_pending(options, preferences, &habits::HABITS_FILES, |claimed| {
+        habits::merge_claimed_habits(options, claimed)
+    });
+    let habits = match habits {
+        Ok(value) if value.get("merged") == Some(&Value::Bool(false)) => return learning,
+        Ok(value) => value,
+        Err(error) => json!({"merged": false, "error": error}),
+    };
+    learning.map(|mut value| {
+        value["habits"] = habits;
+        value
+    })
+}
+
+/// 一类待合并文件的名字：设置页写下的、键盘认领后改成的、记连续失败次数的，以及放弃时报的错和哪些错误说明文件本身不对（直接删掉，不重试）。
+pub(crate) struct PendingFiles {
+    pending: &'static str,
+    claimed: &'static str,
+    attempts: &'static str,
+    abandoned: &'static str,
+    invalid: &'static [&'static str],
+}
+
+const LEARNING_FILES: PendingFiles = PendingFiles {
+    pending: PENDING_LEARNING_NAME,
+    claimed: CLAIMED_LEARNING_NAME,
+    attempts: LEARNING_ATTEMPTS_NAME,
+    abandoned: "learning merge abandoned",
+    invalid: &["invalid snapshot document", "invalid snapshot file"],
+};
+
+/// [`merge_pending_learning`] 的认领与重试：没有文件时返回 `{merged:false}`；有的话拿独占维护权、认领、交给 `merge`，按结果删掉或记下失败次数。
+fn merge_pending(
+    options: &EngineOptions,
+    preferences: &Path,
+    files: &PendingFiles,
+    merge: impl FnOnce(&Path) -> Result<Value, &'static str>,
+) -> Result<Value, &'static str> {
+    let pending = preferences.join(files.pending);
+    let claimed = preferences.join(files.claimed);
+    let attempts = preferences.join(files.attempts);
+    let present = |path: &Path| match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err("snapshot file unavailable"),
+    };
+    if !present(&claimed)? && !present(&pending)? {
+        return Ok(json!({"merged": false}));
+    }
+    let _access = DictionaryAccess::try_maintenance(
+        Path::new(&options.user_data),
+        Path::new(&options.dictionaries),
+    )
+    .map_err(|_| "dictionary access unavailable")?
+    .ok_or("dictionary maintenance busy")?;
+    if !present(&claimed)? {
+        std::fs::rename(&pending, &claimed).map_err(|_| "snapshot file unavailable")?;
+        // 新认领的一份，重试次数从头算。
+        remove_if_present(&attempts)?;
+    }
+    let discard = || {
+        let _ = std::fs::remove_file(&claimed);
+        let _ = std::fs::remove_file(&attempts);
+    };
+    match merge(&claimed) {
+        Ok(merged) => {
+            discard();
+            Ok(merged)
+        }
+        Err(error) if files.invalid.contains(&error) => {
+            discard();
+            Err(error)
+        }
+        Err(error) => {
+            let failures = std::fs::read_to_string(&attempts)
+                .ok()
+                .and_then(|text| text.trim().parse::<u32>().ok())
+                .unwrap_or(0)
+                .saturating_add(1);
+            if failures >= MAX_LEARNING_MERGE_ATTEMPTS {
+                discard();
+                return Err(files.abandoned);
+            }
+            msime_client_core::file_lock::replace_private_file(
+                &attempts,
+                failures.to_string().as_bytes(),
+            )
+            .map_err(|_| "snapshot file unavailable")?;
+            Err(error)
+        }
+    }
+}
+
+fn remove_if_present(path: &Path) -> Result<(), &'static str> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err("snapshot file unavailable"),
+        _ => Ok(()),
+    }
+}
+
+/// 本机日志里输入记录的条数（学习调权、删除记录、固定位置和选词计数，不含用户自己的词）`count`，以及输入习惯的行数 `habits`（[`habits`]），只读。本地备份恢复时用它判断本机是不是还什么都没学过。
+pub(crate) fn learning_count(options: &EngineOptions) -> Result<Value, &'static str> {
+    use msime_engine::host::DictionaryStateRecord;
+    let mut count = 0usize;
+    msime_engine::host::stream_dictionary_state(options, &mut |record| {
+        if !matches!(
+            record,
+            DictionaryStateRecord::Entry {
+                user_inserted: true,
+                deleted: false,
+                ..
+            }
+        ) {
+            count += 1;
+        }
+        true
+    })
+    .map_err(|_| "dictionary read rejected")?;
+    // 整份激活会连同输入习惯一起换掉，所以调用方也要知道本机有没有输入习惯；读不出来时为 null，调用方按「不确定」处理。
+    let habits = msime_engine::host::count_learning_habits(options).ok();
+    Ok(json!({"count": count, "habits": habits}))
 }
 
 fn restore_snapshot_with(
@@ -694,23 +1127,11 @@ fn write_activation_receipt(
 ) -> Result<(), &'static str> {
     let directory = Path::new(&options.user_data);
     let path = directory.join(ACTIVATION_RECEIPT_NAME);
-    write_activation_receipt_at(directory, &path, activation_id)
+    write_activation_receipt_at(&path, activation_id)
 }
 
-fn write_activation_receipt_at(
-    directory: &Path,
-    path: &Path,
-    activation_id: &str,
-) -> Result<(), &'static str> {
-    let mut temporary = tempfile::NamedTempFile::new_in(directory)
-        .map_err(|_| "snapshot activation receipt unavailable")?;
-    temporary
-        .write_all(activation_id.as_bytes())
-        .and_then(|_| temporary.as_file().sync_all())
-        .map_err(|_| "snapshot activation receipt unavailable")?;
-    temporary
-        .persist(path)
-        .map(|_| ())
+fn write_activation_receipt_at(path: &Path, activation_id: &str) -> Result<(), &'static str> {
+    msime_client_core::file_lock::replace_private_file(path, activation_id.as_bytes())
         .map_err(|_| "snapshot activation receipt unavailable")
 }
 
@@ -805,7 +1226,104 @@ fn prepare(
     })
 }
 
+struct ActivationRoot {
+    path: std::path::PathBuf,
+    name: OsString,
+    directory: msime_client_core::file_lock::PrivateDirectory,
+    parent: msime_client_core::file_lock::PrivateDirectory,
+}
+
+struct ActivationBackup {
+    name: OsString,
+    directory: msime_client_core::file_lock::PrivateDirectory,
+    parent: msime_client_core::file_lock::PrivateDirectory,
+}
+
+#[derive(Clone, Copy)]
+enum ActivationRootSlot {
+    Active(usize),
+    Staged(usize),
+    Backup(usize),
+}
+
+struct MovedActivationEntry {
+    from: ActivationRootSlot,
+    to: ActivationRootSlot,
+    name: OsString,
+}
+
+fn bind_activation_root(
+    path: &Path,
+    directory: msime_client_core::file_lock::PrivateDirectory,
+) -> Result<ActivationRoot, &'static str> {
+    let name = path
+        .file_name()
+        .ok_or("invalid snapshot activation path")?
+        .to_os_string();
+    let parent =
+        msime_client_core::file_lock::open_private_directory_at(&directory, OsStr::new(".."))
+            .map_err(|_| "snapshot activation unavailable")?;
+    Ok(ActivationRoot {
+        path: path.to_path_buf(),
+        name,
+        directory,
+        parent,
+    })
+}
+
+fn prepare_snapshot_backup_at(
+    parent: &msime_client_core::file_lock::PrivateDirectory,
+    name: &OsStr,
+) -> std::io::Result<msime_client_core::file_lock::PrivateDirectory> {
+    match msime_client_core::file_lock::open_private_directory_at(parent, name) {
+        Ok(directory) => {
+            if !msime_client_core::file_lock::read_private_directory(&directory)?.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "snapshot backup is not empty",
+                ));
+            }
+            Ok(directory)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            msime_client_core::file_lock::create_private_directory_at(parent, name)?;
+            msime_client_core::file_lock::open_private_directory_at(parent, name)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn activation_slot_directory<'a>(
+    slot: ActivationRootSlot,
+    active: &'a [ActivationRoot],
+    staged: &'a [ActivationRoot],
+    backups: &'a [ActivationBackup],
+) -> &'a msime_client_core::file_lock::PrivateDirectory {
+    match slot {
+        ActivationRootSlot::Active(index) => &active[index].directory,
+        ActivationRootSlot::Staged(index) => &staged[index].directory,
+        ActivationRootSlot::Backup(index) => &backups[index].directory,
+    }
+}
+
+fn activation_entry_leads_to_nested_root(
+    root: &ActivationRoot,
+    entry_name: &OsStr,
+    all: &[ActivationRoot],
+) -> bool {
+    let entry = root.path.join(entry_name);
+    all.iter()
+        .any(|other| other.path != root.path && other.path.starts_with(&entry))
+}
+
 fn activate(handle: u64, expected: &str) -> Result<Value, &'static str> {
+    activate_with_hook(handle, expected, |_| {})
+}
+
+fn activate_with_hook<F>(handle: u64, expected: &str, mut on_swap: F) -> Result<Value, &'static str>
+where
+    F: FnMut(Option<usize>),
+{
     let mut entries = registry()
         .lock()
         .map_err(|_| "snapshot registry unavailable")?;
@@ -838,18 +1356,65 @@ fn activate(handle: u64, expected: &str) -> Result<Value, &'static str> {
         (&active.cache, &staged.cache),
         (&active.dictionaries, &staged.dictionaries),
     ];
-    let mut backups = Vec::with_capacity(pairs.len());
-    backups.extend(pairs.iter().map(|(current, _)| {
-        let current = Path::new(current.as_str());
-        current.with_file_name(format!(
-            "{}{}",
-            current
-                .file_name()
-                .and_then(|x| x.to_str())
-                .unwrap_or("state"),
-            suffix
-        ))
-    }));
+    let active_directories = [
+        _access
+            .directory(Path::new(&active.user_data))
+            .map_err(|_| "snapshot activation unavailable")?,
+        msime_client_core::file_lock::open_private_directory(&active.cache)
+            .map_err(|_| "snapshot activation unavailable")?,
+        _access
+            .directory(Path::new(&active.dictionaries))
+            .map_err(|_| "snapshot activation unavailable")?,
+    ];
+    let staged_directories = [
+        msime_client_core::file_lock::open_private_directory(&staged.user_data)
+            .map_err(|_| "snapshot activation unavailable")?,
+        msime_client_core::file_lock::open_private_directory(&staged.cache)
+            .map_err(|_| "snapshot activation unavailable")?,
+        msime_client_core::file_lock::open_private_directory(&staged.dictionaries)
+            .map_err(|_| "snapshot activation unavailable")?,
+    ];
+    let active_roots = active_directories
+        .into_iter()
+        .zip(pairs.iter().map(|(current, _)| Path::new(current.as_str())))
+        .map(|(directory, path)| bind_activation_root(path, directory))
+        .collect::<Result<Vec<_>, _>>()?;
+    let staged_roots = staged_directories
+        .into_iter()
+        .zip(
+            pairs
+                .iter()
+                .map(|(_, replacement)| Path::new(replacement.as_str())),
+        )
+        .map(|(directory, path)| bind_activation_root(path, directory))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut backups: Vec<ActivationBackup> = Vec::with_capacity(active_roots.len());
+    for root in &active_roots {
+        let mut name = root.name.clone();
+        name.push(&suffix);
+        let parent = root
+            .parent
+            .try_clone()
+            .map_err(|_| "snapshot activation unavailable")?;
+        let directory = match prepare_snapshot_backup_at(&parent, &name) {
+            Ok(directory) => directory,
+            Err(_) => {
+                for backup in &backups {
+                    let _ = msime_client_core::file_lock::remove_private_directory_at(
+                        &backup.parent,
+                        &backup.name,
+                    );
+                }
+                return Err("snapshot activation failed");
+            }
+        };
+        backups.push(ActivationBackup {
+            name,
+            directory,
+            parent,
+        });
+    }
+    on_swap(None);
     // Swap each root's contents rather than the root itself.
     //
     // Renaming the roots cannot work on Windows: the maintenance guard holds
@@ -859,99 +1424,135 @@ fn activate(handle: u64, expected: &str) -> Result<Value, &'static str> {
     // files exactly where they are, which is also what they are documented to
     // require: they are stable coordination objects, and renaming a root moved
     // one out from under every other process using it.
-    let mut roots = Vec::with_capacity(pairs.len());
-    roots.extend(pairs.iter().map(|(current, _)| Path::new(current.as_str())));
-    let mut staged_roots = Vec::with_capacity(pairs.len());
-    staged_roots.extend(
-        pairs
-            .iter()
-            .map(|(_, replacement)| Path::new(replacement.as_str())),
-    );
-    let mut moved: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::with_capacity(pairs.len());
-    let rollback = |moved: &[(std::path::PathBuf, std::path::PathBuf)]| {
+    let mut moved = Vec::new();
+    let rollback = |moved: &[MovedActivationEntry]| {
         // Anything opened on a moved file while the swap ran would outlive its move back.
         msime_engine::close_cached_databases();
-        for (from, to) in moved.iter().rev() {
-            let _ = std::fs::rename(to, from);
+        for entry in moved.iter().rev() {
+            let from = activation_slot_directory(entry.to, &active_roots, &staged_roots, &backups);
+            let to = activation_slot_directory(entry.from, &active_roots, &staged_roots, &backups);
+            let _ = msime_client_core::file_lock::rename_private_entry(
+                from,
+                &entry.name,
+                to,
+                &entry.name,
+            );
         }
         for backup in &backups {
-            discard_recovered_backup(backup);
+            let _ = msime_client_core::file_lock::remove_private_directory_at(
+                &backup.parent,
+                &backup.name,
+            );
         }
     };
+    let mut deferred_receipt = None;
     // An entry that leads to another root nested below this one is left alone:
     // that root does its own swap, and it holds its own lock file.
-    let leads_to_nested_root = |root: &Path, entry: &Path, all: &[&Path]| {
-        all.iter()
-            .any(|other| *other != root && other.starts_with(entry))
-    };
-    for (index, (current, replacement)) in pairs.iter().enumerate() {
-        let current = Path::new(current.as_str());
-        let replacement = Path::new(replacement.as_str());
+    for index in 0..active_roots.len() {
+        let current = &active_roots[index];
+        let replacement = &staged_roots[index];
         let backup = &backups[index];
-        if prepare_snapshot_backup(backup).is_err() {
+        // Out with the old.
+        let listing = match msime_client_core::file_lock::read_private_directory(&current.directory)
+        {
+            Ok(listing) => listing,
+            Err(_) => {
+                rollback(&moved);
+                return Err("snapshot activation failed");
+            }
+        };
+        for entry in listing {
+            if entry == OsStr::new(DICTIONARY_ACCESS_LOCK_NAME)
+                || activation_entry_leads_to_nested_root(current, &entry, &active_roots)
+            {
+                continue;
+            }
+            if msime_client_core::file_lock::rename_private_entry(
+                &current.directory,
+                &entry,
+                &backup.directory,
+                &entry,
+            )
+            .is_err()
+            {
+                rollback(&moved);
+                return Err("snapshot activation failed");
+            }
+            moved.push(MovedActivationEntry {
+                from: ActivationRootSlot::Active(index),
+                to: ActivationRootSlot::Backup(index),
+                name: entry,
+            });
+        }
+        // In with the new.
+        let listing =
+            match msime_client_core::file_lock::read_private_directory(&replacement.directory) {
+                Ok(listing) => listing,
+                Err(_) => {
+                    rollback(&moved);
+                    return Err("snapshot activation failed");
+                }
+            };
+        for entry in listing {
+            if should_defer_activation_receipt(index, &entry) {
+                deferred_receipt = Some(entry);
+                continue;
+            }
+            if entry == OsStr::new(DICTIONARY_ACCESS_LOCK_NAME)
+                || activation_entry_leads_to_nested_root(replacement, &entry, &staged_roots)
+            {
+                continue;
+            }
+            if msime_client_core::file_lock::rename_private_entry(
+                &replacement.directory,
+                &entry,
+                &current.directory,
+                &entry,
+            )
+            .is_err()
+            {
+                rollback(&moved);
+                return Err("snapshot activation failed");
+            }
+            moved.push(MovedActivationEntry {
+                from: ActivationRootSlot::Staged(index),
+                to: ActivationRootSlot::Active(index),
+                name: entry,
+            });
+        }
+        on_swap(Some(index));
+    }
+    if let Some(receipt) = deferred_receipt {
+        let destination = OsStr::new(ACTIVATION_RECEIPT_NAME);
+        if msime_client_core::file_lock::rename_private_entry(
+            &staged_roots[0].directory,
+            &receipt,
+            &active_roots[0].directory,
+            destination,
+        )
+        .is_err()
+        {
             rollback(&moved);
             return Err("snapshot activation failed");
         }
-        // Out with the old.
-        let listing = match std::fs::read_dir(current) {
-            Ok(listing) => listing,
-            Err(_) => {
-                rollback(&moved);
-                return Err("snapshot activation failed");
-            }
-        };
-        for entry in listing {
-            let Ok(entry) = entry else {
-                rollback(&moved);
-                return Err("snapshot activation failed");
-            };
-            let path = entry.path();
-            if entry.file_name() == DICTIONARY_ACCESS_LOCK_NAME
-                || leads_to_nested_root(roots[index], &path, &roots)
-            {
-                continue;
-            }
-            let destination = backup.join(entry.file_name());
-            if std::fs::rename(&path, &destination).is_err() {
-                rollback(&moved);
-                return Err("snapshot activation failed");
-            }
-            moved.push((path, destination));
-        }
-        // In with the new.
-        let listing = match std::fs::read_dir(replacement) {
-            Ok(listing) => listing,
-            Err(_) => {
-                rollback(&moved);
-                return Err("snapshot activation failed");
-            }
-        };
-        for entry in listing {
-            let Ok(entry) = entry else {
-                rollback(&moved);
-                return Err("snapshot activation failed");
-            };
-            let path = entry.path();
-            if entry.file_name() == DICTIONARY_ACCESS_LOCK_NAME
-                || leads_to_nested_root(staged_roots[index], &path, &staged_roots)
-            {
-                continue;
-            }
-            let destination = current.join(entry.file_name());
-            if std::fs::rename(&path, &destination).is_err() {
-                rollback(&moved);
-                return Err("snapshot activation failed");
-            }
-            moved.push((path, destination));
-        }
+        moved.push(MovedActivationEntry {
+            from: ActivationRootSlot::Staged(0),
+            to: ActivationRootSlot::Active(0),
+            name: receipt,
+        });
     }
     // A reader that opened a file while the swap ran holds the old one; the next access opens the restored files.
     msime_engine::close_cached_databases();
     for backup in &backups {
-        let _ = std::fs::remove_dir_all(backup);
+        let _ =
+            msime_client_core::file_lock::remove_private_directory_at(&backup.parent, &backup.name);
     }
     entries.remove(&handle);
     Ok(json!({"activated": true}))
+}
+
+fn should_defer_activation_receipt(root_index: usize, file_name: &OsStr) -> bool {
+    root_index == 0 && file_name == OsStr::new(ACTIVATION_RECEIPT_NAME)
 }
 
 /// Remove a backup directory only once rollback has emptied it.
@@ -961,34 +1562,9 @@ fn activate(handle: u64, expected: &str) -> Result<Value, &'static str> {
 /// exactly the case where the backup is the only remaining copy of the user's dictionaries, and
 /// `remove_dir_all` would delete it on the way out of a failure that had already been survived.
 /// Leaving the directory on disk costs some space and keeps the data.
+#[cfg(test)]
 fn discard_recovered_backup(backup: &Path) {
     let _ = std::fs::remove_dir(backup);
-}
-
-/// Create or reuse only an empty, real backup directory. A backup path is derived from a
-/// process-local handle but lives beside user state, so a pre-existing symlink must never be
-/// accepted as the destination for the old generation's files.
-fn prepare_snapshot_backup(path: &Path) -> std::io::Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            let kind = metadata.file_type();
-            if !kind.is_dir() || kind.is_symlink() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    "snapshot backup is not a real directory",
-                ));
-            }
-            if std::fs::read_dir(path)?.next().is_some() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    "snapshot backup is not empty",
-                ));
-            }
-            Ok(())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(path),
-        Err(error) => Err(error),
-    }
 }
 
 fn version_without_access(options: &EngineOptions) -> Result<String, &'static str> {
@@ -1061,7 +1637,7 @@ impl SnapshotFileRecords {
         let file = open_snapshot_file(path).map_err(|_| "snapshot file unavailable")?;
         Ok(Self {
             reader: BufReader::with_capacity(MAX_SNAPSHOT_LINE_BYTES, file),
-            line: Vec::with_capacity(MAX_SNAPSHOT_LINE_BYTES),
+            line: Vec::new(),
             failed: false,
         })
     }
@@ -1156,12 +1732,18 @@ fn snapshot_queue_process(
     queue: &DictionarySnapshotQueue,
     staging_root: String,
     options: HostOptions,
+    account_id: Option<String>,
 ) -> Result<Value, String> {
     let engine_options = validate_options(options.clone()).map_err(str::to_owned)?;
     let current = durable_local_version(&engine_options).map_err(str::to_owned)?;
     queue
         .publish_local_version(&current)
         .map_err(snapshot_queue_error)?;
+    // 键盘这次读不到共享的会话文件（读取失败或未登录），不知道当前账号是谁。请求留到下一次空闲时再处理，不在未知账号下应用。
+    let Some(account_id) = account_id else {
+        return serde_json::to_value(queue.read().map_err(snapshot_queue_error)?)
+            .map_err(|_| "snapshot_unavailable".to_owned());
+    };
     let lease = match queue.acquire_worker_lease() {
         Ok(lease) => lease,
         Err(SnapshotQueueError::Busy) => {
@@ -1170,13 +1752,16 @@ fn snapshot_queue_process(
         }
         Err(error) => return Err(snapshot_queue_error(error)),
     };
-    let Some(request) = queue.claim(&lease).map_err(snapshot_queue_error)? else {
+    let Some(request) = queue
+        .claim(&lease, &account_id)
+        .map_err(snapshot_queue_error)?
+    else {
         return serde_json::to_value(queue.read().map_err(snapshot_queue_error)?)
             .map_err(|_| "snapshot_unavailable".to_owned());
     };
     if request.expected_local_version != current {
         let _ = queue
-            .complete(request.id, &lease, &current, false, || {
+            .complete(request.id, &lease, &current, false, &account_id, || {
                 Err(SnapshotQueueError::Conflict)
             })
             .map_err(snapshot_queue_error)?;
@@ -1221,7 +1806,7 @@ fn snapshot_queue_process(
             let latest = durable_local_version(&engine_options).map_err(str::to_owned)?;
             if latest != current {
                 let _ = queue
-                    .complete(request.id, &lease, &latest, false, || {
+                    .complete(request.id, &lease, &latest, false, &account_id, || {
                         Err(SnapshotQueueError::Conflict)
                     })
                     .map_err(snapshot_queue_error)?;
@@ -1240,7 +1825,7 @@ fn snapshot_queue_process(
         .and_then(Value::as_u64)
         .ok_or_else(|| "snapshot_unavailable".to_owned())?;
     let mut consumed = false;
-    let completion = queue.complete(request.id, &lease, &current, false, || {
+    let completion = queue.complete(request.id, &lease, &current, false, &account_id, || {
         activate(handle, &raw_expected).map_err(|_| SnapshotQueueError::Unavailable)?;
         consumed = true;
         durable_local_version(&engine_options).map_err(|_| SnapshotQueueError::Unavailable)
@@ -1294,7 +1879,13 @@ fn run_snapshot_queue(action: SnapshotQueueAction) -> Result<Value, String> {
             directory,
             staging_root,
             options,
-        } => snapshot_queue_process(&snapshot_queue(&directory)?, staging_root, options),
+            account_id,
+        } => snapshot_queue_process(
+            &snapshot_queue(&directory)?,
+            staging_root,
+            options,
+            account_id,
+        ),
     }
 }
 
@@ -1307,14 +1898,32 @@ pub unsafe extern "C" fn msime_client_snapshot_queue(
     length: usize,
 ) -> *mut c_char {
     response(|| {
+        // 先限长再建切片：宿主传错长度（比如 size_t 下溢）时直接拒绝，不让 from_raw_parts 拿越界的长度建切片。
         if request.is_null() || length == 0 || length > REQUEST_LIMIT {
             return Err("snapshot_invalid".to_owned());
         }
-        let action: SnapshotQueueAction =
-            serde_json::from_slice(unsafe { std::slice::from_raw_parts(request, length) })
-                .map_err(|_| "snapshot_invalid".to_owned())?;
-        run_snapshot_queue(action)
+        snapshot_queue_json(unsafe { std::slice::from_raw_parts(request, length) })
     })
+}
+
+/// 与 [`msime_client_snapshot_queue`] 相同的快照队列请求，给直接链接本 crate 的 Rust 宿主（Windows 设置应用）用，不经过 C 字符串。
+pub fn snapshot_queue_json(request: &[u8]) -> Result<Value, String> {
+    if request.is_empty() || request.len() > REQUEST_LIMIT {
+        return Err("snapshot_invalid".to_owned());
+    }
+    let action: SnapshotQueueAction =
+        serde_json::from_slice(request).map_err(|_| "snapshot_invalid".to_owned())?;
+    run_snapshot_queue(action)
+}
+
+/// 与 [`msime_client_snapshot_inspect`] 相同：校验一份宿主私有的快照文件，只返回元数据（其中有 `fileSha256` 和 `engineRecords`），不返回内容。
+pub fn inspect_snapshot_json(path: &Path) -> Result<Value, String> {
+    if !path.is_absolute() {
+        return Err("invalid snapshot path".into());
+    }
+    inspect_snapshot(path)
+        .and_then(|metadata| serde_json::to_value(metadata).map_err(|_| "snapshot unavailable"))
+        .map_err(Into::into)
 }
 
 /// Inspect one host-private snapshot file without returning its contents.
@@ -1331,13 +1940,7 @@ pub unsafe extern "C" fn msime_client_snapshot_inspect(
         }
         let text = std::str::from_utf8(unsafe { std::slice::from_raw_parts(path, length) })
             .map_err(|_| "invalid snapshot path")?;
-        let path = Path::new(text);
-        if !path.is_absolute() {
-            return Err("invalid snapshot path".into());
-        }
-        inspect_snapshot(path)
-            .and_then(|metadata| serde_json::to_value(metadata).map_err(|_| "snapshot unavailable"))
-            .map_err(Into::into)
+        inspect_snapshot_json(Path::new(text))
     })
 }
 

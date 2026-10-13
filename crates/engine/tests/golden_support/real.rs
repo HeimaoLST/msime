@@ -190,6 +190,8 @@ pub fn product_options(options: &mut SessionOptions) {
         expression: false,
         command: false,
         mention: false,
+        chaizi: false,
+        shift_letter_entry: true,
     };
     options.wubi.mixed_pinyin = false;
     options.sentence_alternatives = true;

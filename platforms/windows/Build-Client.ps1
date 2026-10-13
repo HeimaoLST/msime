@@ -37,7 +37,7 @@ foreach ($prefix in @($X64Dependencies, $X86Dependencies)) {
     }
 }
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
-$editionTable = Get-Content -LiteralPath (Join-Path $RepoRoot 'shared/contracts/editions.json') -Raw | ConvertFrom-Json
+$editionTable = Get-Content -LiteralPath (Join-Path $RepoRoot 'shared/contracts/editions.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $editionEntry = @($editionTable.editions | Where-Object { $_.id -ceq $Edition -and $null -ne $_.platforms.windows })
 if ($editionEntry.Count -ne 1) { throw "Edition $Edition has no Windows identifiers in shared/contracts/editions.json" }
 # 两个版本的 TIP 被同一个应用加载时，按导入表找 msime_host_api.dll 会拿到先加载的那一个，所以不是 full 的版本把它改成自己的名字（版本表 host_dll），并生成同名的导入库给 TSF DLL、Server 和设置窗口链接。
@@ -111,11 +111,13 @@ try {
             $settingsIntermediate = Join-Path $output 'settings-obj'
             # -restore rather than /t:Restore,Build: restore writes obj\*.nuget.g.targets, where the CppWinRT and Windows App SDK build logic lives, and only a separate evaluation after it imports them. In one evaluation the build skips header generation, which only a previously restored obj directory hides.
             # Built under the name the Server launcher, PE checks and packaging expect. Renaming the output afterwards would leave its resource index behind as MSIME.Settings.pri, which MRT Core looks up by the executable's name.
-            Invoke-ClientBuild msbuild @($settingsProject, '-restore', '/t:Build',
+            # 「关于」页显示这个版本号，并以它为准检查更新；不传 `TargetVersion` 时工程读取 `version.txt`，与 CMake 给 Server 的做法相同。
+            $settingsVersion = if ($TargetVersion -ne '') { @("/p:MsimeVersion=$TargetVersion") } else { @() }
+            Invoke-ClientBuild msbuild (@($settingsProject, '-restore', '/t:Build',
                 '/p:Configuration=RelWithDebInfo', '/p:Platform=x64',
                 '/p:TargetName=msime-client-settings',
                 "/p:HostApiLibrary=$hostLibrary", "/p:MsimeEdition=$Edition",
-                "/p:OutDir=$bin\", "/p:IntDir=$settingsIntermediate\")
+                "/p:OutDir=$bin\", "/p:IntDir=$settingsIntermediate\") + $settingsVersion)
             $settingsPdb = Join-Path $bin 'msime-client-settings.pdb'
             if (-not (Test-Path -LiteralPath $settingsPdb -PathType Leaf)) {
                 throw "Expected one WinUI settings PDB output: $settingsPdb"

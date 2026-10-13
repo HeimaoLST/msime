@@ -22,6 +22,7 @@ pub mod language_dictionary;
 mod lattice;
 mod local;
 mod nine_key;
+mod nine_key_shuangpin;
 pub mod ordering;
 mod paths;
 mod pinyin;
@@ -45,6 +46,8 @@ pub use error::{EngineError, Result};
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
 pub use handwriting::handwriting_recognize;
 pub use handwriting::order_handwriting_candidates;
+pub use nine_key::KeyGrid;
+pub use nine_key_shuangpin::NineKeyShuangpin;
 pub use paths::RuntimePaths;
 pub use pinyin::glide::{GlideKeyboard, GlidePoint};
 pub use session::{Clock, Session, SessionOptions, SessionSnapshot};
@@ -52,9 +55,10 @@ pub use types::{
     autocorrect_type, fuzzy_rule, request_autocorrect_mask, CandidateEdge, CandidateSource,
     Command, CommandTranslationQuery, EnglishInputOptions, FrequencyAdjustmentMode,
     FrequencyAdjustmentOptions, FuzzyPinyinOptions, KeyResult, LocalInputMode, LocalModeOptions,
-    MixedExpressiveOptions, OnlineQuery, PersonalDictionaryEntry, PersonalDictionaryKind,
-    SchemeSet, SchemeType, SentenceAssociationOptions, ShuangpinProfileKind, WordItem,
-    WubiInputOptions, WubiProfileKind,
+    MixedExpressiveOptions, NineKeyShuangpinKind, NineKeyShuangpinTable, OnlineQuery,
+    PersonalDictionaryEntry, PersonalDictionaryKind, SchemeSet, SchemeType,
+    SentenceAssociationOptions, ShuangpinCustomTable, ShuangpinProfileKind, WordItem,
+    WubiInputOptions, WubiProfileKind, DEFAULT_FIRST_PAGE_ROWS,
 };
 pub use user_dictionary::bundled::{
     dictionary_table_entries, edit_bundled_dictionary_entry, DictionaryTableEntry,
@@ -98,4 +102,11 @@ pub fn preload_japanese_dictionary(path: &std::path::Path, bytes: Box<[u8]>) -> 
 /// Forgets the model [`preload_japanese_dictionary`] put at `path`; sessions already using it keep it until they end.
 pub fn unload_japanese_dictionary(path: &std::path::Path) {
     japanese::decoder::JapaneseDictionary::unload(path);
+}
+
+/// Releases the process-level Japanese model cache while sessions that still use a model keep it
+/// alive. Mobile hosts call this from their memory-pressure callback when there is no session
+/// handle to pass to `Session::reset_cache`.
+pub fn release_japanese_dictionary_cache() {
+    japanese::decoder::JapaneseDictionary::release_shared();
 }

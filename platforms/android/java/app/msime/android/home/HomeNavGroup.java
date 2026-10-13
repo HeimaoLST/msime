@@ -1,5 +1,9 @@
 package app.msime.android.home;
 
+import app.msime.android.LayoutPolicy;
+
+import app.msime.android.DimensionPolicy;
+
 import android.content.Context;
 import android.view.View;
 import android.view.ViewGroup;
@@ -8,6 +12,7 @@ import android.widget.TextView;
 import androidx.annotation.DrawableRes;
 import androidx.annotation.Nullable;
 import app.msime.android.R;
+import app.msime.android.ThemeColorPolicy;
 import app.msime.android.ViewPolicy;
 
 /**
@@ -23,11 +28,11 @@ public final class HomeNavGroup {
 
     private HomeNavGroup(ViewGroup parent) {
         Context context = parent.getContext();
-        card = Ui.verticalCard(context, Ui.NAV_GROUP_RADIUS);
+        card = LayoutPolicy.roundedColumn(context, ThemeColorPolicy.card(context), Ui.NAV_GROUP_RADIUS);
         // 按压波纹裁在 24dp 的圆角里。
         card.setClipToOutline(true);
-        LinearLayout.LayoutParams params = Ui.matchWidth();
-        if (parent.getChildCount() > 0) params.topMargin = Ui.dp(context, BLOCK_GAP);
+        LinearLayout.LayoutParams params = LayoutPolicy.matchWidthWrapParams();
+        if (parent.getChildCount() > 0) params.topMargin = DimensionPolicy.pixels(context, BLOCK_GAP);
         parent.addView(card, params);
     }
 
@@ -58,8 +63,7 @@ public final class HomeNavGroup {
         public View view() { return view; }
 
         public void setValue(@Nullable CharSequence text) {
-            value.setText(text);
-            Ui.setVisibilityForText(value, text);
+            ViewPolicy.setTextAndVisibility(value, text);
         }
 
         public void setVisible(boolean visible) {

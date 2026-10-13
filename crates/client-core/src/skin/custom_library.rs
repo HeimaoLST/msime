@@ -5,8 +5,6 @@ use crate::preferences::TouchKeyboardSkinDesign;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::File;
-#[cfg(not(unix))]
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use unicode_segmentation::UnicodeSegmentation;
@@ -15,6 +13,8 @@ use uuid::Uuid;
 const MAXIMUM_ITEMS: usize = 12;
 const MAXIMUM_BYTES: u64 = 9_000_000;
 const MAXIMUM_NAME_GRAPHEMES: usize = 32;
+const LIBRARY_FILE: &str = "library.json";
+const LOCK_FILE: &str = "library.lock";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +67,11 @@ pub struct CustomSkinLibraryStore {
     directory: PathBuf,
 }
 
+struct CustomSkinLibraryLock {
+    directory: crate::file_lock::PrivateDirectory,
+    _lock: File,
+}
+
 impl CustomSkinLibraryStore {
     pub fn new(state_directory: impl AsRef<Path>) -> Self {
         Self {
@@ -79,16 +84,16 @@ impl CustomSkinLibraryStore {
     }
 
     pub fn load(&self) -> Result<Vec<SavedTouchKeyboardSkin>, CustomSkinLibraryError> {
-        let _lock = self.lock()?;
-        self.read_locked()
+        let lock = self.lock()?;
+        self.read_locked(&lock)
     }
 
     pub fn mutate(
         &self,
         action: CustomSkinLibraryAction,
     ) -> Result<Vec<SavedTouchKeyboardSkin>, CustomSkinLibraryError> {
-        let _lock = self.lock()?;
-        let mut items = self.read_locked()?;
+        let lock = self.lock()?;
+        let mut items = self.read_locked(&lock)?;
         match action {
             CustomSkinLibraryAction::Create { name, design } => {
                 if items.len() >= MAXIMUM_ITEMS {
@@ -126,7 +131,7 @@ impl CustomSkinLibraryStore {
                 }
             }
         }
-        self.write_locked(&items)?;
+        self.write_locked(&lock, &items)?;
         Ok(items)
     }
 
@@ -141,12 +146,12 @@ impl CustomSkinLibraryStore {
         if id.is_nil() {
             return Err(CustomSkinLibraryError::Invalid);
         }
-        let _lock = self.lock()?;
-        let mut items = self.read_locked()?;
+        let lock = self.lock()?;
+        let mut items = self.read_locked(&lock)?;
         if let Some(item) = items.iter_mut().find(|item| item.id == id) {
             item.design = design.normalized();
             let imported = item.clone();
-            self.write_locked(&items)?;
+            self.write_locked(&lock, &items)?;
             return Ok(imported);
         }
         if items.len() >= MAXIMUM_ITEMS {
@@ -159,28 +164,36 @@ impl CustomSkinLibraryStore {
             design: design.normalized(),
         };
         items.push(imported.clone());
-        self.write_locked(&items)?;
+        self.write_locked(&lock, &items)?;
         Ok(imported)
     }
 
-    fn lock(&self) -> Result<File, CustomSkinLibraryError> {
+    fn lock(&self) -> Result<CustomSkinLibraryLock, CustomSkinLibraryError> {
         if !crate::storage::create_directory_and_check(&self.directory)? {
             return Err(CustomSkinLibraryError::Invalid);
         }
-        let lock = file_lock::open_lock_file(self.directory.join("library.lock"))?;
+        let directory = crate::file_lock::open_private_directory(&self.directory)?;
+        let lock =
+            file_lock::open_private_lock_file_at(&directory, std::ffi::OsStr::new(LOCK_FILE))?;
         file_lock::exclusive(&lock)?;
-        Ok(lock)
+        Ok(CustomSkinLibraryLock {
+            directory,
+            _lock: lock,
+        })
     }
 
-    fn read_locked(&self) -> Result<Vec<SavedTouchKeyboardSkin>, CustomSkinLibraryError> {
-        let file = match crate::storage::open_private_file_in(&self.path()) {
+    fn read_locked(
+        &self,
+        lock: &CustomSkinLibraryLock,
+    ) -> Result<Vec<SavedTouchKeyboardSkin>, CustomSkinLibraryError> {
+        let file = match crate::file_lock::open_private_file_at(
+            &lock.directory,
+            std::ffi::OsStr::new(LIBRARY_FILE),
+        ) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(_) => return Err(CustomSkinLibraryError::Invalid),
         };
-        if file.metadata()?.len() > MAXIMUM_BYTES {
-            return Err(CustomSkinLibraryError::Invalid);
-        }
         let bytes = crate::bounded_io::read_bounded_file(file, MAXIMUM_BYTES, || {
             CustomSkinLibraryError::Invalid
         })?;
@@ -203,31 +216,21 @@ impl CustomSkinLibraryStore {
         Ok(items)
     }
 
-    fn write_locked(&self, items: &[SavedTouchKeyboardSkin]) -> Result<(), CustomSkinLibraryError> {
+    fn write_locked(
+        &self,
+        lock: &CustomSkinLibraryLock,
+        items: &[SavedTouchKeyboardSkin],
+    ) -> Result<(), CustomSkinLibraryError> {
         let bytes = serde_json::to_vec_pretty(items)?;
         if bytes.len() as u64 > MAXIMUM_BYTES {
             return Err(CustomSkinLibraryError::Invalid);
         }
-        #[cfg(unix)]
-        {
-            let directory = crate::storage::open_private_directory(&self.directory)?;
-            crate::storage::write_private_file_at(
-                &directory,
-                std::ffi::OsStr::new("library.json"),
-                &bytes,
-            )?;
-            Ok(())
-        }
-        #[cfg(not(unix))]
-        {
-            let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
-            temporary.write_all(&bytes)?;
-            temporary.as_file().sync_all()?;
-            temporary
-                .persist(self.path())
-                .map_err(|error| error.error)?;
-            Ok(())
-        }
+        crate::file_lock::write_private_file_at(
+            &lock.directory,
+            std::ffi::OsStr::new(LIBRARY_FILE),
+            &bytes,
+        )?;
+        Ok(())
     }
 }
 
@@ -466,6 +469,25 @@ mod tests {
         symlink(outside.path(), store.path().parent().unwrap()).unwrap();
 
         assert!(matches!(store.load(), Err(CustomSkinLibraryError::Io(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn library_writes_stay_bound_to_the_locked_directory_after_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CustomSkinLibraryStore::new(root.path());
+        fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+        let lock = store.lock().unwrap();
+
+        let moved = root.path().join("CustomSkins-moved");
+        fs::rename(store.path().parent().unwrap(), &moved).unwrap();
+        fs::create_dir(store.path().parent().unwrap()).unwrap();
+
+        store.write_locked(&lock, &[]).unwrap();
+
+        assert!(moved.join("library.json").exists());
+        assert!(!store.path().exists());
+        fs::remove_dir_all(moved).unwrap();
     }
 
     #[test]

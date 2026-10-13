@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { ControlledCheckbox } from "../core/controlled-checkbox";
 
 export interface SettingCheckProps {
   label: ReactNode;
@@ -12,12 +13,11 @@ export interface SettingCheckProps {
 export function SettingCheck({ label, checked, disabled, ariaLabel, onChange }: SettingCheckProps) {
   return (
     <label className="check-option">
-      <input
-        type="checkbox"
+      <ControlledCheckbox
         aria-label={ariaLabel}
         checked={checked}
         disabled={disabled}
-        onChange={(event) => onChange(event.target.checked)}
+        onChange={onChange}
       />
       <span>{label}</span>
     </label>

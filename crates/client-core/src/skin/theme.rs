@@ -1,12 +1,13 @@
 //! The global theme: one id that colours the candidate window, the floating toolbar, the menus and the touch keyboard on every host.
 //!
-//! There are seven ids. `system` leaves every colour to the host's own platform tokens; `shuishan`, `light`, `paper`, `night` and `ink` are the built-in palettes, copied from the design's `THEMES` table; `custom` is whatever the user assembled in `Preferences::custom_theme` (an external candidate skin package, the seven candidate colour pickers, and the keyboard design produced by the editor, the community library or the AI generator).
+//! 共有八个 id。`system`（跟随系统）不带调色板，由宿主自己取色：桌面宿主画平台 token，触屏键盘按应用主题当前季节取色；`native`（原生）同样不带调色板，只画宿主系统自带的键盘 token，不跟季节，目前只有 iOS 提供；`shuishan`、`light`、`paper`、`night` 和 `ink` 是内置调色板，照抄设计稿的 `THEMES` 表；`custom` 是用户在 `Preferences::custom_theme` 里组合出来的主题（外部候选皮肤包、七个候选颜色取色器，以及编辑器、社区皮肤库或 AI 生成的键盘设计）。
 //!
 //! Hosts do not keep their own copy of these palettes. They read the catalog (`catalog`) to draw the picker and call `resolve` for the colours on screen, so a palette is changed here once and every host follows.
 //!
 //! Every colour this module emits is `#RRGGBB` or `#RRGGBBAA` (uppercase, alpha last). A `None` slot means "the host's own platform token for that slot", never "transparent".
 
 use super::catalog::{CandidatePalette, SkinSummary};
+use crate::host_surface::HostPlatform;
 use crate::preferences::{CandidateLayout, CustomTheme, TouchKeyboardSkinDesign};
 use serde::{Deserialize, Serialize};
 
@@ -14,9 +15,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GlobalTheme {
-    /// Follow the platform: every slot is the host's native token, in the host's current light or dark mode.
+    /// 跟随系统：不带调色板，按宿主当前的明暗绘制。桌面宿主画平台自己的 token；触屏键盘（Android、iOS、鸿蒙）按应用主题当前季节取色，键盘与应用同色。
     #[default]
     System,
+    /// 原生：不带调色板，只画宿主系统自带键盘的 token，不跟季节。只在 [`GlobalTheme::platforms`] 列出的宿主上提供，其他宿主收到它时按 `system` 绘制。
+    Native,
     Shuishan,
     Light,
     Paper,
@@ -27,8 +30,9 @@ pub enum GlobalTheme {
 }
 
 impl GlobalTheme {
-    pub const ALL: [GlobalTheme; 7] = [
+    pub const ALL: [GlobalTheme; 8] = [
         GlobalTheme::System,
+        GlobalTheme::Native,
         GlobalTheme::Shuishan,
         GlobalTheme::Light,
         GlobalTheme::Paper,
@@ -40,6 +44,7 @@ impl GlobalTheme {
     pub fn id(self) -> &'static str {
         match self {
             GlobalTheme::System => "system",
+            GlobalTheme::Native => "native",
             GlobalTheme::Shuishan => "shuishan",
             GlobalTheme::Light => "light",
             GlobalTheme::Paper => "paper",
@@ -54,15 +59,30 @@ impl GlobalTheme {
         Self::ALL.into_iter().find(|theme| theme.id() == id)
     }
 
-    /// Whether a custom theme or a skin package may be drawn over this theme: `system` or a built-in theme, never `custom` itself.
+    /// 自定义主题或皮肤包能否以这个主题为底：`system` 或内置主题。`custom` 自身不行；`native` 也不行，因为它只在部分宿主上提供，而自定义主题的底和皮肤包清单的 `base` 在每个宿主上都要画得出来。
     pub fn is_base(self) -> bool {
-        self != GlobalTheme::Custom
+        !matches!(self, GlobalTheme::Custom | GlobalTheme::Native)
+    }
+
+    /// 提供这个主题的宿主；`None` 表示所有宿主都提供。其他宿主的选择器不列出它，收到它时按 `system` 绘制。
+    pub fn platforms(self) -> Option<&'static [HostPlatform]> {
+        match self {
+            GlobalTheme::Native => Some(&[HostPlatform::Ios]),
+            _ => None,
+        }
+    }
+
+    /// `platform` 的选择器是否列出这个主题。
+    pub fn is_offered_on(self, platform: HostPlatform) -> bool {
+        self.platforms()
+            .is_none_or(|platforms| platforms.contains(&platform))
     }
 
     /// The picker title, in the product's language.
     pub fn title(self) -> &'static str {
         match self {
             GlobalTheme::System => "跟随系统",
+            GlobalTheme::Native => "原生",
             GlobalTheme::Shuishan => "水杉",
             GlobalTheme::Light => "浅色",
             GlobalTheme::Paper => "纸白",
@@ -247,7 +267,9 @@ pub struct ThemePreview {
 pub struct ThemeCatalogEntry {
     pub id: GlobalTheme,
     pub title: &'static str,
-    /// `None` for `system` and `custom`, whose appearance depends on the platform or on what the user assembled.
+    /// 提供这个主题的宿主（见 [`GlobalTheme::platforms`]），`None` 表示所有宿主都提供。
+    pub platforms: Option<&'static [HostPlatform]>,
+    /// `None` for `system`, `native` and `custom`, whose appearance depends on the platform or on what the user assembled.
     pub appearance: Option<ThemeAppearance>,
     pub preview: Option<ThemePreview>,
     pub candidate: Option<CandidateThemePalette>,
@@ -297,7 +319,7 @@ impl BuiltinTheme {
     }
 }
 
-/// Every theme the picker offers, in order. `system` and `custom` carry no palette here: `system` never has one, and `custom` has one only once `resolve` combines it with the user's `custom_theme`.
+/// Every theme, in picker order, including the ones only some hosts offer (each entry says which in `platforms`). `system`, `native` and `custom` carry no palette here: `system` and `native` never have one, and `custom` has one only once `resolve` combines it with the user's `custom_theme`.
 pub fn catalog() -> Vec<ThemeCatalogEntry> {
     GlobalTheme::ALL
         .into_iter()
@@ -306,12 +328,21 @@ pub fn catalog() -> Vec<ThemeCatalogEntry> {
             ThemeCatalogEntry {
                 id,
                 title: id.title(),
+                platforms: id.platforms(),
                 appearance: builtin.map(|theme| theme.appearance),
                 preview: builtin.map(BuiltinTheme::preview),
                 candidate: builtin.map(BuiltinTheme::candidate),
                 keyboard: builtin.map(BuiltinTheme::keyboard),
             }
         })
+        .collect()
+}
+
+/// `platform` 的选择器列出的主题，顺序同 [`catalog`]。
+pub fn catalog_for(platform: HostPlatform) -> Vec<ThemeCatalogEntry> {
+    catalog()
+        .into_iter()
+        .filter(|entry| entry.id.is_offered_on(platform))
         .collect()
 }
 
@@ -363,6 +394,12 @@ impl From<&SkinSummary> for ThemePackage {
 }
 
 impl ThemePackage {
+    /// 这个皮肤包能否在 `dark` 模式下绘制：`base` 是固定明暗的内置主题时只在那种明暗下画，`system` 底两种都画。设置页按同一规则把皮肤分到浅色、深色两个槽位（`skin_appearance`）。
+    pub fn draws_in(&self, dark: bool) -> bool {
+        skin_appearance(self.base)
+            .is_none_or(|appearance| (appearance == ThemeAppearance::Dark) == dark)
+    }
+
     /// Read one entry of the published `candidate_skin_catalog` (see `catalog::host_candidate_catalog`). That entry carries a palette for exactly the modes the package declares, so a missing mode reads as undeclared. Its `title`, decoration and corner radius keys are not theme colours and are ignored. The entry is read strictly: an unknown key anywhere, a missing `layouts`, a `base` that is not `system` or a built-in theme (as `catalog::scan` refuses the manifest) or an unsafe id is refused. In particular a `SkinSummary` from `msime_client_skin_catalog`, whose keys are camelCase (`showSelectedBar`, `minWidthDip`, `themes`), is not an entry and is refused rather than read with its selection bar and declared modes silently lost; hosts that scan the skin root pass `skins_directory` instead.
     pub fn from_host_catalog_entry(entry: serde_json::Value) -> Result<Self, String> {
         #[derive(Deserialize)]
@@ -444,19 +481,24 @@ pub struct ResolvedTheme {
     pub source: ThemeSource,
     /// `None` means follow the host's current mode.
     pub appearance: Option<ThemeAppearance>,
-    /// `None` for `system`: draw the platform tokens.
+    /// `system` 和 `native` 为 `None`：画平台 token。
     pub candidate: Option<CandidateThemePalette>,
-    /// `None` for `system`: draw the platform keyboard.
+    /// `system` 和 `native` 为 `None`：画平台键盘。
     pub keyboard: Option<KeyboardThemePalette>,
     /// The external package drawn on this surface: the custom theme names it, it was found, and its manifest declares both `layout` and the mode drawn. Hosts draw the package's decoration and minimum width only when this is set.
     pub candidate_skin: Option<String>,
 }
 
+/// 以 `base` 为底的皮肤包属于哪种明暗：固定明暗的内置主题给出它自己的明暗，`system` 为 `None`，两种模式都可以画。
+pub fn skin_appearance(base: GlobalTheme) -> Option<ThemeAppearance> {
+    base.builtin().map(|builtin| builtin.appearance)
+}
+
 /// Resolve the colours for `theme`.
 ///
-/// `dark` is the host's effective mode for the surface being drawn; only `custom` over a `system` base reads it. `layout` is the candidate layout of that surface; only a custom theme's package reads it. `package` is the installed package `custom.candidate_skin` names, already loaded by the caller (`None` when the custom theme names none or it is not installed); a package with a different id is ignored.
+/// `dark` 是宿主正在绘制的界面当前的明暗模式：它决定自定义主题取哪个槽位的皮肤包，`system` 底也按它取色。`layout` 是该界面的候选排列，只有自定义主题的皮肤包读它。`package` 是调用方已经加载好的、`custom.candidate_skin_for(dark)` 指名的那个已安装皮肤包（自定义主题没指名或没安装时为 `None`）；id 对不上的包被忽略。
 ///
-/// A custom theme is drawn over a base: the named package's manifest `base`, or else `custom.base`. A built-in base fixes the mode, so the package palette is the one for the base's own appearance and `dark` is ignored. The package is drawn only where its manifest says it may be: in a layout it does not declare, or a mode it does not declare, it contributes nothing and is not reported in `candidate_skin`, and the base is drawn with the pickers. A `system` base contributes no slots and follows `dark`.
+/// 自定义主题画在一个底上：选中皮肤包清单里的 `base`，否则是 `custom.base`。皮肤包只在它 `base` 的明暗下绘制：`base` 是固定明暗的内置主题、且与 `dark` 不符时，这个模式不画它，主题落回底加取色器，所以浅色模式不会出现深色皮肤，反之亦然。设过皮肤却在这个模式下没有可画的包时，`custom.base` 也只在属于当前明暗时作底，否则按 `system`；完全没设皮肤的自定义主题照旧用 `custom.base`。`system` 底的皮肤包两种模式都画，按 `dark` 取对应配色。皮肤包也只在清单声明的排列和模式下绘制：其余情况下它不提供任何颜色，也不出现在 `candidate_skin` 里，底照常与取色器一起画。`system` 底不提供槽位颜色，按 `dark` 绘制。
 ///
 /// Candidate colours are layered: the base, then the package palette, then every picker the user set. A text picker also sets the numbers to that colour at `PICKED_NUMBER_ALPHA` unless the number picker is set. `secondary` is the package's `translation` colour, and otherwise follows `number`. Over a built-in base the slots that base derives keep following their sources unless the package or a picker set them: `selected` is `accent` at `SELECTED_ALPHA`, `hover` is `text` at `HOVER_ALPHA`, `selected_text` is `accent` and `selected_number` is `number`. When the selected picker is set, on any base, `selected_text` is black or white by that colour's luminance and `selected_number` is the same colour at `PICKED_NUMBER_ALPHA`, so the highlighted candidate stays readable whatever colour was picked. A custom theme over `system` with no package slots and no pickers has no candidate palette at all and draws the platform's own.
 ///
@@ -478,7 +520,8 @@ pub fn resolve(
             candidate_skin: None,
         };
     }
-    if theme == GlobalTheme::System {
+    // `native` 与 `system` 一样不带调色板，两者的区别只在宿主怎么画：`id` 原样带回，宿主据此分辨。
+    if matches!(theme, GlobalTheme::System | GlobalTheme::Native) {
         return ResolvedTheme {
             id: theme,
             source: ThemeSource::System,
@@ -488,10 +531,24 @@ pub fn resolve(
             candidate_skin: None,
         };
     }
-    let package = package.filter(|package| custom.candidate_skin.as_deref() == Some(&package.id));
-    let base = package
-        .map_or(custom.base, |package| package.base)
-        .builtin();
+    let package = package
+        .filter(|package| custom.candidate_skin_for(dark) == Some(package.id.as_str()))
+        .filter(|package| package.draws_in(dark));
+    let base = match package {
+        Some(package) => package.base,
+        // 设过皮肤、这个模式却没有能画的（槽位空着、明暗不符或包没装）：底也按同一条明暗规则，不属于当前明暗就跟随系统。应用皮肤时会把包的 `base` 写进 `custom.base`，不这样做，浅色模式会落回深色皮肤留下的 `night`。
+        None if custom.candidate_skin.is_some() || custom.candidate_skin_dark.is_some() => {
+            if skin_appearance(custom.base)
+                .is_none_or(|appearance| (appearance == ThemeAppearance::Dark) == dark)
+            {
+                custom.base
+            } else {
+                GlobalTheme::System
+            }
+        }
+        None => custom.base,
+    }
+    .builtin();
     let dark = base.map_or(dark, |base| base.appearance == ThemeAppearance::Dark);
     let drawn = package
         .filter(|package| package.layouts.contains(&layout))

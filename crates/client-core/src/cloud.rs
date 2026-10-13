@@ -5,6 +5,7 @@
 //! in this crate ever opens a socket.
 
 pub mod candidates;
+pub mod clipboard_e2e;
 pub mod dictionary;
 pub mod snapshot_queue;
 pub mod snapshot_validation;

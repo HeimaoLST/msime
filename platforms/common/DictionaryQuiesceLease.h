@@ -83,7 +83,7 @@ inline bool dictionary_quiesced(const std::string &user_data,
     ~CloseOnExit() { ::close(descriptor); }
   } close_on_exit{descriptor};
   struct stat metadata {};
-  if (::fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode)) return false;
+  if (::fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode) || metadata.st_nlink != 1) return false;
   char buffer[32] = {};
   for (;;) {
     const ssize_t count = ::read(descriptor, buffer, sizeof buffer - 1);
@@ -125,8 +125,14 @@ inline bool write_staged_dictionary_lease(const std::filesystem::path &staged,
 inline int lock_dictionary_quiesce_lease(const std::filesystem::path &root) {
   const auto lock = root / std::string(kDictionaryQuiesceLeaseLockName);
   const int descriptor = ::open(lock.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
-  if (descriptor < 0 || ::flock(descriptor, LOCK_EX) != 0) {
-    if (descriptor >= 0) ::close(descriptor);
+  if (descriptor < 0) return -1;
+  struct stat metadata {};
+  if (::fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode) || metadata.st_nlink != 1) {
+    ::close(descriptor);
+    return -1;
+  }
+  if (::flock(descriptor, LOCK_EX) != 0) {
+    ::close(descriptor);
     return -1;
   }
   return descriptor;
@@ -179,7 +185,8 @@ inline void lower_dictionary_quiesce_lease(const std::string &user_data, const s
     ~CloseOnExit() { ::close(descriptor); }
   } close_on_exit{descriptor};
   struct stat metadata {};
-  if (::fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode) || metadata.st_size < 0 ||
+  if (::fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode) || metadata.st_nlink != 1 ||
+      metadata.st_size < 0 ||
       static_cast<std::uintmax_t>(metadata.st_size) > kDictionaryQuiesceLeaseMaxBytes) {
     ::close(lock);
     return;

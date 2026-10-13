@@ -8,10 +8,12 @@ import { GroupList, Row } from "../core/platform-controls";
 import {
   CLOUD_CLIPBOARD_MAX_UTF16,
   cloudClipboardAvailabilityNote,
+  cloudClipboardErrorMessage,
   cloudClipboardFailure,
   type CloudClipboardAvailability,
   type CloudClipboardRequest,
 } from "./cloud-clipboard-send";
+import { cloudClipboardE2e } from "../keyboard/cloud-response";
 import { ActionButton } from "./action-button";
 import { SwitchRow } from "./switch-row";
 import { useAsyncGeneration } from "./use-async-generation";
@@ -38,6 +40,8 @@ export interface ClipboardHistorySectionProps {
   onError: (message: string) => void;
   /** Present while the page is shown on a host that offers the cloud clipboard; each history entry then gets a 发到云剪贴板 action. Nothing is uploaded unless the user picks an entry. */
   cloudRequest?: CloudClipboardRequest;
+  /** 云剪贴板现在走哪条路，例如已保存的自建中继地址和令牌；它一变（同一页上保存或改回了中继）就重新查一次可用状态，不沿用另一条路的结果。 */
+  cloudRoute?: string;
   children?: ReactNode;
 }
 
@@ -52,23 +56,42 @@ export function ClipboardHistorySection({
   onToggle,
   onError,
   cloudRequest,
+  cloudRoute,
   children,
 }: ClipboardHistorySectionProps) {
   const [entries, setEntries] = useState<ClipboardHistoryEntry[]>([]);
   const [clearArmed, setClearArmed] = useState(false);
+  const [historyBusy, setHistoryBusy] = useState(false);
   const [cloud, setCloud] = useState<CloudClipboardAvailability>("checking");
   const [cloudNotice, setCloudNotice] = useState("");
   const [sending, setSending] = useState(false);
   const historyShown = historyEnabled && Boolean(client?.list);
-  const cloudRevision = useAsyncGeneration(cloudRequest, historyShown);
+  const cloudRevision = useAsyncGeneration(cloudRequest, historyShown, cloudRoute);
   const historyGeneration = useAsyncGeneration(
     client,
     ios,
     page,
+    historyEnabled,
     persistedHistoryEnabled,
     revision,
   );
+  // A write belongs to the client even while the user visits another settings page.
+  const historyActionGeneration = useAsyncGeneration(
+    client,
+    ios,
+    historyEnabled,
+    persistedHistoryEnabled,
+  );
   const historyActionBusy = useRef(false);
+  const historyRead = useRef(0);
+
+  useEffect(() => {
+    historyActionBusy.current = false;
+    setHistoryBusy(false);
+    return () => {
+      historyActionBusy.current = false;
+    };
+  }, [client, ios, historyEnabled, persistedHistoryEnabled]);
 
   // The account state and the server's enabled flag are read once each time the page is opened with the history showing; there is no polling.
   useEffect(() => {
@@ -79,14 +102,21 @@ export function ClipboardHistorySection({
     if (!cloudRequest || !historyShown) return;
     cloudRequest({ operation: "list", search: "" }).then(
       (result) => {
-        if (revision === cloudRevision.current)
-          setCloud(result.enabled === false ? "disabled" : "ready");
+        if (revision !== cloudRevision.current) return;
+        const e2e = cloudClipboardE2e(result);
+        setCloud(
+          result.enabled === false || e2e?.status === "disabled"
+            ? "disabled"
+            : e2e?.status === "pending"
+              ? "pending"
+              : "ready",
+        );
       },
       (error: unknown) => {
         if (revision === cloudRevision.current) setCloud(cloudClipboardFailure(error));
       },
     );
-  }, [cloudRequest, cloudRevision, historyShown]);
+  }, [cloudRequest, cloudRevision, historyShown, cloudRoute]);
 
   const sendToCloud = async (text: string) => {
     if (!cloudRequest || cloud !== "ready" || sending) return;
@@ -102,11 +132,13 @@ export function ClipboardHistorySection({
       if (revision === cloudRevision.current) setCloudNotice("已发到云剪贴板");
     } catch (error) {
       if (revision !== cloudRevision.current) return;
-      if (cloudClipboardFailure(error) === "signed_out") {
-        setCloud("signed_out");
-        setCloudNotice("");
+      const failure = cloudClipboardFailure(error);
+      if (failure === "unavailable") {
+        setCloudNotice(cloudClipboardErrorMessage(error, "发到云剪贴板失败，请稍后重试"));
       } else {
-        setCloudNotice("发到云剪贴板失败，请稍后重试");
+        // 未登录、本设备待批准和云剪贴板已关闭都要先由用户处理，在那之前不再允许发送。
+        setCloud(failure);
+        setCloudNotice("");
       }
     } finally {
       if (revision === cloudRevision.current) setSending(false);
@@ -116,6 +148,10 @@ export function ClipboardHistorySection({
 
   useEffect(() => {
     const currentGeneration = historyGeneration.current;
+    const currentRead = historyRead.current;
+    // The section remains mounted behind other settings pages. Read on entry instead of
+    // starting a request that will be invalidated before the history is shown.
+    if (page && page !== "tools") return;
     if (!ios && !persistedHistoryEnabled) {
       setEntries([]);
       setClearArmed(false);
@@ -129,35 +165,44 @@ export function ClipboardHistorySection({
     void client
       .list()
       .then((next) => {
-        if (currentGeneration === historyGeneration.current) {
+        if (
+          currentGeneration === historyGeneration.current &&
+          currentRead === historyRead.current
+        ) {
           setEntries(next);
           setClearArmed(false);
         }
       })
       .catch(() => undefined);
-    return () => {
-      historyActionBusy.current = false;
-    };
-  }, [client, historyGeneration]);
+  }, [client, historyGeneration, ios, page, historyEnabled, persistedHistoryEnabled, revision]);
 
   const mutate = async (action: () => Promise<void>, failure: string) => {
     if (historyActionBusy.current) return;
     historyActionBusy.current = true;
-    const currentGeneration = historyGeneration.current;
+    setHistoryBusy(true);
+    const currentGeneration = historyActionGeneration.current;
     const currentClient = client;
     try {
       await action();
-      if (currentGeneration !== historyGeneration.current) return;
+      if (currentGeneration !== historyActionGeneration.current) return;
+      const currentRead = ++historyRead.current;
       setClearArmed(false);
       if (currentClient?.list) {
         const next = await currentClient.list();
-        if (currentGeneration !== historyGeneration.current) return;
+        if (
+          currentGeneration !== historyActionGeneration.current ||
+          currentRead !== historyRead.current
+        )
+          return;
         setEntries(next);
       }
     } catch {
-      if (currentGeneration === historyGeneration.current) onError(failure);
+      if (currentGeneration === historyActionGeneration.current) onError(failure);
     } finally {
-      if (currentGeneration === historyGeneration.current) historyActionBusy.current = false;
+      if (currentGeneration === historyActionGeneration.current) {
+        historyActionBusy.current = false;
+        setHistoryBusy(false);
+      }
     }
   };
 
@@ -184,6 +229,7 @@ export function ClipboardHistorySection({
             description={clipboardDescription}
             aria-label="剪贴板历史"
             checked={historyEnabled}
+            disabled={historyBusy}
             onChange={toggle}
           />
         )}
@@ -193,19 +239,29 @@ export function ClipboardHistorySection({
               {!ios && client?.sync && (
                 <ActionButton
                   action={() => {
-                    const currentGeneration = historyGeneration.current;
+                    if (historyActionBusy.current) return;
+                    historyActionBusy.current = true;
+                    setHistoryBusy(true);
+                    const currentGeneration = historyActionGeneration.current;
                     void client.sync!()
                       .then((next) => {
-                        if (currentGeneration !== historyGeneration.current) return;
+                        if (currentGeneration !== historyActionGeneration.current) return;
+                        historyRead.current++;
                         setEntries(next);
                         setClearArmed(false);
                       })
                       .catch(() => {
-                        if (currentGeneration === historyGeneration.current)
+                        if (currentGeneration === historyActionGeneration.current)
                           onError("无法同步剪贴板历史");
+                      })
+                      .finally(() => {
+                        if (currentGeneration === historyActionGeneration.current) {
+                          historyActionBusy.current = false;
+                          setHistoryBusy(false);
+                        }
                       });
                   }}
-                  disabled={!historyEnabled || !persistedHistoryEnabled}
+                  disabled={!historyEnabled || !persistedHistoryEnabled || historyBusy}
                   label="从系统剪贴板同步"
                 />
               )}
@@ -218,7 +274,7 @@ export function ClipboardHistorySection({
                     }
                     void mutate(() => client.clear(), "无法清空剪贴板历史，请稍后重试。");
                   }}
-                  disabled={!historyEnabled}
+                  disabled={!historyEnabled || historyBusy}
                   label={clearArmed ? "确认清空" : "清空历史"}
                 />
               )}
@@ -264,6 +320,7 @@ export function ClipboardHistorySection({
                           )
                         }
                         ariaLabel={`${entry.pinned ? "取消固定" : "固定"}剪贴板记录`}
+                        disabled={historyBusy}
                         label={entry.pinned ? "取消固定" : "固定"}
                       />
                     )}
@@ -273,6 +330,7 @@ export function ClipboardHistorySection({
                           void mutate(() => client.remove!(entry.text), "无法删除剪贴板记录")
                         }
                         ariaLabel="删除剪贴板记录"
+                        disabled={historyBusy}
                         label="删除"
                       />
                     )}

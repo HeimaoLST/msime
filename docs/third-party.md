@@ -6,7 +6,7 @@
 
 ## 本项目
 
-源码为 **GPL-3.0-only**，全文在根目录 [LICENSE](../LICENSE)。Rust workspace 的 `license` 字段、Linux 打包元数据和共享客户端都声明同一许可证。
+源码为 **GPL-3.0-only**，全文在根目录 [LICENSE](../LICENSE)。Rust workspace 的 `license` 字段、Linux 打包元数据和共享客户端都声明同一许可证。例外是 `docs/script-plugin-template/`（脚本插件的模板与 SDK）和 `plugins/script/`（[脚本插件合集](#脚本插件合集pluginsscript)）的代码，用 MIT，全文在这两个目录各自的 `LICENSE`；它们不属于 Rust workspace，也不随输入法分发。
 
 ## 输入引擎（`crates/engine`）
 
@@ -116,9 +116,11 @@ print(json.loads(f.read(n))["__metadata__"]["attribution"])
 | 登记方式 | `crates/engine/src/assets.rs` 的 `HELPCODES` 把它登记为第六套方案 `jiajia`，资源目录里的路径是 `helpcodes/jiajia_helpcode.txt` |
 | 许可状态 | **本仓库的 GPL-3.0 不覆盖这张表的内容** |
 
-按 NOTICE.md 的记录，本表的一部分条目直接来自拼音加加 5.x 安装包内的数据表 `fzm.bin`，而拼音加加是商业软件；来源仓库的 `engine/helpcode/NOTICE.md` 写明六张辅助码表没有任何一项拿到明确的再分发授权，并指出 `jiajia` 一行与其余五张性质不同（其余各表只是复现已发表的输入方案）。**在权利澄清之前不要假定这张表可以自由再分发**，打包发布前需确认它在目标渠道是否可接受。退出方式：从 `HELPCODES` 去掉 `jiajia` 那一行，并让该渠道的资源打包不再带上这张表；设置页随之少一个选项，另外五套不受影响。
+按 NOTICE.md 的记录，本表的一部分条目直接来自拼音加加 5.x 安装包内的数据表 `fzm.bin`，而拼音加加是商业软件；来源仓库的 `engine/helpcode/NOTICE.md` 写明六张辅助码表没有任何一项拿到明确的再分发授权，并指出 `jiajia` 一行与其余五张性质不同（其余各表只是复现已发表的输入方案）。**在权利澄清之前不要假定这张表可以自由再分发**，打包发布前需确认它在目标渠道是否可接受。退出方式：从 `HELPCODES` 去掉 `jiajia` 那一行，并让该渠道的资源打包不再带上这张表；设置页随之少一个选项，其余各套不受影响。
 
 构成这张表所用的部件拆分与笔顺数据另有来源（rime-radical-pinyin，GPL-3.0，上游含 chaizi/CC-BY-3.0、CHISE/GPL-2+、yi-bai/ids/MIT；笔顺来自 cnchar，MIT），逐条同样见 NOTICE.md。另外五套辅助码表原先随 Engine 归档而来，现在同样放在 `resources/helpcodes/`，来源说明是从 Engine 原样带过来的 [`resources/helpcodes/ENGINE-NOTICE.md`](../resources/helpcodes/ENGINE-NOTICE.md)：它们同样没有拿到明确的再分发授权。
+
+第七套五笔 86（`wubi86`）不同：它由本仓库从 msime-dictionary 的 86 五笔码表生成，上游许可明确（极点码表 Apache-2.0，另有 16 个字的码来自并入的 rime-wubi 行，LGPL-3.0，按 GPL-3.0 分发），可以随包分发。来源、生成命令、摘要和 Apache-2.0 全文在 [`resources/helpcodes/NOTICE-wubi86.md`](../resources/helpcodes/NOTICE-wubi86.md)。
 
 ## 自带音效包与插件包（`resources/sound-packs/`、`client-core::plugins`）
 
@@ -237,7 +239,7 @@ msime-dictionary 原样收录了 `stroke.dict.yaml`（`sources/stroke/stroke.dic
 | 产物 | `pronunciations/en-phonetic.db`（`en_phonetics(word, phonetic)`，`meta.kind = en_phonetic`，`user_version = 1`，约 18.8 万词、5.7 MB），外加 `pronunciations-NOTICE.txt`（含 ECDICT 的 LICENSE 全文） |
 | 取词范围 | 纯 ASCII 字母词（可含 `-`、`'`），键为小写；同键时取小写词头那一行；`phonetic` 只取第一种读法，西里尔 `ә`、ASCII `'`/`:`/`,` 等写法规范成 IPA，规范后仍含 IPA 以外字符（中文注释、私用区字符、不配对括号）的整条丢弃；ECDICT 约七成条目是旧式英式注音（`dei`、`həˈləu`、`bəːd`、`buk`），生成时按规则改成现行学习词典的写法（`deɪ`、`həˈləʊ`、`bɜːd`、`bʊk`），词尾与元音前的 `i` 保留 happY 惯例，已是现行写法的部分不变 |
 
-同样**放在 resources 的兄弟目录 `pronunciations/`**，理由与 `offline-glosses/` 相同。目前只在本地生成（同一份输入、同一 SQLite 版本逐字节相同），还没有发布位置，也还没接入各平台的发布工作流。
+同样**放在 resources 的兄弟目录 `pronunciations/`**，理由与 `offline-glosses/` 相同。生成物发布在 [`metasequoiaime/chinese-ime-lm` 的 `pronunciations-ecdict-82c9872`](https://github.com/metasequoiaime/chinese-ime-lm/releases/tag/pronunciations-ecdict-82c9872)，锁的 `built` 记它们的地址、长度和 SHA-256；`scripts/fetch_gloss_tables.py` 下载到 `target/pronunciations`，macOS 与 Windows 的发布工作流在打包前调用它（本节与下面两节的三张表共用这个脚本）。
 
 退出方式：不安装 `pronunciations/` 即可。`msime_client_pronunciation_request` 返回空结果，释义照旧显示、只是没有音标。日语罗马音在 macOS 上由系统的 `CFStringTokenizer` 生成，不需要数据文件。
 
@@ -254,7 +256,7 @@ msime-dictionary 原样收录了 `stroke.dict.yaml`（`sources/stroke/stroke.dic
 | 产物 | `character-glosses/zh-en.db`（与离线释义同一结构：`zh_glosses(chinese, gloss, source)`，`meta.target_language = en`，`user_version = 1`，约 2.3 万字、1.2 MB），外加含许可全文的 `character-glosses-NOTICE.txt` |
 | 取词范围 | 去掉辞书附注（部首编号、姓氏、干支、星宿、`numerary adjunct` 之类、括号注记），每字最多两个义项、每义项最多三个词；Unihan 标注「simp. for」的义项排到前面；简化字本身没有释义时取其繁体的释义；少数简化字 Unihan 只给了其本字的冷僻义（几、里、干等），在脚本的 `CORRECTIONS` 表里逐字改写 |
 
-候选恰好是一个字时 host-api 先查这张表，再查下一节的词表（`english.db` 本就没有单字）；用户自己已学的释义不被替换，表缺失或损坏时保持原样。退出方式：不安装 `character-glosses/` 即可。
+候选恰好是一个字时 host-api 先查这张表，再查下一节的词表（`english.db` 本就没有单字）；用户自己已学的释义不被替换，表缺失或损坏时保持原样。生成物发布在 [`metasequoiaime/chinese-ime-lm` 的 `character-glosses-unihan-17.0.0`](https://github.com/metasequoiaime/chinese-ime-lm/releases/tag/character-glosses-unihan-17.0.0)，由 `scripts/fetch_gloss_tables.py` 按锁的 `built` 下载。退出方式：不安装 `character-glosses/` 即可。
 
 ## 词语英文释义（`resources/word-glosses.lock.json`）
 
@@ -263,13 +265,13 @@ msime-dictionary 原样收录了 `stroke.dict.yaml`（`sources/stroke/stroke.dic
 | 项 | 值 |
 | --- | --- |
 | 来源 | [CC-CEDICT](https://cc-cedict.org/)，MDBG 发布的社区汉英词典；CEDICT - Copyright (C) 1997, 1998 Paul Andrew Denisowski |
-| 文件 | `https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.zip`，2026-09-23 导出，`sha256:5189396e…6fe5`，3,975,894 字节 |
+| 文件 | `cedict_1_0_ts_utf-8_mdbg.zip`，2026-10-11 导出，`sha256:25bd79c7…e324`，3,980,433 字节；锁里的地址指向 `metasequoiaime/chinese-ime-lm` 上的镜像 |
 | 许可 | CC BY-SA 4.0，与非英语离线释义相同，可单向兼容到 GPL-3.0 |
 | 生成器 | `scripts/build_word_glosses.py`，只用 Python 标准库；离线测试 `scripts/test-word-glosses.py` 用真实词条 |
 | 产物 | `word-glosses/zh-en.db`（离线释义同一结构，`meta.target_language = en`，约 9.8 万条、4.8 MB），外加 `word-glosses-NOTICE.txt` |
 | 取词范围 | 去掉量词 `CL:`、`variant of`、`see`、姓氏、`abbr. for`、台湾读音等非释义项与交叉引用的拼音，每条最多两个义项、每义项最多三个短语；一个简体词有多个读音条目（便宜 biànyí/piányi）时各取第一个义项；专名（拼音首字母大写）排在最后 |
 
-MDBG 每天用新导出覆盖同一个地址，所以锁里的摘要只对应 2026-09-23 这一份；换新导出要同时更新锁，能复现构建的是锁住的那份文件。与 `offline-glosses/` 一样，适合由维护者把生成物发布到固定位置。
+MDBG 每天用新导出覆盖同一个地址（`https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.zip`），所以锁住的 2026-10-11 导出镜像在 [`metasequoiaime/chinese-ime-lm` 的 `word-glosses-2026.10.11`](https://github.com/metasequoiaime/chinese-ime-lm/releases/tag/word-glosses-2026.10.11)，锁的 `artifact.url` 指向它，从锁重建得到与发布物逐字节相同的产物。生成物也发布在同一个 release，由 `scripts/fetch_gloss_tables.py` 按锁的 `built` 下载。换新导出要先镜像、再同时更新锁。
 
 这个输入法也是学英语的工具，所以释义以准确为先：词表有的词，显示词表的释义而不是 `english.db` 的（`english.db` 有些释义过于宽泛，漂亮 → chic、电源 → ps）；`english.db` 只回答词表没有的词和英文候选，用户自己已学的释义始终保留。CC-CEDICT 同一个字的多个读音按拼音排序而不是按常用程度（要 yāo 在 yào 前），所以 host-api 对单字先查 Unihan 表，词表只补 Unihan 没有的字；对词语直接查词表。**分发义务**：发布时必须随附 `word-glosses-NOTICE.txt` 并保持 CC BY-SA 4.0。退出方式：不安装 `word-glosses/` 即可。
 
@@ -279,7 +281,17 @@ MDBG 每天用新导出覆盖同一个地址，所以锁里的摘要只对应 20
 | --- | --- | --- |
 | [modood/Administrative-divisions-of-China](https://github.com/modood/Administrative-divisions-of-China) 的省、地、县三级行政区划，提交 `c49d495b40ac73eb1a66f6eeae5f8fd10696f035` | WTFPL（全文在 `resources/licenses/Administrative-divisions-of-China-WTFPL.txt`）；上游整理自国家统计局公布的统计用区划代码与城乡划分代码 | `crates/engine/src/local/places.tsv`，`@` 模式在用户自己的列表之后补充的内置地名（3302 个，约 126 KB，`include_str!` 编进引擎）。`msime-dict-build places` 读 `dist/provinces.csv`、`dist/cities.csv`、`dist/areas.csv` 三个文件生成这张表，三者的 URL、长度与 SHA-256 固定在 `resources/dictionary-sources.lock.json` 的 `places/` 条目；拼音由生成器按字注音，再用 `crates/dict-builder/src/places.rs` 的 `READINGS` 纠正地名专用读音。只取地名和上级关系，不带区划代码。设置里「@ 地名」默认关闭 |
 | [libhangul](https://github.com/libhangul/libhangul) 的 `data/hanja/hanja.txt`，提交 `717409ce61524bb3d8426060a384822f21354c62` | BSD-3-Clause（文件头单独声明，Copyright (c) 2005,2006 Choe Hwanjin；全文在 `resources/licenses/libhangul-hanja-BSD-3-Clause.txt`）。libhangul 仓库整体是 LGPL-2.1，但本仓只取这一份单独声明 BSD-3 的数据文件。上游提交历史说明 2006–2007 年部分读音和词表整理自国立国语院的材料，这些材料能否以 BSD 再授权无法独立核实，属于上游作者的声明 | `crates/engine/src/korean/hanja.tsv`，韩语模式把正在组字的音节转换成汉字时的候选表（555 个音节、28416 行，约 430 KB，`include_str!` 编进引擎）。`msime-dict-build hanja --dictionary <msime-dictionary checkout>` 读 msime-dictionary 原样收录的这一个文件（`sources/korean/hanja.txt`，大小与 SHA-256 由该仓 `upstream.lock.json` 固定）生成这张表，libhangul 提交记在 `resources/dictionary-sources.lock.json` 的 `libhangul` 引用里。只取单音节条目：键是一个预组合音节，值是基本多文种平面内的一个统一汉字，即 CJK 统一汉字、扩展 A 区汉字，或兼容汉字区里 NFC 不改写的 12 个统一汉字（U+FA0E 﨎、U+FA11 﨑 等）；真正的兼容汉字（NFC 会改写，固定版本的单音节条目里没有）、辅助平面汉字和两字值都丢弃；每个音节内保持上游顺序，保留上游的训音（훈음）注释，约 27% 的行有训音，扩展 A 区一行都没有。词条级数据（约 5.7 MB）不使用。BSD-3 第 2 条要求二进制分发时附带版权声明和条款，表编进引擎后随六个平台的引擎一起分发，所以六个平台的通知渠道都收录这份文本：Windows 的 `Collect-Notices.ps1`，macOS 输入法包的 `Resources/Licenses`（`CMakeLists.txt` 与 `THIRD_PARTY_NOTICES.txt`），Linux 安装的声明（`CMakeLists.txt` 与 `data/THIRD_PARTY_NOTICES.txt`），Android 的 `assets/native-notices`（`build-native.sh`），iOS App 的资源（`project.yml`），HarmonyOS 的 `resfile/licenses`（`stage-resources.sh`）。`scripts/test-korean-hanja-table.py` 检查这几处都还在 |
+| [kfcd/chaizi](https://github.com/kfcd/chaizi)（開放詞典《漢語拆字字典》）的 `chaizi-jt.txt`、`chaizi-ft.txt`，提交 `e177ab54ce4edf255315a60593ffecbd8167e96b` | CC BY 3.0 Unported（© 2015 開放詞典，http://www.kaifangcidian.com）；署名、改动说明和许可证全文在 `resources/licenses/kfcd-chaizi-CC-BY-3.0.txt`。表里的读音、名次和繁体字形取自 Unihan 17.0.0，Unicode-3.0（全文在 `resources/licenses/Unicode-License-V3.txt`） | `crates/engine/src/local/chaizi.tsv` 与 `chaizi-chars.tsv`，拆字反查（C 模式）的部件拼音索引（约 1.8 万个键、20 387 字，两表合计约 0.6 MB，`include_str!` 编进引擎，网页引擎里是空表）。`scripts/build_chaizi_table.py` 按 `resources/chaizi.lock.json` 校验后读这两个文件：简繁两表取并集，去掉「□」占位行、私用区和兼容表意字的条目（兼容字归一后已在表里的并入）及含私用区部件的拆法，按部件的去调拼音重新索引（读音取 Unihan 17.0.0 的 `kMandarin` 与 `kTGHZ2013`，加上生成器里 `ALIASES` 的部首俗称，如 氵 san、辶 zou），给每个字附 `kMandarin` 首个读音、按《通用规范汉字表》排的名次和 OpenCC s2t 的繁体字形；没有读音的部件所在的拆法不进索引。`scripts/test-chaizi-table.py` 离线检查表的不变量与署名，CI 的 Rust engine 作业设 `MSIME_FETCH=1` 下载锁定输入后逐字节核对。CC BY 3.0 第 4(b) 条要求分发改编作品时署名并写明改动，许可证文件就是这份说明；Unicode License V3 要求随数据或相关文档附上它的版权与许可声明。随引擎分发的每个平台都要在声明渠道里带上这两份文件；`test-chaizi-table.py` 的 `NOTICE_CHANNELS` 列出已经接上的渠道。CC BY 3.0 与 GPL-3.0 的关系、App Store 等带 DRM 的渠道与第 4(a) 条技术措施条款的关系，以及上游没有说明这份数据自身的来源，三点都未经法务审阅，需要维护者判断，见 `.agents/notes/implemented/feature/2026-10-13-builtin-chaizi-mode.md`。设置里的「拆字」开关只停用功能，数据仍随二进制；真正退出要删掉两张表，并让 `local::chaizi` 的查询返回空 |
 | [OpenCC](https://github.com/BYVoid/OpenCC) 词典，提交 `26753884f1984add422f3b0249ccee8613deaff6` | Apache-2.0 | `crates/client-core/data/opencc/`，许可证全文在同目录 `LICENSE`。`STPhrases.txt`、`STCharacters.txt`、`CJK_Compatibility_Ideographs.txt` 原样取自该提交的 `data/dictionary/`；`STPhrases_GeneratedFromRegionalPhrases.txt` 是该提交的 OpenCC 构建产物（`data/scripts/generate_st_phrases_from_regional_phrases.py` 用 `t2s.json` 生成），本仓不重新生成。提交号与来源 MSIME-Windows 的 `vendor/opencc` 子模块一致。只使用数据，不链接 OpenCC 的 C++ 库；`chinese_conversion.rs` 按 `s2t.json` 的规则实现转换。Windows 通知由 `Collect-Notices.ps1` 一并收集 |
+
+## 脚本插件合集（`plugins/script/`）
+
+这些插件不随输入法分发，由用户从源码构建后自己导入；插件代码用 MIT。带第三方数据的插件把数据变换成紧凑的二进制表，用 `include_bytes!` 编进 wasm 模块，生成器和产物都提交进仓库，`scripts/test-script-plugin-data.py` 检查两者一致（ci-platforms.yml 的 Script plugins 作业设 `MSIME_FETCH=1`，下载锁定的 Unihan zip 后也核对常用字集；不联网的 contracts 工作流只核对简繁对照表）。插件包里随附许可证原文和一份 `NOTICE.txt`，写明来源、版本和生成器。
+
+| 组件 | 许可证 | 位置与说明 |
+| --- | --- | --- |
+| Unicode Han Database（Unihan）17.0.0 的 `kTGH`（《通用规范汉字表》）与 `kTraditionalVariant` | Unicode-3.0（全文在 `resources/licenses/Unicode-License-V3.txt`） | `plugins/script/data/common-chars.bin`，生僻字类插件共用的常用字集（8105 字并上它们的繁体形，共 11 049 字，约 4 KiB）。`plugins/script/tools/gen_common_chars.py` 读 `resources/character-glosses.lock.json` 锁定的 `Unihan-17.0.0.zip`（校验 sha256）生成，来源说明在同目录的 `common-chars-NOTICE.txt`。插件包随附 `Unicode-License-V3.txt` |
+| [OpenCC](https://github.com/BYVoid/OpenCC) 词典，提交 `26753884f1984add422f3b0249ccee8613deaff6` | Apache-2.0（全文在 `crates/client-core/data/opencc/LICENSE`） | 读的是上面「编译进共享库的数据」里 vendored 的同一份文件。常用字集取 `STCharacters.txt` 里《通用规范汉字表》各字的繁体单字值（只由 OpenCC 补进集合的有 151 字）。插件包随附 `OpenCC-LICENSE.txt`，组装时（`plugins/script/tools/assemble.py`）逐字节核对它和仓库里的原件相同 |
 
 ## 本地语音识别
 
@@ -315,6 +327,16 @@ MDBG 每天用新导出覆盖同一个地址，所以锁里的摘要只对应 20
 | `tar` | 0.4 | MIT OR Apache-2.0 | 解包模型归档 |
 | `bzip2` | 0.6 | MIT OR Apache-2.0 | 解压 `.tar.bz2`。0.6 默认使用纯 Rust 的 `libbz2-rs-sys` 后端，该 crate 的许可证是 `bzip2-1.0.6`（bzip2 原作的 BSD 式许可，要求保留版权声明） |
 
+## 云剪贴板参考中继（`crates/clipboard-relay`）
+
+用户自己部署的服务端程序 `msime-clipboard-relay`，不进任何平台的安装包。它用的数据库、序列化和摘要 crate 与 workspace 其余部分共用同一版本，只为它新引入了 HTTP 服务器：
+
+| crate | 版本 | 许可证 | 用途 |
+| --- | --- | --- | --- |
+| `axum`（关闭默认特性，只开 `tokio`、`http1`）及其 `axum-core` | 0.8 / 0.5 | MIT | 中继的 HTTP/1 服务器；接口逻辑在不碰网络的 `store` 里 |
+| `matchit`（经 `axum`） | 0.8 | MIT AND BSD-3-Clause | axum 的路由表；中继只用一个兜底处理函数，不注册路由 |
+| `httpdate`（经 `axum`） | 1.0 | MIT OR Apache-2.0 | 响应的 `Date` 头 |
+
 ## 各平台引入的第三方 SDK
 
 | 平台 | 组件 | 许可 |
@@ -326,6 +348,7 @@ MDBG 每天用新导出覆盖同一个地址，所以锁里的摘要只对应 20
 | iOS | `MLKitDigitalInkRecognition` 8.0.0（CocoaPods，链接进键盘扩展 target） | **Google 的 ML Kit 服务条款，不是开源许可证** |
 | iOS | `GoogleSignIn` 10.0.0（CocoaPods，只链接进主 App target，用于通过 Google 登录）及其依赖 AppAuth、GTMAppAuth、GTMSessionFetcher、AppCheckCore、GoogleUtilities、Promises、RecaptchaInterop | Apache-2.0，全文见 `platforms/ios/SharedResources/GoogleSignIn-Dependencies.txt` |
 | macOS | Sparkle 2.9.6 | 以上游发布附带的许可证为准；框架不随仓库分发，由构建者按 `platforms/macos/README.md` 记录的 SHA-256 自行取得 |
+| macOS、Windows | [tplgy/cppcodec](https://github.com/tplgy/cppcodec) v0.2（标签提交 `302dc28f8fd5c8bf2ea8d7212aed3be884d5d166`，归档 SHA-256 `0edaea2a9d9709d456aa99a1c3e17812ed130f9ef2b5c2d152c230a5cbc5c482`），只有头文件 | MIT。`shared/voice` 的阿里云百炼请求把录音编成 Base64 数据 URL 时用它。只原样取 `base64_rfc4648.hpp` 需要的 8 个头文件，放在 `shared/voice/third_party/cppcodec/`，许可证全文在同目录 `LICENSE`；macOS 输入法包的 `Resources/Licenses`（`CMakeLists.txt` 与 `THIRD_PARTY_NOTICES.txt`）和 Windows 的 `Collect-Notices.ps1` 收录这份文本。Linux 不编译 `msime-voice-providers`，不带它 |
 | Windows | vcpkg 提供的 libcurl、fmt、nlohmann/json、utfcpp（清单与 baseline 在 `platforms/windows/vcpkg.json`） | 各自上游许可证；通知由 `platforms/windows/Collect-Notices.ps1` 收集 |
 | Linux | IBus / Fcitx5、GTK 栈、libcurl、ICU、xkbcommon、nlohmann/json、X11 与 Wayland 客户端库 | 各自上游许可证，按发行版依赖引入 |
 | 桌面 | Tauri、React、Vite 等 | 见 `pnpm-lock.yaml` 与各自上游 |

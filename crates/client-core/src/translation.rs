@@ -182,9 +182,9 @@ pub fn niutrans_auth_string(
     hex::encode(digest)
 }
 
-/// Mirrors the reference `BuildTranslationQuery`: Engine `CandidateSource::Emoji` (6) and `CandidateSource::Kaomoji` (7) are never translated, whatever their text. A kaomoji such as "(*Φ皿Φ*)" contains Han characters and would otherwise pass the Chinese text test, sending a picture to a gloss model that can only put noise under it.
-pub fn is_emoji_or_kaomoji_source(source: u8) -> bool {
-    matches!(source, 6 | 7)
+/// 不管文字是什么都不请求释义的候选来源。Engine `CandidateSource::Emoji`（6）和 `CandidateSource::Kaomoji`（7）照参考实现的 `BuildTranslationQuery`：颜文字如 "(*Φ皿Φ*)" 带汉字，按文字判断会当成中文，把一张图送给释义模型，只会在它下面放噪音。`CandidateSource::MixedJapanese`（13）是全拼、双拼里混进来的日文转换，私、開始 这样的汉字是日文，当中文释义会在日文下面写出中文意思，还白白花掉账号的释义额度；Engine 也不为日文方案和临时日文出释义。
+pub fn source_gets_no_gloss(source: u8) -> bool {
+    matches!(source, 6 | 7 | 13)
 }
 
 pub fn is_cloud_translatable_english(text: &str) -> bool {
@@ -228,22 +228,17 @@ pub fn is_secure_endpoint(endpoint: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(endpoint) else {
         return false;
     };
-    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
-        return false;
-    }
     match url.scheme() {
-        "https" => {
-            endpoint.split_once("://").is_some_and(|(_, authority)| {
-                authority
-                    .as_bytes()
-                    .first()
-                    .is_some_and(|byte| *byte != b'/')
-            }) && url.host_str().is_some_and(|host| !host.is_empty())
+        "https" => crate::endpoint::valid_endpoint_shape(endpoint, &url, "https"),
+        "http" => {
+            url.username().is_empty()
+                && url.password().is_none()
+                && url.fragment().is_none()
+                && matches!(
+                    url.host_str(),
+                    Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+                )
         }
-        "http" => matches!(
-            url.host_str(),
-            Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
-        ),
         _ => false,
     }
 }
@@ -252,20 +247,150 @@ pub fn is_supported_endpoint(endpoint: &str) -> bool {
     is_secure_endpoint(endpoint)
 }
 
-/// Whether a DeepLX-compatible reply reports a failure rather than an answer: a body that is not a JSON object, or one whose `code` is not 200. A reply that answers with no translation is still an answer, which `parse_translation_response` cannot tell apart from a failure because it returns `None` for both. Hosts negative-cache answers only, so a rate limit or an outage is asked again instead of hiding the gloss.
+/// 设置页在自定义翻译 Endpoint 下面显示的问题，没有问题时为空。逐条照搬共享设置的 `translationEndpointIssue`（`packages/ui/src/settings/translation-validation.ts`），网址按同一套 WHATWG 规则解析，所以与那里的 `new URL` 判断一致；它只决定提示什么，能不能保存仍由 [`is_supported_endpoint`] 决定。原生 Windows 设置窗口通过 `msime_client_translation_endpoint_issue` 调用它。
+pub fn endpoint_issue(endpoint: &str) -> &'static str {
+    if endpoint.is_empty() {
+        return "请填写完整的接口地址。";
+    }
+    if endpoint.len() > 2048 {
+        return "接口地址过长。";
+    }
+    if endpoint
+        .chars()
+        .any(|character| character <= '\u{1f}' || character == '\u{7f}')
+    {
+        return "接口地址不能包含控制字符。";
+    }
+    let Ok(url) = reqwest::Url::parse(endpoint) else {
+        return "请填写以 http:// 或 https:// 开头的完整接口地址。";
+    };
+    // `new URL` 的 username、password、hash 和 hostname 为空字符串时不算有。
+    if !url.username().is_empty()
+        || url.password().is_some_and(|password| !password.is_empty())
+        || url.fragment().is_some_and(|fragment| !fragment.is_empty())
+        || url.host_str().is_none_or(str::is_empty)
+    {
+        return "接口地址不能包含凭据或片段。";
+    }
+    match url.scheme() {
+        "https" => "",
+        "http" if matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")) => "",
+        "http" => "远程翻译服务必须使用 HTTPS；HTTP 仅支持本机回环地址。",
+        _ => "请填写以 http:// 或 https:// 开头的完整接口地址。",
+    }
+}
+
+/// DeepL 官方 API 的两个主机：Pro 密钥走 `api.deepl.com`，Free 密钥走 `api-free.deepl.com`。
+const DEEPL_PRO_HOST: &str = "api.deepl.com";
+const DEEPL_FREE_HOST: &str = "api-free.deepl.com";
+
+/// 自定义翻译服务的一次请求：地址、请求头和 JSON 正文。带着凭据，不得写进日志。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustomTranslationRequest {
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Value,
+}
+
+/// 地址是否指向 DeepL 官方 API：https、默认端口，主机名恰好是 `api.deepl.com` 或 `api-free.deepl.com`。只看主机名，不看路径：自建 DeepLX 也提供 `/v2/translate`，按路径识别会改掉这些用户现有的请求格式。
+pub fn is_deepl_api_endpoint(endpoint: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(endpoint) else {
+        return false;
+    };
+    // `Url` 会把写明的 443 当作默认端口去掉，所以 `port()` 为空即默认端口。
+    url.scheme() == "https"
+        && url.port().is_none()
+        && matches!(url.host_str(), Some(DEEPL_PRO_HOST | DEEPL_FREE_HOST))
+}
+
+/// DeepL 的 `target_lang`。中文和英文必须写变体：`ZH`、`EN` 只为兼容旧调用保留，文档要求改用 `ZH-HANS`/`ZH-HANT`、`EN-US`/`EN-GB`。候选释义一律简体中文，英文取美式拼写。其余语言（FR、JA、ES、RU、DE、KO）直接取大写代码。
+fn deepl_target_language(target: &str) -> String {
+    match target.to_ascii_lowercase().as_str() {
+        "zh" => "ZH-HANS".into(),
+        "en" => "EN-US".into(),
+        other => other.to_ascii_uppercase(),
+    }
+}
+
+/// 构造自定义翻译服务的请求，运行时描述器和设置页的连接测试共用这一处。调用方负责先校验地址、密钥和文本；`endpoint`、`api_key` 应已去掉首尾空白。
+///
+/// - DeepL 官方 API（见 [`is_deepl_api_endpoint`]）：`Authorization: DeepL-Auth-Key <key>`，正文 `{"text":[文本],"source_lang","target_lang"}`，发往 `https://<主机>/v2/translate`。主机按密钥选：以 `:fx` 结尾的是 Free 密钥，走 `api-free.deepl.com`，否则走 `api.deepl.com`，与 DeepL 官方客户端库的判断相同；用户把 Free 密钥填到 Pro 地址（或反过来）时 DeepL 会回 403，这里直接改到对的主机。DeepL 没有密钥就不能用，空密钥返回 `None`。
+/// - 其他地址按 DeepLX 兼容格式：有密钥时 `Authorization: Bearer <key>`，正文 `{"text":文本,"source_lang","target_lang"}`，地址原样使用。
+///
+/// 源语言照常写明，不交给 DeepL 自动识别：候选词往往只有两三个字，「手紙」这样的词自动识别会当成日语，而规划阶段已经按文字判断了方向。
+pub fn custom_translation_request(
+    endpoint: &str,
+    api_key: &str,
+    text: &str,
+    source_language: &str,
+    target_language: &str,
+) -> Option<CustomTranslationRequest> {
+    let mut headers = vec![("Content-Type".to_owned(), "application/json".to_owned())];
+    if is_deepl_api_endpoint(endpoint) {
+        if api_key.is_empty() {
+            return None;
+        }
+        let host = if api_key.ends_with(":fx") {
+            DEEPL_FREE_HOST
+        } else {
+            DEEPL_PRO_HOST
+        };
+        headers.push((
+            "Authorization".to_owned(),
+            format!("DeepL-Auth-Key {api_key}"),
+        ));
+        return Some(CustomTranslationRequest {
+            url: format!("https://{host}/v2/translate"),
+            headers,
+            body: serde_json::json!({
+                "text": [text],
+                "source_lang": source_language.to_ascii_uppercase(),
+                "target_lang": deepl_target_language(target_language),
+            }),
+        });
+    }
+    if !api_key.is_empty() {
+        headers.push(("Authorization".to_owned(), format!("Bearer {api_key}")));
+    }
+    Some(CustomTranslationRequest {
+        url: endpoint.to_owned(),
+        headers,
+        body: serde_json::json!({
+            "text": text,
+            "source_lang": source_language.to_ascii_uppercase(),
+            "target_lang": target_language.to_ascii_uppercase(),
+        }),
+    })
+}
+
+/// 区分 DeepLX 兼容回复中的失败与空回答。无 `code` 的回复必须带结果字段，显式 `error` 优先表示失败；有结果字段但译文为空仍算已回答，供宿主负缓存。
 pub fn translation_response_failed(response: &str) -> bool {
     let Ok(root) = serde_json::from_str::<Value>(response) else {
         return true;
     };
-    if !root.is_object() {
+    let Some(object) = root.as_object() else {
+        return true;
+    };
+    if has_explicit_error(&root) {
         return true;
     }
-    root.get("code")
-        .is_some_and(|code| !(code.as_i64() == Some(200) || code.as_str() == Some("200")))
+    if let Some(code) = object.get("code") {
+        return code.as_i64() != Some(200) && code.as_str() != Some("200");
+    }
+    !["data", "translation", "result"]
+        .iter()
+        .any(|key| object.get(*key).is_some_and(has_supported_result_shape))
+        && !object
+            .get("translations")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.first().is_none_or(is_result_item_shape))
 }
 
 pub fn parse_translation_response(response: &str) -> Option<String> {
     let root: Value = serde_json::from_str(response).ok()?;
+    if has_explicit_error(&root) {
+        return None;
+    }
     if let Some(code) = root.get("code") {
         let valid = code.as_i64() == Some(200) || code.as_str() == Some("200");
         if !valid {
@@ -290,6 +415,31 @@ pub fn parse_translation_response(response: &str) -> Option<String> {
         .and_then(value_as_text)
 }
 
+fn has_explicit_error(root: &Value) -> bool {
+    root.get("error").is_some_and(|error| match error {
+        Value::Null | Value::Bool(false) => false,
+        Value::String(message) => !message.is_empty(),
+        _ => true,
+    })
+}
+
+fn has_supported_result_shape(value: &Value) -> bool {
+    is_result_item_shape(value)
+        || value
+            .as_array()
+            .is_some_and(|items| items.first().is_none_or(is_result_item_shape))
+}
+
+fn is_result_item_shape(value: &Value) -> bool {
+    match value {
+        Value::String(_) => true,
+        Value::Object(object) => ["text", "translation", "data"]
+            .iter()
+            .any(|key| object.get(*key).is_some_and(Value::is_string)),
+        _ => false,
+    }
+}
+
 fn value_as_text(value: &Value) -> Option<String> {
     value
         .as_str()
@@ -309,6 +459,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn emoji_kaomoji_and_mixed_japanese_sources_get_no_gloss() {
+        for source in [6, 7, 13] {
+            assert!(source_gets_no_gloss(source), "source {source}");
+        }
+        // 词库、生成、英文、云候选照文字判断。
+        for source in [0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12] {
+            assert!(!source_gets_no_gloss(source), "source {source}");
+        }
+    }
+
+    #[test]
     fn accepts_supported_endpoints_only() {
         assert!(is_supported_endpoint("https://translate.example/api"));
         assert!(is_supported_endpoint("http://localhost:8080/translate"));
@@ -322,6 +483,56 @@ mod tests {
         assert!(!is_supported_endpoint("ftp://translate.example"));
         assert!(!is_supported_endpoint("https://bad\n.example"));
         assert!(!is_supported_endpoint("https:///api"));
+    }
+
+    #[test]
+    fn endpoint_issue_matches_the_settings_page() {
+        assert_eq!(endpoint_issue(""), "请填写完整的接口地址。");
+        assert_eq!(
+            endpoint_issue(&format!("https://a.example/{}", "x".repeat(2048))),
+            "接口地址过长。"
+        );
+        assert_eq!(
+            endpoint_issue("https://a.example/\u{7f}"),
+            "接口地址不能包含控制字符。"
+        );
+        for invalid in [
+            "translate.example",
+            "https://",
+            "ftp://translate.example/api",
+        ] {
+            assert_eq!(
+                endpoint_issue(invalid),
+                "请填写以 http:// 或 https:// 开头的完整接口地址。",
+                "{invalid}"
+            );
+        }
+        for leaky in [
+            "https://user@translate.example/api",
+            "https://user:secret@translate.example/api",
+            "https://translate.example/api#part",
+            "mailto:someone@example.com",
+        ] {
+            assert_eq!(
+                endpoint_issue(leaky),
+                "接口地址不能包含凭据或片段。",
+                "{leaky}"
+            );
+        }
+        for fine in [
+            "https://translate.example/api",
+            "https://translate.example/api#",
+            "http://localhost:1188/translate",
+            "http://127.0.0.1/translate",
+            "http://[::1]:1188/translate",
+            "HTTP://LOCALHOST/translate",
+        ] {
+            assert_eq!(endpoint_issue(fine), "", "{fine}");
+        }
+        assert_eq!(
+            endpoint_issue("http://translate.example/api"),
+            "远程翻译服务必须使用 HTTPS；HTTP 仅支持本机回环地址。"
+        );
     }
 
     #[test]
@@ -505,6 +716,133 @@ Signature=fdaffffbe1460ecd8cbc30e296ff6f49cc3b4af10b11e099462cca023fdb2c6c"
         assert!(translation_response_failed(r#"{"code":"500"}"#));
         assert!(translation_response_failed("<html>Bad Gateway</html>"));
         assert!(translation_response_failed(r#"["data"]"#));
+    }
+
+    #[test]
+    fn an_error_envelope_without_a_success_code_is_not_an_empty_answer() {
+        for response in [
+            r#"{"error":"rate limited"}"#,
+            r#"{"error":"rate limited","data":""}"#,
+            r#"{"message":"service unavailable"}"#,
+            "{}",
+        ] {
+            assert!(translation_response_failed(response), "{response}");
+        }
+        assert!(!translation_response_failed(r#"{"data":""}"#));
+        assert!(!translation_response_failed(r#"{"error":null,"data":""}"#));
+    }
+
+    #[test]
+    fn an_error_envelope_does_not_expose_a_partial_translation() {
+        let response = r#"{"error":"rate limited","data":"stale synthetic gloss"}"#;
+        assert!(translation_response_failed(response));
+        assert!(parse_translation_response(response).is_none());
+    }
+
+    #[test]
+    fn unsupported_result_shapes_do_not_count_as_empty_answers() {
+        for response in [
+            r#"{"data":null}"#,
+            r#"{"translation":42}"#,
+            r#"{"result":false}"#,
+            r#"{"translations":"synthetic"}"#,
+            r#"{"data":{}}"#,
+            r#"{"data":[null]}"#,
+        ] {
+            assert!(translation_response_failed(response), "{response}");
+        }
+        for response in [
+            r#"{"data":""}"#,
+            r#"{"translations":[]}"#,
+            r#"{"translation":{"text":""}}"#,
+        ] {
+            assert!(!translation_response_failed(response), "{response}");
+        }
+    }
+
+    /// 与 Linux provider 共用的用例：两边对同一组地址和密钥必须构造出相同的请求。
+    #[test]
+    fn custom_translation_request_matches_the_shared_contract() {
+        let contract: Value = serde_json::from_str(include_str!(
+            "../../../shared/contracts/custom-translation/cases.json"
+        ))
+        .unwrap();
+        let cases = contract["cases"].as_array().unwrap();
+        assert!(cases.len() >= 10);
+        for case in cases {
+            let text = |key: &str| case[key].as_str().unwrap();
+            let request = custom_translation_request(
+                text("endpoint"),
+                text("api_key"),
+                text("text"),
+                text("source_language"),
+                text("target_language"),
+            );
+            let actual = request.map(|request| {
+                let headers: serde_json::Map<String, Value> = request
+                    .headers
+                    .into_iter()
+                    .map(|(name, value)| (name, Value::String(value)))
+                    .collect();
+                serde_json::json!({"url": request.url, "headers": headers, "body": request.body})
+            });
+            assert_eq!(
+                actual.unwrap_or(Value::Null),
+                case["request"],
+                "{}",
+                text("name")
+            );
+        }
+    }
+
+    #[test]
+    fn deepl_endpoint_detection_matches_the_exact_official_hosts() {
+        for endpoint in [
+            "https://api.deepl.com/v2/translate",
+            "https://api-free.deepl.com/v2/translate",
+            "https://api-free.deepl.com",
+            "https://Api-Free.DeepL.com/v2/translate",
+        ] {
+            assert!(is_deepl_api_endpoint(endpoint), "{endpoint}");
+        }
+        for endpoint in [
+            "http://api.deepl.com/v2/translate",
+            "https://api.deepl.com.example/v2/translate",
+            "https://example.com/api.deepl.com/v2/translate",
+            "https://deepl.com/v2/translate",
+            "https://www.deepl.com/v2/translate",
+            "https://api.deepl.com:8443/v2/translate",
+            "https://deeplx.example/v2/translate",
+            "not a url",
+        ] {
+            assert!(!is_deepl_api_endpoint(endpoint), "{endpoint}");
+        }
+    }
+
+    /// DeepL v2 的成功回复带 `detected_source_language`，译文在 `translations[0].text`。
+    #[test]
+    fn parses_a_deepl_v2_reply() {
+        let reply = r#"{"translations":[{"detected_source_language":"ZH","text":"Test"}]}"#;
+        assert!(!translation_response_failed(reply));
+        assert_eq!(parse_translation_response(reply).as_deref(), Some("Test"));
+        let empty = r#"{"translations":[{"detected_source_language":"ZH","text":""}]}"#;
+        assert!(!translation_response_failed(empty));
+        assert!(parse_translation_response(empty).is_none());
+    }
+
+    /// DeepL 的错误（403 密钥无效、456 额度用完、429 过于频繁）走非 2xx 状态，宿主不会把正文交给解析；正文本身也只有 `message`，即使被交过来也只能算失败，不能当成空译文负缓存。
+    #[test]
+    fn a_deepl_error_body_is_a_failed_reply() {
+        for reply in [
+            r#"{"message":"Forbidden"}"#,
+            r#"{"message":"Quota Exceeded"}"#,
+            r#"{"message":"Too many requests"}"#,
+            r#"{"message":"Wrong endpoint. Use https://api.deepl.com"}"#,
+            "",
+        ] {
+            assert!(translation_response_failed(reply), "{reply}");
+            assert!(parse_translation_response(reply).is_none(), "{reply}");
+        }
     }
 
     #[test]

@@ -1,5 +1,10 @@
 package app.msime.android.home;
 
+import app.msime.android.DimensionPolicy;
+
+import app.msime.android.ThemeColorPolicy;
+import app.msime.android.LayoutPolicy;
+
 import android.content.Context;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
@@ -20,10 +25,13 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.content.ContextCompat;
 import app.msime.android.NativeClient;
+import app.msime.android.DrawablePolicy;
 import app.msime.android.JsonPolicy;
 import app.msime.android.BoundsPolicy;
 import app.msime.android.DictionaryCollectionsStore;
 import app.msime.android.KeyPressIds;
+import app.msime.android.KeyboardGeometry;
+import app.msime.android.NumberPolicy;
 import app.msime.android.R;
 import app.msime.android.TypingStatisticsModel;
 import app.msime.android.TypingStatisticsSummary;
@@ -34,7 +42,6 @@ import app.msime.android.TypingStatisticsSummary.Overview;
 import app.msime.android.TypingStatisticsSummary.Share;
 import app.msime.android.ViewPolicy;
 import app.msime.android.policy.HostOptionsPolicy;
-import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -93,9 +100,9 @@ public final class StatisticsFragment extends HomeTabFragment {
         Drawable lock = ContextCompat.getDrawable(requireContext(), R.drawable.ic_ms_shield_lock);
         if (lock != null) {
             lock = lock.mutate();
-            int size = Ui.dp(requireContext(), 14);
+            int size = DimensionPolicy.pixels(requireContext(), 14);
             lock.setBounds(0, 0, size, size);
-            lock.setTint(Ui.subText(requireContext()));
+            lock.setTint(ThemeColorPolicy.subText(requireContext()));
             footer.setCompoundDrawablesRelative(lock, null, null, null);
         }
         reload();
@@ -132,13 +139,9 @@ public final class StatisticsFragment extends HomeTabFragment {
             return true;
         });
         menu.getMenu().add("清空统计").setOnMenuItemClickListener(item -> {
-            new MaterialAlertDialogBuilder(requireContext())
-                .setTitle("清除全部统计")
-                .setMessage("今日、累计、全部分类、按键计数和已解锁的成就都会清空，且无法恢复。键盘会从下一次输入重新开始记录。")
-                .setNegativeButton("取消", null)
-                .setPositiveButton("清除", (dialog, which) -> HostTask.run(this,
-                    context -> HostStore.resetStatistics(context), value -> reload()))
-                .show();
+            MessageDialog.confirm(requireContext(), "清除全部统计",
+                "今日、累计、全部分类、按键计数和已解锁的成就都会清空，且无法恢复。键盘会从下一次输入重新开始记录。",
+                "清除", () -> HostTask.run(this, context -> HostStore.resetStatistics(context), value -> reload()));
             return true;
         });
         menu.show();
@@ -146,7 +149,7 @@ public final class StatisticsFragment extends HomeTabFragment {
 
     // 键盘在另一个进程里，这个页面不在眼前时它一直在记。
     @Override protected void onBecameVisible() {
-        if (statistics != null) reload();
+        reload();
     }
 
     private void reload() {
@@ -176,9 +179,9 @@ public final class StatisticsFragment extends HomeTabFragment {
                     .put("user_only", true));
             JSONObject root = new JSONObject(NativeClient.dictionary(request.toString()));
             if (!JsonPolicy.strictTrue(root.opt("ok"))) return null;
-            JSONObject value = root.optJSONObject("value");
+            JSONObject value = JsonPolicy.objectValue(root);
             if (value == null || !value.has("count")) return null;
-            Long count = DictionaryCollectionsStore.strictLong(value.opt("count"));
+            Long count = JsonPolicy.strictLong(value.opt("count"));
             return count == null ? null : BoundsPolicy.nonNegative(count);
         } catch (JSONException | RuntimeException | LinkageError error) {
             return null;
@@ -227,23 +230,23 @@ public final class StatisticsFragment extends HomeTabFragment {
 
     private void overview(Context context, LinearLayout content, Overview overview) {
         LinearLayout hero = card(context, content, 18);
-        hero.addView(Ui.label(context, "近 7 天共输入", 13, Ui.subText(context)));
-        TextView total = Ui.label(context,
-            figure(context, TypingStatisticsSummary.grouped(overview.weekTotal()), 40, "字"),
-            40, Ui.text(context));
-        Ui.setPaddingDp(total, context, 0, 4, 0, 0);
+        hero.addView(ViewPolicy.label(context, "近 7 天共输入", 13, ThemeColorPolicy.subText(context)));
+        TextView total = ViewPolicy.label(context,
+            figure(context, NumberPolicy.grouped(overview.weekTotal()), 40, "字"),
+            40, ThemeColorPolicy.text(context));
+        ViewPolicy.setPaddingDp(context, total, 0, 4, 0, 0);
         hero.addView(total);
         String delta = TypingStatisticsSummary.weekDelta(overview.weekTotal(), overview.previousWeekTotal());
         if (delta != null) {
-            TextView change = Ui.label(context, delta, 13, Ui.accent(context));
+            TextView change = ViewPolicy.label(context, delta, 13, ThemeColorPolicy.accent(context));
             ViewPolicy.setTypefaceStyle(change, Typeface.BOLD);
-        Ui.setPaddingDp(change, context, 0, 4, 0, 0);
+        ViewPolicy.setPaddingDp(context, change, 0, 4, 0, 0);
             hero.addView(change);
         }
         TrendChart chart = new TrendChart(context);
         chart.setDays(overview.last7());
-        LinearLayout.LayoutParams chartParams = Ui.matchWidth();
-        chartParams.topMargin = Ui.dp(context, 18);
+        LinearLayout.LayoutParams chartParams = LayoutPolicy.matchWidthWrapParams();
+        chartParams.topMargin = DimensionPolicy.pixels(context, 18);
         hero.addView(chart, chartParams);
 
         String speedNote = TypingStatisticsSummary.speedDelta(overview.averageSpeed(),
@@ -267,24 +270,24 @@ public final class StatisticsFragment extends HomeTabFragment {
         LinearLayout heat = card(context, content, 16);
         HeatmapView heatmap = new HeatmapView(context);
         heatmap.setDays(habits.weeks12());
-        heat.addView(heatmap, Ui.matchWidth());
+        heat.addView(heatmap, LayoutPolicy.matchWidthWrapParams());
 
         String peak = TypingStatisticsSummary.peakLabel(habits.peakWindow());
         header(context, content, "活跃时段", peak == null ? null : "最常在 " + peak);
         LinearLayout hours = card(context, content, 16);
         HourHistogramView histogram = new HourHistogramView(context);
         histogram.setHours(habits.hours24(), habits.peakWindow(), peak);
-        hours.addView(histogram, Ui.matchWidth());
+        hours.addView(histogram, LayoutPolicy.matchWidthWrapParams());
 
         List<Share> mix = TypingStatisticsSummary.composition(habits.characters());
         header(context, content, "输入构成", null);
         LinearLayout composition = card(context, content, 16);
         if (mix.isEmpty()) {
-            composition.addView(Ui.label(context, "还没有记录", 14, Ui.subText(context)));
+            composition.addView(ViewPolicy.label(context, "还没有记录", 14, ThemeColorPolicy.subText(context)));
         } else {
             DistributionView bar = new DistributionView(context);
             bar.setShares(mix, DistributionView.Style.STACK);
-            composition.addView(bar, Ui.matchWidth());
+            composition.addView(bar, LayoutPolicy.matchWidthWrapParams());
         }
     }
 
@@ -296,13 +299,14 @@ public final class StatisticsFragment extends HomeTabFragment {
         LinearLayout row = header(context, content, "按键热力图", null);
         SegmentedControl layout = new SegmentedControl(context);
         layout.setOptions(List.of("26 键", "9 键"), nine ? 1 : 0);
-        ViewPolicy.setMinimumHeight(layout, Ui.dp(context, 32));
-        row.addView(layout, Ui.wrapHeight(context, 32));
+        ViewPolicy.setMinimumHeight(layout, DimensionPolicy.pixels(context, 32));
+        row.addView(layout, LayoutPolicy.linearParamsPx(
+            ViewGroup.LayoutParams.WRAP_CONTENT, DimensionPolicy.pixels(context, 32)));
         LinearLayout board = card(context, content, 12);
         KeyHeatmapView heatmap = new KeyHeatmapView(context);
         heatmap.setNineKey(nine);
         heatmap.setKeys(presses);
-        board.addView(heatmap, Ui.matchWidth());
+        board.addView(heatmap, LayoutPolicy.matchWidthWrapParams());
         layout.setOnSelect(index -> {
             nineKey = index == 1;
             heatmap.setNineKey(nineKey);
@@ -334,7 +338,7 @@ public final class StatisticsFragment extends HomeTabFragment {
             }
             DistributionView bars = new DistributionView(context);
             bars.setShares(shares, DistributionView.Style.BARS);
-            positions.addView(bars, Ui.matchWidth());
+            positions.addView(bars, LayoutPolicy.matchWidthWrapParams());
         }
 
         List<Share> methods = TypingStatisticsSummary.methods(value.habits().sources());
@@ -343,7 +347,7 @@ public final class StatisticsFragment extends HomeTabFragment {
             LinearLayout card = card(context, content, 16);
             DistributionView donut = new DistributionView(context);
             donut.setShares(methods, DistributionView.Style.DONUT);
-            card.addView(donut, Ui.matchWidth());
+            card.addView(donut, LayoutPolicy.matchWidthWrapParams());
         }
     }
 
@@ -373,20 +377,20 @@ public final class StatisticsFragment extends HomeTabFragment {
         int start = text.length();
         text.append(" / ").append(String.valueOf(badges.size())).append(" 已解锁");
         text.setSpan(new AbsoluteSizeSpan(15, true), start, text.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        text.setSpan(new ForegroundColorSpan(Ui.subText(context)), start, text.length(),
+        text.setSpan(new ForegroundColorSpan(ThemeColorPolicy.subText(context)), start, text.length(),
             Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        TextView count = Ui.label(context, text, 15, Ui.text(context));
+        TextView count = ViewPolicy.label(context, text, 15, ThemeColorPolicy.text(context));
         progress.addView(count);
         View track = new View(context);
-        track.setBackground(Ui.pill(Ui.hairline(context)));
-        LinearLayout.LayoutParams trackParams = Ui.matchWidthHeight(context, 6);
-        trackParams.topMargin = Ui.dp(context, 12);
+        track.setBackground(DrawablePolicy.pill(ThemeColorPolicy.hairline(context)));
+        LinearLayout.LayoutParams trackParams = LayoutPolicy.matchWidthHeightDp(context, 6);
+        trackParams.topMargin = DimensionPolicy.pixels(context, 12);
         android.widget.FrameLayout bar = new android.widget.FrameLayout(context);
         bar.addView(track, new android.widget.FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(context, 6)));
+            ViewGroup.LayoutParams.MATCH_PARENT, DimensionPolicy.pixels(context, 6)));
         View fillView = new View(context);
-        fillView.setBackground(Ui.pill(Ui.accent(context)));
-        bar.addView(fillView, new android.widget.FrameLayout.LayoutParams(0, Ui.dp(context, 6)));
+        fillView.setBackground(DrawablePolicy.pill(ThemeColorPolicy.accent(context)));
+        bar.addView(fillView, new android.widget.FrameLayout.LayoutParams(0, DimensionPolicy.pixels(context, 6)));
         progress.addView(bar, trackParams);
         float share = badges.isEmpty() ? 0 : unlocked / (float) badges.size();
         bar.post(() -> {
@@ -399,8 +403,8 @@ public final class StatisticsFragment extends HomeTabFragment {
         BadgeGridView grid = new BadgeGridView(context);
         grid.setBadges(badges);
         grid.setOnBadgeTap(badge -> MsToast.show(context, TypingStatisticsSummary.toast(badge)));
-        LinearLayout.LayoutParams gridParams = Ui.matchWidth();
-        gridParams.topMargin = Ui.dp(context, 10);
+        LinearLayout.LayoutParams gridParams = LayoutPolicy.matchWidthWrapParams();
+        gridParams.topMargin = DimensionPolicy.pixels(context, 10);
         content.addView(grid, gridParams);
     }
 
@@ -408,11 +412,11 @@ public final class StatisticsFragment extends HomeTabFragment {
 
     /** 一张统计卡：andCard 底、20dp 圆角，加在 `parent` 末尾。 */
     private static LinearLayout card(Context context, LinearLayout parent, int padding) {
-        LinearLayout card = Ui.verticalCard(context, 20);
-        int pad = Ui.dp(context, padding);
-        Ui.setSymmetricPaddingPx(card, pad);
-        LinearLayout.LayoutParams params = Ui.matchWidth();
-        params.topMargin = Ui.dp(context, parent.getChildCount() == 0 ? 16 : 10);
+        LinearLayout card = LayoutPolicy.roundedColumn(context, ThemeColorPolicy.card(context), 20);
+        int pad = DimensionPolicy.pixels(context, padding);
+        ViewPolicy.setSymmetricPadding(card, pad);
+        LinearLayout.LayoutParams params = LayoutPolicy.matchWidthWrapParams();
+        params.topMargin = DimensionPolicy.pixels(context, parent.getChildCount() == 0 ? 16 : 10);
         parent.addView(card, params);
         return card;
     }
@@ -420,49 +424,48 @@ public final class StatisticsFragment extends HomeTabFragment {
     /** 卡片上方的一行：左边小标题，右边可选的说明；返回这一行，按键页往右边再放分段控件。 */
     private static LinearLayout header(Context context, LinearLayout parent, String title,
             @Nullable String trailing) {
-        LinearLayout row = Ui.row(context);
+        LinearLayout row = LayoutPolicy.row(context);
         ViewPolicy.setCenteredVertically(row);
-        Ui.setHorizontalPaddingDp(row, context, 4);
-        TextView heading = Ui.label(context, title, 13, Ui.subText(context));
-        heading.setAccessibilityHeading(true);
-        row.addView(heading, Ui.weightWrap(1f));
-        if (trailing != null) row.addView(Ui.label(context, trailing, 13, Ui.subText(context)));
-        LinearLayout.LayoutParams params = Ui.matchWidth();
-        params.topMargin = Ui.dp(context, 22);
+        ViewPolicy.setHorizontalPaddingDp(context, row, 4);
+        TextView heading = ViewPolicy.headingLabel(context, title, 13, ThemeColorPolicy.subText(context));
+        row.addView(heading, LayoutPolicy.weightedWrapParams(1f));
+        if (trailing != null) row.addView(ViewPolicy.label(context, trailing, 13, ThemeColorPolicy.subText(context)));
+        LinearLayout.LayoutParams params = LayoutPolicy.matchWidthWrapParams();
+        params.topMargin = DimensionPolicy.pixels(context, 22);
         // 最小 32 dp 而不是固定 32 dp：系统字体调大后标题和右侧的分段控件都比它高。
-        ViewPolicy.setMinimumHeight(row, Ui.dp(context, 32));
+        ViewPolicy.setMinimumHeight(row, DimensionPolicy.pixels(context, 32));
         parent.addView(row, params);
         return row;
     }
 
     /** 并排两张 KPI 卡。 */
     private static void tiles(Context context, LinearLayout parent, View left, View right) {
-        LinearLayout row = Ui.row(context);
-        LinearLayout.LayoutParams leftParams = Ui.weightedMatchParent(1f);
-        LinearLayout.LayoutParams rightParams = Ui.weightedMatchParent(1f);
-        rightParams.setMarginStart(Ui.dp(context, 10));
+        LinearLayout row = LayoutPolicy.row(context);
+        LinearLayout.LayoutParams leftParams = LayoutPolicy.weightedMatchParentParams(1f);
+        LinearLayout.LayoutParams rightParams = LayoutPolicy.weightedMatchParentParams(1f);
+        rightParams.setMarginStart(DimensionPolicy.pixels(context, 10));
         row.addView(left, leftParams);
         row.addView(right, rightParams);
-        LinearLayout.LayoutParams params = Ui.matchWidth();
-        params.topMargin = Ui.dp(context, 10);
+        LinearLayout.LayoutParams params = LayoutPolicy.matchWidthWrapParams();
+        params.topMargin = DimensionPolicy.pixels(context, 10);
         parent.addView(row, params);
     }
 
     /** 一张 KPI 卡：标题、大数字和单位、一行说明；`highlight` 时说明用 accent（环比）。 */
     private static View tile(Context context, String title, String value, String unit, String note,
             boolean highlight) {
-        LinearLayout tile = Ui.column(context);
-        int pad = Ui.dp(context, 14);
-        Ui.setSymmetricPaddingPx(tile, pad);
-        ViewPolicy.setBackground(tile, Ui.rounded(Ui.card(context), Ui.dp(context, 20)));
-        tile.addView(Ui.label(context, title, 13, Ui.text(context)));
-        TextView number = Ui.label(context, figure(context, value, 24,
-            "—".equals(value) ? "" : unit), 24, Ui.text(context));
-        Ui.setPaddingDp(number, context, 0, 6, 0, 6);
+        LinearLayout tile = LayoutPolicy.column(context);
+        int pad = DimensionPolicy.pixels(context, 14);
+        ViewPolicy.setSymmetricPadding(tile, pad);
+        ViewPolicy.setBackground(tile, DrawablePolicy.rounded(ThemeColorPolicy.card(context), DimensionPolicy.pixels(context, 20)));
+        tile.addView(ViewPolicy.label(context, title, 13, ThemeColorPolicy.text(context)));
+        TextView number = ViewPolicy.label(context, figure(context, value, 24,
+            "—".equals(value) ? "" : unit), 24, ThemeColorPolicy.text(context));
+        ViewPolicy.setPaddingDp(context, number, 0, 6, 0, 6);
         tile.addView(number);
-        tile.addView(Ui.label(context, note, 12, highlight ? Ui.accent(context) : Ui.subText(context)));
+        tile.addView(ViewPolicy.label(context, note, 12, highlight ? ThemeColorPolicy.accent(context) : ThemeColorPolicy.subText(context)));
         tile.setContentDescription(title + " " + value + ("—".equals(value) ? "" : " " + unit) + "，" + note);
-        tile.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        ViewPolicy.setImportantForAccessibility(tile, View.IMPORTANT_FOR_ACCESSIBILITY_YES);
         return tile;
     }
 
@@ -472,7 +475,7 @@ public final class StatisticsFragment extends HomeTabFragment {
         text.setSpan(new AbsoluteSizeSpan(sizeSp, true), 0, value.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         text.setSpan(new android.text.style.StyleSpan(Typeface.BOLD), 0, value.length(),
             Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        text.setSpan(new ForegroundColorSpan(Ui.text(context)), 0, value.length(),
+        text.setSpan(new ForegroundColorSpan(ThemeColorPolicy.text(context)), 0, value.length(),
             Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         if (!unit.isEmpty()) {
             int start = text.length();
@@ -480,7 +483,7 @@ public final class StatisticsFragment extends HomeTabFragment {
             text.setSpan(new AbsoluteSizeSpan(
                 BoundsPolicy.bounded(sizeSp / 3, 12, Integer.MAX_VALUE), true), start, text.length(),
                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            text.setSpan(new ForegroundColorSpan(Ui.text(context)), start, text.length(),
+            text.setSpan(new ForegroundColorSpan(ThemeColorPolicy.text(context)), start, text.length(),
                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
         return text;

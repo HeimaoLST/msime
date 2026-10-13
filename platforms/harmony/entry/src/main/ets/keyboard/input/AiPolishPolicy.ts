@@ -1,3 +1,4 @@
+import { TextPolicy } from "../TextPolicy";
 /**
  * What may be polished, and what the editor has to be told to replace it.
  *
@@ -42,17 +43,14 @@ export interface PolishReplacement {
 /**
  * Counted in code points rather than in `String.length`.
  *
- * `deleteBackwardSync(length)` is documented only as "length of text", and the two readings differ
- * for anything outside the BMP — an emoji in the middle of a sentence is one code point and two
- * UTF-16 units. The one place in this host that pins the unit down is the backspace path, whose
- * comment states `deleteBackwardSync(1)` removes one scalar, so that is the reading taken here.
+ * 删除走 `deleteForwardSync(length)`（鸿蒙的 forward 是光标之前，见 `KeyboardSession.deleteEditorBackwardSync`），文档只写了 "length of text"，两种读法对 BMP 之外的字符不一样——句中一个 emoji 是一个码点、两个 UTF-16 单元。设备上实测（HarmonyOS 6.0.2 模拟器）`deleteForwardSync(1)` 把光标前的 😀 整个删掉，单位不是 UTF-16 单元，与这里按码点计算一致；由多个码点组成的字形（带肤色的 emoji 等）还没有在设备上试过。
  *
  * This is the single thing in this file that a device could still contradict, which is why the
  * caller re-reads the text before the caret and refuses to replace anything that no longer matches
  * what it captured. A wrong unit then costs a refusal rather than a corrupted message.
  */
 export function codePointLength(value: string): number {
-  return Array.from(value).length;
+  return TextPolicy.characters(value).length;
 }
 
 export class AiPolishPolicy {
@@ -66,7 +64,7 @@ export class AiPolishPolicy {
    */
   static source(before: string): string {
     if (before.length === 0) return "";
-    const characters = Array.from(before);
+    const characters = TextPolicy.characters(before);
     const bounded =
       characters.length > MAX_POLISH_SOURCE_CHARACTERS
         ? characters.slice(characters.length - MAX_POLISH_SOURCE_CHARACTERS).join("")

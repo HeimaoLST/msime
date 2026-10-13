@@ -1,6 +1,7 @@
 import { useSettingsForm } from "../settings-form-context";
 import { PluginsSection } from "../plugins-section";
 import { pluginPreferences } from "../plugin-preferences";
+import { defaultLocalModes } from "../local-modes-section";
 import { createSettingsDraftActions } from "../settings-draft-actions";
 import { SettingsPageFieldset } from "../settings-page-fieldset";
 
@@ -20,9 +21,12 @@ export function PluginsSettingsPage({ hidden = false }: { hidden?: boolean }) {
     showTypingEffects,
     showTypingEffectStyles,
     showTypingEffectPacks,
+    typingEffectsFlashOnly,
     showHelpcode,
     showWordbookPacks,
     showSymbolSetPacks,
+    showScriptPlugins,
+    host,
     selectPage,
   } = useSettingsForm();
   const vocabulary = client.vocabularyReview;
@@ -36,6 +40,7 @@ export function PluginsSettingsPage({ hidden = false }: { hidden?: boolean }) {
           .catch(() => setError("没能打开背单词，请重试。"))
     : undefined;
   const { onPreferencesChange } = createSettingsDraftActions({ setDraft });
+  const localModes = draft.local_modes ?? defaultLocalModes;
   return (
     <SettingsPageFieldset disabled={busy} hidden={page !== "plugins" || hidden} ariaLabel="插件">
       <PluginsSection
@@ -47,10 +52,20 @@ export function PluginsSettingsPage({ hidden = false }: { hidden?: boolean }) {
         typingEffects={showTypingEffects}
         effectStyles={showTypingEffectStyles}
         effectPacks={showTypingEffectPacks}
+        effectFlashOnly={typingEffectsFlashOnly}
         quickPhraseMode={draft.local_modes?.quick_phrase ?? true}
+        commandMode={draft.local_modes?.command ?? false}
+        mentionMode={draft.local_modes?.mention ?? false}
+        // 指令表详情和 @ 名单里的「打开」按钮就地改「输入 → 快捷模式」的开关，和在输入页拨动它写的是同一个键。
+        onLocalMode={(mode) =>
+          onPreferencesChange({ local_modes: { ...localModes, [mode]: true } })
+        }
+        scheme={draft.scheme}
         helpcode={showHelpcode}
         wordbookPacks={showWordbookPacks}
         symbolSetPacks={showSymbolSetPacks}
+        scriptPlugins={showScriptPlugins}
+        platform={host?.platform}
         onOpenWordbook={openWordbook}
         onOpenPage={selectPage}
         active={page === "plugins" && !hidden}

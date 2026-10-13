@@ -6,13 +6,15 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
 use super::{
     is_builtin, kind_directory, load_directory, PluginError, PluginSummary, MAX_PACK_FILES,
+    UNKNOWN_KIND,
 };
+use crate::storage::StagingDirectory as Staging;
 
 /// Serializes every write to the plugins root in this process. The file lock below does the same across processes (the settings window and an input process both install and remove packs), but a lock on a file is not something every platform promises to hold between two threads of one process.
 static PLUGIN_ROOT_WRITES: Mutex<()> = Mutex::new(());
@@ -57,6 +59,28 @@ const MAX_TOTAL_BYTES: u64 = super::music_pack::MAX_PACK_BYTES + 2 * 1024 * 1024
 ///
 /// Names starting with a dot (`.DS_Store`, `.git`) and a zip's `__MACOSX` folder are left behind, as the file managers that add them intend; anything else the pack may not contain - a subdirectory, a symbolic link, a file its manifest does not account for - refuses the whole import.
 pub fn import(source: &Path, root: &Path) -> Result<PluginSummary, PluginError> {
+    import_inner(source, root, true)
+}
+
+/// 有脚本插件授权页的设置宿主用的 `import`：桌面外壳的设置页（macOS、Linux），以及经 `msime_client_plugins` 声明了 `script_page` 的 Windows 原生设置应用。三个桌面平台的 release 构建都运行脚本（与 host-api 的 `msime_client_scripts_enable` 一致），所以接受脚本包，导入后要在授权页上授权才会运行。移动端没有 `script` 这个类型，清单解析时就拒绝。
+pub fn import_from_settings(source: &Path, root: &Path) -> Result<PluginSummary, PluginError> {
+    import_inner(source, root, true)
+}
+
+/// 没有授权页的设置宿主（`msime_client_plugins` 不带 `script_page`：Android、HarmonyOS）用的 `import`。它们的目录命令不列出脚本插件，所以 release 构建在安装之前拒绝脚本包，用的是移动端遇到 `script` 时同一条"kind 不是已知的插件类型"；开发构建照旧接受。
+pub fn import_without_script_page(
+    source: &Path,
+    root: &Path,
+) -> Result<PluginSummary, PluginError> {
+    import_inner(source, root, cfg!(debug_assertions))
+}
+
+/// `import`, refusing a script pack before anything is installed or any grant is written when `allow_scripts` is false.
+pub(super) fn import_inner(
+    source: &Path,
+    root: &Path,
+    allow_scripts: bool,
+) -> Result<PluginSummary, PluginError> {
     let archive = is_archive(source)?;
     if !crate::storage::create_directory_and_check(root).map_err(|_| PluginError::Storage)? {
         return Err(PluginError::Storage);
@@ -64,10 +88,17 @@ pub fn import(source: &Path, root: &Path) -> Result<PluginSummary, PluginError> 
     let _writes = lock_plugin_root(root)?;
     sweep_leftovers(root, SystemTime::now());
     let staging = Staging::new(root.join(format!(".staging-{}", uuid::Uuid::new_v4().simple())))?;
-    fs::create_dir(&staging.path)?;
-    stage(source, archive, &staging.path)?;
+    staging.create()?;
+    #[cfg(unix)]
+    let staging_directory = Some(staging.open_directory()?);
+    #[cfg(not(unix))]
+    let staging_directory: Option<File> = None;
+    stage(source, archive, &staging.path, staging_directory.as_ref())?;
     let mut summary = check_staged(&staging.path)?;
     let kind = summary.kind();
+    if !allow_scripts && kind.is_script() {
+        return Err(PluginError::Invalid(UNKNOWN_KIND.into()));
+    }
     let directory = kind_directory(root, kind);
     if !crate::storage::create_directory_and_check(&directory).map_err(|_| PluginError::Storage)? {
         return Err(PluginError::Storage);
@@ -76,6 +107,23 @@ pub fn import(source: &Path, root: &Path) -> Result<PluginSummary, PluginError> 
     // A stray file or link where the pack goes is not a pack anyone could have chosen; it is replaced like one.
     if fs::symlink_metadata(&target).is_ok_and(|metadata| !metadata.is_dir()) {
         crate::storage::remove_private_file(&target)?;
+    }
+    // 脚本包的授权绑定在内容哈希上：在同一把锁里、替换包目录之前更新它的条目。先改授权再换包，写授权失败时包还是旧的，替换失败时授权已经收紧，两头都不会让授权落到另一份内容上。
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos"))
+    ))]
+    if let super::PluginContent::Script(pack) = &summary.content {
+        let replaces_installed =
+            fs::symlink_metadata(&target).is_ok_and(|metadata| metadata.is_dir());
+        super::script_grants::installing(
+            root,
+            &_writes,
+            &summary.id,
+            &pack.content_hash,
+            replaces_installed,
+        )?;
     }
     // Named uniquely, so a backup a crashed import left behind, too young yet for the sweep, cannot stand in the way of this one.
     let backup = directory.join(format!(
@@ -93,10 +141,44 @@ pub fn import(source: &Path, root: &Path) -> Result<PluginSummary, PluginError> 
 pub fn validate(source: &Path) -> Result<PluginSummary, PluginError> {
     let archive = is_archive(source)?;
     let staging = tempfile::Builder::new().prefix("msime-pack-").tempdir()?;
-    stage(source, archive, staging.path())?;
+    stage(source, archive, staging.path(), None)?;
     let mut summary = check_staged(staging.path())?;
     summary.directory = source.to_path_buf();
     Ok(summary)
+}
+
+/// 按 [`validate`] 的规则暂存并检查 `source`（文件夹或 `.zip`），再从同一份暂存里读出脚本包的模块，交给调用方编译。只给 `msime-pack run` 用：它要运行的必须是 `validate` 接受的那个包，压缩包也一样。不是脚本包时返回 `plugin_invalid`。
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+pub fn load_script_source(source: &Path) -> Result<super::script_pack::LoadedScript, PluginError> {
+    let archive = is_archive(source)?;
+    let staging = tempfile::Builder::new().prefix("msime-pack-").tempdir()?;
+    stage(source, archive, staging.path(), None)?;
+    let summary = check_staged(staging.path())?;
+    if !summary.kind().is_script() {
+        return Err(PluginError::Invalid(format!(
+            "这是 {} 插件，只有脚本插件（kind = \"script\"）能运行",
+            summary.kind().as_str()
+        )));
+    }
+    let summary = super::load_directory_with(staging.path(), super::DataFiles::Module)
+        .map_err(PluginError::Invalid)?;
+    let super::PluginContent::Script(mut pack) = summary.content else {
+        return Err(PluginError::Invalid("不是脚本插件".into()));
+    };
+    let wasm = pack
+        .module_bytes
+        .take()
+        .ok_or_else(|| PluginError::Invalid(format!("{} 无法读取或太大", pack.module)))?
+        .0;
+    Ok(super::script_pack::LoadedScript {
+        id: summary.id,
+        pack,
+        wasm,
+    })
 }
 
 /// Whether `source` is a `.zip` file (true) or a folder (false); anything else is not a pack source.
@@ -117,11 +199,16 @@ fn is_archive(source: &Path) -> Result<bool, PluginError> {
 }
 
 /// Copy or extract the pack's files from `source` into the empty directory `staging`.
-fn stage(source: &Path, archive: bool, staging: &Path) -> Result<(), PluginError> {
+fn stage(
+    source: &Path,
+    archive: bool,
+    staging: &Path,
+    staging_directory: Option<&File>,
+) -> Result<(), PluginError> {
     if archive {
-        extract(source, staging)
+        extract(source, staging, staging_directory)
     } else {
-        copy_folder(source, staging)
+        copy_folder(source, staging, staging_directory)
     }
 }
 
@@ -132,45 +219,6 @@ fn check_staged(staging: &Path) -> Result<PluginSummary, PluginError> {
         return Err(PluginError::Reserved);
     }
     Ok(summary)
-}
-
-/// Removes the staging directory however the import ends; after a successful rename there is nothing left to remove.
-struct Staging {
-    path: PathBuf,
-    #[cfg(unix)]
-    parent: File,
-    #[cfg(unix)]
-    name: std::ffi::OsString,
-}
-
-impl Staging {
-    fn new(path: PathBuf) -> io::Result<Self> {
-        #[cfg(unix)]
-        {
-            let parent_path = path.parent().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "staging has no parent")
-            })?;
-            let name = path
-                .file_name()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "staging has no name"))?
-                .to_owned();
-            let parent = crate::storage::open_private_directory(parent_path)?;
-            Ok(Self { path, parent, name })
-        }
-        #[cfg(not(unix))]
-        {
-            Ok(Self { path })
-        }
-    }
-}
-
-impl Drop for Staging {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        let _ = crate::storage::remove_private_tree_at(&self.parent, &self.name);
-        #[cfg(not(unix))]
-        let _ = fs::remove_dir_all(&self.path);
-    }
 }
 
 /// Staging, set-aside and replaced directories a crashed import or removal left behind, once they are `LEFTOVER_AGE` old by their modification time at `now`. One whose age cannot be read is left alone.
@@ -280,7 +328,11 @@ impl Budget {
     }
 }
 
-fn copy_folder(source: &Path, staging: &Path) -> Result<(), PluginError> {
+fn copy_folder(
+    source: &Path,
+    staging: &Path,
+    staging_directory: Option<&File>,
+) -> Result<(), PluginError> {
     let mut budget = Budget::default();
     for entry in fs::read_dir(source)? {
         let entry = entry?;
@@ -304,12 +356,16 @@ fn copy_folder(source: &Path, staging: &Path) -> Result<(), PluginError> {
         let input = crate::storage::open_private_file_in(&entry.path())?;
         let size = input.metadata()?.len();
         budget.take(size)?;
-        write_member(staging, &name, input, size)?;
+        write_member(staging, &name, input, size, staging_directory)?;
     }
     Ok(())
 }
 
-fn extract(source: &Path, staging: &Path) -> Result<(), PluginError> {
+fn extract(
+    source: &Path,
+    staging: &Path,
+    staging_directory: Option<&File>,
+) -> Result<(), PluginError> {
     let file = crate::storage::open_private_file_in(source)?;
     if file.metadata()?.len() > MAX_ARCHIVE_BYTES {
         return Err(PluginError::Archive("压缩包太大".into()));
@@ -381,7 +437,7 @@ fn extract(source: &Path, staging: &Path) -> Result<(), PluginError> {
         let member = archive.by_index(index).map_err(archive_error)?;
         let size = member.size();
         budget.take(size)?;
-        write_member(staging, &name, member, size)?;
+        write_member(staging, &name, member, size, staging_directory)?;
     }
     Ok(())
 }
@@ -466,10 +522,36 @@ fn write_member(
     name: &str,
     input: impl Read,
     declared: u64,
+    staging_directory: Option<&File>,
 ) -> Result<(), PluginError> {
     if !super::valid_file_name(name) {
         return Err(PluginError::Invalid(format!("{name} 不是有效的文件名")));
     }
+    #[cfg(unix)]
+    if let Some(staging_directory) = staging_directory {
+        let mut input = input.take(declared.saturating_add(1));
+        crate::storage::write_private_file_at_noclobber_with(
+            staging_directory,
+            std::ffi::OsStr::new(name),
+            |mut output| {
+                let copied = io::copy(&mut input, &mut output)?;
+                if copied != declared {
+                    return Err(PluginError::Invalid(format!("{name} 的大小与记录的不符")));
+                }
+                output.flush()?;
+                Ok::<(File, ()), PluginError>((output, ()))
+            },
+        )
+        .map_err(|error| match error {
+            PluginError::Io(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                PluginError::Invalid(format!("{name} 出现了两次"))
+            }
+            error => error,
+        })?;
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    let _ = staging_directory;
     let mut output = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -489,6 +571,39 @@ fn write_member(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn member_write_stays_in_open_staging_directory_after_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("plugins");
+        let outside = state.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let staging = Staging::new(root.join(".staging-new")).unwrap();
+        staging.create().unwrap();
+        let staging_directory = crate::storage::open_private_directory(&staging.path).unwrap();
+        let moved = state.path().join("plugins-moved");
+        fs::rename(&root, &moved).unwrap();
+        symlink(&outside, &root).unwrap();
+
+        write_member(
+            &staging.path,
+            "fixture.bin",
+            io::Cursor::new(b"synthetic plugin"),
+            b"synthetic plugin".len() as u64,
+            Some(&staging_directory),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(moved.join(".staging-new/fixture.bin")).unwrap(),
+            b"synthetic plugin"
+        );
+        assert!(!outside.join("fixture.bin").exists());
+    }
 
     #[test]
     fn budget_rejects_an_oversized_member_without_overflowing() {

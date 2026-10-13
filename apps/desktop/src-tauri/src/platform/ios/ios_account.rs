@@ -1,16 +1,14 @@
 #[cfg(target_os = "ios")]
 use crate::platform::mobile::mobile_account_helpers::{
     account_chat as shared_account_chat, account_chat_models as shared_account_chat_models,
-    account_command_error, account_delete as shared_account_delete,
-    account_forget as shared_account_forget, account_login as shared_account_login,
-    account_logout as shared_account_logout,
+    account_command_error, account_login as shared_account_login,
     account_preferences_load as shared_account_preferences_load,
     account_preferences_schema as shared_account_preferences_schema,
     account_profile as shared_account_profile, account_rename as shared_account_rename,
     account_request_code as shared_account_request_code, account_status as shared_account_status,
     call_session, cleanup_stale_snapshot_previews, clear_snapshot_previews,
     clear_snapshot_previews_after, cloud_dictionary_account_request, prepare_snapshot_directory,
-    read_snapshot_file, remove_snapshot_file, replace_pending_snapshot, snapshot_command_error,
+    publish_snapshot_preview, read_snapshot_file, remove_snapshot_file, snapshot_command_error,
     snapshot_response_without_account, snapshot_text_within_limit, take_pending_snapshot,
     valid_mobile_haptic_strength, validate_pending_snapshot, write_snapshot_file, PendingSnapshot,
     SnapshotMetadata,
@@ -31,6 +29,8 @@ use serde_json::Value;
 #[cfg(any(target_os = "ios", test))]
 mod account_preferences;
 
+#[cfg(target_os = "ios")]
+use crate::platform::community_resources::CommunityResourceState;
 #[cfg(target_os = "ios")]
 use crate::platform::mobile::mobile_community::MobileCommunityState;
 #[cfg(target_os = "ios")]
@@ -77,6 +77,19 @@ impl<R: Runtime> AccountSessionStorage for IosAccountStorage<R> {
             .clear_account_session()
             .map_err(|_| AccountError::Storage)
     }
+
+    /// 云剪贴板密钥串与账号会话在同一个钥匙串访问组里，退出登录时由 `clearSession` 一并删除。
+    fn load_clipboard_keystore(&self) -> Result<Option<String>, AccountError> {
+        self.0
+            .load_cloud_clipboard_keystore()
+            .map_err(|_| AccountError::Storage)
+    }
+
+    fn save_clipboard_keystore(&self, value: &str) -> Result<(), AccountError> {
+        self.0
+            .save_cloud_clipboard_keystore(value)
+            .map_err(|_| AccountError::Storage)
+    }
 }
 
 #[cfg(target_os = "ios")]
@@ -111,6 +124,7 @@ pub fn setup(app: &AppHandle<Wry>) -> Result<(), AccountError> {
         IosAccountStorage(platform.clone()),
     ));
     let community = MobileCommunityState::new(client, &session)?;
+    let resources = CommunityResourceState::new(&session)?;
     let snapshot_directory =
         std::env::temp_dir().join(format!("msime-ios-tauri-snapshots-{}", std::process::id()));
     prepare_snapshot_directory(&snapshot_directory).map_err(|_| AccountError::Storage)?;
@@ -122,6 +136,7 @@ pub fn setup(app: &AppHandle<Wry>) -> Result<(), AccountError> {
         snapshot_previews: Arc::new(Mutex::new(HashMap::new())),
     });
     app.manage(community);
+    app.manage(resources);
     Ok(())
 }
 
@@ -212,7 +227,13 @@ pub async fn account_login(
     challenge_id: String,
     code: String,
 ) -> Result<StatusResponse, crate::CommandError> {
-    shared_account_login(state, challenge_id, code).await
+    let session = Arc::clone(&state.session);
+    let previews = Arc::clone(&state.snapshot_previews);
+    let result = shared_account_login(state, challenge_id, code, |account_id| {
+        cancel_queued_snapshot(Some(account_id));
+    })
+    .await;
+    clear_snapshot_previews_after(&session, &previews, result)
 }
 
 #[cfg(target_os = "ios")]
@@ -237,14 +258,18 @@ pub async fn account_apple_login(
         .map_err(|_| crate::CommandError {
             code: "apple_sign_in",
         })?;
-    call_session(state.session(), move |session| {
+    let previews = Arc::clone(&state.snapshot_previews);
+    let result = call_session(state.session(), move |session| {
         session
-            .sign_in_apple(&challenge.challenge_id, &credential)
+            .sign_in_apple_with_cleanup(&challenge.challenge_id, &credential, |account_id| {
+                cancel_queued_snapshot(Some(account_id));
+            })
             .map(|user| StatusResponse {
                 user: Some(user.into()),
             })
     })
-    .await
+    .await;
+    clear_snapshot_previews_after(&state.session, &previews, result)
 }
 
 #[cfg(target_os = "ios")]
@@ -288,22 +313,37 @@ pub async fn account_logout(
     state: State<'_, AccountState>,
     all: bool,
 ) -> Result<(), crate::CommandError> {
+    let session = Arc::clone(&state.session);
     let previews = Arc::clone(&state.snapshot_previews);
-    clear_snapshot_previews_after(&previews, shared_account_logout(state, all).await)
+    let result = call_session(&session, move |session| {
+        session.logout_with_cleanup(all, cancel_queued_snapshot)
+    })
+    .await;
+    clear_snapshot_previews_after(&session, &previews, result)
 }
 
 #[cfg(target_os = "ios")]
 #[tauri::command]
 pub async fn account_delete(state: State<'_, AccountState>) -> Result<(), crate::CommandError> {
+    let session = Arc::clone(&state.session);
     let previews = Arc::clone(&state.snapshot_previews);
-    clear_snapshot_previews_after(&previews, shared_account_delete(state).await)
+    let result = call_session(&session, move |session| {
+        session.delete_account_with_cleanup(cancel_queued_snapshot)
+    })
+    .await;
+    clear_snapshot_previews_after(&session, &previews, result)
 }
 
 #[cfg(target_os = "ios")]
 #[tauri::command]
 pub async fn account_forget(state: State<'_, AccountState>) -> Result<(), crate::CommandError> {
+    let session = Arc::clone(&state.session);
     let previews = Arc::clone(&state.snapshot_previews);
-    clear_snapshot_previews_after(&previews, shared_account_forget(state).await)
+    let result = call_session(&session, move |session| {
+        session.forget_with_cleanup(cancel_queued_snapshot)
+    })
+    .await;
+    clear_snapshot_previews_after(&session, &previews, result)
 }
 
 #[cfg(target_os = "ios")]
@@ -338,6 +378,16 @@ fn snapshot_bridge(action: Value) -> Result<Value, crate::CommandError> {
 }
 
 #[cfg(target_os = "ios")]
+fn cancel_queued_snapshot(account_id: Option<&str>) {
+    if let Some(account_id) = account_id {
+        let _ = snapshot_bridge(serde_json::json!({
+            "operation": "cancel",
+            "accountId": account_id,
+        }));
+    }
+}
+
+#[cfg(target_os = "ios")]
 fn snapshot_metadata(value: Value) -> Result<SnapshotMetadata, crate::CommandError> {
     serde_json::from_value(value).map_err(|_| crate::CommandError {
         code: "snapshot_invalid",
@@ -353,40 +403,55 @@ async fn dictionary_snapshot_preview(
     let previews = Arc::clone(&state.snapshot_previews);
     let token = uuid::Uuid::new_v4().to_string();
     let file_token = token.clone();
-    let (account_id, path, metadata) = tauri::async_runtime::spawn_blocking(move || {
-        prepare_snapshot_directory(&directory).map_err(|_| snapshot_command_error())?;
-        let profile = session.profile().map_err(account_command_error)?;
-        let path = directory.join(format!("download-{file_token}.ndjson"));
-        if let Err(error) = session.dictionary_snapshot_to_file(&path) {
-            let _ = remove_snapshot_file(&path);
-            return Err(crate::CommandError { code: error.code() });
-        }
-        let inspected = snapshot_bridge(serde_json::json!({
-            "operation": "inspect",
-            "path": path.to_string_lossy(),
-        }));
-        let metadata = match inspected.and_then(snapshot_metadata) {
-            Ok(value) => value,
-            Err(error) => {
+    let (account_id, generation, path, metadata) =
+        tauri::async_runtime::spawn_blocking(move || {
+            prepare_snapshot_directory(&directory).map_err(|_| snapshot_command_error())?;
+            let profile = session.profile().map_err(account_command_error)?;
+            let (_, _, generation) = session
+                .credentials_with_generation(None, Some(&profile.user.id))
+                .map_err(account_command_error)?;
+            let path = directory.join(format!("download-{file_token}.ndjson"));
+            if let Err(error) = session.dictionary_snapshot_to_file(&path) {
                 let _ = remove_snapshot_file(&path);
-                return Err(error);
+                return Err(crate::CommandError { code: error.code() });
             }
-        };
-        Ok((profile.user.id, path, metadata))
-    })
-    .await
-    .map_err(|_| snapshot_command_error())??;
-    let old = replace_pending_snapshot(
+            let inspected = snapshot_bridge(serde_json::json!({
+                "operation": "inspect",
+                "path": path.to_string_lossy(),
+            }));
+            let metadata = match inspected.and_then(snapshot_metadata) {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = remove_snapshot_file(&path);
+                    return Err(error);
+                }
+            };
+            Ok((profile.user.id, generation, path, metadata))
+        })
+        .await
+        .map_err(|_| snapshot_command_error())??;
+    let old = publish_snapshot_preview(
+        &state.session,
+        generation,
+        &account_id,
         &previews,
         token.clone(),
         PendingSnapshot {
-            account_id,
-            path,
+            account_id: account_id.clone(),
+            generation,
+            path: path.clone(),
             metadata: metadata.clone(),
         },
-    )?;
-    for path in old {
-        let _ = remove_snapshot_file(&path);
+    );
+    let old = match old {
+        Ok(old) => old,
+        Err(error) => {
+            let _ = remove_snapshot_file(&path);
+            return Err(account_command_error(error));
+        }
+    };
+    for preview in old {
+        let _ = remove_snapshot_file(&preview.path);
     }
     Ok(serde_json::json!({
         "previewToken": token,
@@ -413,14 +478,18 @@ async fn dictionary_snapshot_enqueue(
                     code: "snapshot_conflict",
                 })?
                 .to_owned();
-            snapshot_bridge(serde_json::json!({
-                "operation": "enqueue",
-                "path": path.to_string_lossy(),
-                "accountId": pending.account_id,
-                "cloudRevision": pending.metadata.cloud_revision,
-                "expectedLocalVersion": expected,
-                "fileSha256": pending.metadata.file_sha256,
-            }))
+            session
+                .with_generation(pending.generation, Some(&pending.account_id), || {
+                    Ok(snapshot_bridge(serde_json::json!({
+                        "operation": "enqueue",
+                        "path": path.to_string_lossy(),
+                        "accountId": &pending.account_id,
+                        "cloudRevision": pending.metadata.cloud_revision,
+                        "expectedLocalVersion": expected,
+                        "fileSha256": &pending.metadata.file_sha256,
+                    })))
+                })
+                .map_err(account_command_error)?
         })();
         let _ = remove_snapshot_file(&path);
         result
@@ -597,6 +666,9 @@ pub async fn cloud_dictionary_request(
             code: "snapshot_unavailable",
         }),
         CloudDictionaryRequest::SnapshotRestoreCancel => Err(crate::CommandError {
+            code: "snapshot_unavailable",
+        }),
+        CloudDictionaryRequest::SnapshotChooseRestore => Err(crate::CommandError {
             code: "snapshot_unavailable",
         }),
         CloudDictionaryRequest::SnapshotEnqueue { token } => {

@@ -17,8 +17,8 @@
     <queries><intent><action android:name="android.speech.action.RECOGNIZE_SPEECH" /></intent><intent><action android:name="android.speech.RecognitionService" /></intent></queries>
     <!-- 明文 http 只给 AI 辅助的本机、局域网接口用，原因和边界见 res/xml/network_security_config.xml。 -->
     <application android:theme="@style/Theme.MSIME" android:label="@string/app_name" android:icon="@drawable/app_icon_classic" android:allowBackup="false" android:supportsRtl="true" android:networkSecurityConfig="@xml/network_security_config">
-        <!-- 返回手势走 OnBackPressedDispatcher 的预测式返回，只在宿主的 HomeActivity 上打开；不加在 application 上，因为 :ime 进程里的输入法服务靠 KEYCODE_BACK 收起面板。 -->
-        <activity android:name="app.msime.android.home.HomeActivity" android:exported="true" android:enableOnBackInvokedCallback="true">
+        <!-- 返回手势走 OnBackPressedDispatcher 的预测式返回，只在宿主的 HomeActivity 上打开；不加在 application 上，因为 :ime 进程里的输入法服务靠 KEYCODE_BACK 收起面板。adjustResize 写明而不留给系统猜：「对话」tab 的输入栏和各页的搜索框都按键盘的 inset 让位，平移窗口会把它们顶出屏幕；不带 stateVisible，键盘只在「试用键盘」切到对话 tab 时由页面自己弹出。 -->
+        <activity android:name="app.msime.android.home.HomeActivity" android:exported="true" android:enableOnBackInvokedCallback="true" android:windowSoftInputMode="adjustResize">
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
         </activity>
         <activity android:name="app.msime.android.home.OnboardingActivity" android:exported="false" />
@@ -54,7 +54,7 @@
             android:authorities="${applicationId}.mlkit-ime-init"
             android:exported="false"
             android:process=":ime" />
-        <!-- 把缓存里的诊断包、更新安装包和导出文件以 content:// 交给别的应用，可分享的目录见 res/xml/msime_file_paths.xml。 -->
+        <!-- 把缓存里的诊断包、更新安装包、导出文件和键盘发送的剪贴板图片副本以 content:// 交给别的应用，可分享的目录见 res/xml/msime_file_paths.xml。 -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"

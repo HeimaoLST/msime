@@ -72,7 +72,10 @@ export interface CustomCandidateColors {
 /** The shared `custom_theme` preference. Every member is optional; an absent one takes its shared default. */
 export interface CustomThemeDocument {
   readonly base?: string;
+  /** 浅色模式的候选皮肤包，也是 `candidate_skin_dark` 没设时深色模式用的那款。 */
   readonly candidate_skin?: string;
+  /** 深色模式的候选皮肤包。两个槽位都由 `msime_client_resolve_theme` 按 `dark` 取用，宿主不自己挑。 */
+  readonly candidate_skin_dark?: string;
   readonly candidate_colors?: CustomCandidateColors;
   readonly keyboard?: CustomSkinDocument;
 }
@@ -236,6 +239,14 @@ export class GlobalTheme {
     return "#" + (scaled.length === 1 ? "0" + scaled : scaled) + rgb.toUpperCase();
   }
 
+  /** 浅色、深色两次解析给出同一个固定明暗时，主题才算固定了明暗（内置主题、没设皮肤的自定义主题叠在固定明暗的底上）。自定义主题的浅色、深色槽位各放一款皮肤时两次解析的明暗不同，这时返回 `null`，各个界面跟随自己的明暗规则，不能被浅色那次解析钉住。与 macOS 的 `FixedThemeMode` 同一条规则。 */
+  static fixedAppearance(light: ResolvedTheme | null, dark: ResolvedTheme | null): string | null {
+    if (light === null || dark === null || light.appearance !== dark.appearance) {
+      return null;
+    }
+    return light.appearance;
+  }
+
   /** A non-null appearance fixes the mode for every surface; otherwise the surface's own mode rule decides. */
   static surfaceDark(appearance: string | null, fallbackDark: boolean): boolean {
     if (appearance === "dark") {
@@ -397,6 +408,17 @@ export class GlobalTheme {
   }
 
   /** The catalog entry for an id, or `null` when the catalog does not carry it. */
+  /** 固定明暗的主题只属于那一种明暗：浅色模式下不提供深色主题，深色模式下不提供浅色主题，否则键盘和周围的界面颜色反着，风格割裂。`system` 和 `custom` 没有固定明暗，两种模式都提供。 */
+  static fitsMode(appearance: string | null, dark: boolean): boolean {
+    return appearance === null || (appearance === "dark") === dark;
+  }
+
+  /** 某一明暗下实际生效的全局主题：所选主题属于另一种明暗时按 `system` 画。 */
+  static effectiveId(catalog: ThemeCatalogEntry[], id: string, dark: boolean): string {
+    const chosen: ThemeCatalogEntry | null = GlobalTheme.entry(catalog, id);
+    return chosen !== null && !GlobalTheme.fitsMode(chosen.appearance, dark) ? "system" : id;
+  }
+
   static entry(catalog: ThemeCatalogEntry[], id: string): ThemeCatalogEntry | null {
     for (const entry of catalog) {
       if (entry.id === id) {

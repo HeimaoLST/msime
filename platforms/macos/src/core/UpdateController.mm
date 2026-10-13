@@ -2,7 +2,8 @@
 
 #import <Sparkle/Sparkle.h>
 
-static NSString *const MetasequoiaReleasePageURL = @"https://github.com/metasequoiaime/msime/releases";
+// 官网下载页的 macOS 一栏读的就是本仓库的 macos-v 发布，GitHub 按钮旁边有国内镜像（dl.msime.app），国内打开 GitHub 发布页下载常常只有几十 KB/s。
+static NSString *const MetasequoiaReleasePageURL = @"https://msime.app/download/?platform=macos";
 
 // Sparkle needs an application bundle: a feed URL, a version, a code signature. Started anywhere else
 // it reports the misconfiguration with a modal alert, which in an input method process means the user's
@@ -132,8 +133,8 @@ static NSString *const MetasequoiaReleasePageURL = @"https://github.com/metasequ
                      (void)url;
                      NSAlert *alert = [NSAlert new];
                      alert.messageText = @"此构建未配置应用内更新";
-                     alert.informativeText = @"无法使用 Sparkle 自动检查。可以前往水杉输入法的官方发布页查看可用版本。";
-                     [alert addButtonWithTitle:@"前往发布页"];
+                     alert.informativeText = @"无法使用 Sparkle 自动检查。可以前往水杉输入法官网的下载页获取最新版本。";
+                     [alert addButtonWithTitle:@"前往下载页"];
                      [alert addButtonWithTitle:@"取消"];
                      return [alert runModal];
                    }
@@ -143,8 +144,8 @@ static NSString *const MetasequoiaReleasePageURL = @"https://github.com/metasequ
                         failure:^{
                           NSAlert *alert = [NSAlert new];
                           alert.alertStyle = NSAlertStyleCritical;
-                          alert.messageText = @"无法打开发布页";
-                          alert.informativeText = @"请稍后重试，或在浏览器中访问 github.com/metasequoiaime/msime/releases。";
+                          alert.messageText = @"无法打开下载页";
+                          alert.informativeText = @"请稍后重试，或在浏览器中访问 msime.app/download。";
                           [alert runModal];
                         }];
       }

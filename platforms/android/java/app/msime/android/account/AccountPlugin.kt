@@ -26,6 +26,11 @@ class SaveAccountSessionArgs {
 }
 
 @InvokeArg
+class SaveCloudClipboardKeystoreArgs {
+    lateinit var value: String
+}
+
+@InvokeArg
 class SaveFeedbackArgs {
     var soundEnabled: Boolean = true
     var hapticsEnabled: Boolean = false
@@ -80,6 +85,7 @@ class AiTestArgs {
 class AccountPlugin(activity: Activity) : Plugin(activity) {
     private val hostActivity = activity
     private val storage = AndroidAccountSessionStorage(activity)
+    private val clipboardKeystore = CloudClipboardKeystore.deferred(activity)
     private val bootstrapWorker: ExecutorService = AccountTaskExecutor.create()
 
     override fun onDestroy() {
@@ -194,10 +200,38 @@ class AccountPlugin(activity: Activity) : Plugin(activity) {
         }
     }
 
+    // 退出登录（包括会话被服务端吊销后 Rust 清掉它）时，云剪贴板的本机密钥串随会话一起删除；先清会话再删密钥串，理由同 BackendAccount.signOut。
     @Command
     fun clearSession(invoke: Invoke) {
         try {
             storage.clear()
+            clipboardKeystore.delete()
+            invoke.resolve()
+        } catch (_: Exception) {
+            invoke.reject("secure_storage", "secure_storage")
+        }
+    }
+
+    // 云剪贴板的本机密钥串，与键盘（:ime 进程）和原生设置页读写的是同一个文件（CloudClipboardKeystore），见 docs/cloud-clipboard-e2e.md 的「密钥串的存放位置」。
+    @Command
+    fun loadCloudClipboardKeystore(invoke: Invoke) {
+        try {
+            val response = JSObject()
+            response.put("value", clipboardKeystore.load())
+            invoke.resolve(response)
+        } catch (_: Exception) {
+            invoke.reject("secure_storage", "secure_storage")
+        }
+    }
+
+    // 只在有账号会话时写入，退出登录后迟到的一步不会把密钥串写回来；文件里已有另一个设备身份时拒绝，Rust 下一次读到的就是那一个，一个安装只登记成一台设备。
+    @Command
+    fun saveCloudClipboardKeystore(invoke: Invoke) {
+        try {
+            val value = invoke.parseArgs(SaveCloudClipboardKeystoreArgs::class.java).value
+            clipboardKeystore.save(value) {
+                if (storage.load() == null) throw IllegalStateException("signed_out")
+            }
             invoke.resolve()
         } catch (_: Exception) {
             invoke.reject("secure_storage", "secure_storage")

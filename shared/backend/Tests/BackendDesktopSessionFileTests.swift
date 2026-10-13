@@ -3,6 +3,18 @@ import Foundation
 import XCTest
 @testable import MSIMEBackend
 
+private struct FirstLoginAPI: BackendSessionAPI {
+  let tokens: BackendAccountClient.Tokens
+
+  func login(challenge: String, credential: String, linkToken: String?) async throws -> BackendAccountClient.Tokens {
+    tokens
+  }
+  func refresh(_ token: String) async throws -> BackendAccountClient.Tokens {
+    throw BackendAccountClient.Failure(status: 0)
+  }
+  func logout(token: String, all: Bool) async throws { }
+}
+
 final class BackendDesktopSessionFileTests: XCTestCase {
   private var directory: URL!
 
@@ -37,8 +49,22 @@ final class BackendDesktopSessionFileTests: XCTestCase {
     try store.clear()
   }
 
+  func testFirstSignInCreatesTheSharedLockDirectory() async throws {
+    let storage = BackendDesktopSessionFile(directory: directory)
+    let lock = BackendFileRefreshLock(url: directory.appendingPathComponent("account-refresh.lock"))
+    let account = BackendAccountSession(api: FirstLoginAPI(tokens: session("a").tokens),
+                                        storage: storage, refreshLock: lock)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+
+    try await account.signIn(challenge: "synthetic-challenge", credential: "synthetic-credential")
+
+    XCTAssertEqual(try storage.load()?.tokens.access_token, String(repeating: "a", count: 64))
+    let mode = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? Int)
+    XCTAssertEqual(mode & 0o777, 0o700)
+  }
+
   /// The document exactly as the settings app writes it (`FileAccountSessionStorage` with the Apple layout), including the user fields this side does not model.
-  func testReadsTheSessionTheSettingsAppWrites() throws {
+  func testReadsTheSessionTheSettingsAppWrites() async throws {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     let expiresAt = Date().addingTimeInterval(600).timeIntervalSinceReferenceDate
     let document = """
@@ -51,6 +77,14 @@ final class BackendDesktopSessionFileTests: XCTestCase {
     let loaded = try XCTUnwrap(BackendDesktopSessionFile(directory: directory).load())
     XCTAssertEqual(loaded.tokens.refresh_token, String(repeating: "d", count: 64))
     XCTAssertEqual(loaded.expiresAt.timeIntervalSinceReferenceDate, expiresAt, accuracy: 0.001)
+    XCTAssertNil(loaded.sessionID)
+    let storage = BackendDesktopSessionFile(directory: directory)
+    let account = BackendAccountSession(api: FirstLoginAPI(tokens: loaded.tokens), storage: storage,
+      refreshLock: BackendFileRefreshLock(url: directory.appendingPathComponent("account-refresh.lock")))
+    let identity = try await account.credentials()
+    XCTAssertEqual(try storage.load()?.sessionID, identity.sessionID)
+    let repeated = try await account.credentials()
+    XCTAssertEqual(repeated.sessionID, identity.sessionID)
   }
 
   func testRefusesAFileOthersCanRead() throws {

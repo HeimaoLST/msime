@@ -2,7 +2,6 @@ package app.msime.android;
 
 import java.math.BigDecimal;
 import java.math.MathContext;
-import java.util.Locale;
 import org.json.JSONObject;
 
 /**
@@ -114,7 +113,7 @@ public final class AppThemePalette {
         this.dark = dark;
         accent = seed.accent;
         onAccent = seed.onAccent;
-        accentSoft = withAlpha(accent, dark ? 0x40 : 0x22);
+        accentSoft = ColorPolicy.withAlpha(accent, dark ? 0x40 : 0x22);
         background = seed.background;
         rowBackground = seed.card;
         hair = dark ? HAIR_DARK : seed.hair;
@@ -131,7 +130,7 @@ public final class AppThemePalette {
         splashBackground = mix(accent, 20, SPLASH_FIELD);
         splashDisc = mix(accent, 12, WHITE);
         splashBar = mix(accent, 70, WHITE);
-        splashGlow = withAlpha(accent, 0x57);
+        splashGlow = ColorPolicy.withAlpha(accent, 0x57);
         statBar = quantize(mixExact(channels(accent), dark ? 24 : 18, cardExact));
         heat = new int[HEAT_WEIGHTS.length];
         for (int level = 0; level < heat.length; level++) heat[level] = quantize(mixExact(channels(accent), HEAT_WEIGHTS[level], cardExact));
@@ -194,28 +193,13 @@ public final class AppThemePalette {
         return result;
     }
 
-    /** 同一颜色换成指定的 alpha（0–255）。 */
-    public static int withAlpha(int color, int alpha) {
-        return ColorPolicy.withAlpha(color, alpha);
-    }
-
-    /** `#AARRGGBB` 形式，供日志和测试比对。 */
-    public static String hex(int color) {
-        return String.format(Locale.ROOT, "#%08X", color);
-    }
-
     /**
      * 共享契约里的颜色串（`#RRGGBB`，或 alpha 在后的 `#RRGGBBAA`）转成 ARGB。
      *
      * @return 读不懂时为 null
      */
     public static Integer contractColor(String value) {
-        if (value == null || !value.startsWith("#")) return null;
-        String digits = value.substring(1);
-        if (!digits.matches("[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8}")) return null;
-        long parsed = Long.parseLong(digits, 16);
-        if (digits.length() == 6) return (int) (0xFF000000L | parsed);
-        return (int) (((parsed & 0xFF) << 24) | (parsed >>> 8));
+        return ColorPolicy.contractArgb(value);
     }
 
     /**

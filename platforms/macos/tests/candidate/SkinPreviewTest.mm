@@ -280,6 +280,43 @@ static void TestCandidateWindowStyle(MSIMEAppearancePreferences *preferences, NS
     preferences.candidateCornerRadius = @33;
     assert(preferences.candidateScalePercent == 125 && preferences.candidateOpacityPercent == 80 && preferences.candidateCornerRadius == nil);
 
+    // 内边距 (#7316) works like the radius: it follows the skin until set, a document's value inside 0-16 is honoured, the slider writes it here and 跟随皮肤 hands it back with an explicit null.
+    {
+        NSSlider *padding = (id)FindControl(root, @"内边距");
+        NSButton *followPadding = (id)FindControl(root, @"内边距跟随皮肤");
+        assert([padding isKindOfClass:NSSlider.class] && [followPadding isKindOfClass:NSButton.class]);
+        assert(padding.minValue == 2 && padding.maxValue == 16);
+        [preferences applySharedCandidatePreferences:@{}];
+        assert(preferences.candidatePadding == nil && !followPadding.enabled);
+        assert(padding.integerValue == lround([preferences resolvedSkinForDark:NO].tokens.pad));
+        assert([preferences sharedPreferencesByMerging:@{}][@"candidate_padding"] == NSNull.null);
+        [preferences applySharedCandidatePreferences:@{@"candidate_padding": @3}];
+        assert([preferences.candidatePadding isEqual:@3] && followPadding.enabled && padding.integerValue == 3);
+        assert([preferences candidateWindowSkinForDark:NO].tokens.pad == 3.0f);
+        for (id invalid in @[ @17, @(-1), @"3", @YES, @2.5 ]) {
+            [preferences applySharedCandidatePreferences:@{@"candidate_padding": invalid}];
+            assert([preferences.candidatePadding isEqual:@3]);
+        }
+        [preferences applySharedCandidatePreferences:@{@"candidate_padding": @0}];
+        assert([preferences.candidatePadding isEqual:@0]);
+        [preferences applySharedCandidatePreferences:@{@"candidate_padding": NSNull.null}];
+        assert(preferences.candidatePadding == nil);
+
+        padding.integerValue = 2;
+        [NSApp sendAction:padding.action to:padding.target from:padding];
+        assert([preferences.candidatePadding isEqual:@2]);
+        MSIMEAppearancePreferences *again = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults skinsRoot:preferences.skinsRoot];
+        assert([again.candidatePadding isEqual:@2]);
+        NSDictionary *paddedDocument = MSIMEMergePreferenceSnapshot(@{@"candidate_padding": @9}, [preferences sharedPreferencesByMerging:@{}]);
+        assert([paddedDocument[@"candidate_padding"] isEqual:@2]);
+        [NSApp sendAction:followPadding.action to:followPadding.target from:followPadding];
+        assert(preferences.candidatePadding == nil);
+        paddedDocument = MSIMEMergePreferenceSnapshot(paddedDocument, [preferences sharedPreferencesByMerging:@{}]);
+        assert(paddedDocument[@"candidate_padding"] == NSNull.null);
+        preferences.candidatePadding = @17;
+        assert(preferences.candidatePadding == nil);
+    }
+
     // 字体预设: this host's family for the preset, all of the preset's names at the front of the fallback list, then what the user had, without repeats.
     preferences.fallbackFonts = @[@"Menlo", @"SimSun"];
     [presets selectItemAtIndex:1];
@@ -409,6 +446,51 @@ static void TestCustomThemeClearsSurviveSave() {
     MSIMERemoveTestPreferenceSuite(defaults, suite);
 }
 
+static void TestCandidateSettingsTabs(MSIMEAppearancePreferences *preferences, NSUserDefaults *defaults, NSString *suite) {
+    NSView *root = preferences.window.contentView;
+    NSSegmentedControl *tabs = (id)FindControl(root, @"候选窗口设置标签");
+    assert([tabs isKindOfClass:NSSegmentedControl.class] && tabs.segmentCount == 4 && tabs.selectedSegment == 0);
+    NSArray<NSString *> *labels = @[@"布局", @"字体大小", @"窗口样式", @"预编辑"];
+    NSArray<NSView *> *cards = @[FindControl(root, @"候选窗口卡片"), FindControl(root, @"候选字体卡片"),
+        FindControl(root, @"候选窗口样式卡片"), FindControl(root, @"候选预编辑卡片")];
+    MSIMECandidatePreviewView *preview = (id)MSIMEFindPreferenceViewOfClass(root, MSIMECandidatePreviewView.class);
+    NSTextField *sample = (id)FindControl(root, @"预览示例文字");
+    NSDictionary *before = [defaults persistentDomainForName:suite] ?: @{};
+    NSDictionary *sharedBefore = [preferences sharedPreferencesByMerging:@{}];
+    BOOL wasDark = preview.previewUsesDark;
+    sample.stringValue = @"合成 示例";
+    [NSApp sendAction:sample.action to:sample.target from:sample];
+    __block NSUInteger notifications = 0;
+    id observer = [NSNotificationCenter.defaultCenter addObserverForName:MSIMEAppearanceDidChangeNotification object:preferences queue:nil usingBlock:^(NSNotification *note) { (void)note; ++notifications; }];
+    for (NSInteger index = 0; index < 4; ++index) {
+        assert([[tabs labelForSegment:index] isEqual:labels[index]]);
+        tabs.selectedSegment = index;
+        [NSApp sendAction:tabs.action to:tabs.target from:tabs];
+        [root layoutSubtreeIfNeeded];
+        for (NSInteger other = 0; other < 4; ++other) assert(cards[other].hidden == (other != index));
+        assert(preview == MSIMEFindPreferenceViewOfClass(root, MSIMECandidatePreviewView.class));
+        assert([sample.stringValue isEqual:@"合成 示例"] && preview.previewUsesDark == wasDark);
+    }
+    assert([before isEqual:([defaults persistentDomainForName:suite] ?: @{})]);
+    // 在预编辑标签搜索另一标签的设置，结果要能打开它，而非滚到隐藏的控件。
+    NSSearchField *search = nil;
+    for (NSToolbarItem *item in preferences.window.toolbar.items)
+        if ([item isKindOfClass:NSSearchToolbarItem.class]) search = ((NSSearchToolbarItem *)item).searchField;
+    assert(search);
+    search.stringValue = @"候选字号";
+    [NSApp sendAction:search.action to:search.target from:search];
+    NSButton *result = (id)MSIMEFindPreferenceControl(root, NSSelectorFromString(@"openSearchResult:"));
+    assert(result && [result.accessibilityLabel containsString:@"候选字号"]);
+    [NSApp sendAction:result.action to:result.target from:result];
+    assert(tabs.selectedSegment == 1 && !cards[1].hidden && search.stringValue.length == 0);
+    assert(notifications == 0 && [sharedBefore isEqual:[preferences sharedPreferencesByMerging:@{}]]);
+    [NSNotificationCenter.defaultCenter removeObserver:observer];
+    tabs.selectedSegment = 0;
+    [NSApp sendAction:tabs.action to:tabs.target from:tabs];
+    sample.stringValue = @"";
+    [NSApp sendAction:sample.action to:sample.target from:sample];
+}
+
 int main(int argc, const char **argv) {
     @autoreleasepool {
         [NSApplication sharedApplication];
@@ -439,6 +521,7 @@ int main(int argc, const char **argv) {
         assert(![[[MSIMEAppearancePreferences alloc] initWithDefaults:defaults skinsRoot:preferences.skinsRoot] shuangpinPreeditUsesRaw]);
         preferences.shuangpinPreeditUsesRaw = YES;
         NSWindow *window = preferences.window;
+        TestCandidateSettingsTabs(preferences, defaults, suite);
         MSIMECandidatePreviewView *preview =
             (id)MSIMEFindPreferenceViewOfClass(window.contentView, MSIMECandidatePreviewView.class);
         NSButton *theme = (id)MSIMEFindPreferenceControl(window.contentView, NSSelectorFromString(@"togglePreviewTheme:"));
@@ -705,6 +788,24 @@ int main(int argc, const char **argv) {
         assert(automatic.previewUsesDark && automatic.previewSkin.fixedDark == true);
         [automatic setPreviewSkinId:@"missing-package"];
         assert(automatic.previewSkin.id == "custom" && automatic.previewSkin.candidateSkin.empty());
+        // 包只画在它 base 的明暗下：深色底的包卡片在浅色宿主里也按深色预览出包本身，浅色底的同理，不落回没有包的底色。
+        for (NSArray<NSString *> *fixture in @[ @[ @"night-card", @"night", @"dark" ], @[ @"paper-card", @"paper", @"light" ] ]) {
+            std::filesystem::create_directories(root / fixture[0].UTF8String);
+            std::ofstream manifest(root / fixture[0].UTF8String / "skin.toml");
+            manifest << "schema_version = 1\nid = \"" << fixture[0].UTF8String << "\"\nname = \"" << fixture[0].UTF8String
+                     << "\"\nversion = \"1\"\nbase = \"" << fixture[1].UTF8String << "\"\n[supports]\nlayouts = [\"horizontal\", \"vertical\"]\nthemes = [\""
+                     << fixture[2].UTF8String << "\"]\n[candidate_window]\nmin_width_dip = 0\n[candidate." << fixture[2].UTF8String << "]\nsurface = \"#345678\"\n";
+            assert(manifest.good());
+        }
+        for (NSAppearanceName host in @[ NSAppearanceNameAqua, NSAppearanceNameDarkAqua ]) {
+            automatic.appearance = [NSAppearance appearanceNamed:host];
+            [automatic setPreviewSkinId:@"night-card"];
+            assert(automatic.previewSkin.candidateSkin == "night-card" && automatic.previewUsesDark && [automatic previewHasFixedMode]);
+            [automatic setPreviewSkinId:@"paper-card"];
+            assert(automatic.previewSkin.candidateSkin == "paper-card" && !automatic.previewUsesDark && [automatic previewHasFixedMode]);
+        }
+        std::filesystem::remove_all(root / "night-card");
+        std::filesystem::remove_all(root / "paper-card");
         // A large external decoration increases scrollable height, not the fixed settings window.
         std::filesystem::create_directory(root / "synthetic");
         {

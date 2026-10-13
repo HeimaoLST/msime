@@ -10,6 +10,54 @@ private final class MemoryCredentials: BackendSessionStorage, @unchecked Sendabl
   func save(_ value: BackendSavedSession) throws { lock.lock(); defer { lock.unlock() }; saved = value }
   func clear() throws { lock.lock(); defer { lock.unlock() }; saved = nil }
 }
+private final class MemoryKeystore: BackendClipboardKeystoreStorage, @unchecked Sendable {
+  private let lock = NSLock()
+  private var value: String?
+  func load() throws -> String? { lock.lock(); defer { lock.unlock() }; return value }
+  func save(_ value: String) throws { lock.lock(); defer { lock.unlock() }; self.value = value }
+  func clear() throws { lock.lock(); defer { lock.unlock() }; value = nil }
+}
+/// 不加密的驱动替身：列表和上传把下面这个服务端替身的明文正文当作结果，设备状态直接给出。`pending` 为真时模拟本机还在等待批准。
+private final class FixtureClipboardDriver: @unchecked Sendable {
+  private let lock = NSLock()
+  private var pendingValue = false
+  private var operations: [String] = []
+  var pending: Bool { get { lock.lock(); defer { lock.unlock() }; return pendingValue } set { lock.lock(); pendingValue = newValue; lock.unlock() } }
+  var seen: [String] { lock.lock(); defer { lock.unlock() }; return operations }
+  static let code = "0421 9873 5530 1176"
+  var e2e: BackendClipboardE2E { BackendClipboardE2E(drive: { [self] in reply($0) }, keystore: MemoryKeystore(), deviceName: { "合成 Mac" }) }
+  private func devices(pending: Bool) -> [String: Any] {
+    ["enabled": true, "status": pending ? "pending" : "ready", "device_id": String(repeating: "a", count: 32), "code": Self.code, "devices": [
+      ["device_id": String(repeating: "a", count: 32), "name": "合成 Mac", "created_at": "2026-10-11T08:00:00Z", "approved": !pending, "current": true, "code": Self.code],
+      ["device_id": String(repeating: "b", count: 32), "name": "合成 iPhone", "created_at": "2026-10-11T09:00:00Z", "approved": false, "current": false, "code": "1111 2222 3333 4444"],
+    ]]
+  }
+  private func reply(_ data: Data) -> Data? {
+    let input = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+    let pending = self.pending
+    var value: [String: Any] = ["keystore": "synthetic-keystore"]
+    if let start = input["start"] as? [String: Any], let op = start["op"] as? String {
+      lock.lock(); operations.append(op); lock.unlock()
+      switch op {
+      case "list" where pending:
+        value["done"] = ["enabled": true, "retention_days": 0, "items": [], "e2e": ["status": "pending", "code": Self.code, "pending_devices": 0, "undecryptable": 0]]
+      case "list": value["request"] = ["method": "GET", "path": "/v1/users/me/clipboard", "body": NSNull()]; value["state"] = ["op": "list"]
+      case "add" where pending: value["error"] = ["status": 0, "code": "clipboard_device_pending"]
+      case "add":
+        let body = String(data: try! JSONSerialization.data(withJSONObject: ["text": start["text"] ?? ""]), encoding: .utf8)!
+        value["request"] = ["method": "POST", "path": "/v1/users/me/clipboard", "body": body]; value["state"] = ["op": "add"]
+      default: value["done"] = devices(pending: pending)
+      }
+    } else if let state = input["resume"] as? [String: Any], let response = input["response"] as? [String: Any],
+              let body = response["body"] as? String, var object = (try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any] {
+      if state["op"] as? String == "list" {
+        object["e2e"] = ["status": object["enabled"] as? Bool == true ? "ready" : "disabled", "code": Self.code, "pending_devices": 1, "undecryptable": 0]
+      }
+      value["done"] = object
+    } else { value["error"] = ["status": 0, "code": "invalid_response"] }
+    return try? JSONSerialization.data(withJSONObject: ["ok": true, "value": value])
+  }
+}
 private final class AccountFixture: URLProtocol, @unchecked Sendable {
   static var failLogout = false
   static var allowDelete = false
@@ -19,8 +67,10 @@ private final class AccountFixture: URLProtocol, @unchecked Sendable {
   static var deleteRequests = 0
   static var omittedPreferenceKey: String?
   static var themeSchema = true
+  /// 服务端字段表是否收录了晚加入的深色槽位。
+  static var darkSkinSchema = true
   private static var preferenceRevision = 1
-  private static var preferences: [String: Any] = ["platform.macos.candidate_font_size": 18, "platform.macos.candidate_learning": true, "platform.ios.nine_key": true]
+  private static var preferences: [String: Any] = ["platform.macos.candidate_font_size": 18, "platform.macos.candidate_learning": true, "platform.ios.nine_key": true, "platform.macos.quanpin_helpcode_schema": 6, "platform.macos.shuangpin_helpcode_schema": 9]
   private static var clipboardEnabled = false
   private static var clipboardText: String?
   override class func canInit(with request: URLRequest) -> Bool { true }
@@ -42,7 +92,7 @@ private final class AccountFixture: URLProtocol, @unchecked Sendable {
     case ("GET", "/v1/users/me/preferences/schema"):
       var fields: [String: Any] = ["platform.macos.global_theme": ["type":"string", "maxLength":64], "platform.macos.candidate_font_size": ["type":"integer"], "platform.macos.candidate_learning": ["type":"boolean"], "platform.macos.shuangpin_preedit_uses_raw": ["type":"boolean"], "platform.ios.nine_key": ["type":"boolean"]]
       // A server that has registered only part of the theme group, as one that predates the custom theme would.
-      if Self.themeSchema { fields["platform.macos.custom_theme_base"] = ["type":"string", "maxLength":64]; fields["platform.macos.custom_candidate_skin"] = ["type":"string", "maxLength":128] }
+      if Self.themeSchema { fields["platform.macos.custom_theme_base"] = ["type":"string", "maxLength":64]; fields["platform.macos.custom_candidate_skin"] = ["type":"string", "maxLength":128]; if Self.darkSkinSchema { fields["platform.macos.custom_candidate_skin_dark"] = ["type":"string", "maxLength":128] } }
       body = json(["fields": fields, "maximum_bytes": 1048576, "update_mode": "replace", "revision_required": true])
     case ("GET", "/v1/users/me/preferences"):
       body = json(["revision":Self.preferenceRevision, "settings":Self.preferences.filter { $0.key != Self.omittedPreferenceKey }])
@@ -261,14 +311,21 @@ private final class AccountFixture: URLProtocol, @unchecked Sendable {
     model.logout(delete: true); try await finished(model)
     try require(model.user != nil && model.message != nil && storage.load() != nil)
     try require(windowClosures == 0)
-    var localSettings: MacSettingsAccess.Values = ["platform.macos.global_theme": .string("shuishan"), "platform.macos.custom_theme_base": .string("system"), "platform.macos.custom_candidate_skin": .string(""), "platform.macos.candidate_font_size": .integer(16), "platform.macos.candidate_learning": .boolean(false), "platform.macos.shuangpin_preedit_uses_raw": .boolean(false)]
+    var localSettings: MacSettingsAccess.Values = ["platform.macos.global_theme": .string("shuishan"), "platform.macos.custom_theme_base": .string("system"), "platform.macos.custom_candidate_skin": .string(""), "platform.macos.custom_candidate_skin_dark": .string("night-card"), "platform.macos.candidate_font_size": .integer(16), "platform.macos.candidate_learning": .boolean(false), "platform.macos.shuangpin_preedit_uses_raw": .boolean(false)]
     let settings = MacSettingsModel(accountID: "synthetic-user", client: client, account: session, local: .init(snapshot: { localSettings }, validate: { values in
-      guard values.count == 6 else { throw Failure() }
+      guard values.count == 7 else { throw Failure() }
     }, apply: { localSettings = $0 }))
     settings.download(); try await finished(settings)
     try require(settings.preview?["platform.macos.candidate_font_size"] == .integer(18))
     try require(settings.preview?["platform.macos.global_theme"] == .string("shuishan"))
     try require(settings.preview?["platform.macos.shuangpin_preedit_uses_raw"] == .boolean(false))
+    // 云端的辅助码方案下标 9 是本机没有的方案，预览换成本机的选择；6（五笔 86）本机认得，照常进预览。
+    let helpcodeLocal: MacSettingsAccess.Values = ["platform.macos.candidate_font_size": .integer(16), "platform.macos.quanpin_helpcode_schema": .integer(0), "platform.macos.shuangpin_helpcode_schema": .integer(2)]
+    let helpcodeSettings = MacSettingsModel(accountID: "synthetic-user", client: client, account: session, local: .init(snapshot: { helpcodeLocal }, validate: { _ in }, apply: { _ in }))
+    helpcodeSettings.download(); try await finished(helpcodeSettings)
+    try require(helpcodeSettings.preview?["platform.macos.quanpin_helpcode_schema"] == .integer(6))
+    try require(helpcodeSettings.preview?["platform.macos.shuangpin_helpcode_schema"] == .integer(2))
+    helpcodeSettings.close()
     AccountFixture.omittedPreferenceKey = "platform.macos.candidate_font_size"
     settings.download(); try await finished(settings)
     try require(settings.preview == nil && settings.message != nil)
@@ -289,6 +346,7 @@ private final class AccountFixture: URLProtocol, @unchecked Sendable {
     try require(savedPreferences.settings["platform.ios.nine_key"] == .boolean(true))
     try require(savedPreferences.settings["platform.macos.global_theme"] == .string("shuishan"))
     try require(savedPreferences.settings["platform.macos.custom_theme_base"] == .string("system") && savedPreferences.settings["platform.macos.custom_candidate_skin"] == .string(""))
+    try require(savedPreferences.settings["platform.macos.custom_candidate_skin_dark"] == .string("night-card"))
     try require(settings.message == "本机设置已上传，其他平台的云端设置已保留。")
     try require(savedPreferences.settings["platform.macos.shuangpin_preedit_uses_raw"] == .boolean(true))
     localSettings["platform.macos.shuangpin_preedit_uses_raw"] = .boolean(false)
@@ -309,19 +367,51 @@ private final class AccountFixture: URLProtocol, @unchecked Sendable {
     let themeless = try await client.preferences(token: credentials.token)
     try require(themeless.settings["platform.macos.candidate_font_size"] == .integer(22) && themeless.settings["platform.macos.global_theme"] == .string("shuishan"))
     AccountFixture.themeSchema = true
+    // 服务端字段表只缺深色槽位：只去掉这一项，主题组其余字段照常上传，提示也不说主题没上传。
+    AccountFixture.darkSkinSchema = false
+    localSettings["platform.macos.global_theme"] = .string("ink")
+    localSettings["platform.macos.custom_candidate_skin_dark"] = .string("dusk-card")
+    settings.download(); try await finished(settings)
+    settings.upload(); try await finished(settings)
+    try require(settings.message == "本机设置已上传，其他平台的云端设置已保留。")
+    let darkless = try await client.preferences(token: credentials.token)
+    try require(darkless.settings["platform.macos.global_theme"] == .string("ink") && darkless.settings["platform.macos.custom_candidate_skin_dark"] == .string("night-card"))
+    AccountFixture.darkSkinSchema = true
+    // 云端还没有深色槽位：下载时保留本机的值，不因少一项拒绝整份快照。
+    AccountFixture.omittedPreferenceKey = "platform.macos.custom_candidate_skin_dark"
+    settings.download(); try await finished(settings)
+    try require(settings.preview?["platform.macos.custom_candidate_skin_dark"] == .string("dusk-card"))
+    AccountFixture.omittedPreferenceKey = nil
     settings.close(); try require(settings.preview == nil && settings.cloud == nil)
-    let clipboard = MacClipboardModel(accountID: "synthetic-user", client: client, account: session)
+    let driver = FixtureClipboardDriver()
+    let clipboard = MacClipboardModel(accountID: "synthetic-user", client: client, account: session, e2e: driver.e2e)
     clipboard.refresh(); try await finished(clipboard)
-    try require(clipboard.loaded && !clipboard.enabled && clipboard.items.isEmpty)
+    try require(clipboard.loaded && !clipboard.enabled && clipboard.items.isEmpty && clipboard.devices == nil)
     clipboard.setEnabled(true); try await finished(clipboard)
+    // 开着时列表之后再取一次设备状态，等待本机批准的另一台设备显示出来。
+    try require(clipboard.enabled && !clipboard.isPending && clipboard.awaitingApproval.map(\.name) == ["合成 iPhone"])
     clipboard.text = "合成剪贴板内容"; clipboard.upload(); try await finished(clipboard)
     try require(clipboard.items.first?.text == "合成剪贴板内容" && clipboard.text.isEmpty)
+    // 批准经驱动完成，操作本身带回设备状态，不再多取一次。
+    let before = driver.seen.count
+    clipboard.change(.approve(deviceID: String(repeating: "b", count: 32))); try await finished(clipboard)
+    try require(Array(driver.seen.dropFirst(before)) == ["approve", "list"] && clipboard.message == nil)
+    // 本机等待批准：看不到条目，显示核对码；上传失败时提示去批准，草稿留着。
+    driver.pending = true
+    clipboard.refresh(); try await finished(clipboard)
+    try require(clipboard.isPending && clipboard.items.isEmpty && clipboard.code == FixtureClipboardDriver.code && clipboard.awaitingApproval.isEmpty)
+    clipboard.text = "等待批准时的草稿"; clipboard.upload(); try await finished(clipboard)
+    try require(clipboard.text == "等待批准时的草稿" && clipboard.loaded
+                && clipboard.message == BackendAccountClient.Failure.clipboardMessages["clipboard_device_pending"])
+    driver.pending = false
+    clipboard.text = ""; clipboard.refresh(); try await finished(clipboard)
+    try require(!clipboard.isPending && clipboard.items.first?.text == "合成剪贴板内容")
     clipboard.delete(id: clipboard.items.first!.id); try await finished(clipboard)
     try require(clipboard.items.isEmpty)
     clipboard.text = "合成清理内容"; clipboard.upload(); try await finished(clipboard)
     clipboard.setEnabled(false); try await finished(clipboard)
     try require(!clipboard.enabled && clipboard.items.isEmpty)
-    let wrongAccount = MacClipboardModel(accountID: "previous-account", client: client, account: session)
+    let wrongAccount = MacClipboardModel(accountID: "previous-account", client: client, account: session, e2e: driver.e2e)
     wrongAccount.refresh(); try await finished(wrongAccount)
     try require(!wrongAccount.loaded && wrongAccount.items.isEmpty)
     clipboard.text = "未上传的草稿"; clipboard.close()

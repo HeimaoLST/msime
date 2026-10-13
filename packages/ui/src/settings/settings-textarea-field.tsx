@@ -1,4 +1,5 @@
 import type { ReactNode, TextareaHTMLAttributes } from "react";
+import { ControlledTextarea } from "../core/controlled-textarea";
 import * as settings from "./settings-style";
 
 export interface SettingsTextareaFieldProps extends Omit<
@@ -28,12 +29,12 @@ export function SettingsTextareaField({
         <span data-row-title="">{label}</span>
         {description !== undefined && <> {description}</>}
       </span>
-      <textarea
+      <ControlledTextarea
         {...textareaProps}
         className={className}
         aria-label={ariaLabel}
         value={value}
-        onChange={(event) => onChange(event.target.value)}
+        onChange={onChange}
       />
     </label>
   );

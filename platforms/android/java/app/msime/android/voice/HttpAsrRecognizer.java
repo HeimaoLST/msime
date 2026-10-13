@@ -1,8 +1,6 @@
 package app.msime.android;
 
-import android.media.AudioFormat;
 import android.media.AudioRecord;
-import android.media.MediaRecorder;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -11,6 +9,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -75,28 +74,28 @@ public final class HttpAsrRecognizer {
      * <p>Blocking, and never called on the main thread: it holds the microphone for as long as the
      * user is speaking and then waits on a network round trip.
      */
-    public String recognize(String requestId, String language, String endpoint, String model,
-                            String token) throws Refused {
+    public String recognize(String requestId, String language, String requestFormat,
+                            String endpoint, String model, String token) throws Refused {
         byte[] pcm = record();
         if (cancelled.get()) throw new Refused(Failure.CANCELLED);
         byte[] wav = WavAudio.wrap(pcm, pcm.length, WavAudio.SAMPLE_RATE);
         if (wav == null) throw new Refused(Failure.EMPTY);
         String boundary = HttpAsrPolicy.boundary(requestId);
-        byte[] body = HttpAsrPolicy.multipartBody(boundary, model, language, wav);
+        boolean chat = HttpAsrPolicy.CHAT_AUDIO.equals(requestFormat);
+        byte[] body = chat
+            ? HttpAsrPolicy.chatAudioBody(model, wav)
+            : HttpAsrPolicy.multipartBody(boundary, model, language, wav);
         if (body.length > HttpAsrPolicy.MAX_AUDIO_BYTES) throw new Refused(Failure.EMPTY);
-        return upload(endpoint, token, boundary, body);
+        return upload(endpoint, token, HttpAsrPolicy.contentType(requestFormat, boundary), body, chat);
     }
 
     private byte[] record() throws Refused {
-        int minimum = AudioRecord.getMinBufferSize(WavAudio.SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+        int minimum = VoicePcmRecorder.minimumBufferBytes();
         if (minimum <= 0) throw new Refused(Failure.UNAVAILABLE);
         int buffer = BoundsPolicy.atLeast(WavAudio.SAMPLE_RATE, minimum);
         AudioRecord recorder;
         try {
-            recorder = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                WavAudio.SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT, buffer);
+            recorder = VoicePcmRecorder.create(buffer);
         } catch (IllegalArgumentException | SecurityException error) {
             throw new Refused(Failure.PERMISSION);
         }
@@ -127,19 +126,13 @@ public final class HttpAsrRecognizer {
             }
             return captured.toByteArray();
         } finally {
-            try {
-                if (recorder.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) {
-                    recorder.stop();
-                }
-            } catch (IllegalStateException ignored) {
-                // Already stopped; release is what matters.
-            }
+            VoicePcmRecorder.stopIfRecording(recorder);
             recorder.release();
         }
     }
 
-    private String upload(String endpoint, String token, String boundary, byte[] body)
-            throws Refused {
+    private String upload(String endpoint, String token, String contentType, byte[] body,
+                          boolean chat) throws Refused {
         HttpURLConnection opened = null;
         try {
             opened = (HttpURLConnection) new URL(endpoint).openConnection();
@@ -147,27 +140,25 @@ public final class HttpAsrRecognizer {
             if (cancelled.get()) throw new Refused(Failure.CANCELLED);
             // The bearer token belongs to this configured origin. Never let HttpURLConnection
             // replay it after a redirect to another host or protocol.
-            opened.setInstanceFollowRedirects(false);
-            opened.setConnectTimeout(CONNECT_TIMEOUT_MILLIS);
-            opened.setReadTimeout(READ_TIMEOUT_MILLIS);
+            HttpConnectionPolicy.rejectRedirects(opened);
+            HttpConnectionPolicy.setTimeouts(opened, CONNECT_TIMEOUT_MILLIS, READ_TIMEOUT_MILLIS);
             opened.setRequestMethod("POST");
             opened.setDoOutput(true);
             opened.setFixedLengthStreamingMode(body.length);
             opened.setRequestProperty("Authorization", "Bearer " + token);
-            opened.setRequestProperty("Content-Type",
-                "multipart/form-data; boundary=" + boundary);
+            opened.setRequestProperty("Content-Type", contentType);
             opened.setRequestProperty("Accept", "application/json");
             try (OutputStream out = opened.getOutputStream()) {
                 out.write(body);
             }
             if (cancelled.get()) throw new Refused(Failure.CANCELLED);
             int status = opened.getResponseCode();
-            if (status < 200 || status >= 300) throw new Refused(Failure.NETWORK);
+            if (!HttpConnectionPolicy.isSuccessful(status)) throw new Refused(Failure.NETWORK);
             String text;
             try (InputStream input = opened.getInputStream()) {
                 String response = TextPolicy.utf8(
                     HttpBodyPolicy.readRequired(input, MAX_RESPONSE_BYTES));
-                text = text(response);
+                text = chat ? chatText(response) : text(response);
             }
             if (text.isEmpty()) throw new Refused(Failure.EMPTY);
             return text;
@@ -176,6 +167,19 @@ public final class HttpAsrRecognizer {
         } finally {
             if (connection == opened) connection = null;
             if (opened != null) opened.disconnect();
+        }
+    }
+
+    /** chat_audio 的回答：`choices[0].message.content`。 */
+    private static String chatText(String response) {
+        try {
+            JSONArray choices = new JSONObject(response).optJSONArray("choices");
+            JSONObject choice = choices == null ? null : choices.optJSONObject(0);
+            JSONObject message = choice == null ? null : choice.optJSONObject("message");
+            return message == null ? ""
+                : TextPolicy.trimmed(HttpAsrPolicy.strictText(message.opt("content")));
+        } catch (JSONException error) {
+            return "";
         }
     }
 

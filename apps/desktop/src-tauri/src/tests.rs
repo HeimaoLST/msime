@@ -142,89 +142,6 @@ fn runtime_options_reject_a_symlinked_file() {
     );
 }
 
-#[cfg(not(target_os = "android"))]
-#[test]
-fn ai_endpoint_validation_accepts_http_api_urls_and_rejects_unsafe_urls() {
-    for endpoint in [
-        "https://api.example.test/v1/chat/completions",
-        "http://127.0.0.1:8080/v1/chat/completions?tenant=fixture",
-        "http://192.168.1.20:1234/v1/chat/completions",
-        "http://studio.local:1234/v1",
-    ] {
-        assert!(crate::ai::validate_ai_endpoint(endpoint).is_ok());
-    }
-    for endpoint in [
-        "file:///tmp/models",
-        "http://api.example.test/v1/chat/completions",
-        "http://8.8.8.8/v1/chat/completions",
-        "https:///v1/chat/completions",
-        "https://user:password@example.test/v1/chat/completions",
-        "https://example.test/v1/chat/completions#fragment",
-        "https://example.test/v1/chat/\ncompletions",
-    ] {
-        assert!(crate::ai::validate_ai_endpoint(endpoint).is_err());
-    }
-}
-
-#[cfg(not(target_os = "android"))]
-#[test]
-fn ai_models_url_reuses_the_api_prefix() {
-    let endpoint = crate::ai::validate_ai_endpoint(
-        "https://api.example.test/openai/v1/chat/completions?tenant=fixture",
-    )
-    .unwrap_or_else(|_| panic!("fixture endpoint should be valid"));
-    assert_eq!(
-        crate::ai::ai_models_url(&endpoint).as_str(),
-        "https://api.example.test/openai/v1/models"
-    );
-
-    let endpoint = crate::ai::validate_ai_endpoint("https://api.example.test/chat/completions")
-        .unwrap_or_else(|_| panic!("fixture endpoint should be valid"));
-    assert_eq!(
-        crate::ai::ai_models_url(&endpoint).as_str(),
-        "https://api.example.test/models"
-    );
-
-    for (endpoint, models) in [
-        (
-            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-            "https://generativelanguage.googleapis.com/v1beta/openai/models",
-        ),
-        (
-            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-            "https://open.bigmodel.cn/api/paas/v4/models",
-        ),
-        (
-            "https://host.example.test/v1/chat/completions/",
-            "https://host.example.test/v1/models",
-        ),
-    ] {
-        let endpoint = crate::ai::validate_ai_endpoint(endpoint)
-            .unwrap_or_else(|_| panic!("fixture endpoint should be valid"));
-        assert_eq!(crate::ai::ai_models_url(&endpoint).as_str(), models);
-    }
-}
-
-#[cfg(not(target_os = "android"))]
-#[test]
-fn ai_credentials_and_text_reject_empty_or_unsafe_values() {
-    assert!(crate::ai::validate_ai_token("fixture-token").is_ok());
-    assert!(crate::ai::validate_ai_token("").is_err());
-    assert!(crate::ai::validate_ai_token("fixture\n-token").is_err());
-    assert!(crate::ai::ai_text_is_valid("多行\nfixture text\t", false));
-    assert!(crate::ai::ai_text_is_valid("", true));
-    assert!(!crate::ai::ai_text_is_valid("", false));
-    assert!(!crate::ai::ai_text_is_valid("fixture\0text", false));
-}
-
-#[cfg(not(target_os = "android"))]
-#[test]
-fn ai_response_body_limit_rejects_oversized_streams() {
-    let body = vec![b'x'; crate::ai::MAX_RESPONSE_BYTES + 1];
-    let error = crate::ai::read_ai_response_body(std::io::Cursor::new(body)).unwrap_err();
-    assert_eq!(error, crate::ai::AiResponseBodyError::TooLarge);
-}
-
 #[test]
 fn runtime_options_reader_rejects_oversized_documents_without_allocating_them() {
     let directory = tempfile::tempdir().unwrap();
@@ -442,6 +359,26 @@ fn candidate_panel_status_reader_rejects_oversized_documents() {
     assert!(super::read_candidate_panel_status(&path).is_none());
 }
 
+/// IBus 宿主在 GNOME Shell 以外的会话里写 `ibus_panel`：设置页读到它，才会说明圆角、边框颜色和皮肤装饰图在 IBus 面板上不生效，「关于」页照样认出输入法框架。
+#[test]
+fn candidate_panel_status_reader_reports_the_ibus_panel_limit() {
+    use msime_client_core::host_surface::{environment, CandidatePanelLimit};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("candidate-panel.json");
+    // 与 platforms/linux 的 candidate_panel_status_document("ibus", IbusPanel) 逐字节相同。
+    std::fs::write(&path, b"{\"host\":\"ibus\",\"limit\":\"ibus_panel\"}\n").unwrap();
+    let document = super::read_candidate_panel_status(&path).unwrap();
+    assert_eq!(
+        CandidatePanelLimit::from_host_status(&document),
+        Some(CandidatePanelLimit::IbusPanel)
+    );
+    assert_eq!(
+        environment::input_method_framework_from_host_status(&document).as_deref(),
+        Some("IBus")
+    );
+}
+
 #[test]
 fn clipboard_text_validation_enforces_nonempty_nul_free_byte_limit() {
     assert!(!crate::clipboard_history::clipboard_text_is_valid(""));
@@ -549,6 +486,8 @@ fn ios_routes_only_app_group_dictionary_operations() {
     }
     for action in [
         serde_json::json!({ "operation": "reset" }),
+        // 五笔查码只读随包码表，App 进程里的 host-api 直接回答，不经 App Group 的个人词库。
+        serde_json::json!({ "operation": "wubi_codes", "text": "你" }),
         serde_json::json!({ "operation": "unknown" }),
         serde_json::json!({}),
         serde_json::Value::Null,
@@ -674,12 +613,17 @@ fn ios_voice_batch_configuration_covers_everyapi_and_mistral() {
         (
             "everyapi",
             "https://api.everyapi.ai/v1/audio/transcriptions",
-            "openai/whisper-large-v3-turbo",
+            "volc.seedasr.sauc.duration",
         ),
         (
             "mistral",
             "https://api.mistral.ai/v1/audio/transcriptions",
             "voxtral-mini-latest",
+        ),
+        (
+            "bailian",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+            "qwen3-asr-flash",
         ),
     ] {
         let mut preferences = msime_client_core::preferences::Preferences::default();
@@ -697,6 +641,14 @@ fn ios_voice_batch_configuration_covers_everyapi_and_mistral() {
         assert_eq!(configuration.endpoint, endpoint);
         assert_eq!(configuration.model, model);
         assert_eq!(configuration.token, "synthetic-slot");
+        assert_eq!(
+            configuration.request_format,
+            if provider == "bailian" {
+                "chat_audio"
+            } else {
+                "multipart"
+            }
+        );
         // Only Doubao carries request headers; a batch provider that grew any would be
         // sending something the multipart transport never validated.
         assert!(configuration.headers.is_empty());
@@ -718,6 +670,14 @@ fn ios_keyboard_ai_preferences_resolve_origin_tokens_and_disable_incomplete_draf
     assert!(native.enabled);
     assert_eq!(native.provider, "deepSeek");
     assert_eq!(native.token, "fixture-origin-token");
+    preferences
+        .ai_assistant
+        .tokens
+        .insert("deepseek".into(), "fixture-provider-legacy".into());
+    assert_eq!(
+        super::ios_keyboard_ai_preferences(&preferences.ai_assistant).token,
+        "fixture-origin-token"
+    );
     assert_eq!(
         native.prompt,
         "请润色以下文字，保持原意，只返回修改后的文字。"
@@ -735,6 +695,12 @@ fn ios_keyboard_ai_preferences_resolve_origin_tokens_and_disable_incomplete_draf
         super::ios_keyboard_ai_preferences(&preferences.ai_assistant).prompt,
         "请润色以下文字，保持原意，只返回修改后的文字。"
     );
+
+    preferences
+        .ai_assistant
+        .tokens
+        .remove("https://api.example.invalid:443");
+    assert!(!super::ios_keyboard_ai_preferences(&preferences.ai_assistant).enabled);
 
     preferences.ai_assistant.tokens.clear();
     assert!(!super::ios_keyboard_ai_preferences(&preferences.ai_assistant).enabled);
@@ -1010,71 +976,6 @@ fn chrome_background_matches_the_shared_stylesheet() {
         super::chrome_background(None),
         super::CHROME_BACKGROUND_LIGHT
     );
-}
-
-#[test]
-fn an_invalid_dictionary_entry_keeps_its_own_code() {
-    for reason in [
-        "invalid dictionary entry",
-        "invalid dictionary entry: code is empty or too long",
-        "invalid dictionary entry: code contains characters this dictionary does not accept",
-        "invalid dictionary entry: Use complete pinyin syllables separated by apostrophes or spaces",
-        "invalid dictionary entry: Each character must have one pinyin syllable (maximum 64)",
-        "invalid dictionary entry: Wubi codes contain one to four letters",
-    ] {
-        assert_eq!(
-            super::dictionary_error_code(reason),
-            "dictionary_invalid_entry",
-            "{reason}"
-        );
-    }
-    // A valid code with a bad word or weight must not be reported as a code problem, or the page tells the user to fix the wrong field.
-    for reason in [
-        "invalid dictionary entry: word is empty or too long",
-        "invalid dictionary entry: word contains a control character",
-        "invalid dictionary entry: weight is outside 1 to 100000000",
-        "invalid dictionary entry: Weight must be between 1 and 100000000",
-        "invalid dictionary entry: The word contains an unsupported control character",
-    ] {
-        assert_eq!(
-            super::dictionary_error_code(reason),
-            "dictionary_invalid_word",
-            "{reason}"
-        );
-    }
-    // A different failure that merely shares the words is not an entry refusal.
-    assert_eq!(
-        super::dictionary_error_code("invalid dictionary entryway"),
-        "storage"
-    );
-    assert_eq!(
-        super::dictionary_error_code("dictionary edit rejected"),
-        "storage"
-    );
-    // A bundled word refused a new code or text is told it can only be re-weighted or deleted.
-    assert_eq!(
-        super::dictionary_error_code("bundled dictionary entry is read-only"),
-        "dictionary_bundled_readonly"
-    );
-}
-
-#[test]
-fn dictionary_mutations_quiesce_but_reads_do_not() {
-    assert!(super::dictionary_action_requires_quiesce(
-        &serde_json::json!({"operation": "edit"})
-    ));
-    assert!(super::dictionary_action_requires_quiesce(
-        &serde_json::json!({"operation": "import"})
-    ));
-    assert!(super::dictionary_action_requires_quiesce(
-        &serde_json::json!({"operation": "reset"})
-    ));
-    assert!(!super::dictionary_action_requires_quiesce(
-        &serde_json::json!({"operation": "list"})
-    ));
-    assert!(!super::dictionary_action_requires_quiesce(
-        &serde_json::json!({"operation": "export"})
-    ));
 }
 
 // The bundle id comes from the edition's macOS identity, which only the macOS build compiles.
@@ -1527,6 +1428,16 @@ fn linux_input_method_reply_separates_delivery_from_refusal() {
         parse_ime_reply("{\"error\":\"no_focus\",\"ok\":false}\n"),
         Some(ImeReply::Declined)
     );
+    // A host refusal must not be treated as permission to replay through a tool.
+    assert_eq!(
+        parse_ime_reply("{\"error\":\"restricted\",\"ok\":false}\n"),
+        Some(ImeReply::Rejected)
+    );
+    assert_eq!(
+        parse_ime_reply("{\"error\":\"invalid\",\"ok\":false}\n"),
+        Some(ImeReply::Rejected)
+    );
+    assert_eq!(parse_ime_reply("{\"ok\":false}"), None);
     // A missing or garbled answer is not a refusal: the host may already have typed the text.
     assert_eq!(parse_ime_reply(""), None);
     assert_eq!(parse_ime_reply("{\"ok\":\"yes\"}"), None);
@@ -1727,6 +1638,13 @@ fn resolve_theme_reads_the_custom_package_from_the_host_skin_root() {
         "schema_version = 1\nid = 'sakura'\nname = '樱花'\nversion = '1.0'\nbase = 'paper'\n[supports]\nlayouts = ['vertical', 'horizontal']\nthemes = ['light', 'dark']\n[candidate_window]\nmin_width_dip = 10\n[candidate_window.decoration]\ntop_inset_dip = 0\nwidth_dip = 0\n[candidate.light]\nsurface = '#fff0f5'\n[candidate.dark]\nsurface = '#301020'\n",
     )
     .unwrap();
+    let midnight = directory.path().join("midnight");
+    std::fs::create_dir_all(&midnight).unwrap();
+    std::fs::write(
+        midnight.join("skin.toml"),
+        "schema_version = 1\nid = 'midnight'\nname = '午夜'\nversion = '1.0'\nbase = 'night'\n[supports]\nlayouts = ['vertical', 'horizontal']\nthemes = ['dark']\n[candidate_window]\nmin_width_dip = 10\n[candidate_window.decoration]\ntop_inset_dip = 0\nwidth_dip = 0\n[candidate.dark]\nsurface = '#101828'\n",
+    )
+    .unwrap();
     let request =
         |value: serde_json::Value| serde_json::from_value::<ResolveThemeRequest>(value).unwrap();
     let resolved = resolve_theme_at(
@@ -1734,7 +1652,7 @@ fn resolve_theme_reads_the_custom_package_from_the_host_skin_root() {
         request(serde_json::json!({
             "global_theme": "custom",
             "custom_theme": { "candidate_skin": "sakura", "candidate_colors": { "text": "#123456" } },
-            "dark": true,
+            "dark": false,
             "layout": "vertical",
         })),
     )
@@ -1742,13 +1660,44 @@ fn resolve_theme_reads_the_custom_package_from_the_host_skin_root() {
     assert_eq!(resolved.source, ThemeSource::Custom);
     assert_eq!(resolved.candidate_skin.as_deref(), Some("sakura"));
     let candidate = resolved.candidate.expect("custom candidate palette");
-    // The package's paper base fixes the light mode, so a dark host still gets the light palette.
+    // 皮肤包的 paper 底固定浅色，画的是它的浅色配色。
     assert_eq!(
         resolved.appearance,
         Some(msime_client_core::skin::theme::ThemeAppearance::Light)
     );
     assert_eq!(candidate.surface.as_deref(), Some("#FFF0F5"));
     assert_eq!(candidate.text.as_deref(), Some("#123456"));
+
+    // 深色模式取 `candidate_skin_dark` 槽位的包；没设深色槽位时，浅色皮肤在深色模式下不画。
+    let dark = resolve_theme_at(
+        directory.path(),
+        request(serde_json::json!({
+            "global_theme": "custom",
+            "custom_theme": { "candidate_skin": "sakura", "candidate_skin_dark": "midnight" },
+            "dark": true,
+            "layout": "vertical",
+        })),
+    )
+    .unwrap();
+    assert_eq!(dark.candidate_skin.as_deref(), Some("midnight"));
+    assert_eq!(
+        dark.candidate
+            .expect("dark slot palette")
+            .surface
+            .as_deref(),
+        Some("#101828")
+    );
+    let light_only = resolve_theme_at(
+        directory.path(),
+        request(serde_json::json!({
+            "global_theme": "custom",
+            "custom_theme": { "candidate_skin": "sakura" },
+            "dark": true,
+            "layout": "vertical",
+        })),
+    )
+    .unwrap();
+    assert_eq!(light_only.candidate_skin, None);
 
     // The layout is required: without it the page could not ask for the surface it previews.
     assert!(
@@ -1908,6 +1857,8 @@ fn runtime_options_skin_catalog_stays_within_what_the_hosts_read() {
     let mut preferences = serde_json::to_value(Preferences::default()).unwrap();
     // The last package by name: beyond the package cap and the first to go when trimming, were the selection not protected in both.
     preferences["custom_theme"]["candidate_skin"] = "skin39".into();
+    // 深色槽位的皮肤同样在上限之外，同样要留下。
+    preferences["custom_theme"]["candidate_skin_dark"] = "skin38".into();
     let mut document = serde_json::json!({"api_version": 1, "preferences": preferences});
     let bytes = runtime_options_with_skin_catalog(&mut document, &skins, &catalog).unwrap();
     assert!(
@@ -1925,6 +1876,7 @@ fn runtime_options_skin_catalog_stays_within_what_the_hosts_read() {
         packages.len()
     );
     assert!(packages.iter().any(|package| package["id"] == "skin39"));
+    assert!(packages.iter().any(|package| package["id"] == "skin38"));
     assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), document);
 
     // A document already too large for the hosts is not made larger by the catalog.
@@ -2187,6 +2139,7 @@ fn desktop_account_storage_round_trips_an_owner_only_session() {
             },
         },
         expires_at_unix_ms: 1_700_000_000_000,
+        session_id: None,
     };
     storage.save(&session).expect("save");
     let path = directory.path().join("account-session.json");
@@ -2330,19 +2283,27 @@ fn input_source_status_rereads_only_what_the_user_can_change() {
         )]
     };
 
-    let before =
-        super::input_source_status_now(&state, timeout, || Some(false), system_copy).unwrap();
+    let before = super::input_source_status_now(
+        &state,
+        timeout,
+        || Some(false),
+        system_copy,
+        || panic!("an install made by this launch is not looked up in the registry"),
+    )
+    .unwrap();
     assert_eq!(before.enabled, Some(false));
     assert_eq!(
         before.system_bundles,
         vec!["/Library/Input Methods/MetasequoiaIME.app".to_string()]
     );
-    let after = super::input_source_status_now(&state, timeout, || Some(true), Vec::new).unwrap();
+    let after =
+        super::input_source_status_now(&state, timeout, || Some(true), Vec::new, || None).unwrap();
     assert_eq!(after.action, "installed");
     assert_eq!(after.enabled, Some(true));
     assert!(after.system_bundles.is_empty());
     assert_eq!(after.installed_version.as_deref(), Some("0.50.0 (1)"));
-    let unreadable = super::input_source_status_now(&state, timeout, || None, Vec::new).unwrap();
+    let unreadable =
+        super::input_source_status_now(&state, timeout, || None, Vec::new, || None).unwrap();
     assert_eq!(unreadable.enabled, None);
 }
 
@@ -2357,23 +2318,205 @@ fn input_source_status_is_absent_when_no_start_time_check_ran() {
         std::time::Duration::ZERO,
         || panic!("the input source list is not read without a start-time result"),
         || panic!("the system directory is not read without a start-time result"),
+        || panic!("the registry is not read without a start-time result"),
     );
     assert!(status.is_none());
+}
+
+/// 首次安装后同一次登录里再打开设置应用：启动检查只能报 `up_to_date`，输入法不在输入法列表里、也不在本登录会话的注册表里时改报 `login_required`，而不是叫用户去添加一个这次登录列不出来的输入法。
+#[cfg(target_os = "macos")]
+#[test]
+fn an_up_to_date_input_method_missing_from_the_registry_needs_a_login() {
+    let up_to_date = || super::InputSourceStartupStatus {
+        action: "up_to_date",
+        enabled: Some(false),
+        bundled_version: Some("0.50.0 (1)".into()),
+        installed_version: Some("0.50.0 (1)".into()),
+        system_bundles: Vec::new(),
+    };
+    let timeout = std::time::Duration::ZERO;
+    let state = super::InputSourceStartupState::default();
+    state.finish(Some(up_to_date()));
+
+    let missing =
+        super::input_source_status_now(&state, timeout, || Some(false), Vec::new, || Some(false))
+            .unwrap();
+    assert_eq!(missing.action, "login_required");
+    // 查明的结果只查一次，设置页反复询问时不再拉起输入法。
+    let again = super::input_source_status_now(
+        &state,
+        timeout,
+        || Some(false),
+        Vec::new,
+        || panic!("the registry is looked up once per start-time result"),
+    )
+    .unwrap();
+    assert_eq!(again.action, "login_required");
+
+    // 在注册表里：照常是 up_to_date，设置页给出添加步骤。
+    let state = super::InputSourceStartupState::default();
+    state.finish(Some(up_to_date()));
+    let listed =
+        super::input_source_status_now(&state, timeout, || Some(false), Vec::new, || Some(true))
+            .unwrap();
+    assert_eq!(listed.action, "up_to_date");
+
+    // 无从判断时不改结论，下次询问再查。
+    let state = super::InputSourceStartupState::default();
+    state.finish(Some(up_to_date()));
+    let unknown =
+        super::input_source_status_now(&state, timeout, || Some(false), Vec::new, || None).unwrap();
+    assert_eq!(unknown.action, "up_to_date");
+    let retried =
+        super::input_source_status_now(&state, timeout, || Some(false), Vec::new, || Some(false))
+            .unwrap();
+    assert_eq!(retried.action, "login_required");
+
+    // 已经在输入法列表里，或列表读不到时不查注册表。
+    for enabled in [Some(true), None] {
+        let status = super::input_source_status_now(
+            &state,
+            timeout,
+            move || enabled,
+            Vec::new,
+            || panic!("the registry is only looked up while the input method is not in the list"),
+        )
+        .unwrap();
+        assert_eq!(status.action, "up_to_date");
+    }
+
+    // 启动结果换了（安装窗口重新跑了一次）就重新查。
+    state.finish(Some(up_to_date()));
+    let fresh =
+        super::input_source_status_now(&state, timeout, || Some(false), Vec::new, || Some(true))
+            .unwrap();
+    assert_eq!(fresh.action, "up_to_date");
+}
+
+/// 这次启动刚装好或刚更新时不查注册表：登记后有一段分钟级的空窗，查不到不说明什么。
+#[cfg(target_os = "macos")]
+#[test]
+fn a_fresh_install_or_update_is_not_looked_up_in_the_registry() {
+    for action in ["installed", "updated"] {
+        let state = super::InputSourceStartupState::default();
+        state.finish(Some(super::InputSourceStartupStatus {
+            action,
+            enabled: Some(false),
+            bundled_version: Some("0.50.0 (1)".into()),
+            installed_version: Some("0.50.0 (1)".into()),
+            system_bundles: Vec::new(),
+        }));
+        let status = super::input_source_status_now(
+            &state,
+            std::time::Duration::ZERO,
+            || Some(false),
+            Vec::new,
+            || panic!("a bundle this launch replaced is not looked up in the registry"),
+        )
+        .unwrap();
+        assert_eq!(status.action, action);
+    }
+}
+
+/// 设置页挂载时和窗口获得焦点时几乎同时问状态：后到的请求等前一个查完，用它存下的结论，不再拉起一次输入法。
+#[cfg(target_os = "macos")]
+#[test]
+fn concurrent_status_requests_look_up_the_registry_once() {
+    let state = std::sync::Arc::new(super::InputSourceStartupState::default());
+    state.finish(Some(super::InputSourceStartupStatus {
+        action: "up_to_date",
+        enabled: Some(false),
+        bundled_version: Some("0.50.0 (1)".into()),
+        installed_version: Some("0.50.0 (1)".into()),
+        system_bundles: Vec::new(),
+    }));
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let first = {
+        let state = std::sync::Arc::clone(&state);
+        std::thread::spawn(move || {
+            super::input_source_status_now(
+                &state,
+                std::time::Duration::ZERO,
+                || Some(false),
+                Vec::new,
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Some(false)
+                },
+            )
+            .unwrap()
+        })
+    };
+    started_rx.recv().unwrap();
+    let second = {
+        let state = std::sync::Arc::clone(&state);
+        std::thread::spawn(move || {
+            super::input_source_status_now(
+                &state,
+                std::time::Duration::ZERO,
+                || Some(false),
+                Vec::new,
+                || panic!("a request arriving during a lookup waits for its answer"),
+            )
+            .unwrap()
+        })
+    };
+    release_tx.send(()).unwrap();
+    assert_eq!(first.join().unwrap().action, "login_required");
+    assert_eq!(second.join().unwrap().action, "login_required");
+}
+
+/// 查询期间安装窗口换了启动结果：旧查询的结论不写进新结果的缓存，下次询问重新查。
+#[cfg(target_os = "macos")]
+#[test]
+fn a_lookup_overtaken_by_a_new_start_time_result_is_not_kept() {
+    let up_to_date = || super::InputSourceStartupStatus {
+        action: "up_to_date",
+        enabled: Some(false),
+        bundled_version: Some("0.50.0 (1)".into()),
+        installed_version: Some("0.50.0 (1)".into()),
+        system_bundles: Vec::new(),
+    };
+    let timeout = std::time::Duration::ZERO;
+    let state = super::InputSourceStartupState::default();
+    state.finish(Some(up_to_date()));
+    let stale = super::input_source_status_now(
+        &state,
+        timeout,
+        || Some(false),
+        Vec::new,
+        || {
+            state.finish(Some(up_to_date()));
+            Some(false)
+        },
+    )
+    .unwrap();
+    assert_eq!(stale.action, "login_required");
+    let fresh =
+        super::input_source_status_now(&state, timeout, || Some(false), Vec::new, || Some(true))
+            .unwrap();
+    assert_eq!(fresh.action, "up_to_date");
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[test]
 fn cloud_clipboard_route_keeps_providers_ahead_of_the_account() {
-    use super::{cloud_clipboard_route, CloudClipboardRoute};
+    use super::{cloud_clipboard_route, CloudClipboardRoute, CommandError};
     use std::path::PathBuf;
 
+    let never_relay =
+        || -> Result<Option<&'static str>, CommandError> { panic!("relay consulted") };
+    let no_relay = || Ok(None::<&'static str>);
     let never_native = || -> Option<&'static str> { panic!("native session consulted") };
     let never_discover = || -> Option<PathBuf> { panic!("discovery consulted") };
 
-    // A configured socket wins over the native session and discovery.
+    // 显式配置的 socket 胜过中继、原生会话和自动发现的 socket。
     assert_eq!(
         cloud_clipboard_route(
             Some("/run/synthetic/cloud-clipboard.sock".into()),
+            never_relay,
             never_native,
             never_discover,
         )
@@ -2382,19 +2525,45 @@ fn cloud_clipboard_route_keeps_providers_ahead_of_the_account() {
     );
     // A configured socket that is not absolute is refused rather than quietly answered by the account.
     assert_eq!(
-        cloud_clipboard_route(Some("relative.sock".into()), never_native, never_discover)
-            .unwrap_err()
-            .code,
+        cloud_clipboard_route(
+            Some("relative.sock".into()),
+            never_relay,
+            never_native,
+            never_discover
+        )
+        .unwrap_err()
+        .code,
         "unavailable"
+    );
+    // 配置了中继时，中继排在输入法原生会话和自动发现的 socket 之前；中继配置读不出时报错，不退回账号。
+    assert_eq!(
+        cloud_clipboard_route(None, || Ok(Some("relay")), never_native, never_discover).unwrap(),
+        CloudClipboardRoute::Relay("relay")
+    );
+    assert_eq!(
+        cloud_clipboard_route(
+            None,
+            || -> Result<Option<&str>, CommandError> {
+                Err(CommandError {
+                    code: "relay_not_configured",
+                })
+            },
+            never_native,
+            never_discover,
+        )
+        .unwrap_err()
+        .code,
+        "relay_not_configured"
     );
     // The input method's own session comes before a discovered socket.
     assert_eq!(
-        cloud_clipboard_route(None, || Some("native"), never_discover).unwrap(),
+        cloud_clipboard_route(None, no_relay, || Some("native"), never_discover).unwrap(),
         CloudClipboardRoute::Native("native")
     );
     assert_eq!(
         cloud_clipboard_route(
             None,
+            no_relay,
             || None::<&str>,
             || Some(PathBuf::from("/run/synthetic/discovered.sock")),
         )
@@ -2403,18 +2572,86 @@ fn cloud_clipboard_route_keeps_providers_ahead_of_the_account() {
     );
     // With no provider at all, and for a discovered path that is not absolute, the signed-in account serves the request.
     assert_eq!(
-        cloud_clipboard_route(None, || None::<&str>, || None).unwrap(),
+        cloud_clipboard_route(None, no_relay, || None::<&str>, || None).unwrap(),
         CloudClipboardRoute::Account
     );
     assert_eq!(
         cloud_clipboard_route(
             None,
+            no_relay,
             || None::<&str>,
             || Some(PathBuf::from("relative.sock")),
         )
         .unwrap(),
         CloudClipboardRoute::Account
     );
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[test]
+fn relay_only_clipboard_actions_reach_only_the_relay() {
+    use super::{cloud_clipboard_route_for_action, CloudClipboardRoute};
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    for action in [
+        json!({ "operation": "pin", "id": "a".repeat(64), "pinned": true }),
+        json!({ "operation": "set_retention", "days": 7 }),
+        json!({ "operation": "clear" }),
+    ] {
+        let route = cloud_clipboard_route_for_action(
+            &action,
+            None,
+            || Ok(Some("relay")),
+            || -> Option<&str> { panic!("native session consulted") },
+            || -> Option<PathBuf> { panic!("socket discovery consulted") },
+        )
+        .unwrap();
+        assert_eq!(route, CloudClipboardRoute::Relay("relay"));
+
+        let no_relay = cloud_clipboard_route_for_action(
+            &action,
+            None,
+            || Ok(None::<&str>),
+            || -> Option<&str> { panic!("native session consulted") },
+            || -> Option<PathBuf> { panic!("socket discovery consulted") },
+        );
+        assert_eq!(no_relay.unwrap_err().code, "invalid");
+
+        let socket = cloud_clipboard_route_for_action(
+            &action,
+            Some("/run/synthetic/cloud-clipboard.sock".into()),
+            || -> Result<Option<&str>, _> { panic!("relay consulted") },
+            || -> Option<&str> { panic!("native session consulted") },
+            || -> Option<PathBuf> { panic!("socket discovery consulted") },
+        );
+        assert_eq!(socket.unwrap_err().code, "invalid");
+    }
+
+    for action in [
+        json!({ "operation": "pin", "id": "short", "pinned": true }),
+        json!({ "operation": "set_retention", "days": 5 }),
+        json!({ "operation": "unknown" }),
+    ] {
+        let rejected = cloud_clipboard_route_for_action(
+            &action,
+            None,
+            || -> Result<Option<&str>, _> { panic!("relay consulted") },
+            || -> Option<&str> { panic!("native session consulted") },
+            || -> Option<PathBuf> { panic!("socket discovery consulted") },
+        );
+        assert_eq!(rejected.unwrap_err().code, "invalid");
+    }
+
+    let common = cloud_clipboard_route_for_action(
+        &json!({ "operation": "list" }),
+        None,
+        || Ok(None::<&str>),
+        || Some("native"),
+        || -> Option<PathBuf> { panic!("socket discovery consulted") },
+    )
+    .unwrap();
+    assert_eq!(common, CloudClipboardRoute::Native("native"));
 }
 
 #[test]
@@ -2535,4 +2772,26 @@ fn candidate_panel_status_reader_rejects_a_symlinked_file() {
     symlink(&outside, &linked).unwrap();
 
     assert!(super::read_candidate_panel_status(&linked).is_none());
+}
+
+/// Windows 的应用例外按进程基名记：选中的 .exe 交回文件名作为标识、去掉扩展名作为名称；不是 .exe 的文件不成规则。
+#[test]
+fn a_picked_windows_program_becomes_its_file_name() {
+    use std::path::Path;
+    assert_eq!(
+        super::picked_windows_application(Path::new("/Program Files/Microsoft VS Code/Code.exe")),
+        Some(super::PickedApplication {
+            id: "Code.exe".into(),
+            name: "Code".into(),
+        })
+    );
+    assert_eq!(
+        super::picked_windows_application(Path::new("/opt/apps/WeChat.EXE")).map(|app| app.id),
+        Some("WeChat.EXE".into())
+    );
+    assert_eq!(
+        super::picked_windows_application(Path::new("/opt/apps/readme.txt")),
+        None
+    );
+    assert_eq!(super::picked_windows_application(Path::new("/")), None);
 }

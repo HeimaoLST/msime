@@ -19,7 +19,7 @@ function translationServiceOptions(showAccountProvider: boolean) {
       <option value="none">关闭</option>
       <option value="tencent">腾讯云机器翻译</option>
       <option value="niutrans">小牛翻译（NiuTrans）</option>
-      <option value="custom">自定义 DeepLX 兼容服务</option>
+      <option value="custom">自定义（DeepLX 或 DeepL API）</option>
       {showAccountProvider && (
         <option value="account">水杉账号（候选词发送到 api.msime.app）</option>
       )}

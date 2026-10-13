@@ -1,5 +1,8 @@
 package app.msime.android.home;
 
+import app.msime.android.ThemeColorPolicy;
+import app.msime.android.DimensionPolicy;
+
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -11,6 +14,7 @@ import android.view.View;
 import androidx.annotation.Nullable;
 import app.msime.android.BoundsPolicy;
 import app.msime.android.ColorPolicy;
+import app.msime.android.KeyboardGeometry;
 import app.msime.android.ListPolicy;
 import app.msime.android.TypingStatisticsSummary;
 import app.msime.android.TypingStatisticsSummary.Share;
@@ -76,14 +80,14 @@ public final class DistributionView extends View {
     /** 第 `index` 段的颜色。 */
     private int colour(int index) {
         Context context = getContext();
-        int accent = Ui.accent(context);
+        int accent = ThemeColorPolicy.accent(context);
         int mix = MIX[BoundsPolicy.atMost(index, MIX.length - 1)];
-        return ColorPolicy.blend(Ui.card(context), accent, mix / 100f);
+        return ColorPolicy.blend(ThemeColorPolicy.card(context), accent, mix / 100f);
     }
 
     private int track() {
-        boolean dark = Ui.isNight(getContext());
-        return dark ? Ui.withAlpha(Color.WHITE, .1f) : Ui.withAlpha(Color.BLACK, .07f);
+        boolean dark = DimensionPolicy.isNight(getContext());
+        return dark ? ColorPolicy.withAlpha(Color.WHITE, .1f) : ColorPolicy.withAlpha(Color.BLACK, .07f);
     }
 
     @Override protected void onMeasure(int widthSpec, int heightSpec) {
@@ -95,7 +99,7 @@ public final class DistributionView extends View {
             case DONUT -> BoundsPolicy.atLeast(LEGEND_ROW * rows, DONUT);
         };
         setMeasuredDimension(MeasureSpec.getSize(widthSpec),
-            resolveSize(Ui.dp(context, height), heightSpec));
+            resolveSize(DimensionPolicy.pixels(context, height), heightSpec));
     }
 
     @Override protected void onDraw(Canvas canvas) {
@@ -109,8 +113,8 @@ public final class DistributionView extends View {
 
     private void drawStack(Canvas canvas) {
         Context context = getContext();
-        float height = Ui.dp(context, STACK_HEIGHT);
-        float gap = Ui.dp(context, 2);
+        float height = DimensionPolicy.pixels(context, STACK_HEIGHT);
+        float gap = DimensionPolicy.pixels(context, 2);
         float width = getWidth();
         fill.setColor(track());
         box.set(0, 0, width, height);
@@ -129,26 +133,26 @@ public final class DistributionView extends View {
             x += part;
         }
         canvas.restore();
-        float top = height + Ui.dp(context, 12);
+        float top = height + DimensionPolicy.pixels(context, 12);
         float column = width / 2;
         for (int index = 0; index < shares.size(); index++) {
             float left = (index % 2) * column;
-            float rowTop = top + (index / 2) * Ui.dp(context, LEGEND_ROW);
-            legend(canvas, index, left, rowTop, column - Ui.dp(context, index % 2 == 0 ? 16 : 0));
+            float rowTop = top + (index / 2) * DimensionPolicy.pixels(context, LEGEND_ROW);
+            legend(canvas, index, left, rowTop, column - DimensionPolicy.pixels(context, index % 2 == 0 ? 16 : 0));
         }
     }
 
     private void drawBars(Canvas canvas) {
         Context context = getContext();
-        float row = Ui.dp(context, BAR_ROW);
-        float labelWidth = Ui.dp(context, 66);
-        float percentWidth = Ui.dp(context, 52);
-        float barHeight = Ui.dp(context, 10);
+        float row = DimensionPolicy.pixels(context, BAR_ROW);
+        float labelWidth = DimensionPolicy.pixels(context, 66);
+        float percentWidth = DimensionPolicy.pixels(context, 52);
+        float barHeight = DimensionPolicy.pixels(context, 10);
         float width = getWidth();
         for (int index = 0; index < shares.size(); index++) {
             Share share = shares.get(index);
             float middle = index * row + row / 2;
-            styleText(14, Typeface.NORMAL, Ui.text(context));
+            styleText(14, Typeface.NORMAL, ThemeColorPolicy.text(context));
             canvas.drawText(share.title(), 0, middle + textOffset(), text);
             float left = labelWidth;
             float right = width - percentWidth;
@@ -162,7 +166,7 @@ public final class DistributionView extends View {
                 left + BoundsPolicy.atLeast(part, barHeight), middle + barHeight / 2);
                 canvas.drawRoundRect(box, barHeight / 2, barHeight / 2, fill);
             }
-            styleText(14, Typeface.NORMAL, Ui.subText(context));
+            styleText(14, Typeface.NORMAL, ThemeColorPolicy.subText(context));
             String percent = TypingStatisticsSummary.share(share.count(), total) + "%";
             canvas.drawText(percent, width - text.measureText(percent), middle + textOffset(), text);
         }
@@ -170,8 +174,8 @@ public final class DistributionView extends View {
 
     private void drawDonut(Canvas canvas) {
         Context context = getContext();
-        float size = Ui.dp(context, DONUT);
-        float stroke = Ui.dp(context, DONUT_STROKE);
+        float size = DimensionPolicy.pixels(context, DONUT);
+        float stroke = DimensionPolicy.pixels(context, DONUT_STROKE);
         float top = (getHeight() - size) / 2;
         box.set(stroke / 2, top + stroke / 2, size - stroke / 2, top + size - stroke / 2);
         fill.setStyle(Paint.Style.STROKE);
@@ -187,15 +191,15 @@ public final class DistributionView extends View {
         }
         fill.setStyle(Paint.Style.FILL);
         Share first = shares.get(0);
-        styleText(18, Typeface.BOLD, Ui.text(context));
+        styleText(18, Typeface.BOLD, ThemeColorPolicy.text(context));
         String percent = TypingStatisticsSummary.share(first.count(), total) + "%";
         canvas.drawText(percent, size / 2 - text.measureText(percent) / 2,
             top + size / 2, text);
-        styleText(10, Typeface.NORMAL, Ui.subText(context));
+        styleText(10, Typeface.NORMAL, ThemeColorPolicy.subText(context));
         canvas.drawText(first.title(), size / 2 - text.measureText(first.title()) / 2,
-            top + size / 2 + Ui.dp(context, 14), text);
-        float left = size + Ui.dp(context, 20);
-        float row = Ui.dp(context, LEGEND_ROW);
+            top + size / 2 + DimensionPolicy.pixels(context, 14), text);
+        float left = size + DimensionPolicy.pixels(context, 20);
+        float row = DimensionPolicy.pixels(context, LEGEND_ROW);
         float listTop = (getHeight() - row * shares.size()) / 2;
         for (int index = 0; index < shares.size(); index++) {
             legend(canvas, index, left, listTop + index * row, getWidth() - left);
@@ -206,19 +210,19 @@ public final class DistributionView extends View {
     private void legend(Canvas canvas, int index, float left, float top, float width) {
         Context context = getContext();
         Share share = shares.get(index);
-        float middle = top + Ui.dp(context, LEGEND_ROW) / 2;
-        float dot = Ui.dp(context, 4);
+        float middle = top + DimensionPolicy.pixels(context, LEGEND_ROW) / 2;
+        float dot = DimensionPolicy.pixels(context, 4);
         fill.setColor(colour(index));
         canvas.drawCircle(left + dot, middle, dot, fill);
-        styleText(14, Typeface.NORMAL, Ui.text(context));
-        canvas.drawText(share.title(), left + dot * 2 + Ui.dp(context, 10), middle + textOffset(), text);
+        styleText(14, Typeface.NORMAL, ThemeColorPolicy.text(context));
+        canvas.drawText(share.title(), left + dot * 2 + DimensionPolicy.pixels(context, 10), middle + textOffset(), text);
         String percent = TypingStatisticsSummary.share(share.count(), total) + "%";
         canvas.drawText(percent, left + width - text.measureText(percent), middle + textOffset(), text);
     }
 
     private void styleText(int sizeSp, int weight, int colour) {
         ViewPolicy.setTextSizeSp(text, getContext(), sizeSp);
-        text.setTypeface(Typeface.create(Typeface.DEFAULT, weight));
+        ViewPolicy.setTypeface(text, Typeface.create(Typeface.DEFAULT, weight));
         text.setColor(colour);
     }
 

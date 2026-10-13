@@ -1,5 +1,6 @@
 #include <jni.h>
 #include "msime_client.h"
+#include "../../common/HostApiString.h"
 // The polish presets carry their own prompt-injection wording, and there are already four copies
 // of that text in this repository. This host reads the shared one rather than adding a fifth.
 #include "voice/PolishPrompt.h"
@@ -113,16 +114,15 @@ static intptr_t snapshotNext(void *context, uint8_t *buffer, size_t capacity) no
 // Use UTF-8 byte arrays, not JNI modified UTF-8: supplementary characters in
 // candidates and resource paths must survive the Java/native boundary unchanged.
 static jbyteArray response(JNIEnv *env, char *value) {
-    if (!value) return nullptr;
-    size_t length = std::strlen(value);
+    auto owned = msime::host_api::own_string(value);
+    if (!owned) return nullptr;
+    size_t length = std::strlen(owned.get());
     if (length > static_cast<size_t>(std::numeric_limits<jsize>::max())) {
-        msime_client_string_free(value);
         env->ThrowNew(env->FindClass("java/lang/IllegalStateException"), "Native response too large");
         return nullptr;
     }
     jbyteArray output = env->NewByteArray(static_cast<jsize>(length));
-    if (output) env->SetByteArrayRegion(output, 0, static_cast<jsize>(length), reinterpret_cast<const jbyte *>(value));
-    msime_client_string_free(value);
+    if (output) env->SetByteArrayRegion(output, 0, static_cast<jsize>(length), reinterpret_cast<const jbyte *>(owned.get()));
     return output;
 }
 
@@ -134,6 +134,11 @@ constexpr jsize kTypingStatisticsDirectoryLimit = 16384;
 constexpr jsize kPersonalDictionaryRequestLimit = 2248576;
 constexpr jsize kCreateOptionsLimit = 1 * 1024 * 1024;
 constexpr jsize kMobileClipboardHistoryRequestLimit = 524288;
+// 与 msime_client_cloud_clipboard_e2e 的上限一致：继续一步的请求带着一整页密文响应。
+constexpr jsize kCloudClipboardE2eRequestLimit = 2 * 1024 * 1024;
+// 与 msime_client_cloud_clipboard_source、msime_client_relay_cloud_clipboard 和 msime_client_relay_cloud_clipboard_exchange 写在头文件里的上限一致。
+constexpr jsize kCloudClipboardSourceDirectoryLimit = 16384;
+constexpr jsize kCloudClipboardRelayRequestLimit = 131072;
 constexpr jsize kVocabularyReviewRequestLimit = 8 * 1024 * 1024;
 constexpr jsize kPrepareHostRequestLimit = 16384;
 constexpr jsize kSavePreferencesDirectoryLimit = 16384;
@@ -334,6 +339,22 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_mobileClipboard
     return bounded_request(env, request, kMobileClipboardHistoryRequestLimit,
         msime_client_mobile_clipboard_history);
 }
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_cloudClipboardE2eRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, kCloudClipboardE2eRequestLimit,
+        msime_client_cloud_clipboard_e2e);
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_cloudClipboardSourceRaw(JNIEnv *env, jclass, jbyteArray directory) {
+    return bounded_request(env, directory, kCloudClipboardSourceDirectoryLimit,
+        msime_client_cloud_clipboard_source);
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_cloudClipboardRelayRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, kCloudClipboardRelayRequestLimit,
+        msime_client_relay_cloud_clipboard);
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_cloudClipboardRelayExchangeRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, kCloudClipboardRelayRequestLimit,
+        msime_client_relay_cloud_clipboard_exchange);
+}
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_doubaoDecodeFrameRaw(JNIEnv *env, jclass, jbyteArray frame) {
     if (!frame) return response(env, msime_client_doubao_decode_frame(nullptr, 0));
     jsize length = env->GetArrayLength(frame);
@@ -397,6 +418,11 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_doubaoAudioFram
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_shuangpinKeyHintsRaw(JNIEnv *env, jclass, jbyteArray profile) {
     return bounded_request(env, profile, kShuangpinProfileLimit,
         msime_client_shuangpin_key_hints);
+}
+// 九键双拼的表、问题和键面（msime_client_nine_key_shuangpin_layout）；请求是方案名加一张小表，与 host-api 的上限一致。
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_nineKeyShuangpinLayoutRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, kSmallJsonRequestLimit,
+        msime_client_nine_key_shuangpin_layout);
 }
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_savePreferencesRaw(JNIEnv *env, jclass, jbyteArray directory, jlong expected_revision, jbyteArray snapshot) {
     if (!directory || !snapshot || expected_revision < 0) {
@@ -496,6 +522,14 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_focusRaw(JNIEnv
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_setNineKeyModeRaw(JNIEnv *env, jclass, jlong handle, jboolean enabled) {
     return response(env, msime_client_set_nine_key_mode(static_cast<uint64_t>(handle), enabled == JNI_TRUE));
 }
+// 组码网格：0 关，1 九键，2 全拼 14 键；其他取值在这里就拒绝，不截断成 uint8 后变成另一种网格。
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_setKeyGridRaw(JNIEnv *env, jclass, jlong handle, jint grid) {
+    if (grid < 0 || grid > 2) {
+        env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), "Key grid must be 0, 1 or 2");
+        return nullptr;
+    }
+    return response(env, msime_client_set_key_grid(static_cast<uint64_t>(handle), static_cast<uint8_t>(grid)));
+}
 
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_setPrivateSessionRaw(JNIEnv *env, jclass, jlong handle, jboolean enabled) {
     return response(env, msime_client_set_private_session(static_cast<uint64_t>(handle), enabled == JNI_TRUE));
@@ -524,6 +558,9 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_simplifiedToTra
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_resetCacheRaw(JNIEnv *env, jclass, jlong handle) {
     return response(env, msime_client_reset_cache(static_cast<uint64_t>(handle)));
 }
+JNIEXPORT void JNICALL Java_app_msime_android_NativeClient_releaseProcessCacheRaw(JNIEnv *, jclass) {
+    msime_client_release_process_cache();
+}
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_setChinesePunctuationRaw(JNIEnv *env, jclass, jlong handle, jboolean enabled) {
     return response(env, msime_client_set_chinese_punctuation(static_cast<uint64_t>(handle), enabled == JNI_TRUE));
 }
@@ -536,6 +573,14 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_characterRaw(JN
         return nullptr;
     }
     return response(env, msime_client_character(static_cast<uint64_t>(handle), static_cast<uint8_t>(ascii), shift == JNI_TRUE));
+}
+// 14 键的一键：送这一组的首字母，组外的字母由引擎回 handled=false。只拦非 ASCII，免得截断成 uint8 后变成另一个字母。
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_gridKeyRaw(JNIEnv *env, jclass, jlong handle, jint letter) {
+    if (letter < 0 || letter > 127) {
+        env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), "Grid key must be ASCII");
+        return nullptr;
+    }
+    return response(env, msime_client_grid_key(static_cast<uint64_t>(handle), static_cast<uint8_t>(letter)));
 }
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_punctuationWithContextRaw(JNIEnv *env, jclass, jlong handle, jint ascii, jint preceding) {
     if (ascii < 0 || ascii > 127 || preceding < 0) {
@@ -770,6 +815,25 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_applyOnlineCand
     env->ReleaseByteArrayElements(query, queryBytes, JNI_ABORT);
     return response(env, result);
 }
+// AI 回答为空、失败或被拒：AI 座位上的占位行换成「—」（#6888）。
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_resolveOnlineCandidatesRaw(JNIEnv *env, jclass, jlong handle, jbyteArray query, jint source) {
+    if (!query || source < 0 || source > 1) {
+        return response(env, msime_client_resolve_online_candidates(
+            static_cast<uint64_t>(handle), nullptr, 0, 0));
+    }
+    jsize queryLength = env->GetArrayLength(query);
+    if (queryLength > kOnlineQueryLimit) {
+        return response(env, msime_client_resolve_online_candidates(
+            static_cast<uint64_t>(handle), nullptr, 0, 0));
+    }
+    jbyte *queryBytes = env->GetByteArrayElements(query, nullptr);
+    if (!queryBytes) return nullptr;
+    char *result = msime_client_resolve_online_candidates(static_cast<uint64_t>(handle),
+        reinterpret_cast<const uint8_t *>(queryBytes), static_cast<size_t>(queryLength),
+        static_cast<uint8_t>(source));
+    env->ReleaseByteArrayElements(query, queryBytes, JNI_ABORT);
+    return response(env, result);
+}
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_clearOnlineCandidatesRaw(JNIEnv *env, jclass, jlong handle, jint source) {
     if (source < 0 || source > 1) {
         return response(env, msime_client_clear_online_candidates(
@@ -883,6 +947,25 @@ constexpr jsize kPlatformLimit = 64;
 constexpr jsize kVoiceRequestLimit = 1 * 1024 * 1024;
 constexpr jsize kResourcePackRequestLimit = 16384;
 constexpr jsize kResourcePackIdLimit = 256;
+// 用户自己的翻译服务（小牛、自定义、腾讯）：描述器请求、服务回复和设置页检查的上限，与 msime_client.h 写明的一致。
+constexpr jsize kCustomTranslationRequestLimit = 16384;
+constexpr jsize kTranslationRequestLimit = 65536;
+constexpr jsize kTranslationResponseLimit = 1 * 1024 * 1024;
+constexpr jsize kTranslationSettingsLimit = 65536;
+// 腾讯一批最多的词数，与共享层的每页候选上限相同。
+constexpr jint kTencentBatchLimit = 10;
+
+// 服务回复是否表示失败（而不是一个回答，哪怕为空）。空引用、超限或取不到数组都按失败处理，宿主只对回答做负缓存。
+template <typename Call> jboolean reply_failed(JNIEnv *env, jbyteArray body, Call call) {
+    if (!body) return JNI_TRUE;
+    jsize length = env->GetArrayLength(body);
+    if (length > kTranslationResponseLimit) return JNI_TRUE;
+    jbyte *bytes = env->GetByteArrayElements(body, nullptr);
+    if (!bytes) return JNI_TRUE;
+    bool failed = call(reinterpret_cast<const uint8_t *>(bytes), static_cast<size_t>(length));
+    env->ReleaseByteArrayElements(body, bytes, JNI_ABORT);
+    return failed ? JNI_TRUE : JNI_FALSE;
+}
 
 // 资源包安装的进度回调上下文：回调在调用 msime_client_resource_pack_install 的同一线程上触发，所以可以直接用这个线程的 JNIEnv。
 struct ResourcePackProgress {
@@ -903,6 +986,25 @@ void resource_pack_progress(void *context, const char *phase, uint64_t done, uin
     };
     progress->env->CallVoidMethod(progress->listener, progress->method, name, bounded(done), bounded(total));
     progress->env->DeleteLocalRef(name);
+}
+
+// 本地语音模型安装的进度回调上下文：与资源包一样在调用安装的线程上触发，所以直接用这个线程的 JNIEnv。
+struct LocalModelProgress {
+    JNIEnv *env;
+    jobject listener;
+    jmethodID method;
+};
+
+// 把一次进度（{id,stage,downloaded,total} 的 JSON）原样交给 Java 的 onProgress(byte[])。共享层回调返回后缓冲区就失效，所以这里复制一份；listener 抛出异常后不再调用，局部引用每次释放。
+void local_model_progress(const uint8_t *json, size_t length, void *context) {
+    auto *progress = static_cast<LocalModelProgress *>(context);
+    if (!progress || !json || progress->env->ExceptionCheck()) return;
+    if (length > static_cast<size_t>(kResourcePackRequestLimit)) return;
+    jbyteArray bytes = progress->env->NewByteArray(static_cast<jsize>(length));
+    if (!bytes) return;
+    progress->env->SetByteArrayRegion(bytes, 0, static_cast<jsize>(length), reinterpret_cast<const jbyte *>(json));
+    progress->env->CallVoidMethod(progress->listener, progress->method, bytes);
+    progress->env->DeleteLocalRef(bytes);
 }
 } // namespace
 
@@ -989,6 +1091,55 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_accountSettings
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_accountSettingsApplyRaw(JNIEnv *env, jclass, jbyteArray request) {
     return bounded_request(env, request, kAccountSettingsLimit, msime_client_account_settings_apply);
 }
+// 语音设置页的「测试」：按偏好目录里存的配置测识别或润色服务，阻塞到约 15 秒，只在工作线程上调用。请求带偏好目录，响应只有结果文案，不含凭据。
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_testVoiceCredentialRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, kResourcePackRequestLimit, msime_client_test_voice_credential);
+}
+// 候选翻译接用户自己的服务：请求由共享层构造（含签名和鉴权头），回复由共享层解析，Java 只负责收发字节。描述器带着凭据，不得写进日志。
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_customTranslationHttpRequestRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, kCustomTranslationRequestLimit, msime_client_custom_translation_http_request);
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_niutransTranslationHttpRequestRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, kTranslationRequestLimit, msime_client_niutrans_translation_http_request);
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_tencentTranslationHttpRequestRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, kTranslationRequestLimit, msime_client_tencent_translation_http_request);
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_parseCustomTranslationResponseRaw(JNIEnv *env, jclass, jbyteArray body) {
+    return bounded_request(env, body, kTranslationResponseLimit, msime_client_parse_custom_translation_response);
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_parseNiuTransTranslationResponseRaw(JNIEnv *env, jclass, jbyteArray body) {
+    return bounded_request(env, body, kTranslationResponseLimit, msime_client_parse_niutrans_translation_response);
+}
+// expected 超出 1..10 时交给宿主以空请求拒绝，与 bounded_request 处理超限请求的方式相同。
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_parseTencentTranslationResponseRaw(JNIEnv *env, jclass, jbyteArray body, jint expected) {
+    if (!body || expected < 1 || expected > kTencentBatchLimit) {
+        return response(env, msime_client_parse_tencent_translation_response(nullptr, 0, 0));
+    }
+    jsize length = env->GetArrayLength(body);
+    if (length > kTranslationResponseLimit) {
+        return response(env, msime_client_parse_tencent_translation_response(nullptr, 0, 0));
+    }
+    jbyte *bytes = env->GetByteArrayElements(body, nullptr);
+    if (!bytes) return nullptr;
+    char *result = msime_client_parse_tencent_translation_response(
+        reinterpret_cast<const uint8_t *>(bytes), static_cast<size_t>(length), static_cast<size_t>(expected));
+    env->ReleaseByteArrayElements(body, bytes, JNI_ABORT);
+    return response(env, result);
+}
+JNIEXPORT jboolean JNICALL Java_app_msime_android_NativeClient_customTranslationReplyFailedRaw(JNIEnv *env, jclass, jbyteArray body) {
+    return reply_failed(env, body, msime_client_custom_translation_reply_failed);
+}
+JNIEXPORT jboolean JNICALL Java_app_msime_android_NativeClient_niutransTranslationReplyFailedRaw(JNIEnv *env, jclass, jbyteArray body) {
+    return reply_failed(env, body, msime_client_niutrans_translation_reply_failed);
+}
+// 翻译服务设置页：接口地址下面的提示不做 I/O；「测试连接」按表单里的值发一次请求，阻塞到约 15 秒，只在工作线程上调用。请求带着凭据，响应只有结果文案。
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_translationEndpointIssueRaw(JNIEnv *env, jclass, jbyteArray endpoint) {
+    return bounded_request(env, endpoint, kTranslationSettingsLimit, msime_client_translation_endpoint_issue);
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_testApiCredentialRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, kTranslationSettingsLimit, msime_client_test_api_credential);
+}
 // 按需下载的资源包（msime_client.h 里 msime_client_resource_pack_* 一节）。列出只读几个文件属性；安装和收编阻塞，只在主进程的工作线程上调用。
 JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_resourcePacksRaw(JNIEnv *env, jclass, jbyteArray request) {
     return bounded_request(env, request, kResourcePackRequestLimit, msime_client_resource_packs);
@@ -1018,7 +1169,7 @@ JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_resourcePackIns
     char *result = install(reinterpret_cast<const uint8_t *>(bytes), static_cast<size_t>(length));
     env->ReleaseByteArrayElements(request, bytes, JNI_ABORT);
     if (env->ExceptionCheck()) {
-        msime_client_string_free(result);
+        msime::host_api::discard_string(result);
         return nullptr;
     }
     return response(env, result);
@@ -1035,6 +1186,44 @@ JNIEXPORT void JNICALL Java_app_msime_android_NativeClient_resourcePackCancelRaw
     if (!bytes) return;
     msime_client_resource_pack_cancel(reinterpret_cast<const uint8_t *>(bytes), static_cast<size_t>(length));
     env->ReleaseByteArrayElements(pack, bytes, JNI_ABORT);
+}
+// 本地语音模型（msime_client.h 里 msime_client_voice_local_model* 一节）：列出、下载、取消、删除，模型装在 filesDir/voice-models/<id>。列出只读目录；安装阻塞，只在主进程的工作线程上调用。
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_voiceLocalModelsRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, kResourcePackRequestLimit, msime_client_voice_local_models);
+}
+// listener 可以为 null；不为 null 时在本线程上收到 onProgress(byte[])。listener 抛出的异常在安装结束后原样抛给调用方，此时不返回结果。
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_voiceLocalModelInstallRaw(JNIEnv *env, jclass, jbyteArray request, jobject listener) {
+    LocalModelProgress progress{env, listener, nullptr};
+    if (listener) {
+        jclass type = env->GetObjectClass(listener);
+        if (!type) return nullptr;
+        progress.method = env->GetMethodID(type, "onProgress", "([B)V");
+        env->DeleteLocalRef(type);
+        if (!progress.method) return nullptr;
+    }
+    const auto install = [&](const uint8_t *bytes, size_t length) {
+        return msime_client_voice_local_model_install(bytes, length,
+            listener ? local_model_progress : nullptr, listener ? &progress : nullptr);
+    };
+    if (!request) return response(env, install(nullptr, 0));
+    jsize length = env->GetArrayLength(request);
+    if (length > kResourcePackRequestLimit) return response(env, install(nullptr, 0));
+    jbyte *bytes = env->GetByteArrayElements(request, nullptr);
+    if (!bytes) return nullptr;
+    char *result = install(reinterpret_cast<const uint8_t *>(bytes), static_cast<size_t>(length));
+    env->ReleaseByteArrayElements(request, bytes, JNI_ABORT);
+    if (env->ExceptionCheck()) {
+        msime::host_api::discard_string(result);
+        return nullptr;
+    }
+    return response(env, result);
+}
+// 任何线程都可以调用，立即返回。
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_voiceLocalModelCancelRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, kResourcePackRequestLimit, msime_client_voice_local_model_cancel);
+}
+JNIEXPORT jbyteArray JNICALL Java_app_msime_android_NativeClient_voiceLocalModelRemoveRaw(JNIEnv *env, jclass, jbyteArray request) {
+    return bounded_request(env, request, kResourcePackRequestLimit, msime_client_voice_local_model_remove);
 }
 // 指定 libsherpa-onnx-c-api.so 的绝对路径（下载的 voice-runtime 资源包）。之前没加载成功的结果作废，下一次 localSpeechAvailableRaw 按新路径重试；已经加载成功后不再改变。
 JNIEXPORT void JNICALL Java_app_msime_android_NativeClient_localSpeechRuntimeRaw(JNIEnv *env, jclass, jbyteArray path) {

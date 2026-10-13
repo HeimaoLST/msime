@@ -10,7 +10,7 @@ use std::path::PathBuf;
 #[cfg(unix)]
 #[test]
 fn local_cleanup_rejects_a_symlinked_parent() {
-    use std::os::unix::fs::symlink;
+    use msime_path_trust::untrusted_symlink as symlink;
 
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
@@ -67,6 +67,25 @@ fn sync_state_fifo_is_rejected_without_blocking() {
         "FIFO state file must be rejected without blocking"
     );
     assert!(fs::symlink_metadata(&path).unwrap().file_type().is_fifo());
+}
+
+#[cfg(unix)]
+#[test]
+fn state_lock_stays_bound_to_the_original_parent_after_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("state");
+    fs::create_dir(&directory).unwrap();
+    let path = directory.join(STATE_FILE);
+    let lock = lock_state(&path).unwrap();
+
+    let moved = root.path().join("state-moved");
+    fs::rename(&directory, &moved).unwrap();
+    fs::create_dir(&directory).unwrap();
+
+    save_state_locked(&lock, &SyncState::default()).unwrap();
+
+    assert!(moved.join(STATE_FILE).exists());
+    assert!(!directory.join(STATE_FILE).exists());
 }
 
 fn manifest(id: &str, name: &str, head: &str, tail: &str) -> String {
@@ -1054,7 +1073,7 @@ fn a_symlinked_sync_state_does_not_delete_a_local_skin() {
         Err(AccountError::Storage)
     );
     assert!(fixture.installed("sakura"));
-    assert_eq!(fixture.library.rows.borrow().len(), 1);
+    assert_eq!(fixture.library.rows.borrow().len(), 0);
     assert_eq!(fs::read(&external_state).unwrap(), bytes);
 }
 
@@ -1077,7 +1096,7 @@ fn a_symlinked_sync_state_parent_does_not_write_outside() {
     );
     assert!(!outside.path().join(STATE_FILE).exists());
     assert!(fixture.installed("sakura"));
-    assert_eq!(fixture.library.rows.borrow().len(), 1);
+    assert_eq!(fixture.library.rows.borrow().len(), 0);
 }
 
 #[cfg(unix)]

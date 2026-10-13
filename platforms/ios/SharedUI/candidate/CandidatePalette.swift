@@ -15,7 +15,7 @@ struct CandidatePalette: Equatable {
   var border: UIColor
 
   static let followsDesktopKey = "candidate_palette_follows_desktop"
-  static var defaults: UserDefaults { UserDefaults(suiteName: InputSchemePreference.appGroupIdentifier) ?? .standard }
+  static var defaults: UserDefaults { InputSchemePreference.appGroupDefaults }
   static var followsDesktop: Bool { defaults.bool(forKey: followsDesktopKey) }
 
   static let themes: [(id: String, title: String)] = [("follow", "跟随系统"), ("light", "浅色"), ("dark", "深色")]
@@ -39,7 +39,8 @@ struct CandidatePalette: Equatable {
                            skinsRoot: URL? = ExternalCandidateSkin.defaultRoot) -> ResolvedTheme? {
     let dark = isDark(candidateTheme: preferences?["candidate_theme"] as? String, appMode: preferences?["theme"] as? String,
                       systemDark: systemDark)
-    return ResolvedTheme.resolve(globalTheme: GlobalThemePreference.theme(in: preferences),
+    // 所选主题属于另一种明暗时候选条和键盘一样按跟随系统画。
+    return ResolvedTheme.resolve(globalTheme: GlobalThemeCatalog.effectiveId(GlobalThemePreference.theme(in: preferences), dark: dark),
                                  customTheme: GlobalThemePreference.customTheme(in: preferences),
                                  dark: dark, skinsRoot: skinsRoot)
   }

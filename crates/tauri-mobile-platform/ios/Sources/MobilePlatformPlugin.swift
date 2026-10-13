@@ -15,6 +15,10 @@ private struct SaveAccountSessionArgs: Decodable {
   let value: String
 }
 
+private struct SaveCloudClipboardKeystoreArgs: Decodable {
+  let value: String
+}
+
 private struct AppleSignInArgs: Decodable {
   let challengeId: String
   let nonce: String
@@ -36,6 +40,8 @@ private struct VoiceRequestHeader: Decodable {
 private struct VoiceTranscriptionArgs: Decodable {
   let requestId: String
   let provider: String
+  /// 请求格式：multipart、chat_audio 或 doubao_websocket，由共享层按 provider 给出；这里只按它挑请求构造。
+  let requestFormat: String
   let endpoint: String
   let model: String
   let token: String
@@ -129,7 +135,7 @@ private final class VoiceTranscriptionTransport: NSObject, URLSessionDataDelegat
     guard !completed else { return }
     guard error == nil, response != nil,
           let document = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-          let text = document["text"] as? String,
+          let text = Self.transcript(document),
           text.count <= 10_000,
           !text.unicodeScalars.contains(where: { $0.value == 0 }) else {
       finish(.failure(VoicePluginFailure(code: "voice_response")))
@@ -143,6 +149,14 @@ private final class VoiceTranscriptionTransport: NSObject, URLSessionDataDelegat
                   newRequest request: URLRequest,
                   completionHandler: @escaping (URLRequest?) -> Void) {
     completionHandler(nil)
+  }
+
+  /// 回答里的文字：multipart 接口放在 `text`，chat_audio 接口放在 `choices[0].message.content`。
+  static func transcript(_ document: [String: Any]) -> String? {
+    if let text = document["text"] as? String { return text }
+    guard let choices = document["choices"] as? [[String: Any]],
+          let message = choices.first?["message"] as? [String: Any] else { return nil }
+    return message["content"] as? String
   }
 }
 
@@ -214,11 +228,12 @@ private final class IOSVoiceTranscriptionService {
           components.user == nil, components.password == nil, components.fragment == nil else {
       return false
     }
-    if ["openai", "siliconflow", "groq", "everyapi", "mistral"].contains(args.provider) {
+    if ["multipart", "chat_audio"].contains(args.requestFormat) {
       return components.scheme?.lowercased() == "https" && !model.isEmpty &&
         args.headers.isEmpty && args.boostingTableId.isEmpty
     }
-    guard args.provider == "doubao", components.scheme?.lowercased() == "wss",
+    guard args.requestFormat == "doubao_websocket", args.provider == "doubao",
+          components.scheme?.lowercased() == "wss",
           model.isEmpty, args.token.isEmpty, (3...4).contains(args.headers.count) else {
       return false
     }
@@ -332,7 +347,7 @@ private final class IOSVoiceTranscriptionService {
       fail(session, code: "voice_recording")
       return
     }
-    if session.args.provider == "doubao" {
+    if session.args.requestFormat == "doubao_websocket" {
       startDoubao(session, audio: audio)
       return
     }
@@ -395,6 +410,9 @@ private final class IOSVoiceTranscriptionService {
   private func transcriptionRequest(_ args: VoiceTranscriptionArgs, audio: Data) -> URLRequest? {
     let endpoint = args.endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
     guard let url = URL(string: endpoint) else { return nil }
+    if args.requestFormat == "chat_audio" {
+      return chatAudioRequest(args, url: url, audio: audio)
+    }
     let boundary = "MSIME-\(UUID().uuidString)"
     var body = Data()
     func append(_ value: String) { body.append(Data(value.utf8)) }
@@ -412,6 +430,30 @@ private final class IOSVoiceTranscriptionService {
     request.httpBody = body
     request.setValue("multipart/form-data; boundary=\(boundary)",
       forHTTPHeaderField: "Content-Type")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    if !args.token.isEmpty {
+      request.setValue("Bearer \(args.token)", forHTTPHeaderField: "Authorization")
+    }
+    return request
+  }
+
+  /// 阿里云百炼的整句识别：Chat Completions 请求，录音作为 `input_audio` 的 Base64 数据 URL。录音最长 60 秒、约 1.9 MB，编码后仍在百炼 10 MB 的上限以内。
+  private func chatAudioRequest(_ args: VoiceTranscriptionArgs, url: URL, audio: Data) -> URLRequest? {
+    let content: [[String: Any]] = [[
+      "type": "input_audio",
+      "input_audio": ["data": "data:audio/wav;base64," + audio.base64EncodedString()],
+    ]]
+    let document: [String: Any] = [
+      "model": args.model.trimmingCharacters(in: .whitespacesAndNewlines),
+      "stream": false,
+      "messages": [["role": "user", "content": content]],
+    ]
+    guard let body = try? JSONSerialization.data(withJSONObject: document) else { return nil }
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.timeoutInterval = 60
+    request.httpBody = body
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     if !args.token.isEmpty {
       request.setValue("Bearer \(args.token)", forHTTPHeaderField: "Authorization")
@@ -612,11 +654,14 @@ private struct IOSKeyboardPreferenceStore {
     "japaneseNineKey", "japanese", "korean", "handwriting", "cantonese", "zhuyin", "vietnamese",
     "tibetan",
     "stroke",
+    "fourteenKey",
   ]
-  /// 没有存过 `enabledInputSchemes` 的键盘不打开这些方案，所以新增它们不会改变已有的键盘；由用户在设置里打开。
-  static let optInSchemes: Set<String> = ["cantonese", "zhuyin", "vietnamese", "tibetan", "stroke"]
-  /// The global theme ids (`GlobalTheme::ALL` in client-core), the only values `globalTheme` may hold.
-  static let themeOrder = ["system", "shuishan", "light", "paper", "night", "ink", "custom"]
+  /// 没有存过 `enabledInputSchemes` 的键盘不打开这些方案，所以新增它们不会改变已有的键盘；由用户在设置里打开。全拼 14 键也是这样，新装也不默认打开。
+  static let optInSchemes: Set<String> = [
+    "cantonese", "zhuyin", "vietnamese", "tibetan", "stroke", "fourteenKey",
+  ]
+  /// 全局主题 id（client-core 的 `GlobalTheme::ALL`），`globalTheme` 只能是其中之一。
+  static let themeOrder = ["system", "native", "shuishan", "light", "paper", "night", "ink", "custom"]
   /// `system` 是「跟随系统」，见 `previewKeyboardHaptics`。
   static let hapticStrengths = ["system", "light", "medium", "strong"]
 
@@ -773,6 +818,65 @@ private struct AccountSessionKeychain {
   }
 }
 
+/// 云剪贴板端到端加密的密钥串（`docs/cloud-clipboard-e2e.md` 的「密钥串的存放位置」）：与账号会话同一个服务名下账号名为 `cloud-clipboard-keystore` 的通用密码项，访问组与本插件保存的账号会话相同。退出登录（`clearSession`）时随会话一起删除。
+private struct CloudClipboardKeystoreKeychain {
+  static let maximumPayloadBytes = 4096
+
+  private var query: [String: Any] {
+    [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: "app.msime.backend.account",
+      kSecAttrAccount as String: "cloud-clipboard-keystore",
+    ]
+  }
+
+  /// 密钥串只含可见 ASCII，不超过上限。
+  private static func valid(_ data: Data) -> Bool {
+    !data.isEmpty && data.count <= maximumPayloadBytes && data.allSatisfy { (33...126).contains($0) }
+  }
+
+  func load() throws -> String? {
+    var lookup = query
+    lookup[kSecReturnData as String] = true
+    lookup[kSecMatchLimit as String] = kSecMatchLimitOne
+    var result: CFTypeRef?
+    let status = SecItemCopyMatching(lookup as CFDictionary, &result)
+    if status == errSecItemNotFound {
+      return nil
+    }
+    guard status == errSecSuccess, let data = result as? Data, Self.valid(data),
+          let value = String(data: data, encoding: .utf8) else {
+      throw NSError(domain: "secure_storage", code: Int(status == errSecSuccess ? errSecDecode : status))
+    }
+    return value
+  }
+
+  func save(_ value: String) throws {
+    let data = Data(value.utf8)
+    guard Self.valid(data) else {
+      throw NSError(domain: "secure_storage", code: Int(errSecParam))
+    }
+    let attributes: [String: Any] = [
+      kSecValueData as String: data,
+      kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+    ]
+    var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+    if status == errSecItemNotFound {
+      status = SecItemAdd(query.merging(attributes) { _, new in new } as CFDictionary, nil)
+    }
+    guard status == errSecSuccess else {
+      throw NSError(domain: "secure_storage", code: Int(status))
+    }
+  }
+
+  func clear() throws {
+    let status = SecItemDelete(query as CFDictionary)
+    guard status == errSecSuccess || status == errSecItemNotFound else {
+      throw NSError(domain: "secure_storage", code: Int(status))
+    }
+  }
+}
+
 /// Keeps the native Apple authorization delegate alive while a Tauri invoke is
 /// pending. The identity token is resolved directly to Rust and never exposed
 /// to the WebView.
@@ -853,6 +957,7 @@ private final class SkinFolderPickerCoordinator: NSObject, UIDocumentPickerDeleg
 final class MobilePlatformPlugin: Plugin {
   private static let onboardingKey = "hasCompletedOnboarding"
   private let accountSession = AccountSessionKeychain()
+  private let cloudClipboardKeystore = CloudClipboardKeystoreKeychain()
   private let keyboardPreferences = IOSKeyboardPreferenceStore()
   private let keyboardAI = IOSKeyboardAIStore()
   private let voiceHandoff = VoiceTextHandoffWriter()
@@ -998,9 +1103,32 @@ final class MobilePlatformPlugin: Plugin {
     }
   }
 
+  /// 退出登录：云剪贴板密钥串随会话一起删除，先删它，删不掉时会话也留着。
   @objc public func clearSession(_ invoke: Invoke) {
     do {
+      try cloudClipboardKeystore.clear()
       try accountSession.clear()
+      invoke.resolve()
+    } catch {
+      invoke.reject("secure_storage", code: "secure_storage")
+    }
+  }
+
+  /// 读取云剪贴板密钥串，返回 `{"value": string|null}`。
+  @objc public func loadCloudClipboardKeystore(_ invoke: Invoke) {
+    do {
+      let value = try cloudClipboardKeystore.load()
+      invoke.resolve(["value": value as Any? ?? NSNull()])
+    } catch {
+      invoke.reject("secure_storage", code: "secure_storage")
+    }
+  }
+
+  /// 保存（原子替换）云剪贴板密钥串，参数 `{"value": string}`。
+  @objc public func saveCloudClipboardKeystore(_ invoke: Invoke) {
+    do {
+      let args = try invoke.parseArgs(SaveCloudClipboardKeystoreArgs.self)
+      try cloudClipboardKeystore.save(args.value)
       invoke.resolve()
     } catch {
       invoke.reject("secure_storage", code: "secure_storage")

@@ -76,8 +76,7 @@ public final class WebSocketFrames {
         if (value == null || value.isEmpty()) return false;
         for (int index = 0; index < value.length(); index++) {
             char character = value.charAt(index);
-            if (character > 0x7e || !(character >= 'a' && character <= 'z')
-                    && !(character >= 'A' && character <= 'Z')
+            if (character > 0x7e || !TextPolicy.isAsciiLetter(character)
                     && !(character >= '0' && character <= '9')
                     && !"!#$%&'*+-.^_`|~".contains(String.valueOf(character))) return false;
         }
@@ -106,12 +105,11 @@ public final class WebSocketFrames {
         for (String line : response.split("\r\n")) {
             int separator = line.indexOf(':');
             if (separator <= 0) continue;
-            String name = TextPolicy.lowercase(TextPolicy.trimmed(line.substring(0, separator)));
+            String name = TextPolicy.lowercaseTrimmed(line.substring(0, separator));
             String value = TextPolicy.trimmed(line.substring(separator + 1));
             switch (name) {
                 case "upgrade" -> upgrade = value.equalsIgnoreCase("websocket");
-                case "connection" -> connection = TextPolicy.lowercase(value)
-                    .contains("upgrade");
+                case "connection" -> connection = connection || containsToken(value, "upgrade");
                 case "sec-websocket-accept" -> accepted = value.equals(expected);
                 // An extension this host never offered must not be applied to its frames.
                 case "sec-websocket-extensions" -> {
@@ -123,6 +121,14 @@ public final class WebSocketFrames {
         return upgrade && connection && accepted;
     }
 
+    /** HTTP list fields match a comma-separated token, not an arbitrary substring. */
+    private static boolean containsToken(String value, String expected) {
+        for (String token : value.split(",")) {
+            if (TextPolicy.lowercaseTrimmed(token).equals(expected)) return true;
+        }
+        return false;
+    }
+
     /**
      * One client frame: always masked, as the RFC requires of a client.
      *
@@ -132,7 +138,7 @@ public final class WebSocketFrames {
      */
     public static byte[] clientFrame(int opcode, byte[] payload, int length, byte[] mask) {
         byte[] body = payload == null ? new byte[0] : payload;
-        int size = KeyboardGeometry.bounded(length, 0, body.length);
+        int size = BoundsPolicy.bounded(length, 0, body.length);
         int headerLength = 2 + lengthBytes(size) + 4;
         byte[] frame = new byte[headerLength + size];
         frame[0] = (byte) (0x80 | opcode & 0x0f);

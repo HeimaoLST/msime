@@ -646,14 +646,17 @@ fn panel_input_socket() -> Option<std::path::PathBuf> {
 pub(crate) enum ImeReply {
     Ok(Option<u64>),
     Declined,
+    Rejected,
 }
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, PartialEq, Eq)]
 enum ImeOutcome {
     Delivered,
-    // The host answered that it did not type anything, or could not be reached: another route may try.
+    // The host had no focused context, or could not be reached: another route may try.
     Declined,
+    // The host explicitly refused the request; a tool route must not bypass it.
+    Rejected,
     // The request was sent and no answer came back. The host may still have typed it, so no other route may try, or the text could appear twice.
     Unknown,
 }
@@ -665,7 +668,11 @@ pub(crate) fn parse_ime_reply(line: &str) -> Option<ImeReply> {
         true => Some(ImeReply::Ok(
             value.get("generation").and_then(serde_json::Value::as_u64),
         )),
-        false => Some(ImeReply::Declined),
+        false => match value.get("error")?.as_str()? {
+            "no_focus" => Some(ImeReply::Declined),
+            "restricted" | "invalid" => Some(ImeReply::Rejected),
+            _ => None,
+        },
     }
 }
 
@@ -733,6 +740,7 @@ fn send_through_input_method(app: &tauri::AppHandle, mut request: serde_json::Va
         return match ime_exchange(&socket, &request) {
             Ok(ImeReply::Ok(_)) => ImeOutcome::Delivered,
             Ok(ImeReply::Declined) => ImeOutcome::Declined,
+            Ok(ImeReply::Rejected) => ImeOutcome::Rejected,
             Err(outcome) => outcome,
         };
     }
@@ -751,6 +759,7 @@ fn send_through_input_method(app: &tauri::AppHandle, mut request: serde_json::Va
         match ime_exchange(&socket, &request) {
             Ok(ImeReply::Ok(_)) => ImeOutcome::Delivered,
             Ok(ImeReply::Declined) => ImeOutcome::Declined,
+            Ok(ImeReply::Rejected) => ImeOutcome::Rejected,
             Err(outcome) => outcome,
         }
     };
@@ -767,7 +776,7 @@ fn settle_through_input_method(
 ) -> Option<Result<(), HostActionError>> {
     match send_through_input_method(app, request) {
         ImeOutcome::Delivered => Some(Ok(())),
-        ImeOutcome::Unknown => Some(Err(HostActionError {
+        ImeOutcome::Unknown | ImeOutcome::Rejected => Some(Err(HostActionError {
             code: "unavailable",
         })),
         ImeOutcome::Declined if matches!(target, PanelInputTarget::InputMethod) => {
@@ -989,6 +998,21 @@ pub(crate) fn record_panel_typing_statistics(
         date.day()
     );
     let _ = store.record(text, source, &day, Some(now.hour()));
+}
+
+/// Windows 面板文字注入成功后计入打字统计，与 Linux 的 `deliver_panel_text` 一样在阻塞线程上写：统计文件要拿跨进程的文件锁，不能占着异步运行时的线程等。计数失败只丢这一次，不影响已经上屏的文字。
+#[cfg(target_os = "windows")]
+pub(crate) async fn record_windows_panel_typing_statistics(
+    store: &TypingStatisticsStore,
+    text: &str,
+    source: TypingSource,
+) {
+    let store = store.clone();
+    let text = text.to_owned();
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        record_panel_typing_statistics(&store, &text, source)
+    })
+    .await;
 }
 
 #[cfg(target_os = "linux")]

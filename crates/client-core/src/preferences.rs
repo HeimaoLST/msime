@@ -51,6 +51,10 @@ pub enum TouchKeyboardLayout {
     TwentySixKey,
     NineKey,
     Handwriting,
+    /// 全拼 14 键：QWERTY 上相邻两个字母一个键（L、M 单独一键），按组消歧，与九键共用九宫格会话。只配全拼。
+    FourteenKey,
+    /// 九键双拼：数字键上每个音节固定两位（声母一位、韵母一位），表由 `nine_key_shuangpin_profile` 选，与九键共用九宫格会话（#6572）。引擎方案是全拼，不配别的方案。
+    NineKeyShuangpin,
 }
 
 /// 触屏九宫格数字层的排列。桌面宿主原样保留、不使用。
@@ -62,6 +66,17 @@ pub enum NumberKeypadOrder {
     Phone,
     /// 计算器：7 8 9 在最上面，1 2 3 在最下面。
     Calculator,
+}
+
+/// 触屏 26 键按「123」切到的数字层。桌面宿主原样保留、不使用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TwentySixKeyNumberLayout {
+    /// 1 到 0 排成一行，下面是符号行。
+    #[default]
+    Row,
+    /// 九宫格数字层：3×3 数字键，排列跟 [`NumberKeypadOrder`] 走。
+    NineKey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,12 +266,15 @@ fn supported_skin_photo(bytes: &[u8]) -> bool {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CustomTheme {
-    /// The theme the custom theme is drawn over: `system` (the platform's own tokens) or one of the five built-in themes, never `custom`. It supplies the candidate colours the package and the pickers leave unset and, while there is no keyboard design, the keyboard. An applied package replaces it with the package's own manifest `base`.
+    /// 自定义主题的底：`system` 或五个内置主题之一，不能是 `custom`，也不能是只在部分宿主上提供的 `native`（见 `GlobalTheme::is_base`）。皮肤包和取色器没设的候选颜色由它补上；没有键盘设计时，键盘也画它的。应用了皮肤包时，改用包清单自己的 `base`。
     #[serde(skip_serializing_if = "is_system_theme")]
     pub base: crate::skin::theme::GlobalTheme,
-    /// The external candidate skin package (a folder name in the host's skin root) whose colours and decoration the custom theme uses. Never a global theme id.
+    /// 浅色模式用的候选窗皮肤包（宿主皮肤目录里的文件夹名），也是没设 `candidate_skin_dark` 时深色模式用的那款。不会是全局主题 ID。皮肤包只在它 `base` 的明暗下绘制，见 `CustomTheme::candidate_skin_for`。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate_skin: Option<String>,
+    /// 深色模式用的候选窗皮肤包。`None` 时深色模式也取 `candidate_skin`，只设过一款皮肤的旧文档因此照旧。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_skin_dark: Option<String>,
     /// The candidate colour pickers, drawn over the package's colours.
     #[serde(skip_serializing_if = "CustomCandidateColors::is_empty")]
     pub candidate_colors: CustomCandidateColors,
@@ -272,7 +290,7 @@ fn is_system_theme(theme: &crate::skin::theme::GlobalTheme) -> bool {
 impl CustomTheme {
     /// The same checks `Preferences::validate` applies to `custom_theme`, for hosts that receive a custom theme outside a preferences document.
     pub fn validate(&self) -> Result<(), PreferencesError> {
-        if self.base == crate::skin::theme::GlobalTheme::Custom {
+        if !self.base.is_base() {
             return Err(PreferencesError::InvalidCustomThemeBase);
         }
         if self
@@ -315,14 +333,25 @@ impl CustomTheme {
             }
         }
         // 与皮肤目录的文件夹名同一形状，但沿用较宽的 `is_selectable_id`：被 msime-windows 内置外观占用的旧皮肤名仍可保存，只是目录里找不到它。
-        if self
-            .candidate_skin
-            .as_deref()
-            .is_some_and(|skin| !crate::skin::catalog::is_selectable_id(skin))
+        if [&self.candidate_skin, &self.candidate_skin_dark]
+            .into_iter()
+            .flatten()
+            .any(|skin| !crate::skin::catalog::is_selectable_id(skin))
         {
             return Err(PreferencesError::InvalidCandidateSkin);
         }
         Ok(())
+    }
+
+    /// 宿主在 `dark` 模式下要加载的皮肤包：深色模式优先取 `candidate_skin_dark`，没设时与浅色模式一样取 `candidate_skin`。选中的包画不画还要看它的 `base` 是否属于这个模式，由 `theme::resolve` 判断。
+    pub fn candidate_skin_for(&self, dark: bool) -> Option<&str> {
+        if dark {
+            self.candidate_skin_dark
+                .as_deref()
+                .or(self.candidate_skin.as_deref())
+        } else {
+            self.candidate_skin.as_deref()
+        }
     }
 }
 
@@ -379,11 +408,15 @@ pub enum TouchKeyboardScheme {
     Stroke,
     /// 注音 9 键：数字键 1-0 各承载几个注音符号（US 6,009,444 FIG.1 的分组），声调键 ˉ ˊ ˇ ˋ ˙ 结束一个音节，与大千注音一样输出繁体（`InputScheme::Zhuyin` 配 `TouchKeyboardLayout::NineKey`）。
     ZhuyinNineKey,
+    /// 全拼 14 键（`InputScheme::Quanpin` 配 `TouchKeyboardLayout::FourteenKey`）。默认不启用，由用户在「添加语言」或全拼的布局选择里打开。
+    FourteenKey,
+    /// 九键双拼（`InputScheme::Quanpin` 配 `TouchKeyboardLayout::NineKeyShuangpin`，表由 `nine_key_shuangpin_profile` 选）。默认不启用。
+    NineKeyShuangpin,
 }
 
 impl TouchKeyboardScheme {
     /// Every touch scheme in picker order. Schemes are appended, never reordered.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 19] = [
         Self::Quanpin,
         Self::NineKey,
         Self::Xiaohe,
@@ -401,9 +434,11 @@ impl TouchKeyboardScheme {
         Self::Tibetan,
         Self::Stroke,
         Self::ZhuyinNineKey,
+        Self::FourteenKey,
+        Self::NineKeyShuangpin,
     ];
 
-    /// 新装时键盘显示的方案：只有中文方案（拼音、双拼、五笔和手写）。日文（9 键和 26 键）、韩文、粤拼、注音（大千和 9 键）、越南文、藏文和笔画都由用户自己在「添加语言」里打开：日文词典和语言词库在 Android 上按需下载，默认不启用它们，新装用户就不会看到一个还没有词典的键盘。
+    /// 新装时键盘显示的方案：只有中文方案（拼音、双拼、五笔和手写）。日文（9 键和 26 键）、韩文、粤拼、注音（大千和 9 键）、越南文、藏文和笔画都由用户自己在「添加语言」里打开：日文词典和语言词库在 Android 上按需下载，默认不启用它们，新装用户就不会看到一个还没有词典的键盘。全拼 14 键也不默认启用：它是全拼的另一种键面，由用户在全拼的布局选择或「添加语言」里打开。
     ///
     /// 只用于新装：还没有偏好文件、状态目录也没有被以前的版本准备过的时候（见 `PreferencesStore` 读不到文件时的处理）。已有的文档没存列表时按 [`Self::LEGACY_DEFAULT_ENABLED`]，存过列表的照旧按它保存的列表。
     pub const DEFAULT_ENABLED: [Self; 8] = [
@@ -601,6 +636,33 @@ pub enum ImeModeScope {
     Global,
 }
 
+/// 「应用例外」里一个应用固定的起始模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppInputModeRule {
+    Chinese,
+    English,
+}
+
+/// 「应用例外」的条目上限与应用标识的字节上限。规则表进 Windows Server 的偏好快照和 iOS 桥接的偏好文档（都是整份 16KiB 上限），32 条、每条 64 字节以内最多约 2.6KB；bundle id 和程序文件名很少超过 64 字节。
+pub const MAX_APP_INPUT_MODE_RULES: usize = 32;
+pub const MAX_APP_INPUT_MODE_RULE_ID_BYTES: usize = 64;
+
+/// 应用标识：macOS 是 bundle id，Windows 是进程的可执行文件基名（如 `code.exe`，设置页写入前转成小写）。非空、不超过 `MAX_APP_INPUT_MODE_RULE_ID_BYTES` 字节，不含控制字符和路径分隔符，两侧没有空白；整张表按 ASCII 不分大小写地不重复，因为 Windows 按这个规则比较进程名，只差大小写的两条会让同一个进程拿到两种模式。
+fn valid_app_input_mode_rules(rules: &BTreeMap<String, AppInputModeRule>) -> bool {
+    let mut seen = BTreeSet::new();
+    rules.len() <= MAX_APP_INPUT_MODE_RULES
+        && rules.keys().all(|id| {
+            !id.is_empty()
+                && id.len() <= MAX_APP_INPUT_MODE_RULE_ID_BYTES
+                && id.trim() == id.as_str()
+                && !id
+                    .chars()
+                    .any(|character| character.is_control() || matches!(character, '\\' | '/'))
+                && seen.insert(id.to_ascii_lowercase())
+        })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChineseScheme {
@@ -734,6 +796,9 @@ pub struct Preferences {
     pub default_ime_mode: DefaultImeMode,
     #[serde(default)]
     pub ime_mode_scope: ImeModeScope,
+    /// 应用例外：切到这些应用时从固定的中文或英文开始，优先于按应用记忆、全局状态和 `default_ime_mode`，在全局作用域下同样生效；用户在应用里手动切换后，本次停留期间让位，离开再回来重新生效。macOS 按 bundle id、Windows 按进程基名查找。没有规则时不写进文档，没有这个键的旧版本照样能读。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub app_input_mode_rules: BTreeMap<String, AppInputModeRule>,
     #[serde(default)]
     pub voice_input: VoiceInputPreferences,
     #[serde(default)]
@@ -781,7 +846,7 @@ pub struct Preferences {
     pub candidate_layout: CandidateLayout,
     #[serde(default)]
     pub candidate_preedit_style: CandidatePreeditStyle,
-    /// Show the current/total page text in Linux candidate panels, independently of preedit.
+    /// Show the current/total page text in Linux candidate panels, independently of preedit. On macOS it also governs the ‹ › page arrows beside that text, so with the logo and the reading hidden too the card loses its top row. Paging by key and wheel is unaffected on both.
     #[serde(default = "enabled_by_default")]
     pub show_candidate_page_number: bool,
     #[serde(default)]
@@ -790,19 +855,28 @@ pub struct Preferences {
     pub diagnostic_log: DiagnosticLogPreferences,
     #[serde(default = "enabled_by_default")]
     pub candidate_follow_cursor: bool,
-    /// macOS displays a short, non-activating badge after switching between
-    /// Chinese and English input. Other hosts preserve this preference but do
-    /// not render the native badge.
+    /// 切换中英文后在光标旁短暂显示一个不抢焦点的「中」/「英」徽标。macOS 和 Windows 自己画，HarmonyOS 和 Linux 交给各自的面板（见 `HostCapabilities::input_mode_hud`），其他宿主保留这个偏好但不画。
     #[serde(default = "enabled_by_default")]
     pub input_mode_hud: bool,
+    /// 在 macOS 菜单栏放一个状态项，常驻显示当前输入模式（中/双/五/日……，英文时为「英」），不需要把「英」加成系统输入源。默认关闭；只有 macOS 宿主画它（见 `HostCapabilities::input_mode_status_item`），其他宿主保留这个偏好但不画。
+    #[serde(default)]
+    pub input_mode_status_item: bool,
     /// 候选窗和悬浮工具栏左端的水杉 logo。新装默认隐藏（见 `Default`）；已存文档缺这个字段时读成显示，升级沿用原来的样子。
     #[serde(default = "enabled_by_default")]
     pub show_app_logo: bool,
+    /// 「展开候选」：横排候选窗组字时按 ↓ 展开成多行候选网格（一行一页，上下滚动），候选窗上也多一个展开按钮；竖排候选窗不受影响。默认关闭，缺字段的旧文档读成关闭。只有声明 `HostCapabilities::expand_candidates` 的宿主（目前只有 macOS）读它，其他宿主保留这个偏好但不用。
+    #[serde(default)]
+    pub expand_candidates: bool,
     pub scheme: InputScheme,
     /// Show the Wubi code suffix that remains after the typed prefix.
     #[serde(default = "enabled_by_default")]
     pub wubi_code_hint: bool,
-    /// Answer an unmatched Wubi code with candidates from the same Pinyin spelling.
+    /// 完整四码且整个列表只有一个候选时，在第四键提交。
+    ///
+    /// *哪些*码是这样由 Engine 回答；词是否就在那里离开输入法由用户决定，关掉表示它留在候选列表里，等空格或数字键选走。
+    #[serde(default = "enabled_by_default")]
+    pub wubi_auto_commit_unique: bool,
+    /// 五笔拼音混输：五笔候选之后接着列出同一串字母的全拼候选，五笔编码打不出时直接出拼音候选。
     #[serde(default)]
     pub wubi_mixed_pinyin: bool,
     /// 五笔用 86 还是 98 码表；个人词条和学习记录也按它分开存。
@@ -830,6 +904,12 @@ pub struct Preferences {
     /// 九宫格数字层按电话还是计算器排列；字母层不受影响。
     #[serde(default)]
     pub touch_number_keypad_order: NumberKeypadOrder,
+    /// 26 键按「123」时出一行 1 到 0 的数字符号页，还是九宫格那样的 3×3 数字层。
+    #[serde(default)]
+    pub touch_twenty_six_key_number_layout: TwentySixKeyNumberLayout,
+    /// 触屏 26 键双拼时在字母键底部画当前方案的声母/韵母提示，读屏也读它。默认开；全拼、独立英文和本地模式本来就不画，不受它影响。桌面宿主原样保留、不使用。
+    #[serde(default = "enabled_by_default")]
+    pub touch_shuangpin_key_hints: bool,
     /// The optional buttons on the touch keyboard's toolbar, the counterpart of the floating toolbar's component switches. The voice entry stays under `touch_voice_shortcut`.
     #[serde(default)]
     pub touch_toolbar: TouchToolbarPreferences,
@@ -838,8 +918,22 @@ pub struct Preferences {
     pub last_chinese_scheme: Option<ChineseScheme>,
     #[serde(default)]
     pub shuangpin_profile: ShuangpinProfile,
+    /// `shuangpin_profile` 为 `custom` 时用的键位表。这里只限制大小，合不合法由 Engine 判定（`msime_engine::host::validate_shuangpin_custom_profile`）；表缺失或不合法时宿主按小鹤运行。选别的方案时保留，切回 `custom` 还能用。
+    #[serde(default, skip_serializing_if = "ShuangpinCustomProfile::is_empty")]
+    pub shuangpin_custom_profile: ShuangpinCustomProfile,
+    /// 九键双拼（`touch_keyboard_layout` 为 `nine_key_shuangpin`）用哪张表。等于默认值时不写进文件，没用过九键双拼的文档与以前的版本相同。
+    #[serde(default, skip_serializing_if = "NineKeyShuangpinProfile::is_default")]
+    pub nine_key_shuangpin_profile: NineKeyShuangpinProfile,
+    /// `nine_key_shuangpin_profile` 为 `custom` 时用的表，形状与 `shuangpin_custom_profile` 相同，键是数字：`initials` 放 23 个声母，`finals` 放 33 个韵母，各一个数字；`zero_initials` 放 12 个零声母音节，各两位数字。这里只限制大小，合不合法由 Engine 判定（`msime_engine::host::validate_nine_key_shuangpin_table`）；表缺失或不合法时宿主按默认的内置方案运行。选别的方案时保留，空表不写进文件。
+    #[serde(default, skip_serializing_if = "ShuangpinCustomProfile::is_empty")]
+    pub nine_key_shuangpin_custom_profile: ShuangpinCustomProfile,
     #[serde(default = "enabled_by_default")]
     pub shuangpin_preedit_uses_raw: bool,
+    /// 「输入时显示双拼键位提示」：双拼组字时在候选窗旁显示当前方案的键位图，高亮刚按下的键，上屏后隐藏。macOS 和 Windows 画它。
+    ///
+    /// 没写过时为 `None`，不写进文档：这个开关以前只存在 macOS 本机的 defaults 里（`MSIMEClientShuangpinKeymap`），macOS 在文档从没带过这一项时仍读那里的旧选择，再由下一次保存写进文档；文档带着这一项载入过一次之后 macOS 删掉那个旧键，此后缺这一项在所有宿主上都是关。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shuangpin_keymap_hint: Option<bool>,
     /// The Vietnamese input method and tone placement.
     #[serde(default)]
     pub vietnamese: VietnamesePreferences,
@@ -865,6 +959,9 @@ pub struct Preferences {
     /// Corner radius of the candidate card in points (DIP on Windows), 0-32. It wins over the skin package's `corner_radius_dip`, which wins over the host's own constant; absent means the host or skin decides. Row and selection radii become the smaller of the host's row radius and this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_corner_radius: Option<u8>,
+    /// Space in points (DIP on Windows) between the candidate card's edge and its candidates, 0-16, before `candidate_scale_percent` multiplies it. It wins over the skin package's padding and the host's own constant (macOS 6pt); absent means the host or skin decides. A host may keep a small floor so the selection highlight does not touch the edge (macOS 2pt).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_padding: Option<u8>,
     #[serde(default = "default_candidate_font_family")]
     pub candidate_font_family: String,
     /// Optional leading face for the Windows candidate glyph fallback chain.
@@ -885,6 +982,9 @@ pub struct Preferences {
     /// Render and commit Chinese Engine output in Traditional Chinese at the host boundary.
     #[serde(default)]
     pub traditional_chinese_output: bool,
+    /// 中英文之间加空格：一次上屏的文本里，汉字与 ASCII 字母、数字相邻处插入一个半角空格（host-api 在全角转换之后做，见 `crates/host-api/src/chinese_english_spacing.rs`）。两次上屏之间不加，候选窗显示不变。默认关；关着时不写进文档，没有这个键的旧版本照样能读。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub chinese_english_spacing: bool,
     pub chinese_punctuation: bool,
     #[serde(default = "smart_punctuation_default")]
     pub smart_punctuation: bool,
@@ -912,12 +1012,21 @@ pub struct Preferences {
     pub paired_punctuation: bool,
     #[serde(default)]
     pub punctuation_lock: PunctuationLock,
+    /// 大写锁定打开时，中文模式下没有组字时的标点按英文标点输出，和切到英文模式时一样（`punctuation_lock` 为 `chinese` 时仍是中文标点）。只有向会话报告大写锁定状态的宿主（`HostCapabilities::caps_lock_punctuation`）会用到它。默认关，打开前的行为不变。
+    #[serde(default)]
+    pub caps_lock_ascii_punctuation: bool,
     #[serde(default)]
     pub navigation: NavigationPreferences,
     #[serde(default)]
     pub keybindings: KeybindingPreferences,
     #[serde(default)]
     pub word_character: WordCharacterPreferences,
+    /// 用两个专用键直接选当前页的第二、第三个候选。等于默认值（关闭）时不写进文档，没有这个键的旧版本照样能读。
+    #[serde(
+        default,
+        skip_serializing_if = "SecondThirdCandidatePreferences::is_default"
+    )]
+    pub second_third_candidate: SecondThirdCandidatePreferences,
     #[serde(default)]
     pub frequency: FrequencyPreferences,
     #[serde(default)]
@@ -935,6 +1044,12 @@ pub struct Preferences {
     pub game_compatibility: GameCompatibilityPreferences,
     #[serde(default)]
     pub clipboard_history: bool,
+    /// 云剪贴板改走用户自建的中继（协议见 `docs/cloud-clipboard-relay.md`）：地址为空表示不用中继，走水杉账号。配置了中继时云剪贴板只经中继，不再碰账号。令牌和语音、翻译服务的凭据一样明文存在这份文档里，列在 [`Preferences::credential_slots`]，不进设置文件导出（`settings_document::LOCAL_SECTIONS`）和账号设置同步。没配置时不写进文档，没有这个键的旧版本照样能读。
+    #[serde(
+        default,
+        skip_serializing_if = "CloudClipboardRelayPreferences::is_default"
+    )]
+    pub cloud_clipboard_relay: CloudClipboardRelayPreferences,
     /// 向云候选服务多要一条候选。它会把正在组的拼写发给 `https://inputtools.google.com`，所以新装默认关闭（见 `Default`）；已存文档缺这个字段时读成开启，升级沿用原来的行为。
     #[serde(default = "enabled_by_default")]
     pub cloud_candidates: bool,
@@ -1058,6 +1173,18 @@ pub struct VoiceInputPreferences {
     pub doubao_enable_ddc: bool,
     #[serde(default)]
     pub doubao_boosting_table_id: String,
+}
+
+/// EveryAPI 的识别默认模型以前写成 `openai/whisper-large-v3-turbo`，那是照搬 Apple 预设的名字，EveryAPI 从没有它的渠道（请求返回 503 `model_not_found`）。共享设置页切到 EveryAPI 时会把默认模型写进 `asr_model`，所以选过 EveryAPI 的文档里存的就是这个值。
+const RETIRED_EVERYAPI_ASR_MODEL: &str = "openai/whisper-large-v3-turbo";
+
+impl VoiceInputPreferences {
+    /// 读出文档时把 EveryAPI 下存着的旧默认模型清空，由 `voice::provider` 补上现在的默认（`volc.seedasr.sauc.duration`）。只认这一个值：用户自己填的其他模型原样保留；文件本身等下一次保存才改写。
+    fn retire_unavailable_asr_model(&mut self) {
+        if self.asr_provider == "everyapi" && self.asr_model.trim() == RETIRED_EVERYAPI_ASR_MODEL {
+            self.asr_model.clear();
+        }
+    }
 }
 
 impl Default for VoiceInputPreferences {
@@ -1282,7 +1409,7 @@ pub struct FloatingToolbarPreferences {
     pub enabled: bool,
     #[serde(default = "enabled_by_default")]
     pub english_mode: bool,
-    /// 切换输入方案的按钮：点开列出全拼、双拼、五笔、粤拼、注音等方案。默认开启——在 macOS 27 上粤、注这类菜单栏入口只能由用户自己去系统设置里添加，这个按钮让不加入口也能切换。目前只有 macOS 的工具栏画它（见 `HostCapabilities::floating_toolbar_input_scheme`）。
+    /// 切换输入方案的按钮：点开列出全拼、双拼、五笔、粤拼、注音等方案。默认开启——在 macOS 27 上粤、注这类菜单栏入口只能由用户自己去系统设置里添加，这个按钮让不加入口也能切换。macOS 和 Windows 的工具栏画它（见 `HostCapabilities::floating_toolbar_input_scheme`）。
     #[serde(default = "enabled_by_default")]
     pub input_scheme: bool,
     #[serde(default = "default_toolbar_scale")]
@@ -1439,6 +1566,12 @@ pub struct LocalModePreferences {
     /// The `@` mode also offers China's provinces, cities and counties from the Engine's built-in table, after the user's own names. Off by default, and only meaningful while `mention` is on.
     #[serde(default)]
     pub mention_places: bool,
+    /// 拆字反查（`C`）：没有组字时 Shift+C，再输入字的各个部件的拼音找字。`None` 表示用户没动过开关，由宿主形态决定：触屏宿主（iOS、Android、HarmonyOS）读作开，屏幕键盘从菜单进入；桌面宿主读作关，因为打开后句首和中英混打的大写 C（C盘、C语言）会进入模式。Android 和 HarmonyOS 接实体键盘（含鸿蒙电脑）时 Shift+C 同样会进入模式，桌面的这个问题在那里仍然存在，而且这两个宿主不提供「Shift+字母」总开关，用户只能整项关掉拆字。只有用户动过开关时文档里才有这个键，缺键的文档读作 `None`，旧版本也只在这种情况下因 `deny_unknown_fields` 读不懂文档。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chaizi: Option<bool>,
+    /// 「Shift+字母进入快捷模式」总开关：关掉后没有组字时 Shift+U/T/K/E/M/J/Y/R/V/C 不进入快捷模式，照常打出大写字母，上面各模式自己的开关保留原值。默认开，和以前的行为一样；缺这个键的旧文档读作开。
+    #[serde(default = "enabled_by_default")]
+    pub shift_letter_entry: bool,
 }
 
 impl Default for LocalModePreferences {
@@ -1456,6 +1589,8 @@ impl Default for LocalModePreferences {
             command: false,
             mention: false,
             mention_places: false,
+            chaizi: None,
+            shift_letter_entry: true,
         }
     }
 }
@@ -1635,6 +1770,9 @@ pub struct MixedInputPreferences {
     pub minimum_prefix: u8,
     pub emoji: bool,
     pub kaomoji: bool,
+    /// 实验选项：全拼、双拼里给整段罗马字补一个日文转换候选（ohayou → おはよう）。后加的成员，缺省为关；关着时不写进文档，旧版本和只写前四项的宿主都还能读。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub japanese: bool,
 }
 
 impl Default for MixedInputPreferences {
@@ -1644,6 +1782,7 @@ impl Default for MixedInputPreferences {
             minimum_prefix: 5,
             emoji: source_mixed_emoji_default(),
             kaomoji: false,
+            japanese: false,
         }
     }
 }
@@ -1713,6 +1852,56 @@ impl Default for WordCharacterPreferences {
     }
 }
 
+/// 选第二、第三个候选的那一对键。目前只有分号和单引号一种；留成枚举，是为了以后加左右 Shift 之类的键位时不必改文档格式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SecondThirdCandidateKeys {
+    /// `;` 选第二个候选，`'` 选第三个候选。
+    #[default]
+    SemicolonQuote,
+}
+
+/// 缺哪个字段就取默认值，宿主的设置页只写 `enabled` 也能读。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct SecondThirdCandidatePreferences {
+    pub enabled: bool,
+    pub keys: SecondThirdCandidateKeys,
+}
+
+impl SecondThirdCandidatePreferences {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// 自建的云剪贴板中继：基地址和中继管理员发的令牌，两项要么都空（不用中继），要么都合规。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct CloudClipboardRelayPreferences {
+    /// 中继的基地址，例如 `https://relay.example.com/msime`；规则见 [`crate::clipboard_relay::valid_relay_url`]。
+    pub url: String,
+    /// 中继令牌，每个令牌对应中继上一个独立的剪贴板空间；规则见 [`crate::clipboard_relay::valid_relay_token`]。
+    pub token: String,
+}
+
+impl CloudClipboardRelayPreferences {
+    fn is_default(&self) -> bool {
+        self.url.is_empty() && self.token.is_empty()
+    }
+
+    /// 是否配置了中继。配置了就只走中继。
+    pub fn is_configured(&self) -> bool {
+        !self.url.is_empty()
+    }
+
+    fn validate(&self) -> bool {
+        self.is_default()
+            || (crate::clipboard_relay::valid_relay_url(&self.url)
+                && crate::clipboard_relay::valid_relay_token(&self.token))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NavigationPreferences {
@@ -1755,11 +1944,15 @@ pub struct KeybindingPreferences {
     pub switch_language_ctrl_alt_space: bool,
     #[serde(default = "enabled_by_default")]
     pub toggle_character_set_ctrl_shift_f: bool,
-    /// The macOS Option+Shift+H chord. The host has reserved it unconditionally since it shipped,
-    /// so this defaults on: the preference gives the chord back to the application, it does not
-    /// turn on something that was off. Other hosts have no such chord and ignore it.
+    /// macOS 的 Option+Shift+H、Windows 和 Android 的 Alt+Shift+H 切换全半角。macOS 从上线起就无条件占用这个组合键，所以默认开：这个偏好是把组合键还给应用，而不是打开一个原本关着的功能。没有这个组合键的宿主忽略它。
     #[serde(default = "enabled_by_default")]
     pub toggle_fullwidth_option_shift_h: bool,
+    /// 单按 Caps Lock 切换中英文：按下后在 300 毫秒内松开、期间没有别的键，算一次轻点，切换输入法自己的中英文模式，并把大写锁定撤回关闭；按住更久照常打开大写锁定。大写锁定已经开着时按它照常关掉，不切换。默认关；只有声明 `HostCapabilities::caps_lock_language_switch` 的宿主读它。
+    #[serde(default)]
+    pub switch_language_caps_lock: bool,
+    /// Ctrl+Shift+J 在中文和日语之间切换：中文状态下，当前是中文方案时切到日语方案，并把这个中文方案记进 `last_chinese_scheme`；当前是日语或其他非中文方案时回到 `last_chinese_scheme`。英文模式下组合键交给应用。默认关，因为浏览器把它当作打开开发者工具或下载页；只有声明 `HostCapabilities::japanese_toggle_shortcut` 的宿主读它。
+    #[serde(default)]
+    pub toggle_japanese_ctrl_shift_j: bool,
 }
 
 impl Default for KeybindingPreferences {
@@ -1771,6 +1964,8 @@ impl Default for KeybindingPreferences {
             switch_language_ctrl_alt_space: true,
             toggle_character_set_ctrl_shift_f: true,
             toggle_fullwidth_option_shift_h: true,
+            switch_language_caps_lock: false,
+            toggle_japanese_ctrl_shift_j: false,
         }
     }
 }
@@ -1880,6 +2075,7 @@ impl Default for Preferences {
         Self {
             default_ime_mode: DefaultImeMode::default(),
             ime_mode_scope: ImeModeScope::default(),
+            app_input_mode_rules: BTreeMap::new(),
             ai_assistant: AiAssistantPreferences::default(),
             sentence_association: SentenceAssociationPreferences::default(),
             custom_translation: CustomTranslationPreferences::default(),
@@ -1907,9 +2103,12 @@ impl Default for Preferences {
             diagnostic_log: DiagnosticLogPreferences::default(),
             candidate_follow_cursor: true,
             input_mode_hud: true,
+            input_mode_status_item: false,
             show_app_logo: false,
+            expand_candidates: false,
             scheme: InputScheme::default(),
             wubi_code_hint: true,
+            wubi_auto_commit_unique: true,
             wubi_mixed_pinyin: false,
             wubi_profile: WubiProfile::default(),
             touch_keyboard_layout: TouchKeyboardLayout::default(),
@@ -1919,10 +2118,16 @@ impl Default for Preferences {
             touch_keyboard_height_adjustment: 0,
             touch_voice_shortcut: false,
             touch_number_keypad_order: NumberKeypadOrder::default(),
+            touch_twenty_six_key_number_layout: TwentySixKeyNumberLayout::default(),
+            touch_shuangpin_key_hints: true,
             touch_toolbar: TouchToolbarPreferences::default(),
             last_chinese_scheme: None,
             shuangpin_profile: ShuangpinProfile::default(),
+            shuangpin_custom_profile: ShuangpinCustomProfile::default(),
+            nine_key_shuangpin_profile: NineKeyShuangpinProfile::default(),
+            nine_key_shuangpin_custom_profile: ShuangpinCustomProfile::default(),
             shuangpin_preedit_uses_raw: true,
+            shuangpin_keymap_hint: None,
             vietnamese: VietnamesePreferences::default(),
             single_character_only: false,
             candidate_page_size: 6,
@@ -1932,6 +2137,7 @@ impl Default for Preferences {
             candidate_scale_percent: default_candidate_scale_percent(),
             candidate_opacity_percent: default_candidate_opacity_percent(),
             candidate_corner_radius: None,
+            candidate_padding: None,
             candidate_font_family: default_candidate_font_family(),
             candidate_english_font: None,
             candidate_fallback_fonts: default_candidate_fallback_fonts(),
@@ -1941,6 +2147,7 @@ impl Default for Preferences {
             quanpin_helpcode: default_quanpin_helpcode(),
             shuangpin_helpcode: default_shuangpin_helpcode(),
             traditional_chinese_output: false,
+            chinese_english_spacing: false,
             chinese_punctuation: true,
             smart_punctuation: smart_punctuation_default(),
             smart_punctuation_repeat: smart_punctuation_default(),
@@ -1949,15 +2156,18 @@ impl Default for Preferences {
             smart_punctuation_direct_letter: smart_punctuation_default(),
             paired_punctuation: true,
             punctuation_lock: PunctuationLock::Follow,
+            caps_lock_ascii_punctuation: false,
             navigation: NavigationPreferences::default(),
             keybindings: KeybindingPreferences::default(),
             word_character: WordCharacterPreferences::default(),
+            second_third_candidate: SecondThirdCandidatePreferences::default(),
             frequency: FrequencyPreferences::default(),
             mixed_input: MixedInputPreferences::default(),
             local_modes: LocalModePreferences::default(),
             plugins: PluginPreferences::default(),
             game_compatibility: GameCompatibilityPreferences::default(),
             clipboard_history: false,
+            cloud_clipboard_relay: CloudClipboardRelayPreferences::default(),
             // 会把输入内容发出设备的两条路径新装都关闭，由 Windows、macOS、Linux 的首次询问或各平台的设置开关打开。
             cloud_candidates: false,
             candidate_translations: true,
@@ -2070,6 +2280,69 @@ pub enum ShuangpinProfile {
     Ziranma,
     Shoudao,
     Microsoft,
+    /// 用户自己的键位表，见 `Preferences::shuangpin_custom_profile`。
+    Custom,
+}
+
+/// 九键双拼方案（#6572）。Engine 的编码是声明顺序（`NineKeyShuangpinKind`）；内置的三个方案和它们的来源见 `.agents/notes/implemented/feature/2026-10-10-nine-key-shuangpin.md`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NineKeyShuangpinProfile {
+    /// 米旮旯 2。
+    Migala2,
+    /// 米旮旯 3。
+    #[default]
+    Migala3,
+    /// 辜氏 2 低重码。
+    Gushi2Low,
+    /// 用户自己的表，见 `Preferences::nine_key_shuangpin_custom_profile`。
+    Custom,
+}
+
+impl NineKeyShuangpinProfile {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// 自定义双拼方案的键位表，与 Engine 的 `ShuangpinCustomTable` 一一对应：`initials` 只放 `zh` `ch` `sh`，`finals` 放 33 个韵母，`zero_initials` 放 12 个零声母音节的两键编码；键是小写字母或 `;`，`ü` 写作 `v`。导入导出用的也是这个 JSON 形状。
+///
+/// 九键双拼的自定义表（`Preferences::nine_key_shuangpin_custom_profile`）用同一个形状，对应 Engine 的 `NineKeyShuangpinTable`：`initials` 放全部 23 个声母，键是数字。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShuangpinCustomProfile {
+    #[serde(default)]
+    pub initials: BTreeMap<String, String>,
+    #[serde(default)]
+    pub finals: BTreeMap<String, String>,
+    #[serde(default)]
+    pub zero_initials: BTreeMap<String, String>,
+}
+
+impl ShuangpinCustomProfile {
+    /// 一张合法的表最多有 3 + 33 + 12 个单位；留出余量，只挡住明显不是键位表的东西。
+    const MAX_UNITS_PER_PART: usize = 64;
+    const MAX_UNIT_BYTES: usize = 8;
+    const MAX_KEY_BYTES: usize = 4;
+
+    pub fn is_empty(&self) -> bool {
+        self.initials.is_empty() && self.finals.is_empty() && self.zero_initials.is_empty()
+    }
+
+    /// 只看大小和字符，不看键位合不合法。
+    fn validate(&self) -> bool {
+        [&self.initials, &self.finals, &self.zero_initials]
+            .into_iter()
+            .all(|part| {
+                part.len() <= Self::MAX_UNITS_PER_PART
+                    && part.iter().all(|(unit, key)| {
+                        unit.len() <= Self::MAX_UNIT_BYTES
+                            && key.len() <= Self::MAX_KEY_BYTES
+                            && unit.bytes().all(|byte| byte.is_ascii_lowercase())
+                            && key.bytes().all(|byte| byte.is_ascii_graphic())
+                    })
+            })
+    }
 }
 
 /// 五笔码表版本。Engine 的编码是声明顺序（`wubi_profile`）。
@@ -2091,6 +2364,8 @@ pub enum HelpcodeSchema {
     Shouyouplus,
     Xiaohe,
     Jiajia,
+    /// 五笔 86：每个字取 86 五笔全码的前两码（`resources/helpcodes/wubi86_helpcode.txt`）。
+    Wubi86,
     /// A user table under the resource set's `helpcodes/custom` directory.
     Custom(String),
 }
@@ -2104,6 +2379,7 @@ impl HelpcodeSchema {
             Self::Shouyouplus => "shouyouplus",
             Self::Xiaohe => "xiaohe",
             Self::Jiajia => "jiajia",
+            Self::Wubi86 => "wubi86",
             Self::Custom(value) => value,
         }
     }
@@ -2131,6 +2407,7 @@ impl<'de> Deserialize<'de> for HelpcodeSchema {
             "shouyouplus" => Ok(Self::Shouyouplus),
             "xiaohe" => Ok(Self::Xiaohe),
             "jiajia" => Ok(Self::Jiajia),
+            "wubi86" => Ok(Self::Wubi86),
             value if crate::helpcode::is_custom_schema(value) => Ok(Self::Custom(value.into())),
             _ => Err(serde::de::Error::custom("unknown helpcode schema")),
         }
@@ -2182,6 +2459,11 @@ pub fn is_absolute_model_path(path: &str) -> bool {
     bytes.len() > 2 && bytes[0] == b'\\' && bytes[1] == b'\\' && bytes[2] != b'\\'
 }
 
+/// 判断 `voice_input.asr_model_path` 能否保存：空字符串，或不超过 4096 字节、不含控制字符的绝对路径（[`is_absolute_model_path`]）。
+pub fn valid_model_path(path: &str) -> bool {
+    crate::text::is_bounded_text(path, 4096) && (path.is_empty() || is_absolute_model_path(path))
+}
+
 /// 判断本地模型镜像：空字符串，或不带凭据、查询和片段的 HTTPS 前缀。
 pub fn valid_model_mirror(mirror: &str) -> bool {
     if mirror.is_empty() {
@@ -2200,12 +2482,7 @@ pub fn valid_model_mirror(mirror: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(mirror) else {
         return false;
     };
-    url.scheme() == "https"
-        && url.host_str().is_some_and(|host| !host.is_empty())
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.query().is_none()
-        && url.fragment().is_none()
+    crate::endpoint::valid_endpoint_shape(mirror, &url, "https") && url.query().is_none()
 }
 
 fn default_shuangpin_helpcode() -> HelpcodePreferences {
@@ -2217,13 +2494,14 @@ fn default_shuangpin_helpcode() -> HelpcodePreferences {
 }
 
 /// Persisted recognition provider identifiers. Hosts expose only the providers they implement: `system` is the platform speech adapter, not a cloud profile, and `local` is an installed on-device sherpa-onnx model directory named by `asr_model_path`, which needs a host built with the recognizer behind it.
-pub const ASR_PROVIDERS: [&str; 8] = [
+pub const ASR_PROVIDERS: [&str; 9] = [
     "doubao",
     "siliconflow",
     "openai",
     "groq",
     "everyapi",
     "mistral",
+    "bailian",
     "system",
     "local",
 ];
@@ -2327,13 +2605,16 @@ impl Preferences {
         next.niutrans.app_id = self.niutrans.app_id.clone();
         next.niutrans.apikey = self.niutrans.apikey.clone();
 
+        // 中继的地址和令牌成对保留，理由与上面的服务地址相同。
+        next.cloud_clipboard_relay = self.cloud_clipboard_relay.clone();
+
         next.fuzzy_pinyin.seeded = self.fuzzy_pinyin.seeded;
 
         next
     }
 
     /// 偏好里的全部服务凭据（token、密钥、应用 id），按文档里的路径列出。恢复默认设置时原样保留的、导出诊断包时换成 [`REDACTED`] 的，都是这一份清单；`preferences/tests.rs` 用字段名兜底，新加的凭据字段不进清单测试就失败。
-    pub fn credential_slots(&mut self) -> [(&'static str, CredentialSlot<'_>); 12] {
+    pub fn credential_slots(&mut self) -> [(&'static str, CredentialSlot<'_>); 13] {
         [
             (
                 "voice_input.asr_app_key",
@@ -2382,6 +2663,10 @@ impl Preferences {
             (
                 "niutrans.apikey",
                 CredentialSlot::Text(&mut self.niutrans.apikey),
+            ),
+            (
+                "cloud_clipboard_relay.token",
+                CredentialSlot::Text(&mut self.cloud_clipboard_relay.token),
             ),
         ]
     }
@@ -2452,11 +2737,9 @@ impl Preferences {
         {
             return Err(PreferencesError::InvalidAiAssistant);
         }
-        let model_path = &self.voice_input.asr_model_path;
         if !ASR_PROVIDERS.contains(&self.voice_input.asr_provider.as_str())
             || !POLISH_PROVIDERS.contains(&self.voice_input.polish_provider.as_str())
-            || !crate::text::is_bounded_text(model_path, 4096)
-            || (!model_path.is_empty() && !is_absolute_model_path(model_path))
+            || !valid_model_path(&self.voice_input.asr_model_path)
             || !valid_model_mirror(&self.voice_input.asr_model_mirror)
         {
             return Err(PreferencesError::InvalidVoiceInput);
@@ -2472,15 +2755,27 @@ impl Preferences {
         if !self.plugins.validate() {
             return Err(PreferencesError::InvalidPlugins);
         }
+        if !self.shuangpin_custom_profile.validate() {
+            return Err(PreferencesError::InvalidShuangpinCustomProfile);
+        }
+        if !self.nine_key_shuangpin_custom_profile.validate() {
+            return Err(PreferencesError::InvalidNineKeyShuangpinCustomProfile);
+        }
         if !self.game_compatibility.validate() {
             return Err(PreferencesError::InvalidGameCompatibility);
+        }
+        if !valid_app_input_mode_rules(&self.app_input_mode_rules) {
+            return Err(PreferencesError::InvalidAppInputModeRules);
+        }
+        if !self.cloud_clipboard_relay.validate() {
+            return Err(PreferencesError::InvalidCloudClipboardRelay);
         }
         if !(1..=10).contains(&self.frequency.trigger_count)
             || !(1..=10).contains(&self.frequency.linear_step)
         {
             return Err(PreferencesError::InvalidFrequency);
         }
-        if !(1..=9).contains(&self.candidate_page_size) {
+        if !(1..=MAX_CANDIDATE_PAGE_SIZE).contains(&self.candidate_page_size) {
             return Err(PreferencesError::InvalidPageSize);
         }
         if !(30..=60).contains(&self.touch_key_spacing_tenths)
@@ -2509,6 +2804,7 @@ impl Preferences {
             || self
                 .candidate_corner_radius
                 .is_some_and(|radius| radius > 32)
+            || self.candidate_padding.is_some_and(|padding| padding > 16)
         {
             return Err(PreferencesError::InvalidCandidateWindowStyle);
         }
@@ -2586,7 +2882,7 @@ pub enum PreferencesError {
     InvalidTencentTmt,
     #[error("NiuTrans translation credentials are invalid")]
     InvalidNiuTrans,
-    #[error("candidate page size must be between 1 and 9")]
+    #[error("candidate page size must be between 1 and 10")]
     InvalidPageSize,
     #[error("touch keyboard key spacing must be 3.0-6.0 and row spacing must be 4.0-10.0")]
     InvalidTouchKeyboardSpacing,
@@ -2594,13 +2890,17 @@ pub enum PreferencesError {
         "at least one touch keyboard scheme must be enabled and the selection must be visible"
     )]
     InvalidTouchKeyboardSchemes,
+    #[error("custom shuangpin profile table is too large or has non-ASCII units or keys")]
+    InvalidShuangpinCustomProfile,
+    #[error("nine-key shuangpin custom table is too large or has non-ASCII units or keys")]
+    InvalidNineKeyShuangpinCustomProfile,
     #[error("custom theme keyboard design is invalid")]
     InvalidTouchKeyboardSkinDesign,
     #[error("custom theme base must be system or a built-in theme")]
     InvalidCustomThemeBase,
     #[error("candidate font size must be between 12 and 32")]
     InvalidCandidateFontSize,
-    #[error("candidate window scale must be 50-200%, opacity 50-100% and corner radius 0-32")]
+    #[error("candidate window scale must be 50-200%, opacity 50-100%, corner radius 0-32 and padding 0-16")]
     InvalidCandidateWindowStyle,
     #[error("candidate text color must be #RRGGBB or omitted")]
     InvalidCandidateTextColor,
@@ -2630,6 +2930,10 @@ pub enum PreferencesError {
     InvalidPlugins,
     #[error("game compatibility process names must be distinct .exe base names of at most 64 characters, at most 32 in total")]
     InvalidGameCompatibility,
+    #[error("app input mode rules must use distinct application identifiers of at most 64 bytes without control characters or path separators, at most 32 in total")]
+    InvalidAppInputModeRules,
+    #[error("cloud clipboard relay needs an https address (http only for loopback) without query, fragment or credentials, and a token of 16-256 printable ASCII characters")]
+    InvalidCloudClipboardRelay,
     #[error("preferences changed; reload before saving")]
     Conflict,
     #[error("unsupported preferences format")]
@@ -2789,11 +3093,15 @@ impl PreferencesStore {
             MAX_DOCUMENT_BYTES,
             || PreferencesError::DocumentTooLarge,
         )?;
-        let snapshot: PreferencesSnapshot = serde_json::from_slice(&bytes)?;
+        let mut snapshot: PreferencesSnapshot = serde_json::from_slice(&bytes)?;
         if snapshot.format_version != 1 {
             return Err(PreferencesError::UnsupportedFormat);
         }
         snapshot.preferences.validate()?;
+        snapshot
+            .preferences
+            .voice_input
+            .retire_unavailable_asr_model();
         Ok(snapshot)
     }
 
@@ -2875,7 +3183,9 @@ impl PreferencesStore {
         // enabled opts every fuzzy rule in once. The marker is separate from
         // the rule set so intentionally clearing every rule does not reseed
         // on a later disable/enable cycle.
+        // 写入方自己已经标了 seeded 时不再种：共享设置页首次打开时自己种好规则并标记，导入的设置文件带的是用户在另一台电脑上定下的规则（settings_document::import_document），这里再种会把它们盖成全部规则。
         if preferences.fuzzy_pinyin.enabled
+            && !preferences.fuzzy_pinyin.seeded
             && !current.preferences.fuzzy_pinyin.enabled
             && !current.preferences.fuzzy_pinyin.seeded
         {
@@ -3242,6 +3552,9 @@ fn sweep_stale_temporaries(directory: &Path) {
 /// 诊断快照里替换凭据的值，与服务端校验要求的写法相同。
 pub const REDACTED: &str = "<redacted>";
 
+/// 每页候选数的上限。数字键 1–9 选前九个，第十个由 0 键选（宿主各自按键位映射）。
+pub const MAX_CANDIDATE_PAGE_SIZE: u8 = 10;
+
 /// [`Preferences::credential_slots`] 里的一个凭据字段。
 pub enum CredentialSlot<'a> {
     Text(&'a mut String),
@@ -3259,11 +3572,12 @@ pub fn is_sensitive_key(name: &str) -> bool {
 }
 
 /// 用户可以自填的服务地址。地址本身不是凭据，但有的服务把密钥放在查询串或 `user:password@` 里，诊断快照只留协议、主机、端口和路径。
-const DIAGNOSTIC_ENDPOINTS: [&str; 4] = [
+const DIAGNOSTIC_ENDPOINTS: [&str; 5] = [
     "/voice_input/asr_endpoint",
     "/voice_input/polish_endpoint",
     "/ai_assistant/endpoint",
     "/custom_translation/endpoint",
+    "/cloud_clipboard_relay/url",
 ];
 
 /// 去掉地址里的用户信息、查询串和片段；解析不了的地址整个换成 [`REDACTED`]，因为看不出密钥藏在哪。

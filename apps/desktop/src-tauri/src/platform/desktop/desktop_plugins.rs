@@ -4,6 +4,7 @@
 
 use crate::DictionaryHostOptions;
 use msime_client_core::plugins::mentions::{MentionEntry, MentionStore};
+use msime_client_core::plugins::script_grants::{self, ScriptGrantsView};
 use msime_client_core::plugins::{self, PluginCatalog, PluginFailure, PluginSummary};
 use std::path::{Path, PathBuf};
 use tauri::State;
@@ -101,7 +102,7 @@ async fn blocking<T: Send + 'static>(
         .map_err(|_| PluginFailure::code("storage"))?
 }
 
-/// Every installed and built-in pack, with what is wrong with each folder that is not one.
+/// 已安装的包和内置包，以及每个不是包的文件夹出了什么问题。脚本插件也列出（带声明的钩子、申请的能力和内容哈希），页面只在宿主声明了 `script_plugins` 时展示它们。
 #[tauri::command]
 pub async fn plugin_catalog(
     app: tauri::AppHandle,
@@ -150,7 +151,7 @@ pub async fn import_plugin_pack(
 }
 
 fn import_pack_at(source: &Path, root: &Path) -> Result<PluginSummary, PluginFailure> {
-    Ok(plugins::import(source, root)?)
+    Ok(plugins::import_from_settings(source, root)?)
 }
 
 /// Remove an installed pack. A built-in sound pack cannot be removed.
@@ -162,6 +163,74 @@ pub async fn remove_plugin_pack(
 ) -> Result<(), PluginFailure> {
     let root = state.0.clone();
     blocking(move || plugins::remove_named(&root, &kind, &id)).await
+}
+
+/// 宿主选项里的 `user_data`：输入法写健康文件的目录。
+fn user_data(options: &DictionaryHostOptions) -> Option<PathBuf> {
+    options
+        .snapshot()
+        .ok()?
+        .get("user_data")?
+        .as_str()
+        .map(PathBuf::from)
+}
+
+/// 脚本插件的授权、执行顺序和输入法记下的停用。
+#[tauri::command]
+pub async fn script_grants(
+    state: State<'_, PluginsState>,
+    options: State<'_, DictionaryHostOptions>,
+) -> Result<ScriptGrantsView, PluginFailure> {
+    let root = state.0.clone();
+    let options = options.inner().clone();
+    blocking(move || {
+        let user_data = user_data(&options);
+        Ok(script_grants::view(
+            script_grants::read(&root),
+            user_data.as_deref(),
+        ))
+    })
+    .await
+}
+
+/// 授予、调整或撤销一个脚本插件的授权。`hash` 是页面展示给用户的那个内容哈希，包在这之后被换过时返回 `plugin_script_changed`；启用时超出同时启用的个数或内存总账分别返回 `plugin_script_limit`、`plugin_script_memory`。
+#[tauri::command]
+pub async fn set_script_grant(
+    state: State<'_, PluginsState>,
+    options: State<'_, DictionaryHostOptions>,
+    id: String,
+    hash: String,
+    enabled: bool,
+    granted: Vec<String>,
+) -> Result<ScriptGrantsView, PluginFailure> {
+    let root = state.0.clone();
+    let options = options.inner().clone();
+    blocking(move || {
+        let user_data = user_data(&options);
+        let granted = script_grants::capabilities(&granted)?;
+        let grants = script_grants::set(&root, &id, &hash, enabled, granted)?;
+        Ok(script_grants::view(grants, user_data.as_deref()))
+    })
+    .await
+}
+
+/// 调整执行顺序：`ids` 按给出的顺序排在最前。
+#[tauri::command]
+pub async fn reorder_scripts(
+    state: State<'_, PluginsState>,
+    options: State<'_, DictionaryHostOptions>,
+    ids: Vec<String>,
+) -> Result<ScriptGrantsView, PluginFailure> {
+    let root = state.0.clone();
+    let options = options.inner().clone();
+    blocking(move || {
+        let user_data = user_data(&options);
+        Ok(script_grants::view(
+            script_grants::reorder(&root, &ids)?,
+            user_data.as_deref(),
+        ))
+    })
+    .await
 }
 
 /// The @ mode's name list, empty before one was saved.

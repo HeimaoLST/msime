@@ -1,6 +1,8 @@
 //! 插件包：音效包、背景音乐、指令表、打字特效参数、短语表、辅助码表、单词本和符号集，全部是经过校验的数据。
 //!
-//! Nothing in a pack runs. The kinds are a closed set, each with a fixed manifest shape that this module parses in full, and a pack that asks for any permission is refused, so a third party can supply samples, tracks and text templates and nothing else. Hosts play the audio, hand the command rows to the Engine and draw their own built-in effects with an effect pack's parameters; all of them only ever see a pack this module has accepted.
+//! 数据类插件包里没有任何会运行的东西。类型是封闭集合，每种类型的清单形状固定、由本模块完整解析，申请任何权限的数据包一律拒绝，所以第三方只能提供音频样本、曲目和文本模板。宿主播放音频、把指令行交给 Engine、用特效包的参数画自己内置的特效；它们看到的都是本模块接受过的包。
+//!
+//! 唯一的例外是桌面上的脚本插件（`kind = "script"`，见 `script_pack`）：它带一个 core wasm 模块，只在桌面输入法进程里由沙箱解释器按用户逐项授予的能力运行。它只在 macOS、Windows 和非 ohos 的 Linux 上编译，清单必须写 `schema_version = 2`，`permissions` 只对它放行白名单里的能力；授权记在 `script-grants.json`（`script_grants`）。移动端没有这个类型，上面的原则在移动端原样成立。
 //!
 //! 一个包放在 `<root>/<kind>/<id>/`：`root` 是宿主状态根目录下的 `plugins` 目录，`kind` 是 `PluginKind::as_str` 给出的名字（`sound`、`music`、`command_table`、`effect`、`phrase_table` 等）。目录里只有 `plugin.toml`、清单点名的平铺文件（音频或数据文件）和可选的说明文本，别的一律没有：没有子目录、没有符号链接、没有清单不认账的文件。内置音效包随各平台的安装包分发，不在 `root` 下，而在宿主指定的目录里（仓库中是 `resources/sound-packs`），与已安装的包并列列出。
 //!
@@ -15,12 +17,30 @@ mod import;
 pub mod mentions;
 pub mod music_pack;
 pub mod phrase_table;
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+pub mod script_grants;
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+pub mod script_pack;
 pub mod sound_pack;
 pub mod symbol_set;
 pub mod wordbook_pack;
 
 pub use failure::{remove_named, PluginFailure};
-pub use import::{import, validate};
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+pub use import::load_script_source;
+pub use import::{import, import_from_settings, import_without_script_page, validate};
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -93,9 +113,37 @@ pub enum PluginKind {
     Wordbook,
     /// 符号集：追加到符号面板的符号组和颜文字组，全部写在清单里。
     SymbolSet,
+    /// 脚本插件：一个 core wasm 模块，由桌面输入法进程的沙箱解释器按授权运行。只在桌面存在，移动端的 `ALL`、`parse` 和各处穷举都看不到它。
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos"))
+    ))]
+    Script,
 }
 
 impl PluginKind {
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos"))
+    ))]
+    pub const ALL: [Self; 9] = [
+        Self::Sound,
+        Self::Music,
+        Self::CommandTable,
+        Self::Effect,
+        Self::PhraseTable,
+        Self::Helpcode,
+        Self::Wordbook,
+        Self::SymbolSet,
+        Self::Script,
+    ];
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos"))
+    )))]
     pub const ALL: [Self; 8] = [
         Self::Sound,
         Self::Music,
@@ -118,13 +166,38 @@ impl PluginKind {
             Self::Helpcode => "helpcode",
             Self::Wordbook => "wordbook",
             Self::SymbolSet => "symbol_set",
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "windows",
+                all(target_os = "linux", not(target_env = "ohos"))
+            ))]
+            Self::Script => "script",
         }
     }
 
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.as_str() == value)
     }
+
+    /// 是不是脚本插件。移动端没有这个类型，任何值的 `as_str` 都不是 `script`，所以恒为 false；按名字比较让这里不必为两种 cfg 各写一份。
+    pub fn is_script(self) -> bool {
+        self.as_str() == "script"
+    }
 }
+
+// 移动端的类型集合不变：仍是原来那 8 种，`script` 在那里不是已知类型，`scan` 和遗留目录清扫也不会碰 `script/`。写成编译期断言，任何目标只要编译 client-core 就检查一次，不依赖哪台 CI 机器跑了测试。
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+)))]
+const _: () = assert!(PluginKind::ALL.len() == 8);
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+const _: () = assert!(PluginKind::ALL.len() == 9);
 
 /// Whether `id` of `kind` names a pack the bundle ships. Only sound and music packs are built in: an effect has nothing to ship, since the styles themselves are in the hosts and `effect_style` already selects one without a pack.
 pub fn is_builtin(kind: PluginKind, id: &str) -> bool {
@@ -137,6 +210,12 @@ pub fn is_builtin(kind: PluginKind, id: &str) -> bool {
         | PluginKind::Helpcode
         | PluginKind::Wordbook
         | PluginKind::SymbolSet => false,
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "windows",
+            all(target_os = "linux", not(target_env = "ohos"))
+        ))]
+        PluginKind::Script => false,
     }
 }
 
@@ -202,6 +281,12 @@ impl PluginSummary {
             PluginContent::Helpcode(_) => PluginKind::Helpcode,
             PluginContent::Wordbook(_) => PluginKind::Wordbook,
             PluginContent::SymbolSet(_) => PluginKind::SymbolSet,
+            #[cfg(any(
+                target_os = "macos",
+                target_os = "windows",
+                all(target_os = "linux", not(target_env = "ohos"))
+            ))]
+            PluginContent::Script(_) => PluginKind::Script,
         }
     }
 }
@@ -217,6 +302,21 @@ pub enum PluginContent {
     Helpcode(helpcode_pack::HelpcodePack),
     Wordbook(wordbook_pack::WordbookPack),
     SymbolSet(symbol_set::SymbolSet),
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos"))
+    ))]
+    Script(script_pack::ScriptPack),
+}
+
+impl PluginCatalog {
+    /// 去掉脚本插件的包和问题行。host-api 的 `msime_client_plugins` 目录命令在请求不带 `script_page` 时经过这里：这样调用的宿主（Android、HarmonyOS）没有授权页。桌面外壳的目录命令和带 `script_page` 的 Windows 原生设置应用列出脚本插件，由页面按 `script_plugins` 决定展示与否；移动端没有脚本插件，原样返回。
+    pub fn without_scripts(mut self) -> Self {
+        self.packages.retain(|package| !package.kind().is_script());
+        self.issues.retain(|issue| !issue.kind.is_script());
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -253,6 +353,9 @@ pub enum PluginError {
     #[error("plugin_io: {0}")]
     Io(#[from] std::io::Error),
 }
+
+/// 清单的 `kind` 不在 `PluginKind::ALL` 里时的拒绝原因；不接受脚本包的设置导入（`import_without_script_page` 的 release 构建）拒绝脚本包时也用它。
+pub(crate) const UNKNOWN_KIND: &str = "kind 不是已知的插件类型";
 
 /// `<root>/<kind>`.
 pub fn kind_directory(root: &Path, kind: PluginKind) -> PathBuf {
@@ -408,13 +511,20 @@ pub(crate) fn load_package_unread(
     )
 }
 
-/// 载入包时是否读出数据文件（辅助码表、单词本）的摘要。
+/// 载入包时是否读出数据文件（辅助码表、单词本、脚本模块）的内容。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DataFiles {
-    /// 读出并严格解析，摘要（条数、预览）写进 `content`。
+    /// 读出并严格解析，摘要（条数、预览）写进 `content`；脚本模块读出后按 ABI v1 校验（只编译，不执行），并算出内容哈希。
     Summarize,
-    /// 只检查文件存在、大小和扩展名，内容由调用方自己解析。
+    /// 只检查文件存在、大小和扩展名，内容由调用方自己解析。脚本包的内容哈希留空。
     Unread,
+    /// 只给脚本包用：读出模块、算出内容哈希，字节随摘要交回调用方，由调用方自己编译。编译就是同一份 ABI 校验，这里不重复做；哈希和交出去的字节出自同一次读取。
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos"))
+    ))]
+    Module,
 }
 
 /// A pack in `<directory>/<folder>`, whose manifest must name `folder` as its id and `kind` as its kind.
@@ -464,6 +574,16 @@ const COMMON_KEYS: [&str; 9] = [
     "permissions",
 ];
 
+/// 数据类插件不能申请任何权限：`permissions` 不写，或者写成空数组。
+fn refuse_permissions(table: &toml::map::Map<String, Value>) -> Result<(), String> {
+    match table.get("permissions") {
+        None => Ok(()),
+        Some(Value::Array(items)) if items.is_empty() => Ok(()),
+        Some(Value::Array(_)) => Err("插件不能申请权限，permissions 必须为空".into()),
+        Some(_) => Err("permissions 必须是数组".into()),
+    }
+}
+
 /// A plain file in a pack directory, by name, with its size.
 pub(crate) type PackFiles = BTreeMap<String, u64>;
 
@@ -483,14 +603,35 @@ fn load_directory_with(directory: &Path, data_files: DataFiles) -> Result<Plugin
         toml::from_str(std::str::from_utf8(&bytes).map_err(|_| "plugin.toml 不是 UTF-8 编码")?)
             .map_err(|_| "plugin.toml 不是有效的 TOML")?;
     let table = value.as_table().ok_or("plugin.toml 的内容必须是一个表")?;
-    if table.get("schema_version").and_then(Value::as_integer) != Some(1) {
+    let schema_version = table.get("schema_version").and_then(Value::as_integer);
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos"))
+    )))]
+    if schema_version != Some(1) {
+        return Err("不支持这个 schema_version".into());
+    }
+    // 桌面上版本要按类型判断：script 必须写 2，其他类型仍只认 1。既不是 1 也不是 2 时照旧先报版本，和移动端的报错顺序一致。
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos"))
+    ))]
+    if !matches!(schema_version, Some(1 | 2)) {
         return Err("不支持这个 schema_version".into());
     }
     let kind = table
         .get("kind")
         .and_then(Value::as_str)
         .and_then(PluginKind::parse)
-        .ok_or("kind 不是已知的插件类型")?;
+        .ok_or(UNKNOWN_KIND)?;
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos"))
+    ))]
+    script_pack::check_schema_version(kind, schema_version)?;
     let id = required_string(table, "id", 64)?;
     if !safe_id(&id) {
         return Err("插件 id 无效".into());
@@ -506,12 +647,24 @@ fn load_directory_with(directory: &Path, data_files: DataFiles) -> Result<Plugin
     }
     let author = optional_string(table, "author", 120)?;
     let description = optional_string(table, "description", 500)?;
-    match table.get("permissions") {
-        None => {}
-        Some(Value::Array(items)) if items.is_empty() => {}
-        Some(Value::Array(_)) => return Err("插件不能申请权限，permissions 必须为空".into()),
-        Some(_) => return Err("permissions 必须是数组".into()),
-    }
+    // 权限只对脚本插件放行，而且只认白名单里的能力；数据类插件照旧必须为空。
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos"))
+    ))]
+    let permissions = if kind.is_script() {
+        script_pack::parse_permissions(table)?
+    } else {
+        refuse_permissions(table)?;
+        msime_script_runtime::CapabilitySet::EMPTY
+    };
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos"))
+    )))]
+    refuse_permissions(table)?;
     let kind_keys: &[&str] = match kind {
         PluginKind::Sound => &sound_pack::MANIFEST_KEYS,
         PluginKind::Music => &music_pack::MANIFEST_KEYS,
@@ -521,6 +674,12 @@ fn load_directory_with(directory: &Path, data_files: DataFiles) -> Result<Plugin
         PluginKind::Helpcode => &helpcode_pack::MANIFEST_KEYS,
         PluginKind::Wordbook => &wordbook_pack::MANIFEST_KEYS,
         PluginKind::SymbolSet => &symbol_set::MANIFEST_KEYS,
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "windows",
+            all(target_os = "linux", not(target_env = "ohos"))
+        ))]
+        PluginKind::Script => &script_pack::MANIFEST_KEYS,
     };
     if let Some(key) = table
         .keys()
@@ -596,6 +755,17 @@ fn load_directory_with(directory: &Path, data_files: DataFiles) -> Result<Plugin
                 AudioLimits::NONE,
             )
         }
+        // 模块按数据文件登记，走同一份文件检查（存在、1 字节到 256 KiB、扩展名 `.wasm`）；内容等文件检查过之后再读。
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "windows",
+            all(target_os = "linux", not(target_env = "ohos"))
+        ))]
+        PluginKind::Script => {
+            let pack = script_pack::parse(table, permissions)?;
+            data.push(script_pack::module_file(&pack));
+            (PluginContent::Script(pack), Vec::new(), AudioLimits::NONE)
+        }
     };
     check_files(directory, &files, &audio, limits, &data)?;
     let content = match content {
@@ -605,6 +775,14 @@ fn load_directory_with(directory: &Path, data_files: DataFiles) -> Result<Plugin
         }
         PluginContent::Wordbook(pack) => {
             PluginContent::Wordbook(wordbook_pack::read(directory, &pack.file)?)
+        }
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "windows",
+            all(target_os = "linux", not(target_env = "ohos"))
+        ))]
+        PluginContent::Script(pack) => {
+            PluginContent::Script(script_pack::read(directory, pack, &bytes, data_files)?)
         }
         other => other,
     };
@@ -622,7 +800,7 @@ fn load_directory_with(directory: &Path, data_files: DataFiles) -> Result<Plugin
 }
 
 fn data_file_capacity(kind: PluginKind) -> usize {
-    if matches!(kind, PluginKind::Helpcode | PluginKind::Wordbook) {
+    if matches!(kind, PluginKind::Helpcode | PluginKind::Wordbook) || kind.is_script() {
         1
     } else {
         0
@@ -711,16 +889,19 @@ pub(crate) fn valid_file_name(name: &str) -> bool {
         && !reserved
 }
 
-/// 数据文件按行切开：整个文件必须是 UTF-8（开头可以有 BOM），按 `\n` 分行，每行去掉一个行尾的 `\r`；其余位置的 `\r` 和别的控制字符一样留给各类型的行规则拒绝。返回从 1 开始的行号和行内容。
-pub(crate) fn data_lines<'a>(bytes: &'a [u8], name: &str) -> Result<Vec<(usize, &'a str)>, String> {
+/// 数据文件按行切开：整个文件必须是 UTF-8（开头可以有 BOM），按 `\n` 分行，每行去掉一个行尾的 `\r`；其余位置的 `\r` 和别的控制字符一样留给各类型的行规则拒绝。
+/// 先校验整个文件的编码，再按需产生从 1 开始的行号和借用行内容。
+pub(crate) fn data_lines<'a>(
+    bytes: &'a [u8],
+    name: &str,
+) -> Result<impl Iterator<Item = (usize, &'a str)> + 'a, String> {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     let text = std::str::from_utf8(bytes).map_err(|_| format!("{name} 不是 UTF-8 编码"))?;
     Ok(text
         .split('\n')
         .map(|line| line.strip_suffix('\r').unwrap_or(line))
         .enumerate()
-        .map(|(index, line)| (index + 1, line))
-        .collect())
+        .map(|(index, line)| (index + 1, line)))
 }
 
 /// The lower-case extension of a file name.
@@ -889,6 +1070,15 @@ pub fn remove(root: &Path, kind: PluginKind, id: &str) -> Result<(), PluginError
         return Ok(());
     }
     let _writes = import::lock_plugin_root(root)?;
+    // 脚本包的授权条目在同一把锁里、移走包目录之前去掉：删包失败时授权已经收回，不会反过来留下一条能在重新导入同样内容后复活的授权。
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos"))
+    ))]
+    if kind.is_script() {
+        script_grants::removing(root, &_writes, id)?;
+    }
     let target = directory.join(id);
     let metadata = match fs::symlink_metadata(&target) {
         Ok(metadata) => metadata,
@@ -928,5 +1118,14 @@ pub fn remove(root: &Path, kind: PluginKind, id: &str) -> Result<(), PluginError
     Ok(())
 }
 
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", not(target_env = "ohos"))
+    )
+))]
+mod script_tests;
 #[cfg(test)]
 mod tests;

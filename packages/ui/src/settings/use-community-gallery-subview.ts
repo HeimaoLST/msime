@@ -1,0 +1,84 @@
+import { useEffect, useState } from "react";
+import type {
+  CommunityDestinationCategory,
+  CommunityDestinationView,
+} from "../community/community-destination";
+import { pushMobileSettingsState } from "./mobile-navigation";
+import type { SettingsPageId } from "./settings-page-registry";
+import { useMobilePopState } from "./use-mobile-pop-state";
+
+/** 触屏宿主上一个打开着的完整社区图库：哪一类（皮肤、词库、回复模板），以及打开时的范围。 */
+export type CommunityGalleryView = CommunityDestinationView;
+
+/** 各类社区内容所在的功能页：皮肤在「皮肤」页，词库在「词库」页，回复模板是 AI 高情商回复用的，在「AI 辅助」页。 */
+export function communityGalleryPage(
+  category: CommunityDestinationCategory,
+): Extract<SettingsPageId, "skin" | "dictionary" | "ai"> {
+  return category === "skin" ? "skin" : category === "dictionary" ? "dictionary" : "ai";
+}
+
+function galleryView(value: unknown): CommunityGalleryView | null {
+  if (!value || typeof value !== "object") return null;
+  const { category, scope, initialMine } = value as Record<string, unknown>;
+  if (category !== "skin" && category !== "dictionary" && category !== "reply") return null;
+  if (scope !== "" && scope !== "mine" && scope !== "saved") return null;
+  return { category, scope, initialMine: initialMine === true };
+}
+
+export interface CommunityGallerySubviewOptions {
+  mobile: boolean;
+  page: SettingsPageId;
+  selectPage: (page: SettingsPageId) => void;
+  /** 宿主有没有键盘皮肤图库；没有时，要打开皮肤图库的请求改为打开词库图库。 */
+  hasSkins: boolean;
+}
+
+/**
+ * 触屏宿主上，完整的社区图库是各功能页上的一个子视图，而不是单独的「社区」标签页。
+ *
+ * 打开时先去到它所在的功能页，再压入一条带 `communityGallery` 的历史记录，和皮肤页的 `skinSubpage` 一样：系统返回手势先关掉图库里的详情（详情的记录也留在这一页，见 `historyPage`），再关掉图库，最后才离开这一页。`popstate` 时图库的开关只取自历史记录，所以前进后退都与记录一致。离开所在的功能页时图库随之关上，下次进来不会自己打开。
+ */
+export function useCommunityGallerySubview({
+  mobile,
+  page,
+  selectPage,
+  hasSkins,
+}: CommunityGallerySubviewOptions) {
+  const [gallery, setGallery] = useState<CommunityGalleryView | null>(null);
+  useMobilePopState(mobile, (event) => {
+    const state = event.state as Record<string, unknown> | null;
+    const view = galleryView(state?.communityGallery);
+    setGallery(view && state?.page === communityGalleryPage(view.category) ? view : null);
+  });
+  useEffect(() => {
+    setGallery((current) =>
+      current && communityGalleryPage(current.category) === page ? current : null,
+    );
+  }, [page]);
+
+  const openCommunityGallery = (requested: CommunityGalleryView) => {
+    const view: CommunityGalleryView =
+      requested.category === "skin" && !hasSkins
+        ? { category: "dictionary", scope: requested.scope, initialMine: false }
+        : requested;
+    const host = communityGalleryPage(view.category);
+    selectPage(host);
+    if (typeof window !== "undefined")
+      pushMobileSettingsState({ page: host, communityGallery: view });
+    setGallery(view);
+  };
+
+  const closeCommunityGallery = () => {
+    if (typeof window !== "undefined" && window.history.state?.communityGallery) {
+      window.history.back();
+      return;
+    }
+    setGallery(null);
+  };
+
+  return {
+    communityGallery: mobile ? gallery : null,
+    openCommunityGallery,
+    closeCommunityGallery,
+  } as const;
+}

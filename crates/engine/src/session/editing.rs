@@ -8,7 +8,7 @@ use crate::shuangpin::query::{
     trim_trailing_letters_preserve_delimiters,
 };
 use crate::stroke;
-use crate::types::{Command, KeyResult, LocalInputMode, SchemeType, ShuangpinProfileKind};
+use crate::types::{Command, KeyResult, LocalInputMode, SchemeType};
 
 pub(super) fn temporary_japanese_preedit(raw: &str) -> String {
     let mut preedit = String::with_capacity(1 + raw.len());
@@ -151,15 +151,12 @@ impl InputSession {
                 LocalInputMode::None => {
                     let scheme = self.scheme();
                     accepted = lower
-                        || (upper
-                            && ((scheme == SchemeType::Quanpin && self.quanpin_helpcode_enabled)
-                                || (scheme == SchemeType::Shuangpin
-                                    && self.shuangpin_helpcode_enabled)));
+                        || (upper && matches!(scheme, SchemeType::Quanpin | SchemeType::Shuangpin));
                     if value == b';'
                         && scheme == SchemeType::Shuangpin
-                        && self.profile == ShuangpinProfileKind::Microsoft
+                        && self.profile.uses_semicolon_key()
                     {
-                        // The Microsoft `ing` key is a final: it may only complete an odd-length chunk.
+                        // `;`（微软的 ing，或自定义方案放在 `;` 上的韵母、零声母编码的第二个键）只能补完一个奇数长度的片段。
                         let start = text[..caret].rfind('\'').map_or(0, |at| at + 1);
                         accepted = (caret - start) % 2 == 1;
                     }
@@ -181,6 +178,13 @@ impl InputSession {
                 }
                 LocalInputMode::Command | LocalInputMode::Mention => {
                     accepted = text.len() < GENERATED_MODE_INPUT_LIMIT && lower;
+                }
+                // 与 `handle_local_character` 同一组规则：收字母，`'` 不能插在入口字母 `C` 之后（连续的 `'` 由下面的通用检查吞掉），`;` 只在微软双拼补完奇数长度的片段时收。
+                LocalInputMode::Chaizi => {
+                    accepted = text.len() < GENERATED_MODE_INPUT_LIMIT
+                        && (accepted
+                            || (value == b'\'' && caret > 1)
+                            || (value == b';' && self.chaizi_takes_symbol(value, caret)));
                 }
                 // 与 `handle_local_character` 同一组规则。
                 LocalInputMode::Url => {
@@ -273,9 +277,10 @@ impl InputSession {
                 }
                 boundaries
             }
-            SchemeType::Quanpin => {
-                quanpin_raw_boundaries(raw_with_cases, &self.pinyin_segmentation_with_cases())
-            }
+            SchemeType::Quanpin => quanpin_raw_boundaries(
+                raw_with_cases,
+                self.pinyin_segmentation_with_cases().as_ref(),
+            ),
             // The Cantonese editing text is spaced, so raw offsets would not land on its syllables; the host edits it one character at a time. A stroke is one character, so Stroke has no units either.
             SchemeType::Wubi
             | SchemeType::JapaneseRomaji
@@ -290,6 +295,8 @@ impl InputSession {
 
     /// Clamped to the editing text; recomputes the prefix candidates. Korean has no caret inside its open syllable and Zhuyin none inside its conversion, so the caret stays at the end.
     pub(super) fn set_caret(&mut self, caret: Option<usize>) {
+        // 宿主直接放字母光标，就是回到拼音编辑。
+        self.leave_conversion();
         if self.engine.current_scheme_type().locks_caret()
             && !self.dedicated_english
             && self.local_mode == LocalInputMode::None

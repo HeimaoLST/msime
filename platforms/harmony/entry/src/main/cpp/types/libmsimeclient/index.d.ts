@@ -101,6 +101,10 @@ export const pluginsAsync: (request: string) => Promise<string>;
  */
 export const commonPhrases: (request: string) => Promise<string>;
 /**
+ * The settings page's explicit 修复配置文件 for the absolute preferences `directory`, on a worker thread: a document load refuses, a newer build's included, is copied aside as `preferences.json.corrupt-<time>` and replaced by the settings this schema still accepts over the defaults. Resolves with `{ok,value:{recovered,snapshot,backup_path?,backup_name?,salvaged?}}` or `{ok:false,error}`; a readable or missing document is left untouched (`recovered:false`).
+ */
+export const repairPreferences: (directory: string) => Promise<string>;
+/**
  * Registers the device's anonymous MSIME account under `directory` (an absolute path; `anonymous-account.json` and `anonymous-session.json`) unless a session is already there, on a worker thread. Resolves with `{ok,value}` or `{ok:false,error}`; rejects only when the worker produced no answer.
  */
 export const ensureAnonymousAccount: (directory: string) => Promise<string>;
@@ -123,6 +127,10 @@ export const notices: (request: string) => Promise<string>;
 /** `{directory,id}`: remembers that the user dismissed notice `id`. */
 export const noticeDismiss: (request: string) => string;
 /**
+ * 传入 `{platform,current_version,edition?,arch?}`；在工作线程上根据 GitHub 上 `platform` 最新的已发布版本，返回 `{ok,value:{status:"available"|"current",update:{version:{display,parts},release_url,installer_name,installer_sha256,signed}}}` 或 `{ok,value:{status:"none"}}`。最多等网络十秒。
+ */
+export const updateCheck: (request: string) => Promise<string>;
+/**
  * Decodes the WAV sample at `sample` once per semitone and writes each note to `<directory>/note-<index>.wav` at 48 kHz, pitched as a playback rate. Resolves with the files in semitone order; rejects a sample that is not WAV, lasts longer than `maxMillis`, or decodes past its declared length.
  */
 export const keySoundRenderNotes: (
@@ -136,6 +144,10 @@ export const typingStatisticsEnabled: (directory: string) => number;
 export const vocabularyReview: (request: string) => Promise<string>;
 /** Locked mobile history operations; every mutation answers with the latest complete entry list. */
 export const mobileClipboardHistory: (request: string) => string;
+/**
+ * 云剪贴板端到端加密的 sans-IO 驱动（`msime_client_cloud_clipboard_e2e`），协议见 `docs/cloud-clipboard-e2e.md` 的「客户端驱动」。传入 `{start:{op,…},keystore,device_name}` 开始一个操作，或 `{resume:<上一步的 state>,response:{status,body}}` 交回上一步请求的响应；应答 `{ok:true,value}`，`value` 是 `{request:{method,path,body},state,keystore}`、`{done,keystore}` 或 `{error:{status,code},keystore}`。驱动不联网、不读写文件：请求由宿主带上登录凭据发出，`keystore` 由宿主保存。请求最大 2 MiB。
+ */
+export const cloudClipboardE2e: (request: string) => string;
 export const emojiCatalog: (query: string, resources: string) => string;
 export const candidateGlosses: (request: string, resources: string) => string;
 /** `{prefix,limit}` against the packaged English dictionary; no session, safe off the UI thread. */
@@ -144,6 +156,8 @@ export const englishCompletions: (request: string, resources: string) => string;
 export const resetCache: (handle: number) => string;
 export const translationGlossSave: (request: string, userData: string) => string;
 export const translationPlan: (request: string) => string;
+/** Google 登录的回环判定（`msime_client_google_loopback`）：operation 为 target、plan 或 reply，请求与返回值见头文件。设置应用自己监听 127.0.0.1、打开浏览器、经系统 HTTPS 栈申请 challenge 和提交授权码。 */
+export const googleLoopback: (request: string) => string;
 export const tencentTranslationHttpRequest: (request: string) => string;
 export const niuTransTranslationHttpRequest: (request: string) => string;
 export const customTranslationHttpRequest: (request: string) => string;
@@ -163,6 +177,8 @@ export const applyOnlineCandidates: (
   candidates: string,
   source: number,
 ) => string;
+/** `msime_client_resolve_online_candidates`：AI 回答为空、失败或被拒时调用（source 只认 1），AI 座位上的占位行换成「—」。应答 `{ok, value: {applied, view}}`。 */
+export const resolveOnlineCandidates: (handle: number, query: string, source: number) => string;
 export const personalDictionarySync: (options: string) => string;
 /**
  * `{options,action}` against the queued personal dictionary rather than the Engine.
@@ -172,6 +188,12 @@ export const personalDictionarySync: (options: string) => string;
  * file, where "maintenance busy" is not an answer to "add these words".
  */
 export const personalDictionaryRequest: (request: string) => string;
+/**
+ * `{options,action}` against the named dictionaries under `<preferences_directory>/DictionaryCollections`: `action.operation` is `load`, `create`, `rename`, `delete`, `set_enabled`, `add_words`, `remove_words`, `import`, `install_community`, `queue_words` or `flush`. Answers `{ok,value}` with the collections view, or `{ok:false,error}` with a stable code. Synchronous; the keyboard uses it only for the small `flush` after each personal-dictionary drain.
+ */
+export const dictionaryCollections: (request: string) => string;
+/** The same request on a worker thread, for the settings page: an import parses up to 16 MiB and every operation rewrites files under a lock. */
+export const dictionaryCollectionsAsync: (request: string) => Promise<string>;
 export const prepareHost: (options: string) => string;
 
 export const snapshotVersion: (options: string) => string;
@@ -187,6 +209,8 @@ export const create: (options: string) => string;
 export const destroy: (handle: number) => string;
 export const focus: (handle: number, focused: boolean) => string;
 export const setNineKeyMode: (handle: number, enabled: boolean) => string;
+/** 换引擎的组码网格：0 关，1 九键，2 全拼 14 键；只在组字结束后调用，答复的 value 是 View，`key_grid` 是权威状态。 */
+export const setKeyGrid: (handle: number, grid: number) => string;
 export const setEnglishMode: (handle: number, enabled: boolean) => string;
 /** Whether ASCII is committed as its fullwidth twin, which Ctrl+Shift+F toggles. */
 export const setCharacterWidth: (handle: number, fullwidth: boolean) => string;
@@ -194,6 +218,8 @@ export const setCharacterWidth: (handle: number, fullwidth: boolean) => string;
 export const setPrivateSession: (handle: number, enabled: boolean) => string;
 
 export const character: (handle: number, ascii: number, shift: boolean) => string;
+/** `msime_client_grid_key`：14 键的一键，送这一组的首字母（ASCII 码）；答复同 `character`。不在 14 键下、26 键正在组字、专用英文或本地模式时 `handled` 为假，会话不变。 */
+export const gridKey: (handle: number, letter: number) => string;
 /**
  * `msime_client_glide`: one glide stroke (滑行输入) across the letter keys, `request` being `{"keys":[[x,y] x 26],"key_width":w,"key_height":h,"points":[[x,y,ms], 2..1024]}` (at most 65536 bytes, unknown keys refused). Answers like `character`; `handled` false means the stroke was not typed (not quanpin, a local mode, dedicated English, nine-key digits composing, or nothing decoded) and its keys must not be typed either.
  */

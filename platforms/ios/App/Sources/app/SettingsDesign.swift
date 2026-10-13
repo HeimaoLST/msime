@@ -61,7 +61,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case .candidate: return ["候选", "字号", "字体"]
     case .toolbar: return ["工具栏", "按钮"]
     case .input: return ["方案", "拼音", "双拼", "五笔", "模糊音", "简繁", "辅助码", "翻译"]
-    case .ai: return ["标点", "联想", "英文"]
+    case .ai: return ["标点", "联想", "英文", "空格"]
     case .phrases: return ["短语", "快捷回复"]
     case .dictionary: return ["词库", "自造词", "学习"]
     case .layout: return ["键盘", "高度", "间距", "按键音", "振动"]
@@ -158,10 +158,7 @@ struct SettingsCardRow: View {
           if let value {
             Text(value).font(.system(size: 17)).foregroundStyle(MetasequoiaTheme.sub).lineLimit(1)
           }
-          Image(systemName: "chevron.right").font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(MetasequoiaTheme.sub.opacity(0.55))
-            .padding(.trailing, 2)
-            .accessibilityHidden(true)
+          DesignChevron(fontSize: 14).padding(.trailing, 2)
         }
         .frame(minHeight: 52)
         .overlay(alignment: .bottom) {
@@ -215,16 +212,11 @@ struct SettingsSearchPill: View {
 ///
 /// 宿主 app 无法判断键盘是否已添加、是否已获得完全访问权限 —— iOS 对这两者都没有公开 API，而由键盘写入的标记在用户撤销权限后仍会保留 —— 所以每一步都显示中性的序号标记，而不是设计稿的 ✓ / ! 状态，两个 去开启 链接也始终显示。
 struct KeyboardStatusCard: View {
-  /// 试用键盘 的行为：把试用页推入手机的导航栈，或执行一个操作（iPad 在侧栏中选中试用页）。
-  enum Tryout {
-    case push
-    case action(() -> Void)
-  }
-
   let scheme: ChineseInputScheme
-  let tryout: Tryout
+  /// 试用键盘 的行为。试用页就是「对话」标签页，所以手机和 iPad 都是切到那个标签页（`AppNavigation.openChat`），不再在设置里另外推入一份。
+  let tryout: () -> Void
 
-  init(scheme: ChineseInputScheme, tryout: Tryout) {
+  init(scheme: ChineseInputScheme, tryout: @escaping () -> Void) {
     self.scheme = scheme
     self.tryout = tryout
   }
@@ -235,7 +227,7 @@ struct KeyboardStatusCard: View {
         AppMarkDisc(diameter: 52, markSize: 30)
         VStack(alignment: .leading, spacing: 2) {
           Text("水杉输入法").font(.system(size: 17, weight: .semibold))
-          Text(scheme.shortLabel).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+          Text(scheme.shortLabel).designSubtext()
             .accessibilityIdentifier("keyboardStatusScheme")
         }
       }
@@ -284,17 +276,10 @@ struct KeyboardStatusCard: View {
     .contentShape(Capsule())
   }
 
-  @ViewBuilder private var tryoutButton: some View {
-    switch tryout {
-    case .push:
-      NavigationLink(destination: KeyboardTryoutView(focusOnAppear: true)) { tryoutLabel }
-        .buttonStyle(DimOnPressButtonStyle())
-        .accessibilityIdentifier("keyboardTryoutLink")
-    case .action(let action):
-      Button(action: action) { tryoutLabel }
-        .buttonStyle(DimOnPressButtonStyle())
-        .accessibilityIdentifier("keyboardTryoutLink")
-    }
+  private var tryoutButton: some View {
+    Button(action: tryout) { tryoutLabel }
+      .buttonStyle(DimOnPressButtonStyle())
+      .accessibilityIdentifier("keyboardTryoutLink")
   }
 }
 
@@ -302,13 +287,5 @@ struct KeyboardStatusCard: View {
 private struct DimOnPressButtonStyle: ButtonStyle {
   func makeBody(configuration: Configuration) -> some View {
     configuration.label.opacity(configuration.isPressed ? 0.7 : 1)
-  }
-}
-
-/// Section header in the grouped lists: 13pt regular in the design's group-title grey, not the uppercase footnote UIKit draws by default.
-struct SettingsGroupHeader: View {
-  let title: String
-  var body: some View {
-    Text(title).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.groupTitle).textCase(nil)
   }
 }

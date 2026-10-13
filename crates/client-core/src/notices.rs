@@ -10,8 +10,6 @@ use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::File;
-#[cfg(not(unix))]
-use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -148,6 +146,11 @@ pub struct NoticeStore {
     directory: PathBuf,
 }
 
+struct NoticeLock {
+    directory: crate::file_lock::PrivateDirectory,
+    _lock: File,
+}
+
 impl NoticeStore {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
@@ -165,9 +168,9 @@ impl NoticeStore {
     ) -> Result<Vec<Notice>, NoticeError> {
         let platform =
             crate::telemetry::canonical_platform(platform).ok_or(NoticeError::Invalid)?;
-        let _lock = self.lock()?;
+        let lock = self.lock()?;
         let feed = format!("{}/{platform}", channel.as_str());
-        let mut cache = self.read();
+        let mut cache = self.read_locked(&lock);
         if cache.feed != feed {
             cache.items.clear();
             cache.attempted_at_unix_ms = 0;
@@ -186,7 +189,7 @@ impl NoticeStore {
                     cache.items.iter().map(|item| item.id.as_str()).collect();
                 cache.dismissed.retain(|id| item_ids.contains(id.as_str()));
             }
-            self.write(&cache)?;
+            self.write_locked(&lock, &cache)?;
         }
         Ok(cache
             .items
@@ -204,8 +207,8 @@ impl NoticeStore {
         {
             return Err(NoticeError::Invalid);
         }
-        let _lock = self.lock()?;
-        let mut cache = self.read();
+        let lock = self.lock()?;
+        let mut cache = self.read_locked(&lock);
         if cache.dismissed.iter().any(|dismissed| dismissed == id) {
             return Ok(());
         }
@@ -214,20 +217,28 @@ impl NoticeStore {
             let excess = cache.dismissed.len() - MAX_DISMISSED;
             cache.dismissed.drain(..excess);
         }
-        self.write(&cache)
+        self.write_locked(&lock, &cache)
     }
 
-    fn lock(&self) -> Result<File, NoticeError> {
+    fn lock(&self) -> Result<NoticeLock, NoticeError> {
         if !self.directory.is_absolute()
             || !crate::storage::create_directory_and_check(&self.directory)?
         {
             return Err(NoticeError::Storage);
         }
-        let lock = crate::file_lock::open_lock_file(self.directory.join(NOTICES_LOCK_FILE))?;
+        let directory = crate::file_lock::open_private_directory(&self.directory)?;
+        let lock = crate::file_lock::open_private_lock_file_at(
+            &directory,
+            std::ffi::OsStr::new(NOTICES_LOCK_FILE),
+        )?;
         crate::file_lock::exclusive(&lock)?;
-        Ok(lock)
+        Ok(NoticeLock {
+            directory,
+            _lock: lock,
+        })
     }
 
+    #[cfg(all(test, unix))]
     fn read(&self) -> NoticeCache {
         let path = self.directory.join(NOTICES_FILE);
         if !self.directory.is_absolute() {
@@ -244,32 +255,27 @@ impl NoticeStore {
         cache
     }
 
-    fn write(&self, cache: &NoticeCache) -> Result<(), NoticeError> {
-        if !self.directory.is_absolute()
-            || !crate::storage::create_directory_and_check(&self.directory)?
-        {
-            return Err(NoticeError::Storage);
-        }
+    fn read_locked(&self, lock: &NoticeLock) -> NoticeCache {
+        let mut cache: NoticeCache = crate::file_lock::open_private_file_at(
+            &lock.directory,
+            std::ffi::OsStr::new(NOTICES_FILE),
+        )
+        .ok()
+        .and_then(|file| crate::bounded_io::read_bounded(file, MAX_CACHE_BYTES).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+        cache.items = valid_items(cache.items);
+        cache
+    }
+
+    fn write_locked(&self, lock: &NoticeLock, cache: &NoticeCache) -> Result<(), NoticeError> {
         let bytes = serde_json::to_vec(cache).map_err(|_| NoticeError::Storage)?;
-        #[cfg(unix)]
-        {
-            let directory = crate::storage::open_private_directory(&self.directory)?;
-            crate::storage::write_private_file_at(
-                &directory,
-                std::ffi::OsStr::new(NOTICES_FILE),
-                &bytes,
-            )?;
-            Ok(())
-        }
-        #[cfg(not(unix))]
-        {
-            let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
-            temporary.write_all(&bytes)?;
-            temporary
-                .persist(self.directory.join(NOTICES_FILE))
-                .map_err(|_| NoticeError::Storage)?;
-            Ok(())
-        }
+        crate::file_lock::write_private_file_at(
+            &lock.directory,
+            std::ffi::OsStr::new(NOTICES_FILE),
+            &bytes,
+        )?;
+        Ok(())
     }
 }
 

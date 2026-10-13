@@ -34,11 +34,8 @@ final class ImeKeyFeedback {
     static final int KEY_BACKSPACE = 3;
 
     private final MSIMEInputService s;
-    private final ExecutorService loader = Executors.newSingleThreadExecutor(runnable -> {
-        Thread thread = new Thread(runnable, "msime-key-sound");
-        thread.setDaemon(true);
-        return thread;
-    });
+    private final ExecutorService loader = Executors.newSingleThreadExecutor(
+        ThreadPolicy.namedDaemonFactory("msime-key-sound"));
     private JSONObject preferencesSeen;
     private AndroidLocalSettings.Snapshot localSeen;
     private String packId = "default";
@@ -124,12 +121,12 @@ final class ImeKeyFeedback {
 
     /** 0–100 的音量换成 SoundPool 的 0–1。 */
     static float volumeFor(int percent) {
-        return KeyboardGeometry.bounded(percent, 0, 100) / 100f;
+        return BoundsPolicy.bounded(percent, 0, 100) / 100f;
     }
 
     /** 共享偏好里的音量必须是 JSON 整数；异常值按 100% 处理。 */
     static int volumePreference(Object raw) {
-        return KeyboardGeometry.strictInt(raw, 100);
+        return NumberPolicy.strictInt(raw, 100);
     }
 
     private void refreshPreferences() {
@@ -157,7 +154,7 @@ final class ImeKeyFeedback {
     private void feedback(View source, int keyClass) {
         refreshPreferences();
         if (inside(source, s.candidateViewport) || inside(source, s.expandedCandidates)) {
-            s.imeDebugOverlay.recordEvent(ImeDebugOverlay.Event.CANDIDATE_SELECTED);
+            s.imeDebugOverlay.recordEvent(DiagnosticEventKind.CANDIDATE_SELECTED);
         } else if (inside(source, s.keyRows) || inside(source, s.actionRow)) {
             s.imeDebugOverlay.onKeyPressed(keyClass == KEY_BACKSPACE);
             if (animation != KeyPressAnimator.Style.NONE) {
@@ -224,8 +221,7 @@ final class ImeKeyFeedback {
                 PackSounds next = null;
                 try {
                     JSONObject root = new JSONObject(NativeClient.keySoundPack(body));
-                    JSONObject value = JsonPolicy.strictTrue(root.opt("ok"))
-                        ? root.optJSONObject("value") : null;
+                    JSONObject value = JsonPolicy.objectValue(root);
                     JSONObject files = value == null ? null : value.optJSONObject("sounds");
                     if (value != null && "keys".equals(JsonPolicy.strictString(value.opt("mode")))
                             && files != null) {

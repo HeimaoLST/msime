@@ -14,10 +14,9 @@ use super::catalog;
 use crate::account::{AccountApi, AccountError, AccountSessionStorage};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::ffi::OsString;
 use std::fs::File;
-#[cfg(not(unix))]
-use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
@@ -236,38 +235,52 @@ struct SyncState {
     installed: BTreeMap<String, Uuid>,
 }
 
+struct StateLock {
+    directory: crate::file_lock::PrivateDirectory,
+    name: OsString,
+    _lock: File,
+}
+
+fn lock_state(path: &Path) -> Result<StateLock, &'static str> {
+    crate::storage::reject_symlink(path).map_err(|_| STORAGE)?;
+    let parent = path.parent().ok_or(STORAGE)?;
+    if !crate::storage::create_directory_and_check(parent).map_err(|_| STORAGE)? {
+        return Err(STORAGE);
+    }
+    let directory = crate::file_lock::open_private_directory(parent).map_err(|_| STORAGE)?;
+    let name = path.file_name().ok_or(STORAGE)?.to_os_string();
+    let mut lock_name = name.clone();
+    lock_name.push(".lock");
+    let lock =
+        crate::file_lock::open_private_lock_file_at(&directory, &lock_name).map_err(|_| STORAGE)?;
+    crate::file_lock::exclusive(&lock).map_err(|_| STORAGE)?;
+    Ok(StateLock {
+        directory,
+        name,
+        _lock: lock,
+    })
+}
+
 /// A state file that cannot be read is treated as empty: without state a run never deletes anything, it only uploads, downloads or compares.
-fn load_state(path: &Path) -> SyncState {
-    open_state_file(path)
+fn load_state_locked(lock: &StateLock) -> SyncState {
+    crate::file_lock::open_private_file_at(&lock.directory, &lock.name)
+        .ok()
         .and_then(|file| crate::bounded_io::read_bounded(file, MAX_STATE_BYTES).ok())
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
 }
 
+#[cfg(all(test, unix))]
 fn open_state_file(path: &Path) -> Option<File> {
     crate::storage::reject_symlink(path).ok()?;
     crate::storage::open_private_file_in(path).ok()
 }
 
-/// Write the state by rename, so a reader never sees half of it.
-fn save_state(path: &Path, state: &SyncState) -> Result<(), &'static str> {
-    crate::storage::reject_symlink(path).map_err(|_| STORAGE)?;
-    let directory = path.parent().ok_or(STORAGE)?;
+/// Write the state relative to the directory held by the state lock, so a reader never sees half of it and a replaced parent cannot redirect the update.
+fn save_state_locked(lock: &StateLock, state: &SyncState) -> Result<(), &'static str> {
     let bytes = serde_json::to_vec_pretty(state).map_err(|_| STORAGE)?;
-    #[cfg(unix)]
-    {
-        let directory = crate::storage::open_private_directory(directory).map_err(|_| STORAGE)?;
-        let name = path.file_name().ok_or(STORAGE)?;
-        crate::storage::write_private_file_at(&directory, name, &bytes).map_err(|_| STORAGE)
-    }
-    #[cfg(not(unix))]
-    {
-        let mut file = tempfile::NamedTempFile::new_in(directory).map_err(|_| STORAGE)?;
-        file.write_all(&bytes).map_err(|_| STORAGE)?;
-        file.as_file().sync_all().map_err(|_| STORAGE)?;
-        file.persist(path).map_err(|_| STORAGE)?;
-        Ok(())
-    }
+    crate::file_lock::write_private_file_at(&lock.directory, &lock.name, &bytes)
+        .map_err(|_| STORAGE)
 }
 
 /// The digest of a package's content alone, the manifest and the images, independent of the listing name and description.
@@ -300,6 +313,21 @@ fn local_packages(root: &Path) -> std::io::Result<BTreeSet<String>> {
     Ok(packages)
 }
 
+/// Where sync remembers what it last saw of the skin root `root`: [`STATE_FILE`] beside it, so the root itself holds only packages.
+pub fn state_path(root: &Path) -> PathBuf {
+    root.with_file_name(STATE_FILE)
+}
+
+/// Install a package downloaded from the gallery into `root` ([`candidate_community::install`]) and record where it came from ([`record_install`]), so the next run keeps someone else's publication out of the user's library. Without `replace` an installed folder of the same name is left alone and `candidate_skin_exists` returned. The caller rescans the root afterwards.
+pub fn install_downloaded(
+    root: &Path,
+    package: &CandidateSkinPackage,
+    replace: bool,
+) -> Result<(), &'static str> {
+    candidate_community::install(root, package, replace)?;
+    record_install(&state_path(root), &package.package_id, package.id)
+}
+
 /// Record that `package_id` was just installed from the gallery publication `publication`. A later run leaves the package alone unless that publication is one of the user's own, and compares it afresh if it is, since the install replaced whatever was synced before.
 pub fn record_install(
     state_path: &Path,
@@ -307,10 +335,11 @@ pub fn record_install(
     publication: Uuid,
 ) -> Result<(), &'static str> {
     let _run = lock_runs();
-    let mut state = load_state(state_path);
+    let lock = lock_state(state_path)?;
+    let mut state = load_state_locked(&lock);
     state.packages.remove(package_id);
     state.installed.insert(package_id.to_owned(), publication);
-    save_state(state_path, &state)
+    save_state_locked(&lock, &state)
 }
 
 /// Take the publication `publication` out of the library and forget the row it was synced with. The local folder is then uploaded again as a new private package by the next run rather than deleted to match. Both happen under the run lock: a run that listed the library between the two would find the row gone while its state still named it, and delete the local folder.
@@ -320,22 +349,26 @@ pub fn unpublish(
     publication: Uuid,
 ) -> Result<(), AccountError> {
     let _run = lock_runs();
+    let lock = lock_state(state_path).map_err(|_| AccountError::Storage)?;
     match remote.unpublish(publication) {
         Ok(()) | Err(AccountError::NotFound) => {}
         Err(error) => return Err(error),
     }
-    let mut state = load_state(state_path);
+    let mut state = load_state_locked(&lock);
     state
         .packages
         .retain(|_, synced| synced.cloud_id != publication);
-    save_state(state_path, &state).map_err(|_| AccountError::Storage)?;
+    save_state_locked(&lock, &state).map_err(|_| AccountError::Storage)?;
     Ok(())
 }
 
 /// The library row each package was last synced with, by package id.
 pub fn synced_packages(state_path: &Path) -> BTreeMap<String, Uuid> {
     let _run = lock_runs();
-    load_state(state_path)
+    let Some(lock) = lock_state(state_path).ok() else {
+        return BTreeMap::new();
+    };
+    load_state_locked(&lock)
         .packages
         .into_iter()
         .map(|(id, synced)| (id, synced.cloud_id))
@@ -363,6 +396,8 @@ pub fn publish(
     category: Option<CandidateSkinCategory>,
 ) -> Result<CandidateSkinItem, CandidateSkinPublishError> {
     let _run = lock_runs();
+    let state_lock = lock_state(state_path)
+        .map_err(|_| CandidateSkinPublishError::Account(AccountError::Storage))?;
     let packed =
         pack_as(root, package_id, visibility).map_err(CandidateSkinPublishError::Package)?;
     let local_digest = content_digest(&packed.manifest, &packed.files)
@@ -379,7 +414,7 @@ pub fn publish(
         .session_generation()
         .map_err(CandidateSkinPublishError::Account)?;
     ensure_session(remote, &user, generation).map_err(CandidateSkinPublishError::Account)?;
-    let mut state = load_state(state_path);
+    let mut state = load_state_locked(&state_lock);
     if state.user_id != user {
         state.user_id = user.clone();
         state.packages.clear();
@@ -448,7 +483,7 @@ pub fn publish(
                 local_digest,
             },
         );
-        save_state(state_path, &state).map_err(|_| AccountError::Storage)?;
+        save_state_locked(&state_lock, &state).map_err(|_| AccountError::Storage)?;
         Ok(())
     })
     .map_err(CandidateSkinPublishError::Account)?;
@@ -506,12 +541,13 @@ pub fn sync_candidate_skins(
     remote: &impl CandidateSkinSyncRemote,
 ) -> Result<CandidateSkinSyncReport, AccountError> {
     let _run = lock_runs();
+    let state_lock = lock_state(state_path).map_err(|_| AccountError::Storage)?;
     if crate::storage::reject_symlink(root).is_err() {
         return Err(AccountError::Storage);
     }
     let user = remote.user_id()?.ok_or(AccountError::Unauthorized)?;
     let generation = remote.session_generation()?;
-    let mut state = load_state(state_path);
+    let mut state = load_state_locked(&state_lock);
     if state.user_id != user {
         state.user_id = user.clone();
         state.packages.clear();
@@ -537,7 +573,7 @@ pub fn sync_candidate_skins(
         .collect();
     let mut run = Run {
         root,
-        state_path,
+        state_lock: &state_lock,
         remote,
         user_id: user,
         generation,
@@ -550,7 +586,7 @@ pub fn sync_candidate_skins(
         run.package(id, local.contains(id), newest.get(id))?;
     }
     run.with_local_effect(|run| {
-        save_state(run.state_path, &run.state).map_err(|_| AccountError::Storage)?;
+        save_state_locked(run.state_lock, &run.state).map_err(|_| AccountError::Storage)?;
         Ok(())
     })?;
     Ok(run.report)
@@ -558,7 +594,7 @@ pub fn sync_candidate_skins(
 
 struct Run<'a, R: CandidateSkinSyncRemote> {
     root: &'a Path,
-    state_path: &'a Path,
+    state_lock: &'a StateLock,
     remote: &'a R,
     user_id: String,
     generation: Option<u64>,
@@ -659,7 +695,7 @@ impl<R: CandidateSkinSyncRemote> Run<'_, R> {
                 local_digest,
             },
         );
-        let _ = save_state(self.state_path, &self.state);
+        let _ = save_state_locked(self.state_lock, &self.state);
     }
 
     fn package(
@@ -915,7 +951,7 @@ impl<R: CandidateSkinSyncRemote> Run<'_, R> {
             };
             if removed {
                 run.state.packages.remove(id);
-                let _ = save_state(run.state_path, &run.state);
+                let _ = save_state_locked(run.state_lock, &run.state);
                 run.report.deleted_local.push(id.to_owned());
             } else {
                 run.skip(id, STORAGE);
@@ -928,7 +964,7 @@ impl<R: CandidateSkinSyncRemote> Run<'_, R> {
         match self.remote.unpublish(row.id) {
             Ok(()) | Err(AccountError::NotFound) => self.with_local_effect(|run| {
                 run.state.packages.remove(id);
-                let _ = save_state(run.state_path, &run.state);
+                let _ = save_state_locked(run.state_lock, &run.state);
                 run.report.deleted_cloud.push(id.to_owned());
                 Ok(())
             }),

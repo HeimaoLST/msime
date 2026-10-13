@@ -1,6 +1,5 @@
 package app.msime.android.home;
 
-import app.msime.android.TextPolicy;
 import app.msime.android.ViewPolicy;
 import app.msime.android.core.InputViewValuePolicy;
 
@@ -10,22 +9,17 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
-import android.widget.LinearLayout;
-import android.widget.RadioButton;
-import android.widget.RadioGroup;
 import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.appcompat.app.AlertDialog;
 import androidx.fragment.app.Fragment;
-import app.msime.android.BoundsPolicy;
+import app.msime.android.BackendAccount;
 import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import app.msime.android.CommonPhrasesStore;
 import app.msime.android.CommunityCatalog;
 import app.msime.android.CommunityRequest;
-import app.msime.android.CommunitySkinCache;
 import app.msime.android.CustomSkinLibrary;
 import app.msime.android.DictionaryCollectionsStore;
 import app.msime.android.R;
@@ -33,12 +27,9 @@ import app.msime.android.SyncSignals;
 import app.msime.android.SyncSwitch;
 import app.msime.android.ViewPolicy;
 import com.google.android.material.button.MaterialButton;
-import com.google.android.material.button.MaterialButtonToggleGroup;
 import com.google.android.material.chip.Chip;
 import com.google.android.material.chip.ChipGroup;
-import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.textfield.TextInputEditText;
-import com.google.android.material.textfield.TextInputLayout;
 import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.List;
@@ -46,28 +37,47 @@ import java.util.Map;
 import org.json.JSONObject;
 
 /**
- * The 社区 tab: skins, dictionaries and phrase packs published by other people, with the reply templates as a second section under the phrase packs (「AI 回复模板」).
+ * 一类社区作品的完整列表：皮肤、词库、短语或 AI 回复模板，各自从对应的功能页（皮肤、词库、表达、AI 润色与回复）末尾的「浏览更多…」打开，压在那一页上面，返回回到那一页。底部导航原先有一个「社区」tab 把四类放在一页里分段显示，这个 tab 已经撤掉，社区内容并进了各功能页。
  *
- * <p>Publishing and rating need a signed-in account, and this host carries only the keyboard's anonymous identity; a publish button that always answers "请先登录" would be worse than the honest absence of one. Taking a work, which is what people open this tab to do, works on every card: a skin's 获取 saves it into the custom skin library (and counts a download), after which the same pill says 使用 and puts it on the keyboard; a dictionary's 添加 installs it as a named dictionary, a phrase pack's 添加 installs it into the common phrases. 例外是分类：登录了水杉账号的作者可以在详情里改自己皮肤的分类。
+ * <p>页面经 {@link PageId#COMMUNITY} 和 {@link SettingsNavigator} 打开，类型放在参数 {@link #ARG_KIND} 里（{@link CommunityRequest.Kind#id()}），缺省或不认识时是皮肤。列表里有搜索、皮肤的分类筛选、详情面板、举报，作者还能在详情里改自己皮肤的分类。
+ *
+ * <p>发布和评分要登录的账号，这个宿主只带键盘的匿名身份，一个永远回答「请先登录」的发布按钮不如诚实地没有。拿走作品是打开这一页的目的，每张卡片都能做到：皮肤的「获取」存进自定义皮肤库（并记一次下载），之后同一个按钮变成「使用」并把它换到键盘上；词库的「添加」装成命名词库，短语包的「添加」装进常用语；回复模板手机上还不能添加，只能看详情。
  */
 public final class CommunityFragment extends Fragment {
-    private static final String ARG_KIND = "kind";
-    private static final String REPLY_SECTION = "AI 回复模板";
+    /** 参数：要列出的作品类型，取 {@link CommunityRequest.Kind#id()}。 */
+    public static final String ARG_KIND = "kind";
+    private record LoadedPage(CommunityCatalog.Page page, String sessionId, boolean stable) {}
 
-    /** The segment on screen: skins, dictionaries or phrases. */
+    /** 这一页列出的作品类型。 */
     private CommunityRequest.Kind kind = CommunityRequest.Kind.SKIN;
-    /** The kind being paged: equal to `kind`, except that the phrase segment pages its replies after its packs. */
-    private CommunityRequest.Kind section = CommunityRequest.Kind.SKIN;
     private CommunityAdapter adapter;
     private String search = "";
     // 皮肤的分类筛选，null 是「全部」。只在皮肤页生效，词库和短语没有分类。
     @Nullable private CommunityRequest.Category category;
     private boolean loading;
     private boolean hasMore;
+    private long requestGeneration;
     // 预览按用户自己的布局画。读不到就按 26 键，那是默认值。
     private boolean nineKey;
 
-    /** The tab, opened on one kind of work; a null kind opens on skins, reply templates open the phrase segment. */
+    /** 从功能页打开某一类作品的完整列表，压在当前页面上面。 */
+    public static void browse(Context context, CommunityRequest.Kind kind) {
+        Bundle arguments = new Bundle();
+        arguments.putString(ARG_KIND, kind.id());
+        SettingsNavigator.open(context, PageId.COMMUNITY, arguments);
+    }
+
+    /** 完整列表的页面标题。 */
+    static String title(CommunityRequest.Kind kind) {
+        return switch (kind) {
+            case SKIN -> "社区皮肤";
+            case DICTIONARY -> "社区词库";
+            case PHRASE -> "社区短语";
+            case REPLY -> "AI 回复模板";
+        };
+    }
+
+    /** 一类作品的列表页；类型为 null 时列皮肤。 */
     public static CommunityFragment forKind(@Nullable CommunityRequest.Kind kind) {
         CommunityFragment fragment = new CommunityFragment();
         if (kind != null) {
@@ -90,34 +100,12 @@ public final class CommunityFragment extends Fragment {
                 if (value.id().equals(arguments.getString(ARG_KIND))) kind = value;
             }
         }
-        // 回复模板没有自己的分段，它在「短语」分段的第二个小节里。
-        if (kind == CommunityRequest.Kind.REPLY) kind = CommunityRequest.Kind.PHRASE;
-        section = kind;
 
-        // The design's outlined segmented control. The opening kind is checked before the listener is attached, so opening loads the listing once, below, rather than once per path.
-        MaterialButtonToggleGroup kinds = view.findViewById(R.id.community_kinds);
-        LayoutInflater inflater = LayoutInflater.from(requireContext());
-        List<CommunityRequest.Kind> values = CommunityRequest.segments();
-        int[] segments = new int[values.size()];
-        for (int index = 0; index < values.size(); index++) {
-            MaterialButton segment =
-                (MaterialButton) inflater.inflate(R.layout.item_segment, kinds, false);
-            segment.setId(View.generateViewId());
-            segment.setText(values.get(index).title());
-            kinds.addView(segment);
-            segments[index] = segment.getId();
-        }
-        kinds.check(segments[BoundsPolicy.nonNegative(values.indexOf(kind))]);
-        kinds.addOnButtonCheckedListener((group, id, checked) -> {
-            if (!checked) return;
-            for (int index = 0; index < segments.length; index++) {
-                if (segments[index] != id || values.get(index) == kind) continue;
-                kind = values.get(index);
-                updateSearchHint();
-                updateCategories();
-                load(true);
-            }
-        });
+        // 和详情页一样：左上角返回，标题是这一类作品。返回走 Activity 的返回分发，弹回打开这一页的功能页。
+        ((TextView) view.findViewById(R.id.community_title)).setText(title(kind));
+        View back = view.findViewById(R.id.community_back);
+        back.setContentDescription("返回");
+        ViewPolicy.bindClick(back, () -> requireActivity().getOnBackPressedDispatcher().onBackPressed());
 
         // 分类筛选条：「全部」在最前，后面是固定的八个分类。换分类和换搜索词一样从第一页重新载入。
         ChipGroup categories = view.findViewById(R.id.community_categories);
@@ -190,40 +178,15 @@ public final class CommunityFragment extends Fragment {
 
         load(true);
         updateSearchHint();
-        cacheSkinCatalogue();
-    }
-
-    /** 拉全社区皮肤目录写进本机缓存，键盘的皮肤面板据此列出全部社区皮肤（键盘进程不为浏览目录联网）。最多翻十页，失败时保留旧缓存。 */
-    private void cacheSkinCatalogue() {
-        HostTask.runNetwork(this, context -> {
-            String directory = HostStore.directory(context);
-            if (directory.isEmpty()) return null;
-            CommunityCatalog catalog = new CommunityCatalog(context);
-            java.util.List<CommunitySkinCache.Entry> entries = new java.util.ArrayList<>(
-                10 * CommunityRequest.PAGE_SIZE);
-            for (int page = 0; page < 10; page++) {
-                CommunityCatalog.Page result = catalog.list(CommunityRequest.Kind.SKIN, "", entries.size(), null);
-                if (result == null || result.failed()) return null;
-                for (CommunityCatalog.Item item : result.items()) {
-                    if (item.payload() != null) entries.add(new CommunitySkinCache.Entry(item.id(), item.name(), item.author(), item.payload()));
-                }
-                if (!result.hasMore() || result.items().isEmpty()) break;
-            }
-            try {
-                CommunitySkinCache.write(Paths.get(directory), entries);
-            } catch (java.io.IOException error) {
-                android.util.Log.w("MSIMECommunity", "Skin catalogue cache was not written", error);
-            }
-            return null;
-        }, ignored -> { });
+        // 打开完整的皮肤列表时顺手把键盘皮肤面板用的目录缓存也刷新一遍，不看缓存新旧。
+        if (kind == CommunityRequest.Kind.SKIN) CommunitySkinCatalogue.refresh(this, true, ignored -> { });
     }
 
     private void updateSearchHint() {
         View view = getView();
         if (view == null) return;
-        // The pill field has no floating label, so the hint lives on the text itself.
-        ((TextInputEditText) view.findViewById(R.id.community_search)).setHint(
-            kind == CommunityRequest.Kind.PHRASE ? "搜索短语和回复模板" : kind.searchHint());
+        // 胶囊搜索框没有浮动标签，提示直接写在输入框里。
+        ((TextInputEditText) view.findViewById(R.id.community_search)).setHint(kind.searchHint());
     }
 
     /** 分类筛选条只属于皮肤页。 */
@@ -244,55 +207,54 @@ public final class CommunityFragment extends Fragment {
         if (view == null) return;
         // Only paging defers to a request already in flight. A new tab or a new search must go out even mid-load, or switching tabs while the first page is arriving does nothing at all; the reply that was already on its way is discarded below by the same check.
         if (loading && !fresh) return;
+        long request = ++requestGeneration;
         loading = true;
         if (fresh) {
             hasMore = false;
-            section = kind;
             adapter.set(List.of());
             state("正在载入…", false);
         }
-        CommunityRequest.Kind segment = kind;
-        CommunityRequest.Kind requested = section;
+        CommunityRequest.Kind requested = kind;
         int offset = adapter.count(requested);
         String term = search;
         CommunityRequest.Category filter = requestCategory();
         HostTask.run(this,
-            context -> new CommunityCatalog(context).list(requested, term, offset, filter),
-            page -> {
-                // The tab, the search or the category may have moved on while this page was in flight. A stale answer must not write over what the user is now looking at, and must not clear the flag belonging to the request that replaced it.
-                if (segment != kind || requested != section || !term.equals(search)
+            context -> {
+                BackendAccount account = new BackendAccount(context);
+                String before = account.sessionId();
+                CommunityCatalog.Page page = new CommunityCatalog(context).list(
+                    requested, term, offset, filter);
+                String after = account.sessionId();
+                return new LoadedPage(page, before, java.util.Objects.equals(before, after));
+            },
+            loaded -> {
+                // 同一筛选条件也可能连续请求；旧结果不能填入新列表或清掉新请求的加载状态。
+                if (request != requestGeneration || requested != kind || !term.equals(search)
                         || filter != requestCategory()) {
                     return;
                 }
+                if (loaded == null || !loaded.stable()
+                        || !java.util.Objects.equals(loaded.sessionId(),
+                            new BackendAccount(requireContext()).sessionId())) {
+                    loading = false;
+                    state("账号已切换，请重试。", true);
+                    return;
+                }
                 loading = false;
-                boolean replies = requested == CommunityRequest.Kind.REPLY;
+                CommunityCatalog.Page page = loaded.page();
                 if (page == null || page.failed()) {
-                    // 回复模板只是短语分段的第二个小节：它读不到时短语包照常显示，只是不再往下翻。
-                    if (replies && adapter.hasItems()) {
-                        hasMore = false;
-                        return;
-                    }
                     state(page == null ? CommunityRequest.message(null, 0) : page.failure(), true);
                     return;
                 }
-                if (replies && offset == 0 && !page.items().isEmpty()) adapter.appendHeader(REPLY_SECTION);
                 adapter.append(page.items());
                 hasMore = page.hasMore();
-                if (!hasMore && segment == CommunityRequest.Kind.PHRASE
-                        && requested == CommunityRequest.Kind.PHRASE) {
-                    // 短语包翻完了，接着翻同一个搜索词下的回复模板。
-                    section = CommunityRequest.Kind.REPLY;
-                    hasMore = true;
-                    load(false);
-                    return;
-                }
                 state(adapter.hasItems() ? "" : emptyMessage(), false);
             });
     }
 
     private String emptyMessage() {
         CommunityRequest.Category filter = requestCategory();
-        String title = kind == CommunityRequest.Kind.PHRASE ? "短语或回复模板" : kind.title();
+        String title = kind.title();
         String what = filter == null ? title : "「" + filter.label() + "」分类的" + title;
         return search.isEmpty()
             ? "社区里还没有公开的" + what + "。"
@@ -303,8 +265,7 @@ public final class CommunityFragment extends Fragment {
         View view = getView();
         if (view == null) return;
         TextView state = view.findViewById(R.id.community_state);
-        state.setText(message);
-        Ui.setVisibilityForText(state, message);
+        ViewPolicy.setTextAndVisibility(state, message);
         ViewPolicy.setVisible(view.findViewById(R.id.community_retry), retryable);
     }
 
@@ -439,58 +400,9 @@ public final class CommunityFragment extends Fragment {
         });
     }
 
-    /** 举报：one of the fixed reasons and an optional detail, sent with this device's account (the anonymous one counts). */
+    /** 举报：对话框与 AI 页的回复模板共用。 */
     private void report(CommunityCatalog.Item item) {
-        Context context = requireContext();
-        int padding = Ui.dp(context, 20);
-        LinearLayout form = Ui.column(context);
-        ViewPolicy.setPadding(form, padding, Ui.dp(context, 8), padding, 0);
-        RadioGroup reasons = new RadioGroup(context);
-        for (String reason : CommunityRequest.REPORT_REASONS) {
-            RadioButton choice = new RadioButton(context);
-            choice.setId(View.generateViewId());
-            choice.setText(reason);
-            choice.setTag(reason);
-            reasons.addView(choice);
-        }
-        form.addView(reasons);
-        TextInputLayout detailField = new TextInputLayout(context);
-        detailField.setHint("补充说明（可选）");
-        detailField.setCounterEnabled(true);
-        detailField.setCounterMaxLength(CommunityRequest.MAX_REPORT_DETAIL);
-        TextInputEditText detail = new TextInputEditText(detailField.getContext());
-        ViewPolicy.setMaxLines(detail, 4);
-        detailField.addView(detail);
-        form.addView(detailField);
-
-        AlertDialog dialog = new MaterialAlertDialogBuilder(context)
-            .setTitle("举报「" + item.name() + "」")
-            .setView(form)
-            .setNegativeButton("取消", null)
-            .setPositiveButton("提交", null)
-            .create();
-        dialog.setOnShowListener(ignored -> {
-            View submit = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-            ViewPolicy.setEnabled(submit, false);
-            reasons.setOnCheckedChangeListener((group, checked) -> ViewPolicy.setEnabled(submit, checked != -1));
-            ViewPolicy.bindClick(submit, () -> {
-                View checked = reasons.findViewById(reasons.getCheckedRadioButtonId());
-                String reason = checked == null ? "" : String.valueOf(checked.getTag());
-                String text = TextPolicy.trimmed(detail.getText() == null ? null : detail.getText().toString());
-                if (!CommunityRequest.validReport(reason, text)) {
-                    detailField.setError("最多 " + CommunityRequest.MAX_REPORT_DETAIL + " 字");
-                    return;
-                }
-                dialog.dismiss();
-                HostTask.runNetwork(this, worker -> new CommunityCatalog(worker).report(item, reason, text),
-                    failure -> {
-                        if (getView() == null) return;
-                        MsToast.show(requireContext(), failure == null || failure.isEmpty()
-                            ? "已收到举报，管理员会尽快处理。" : failure);
-                    });
-            });
-        });
-        dialog.show();
+        CommunityReportDialog.show(this, item);
     }
 
     private void changeCategory(CommunityCatalog.Item item, CommunityRequest.Category next) {

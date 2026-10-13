@@ -19,6 +19,7 @@ import {
 } from "react";
 import { ActionSheet, type SheetOption } from "./action-sheet";
 import { FluentIcon } from "./fluent-icons";
+import { clamp } from "./number";
 import * as style from "./platform-controls-style";
 
 type RowLabels = { labelId: string; descriptionId?: string };
@@ -55,6 +56,7 @@ export function Row({
   description,
   icon,
   hidden,
+  wideControl,
   children,
 }: {
   title: ReactNode;
@@ -63,13 +65,15 @@ export function Row({
   hidden?: boolean;
   /** Shown where the platform leads rows with a glyph (Windows); decorative. */
   icon?: ReactNode;
+  /** 控件需要整行宽度（文本框）：HarmonyOS 手机上放到标题下方独占一行。 */
+  wideControl?: boolean;
   /** The control on the trailing edge. */
   children?: ReactNode;
 }) {
   const labelId = useId();
   const descriptionId = useId();
   return (
-    <div className={style.row} hidden={hidden}>
+    <div className={wideControl ? style.wideRow : style.row} hidden={hidden}>
       {icon && (
         <span className={style.rowIcon} aria-hidden="true">
           {icon}
@@ -90,32 +94,37 @@ export function Row({
         <RowLabelsContext.Provider
           value={{ labelId, descriptionId: description ? descriptionId : undefined }}
         >
-          <span className={style.rowControl}>{children}</span>
+          <span className={wideControl ? style.wideRowControl : style.rowControl}>{children}</span>
         </RowLabelsContext.Provider>
       )}
     </div>
   );
 }
 
-/** 跳转行：没有控件，点击后去别处。`external` 为假时打开另一个设置页，行尾画 ›；为真时打开应用外的链接，行尾画 ↗。按钮以标题命名，以说明描述。 */
+/** 跳转行：没有控件，点击后去别处。`external` 为假时打开另一个设置页，行尾画 ›；为真时打开应用外的链接，行尾画 ↗。`value` 是画在箭头前的当前状态（例如「已填写」）。按钮以标题命名，以说明和状态描述。 */
 export function LinkRow({
   title,
   description,
+  value,
   external,
   onClick,
 }: {
   title: string;
   description?: ReactNode;
+  value?: string;
   external?: boolean;
   onClick: () => void;
 }) {
   const descriptionId = useId();
+  const valueId = useId();
+  const describedBy =
+    [value ? valueId : "", description ? descriptionId : ""].filter(Boolean).join(" ") || undefined;
   return (
     <button
       type="button"
       className={style.linkRow}
       aria-label={title}
-      aria-describedby={description ? descriptionId : undefined}
+      aria-describedby={describedBy}
       onClick={onClick}
     >
       <span className={style.rowText}>
@@ -126,8 +135,13 @@ export function LinkRow({
           </span>
         )}
       </span>
-      <span className={style.rowDescription} aria-hidden="true">
-        {external ? "↗" : "›"}
+      <span className={style.rowDescription}>
+        {value && (
+          <span id={valueId} className="mr-1.5">
+            {value}
+          </span>
+        )}
+        <span aria-hidden="true">{external ? "↗" : "›"}</span>
       </span>
     </button>
   );
@@ -271,7 +285,7 @@ export function Slider({
   ticks?: boolean;
 } & Labelled) {
   const names = useRowLabels(labels);
-  const fill = max > min ? ((Math.min(Math.max(value, min), max) - min) / (max - min)) * 100 : 0;
+  const fill = max > min ? ((clamp(value, min, max) - min) / (max - min)) * 100 : 0;
   const steps = ticks && max > min && step > 0 ? Math.round((max - min) / step) : 0;
   const input = (
     <input
@@ -528,40 +542,54 @@ export function PickerRow({
   const [open, setOpen] = useState(false);
   const titleId = useId();
   const sheetTitle = textOf(title);
+  const value = (
+    <span className={description ? style.pickerValueDescribed : style.pickerValue}>
+      <span className={style.pickerValueText}>{valueLabel}</span>
+      <svg
+        width="13"
+        height="13"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+        className="shrink-0"
+      >
+        <path d="m9 6 6 6-6 6" />
+      </svg>
+    </span>
+  );
   return (
     <div className="min-w-0" hidden={hidden}>
       {/* 按内容（标题、描述、当前值）命名，而不是用 `aria-labelledby`：标题已经是隐藏控件的标签，同一个标签命名两个控件会让标签查找指向哪个控件变得含糊。 */}
       <button
         type="button"
-        className={style.pickerRow}
+        className={description ? style.pickerRowDescribed : style.pickerRow}
         aria-haspopup="dialog"
         aria-expanded={open}
         disabled={disabled}
         onClick={() => setOpen(true)}
       >
-        <span className={style.rowText}>
-          <span id={titleId} className={style.rowTitle} data-row-title="">
-            {title}
-          </span>
-          {description && <span className={style.rowDescription}>{description}</span>}
-        </span>
-        <span className={style.pickerValue}>
-          <span className={style.pickerValueText}>{valueLabel}</span>
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.6"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-            className="shrink-0"
-          >
-            <path d="m9 6 6 6-6 6" />
-          </svg>
-        </span>
+        {description ? (
+          <>
+            <span id={titleId} className={style.rowTitle} data-row-title="">
+              {title}
+            </span>
+            {value}
+            <span className={style.pickerRowDescription}>{description}</span>
+          </>
+        ) : (
+          <>
+            <span className={style.rowText}>
+              <span id={titleId} className={style.rowTitle} data-row-title="">
+                {title}
+              </span>
+            </span>
+            {value}
+          </>
+        )}
       </button>
       {/* inert 让隐藏控件不受触摸、焦点和辅助技术的访问，用户遇到的唯一控件就是行按钮；它仍然保存值并接收变更。 */}
       <span className="sr-only" inert>

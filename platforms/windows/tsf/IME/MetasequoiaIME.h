@@ -4,6 +4,8 @@
 #include "KeyHandlerEditSession.h"
 #include "MetasequoiaIMEBaseStructure.h"
 #include "Ipc.h"
+#include "JapaneseConversionPolicy.h"
+#include "../../../../shared/input/CapsLockTap.h"
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -54,10 +56,12 @@ constexpr ULONG_PTR SMART_PUNCTUATION_SENDINPUT_EXTRA_INFO = 0x4D535050u;
 constexpr ULONG_PTR PAIRED_PUNCTUATION_SENDINPUT_EXTRA_INFO = 0x4D535051u;
 // Marker for a caret or editing key replayed after a queued Korean syllable commit. Key sinks and the bare-Shift hook must pass these events through to the host.
 constexpr ULONG_PTR KOREAN_SYLLABLE_SENDINPUT_EXTRA_INFO = 0x4D535052u;
+// 单按 Caps Lock 切换中英文后，为撤回大写锁定再按的那一次 Caps Lock。按键处理和裸 Shift 钩子都要放它过去，不能再当成一次轻点。
+constexpr ULONG_PTR CAPS_LOCK_SENDINPUT_EXTRA_INFO = 0x4D535053u;
 constexpr bool IsSelfGeneratedSendInputExtraInfo(ULONG_PTR extraInfo)
 {
     return extraInfo == SMART_PUNCTUATION_SENDINPUT_EXTRA_INFO || extraInfo == PAIRED_PUNCTUATION_SENDINPUT_EXTRA_INFO ||
-           extraInfo == KOREAN_SYLLABLE_SENDINPUT_EXTRA_INFO;
+           extraInfo == KOREAN_SYLLABLE_SENDINPUT_EXTRA_INFO || extraInfo == CAPS_LOCK_SENDINPUT_EXTRA_INFO;
 }
 constexpr ULONGLONG SMART_PUNCTUATION_REPEAT_INTERVAL_MS = 2000;
 // How long a queued rewrite stays valid. Unlike the interval above this is not
@@ -185,6 +189,9 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     // key event handlers for composition/candidate/phrase common objects.
     HRESULT _HandleComplete(TfEditCookie ec, _In_ ITfContext *pContext);
     HRESULT _HandleHostRawCommit(TfEditCookie ec, _In_ ITfContext *pContext);
+    // 整句改字时的空格和回车：宿主会话没有在改字时 `*handled` 为假，什么都不做。空格选中高亮的候选（光标在句末时上屏整句），回车上屏改好的整句；都由 TIP 自己的宿主会话完成，Server 的会话对同一个键发同一条命令，空格的回复读掉不用，回车没有回复。
+    HRESULT _HandleConversionKey(TfEditCookie ec, _In_ ITfContext *pContext, bool enter, uint64_t requestId,
+                                 bool *handled);
     // 韩文、注音、越南文和藏文：上屏当前组字，`wch` 是可打印 ASCII 时再插入它；注音的标点键改为连同组字一起走中文标点表。`code` 是结束组字的按键，没有按键结束时（焦点或方案切换）为 0。
     HRESULT _HandleSyllableCommit(TfEditCookie ec, _In_ ITfContext *pContext, UINT code, WCHAR wch,
                                   bool replayKey = false);
@@ -202,7 +209,10 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     HostComposedView _ReadHostComposedView() const;
     // A lone right Ctrl tap while a Korean syllable composes converts it as the Hanja key does: on the release the tap is queued as that key and true is returned. Checked ahead of the single-Ctrl language toggle, which it takes precedence over only in that state.
     bool _QueueKoreanHanjaTap(_In_ ITfContext *pContext, WPARAM wParam, LPARAM lParam);
-    // 向宿主会话发 MSIME_CANCEL；第一次只关闭了韩文或注音的列表、或只把越南文词或藏文音节串重新显示为原文时再发一次，所以组字无论如何都会被丢弃。没有宿主会话时返回 true。
+    // 单按 Caps Lock 切换中英文：按下时布防（lockWasOn 是按下前的大写锁定状态），松开时认定为轻点就先撤回大写锁定，撤回成功再排入和单按 Shift 相同的切换，返回 true。
+    void _ArmCapsLockTap(bool lockWasOn);
+    bool _QueueCapsLockTap(_In_ ITfContext *pContext, WPARAM wParam);
+    // 向宿主会话发 MSIME_CANCEL；第一次只关闭了韩文或注音的列表、只把越南文词或藏文音节串重新显示为原文、或只退出了整句改字时再发一次，所以组字无论如何都会被丢弃。没有宿主会话时返回 true。
     bool _CancelHostComposition();
     // A caret or editing key that ended a Korean syllable behind the deferred-key barrier was eaten to keep its place in the queue; once the syllable is committed it is sent again through the input queue so the application still does its own work with it.
     void _QueueKoreanSyllableKeyReplay(UINT virtualKey);
@@ -226,8 +236,9 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     HRESULT _HandleCompositionConvert(TfEditCookie ec, _In_ ITfContext *pContext, BOOL isWildcardSearch);
     HRESULT _HandleCompositionBackspace(TfEditCookie ec, _In_ ITfContext *pContext, uint64_t requestId);
     HRESULT _HandleCompositionDelete(TfEditCookie ec, _In_ ITfContext *pContext, uint64_t requestId);
+    // `letterCaret`：全拼、双拼里 Ctrl+左右逐个字母地移拼音光标，不是整句改字。
     HRESULT _HandleCompositionArrowKey(TfEditCookie ec, _In_ ITfContext *pContext, KEYSTROKE_FUNCTION keyFunction,
-                                       uint64_t requestId = FANY_IME_NO_REQUEST_ID);
+                                       uint64_t requestId = FANY_IME_NO_REQUEST_ID, bool letterCaret = false);
     HRESULT _HandleCompositionSegmentEdit(TfEditCookie ec, _In_ ITfContext *pContext,
                                            KEYSTROKE_FUNCTION keyFunction, uint64_t requestId);
     HRESULT _HandleCompositionPunctuation(TfEditCookie ec, _In_ ITfContext *pContext, UINT code, WCHAR wch,
@@ -250,6 +261,14 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     void _ClearPairedPunctuationStack();
     bool _TryStepOverPairedPunctuation(TfEditCookie ec, _In_ ITfContext *pContext, WCHAR closing);
     void _NoteKeyForPairedPunctuation(UINT code);
+    // 候选上屏的整条文字恰好是一个左半边时要补的右半边，成对补全关闭或宿主被排除时为 0。
+    WCHAR _CandidateCommitPairedClosing(const std::wstring &text) const;
+    // 补出右半边之后记下这一对，并把光标移回两半之间，与标点键补全走同一条带焦点令牌的路径。
+    void _OpenCandidateCommitPair(WCHAR opening, WCHAR closing);
+    // 日语空格的回执是导航类时记下：这段组字的转换已经开始，回车改为上屏 Server 高亮的候选。
+    void _NoteJapaneseConversionStarted();
+    // 这次回车（`modifiers` 是线上的修饰键位）要不要上屏 Server 高亮的候选：日语、裸回车、转换开始后组字和读音都没变。
+    bool _JapaneseEnterCommitsCandidate(UINT modifiers);
     void _QueuePairedPunctuationCaretMove(int delta);
     void _RunPairedPunctuationCaretMove();
     void _CancelPairedPunctuationCaretMove();
@@ -267,6 +286,10 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     void _NoteKeyForSmartPunctuation(UINT code, WCHAR wch, bool isEaten);
     void _NotePassthroughStatistics(UINT virtualKey, WCHAR wch, bool keyboardKnownEnabled);
     void _NoteKeyPressStatistics(WPARAM wParam, LPARAM lParam);
+    // wch 是分类时布局按出的字符，用来认出 AltGr 打字（见 Global::IsAltGrCharacter）。
+    void _NotePassthroughKeySound(WPARAM wParam, LPARAM lParam, WCHAR wch);
+    // 记下当前字段的属性（停用的键盘或空上下文、安全桌面算 SECURE，提权进程算 ELEVATED），下一次发给 Server 的按键或状态快照之前、属性变了时先报（NoteFieldTraitsForServer）。只是转述给 Server：这个 TIP 自己的宿主会话从不调用生命周期的任何 FFI。
+    void _NoteFieldTraitsForServer();
     void _ResetSmartPunctuationHistory();
     // Focus-loss counterpart of the reference's _ClearSmartPunctuationAction: forgets the armed space/revert history and drops a queued repeated-punctuation rewrite, whose Backspace would otherwise land in whatever gains focus next.
     void _ClearSmartPunctuationAction();
@@ -284,11 +307,13 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     HRESULT _HandleCandidateFinalize(TfEditCookie ec, _In_ ITfContext *pContext, uint64_t requestId,
                                      const std::wstring &prefetchedText);
     HRESULT _HandleCandidateFinalizeForVKReturn(TfEditCookie ec, _In_ ITfContext *pContext);
+    // Server 回了 CommitExactText（预选的释义列、Ctrl+Enter 的释义页）：它已经取消了自己的组字，text 是要原样上屏的完整文本。宿主会话也丢掉组字，再把 text 写进组字并结束组字，不补成对标点。
+    HRESULT _CommitServerExactText(TfEditCookie ec, _In_ ITfContext *pContext, const std::wstring &text);
     HRESULT _HandleCandidateConvert(TfEditCookie ec, _In_ ITfContext *pContext, uint64_t requestId,
                                     const std::wstring &prefetchedText);
     HRESULT _HandleCandidateArrowKey(TfEditCookie ec, _In_ ITfContext *pContext, _In_ KEYSTROKE_FUNCTION keyFunction,
                                      uint64_t requestId = FANY_IME_NO_REQUEST_ID);
-    HRESULT _HandleCandidateSelectByNumber(TfEditCookie ec, _In_ ITfContext *pContext, _In_ UINT uCode,
+    HRESULT _HandleCandidateSelectByNumber(TfEditCookie ec, _In_ ITfContext *pContext, _In_ UINT uCode, WCHAR wch,
                                            uint64_t requestId, const std::wstring &prefetchedText);
 
     BOOL _IsSecureMode(void)
@@ -615,6 +640,9 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     // The key press last counted by _NoteKeyPressStatistics (scan code plus extended bit) and its message time; the Test and Key probes of one press share both.
     UINT _keyPressStatsKey = 0;
     LONG _keyPressStatsMessageTime = 0;
+    // _NotePassthroughKeySound 上一次报给 Server 的按下（扫描码加扩展位）和它的消息时间：同一次按下可能被探测不止一次。
+    UINT _passthroughSoundKey = 0;
+    LONG _passthroughSoundMessageTime = 0;
     WCHAR _smartPunctuationKey = 0;
     WCHAR _smartPunctuationPrecedingChar = 0;
     bool _smartPunctuationCommittedAscii = false;
@@ -662,6 +690,8 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
         uint64_t focusToken = 0;
     };
     std::vector<PairedPunctuationEntry> _pairedPunctuationStack;
+    // 日语空格「変換」：Server 已经开始转换的那段组字（Global/JapaneseConversionPolicy.h）。
+    Global::JapaneseConversionMark _japaneseConversion;
     struct CreatingWordRestoreEntry
     {
         std::string consumedRaw;
@@ -748,6 +778,8 @@ class CMetasequoiaIME : public ITfTextInputProcessorEx,
     bool _shiftHotkeyArmed;
     bool _ctrlHotkeyArmed;
     std::chrono::steady_clock::time_point _modifierHotkeyExpire;
+    // 单按 Caps Lock 切换中英文的判定，三个桌面宿主共用一套规则（shared/input/CapsLockTap.h）。
+    msime::input::CapsLockTap _capsLockTap;
 
     HHOOK _bareShiftHook;
     BYTE _bareShiftDownMask;

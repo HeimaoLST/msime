@@ -1,12 +1,15 @@
 package app.msime.android.home;
 
+import app.msime.android.ThemeColorPolicy;
+import app.msime.android.LayoutPolicy;
+
+import app.msime.android.DimensionPolicy;
+
 import android.content.Context;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
-import android.text.Editable;
 import android.text.InputType;
-import android.text.TextWatcher;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
@@ -17,6 +20,8 @@ import android.widget.TextView;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatDialog;
 import app.msime.android.BoundsPolicy;
+import app.msime.android.DrawablePolicy;
+import app.msime.android.KeyboardGeometry;
 import app.msime.android.ListPolicy;
 import app.msime.android.TextPolicy;
 import app.msime.android.ViewPolicy;
@@ -47,50 +52,51 @@ public final class InputDialog {
         dialog = new AppCompatDialog(context);
         dialog.supportRequestWindowFeature(Window.FEATURE_NO_TITLE);
 
-        LinearLayout root = Ui.column(context);
-        ViewPolicy.setBackground(root, Ui.rounded(Ui.sheetBackground(context), Ui.dp(context, Ui.DIALOG_RADIUS)));
+        LinearLayout root = LayoutPolicy.column(context);
+        ViewPolicy.setBackground(root, DrawablePolicy.rounded(ThemeColorPolicy.sheetBackground(context), DimensionPolicy.pixels(context, Ui.DIALOG_RADIUS)));
         root.setClipToOutline(true);
 
-        TextView heading = Ui.styledLabel(context, title, Ui.TEXT_DIALOG_TITLE, 600, Ui.text(context));
+        TextView heading = ViewPolicy.headingLabel(context, title, Ui.TEXT_DIALOG_TITLE, 600, ThemeColorPolicy.text(context));
         ViewPolicy.setCentered(heading);
-        heading.setAccessibilityHeading(true);
-        LinearLayout.LayoutParams headingParams = Ui.matchWidth();
-        headingParams.topMargin = Ui.dp(context, 20);
-        headingParams.leftMargin = Ui.dp(context, 20);
-        headingParams.rightMargin = Ui.dp(context, 20);
+        LinearLayout.LayoutParams headingParams = LayoutPolicy.matchWidthWrapParams();
+        headingParams.topMargin = DimensionPolicy.pixels(context, 20);
+        headingParams.leftMargin = DimensionPolicy.pixels(context, 20);
+        headingParams.rightMargin = DimensionPolicy.pixels(context, 20);
         root.addView(heading, headingParams);
 
         if (message != null && message.length() > 0) {
-            TextView note = Ui.styledLabel(context, message, Ui.TEXT_SHEET_HEADER, 400, Ui.subText(context));
-            ViewPolicy.setCentered(note);
-            LinearLayout.LayoutParams params = Ui.matchWidth();
-            params.topMargin = Ui.dp(context, 4);
-            params.leftMargin = Ui.dp(context, 20);
-            params.rightMargin = Ui.dp(context, 20);
+            TextView note = ViewPolicy.centeredLabel(context, message, Ui.TEXT_SHEET_HEADER, 400,
+                ThemeColorPolicy.subText(context));
+            LinearLayout.LayoutParams params = LayoutPolicy.matchWidthWrapParams();
+            params.topMargin = DimensionPolicy.pixels(context, 4);
+            params.leftMargin = DimensionPolicy.pixels(context, 20);
+            params.rightMargin = DimensionPolicy.pixels(context, 20);
             root.addView(note, params);
         }
 
-        fields = Ui.column(context);
-        Ui.setPaddingDp(fields, context, 16, 6, 16, 16);
-        root.addView(fields, Ui.matchWidth());
+        fields = LayoutPolicy.column(context);
+        ViewPolicy.setPaddingDp(context, fields, 16, 6, 16, 16);
+        root.addView(fields, LayoutPolicy.matchWidthWrapParams());
 
-        root.addView(Ui.divider(context, true));
-        LinearLayout buttons = Ui.row(context);
-        TextView cancel = button("取消", 400, Ui.accent(context));
+        root.addView(LayoutPolicy.divider(context, ThemeColorPolicy.hairline(context), true));
+        LinearLayout buttons = LayoutPolicy.row(context);
+        TextView cancel = button("取消", 400, ThemeColorPolicy.accent(context));
         ViewPolicy.bindClick(cancel, dialog::cancel);
-        buttons.addView(cancel, Ui.weightedHeight(context, 48, 1f));
-        buttons.addView(Ui.divider(context, false));
-        primary = button("确定", 600, Ui.text(context));
+        buttons.addView(cancel,
+            LayoutPolicy.weightedHeightPxParams(DimensionPolicy.pixels(context, 48), 1f));
+        buttons.addView(LayoutPolicy.divider(context, ThemeColorPolicy.hairline(context), false));
+        primary = button("确定", 600, ThemeColorPolicy.text(context));
         ViewPolicy.bindClick(primary, this::submit);
-        buttons.addView(primary, Ui.weightedHeight(context, 48, 1f));
-        root.addView(buttons, Ui.matchWidth());
+        buttons.addView(primary,
+            LayoutPolicy.weightedHeightPxParams(DimensionPolicy.pixels(context, 48), 1f));
+        root.addView(buttons, LayoutPolicy.matchWidthWrapParams());
 
         dialog.setContentView(root);
         Window window = dialog.getWindow();
         if (window != null) {
             window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            window.setLayout(BoundsPolicy.atMost(Ui.dp(context, Ui.DIALOG_WIDTH),
-                Ui.screenWidthPixels(context) - Ui.dp(context, 48)),
+            window.setLayout(BoundsPolicy.atMost(DimensionPolicy.pixels(context, Ui.DIALOG_WIDTH),
+                DimensionPolicy.screenWidthPixels(context) - DimensionPolicy.pixels(context, 48)),
                 ViewGroup.LayoutParams.WRAP_CONTENT);
             window.setDimAmount(0.35f);
             window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE
@@ -105,31 +111,25 @@ public final class InputDialog {
      * @param inputType `InputType` 的组合；0 表示普通单行文字
      */
     public EditText addField(CharSequence hint, @Nullable CharSequence initial, int inputType) {
-        EditText input = Ui.styledInput(context, 15, 400, Ui.text(context));
+        EditText input = ViewPolicy.styledInput(context, 15, 400, ThemeColorPolicy.text(context));
         input.setHint(hint);
         input.setText(initial);
         ViewPolicy.setSingleLine(input);
         input.setInputType(inputType == 0 ? InputType.TYPE_CLASS_TEXT : inputType);
-        input.setHintTextColor(Ui.subText(context));
-        GradientDrawable field = Ui.outlined(Ui.rowBackground(context), Ui.dp(context, 10),
-            Ui.atLeastOnePx(context, 1), Ui.hairline(context));
+        input.setHintTextColor(ThemeColorPolicy.subText(context));
+        GradientDrawable field = DrawablePolicy.outlined(ThemeColorPolicy.rowBackground(context), DimensionPolicy.pixels(context, 10),
+            DimensionPolicy.atLeastOnePixel(context, 1), ThemeColorPolicy.hairline(context));
         ViewPolicy.setBackground(input, field);
-        Ui.setHorizontalPaddingDp(input, context, 12);
-        input.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) {}
-
-            @Override public void onTextChanged(CharSequence text, int start, int before, int count) {}
-
-            @Override public void afterTextChanged(Editable text) { refresh(); }
-        });
+        ViewPolicy.setHorizontalPaddingDp(context, input, 12);
+        ViewPolicy.afterTextChanged(input, ignored -> refresh());
         input.setOnEditorActionListener((view, actionId, event) -> {
             int index = inputs.indexOf(input);
             if (index < inputs.size() - 1) return false;
             submit();
             return true;
         });
-        LinearLayout.LayoutParams params = Ui.matchWidthHeight(context, 40);
-        params.topMargin = Ui.dp(context, 8);
+        LinearLayout.LayoutParams params = LayoutPolicy.matchWidthHeightDp(context, 40);
+        params.topMargin = DimensionPolicy.pixels(context, 8);
         fields.addView(input, params);
         // 前面的输入框回车跳到下一个，最后一个回车就是提交。
         for (EditText earlier : inputs) earlier.setImeOptions(EditorInfo.IME_ACTION_NEXT);
@@ -183,7 +183,7 @@ public final class InputDialog {
     }
 
     private TextView button(CharSequence label, int weight, int color) {
-        return Ui.textButton(context, label, Ui.TEXT_DIALOG_TITLE, weight, color, Ui.ripple(context), 0);
+        return ViewPolicy.textButton(context, label, Ui.TEXT_DIALOG_TITLE, weight, color, ViewPolicy.ripple(context), 0);
     }
 
     /** 分隔线：横的在按钮上方，竖的在两个按钮之间。 */

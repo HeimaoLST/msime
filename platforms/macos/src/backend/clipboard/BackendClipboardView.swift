@@ -10,59 +10,110 @@ final class MacClipboardModel: ObservableObject {
   @Published var search = ""
   @Published var busy = false
   @Published var message: String?
+  /// 列表带回的端到端加密状态；`pending` 时本机还在等待其他设备批准。
+  @Published var e2e: BackendAccountClient.ClipboardE2EStatus?
+  /// 账号下登记的设备，云剪贴板开着时与列表一起刷新。
+  @Published var devices: BackendAccountClient.ClipboardDevices?
   private let accountID: String
+  private var sessionID: UUID?
   private let client: BackendAccountClient
   private let account: BackendAccountSession
+  private let clipboardE2E: BackendClipboardE2E?
   private var pending: Task<Void, Never>?
-  init(accountID: String, client: BackendAccountClient = BackendAccountClient(), account: BackendAccountSession = .shared) {
-    self.accountID = accountID; self.client = client; self.account = account
+  /// `e2e` 缺省是输入法交给后端的驱动；没有驱动时读写都失败，不退回明文。
+  init(accountID: String, client: BackendAccountClient = BackendAccountClient(), account: BackendAccountSession = .shared,
+       e2e: BackendClipboardE2E? = MacCloudClipboardDriver.e2e) {
+    self.accountID = accountID; self.client = client; self.account = account; self.clipboardE2E = e2e
   }
+
+  /// 本机还在等待批准：看不到条目，也不能上传。
+  var isPending: Bool { enabled && e2e?.status == "pending" }
+  /// 本机的核对码，列表和设备状态里都有。
+  var code: String? { devices?.code ?? e2e?.code }
+  /// 等待本机批准的其他设备。
+  var awaitingApproval: [BackendAccountClient.ClipboardDevice] { isPending ? [] : devices?.awaitingApproval ?? [] }
+
   private func credentials() async throws -> String {
-    let identity = try await account.credentials(matchingUserID: accountID)
+    let identity = try await account.credentials(matchingUserID: accountID, matchingSessionID: sessionID)
     try Task.checkCancellation()
     guard identity.userID == accountID else { throw CancellationError() }
+    sessionID = identity.sessionID
     return identity.token
   }
-  func run(_ action: @escaping @MainActor (String) async throws -> Void) {
+  /// 执行一个操作，然后重新读列表；云剪贴板开着时再读一次设备状态（操作本身已经带回设备状态时不再读）。
+  func run(_ action: @escaping @MainActor (String) async throws -> BackendAccountClient.ClipboardDevices?) {
     guard !busy else { return }
     busy = true; message = nil
+    let e2e = clipboardE2E
     pending = Task {
       defer { busy = false }
       do {
-        let token = try await credentials()
-        try await action(token)
-        let page = try await client.clipboard(token: token, search: search)
-        _ = try await credentials()
-        enabled = page.enabled; items = page.items; loaded = true
-      } catch is CancellationError { items = []; text = ""; loaded = false }
-      catch { items = []; loaded = false; if !Task.isCancelled { message = error.localizedDescription } }
+        let identity = try await account.credentials(matchingUserID: accountID, matchingSessionID: sessionID)
+        try Task.checkCancellation()
+        sessionID = identity.sessionID
+        var status = try await account.authenticated(matchingUserID: identity.userID,
+                                                     matchingSessionID: identity.sessionID) { token in
+          try await action(token)
+        }.value
+        let page = try await client.clipboard(search: search, e2e: e2e, session: account,
+                                              matchingUserID: identity.userID,
+                                              matchingSessionID: identity.sessionID)
+        if page.enabled && status == nil {
+          status = try await account.authenticated(matchingUserID: identity.userID,
+                                                   matchingSessionID: identity.sessionID) { [client] token in
+            try await client.clipboardDevices(token: token, e2e: e2e)
+          }.value
+        }
+        try await account.requireSession(matchingUserID: identity.userID, matchingSessionID: identity.sessionID)
+        enabled = page.enabled; items = page.items; self.e2e = page.e2e
+        devices = page.enabled ? status : nil
+        loaded = true
+      } catch is CancellationError { clear() }
+      catch {
+        let keepsState = (error as? BackendAccountClient.Failure)?.code == "clipboard_device_pending"
+        if !keepsState { items = []; loaded = false }
+        if !Task.isCancelled { message = error.localizedDescription }
+      }
     }
   }
-  func refresh() { run { _ in } }
-  func setEnabled(_ value: Bool) { run { try await self.client.setClipboardEnabled(value, token: $0) } }
+  func refresh() { run { _ in nil } }
+  func setEnabled(_ value: Bool) { run { try await self.client.setClipboardEnabled(value, token: $0); return nil } }
   func upload() {
     let value = text
+    let e2e = clipboardE2E
     run { token in
-      _ = try await self.client.addClipboard(value, token: token)
+      _ = try await self.client.addClipboard(value, token: token, e2e: e2e)
       _ = try await self.credentials()
       self.text = ""
+      return nil
     }
   }
-  func delete(id: String? = nil) { run { try await self.client.deleteClipboard(id: id, token: $0) } }
+  func delete(id: String? = nil) { run { try await self.client.deleteClipboard(id: id, token: $0); return nil } }
+  /// 批准、拒绝、移除一台设备或重置云剪贴板。
+  func change(_ operation: BackendAccountClient.ClipboardE2EOperation) {
+    let e2e = clipboardE2E
+    run { token in try await self.client.clipboardDevices(operation, token: token, e2e: e2e) }
+  }
   func copy(_ item: BackendAccountClient.ClipboardItem) {
     run { _ in
       NSPasteboard.general.clearContents()
       NSPasteboard.general.setString(item.text, forType: .string)
+      return nil
     }
   }
-  func close() { pending?.cancel(); items = []; text = ""; search = ""; loaded = false }
+  private func clear() { items = []; text = ""; loaded = false; e2e = nil; devices = nil }
+  func close() { pending?.cancel(); clear(); search = "" }
 }
 
 struct MacCloudClipboardView: View {
   @StateObject private var model: MacClipboardModel
   @Environment(\.dismiss) private var dismiss
   @State private var confirmation: Confirmation?
-  private enum Confirmation { case enable, disable, clear }
+  private enum Confirmation: Equatable {
+    case enable, disable, clear, reset
+    case remove(BackendAccountClient.ClipboardDevice)
+    case reject(BackendAccountClient.ClipboardDevice)
+  }
   init(accountID: String) { _model = StateObject(wrappedValue: MacClipboardModel(accountID: accountID)) }
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
@@ -71,55 +122,183 @@ struct MacCloudClipboardView: View {
         Spacer()
         Button("关闭") { model.close(); dismiss() }
       }
-      Text("只上传你明确添加的内容，不自动读取系统剪贴板。最多保存 50 条；关闭云剪贴板会删除云端历史。")
-        .font(.footnote).foregroundStyle(.secondary)
+      Text("文字在本机加密后才上传，服务端只保存密文。只上传你明确添加的内容，不自动读取系统剪贴板。最多保存 50 条；关闭云剪贴板会删除云端历史和所有设备的登记。")
+        .font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
       if model.loaded {
         Button(model.enabled ? "关闭云剪贴板" : "开启云剪贴板") { confirmation = model.enabled ? .disable : .enable }
           .disabled(model.busy)
       }
-      if model.enabled && model.loaded {
-        TextEditor(text: $model.text).frame(height: 80).border(Color.secondary.opacity(0.3))
-        HStack {
-          Text("\(model.text.utf16.count) / 4000").font(.caption)
-          Spacer()
-          Button("上传这段文字") { model.upload() }
-            .disabled(model.busy || model.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.text.utf16.count > 4000)
-        }
-        HStack {
-          TextField("搜索云端历史", text: $model.search).onSubmit { model.refresh() }
-          Button("搜索 / 刷新") { model.refresh() }.disabled(model.busy)
-        }
-        List(model.items) { item in
-          VStack(alignment: .leading, spacing: 6) {
-            Text(item.text).textSelection(.enabled)
-            HStack {
-              Button("复制到本机") { model.copy(item) }
-              Button("删除", role: .destructive) { model.delete(id: item.id) }
-            }.disabled(model.busy)
-          }.padding(.vertical, 4)
-        }
-        Button("清空云端历史", role: .destructive) { confirmation = .clear }.disabled(model.busy || model.items.isEmpty)
+      ScrollView {
+        VStack(alignment: .leading, spacing: 12) {
+          if model.enabled && model.loaded {
+            if model.isPending { pendingCard } else { approvals; clipboard }
+            deviceList
+          }
+          if !model.loaded && !model.busy { Button("加载云剪贴板") { model.refresh() } }
+        }.frame(maxWidth: .infinity, alignment: .leading)
       }
-      if !model.loaded && !model.busy { Button("加载云剪贴板") { model.refresh() } }
       if model.busy { ProgressView() }
-      if let message = model.message { Text(message).foregroundStyle(.secondary) }
-      Spacer(minLength: 0)
+      if let message = model.message { Text(message).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
     }
     .padding(20).frame(width: 560, height: 560)
     .onAppear { model.refresh() }
     .onDisappear { model.close() }
-    .alert(confirmation == .enable ? "开启云剪贴板？" : "删除云端历史？", isPresented: Binding(
+    .alert(title, isPresented: Binding(
       get: { confirmation != nil }, set: { if !$0 { confirmation = nil } })) {
       Button("取消", role: .cancel) { confirmation = nil }
-      Button("确认", role: confirmation == .enable ? nil : .destructive) {
+      Button(confirmButton, role: confirmation == .enable ? nil : .destructive) {
         switch confirmation {
         case .enable: model.setEnabled(true)
         case .disable: model.setEnabled(false)
         case .clear: model.delete()
+        case .reset: model.change(.reset)
+        case .remove(let device): model.change(.remove(deviceID: device.device_id))
+        case .reject(let device): model.change(.reject(deviceID: device.device_id))
         case nil: break
         }
         confirmation = nil
       }
-    } message: { Text(confirmation == .enable ? "开启后可以手动上传文字，并在已登录的设备上获取。" : "云端历史删除后不可恢复，已复制到其他应用的内容不会被删除。") }
+    } message: { Text(confirmationMessage) }
+  }
+
+  /// 本机等待批准：显示核对码，说明去哪里批准；所有设备都用不了时可以重置。
+  private var pendingCard: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text("这台 Mac 正在等待批准").font(.headline)
+      if let code = model.code {
+        Text(code).font(.system(size: 22, weight: .semibold, design: .monospaced)).textSelection(.enabled)
+          .accessibilityLabel("核对码 \(code)")
+      }
+      Text("在一台已经能使用云剪贴板的设备上打开云剪贴板，确认那里显示的核对码与上面相同，再点「允许」。批准后点「刷新」即可读取和上传。")
+        .font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+      HStack {
+        Button("刷新") { model.refresh() }.disabled(model.busy)
+        Spacer()
+        Button("重置云剪贴板…", role: .destructive) { confirmation = .reset }.disabled(model.busy)
+      }
+    }
+    .padding(12).background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
+  }
+
+  /// 等待本机批准的其他设备。
+  @ViewBuilder private var approvals: some View {
+    let waiting = model.awaitingApproval
+    if !waiting.isEmpty {
+      VStack(alignment: .leading, spacing: 8) {
+        Text("有设备请求使用云剪贴板").font(.headline)
+        Text("只在那台设备上显示的核对码与这里相同时才点「允许」。").font(.footnote).foregroundStyle(.secondary)
+        ForEach(waiting) { device in
+          HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+              Text(Self.name(device))
+              Text(device.code).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+            }
+            Spacer()
+            Button("拒绝") { confirmation = .reject(device) }
+            Button("允许") { model.change(.approve(deviceID: device.device_id)) }.keyboardShortcut(.defaultAction)
+          }.disabled(model.busy)
+        }
+      }
+      .padding(12).background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.08)))
+    }
+  }
+
+  @ViewBuilder private var clipboard: some View {
+    TextEditor(text: $model.text).frame(height: 80).border(Color.secondary.opacity(0.3))
+    HStack {
+      Text("\(model.text.utf16.count) / 4000").font(.caption)
+      Spacer()
+      Button("上传这段文字") { model.upload() }
+        .disabled(model.busy || model.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.text.utf16.count > 4000)
+    }
+    HStack {
+      TextField("搜索云端历史", text: $model.search).onSubmit { model.refresh() }
+      Button("搜索 / 刷新") { model.refresh() }.disabled(model.busy)
+    }
+    if let skipped = model.e2e?.undecryptable, skipped > 0 {
+      Text("有 \(skipped) 条内容用旧密钥加密，这台设备解不开，已略去。").font(.footnote).foregroundStyle(.secondary)
+    }
+    ForEach(model.items) { item in
+      VStack(alignment: .leading, spacing: 6) {
+        Text(item.text).textSelection(.enabled)
+        let meta = Self.meta(item)
+        if !meta.isEmpty { Text(meta).font(.caption).foregroundStyle(.secondary) }
+        HStack {
+          Button("复制到本机") { model.copy(item) }
+          Button("删除", role: .destructive) { model.delete(id: item.id) }
+        }.disabled(model.busy)
+      }.padding(.vertical, 4)
+      Divider()
+    }
+    Button("清空云端历史", role: .destructive) { confirmation = .clear }.disabled(model.busy || model.items.isEmpty)
+  }
+
+  /// 账号下的设备。移除一台已批准的设备会换钥，其余设备都要重新批准。
+  @ViewBuilder private var deviceList: some View {
+    if let devices = model.devices?.devices, !devices.isEmpty {
+      VStack(alignment: .leading, spacing: 6) {
+        Text("设备").font(.headline)
+        ForEach(devices) { device in
+          HStack {
+            VStack(alignment: .leading, spacing: 2) {
+              Text(Self.name(device) + (device.current ? "（本机）" : ""))
+              Text(device.approved ? "已批准" : "等待批准").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if !device.current && !model.isPending {
+              if device.approved {
+                Button("移除", role: .destructive) { confirmation = .remove(device) }
+              } else {
+                Button("拒绝") { confirmation = .reject(device) }
+              }
+            }
+          }.disabled(model.busy)
+        }
+        if !model.isPending {
+          Button("重置云剪贴板…", role: .destructive) { confirmation = .reset }.disabled(model.busy)
+        }
+      }
+    }
+  }
+
+  private static func name(_ device: BackendAccountClient.ClipboardDevice) -> String {
+    device.name.isEmpty ? "未命名设备" : device.name
+  }
+
+  private static func meta(_ item: BackendAccountClient.ClipboardItem) -> String {
+    var parts: [String] = []
+    if item.pinned == true { parts.append("已置顶") }
+    if let device = item.device { parts.append(device) }
+    return parts.joined(separator: " · ")
+  }
+
+  private var title: String {
+    switch confirmation {
+    case .enable: return "开启云剪贴板？"
+    case .disable, .clear: return "删除云端历史？"
+    case .reset: return "重置云剪贴板？"
+    case .remove(let device): return "移除「\(Self.name(device))」？"
+    case .reject(let device): return "拒绝「\(Self.name(device))」？"
+    case nil: return ""
+    }
+  }
+  private var confirmButton: String {
+    switch confirmation {
+    case .reset: return "重置"
+    case .remove: return "移除"
+    case .reject: return "拒绝"
+    default: return "确认"
+    }
+  }
+  private var confirmationMessage: String {
+    switch confirmation {
+    case .enable: return "开启后可以手动上传文字，内容在本机加密后保存，在已登录并获准的设备上解密查看。"
+    case .disable: return "关闭后云端历史、加密密钥和所有设备的登记都会删除，不可恢复；再开启时其他设备需要重新批准。已复制到其他应用的内容不会被删除。"
+    case .clear: return "云端历史删除后不可恢复，已复制到其他应用的内容不会被删除。"
+    case .reset: return "重置会换一把新的加密密钥并删除云端的全部条目。其他所有设备都要重新批准才能继续使用云剪贴板。只在已获批准的设备都用不了时这样做。"
+    case .remove: return "移除后这台设备不能再读取云剪贴板。为此会换一把新的加密密钥并删除云端的全部条目，其他设备都要重新批准。"
+    case .reject: return "拒绝后这台设备的登记会被删除；它下次打开云剪贴板时会重新请求批准。"
+    case nil: return ""
+    }
   }
 }

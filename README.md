@@ -1,6 +1,26 @@
 # 水杉输入法
 
+**简体中文** · [English](docs/readme/README.en.md) · [日本語](docs/readme/README.ja.md) · [한국어](docs/readme/README.ko.md) · [繁體中文](docs/readme/README.zh-Hant.md)
+
+[![Core CI](https://img.shields.io/github/actions/workflow/status/metasequoiaime/msime/ci.yml?branch=develop&label=Core%20CI&logo=githubactions&logoColor=white)](https://github.com/metasequoiaime/msime/actions/workflows/ci.yml?query=branch%3Adevelop)
+[![Native Platform CI](https://img.shields.io/github/actions/workflow/status/metasequoiaime/msime/ci-platforms.yml?branch=develop&label=Platform%20CI&logo=githubactions&logoColor=white)](https://github.com/metasequoiaime/msime/actions/workflows/ci-platforms.yml?query=branch%3Adevelop)
+[![CodeQL](https://img.shields.io/github/actions/workflow/status/metasequoiaime/msime/codeql.yml?branch=develop&event=schedule&label=CodeQL&logo=github)](https://github.com/metasequoiaime/msime/actions/workflows/codeql.yml)
+[![Cargo audit](https://img.shields.io/github/actions/workflow/status/metasequoiaime/msime/cargo-audit.yml?branch=develop&event=schedule&label=cargo%20audit&logo=rust)](https://github.com/metasequoiaime/msime/actions/workflows/cargo-audit.yml)
+
+[![Android version](https://img.shields.io/badge/dynamic/yaml?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmetasequoiaime%2Fmsime%2Fdevelop%2Fplatforms%2Fandroid%2Fversion.txt&query=%24&prefix=v&label=Android&logo=android&logoColor=white&color=34A853)](platforms/android/README.md)
+[![iOS version](https://img.shields.io/badge/dynamic/yaml?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmetasequoiaime%2Fmsime%2Fdevelop%2Fplatforms%2Fios%2Fversion.txt&query=%24&prefix=v&label=iOS&logo=apple&logoColor=white&color=147EFB)](platforms/ios/README.md)
+[![macOS version](https://img.shields.io/badge/dynamic/yaml?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmetasequoiaime%2Fmsime%2Fdevelop%2Fplatforms%2Fmacos%2Fversion.txt&query=%24&prefix=v&label=macOS&logo=apple&logoColor=white&color=000000)](platforms/macos/README.md)
+[![Linux version](https://img.shields.io/badge/dynamic/yaml?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmetasequoiaime%2Fmsime%2Fdevelop%2Fplatforms%2Flinux%2Fversion.txt&query=%24&prefix=v&label=Linux&logo=linux&logoColor=white&color=D97706)](platforms/linux/README.md)
+[![Windows version](https://img.shields.io/badge/dynamic/yaml?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmetasequoiaime%2Fmsime%2Fdevelop%2Fplatforms%2Fwindows%2Fversion.txt&query=%24&prefix=v&label=Windows&logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0wIDBoMTEuMzc3djExLjM3Mkgwem0xMi42MjMgMEgyNHYxMS4zNzJIMTIuNjIzek0wIDEyLjYyM2gxMS4zNzdWMjRIMHptMTIuNjIzIDBIMjRWMjRIMTIuNjIzeiIvPjwvc3ZnPg%3D%3D&logoColor=white&color=0078D4)](platforms/windows/README.md)
+[![HarmonyOS version](https://img.shields.io/badge/dynamic/yaml?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmetasequoiaime%2Fmsime%2Fdevelop%2Fplatforms%2Fharmony%2Fversion.txt&query=%24&prefix=v&label=HarmonyOS&logo=harmonyos&logoColor=white&color=CF0A2C)](platforms/harmony/README.md)
+[![npm @msime/web-engine](https://img.shields.io/npm/v/@msime/web-engine?label=%40msime%2Fweb-engine&logo=npm)](https://www.npmjs.com/package/@msime/web-engine)
+
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg)](LICENSE)
+[![Rust 1.89+](https://img.shields.io/badge/rust-1.89%2B-orange?logo=rust)](Cargo.toml)
+[![Website](https://img.shields.io/badge/website-msime.app-2E7D32)](https://msime.app/)
+[![GitHub stars](https://img.shields.io/github/stars/metasequoiaime/msime?style=flat&logo=github)](https://github.com/metasequoiaime/msime/stargazers)
+[![Contributors](https://img.shields.io/github/contributors/metasequoiaime/msime)](https://github.com/metasequoiaime/msime/graphs/contributors)
+[![Last commit](https://img.shields.io/github/last-commit/metasequoiaime/msime/develop)](https://github.com/metasequoiaime/msime/commits/develop)
 <a href="https://depot.dev/?utm_source=metasequoiaime"><img src="https://depot.dev/badges/built-with-depot.svg" alt="Built with Depot" height="20"></a>
 
 水杉输入法（MSIME）是面向 Android、iOS、macOS、Linux、Windows 与 HarmonyOS 的多平台中文输入法。六个平台各有自己的原生输入法宿主，都接入同一套共享输入运行时和同一份 React 设置界面；React 管理界面通过 Tauri 调用普通 Rust 业务库；输入算法由 msime-engine 提供。
@@ -55,7 +75,7 @@
 
 ## 开发
 
-贡献代码前请阅读 [架构说明](ARCHITECTURE.md)、[贡献指南](CONTRIBUTING.md)、[安全策略](SECURITY.md)、[网络请求与数据流向](PRIVACY.md) 和 [行为准则](CODE_OF_CONDUCT.md)。准备公开源代码或平台构建物时，再阅读 [开源发布清单](docs/open-source-release.md) 和[第三方组件清单](docs/third-party.md)；它们列出第三方通知、资源许可、敏感文件检查和验证边界。各平台宿主的构建、测试与安装细节以对应的 `platforms/<os>/README.md` 为准。制作音效包、音乐包、指令表、特效包、短语表、辅助码表、单词本或符号集，见[插件作者指南](docs/plugins.md)。
+贡献代码前请阅读 [架构说明](docs/ARCHITECTURE.md)、[贡献指南](.github/CONTRIBUTING.md)、[安全策略](.github/SECURITY.md)、[网络请求与数据流向](PRIVACY.md) 和 [行为准则](.github/CODE_OF_CONDUCT.md)。准备公开源代码或平台构建物时，再阅读 [开源发布清单](docs/open-source-release.md) 和[第三方组件清单](docs/third-party.md)；它们列出第三方通知、资源许可、敏感文件检查和验证边界。各平台宿主的构建、测试与安装细节以对应的 `platforms/<os>/README.md` 为准。制作音效包、音乐包、指令表、特效包、短语表、辅助码表、单词本或符号集，见[插件作者指南](docs/plugins.md)。
 
 跨平台的本地验证入口是 `bash scripts/verify-local.sh`：`--quick` 只跑编译阶段，是合并前的门禁；无参数跑全量，包含 Rust 测试、fmt、clippy、依赖审计、前端 lint 与类型检查、各原生宿主的 ctest 以及整句转换与逐键延迟评测。每个阶段把失败的测试名与 `scripts/known-failures.txt` 比对，只对不在清单里的名字失败。`git config core.hooksPath .githooks` 可以把 `--quick` 挂到 pre-push 上。
 
@@ -75,7 +95,7 @@ pnpm tauri dev
 
 Android 合包构建和设备测试见 [Android 宿主](platforms/android/README.md#tauri--react-共享设置合包)。Tauri 设置与原生 `:ime` 服务同包、不同进程，共享私有 files/bootstrap/state；关闭设置窗口不结束输入法进程。iOS 的产品宿主是 `platforms/ios` 的原生 App，它嵌入原生键盘扩展并通过 App Group 共享状态；Tauri/React 在 iOS 上只作为共享功能与界面的公共组件，不作为独立 App 启动。签名与设备安装步骤见 [iOS 宿主](platforms/ios/README.md)。
 
-共享设置支持 shuangpin_profile：xiaohe（小鹤）、ziranma（自然码）、shoudao（首道）、microsoft（微软）。缺省按小鹤读取，未知值拒绝；设置页在非双拼方案下禁用此选择但保留已选值。方案更改沿用组词结束后替换 Engine 的规则。
+共享设置支持 shuangpin_profile：xiaohe（小鹤）、ziranma（自然码）、shoudao（首道）、microsoft（微软），以及 custom（自定义双拼，键位表存在 shuangpin_custom_profile）。缺省按小鹤读取，未知值拒绝；设置页在非双拼方案下禁用此选择但保留已选值。macOS 和 Linux 的设置页可以从内置方案起步编辑自定义键位、导入导出 JSON，表要通过 Engine 的校验才能保存；表不能用时输入法按小鹤运行。方案更改沿用组词结束后替换 Engine 的规则。
 
 Linux 本地构建、隔离 D-Bus / IBus 测试和安装后的首次配置见 [Linux 宿主](platforms/linux/README.md)。宿主支持设置文件自动重读，安装后由随装的 `msime-linux-setup` 备齐词库并准备运行配置；`msime-linux-setup --download` 按 `resources/desktop-dictionary.lock.json` 取回缺失词库，图形入口在缺少 `runtime-options.json` 时会打开同一套首次配置页。
 
@@ -127,14 +147,12 @@ macOS 原生 IMK bundle 的构建、隔离状态目录与安装见 [macOS 宿主
 
 ## 代码签名策略 / Code signing policy
 
-Windows 正式版目前由 [msime-windows](https://github.com/metasequoiaime/msime-windows) 构建、签名和发布，签名适用那边的 [Code signing policy](https://github.com/metasequoiaime/msime-windows/blob/develop/docs/code-signing-policy.md)：
-
 Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
 
-本仓库的 `release-windows.yml` 只产出未签名的 Windows 安装包，不使用任何签名凭据。其余平台按各自平台的机制签名，不经过 SignPath。隐私说明见 [PRIVACY.md](PRIVACY.md)。
+Windows 正式版目前由 [msime-windows](https://github.com/metasequoiaime/msime-windows) 构建、签名和发布，签名适用那边的 [Code signing policy](https://github.com/metasequoiaime/msime-windows/blob/develop/docs/code-signing-policy.md)。本仓库的 Windows 安装包由 `release-windows.yml` 构建，SignPath 签名尚未启用（要等 SignPath Foundation 把本仓库加进同一个项目），启用前发布的是未签名安装包；启用后的签名范围、角色和流程见本仓库的 [Code signing policy](docs/code-signing-policy.md)。其余平台按各自平台的机制签名，不经过 SignPath。隐私说明见 [PRIVACY.md](PRIVACY.md)。
 
 ## 许可证
 
-源码为 **GPL-3.0-only**，全文见 [LICENSE](LICENSE)。
+源码为 **GPL-3.0-only**，全文见 [LICENSE](LICENSE)。例外是脚本插件的模板与 SDK（[docs/script-plugin-template](docs/script-plugin-template/)）和脚本插件合集（[plugins/script](plugins/script/)）的代码，用 MIT，全文分别在这两个目录的 `LICENSE`：SDK 要编进每个插件，作者照模板写的插件不必因此变成 GPL。插件包里编进的第三方数据按各自的许可证。
 
 上游代码、词库、模型和各平台 SDK 以各自许可证和通知为准，其中 Android 与 iOS 的手写识别使用 Google ML Kit，按其服务条款授权而非开源许可证。完整对照见[第三方组件清单](docs/third-party.md)。

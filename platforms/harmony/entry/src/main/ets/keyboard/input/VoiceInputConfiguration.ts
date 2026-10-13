@@ -7,11 +7,13 @@ export interface VoicePolishTokens {
 }
 
 export interface VoiceAsrTokens {
+  doubao?: string;
   openai?: string;
   siliconflow?: string;
   groq?: string;
   everyapi?: string;
   mistral?: string;
+  bailian?: string;
 }
 
 export interface VoiceInputConfiguration {
@@ -120,8 +122,11 @@ export class VoiceInputConfigurationPolicy {
     if (config.asr_provider === "local" && (config.asr_model_path ?? "").trim().length > 0) {
       return "使用本机模型识别；原始音频不会离开设备。";
     }
-    if (config.asr_provider === "doubao" && config.asr_token.trim().length > 0) {
+    if (DoubaoCredentialPolicy.attempted(config)) {
       return "使用豆包实时语音识别；原始音频会发送到豆包。";
+    }
+    if (config.asr_provider === "doubao") {
+      return "豆包未填写密钥，暂用 HarmonyOS 系统语音识别；输入法不会保存原始音频。";
     }
     const cloudProviders: Record<string, string> = {
       openai: "OpenAI",
@@ -129,6 +134,7 @@ export class VoiceInputConfigurationPolicy {
       groq: "Groq",
       everyapi: "EveryAPI",
       mistral: "Mistral",
+      bailian: "阿里云百炼",
     };
     const provider: string | undefined = cloudProviders[config.asr_provider];
     if (provider !== undefined) {
@@ -138,5 +144,36 @@ export class VoiceInputConfigurationPolicy {
       return "使用 HarmonyOS 系统语音识别；输入法不会保存原始音频。";
     }
     return "当前语音服务不可用，请检查设置。";
+  }
+}
+
+/**
+ * 豆包要不要用、缺什么。出厂的 `asr_provider` 就是 `doubao` 且不带任何凭据，从没配置过的用户拿到的一直是系统识别，所以「一个凭据都没填」读作没有配置，照旧交给系统识别，不报错；只要填过其中一项（密钥或 App ID），就按豆包走，缺的那一项明确报出来，不再悄悄换成系统识别。
+ */
+export class DoubaoCredentialPolicy {
+  /** 豆包密钥：当前框优先，空时取 `asr_tokens.doubao`，与共享解析 `resolve_voice_fields` 一致。 */
+  static token(config: VoiceInputConfiguration): string {
+    const flat: string = config.asr_token.trim();
+    return flat.length > 0 ? flat : (config.asr_tokens?.doubao ?? "").trim();
+  }
+
+  /** 选了豆包，并且至少填过一项凭据。 */
+  static attempted(config: VoiceInputConfiguration): boolean {
+    return (
+      config.asr_provider === "doubao" &&
+      (DoubaoCredentialPolicy.token(config).length > 0 || config.asr_app_key.trim().length > 0)
+    );
+  }
+
+  /** 填了一部分时缺的那一项，给语音面板显示；没选豆包、没碰过或凭据齐全时为 null。格式问题（非法字符、接口地址）仍由握手前的校验报出。 */
+  static missing(config: VoiceInputConfiguration): string | null {
+    if (!DoubaoCredentialPolicy.attempted(config)) return null;
+    const legacy: boolean = config.doubao_auth_mode === "legacy";
+    if (DoubaoCredentialPolicy.token(config).length === 0) {
+      return legacy ? "豆包缺少 Access Token，请在设置中填写" : "豆包缺少 API Key，请在设置中填写";
+    }
+    if (legacy && config.asr_app_key.trim().length === 0)
+      return "豆包旧版鉴权缺少 App ID，请在设置中填写";
+    return null;
   }
 }

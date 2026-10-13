@@ -23,14 +23,6 @@ public final class AiPolishModelCatalog {
 
     private AiPolishModelCatalog() {}
 
-    static String strictString(Object value) {
-        return JsonPolicy.strictString(value);
-    }
-
-    static Boolean strictBoolean(Object value) {
-        return JsonPolicy.strictBoolean(value);
-    }
-
     public static List<String> fetch(String endpoint, String token) throws AiPolishClient.Failure {
         final AiPolishConfiguration configuration;
         try {
@@ -106,17 +98,16 @@ public final class AiPolishModelCatalog {
             if (!AiEndpointPolicy.allowed(uri.toString()))
                 throw new AiPolishClient.Failure(AiPolishClient.Reason.INVALID);
             connection = (HttpURLConnection) AiEndpointPolicy.open(uri.toURL());
-            connection.setInstanceFollowRedirects(false);
+            HttpConnectionPolicy.rejectRedirects(connection);
             connection.setRequestMethod("GET");
-            connection.setConnectTimeout(30_000);
-            connection.setReadTimeout(30_000);
+            HttpConnectionPolicy.setTimeouts(connection, 30_000, 30_000);
             connection.setRequestProperty("Accept", "application/json");
             if (anthropic) {
                 connection.setRequestProperty("x-api-key", token);
                 connection.setRequestProperty("anthropic-version", "2023-06-01");
             } else connection.setRequestProperty("Authorization", "Bearer " + token);
             int status = connection.getResponseCode();
-            if (status < 200 || status >= 300)
+            if (!HttpConnectionPolicy.isSuccessful(status))
                 throw new AiPolishClient.Failure(AiPolishClient.Reason.UNAVAILABLE);
             byte[] response;
             try (InputStream input = connection.getInputStream()) {

@@ -199,9 +199,10 @@ fn call_arguments(arguments: config::Arguments) -> Result<serde_json::Map<String
     let text = match arguments {
         config::Arguments::Inline(text) => text,
         config::Arguments::File(path) => {
-            let file = msime_client_core::file_lock::open_private_file(&path).map_err(|error| {
-                format!("cannot read the arguments from {}: {error}", path.display())
-            })?;
+            let file =
+                msime_client_core::file_lock::open_private_file_in(&path).map_err(|error| {
+                    format!("cannot read the arguments from {}: {error}", path.display())
+                })?;
             let bytes =
                 crate::bounded::read(file, ARGUMENTS_READ_LIMIT).map_err(|error| match error {
                     crate::bounded::ReadError::TooLarge => {
@@ -264,6 +265,23 @@ mod tests {
         symlink(&target, &link).unwrap();
 
         let result = call_arguments(config::Arguments::File(link));
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn argument_files_reject_a_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let linked = directory.path().join("linked");
+        symlink(outside.path(), &linked).unwrap();
+        let target = outside.path().join("arguments.json");
+        std::fs::write(&target, br#"{"text":"synthetic"}"#).unwrap();
+
+        let result = call_arguments(config::Arguments::File(linked.join("arguments.json")));
+
         assert!(result.is_err());
     }
 }

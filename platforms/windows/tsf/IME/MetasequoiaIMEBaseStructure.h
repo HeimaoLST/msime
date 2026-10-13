@@ -84,7 +84,9 @@ enum KEYSTROKE_FUNCTION
     // Korean, behind the deferred-key barrier: a caret or editing key was eaten to keep its place in the queue, so after the syllable is committed the key is replayed to the application.
     FUNCTION_COMMIT_SYLLABLE_AND_REPLAY,
     // Korean: the Hanja key, or a key the open Hanja list takes (KoreanHanjaKey.h). Decided against the host session when the key runs, so a list key queued behind the key that opened or closed the list still does the right thing.
-    FUNCTION_KOREAN_HANJA_KEY
+    FUNCTION_KOREAN_HANJA_KEY,
+    // Ctrl+Shift+J：在中文方案和日语方案之间切换。和 FUNCTION_TOGGLE_CHARACTER_SET 一样只发给 Server、不读回复、不改组字。
+    FUNCTION_TOGGLE_JAPANESE
 };
 
 static_assert(FUNCTION_MOVE_UP == 16 && FUNCTION_MOVE_PAGE_BOTTOM == 21,
@@ -94,7 +96,7 @@ static_assert(FUNCTION_INSERT_TEXT == 25 && FUNCTION_TOGGLE_CHARACTER_SET == 29,
 static_assert(FUNCTION_SMART_PUNCTUATION_REVERT == 31 && FUNCTION_BACKSPACE_SEGMENT == 32 &&
                   FUNCTION_MOVE_LEFT_SEGMENT == 33 && FUNCTION_MOVE_RIGHT_SEGMENT == 34 &&
                   FUNCTION_COMMIT_SYLLABLE == 35 && FUNCTION_COMMIT_SYLLABLE_AND_REPLAY == 36 &&
-                  FUNCTION_KOREAN_HANJA_KEY == 37,
+                  FUNCTION_KOREAN_HANJA_KEY == 37 && FUNCTION_TOGGLE_JAPANESE == 38,
               "New composition functions must be append-only");
 
 //---------------------------------------------------------------------
@@ -211,7 +213,8 @@ class CCandidateRange
     ~CCandidateRange(void);
 
     BOOL IsRange(UINT vKey);
-    int GetIndex(UINT vKey);
+    // enginePage：presenter 持有 TIP 宿主会话的真实一页（见 common/SecondThirdCandidatePolicy.h 的 tip_candidate_selection_index）。
+    int GetIndex(UINT vKey, WCHAR wch, bool enginePage);
 
     inline int Count() const
     {

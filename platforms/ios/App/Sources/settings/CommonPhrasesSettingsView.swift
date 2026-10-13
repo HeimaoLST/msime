@@ -2,12 +2,13 @@ import SwiftUI
 
 /// 常用语，对应 Android 的 `PhrasesPage`：列出键盘 常用语 面板中那些不带编码的短语，每条都可删除，并提供 添加常用语 操作。它通过 `CommonPhrasesBridge` 读写 App Group 里同一份 `CommonPhrases.json`，所以键盘下次打开面板时就会显示改动。每次调用存储都要拿文件锁并读写磁盘，所以放在主线程之外执行。
 struct CommonPhrasesSettingsView: View {
-  @Environment(\.scenePhase) private var scenePhase
   @State private var phrases: [CommonPhrasesBridge.Phrase]?
   @State private var loadFailed = false
   @State private var adding = false
   @State private var deleting: CommonPhrasesBridge.Phrase?
-  @State private var busy = false
+  @State private var requestState = CommonPhrasesRequestState()
+  @State private var pending: Task<Void, Never>?
+  @State private var request = ViewRequestGeneration()
 
   var body: some View {
     List {
@@ -38,7 +39,7 @@ struct CommonPhrasesSettingsView: View {
           .frame(minHeight: 34)
           .contentShape(Rectangle())
         }
-        .disabled(busy || phrases == nil)
+        .disabled(requestState.busy || phrases == nil)
         .accessibilityIdentifier("addCommonPhrase")
         .designRow()
       } footer: {
@@ -48,8 +49,11 @@ struct CommonPhrasesSettingsView: View {
     .designPage()
     .navigationTitle("常用语")
     .navigationBarTitleDisplayMode(.inline)
-    .onAppear(perform: reload)
-    .onChange(of: scenePhase) { _, phase in if phase == .active { reload() } }
+    .reloadOnAppearAndActive(reload, onAppear: { request.appear() })
+    .onDisappear {
+      ViewRequestTask.disappear(request: $request, pending: $pending)
+      requestState.invalidate()
+    }
     .sheet(isPresented: $adding) {
       CommonPhraseEditor { text in run(success: "已添加") { try CommonPhrasesBridge.add(text) } }
     }
@@ -70,34 +74,61 @@ struct CommonPhrasesSettingsView: View {
   }
 
   private func reload() {
-    Task {
-      let loaded = await Task.detached(priority: .userInitiated) { Result { try CommonPhrasesBridge.load() } }.value
-      switch loaded {
-      case .success(let list):
-        phrases = list
-        loadFailed = false
-      case .failure:
-        // 已经加载的列表保留不动；刷新失败只替换加载提示。
-        if phrases == nil { loadFailed = true }
+    guard request.isVisible, let reloadRequest = requestState.beginReload() else { return }
+    let id = ViewRequestTask.claim(request: $request, pending: $pending)
+    pending = Task { @MainActor in
+      defer { ViewRequestTask.clear(request: $request, pending: $pending, id: id) }
+      do {
+        try request.checkCurrent(id)
+        let loaded = await Task.detached(priority: .userInitiated) { Result { try CommonPhrasesBridge.load() } }.value
+        try request.checkCurrent(id)
+        guard requestState.acceptReload(reloadRequest) else { return }
+        switch loaded {
+        case .success(let list):
+          phrases = list
+          loadFailed = false
+        case .failure:
+          // 已经加载的列表保留不动；刷新失败只替换加载提示。
+          if phrases == nil { loadFailed = true }
+        }
+      } catch is CancellationError {
+      } catch {
+        // 业务错误已由 Result 返回；完整捕获保证任务的失败类型为 Never。
       }
     }
   }
 
   /// 在主线程之外执行一次写入，并显示它返回的已存储列表，或说明存储拒绝的原因。写入被拒绝时会重新加载，这样在别处被删除的短语（`common_phrases_not_found`）也会从列表中消失。
   private func run(success: String, _ operation: @escaping @Sendable () throws -> [CommonPhrasesBridge.Phrase]) {
-    guard !busy else { return }
-    busy = true
-    Task {
-      let result = await Task.detached(priority: .userInitiated) { Result { try operation() } }.value
-      busy = false
-      switch result {
-      case .success(let list):
-        phrases = list
-        loadFailed = false
-        ToastCenter.shared.show(success)
-      case .failure(let error):
-        ToastCenter.shared.show(CommonPhrasesBridge.message(for: error))
-        reload()
+    guard request.isVisible, requestState.beginMutation() else { return }
+    let id = ViewRequestTask.claim(request: $request, pending: $pending)
+    pending = Task { @MainActor in
+      var mutationFinished = false
+      defer {
+        if request.isCurrent(id) {
+          if !mutationFinished { requestState.finishMutation() }
+          ViewRequestTask.clear(request: $request, pending: $pending, id: id)
+        }
+      }
+      do {
+        try request.checkCurrent(id)
+        let result = await Task.detached(priority: .userInitiated) { Result { try operation() } }.value
+        try request.checkCurrent(id)
+        requestState.finishMutation()
+        mutationFinished = true
+        ViewRequestTask.clear(request: $request, pending: $pending, id: id)
+        switch result {
+        case .success(let list):
+          phrases = list
+          loadFailed = false
+          ToastCenter.shared.show(success)
+        case .failure(let error):
+          ToastCenter.shared.show(CommonPhrasesBridge.message(for: error))
+          reload()
+        }
+      } catch is CancellationError {
+      } catch {
+        // 业务错误已由 Result 返回；完整捕获保证任务的失败类型为 Never。
       }
     }
   }

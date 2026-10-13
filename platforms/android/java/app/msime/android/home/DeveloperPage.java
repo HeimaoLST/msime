@@ -2,15 +2,16 @@ package app.msime.android.home;
 
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageInfo;
 import android.net.Uri;
-import android.os.Bundle;
 import android.widget.LinearLayout;
 import androidx.annotation.Nullable;
 import androidx.core.content.FileProvider;
 import app.msime.android.AndroidLocalSettings;
+import app.msime.android.AppVersionPolicy;
+import app.msime.android.BackendAccount;
 import app.msime.android.CloudApi;
 import app.msime.android.DiagnosticsApi;
+import app.msime.android.FilePolicy;
 import app.msime.android.McpUploadSwitchPolicy;
 import app.msime.android.NativeClient;
 import app.msime.android.JsonPolicy;
@@ -18,6 +19,7 @@ import app.msime.android.NumberPolicy;
 import app.msime.android.PreferencesRevisionPolicy;
 import app.msime.android.SyncSignals;
 import app.msime.android.SyncSwitch;
+import app.msime.android.TimestampDisplayPolicy;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import java.io.File;
 import java.time.Instant;
@@ -25,7 +27,6 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -43,43 +44,55 @@ import org.json.JSONObject;
  *
  * <p>调试开关、日志级别、「记录输入日志」和 MCP 上传的内容与保留时长只在本机，存在 {@link AndroidLocalSettings}（`platform.android.developer.*`），不进共享偏好、不同步；「重置所有设置」同时把共享偏好和这份本地设置恢复为默认值。
  */
-public final class DeveloperPage extends DetailPage {
+public final class DeveloperPage extends ReloadingDetailPage {
     private static final String PLATFORM = "android";
     private static final String DIAGNOSTICS_CACHE = "diagnostics";
     private static final String UPLOAD_BUNDLE = "mcp-upload.zip";
     private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm", Locale.ROOT);
     private static final DateTimeFormatter DAY_CLOCK = DateTimeFormatter.ofPattern("M月d日 HH:mm", Locale.ROOT);
 
-    @Nullable private LinearLayout column;
     @Nullable private JSONObject snapshot;
     private AndroidLocalSettings.Snapshot local = AndroidLocalSettings.defaults();
     private DiagnosticsApi.State cloud = DiagnosticsApi.State.EMPTY;
     private boolean cloudLoaded;
     private boolean confirming;
     private boolean busy;
+    private long generation;
+    private String cloudAccountId = "";
+    private String cloudSessionId = "";
     /** 本次会话里拿到的完整令牌；只在内存里，离开页面就丢。 */
     @Nullable private String freshToken;
     private final Set<Integer> expanded = new HashSet<>();
 
-    @Override protected void buildContent(LinearLayout column, Bundle args) {
-        this.column = column;
+    private record LoadedCloud(DiagnosticsApi.State state, String accountId, String sessionId) {}
+
+    @Override protected void onContentReady() {
         render();
-        reload();
     }
 
-    @Override protected void onBecameVisible() {
-        reload();
+    @Override protected void onContentDestroyed() {
+        generation++;
+        cloudAccountId = "";
+        cloudSessionId = "";
+        // Work results are fenced to the old view and will be dropped after recreation. Do not
+        // leave the rebuilt page permanently disabled, and never retain a full access token past
+        // the view that displayed it.
+        busy = false;
+        confirming = false;
+        freshToken = null;
     }
 
-    @Override public void onDestroyView() {
-        column = null;
-        super.onDestroyView();
-    }
-
-    private void reload() {
+    @Override protected void reload() {
         if (getView() == null) return;
+        long request = ++generation;
+        cloud = DiagnosticsApi.State.EMPTY;
+        cloudLoaded = false;
+        cloudAccountId = "";
+        cloudSessionId = "";
+        render();
         HostTask.run(this, context -> new Object[] {HostStore.loadPreferences(context),
             AndroidLocalSettings.load(context)}, loaded -> {
+            if (request != generation || getView() == null) return;
             snapshot = loaded[0] instanceof JSONObject value ? value : null;
             if (loaded[1] instanceof AndroidLocalSettings.Snapshot settings) local = settings;
             render();
@@ -87,21 +100,47 @@ public final class DeveloperPage extends DetailPage {
         // 读云端状态是一次 HTTP 请求，走网络线程；放在共享存储的串行线程上时，网络慢的那几十秒里开关的保存都排在它后面。
         HostTask.runNetwork(this, context -> {
             try {
-                return new DiagnosticsApi(new CloudApi(context)).state();
+                String accountId = SyncSwitch.accountId(context);
+                String sessionId = new BackendAccount(context).sessionId();
+                DiagnosticsApi.State state = new DiagnosticsApi(pageCloud(context, accountId, sessionId)).state();
+                return new LoadedCloud(state, accountId, sessionId);
             } catch (CloudApi.Failure failure) {
                 return null;
             }
-        }, state -> {
-            cloudLoaded = state != null;
-            if (state != null) cloud = state;
+        }, result -> {
+            if (request != generation || getView() == null) return;
+            LoadedCloud loaded = result;
+            cloudLoaded = loaded != null;
+            if (loaded != null) {
+                cloud = loaded.state();
+                cloudAccountId = loaded.accountId();
+                cloudSessionId = loaded.sessionId();
+            }
             render();
         });
+    }
+
+    /** 把诊断页的每个请求限制在加载页面时的账号；匿名页也拒绝账号后来变成真实账号。 */
+    private static CloudApi pageCloud(Context context, String expectedAccountId, String expectedSessionId)
+            throws CloudApi.Failure {
+        String currentAccountId = SyncSwitch.accountId(context);
+        if (!expectedAccountId.isEmpty() && !expectedAccountId.equals(currentAccountId))
+            throw new CloudApi.Failure(409, "session_changed", "account changed", 0);
+        String currentSessionId = new BackendAccount(context).sessionId();
+        if (expectedSessionId.isEmpty()) {
+            if (!currentSessionId.isEmpty())
+                throw new CloudApi.Failure(409, "session_changed", "account changed", 0);
+        } else if (!expectedSessionId.equals(currentSessionId)) {
+            throw new CloudApi.Failure(409, "session_changed", "account changed", 0);
+        }
+        CloudApi cloud = new CloudApi(context);
+        return expectedSessionId.isEmpty() ? cloud : cloud.forAccountSession(expectedSessionId);
     }
 
     // ---- 渲染 ----
 
     private void render() {
-        LinearLayout target = column;
+        LinearLayout target = contentColumn();
         if (target == null) return;
         target.removeAllViews();
         AndroidLocalSettings.Snapshot settings = local;
@@ -229,15 +268,19 @@ public final class DeveloperPage extends DetailPage {
             local.choice(AndroidLocalSettings.MCP_RETENTION));
         if (!include.any()) return;
         busy = true;
+        long request = ++generation;
         render();
+        String expectedAccountId = cloudAccountId;
+        String expectedSessionId = cloudSessionId;
         HostTask.runNetwork(this, context -> {
             File zip = new File(diagnosticsCache(context), UPLOAD_BUNDLE);
             try {
                 String path = writeBundle(context, include, zip);
                 if (path == null) return new UploadResult(null, null, "诊断包生成失败，请重试");
                 DiagnosticsApi.Sections sections = DiagnosticsApi.readBundle(new File(path), include);
-                DiagnosticsApi api = new DiagnosticsApi(new CloudApi(context));
-                DiagnosticsApi.Created created = api.upload(PLATFORM, appVersion(context), sections, retention);
+                DiagnosticsApi api = new DiagnosticsApi(pageCloud(context, expectedAccountId, expectedSessionId));
+                DiagnosticsApi.Created created = api.upload(
+                    PLATFORM, AppVersionPolicy.versionName(context, ""), sections, retention);
                 DiagnosticsApi.State state;
                 try {
                     state = api.state();
@@ -250,9 +293,13 @@ public final class DeveloperPage extends DetailPage {
             } catch (java.io.IOException failure) {
                 return new UploadResult(null, null, "诊断包读取失败，请重试");
             } finally {
-                if (zip.exists() && !zip.delete()) zip.deleteOnExit();
+                FilePolicy.deleteQuietly(zip);
             }
         }, result -> {
+            if (request != generation) {
+                busy = false;
+                return;
+            }
             busy = false;
             if (result == null || result.created == null) {
                 MsToast.show(requireContext(), result == null ? "上传失败，请重试" : result.error);
@@ -276,6 +323,8 @@ public final class DeveloperPage extends DetailPage {
             @Nullable String error) {}
 
     private void confirmDelete() {
+        String expectedAccountId = cloudAccountId;
+        String expectedSessionId = cloudSessionId;
         new MaterialAlertDialogBuilder(requireContext())
             .setTitle("删除云端日志")
             .setMessage("云端快照和访问令牌会立即删除，开发者无法再读取。")
@@ -283,15 +332,20 @@ public final class DeveloperPage extends DetailPage {
             .setOnCancelListener(dialog -> render())
             .setPositiveButton("删除", (dialog, which) -> {
                 busy = true;
+                long request = ++generation;
                 render();
                 HostTask.runNetwork(this, context -> {
                     try {
-                        new DiagnosticsApi(new CloudApi(context)).delete();
+                        new DiagnosticsApi(pageCloud(context, expectedAccountId, expectedSessionId)).delete();
                         return "";
                     } catch (CloudApi.Failure failure) {
                         return failureMessage(failure);
                     }
                 }, error -> {
+                    if (request != generation) {
+                        busy = false;
+                        return;
+                    }
                     busy = false;
                     if (error == null || !error.isEmpty()) {
                         MsToast.show(requireContext(), error == null ? "删除失败，请重试" : error);
@@ -308,26 +362,29 @@ public final class DeveloperPage extends DetailPage {
     }
 
     private void confirmRegenerate() {
-        new MaterialAlertDialogBuilder(requireContext())
-            .setTitle("重新生成访问令牌")
-            .setMessage("旧令牌会立即失效，已经拿到它的开发者需要换用新令牌。")
-            .setNegativeButton("取消", null)
-            .setPositiveButton("重新生成", (dialog, which) -> regenerate(token -> MsToast.show(requireContext(),
-                "已生成新令牌，可用「发送给开发者」分享")))
-            .show();
+        MessageDialog.confirm(requireContext(), "重新生成访问令牌",
+            "旧令牌会立即失效，已经拿到它的开发者需要换用新令牌。", "重新生成",
+            () -> regenerate(token -> MsToast.show(requireContext(), "已生成新令牌，可用「发送给开发者」分享")));
     }
 
     private void regenerate(Consumer<String> then) {
         busy = true;
+        long request = ++generation;
         render();
+        String expectedAccountId = cloudAccountId;
+        String expectedSessionId = cloudSessionId;
         HostTask.runNetwork(this, context -> {
             try {
-                String token = new DiagnosticsApi(new CloudApi(context)).regenerateToken();
+                String token = new DiagnosticsApi(pageCloud(context, expectedAccountId, expectedSessionId)).regenerateToken();
                 return new String[] {token, null};
             } catch (CloudApi.Failure failure) {
                 return new String[] {null, failureMessage(failure)};
             }
         }, result -> {
+            if (request != generation) {
+                busy = false;
+                return;
+            }
             busy = false;
             if (result == null || result[0] == null) {
                 MsToast.show(requireContext(), result == null ? "重新生成失败，请重试" : result[1]);
@@ -348,12 +405,9 @@ public final class DeveloperPage extends DetailPage {
             return;
         }
         // 云端只存令牌的哈希，完整令牌只在生成时出现一次；离开过本页就只能换一枚新的再发。
-        new MaterialAlertDialogBuilder(requireContext())
-            .setTitle("发送给开发者")
-            .setMessage("完整令牌只在生成时显示一次。要生成一枚新令牌并分享吗？旧令牌会立即失效。")
-            .setNegativeButton("取消", null)
-            .setPositiveButton("生成并分享", (dialog, which) -> regenerate(fresh -> share(url, fresh)))
-            .show();
+        MessageDialog.confirm(requireContext(), "发送给开发者",
+            "完整令牌只在生成时显示一次。要生成一枚新令牌并分享吗？旧令牌会立即失效。",
+            "生成并分享", () -> regenerate(fresh -> share(url, fresh)));
     }
 
     private void share(String url, String token) {
@@ -379,7 +433,7 @@ public final class DeveloperPage extends DetailPage {
             File[] old = directory.listFiles((dir, file) -> file.startsWith("msime-diagnostics-"));
             if (old != null) {
                 for (File stale : old) {
-                    if (!stale.delete()) stale.deleteOnExit();
+                    FilePolicy.deleteQuietly(stale);
                 }
             }
             return writeBundle(context, include, new File(directory, name));
@@ -399,11 +453,8 @@ public final class DeveloperPage extends DetailPage {
     }
 
     private void confirmReset() {
-        new MaterialAlertDialogBuilder(requireContext())
-            .setTitle("重置所有设置")
-            .setMessage("所有设置恢复为出厂设置，词库、统计和服务凭据不受影响。")
-            .setNegativeButton("取消", null)
-            .setPositiveButton("重置", (dialog, which) -> {
+        MessageDialog.confirm(requireContext(), "重置所有设置",
+            "所有设置恢复为出厂设置，词库、统计和服务凭据不受影响。", "重置", () -> {
                 busy = true;
                 render();
                 HostTask.run(this, context -> {
@@ -435,8 +486,7 @@ public final class DeveloperPage extends DetailPage {
                     reload();
                     MsToast.show(requireContext(), "已恢复出厂设置");
                 });
-            })
-            .show();
+            });
     }
 
     // ---- 本地设置 ----
@@ -539,19 +589,9 @@ public final class DeveloperPage extends DetailPage {
         if (response == null) return null;
         try {
             JSONObject root = new JSONObject(response);
-            return JsonPolicy.strictTrue(root.opt("ok"))
-                ? root.optJSONObject("value") : null;
+            return JsonPolicy.objectValue(root);
         } catch (JSONException malformed) {
             return null;
-        }
-    }
-
-    private static String appVersion(Context context) {
-        try {
-            PackageInfo info = context.getPackageManager().getPackageInfo(context.getPackageName(), 0);
-            return info.versionName == null ? "" : info.versionName;
-        } catch (android.content.pm.PackageManager.NameNotFoundException missing) {
-            return "";
         }
     }
 
@@ -560,8 +600,8 @@ public final class DeveloperPage extends DetailPage {
     private static String failureMessage(CloudApi.Failure failure) {
         if (failure.network()) return "连不上水杉云，请检查网络";
         if (failure.unavailable()) return "这项服务暂未开放";
-        if (failure.status == 429) return "上传太频繁，请稍后再试";
-        if (failure.status == 413) return "日志太大，请少选几类再上传";
+        if (failure.rateLimited()) return "上传太频繁，请稍后再试";
+        if (failure.payloadTooLarge()) return "日志太大，请少选几类再上传";
         if (failure.signedOut()) return "账号会话已失效，请稍后重试";
         if (failure.status == 400) return "日志未通过校验，未上传";
         return "操作失败，请重试";
@@ -631,14 +671,6 @@ public final class DeveloperPage extends DetailPage {
 
     @Nullable private static ZonedDateTime parse(String iso) {
         if (iso == null || iso.isEmpty()) return null;
-        try {
-            return Instant.parse(iso).atZone(ZoneId.systemDefault());
-        } catch (DateTimeParseException notInstant) {
-            try {
-                return ZonedDateTime.parse(iso).withZoneSameInstant(ZoneId.systemDefault());
-            } catch (DateTimeParseException unreadable) {
-                return null;
-            }
-        }
+        return TimestampDisplayPolicy.parse(iso);
     }
 }

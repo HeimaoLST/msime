@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import os
 
 /// 「诊断日志」: the keyboard's host log, the iOS counterpart of the macOS and Linux host logs, turned on by the shared `diagnostic_log.server`.
 ///
@@ -106,4 +107,32 @@ final class DiagnosticLog: @unchecked Sendable {
     formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
     return formatter
   }()
+}
+
+extension DiagnosticLog {
+  /// 进程内存的一次读数，键盘把它以 `mem=`、`avail=` 字段附在加载、出现、设置应用和内存警告这几行后面（#6685）。
+  ///
+  /// `footprint` 取 `task_vm_info.phys_footprint`，是 iOS 判断扩展是否超出内存上限时用的那个数，也是 Xcode 内存仪表显示的数；`available` 取 `os_proc_available_memory()`，即本进程离上限还剩多少（与 `task_vm_info.limit_bytes_remaining` 同值）。按 SDK 头文件 `os/proc.h`，调用方「不是 App」或已经超出上限时它返回 0，模拟器上也是 0；键盘扩展在真机上算不算「App」还没有实测过。所以 0 不能读成「没有上限」，也不能直接读成「已经超限」：日志里把 0 写成 `avail=-`，与余量不足 1 MiB 时向下取整得到的 `avail=0` 区分开。两者都只是字节数，写进日志时取整到 MiB，不含任何输入内容。
+  struct MemorySample: Equatable {
+    let footprint: UInt64
+    let available: UInt64
+
+    static func current() -> MemorySample {
+      var info = task_vm_info_data_t()
+      var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+      let result = withUnsafeMutablePointer(to: &info) {
+        $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+          task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+        }
+      }
+      return MemorySample(footprint: result == KERN_SUCCESS ? info.phys_footprint : 0,
+                          available: UInt64(os_proc_available_memory()))
+    }
+
+    /// 字节数向下取整到 MiB。
+    static func mebibytes(_ bytes: UInt64) -> UInt64 { bytes >> 20 }
+
+    /// `mem=<MiB> avail=<MiB>`，日志行里的固定写法；系统没给出余量（`available` 为 0）时写 `avail=-`。
+    var fields: String { "mem=\(Self.mebibytes(footprint)) avail=\(available == 0 ? "-" : String(Self.mebibytes(available)))" }
+  }
 }

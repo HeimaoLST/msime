@@ -2,6 +2,8 @@ import inputMethodEngine from '@ohos.inputMethodEngine';
 import fs from '@ohos.file.fs';
 import util from '@ohos.util';
 import client from 'libmsimeclient.so';
+import { FileSessionStore } from '../account/HarmonyAccountTransport';
+import { storedSessionUserId } from '../account/AccountCloudBridge';
 import { utf8Length, utf8WriteComplete } from './Utf8';
 import { TextPolicy } from './TextPolicy';
 import { KeyboardLog, describeError } from './KeyboardLog';
@@ -21,7 +23,7 @@ import {
 } from './skin/GlobalTheme';
 import { KeyboardFormFactor } from './KeyboardFormFactor';
 import { AppEdition } from './AppEdition';
-import { KeyboardScheme, PreferenceMapping, SchemeDefinition } from './KeyboardScheme';
+import { KeyboardScheme, KeyGrid, PreferenceMapping, SchemeDefinition } from './KeyboardScheme';
 import { EditorPolicy, EditorTraits } from './input/EditorPolicy';
 import { EditEchoLedger } from './input/EditEchoLedger';
 import { JapaneseSpacePolicy } from './input/JapaneseSpacePolicy';
@@ -38,7 +40,6 @@ import { FullWidthInputPolicy } from './input/FullWidthInputPolicy';
 import { ChineseHelpcodePolicy } from './input/ChineseHelpcodePolicy';
 import { ChineseOutputPolicy } from './input/ChineseOutputPolicy';
 import { KeyboardFeedback, FeedbackSettings, HapticPlan, HapticStrength } from './KeyboardFeedback';
-import { NumberKeypadOrder } from './input/NineKeyLayout';
 import { HardwareKeyRouter, HardwareNavigationPreferences, HardwareSpelling } from './HardwareKeyRouter';
 import vibrator from '@ohos.vibrator';
 import common from '@ohos.app.ability.common';
@@ -74,9 +75,10 @@ import {
 import { CandidatePresentationPolicy } from './candidate/CandidatePresentationPolicy';
 import {
   CandidateSkinCatalogPolicy, CandidateSkinPackage, CandidateSkinDecoration, CandidateSkinBackground,
-  CandidateSkinAlign, CandidateSkinFit
+  CandidateSkinAlign, CandidateSkinFit, CandidateSkinAnimation
 } from './candidate/CandidateSkinCatalogPolicy';
 import { CandidateWidthPolicy } from './candidate/CandidateWidthPolicy';
+import { CandidateFontSizePolicy } from './candidate/CandidateFontSizePolicy';
 import { CandidatePagerPolicy } from './candidate/CandidatePagerPolicy';
 import { CandidateLogoPolicy } from './candidate/CandidateLogoPolicy';
 import { CandidateNumberFontPolicy } from './candidate/CandidateNumberFontPolicy';
@@ -98,9 +100,9 @@ import {
   ClipboardHistoryStore, ClipboardHistoryItem, ClipboardHistoryError, ClipboardFailure
 } from './clipboard/ClipboardHistoryStore';
 import { ClipboardHistoryPreferencePolicy } from './clipboard/ClipboardHistoryPreferencePolicy';
-import { CloudClipboardClient } from './clipboard/CloudClipboardClient';
+import { CloudClipboardBoundListing, CloudClipboardClient } from './clipboard/CloudClipboardClient';
 import {
-  CloudClipboardListing, CloudClipboardPolicy, CloudClipboardSendOutcome
+  CloudClipboardPolicy, CloudClipboardSendOutcome
 } from './clipboard/CloudClipboardPolicy';
 import {
   DEFAULT_VOICE_INPUT_CONFIGURATION, VoiceInputConfiguration, VoiceInputConfigurationPolicy
@@ -133,6 +135,8 @@ import {
   SmartPunctuationRepeatPolicy, SmartPunctuationRepeatSnapshot
 } from './input/SmartPunctuationRepeatPolicy';
 import { BackspaceHoldPolicy } from './input/BackspaceHoldPolicy';
+import { SharedStateMirror } from './SharedStateMirror';
+import { SharedStateSync } from './SharedStateSync';
 import { InlinePreeditPolicy, InlinePreeditStyle } from './input/InlinePreeditPolicy';
 import {
   CompositionBoundary, CompositionBoundaryAction, CompositionBoundaryPolicy
@@ -732,6 +736,7 @@ interface SnapshotQueueProcessAction {
   directory: string;
   staging_root: string;
   options: Object;
+  account_id: string | null;
 }
 
 interface SnapshotQueueProcessReply {
@@ -842,8 +847,8 @@ interface PreparedPreferences {
   touch_keyboard_height_adjustment: number;
   /** Show the native Harmony voice entry in the top touch-keyboard shortcut bar. */
   touch_voice_shortcut: boolean;
-  /** 九键数字层的排列：`phone`（1 2 3 在上）或 `calculator`（7 8 9 在上）；旧文档没有这个键，按 `phone`。 */
-  touch_number_keypad_order?: string;
+  /** 26 键双拼字母键底部的声母/韵母提示；旧文档没有这个键，按开。 */
+  touch_shuangpin_key_hints?: boolean;
   /** Shared privacy switch for the private clipboard history file and keyboard entry point. */
   clipboard_history: boolean;
   voice_input: VoiceInputConfiguration;
@@ -933,6 +938,8 @@ export interface KeyboardPreferences {
   readonly candidateBackgroundImage: string | null;
   readonly candidateBackgroundFit: CandidateSkinFit;
   readonly candidateBackgroundOpacity: number;
+  /** The bounded native motion presets from the selected candidate package. */
+  readonly candidateAnimation: CandidateSkinAnimation;
   /** The user's 0.5..1 factor on the card's fill, border and background image; text and the selection stay opaque. */
   readonly candidateWindowOpacity: number;
   readonly candidateDark: boolean;
@@ -977,8 +984,8 @@ export interface KeyboardPreferences {
   readonly keySpacingTenths: number;
   readonly rowSpacingTenths: number;
   readonly heightAdjustment: number;
-  /** `NumberKeypadOrder` 归一后的九键数字层排列。 */
-  readonly numberKeypadOrder: string;
+  /** `touch_shuangpin_key_hints`：关掉时 26 键双拼不画键位提示。 */
+  readonly shuangpinKeyHints: boolean;
 }
 
 /** 刚保存的整份偏好文档，按键盘关心的字段读回来，替换缓存里那份准备时的偏好。 */
@@ -1021,6 +1028,22 @@ interface DictionaryRequest {
 interface PersonalDictionarySyncValue {
   pending_count: number;
 }
+
+interface DictionaryCollectionsFlushValue {
+  sent?: number;
+}
+
+interface DictionaryCollectionsFlushResponse {
+  ok: boolean;
+  value: DictionaryCollectionsFlushValue;
+  error?: string;
+}
+
+/** 命名词库接受的操作，与 client-core 的 `DictionaryCollectionsAction` 一致；别的一律在桥上拒绝。 */
+const DICTIONARY_COLLECTION_OPERATIONS: string[] = [
+  'load', 'create', 'rename', 'delete', 'set_enabled', 'add_words', 'remove_words', 'import',
+  'install_community', 'queue_words', 'flush',
+];
 
 interface PersonalDictionarySyncResponse {
   ok: boolean;
@@ -1137,9 +1160,8 @@ export class KeyboardSession implements HardwareKeyTarget {
   // Hardware events report this independently of the Engine's dedicated-English mode. The
   // floating toolbar uses it as the same high-priority status shown by the Windows presenter.
   private capsLock: boolean = false;
-  // The grid is the Engine's business too: it decides what a 2 means, and it only reads them as
-  // nine-key spellings once it has been told the grid is up.
-  private nineKeyMode: boolean = false;
+  // 网格也归引擎管：九键下它决定一个 2 是什么意思，14 键下它把一组字母解成拼音，都要先告诉它网格开着。取值见 `KeyGrid`。
+  private keyGrid: number = KeyGrid.NONE;
   // 还没读到 Engine 的视图时按本版本的默认方案算（full 是全拼）。
   private schemeName: string = AppEdition.current().defaultScheme;
   private profileName: string = 'xiaohe';
@@ -1156,6 +1178,9 @@ export class KeyboardSession implements HardwareKeyTarget {
   private modeBadge: boolean = true;
   private resourceDirectory: string = '';
   private stateDirectory: string = '';
+  // 共享沙箱里与设置应用交换状态的镜像，没有共享目录时为 null；`sharedFullMode` 报告键盘此刻是否处于完整体验模式，只有那时键盘才能写共享目录。
+  private sharedMirror: SharedStateMirror | null = null;
+  private sharedFullMode: () => boolean = (): boolean => false;
   private cloudClipboardClient: CloudClipboardClient | undefined = undefined;
   private systemDark: boolean = false;
   // What the editor wants its return key to do. Sending this rather than a newline is what makes the
@@ -1180,6 +1205,7 @@ export class KeyboardSession implements HardwareKeyTarget {
     candidateBackgroundImage: null,
     candidateBackgroundFit: 'cover',
     candidateBackgroundOpacity: 1,
+    candidateAnimation: { enter: 'none', exit: 'none', selection: 'none', durationMs: 0, staggerMs: 0 },
     candidateWindowOpacity: 1,
     candidateDark: false,
     candidateSelectedBar: false,
@@ -1217,7 +1243,7 @@ export class KeyboardSession implements HardwareKeyTarget {
     keySpacingTenths: KeyboardGeometry.DEFAULT_KEY_SPACING_TENTHS,
     rowSpacingTenths: KeyboardGeometry.DEFAULT_ROW_SPACING_TENTHS,
     heightAdjustment: KeyboardGeometry.DEFAULT_HEIGHT_ADJUSTMENT_VP,
-    numberKeypadOrder: NumberKeypadOrder.PHONE
+    shuangpinKeyHints: true
   };
   private voiceInput: VoiceInputConfiguration = DEFAULT_VOICE_INPUT_CONFIGURATION;
   /**
@@ -1399,6 +1425,9 @@ export class KeyboardSession implements HardwareKeyTarget {
       : NO_CANDIDATE_SKIN_IMAGE;
     const skinBackground: CandidateSkinBackground | null = packageId === null
       ? null : CandidateSkinCatalogPolicy.background(skinPackages, packageId);
+    const candidateAnimation: CandidateSkinAnimation = packageId === null
+      ? { enter: 'none', exit: 'none', selection: 'none', durationMs: 0, staggerMs: 0 }
+      : CandidateSkinCatalogPolicy.animation(skinPackages, packageId);
     // Like the decoration, the background is a desktop candidate window's; the touch strip keeps the keyboard's look.
     const backgroundImage: CandidateSkinImage = KeyboardFormFactor.isDesktop() && packageId !== null
       ? this.readCandidateSkinImage(this.stateDirectory, packageId,
@@ -1431,6 +1460,7 @@ export class KeyboardSession implements HardwareKeyTarget {
       candidateBackgroundImage: backgroundImage.image,
       candidateBackgroundFit: skinBackground === null ? 'cover' : skinBackground.fit,
       candidateBackgroundOpacity: skinBackground === null ? 1 : skinBackground.opacity,
+      candidateAnimation: candidateAnimation,
       candidateWindowOpacity: windowOpacity,
       candidateDark: candidateDark,
       candidateSelectedBar: preferences.candidate_selected_bar ?? candidateColors.showSelectedBar,
@@ -1468,9 +1498,9 @@ export class KeyboardSession implements HardwareKeyTarget {
       // The shared store validates these to 12..32 and strips control
       // characters from family names. Clamp again at the host boundary so
       // an older staged document cannot produce an unusable panel.
-      candidateFontSize: Math.max(12, Math.min(32, preferences.candidate_font_size)),
+      candidateFontSize: CandidateFontSizePolicy.bounded(preferences.candidate_font_size),
       candidatePreeditFontSize:
-        Math.max(12, Math.min(32, preferences.candidate_preedit_font_size)),
+        CandidateFontSizePolicy.bounded(preferences.candidate_preedit_font_size),
       candidateFontFamily: preferences.candidate_font_family.trim().length > 0
         ? preferences.candidate_font_family : 'Noto Sans SC',
       candidateEnglishFont: preferences.candidate_english_font ?? null,
@@ -1483,7 +1513,7 @@ export class KeyboardSession implements HardwareKeyTarget {
       rowSpacingTenths: KeyboardGeometry.rowSpacing(preferences.touch_row_spacing_tenths),
       heightAdjustment:
         KeyboardGeometry.heightAdjustment(preferences.touch_keyboard_height_adjustment),
-      numberKeypadOrder: NumberKeypadOrder.normalized(preferences.touch_number_keypad_order)
+      shuangpinKeyHints: preferences.touch_shuangpin_key_hints !== false
     };
     // The theme's bar, then the package's `[toolbar]` colours for that mode, then its stylesheet.
     const toolbarColors: CandidateColors = GlobalTheme.candidateColors(
@@ -1499,9 +1529,9 @@ export class KeyboardSession implements HardwareKeyTarget {
       KeyboardSkin.resolveDark(surfaceTheme, appMode, this.systemDark));
   }
 
-  /** `light` or `dark` when the global theme fixes the mode; the answer is the same for both requested modes. */
+  /** 全局主题固定了明暗时为 `light` 或 `dark`：两种明暗的解析结果一致才算，见 `GlobalTheme.fixedAppearance`。 */
   private fixedAppearance(): string | null {
-    return this.themeLight === null ? null : this.themeLight.appearance;
+    return GlobalTheme.fixedAppearance(this.themeLight, this.themeDark);
   }
 
   private readThemeCatalog(): ThemeCatalogEntry[] {
@@ -1516,7 +1546,8 @@ export class KeyboardSession implements HardwareKeyTarget {
   /** One mode of the global theme. A refused request draws the native tokens rather than failing the session. */
   private resolveTheme(preferences: PreparedPreferences, dark: boolean): ResolvedTheme | null {
     const request: ResolveThemeRequest = {
-      global_theme: preferences.global_theme,
+      // 固定明暗的主题在另一种明暗下按跟随系统解析，见 `GlobalTheme.fitsMode`。两种明暗于是不再一致，`fixedAppearance` 也就不再把各界面钉在那种明暗上。
+      global_theme: GlobalTheme.effectiveId(this.themeCatalog, preferences.global_theme, dark),
       custom_theme: preferences.custom_theme,
       dark: dark,
       layout: preferences.candidate_layout === 'horizontal' ? 'horizontal' : 'vertical',
@@ -1618,8 +1649,8 @@ export class KeyboardSession implements HardwareKeyTarget {
         ? preferences.word_character.keys : 'disabled';
       this.clearSmartPunctuationRepeat();
       this.toolbar = preferences.floating_toolbar;
-      this.nineKeyMode = preferences.touch_keyboard_layout === 'nine_key'
-        && preferences.scheme === 'quanpin';
+      this.keyGrid = KeyboardScheme.keyGrid(preferences.touch_keyboard_layout, preferences.scheme,
+        KeyboardFormFactor.isDesktop());
       this.soundPlayer.configure(KeyboardFormFactor.isDesktop()
         ? KeySoundPolicy.settings(preferences.plugins) : KEY_SOUNDS_OFF, stateRoot);
       this.musicPlayer.configure(KeyboardFormFactor.isDesktop()
@@ -1677,10 +1708,28 @@ export class KeyboardSession implements HardwareKeyTarget {
         KeyboardLog.error(`personal dictionary queue not applied; it will be retried: ${reply.error}`);
         return false;
       }
-      return reply.value.pending_count === 0;
+      // 命名词库的词分批交给个人词库队列（同时最多 128 条在途）。每处理完一批就送下一批，和 Android 键盘的 `flushSent` 一样，导入的大词库不用等用户回设置页刷新。
+      const sent: number = this.flushDictionaryCollections(options);
+      return reply.value.pending_count === 0 && sent === 0;
     } catch (error) {
       KeyboardLog.error(`personal dictionary queue unavailable: ${describeError(error)}`);
       return false;
+    }
+  }
+
+  /** 把命名词库里还没送出的增删再送一批，返回这次送出的条数；失败按 0 算，下次排空时再试。 */
+  private flushDictionaryCollections(options: string): number {
+    try {
+      const reply: DictionaryCollectionsFlushResponse = JSON.parse(client.dictionaryCollections(
+        `{"options":${options},"action":{"operation":"flush"}}`)) as DictionaryCollectionsFlushResponse;
+      if (reply.ok !== true) {
+        KeyboardLog.error(`dictionary collections not flushed: ${reply.error}`);
+        return 0;
+      }
+      return typeof reply.value.sent === 'number' ? reply.value.sent : 0;
+    } catch (error) {
+      KeyboardLog.error(`dictionary collections unavailable: ${describeError(error)}`);
+      return 0;
     }
   }
 
@@ -1749,7 +1798,7 @@ export class KeyboardSession implements HardwareKeyTarget {
   private restartIdleSession(reason: string): void {
     const attached: inputMethodEngine.InputClient | undefined = this.inputClient;
     const english: boolean = this.englishMode;
-    const nineKey: boolean = this.nineKeyMode;
+    const keyGrid: number = this.keyGrid;
     const revision: number = this.preferencesRevision;
     const seedLight: AppThemeSeed | null = this.appThemeSeedLight;
     const seedDark: AppThemeSeed | null = this.appThemeSeedDark;
@@ -1760,12 +1809,12 @@ export class KeyboardSession implements HardwareKeyTarget {
       return;
     }
     this.englishMode = english;
-    this.nineKeyMode = nineKey;
+    this.keyGrid = keyGrid;
     if (attached !== undefined && this.inputClient === attached) {
       this.apply(client.focus(this.handle, true));
       this.refreshTypingEffects();
       this.applyView(client.setEnglishMode(this.handle, english));
-      this.applyView(client.setNineKeyMode(this.handle, nineKey));
+      this.applyView(client.setKeyGrid(this.handle, keyGrid));
     }
     // Any rebuild reads the document afresh, whatever it was for, so the surfaces follow whenever the stored preferences moved underneath it.
     if (this.preferencesRevision !== revision) {
@@ -1835,12 +1884,14 @@ export class KeyboardSession implements HardwareKeyTarget {
   keyboardSkin(dark: boolean): KeyboardSkin {
     this.refreshAppTheme(false);
     const seed: AppThemeSeed | null = this.appThemeSeed(dark);
-    const title: string = this.themeTitle(this.globalThemeId);
-    if (this.globalThemeId === 'custom' && this.customDesign !== null) {
+    // 面板按这个 id 标出选中的卡片：所选主题属于另一种明暗时，生效的是「跟随系统」。
+    const id: string = GlobalTheme.effectiveId(this.themeCatalog, this.globalThemeId, dark);
+    const title: string = this.themeTitle(id);
+    if (id === 'custom' && this.customDesign !== null) {
       return KeyboardSkin.fromDesign(title, this.customDesign, dark, seed);
     }
     const theme: ResolvedTheme | null = dark ? this.themeDark : this.themeLight;
-    return KeyboardSkin.fromTheme(this.globalThemeId, title, theme === null ? null : theme.keyboard, dark, seed);
+    return KeyboardSkin.fromTheme(id, title, theme === null ? null : theme.keyboard, dark, seed);
   }
 
   /** 某一模式解析出的季节种子；应用主题无法解析时为 `null`。 */
@@ -1936,7 +1987,10 @@ export class KeyboardSession implements HardwareKeyTarget {
     if (this.themeCatalog.length === 0) {
       return [this.keyboardSkin(dark)];
     }
-    return this.themeCatalog.map((entry: ThemeCatalogEntry): KeyboardSkin => {
+    // 只列当前明暗下能用的主题，见 `GlobalTheme.fitsMode`。
+    const offered: ThemeCatalogEntry[] = this.themeCatalog.filter((entry: ThemeCatalogEntry): boolean =>
+      GlobalTheme.fitsMode(entry.appearance, dark));
+    return offered.map((entry: ThemeCatalogEntry): KeyboardSkin => {
       if (entry.id === this.globalThemeId) {
         return this.keyboardSkin(GlobalTheme.surfaceDark(entry.appearance, dark));
       }
@@ -2652,14 +2706,15 @@ export class KeyboardSession implements HardwareKeyTarget {
     }
   }
 
-  setNineKey(enabled: boolean): void {
-    // This keyboard only offers the Engine's nine-key flag for quanpin — Japanese has its own kana grid, the Zhuyin keypad is Android-only, and the Engine answers "nine-key mode requires the quanpin or zhuyin scheme" for the rest. Asking anyway put a refusal in the log on every Japanese focus.
-    const wanted: boolean = enabled && this.schemeName === 'quanpin';
-    if (this.handle === 0 || this.nineKeyMode === wanted) {
+  /** 告诉引擎键面现在是哪种网格（`KeyGrid`），只在组字结束后调用。 */
+  setKeyGrid(grid: number): void {
+    // 这个键盘只给全拼开引擎的组码网格：日文有自己的假名九宫格，注音九键只有 Android 有，其余方案引擎会拒绝。照样去开的话，每次日文获得焦点都会在日志里留一条拒绝。
+    const wanted: number = this.schemeName === 'quanpin' ? grid : KeyGrid.NONE;
+    if (this.handle === 0 || this.keyGrid === wanted) {
       return;
     }
-    this.nineKeyMode = wanted;
-    this.applyView(client.setNineKeyMode(this.handle, wanted));
+    this.keyGrid = wanted;
+    this.applyView(client.setKeyGrid(this.handle, wanted));
   }
 
   /** Flips the composing language and reports the mode now in force. */
@@ -2940,8 +2995,10 @@ export class KeyboardSession implements HardwareKeyTarget {
       this.apply(client.focus(this.handle, true));
       this.refreshTypingEffects();
       this.applyView(client.setEnglishMode(this.handle, this.englishMode));
-      this.applyView(client.setNineKeyMode(this.handle, this.nineKeyMode));
+      this.applyView(client.setKeyGrid(this.handle, this.keyGrid));
     }
+    // 先导入设置应用经共享沙箱发布的改动，随后的修订号比较、按键反馈和应用主题的重新读取就会看到它们。
+    this.syncSharedState();
     this.reloadChangedPreferences();
     // 按键反馈和手写板设置是另一个文件，设置应用写它时不会推进偏好修订号，所以每次获得焦点都要读取，而不只在构建会话时读取。文件存在却读不到时保留上次的值，一次读取失败不能把隐私模式当成关闭。
     this.refreshFeedback();
@@ -2950,6 +3007,19 @@ export class KeyboardSession implements HardwareKeyTarget {
     if (this.refreshAppTheme(true) && this.onViewPreferencesReloaded !== undefined) {
       this.onViewPreferencesReloaded();
     }
+  }
+
+  /** 设置应用和键盘共享沙箱的镜像，由扩展在拿到共享目录后交给会话；`fullMode` 每次调用时读当前的安全模式。 */
+  useSharedSandbox(mirror: SharedStateMirror, fullMode: () => boolean): void {
+    this.sharedMirror = mirror;
+    this.sharedFullMode = fullMode;
+  }
+
+  private syncSharedState(): void {
+    if (this.sharedMirror === null || this.stateDirectory.length === 0) {
+      return;
+    }
+    SharedStateSync.keyboardSync(this.sharedMirror, this.stateDirectory, this.sharedFullMode());
   }
 
   detach(): void {
@@ -2975,6 +3045,10 @@ export class KeyboardSession implements HardwareKeyTarget {
     this.updateMusic();
     this.keyStatisticsEditorKnown = false;
     this.flushKeyPresses();
+    // 完整体验模式下把这次编辑里记下的统计、在键盘里改的偏好发布给设置应用；基础访问模式下键盘写不了共享目录。
+    if (this.sharedMirror !== null && this.sharedFullMode()) {
+      SharedStateSync.keyboardPublish(this.sharedMirror);
+    }
   }
 
   stop(): void {
@@ -3180,11 +3254,15 @@ export class KeyboardSession implements HardwareKeyTarget {
     }
   }
 
-  /** Delete through the editor while reserving the asynchronous text-change echo it produces. */
+  /**
+   * 删掉光标前的 `count` 个字符，并为它在编辑器里产生的异步文本变化回声预留一笔。
+   *
+   * 鸿蒙输入法框架的方向命名与 Android 相反：`deleteForwardSync` 删光标之前的文字，`deleteBackwardSync` 删光标之后的。英文文档只写了 "Delete text forward/backward"，看不出以什么为参照，这里以设备实测为准（HarmonyOS 6.0.2 模拟器，光标在 `abc` 末尾：`deleteForward(1)` 得到 `ab`，`deleteBackward(1)` 什么也不删且照样报告成功）。以前这里调的是 `deleteBackwardSync`，于是退格、智能标点替换、AI 润色和翻译的替换在光标位于末尾时都悄无声息地什么也不删，光标在中间时删的是后面的字。
+   */
   private deleteEditorBackwardSync(count: number): void {
     const inputClient: inputMethodEngine.InputClient | undefined = this.inputClient;
     if (inputClient === undefined) return;
-    this.editEditorSync((): void => inputClient.deleteBackwardSync(count));
+    this.editEditorSync((): void => inputClient.deleteForwardSync(count));
   }
 
   /** Resume one durable cloud snapshot before a shared Engine session takes the read lock. */
@@ -3192,9 +3270,11 @@ export class KeyboardSession implements HardwareKeyTarget {
     const staging: string = `${stateRoot}/dictionary-snapshot-staging`;
     try {
       if (!fs.accessSync(staging)) fs.mkdirSync(staging, true);
+      // 每次空闲处理都重新读共享的会话文件：键盘进程可能比设置里的一次账号切换活得更久。
+      const accountId: string | null = storedSessionUserId(new FileSessionStore(stateRoot).load());
       const action: SnapshotQueueProcessAction = {
         operation: 'process', directory: `${stateRoot}/dictionary-snapshots`,
-        staging_root: staging, options: options
+        staging_root: staging, options: options, account_id: accountId
       };
       const reply: SnapshotQueueProcessReply =
         JSON.parse(client.snapshotQueue(JSON.stringify(action))) as SnapshotQueueProcessReply;
@@ -3231,7 +3311,7 @@ export class KeyboardSession implements HardwareKeyTarget {
     const maintenance: boolean = decision.maintenance;
     const hadSession: boolean = this.handle !== 0;
     const english: boolean = this.englishMode;
-    const nineKey: boolean = this.nineKeyMode;
+    const keyGrid: number = this.keyGrid;
     if (maintenance && hadSession) {
       this.stop();
     }
@@ -3261,12 +3341,12 @@ export class KeyboardSession implements HardwareKeyTarget {
       if (maintenance && hadSession) {
         if (this.start(resources, stateRoot, this.systemDark)) {
           this.englishMode = english;
-          this.nineKeyMode = nineKey;
+          this.keyGrid = keyGrid;
           if (this.inputClient !== undefined) {
             this.apply(client.focus(this.handle, true));
             this.refreshTypingEffects();
             this.applyView(client.setEnglishMode(this.handle, english));
-            this.applyView(client.setNineKeyMode(this.handle, nineKey));
+            this.applyView(client.setKeyGrid(this.handle, keyGrid));
           }
         } else {
           KeyboardLog.error('dictionary maintenance left the session unavailable');
@@ -3274,6 +3354,33 @@ export class KeyboardSession implements HardwareKeyTarget {
       }
     }
     return result;
+  }
+
+  /**
+   * 设置页的命名词库操作（`msime_client_dictionary_collections`），在原生工作线程上执行。
+   *
+   * 集合只是元数据，词条经由个人词库队列交给 Engine，所以这里不碰键盘的会话，也不需要维护锁。API 12 起设置应用和键盘各有自己的沙箱，在共享沙箱接上之前，这里写下的集合键盘看不到（platforms/harmony/README.md「输入法扩展的独立沙箱」）。
+   */
+  async dictionaryCollections(actionDocument: string, resources: string,
+    stateRoot: string): Promise<string> {
+    let action: DictionaryAction;
+    try {
+      const decoded: DictionaryAction | null = JSON.parse(actionDocument) as DictionaryAction | null;
+      if (decoded === null || !DICTIONARY_COLLECTION_OPERATIONS.includes(decoded.operation)) {
+        return JSON.stringify({ ok: false, error: 'collections_invalid' });
+      }
+      action = decoded;
+    } catch (error) {
+      return JSON.stringify({ ok: false, error: 'collections_invalid' });
+    }
+    const bootstrap: PrepareRequest = KeyboardSession.prepareRequest(resources, stateRoot);
+    const prepared: PrepareResponse =
+      JSON.parse(client.prepareHost(JSON.stringify(bootstrap))) as PrepareResponse;
+    if (prepared.ok !== true) {
+      return JSON.stringify(prepared);
+    }
+    const request: DictionaryRequest = { options: prepared.value, action: action };
+    return await client.dictionaryCollectionsAsync(JSON.stringify(request));
   }
 
   /** Whether the key did anything. The touch keyboard ignores the answer; the hardware path hands a declined letter back to the application. */
@@ -3323,6 +3430,34 @@ export class KeyboardSession implements HardwareKeyTarget {
   }
 
   /**
+   * 14 键键面上的一键：`ascii` 是这一组的首字母，经 `msime_client_grid_key` 交给引擎，由它归成组码按网格解码。不走 `press()`：那条路给 26 键字母，会按 Shift 当辅助码、在双拼和英文直出里另有分支，而 14 键的一下是一组字母，不是其中某一个。
+   *
+   * 引擎不受理（26 键正在组字、专用英文或本地模式）时这一下不输入任何东西，与九键在这些情况下的数字键相同；键面在这些情况下本来也不画 14 键。
+   *
+   * 不组字的编辑框（数字、电话、日期这类不是文本的输入框）同样不输入：14 键的一下是一组字母，照字面写进去只能挑这一组的首字母，未必是用户要的那个。与 Android 相同（没有引擎会话时 `gridKey` 不处理）。密码、网址和邮箱框画 26 键（`EditorPolicy.prefersFullFace`），走不到这里。
+   */
+  pressGridKey(ascii: number): boolean {
+    this.clearSmartPunctuationRepeat();
+    if (!this.composes()) {
+      return false;
+    }
+    if (this.handle === 0) {
+      KeyboardLog.error('grid key ignored: no session');
+      return false;
+    }
+    this.tapFeedback();
+    const before: string = this.editing;
+    const handled: boolean = this.apply(client.gridKey(this.handle, ascii));
+    const consumed: boolean = handled || this.editing !== before;
+    if (!consumed) {
+      // 只记失败的形状，不记按键：hilog 能被工具读到，按了什么是用户的输入。
+      KeyboardLog.error(`grid key produced no composition: scheme=${this.schemeName}`
+        + ` local=${this.localMode} english=${this.englishMode} grid=${this.keyGrid}`);
+    }
+    return consumed;
+  }
+
+  /**
    * One glide stroke (滑行输入), as `GlideTypingPolicy.request` built it, applied exactly as a letter's reply is. Whether the Engine typed it: a stroke it declines is dropped, and its keys are not typed instead. The stroke gets the one key feedback a press would, however many keys it crossed.
    */
   glide(request: string): boolean {
@@ -3354,7 +3489,7 @@ export class KeyboardSession implements HardwareKeyTarget {
       const chinese: string | null = SmartPunctuationRepeatPolicy.chineseMark(ascii);
       if (chinese !== null) {
         try {
-          // deleteBackwardSync(1) removes the one scalar just before the caret. The preceding
+          // deleteEditorBackwardSync(1) removes the one scalar just before the caret. The preceding
           // scalar was checked above, so a replacement cannot consume unrelated text.
           this.deleteEditorBackwardSync(1);
           this.insertEditorTextSync(chinese);
@@ -3884,6 +4019,8 @@ export class KeyboardSession implements HardwareKeyTarget {
   private onlineEpoch: number = 0;
   private readonly onlineRequests: Set<http.HttpRequest> = new Set<http.HttpRequest>();
   private onlineSignature: string = '';
+  /** 问过 AI 却没有结果、占位行已换成「—」的那次请求的签名：同一组字不再向 AI 发请求，只在本地把占位行再换成「—」；组字一变就清掉（#6888）。 */
+  private aiResolvedSignature: string = '';
   private translationTimer: number = -1;
   private translationEpoch: number = 0;
   private readonly translationRequests: Set<http.HttpRequest> = new Set<http.HttpRequest>();
@@ -4113,11 +4250,13 @@ export class KeyboardSession implements HardwareKeyTarget {
     }
     const query: OnlineQuery | null = NativeReplyPolicy.successfulValue<OnlineQuery>(reply);
     if (query === null) {
+      this.aiResolvedSignature = '';
       this.invalidateOnlineProviders();
       return;
     }
     const signature: string = OnlineCandidatePolicy.signature(query);
     if (signature === this.onlineSignature) return;
+    if (signature !== this.aiResolvedSignature) this.aiResolvedSignature = '';
     this.invalidateOnlineProviders();
     this.onlineSignature = signature;
     const epoch: number = ++this.onlineEpoch;
@@ -4163,7 +4302,14 @@ export class KeyboardSession implements HardwareKeyTarget {
     if (epoch !== this.onlineEpoch || handle !== this.handle) return;
     const assistant = aiQuery.ai_assistant;
     if (assistant?.enabled === true && aiQuery.ai_eligible) {
-      complete = await this.fetchAi(handle, aiDocument, assistant.candidate_limit, epoch) && complete;
+      // 这个组字问过 AI 而没有结果（云候选失败触发的重试走到这里）：不再发请求，只把占位行换成「—」。
+      const aiApplied: boolean = requestSignature !== this.aiResolvedSignature
+        && await this.fetchAi(handle, aiDocument, assistant.candidate_limit, epoch);
+      // 向 AI 发问了却没有采用任何回答（请求发不出去、失败、空回答、被拒）：AI 座位上的占位行换成「—」，后面的候选不挪位；同一组字不再问，所以不为 AI 释放签名，只有云候选失败才重试（#6888）。
+      if (!aiApplied) {
+        this.resolveAiSeat(handle, aiDocument, epoch);
+        if (epoch === this.onlineEpoch && handle === this.handle) this.aiResolvedSignature = requestSignature;
+      }
     }
     if (!complete) this.releaseOnlineSignatureIfCurrent(requestSignature, epoch, handle);
   }
@@ -4210,6 +4356,19 @@ export class KeyboardSession implements HardwareKeyTarget {
     } finally {
       this.onlineRequests.delete(request);
       request.destroy();
+    }
+  }
+
+  /** AI 座位上的占位行换成「—」；座位已经换过或没开时 Host API 答 applied:false，什么都不画。 */
+  private resolveAiSeat(handle: number, queryDocument: string, epoch: number): void {
+    if (epoch !== this.onlineEpoch || handle !== this.handle) return;
+    try {
+      const resolved: NativeReply<OnlineApplyValue> = JSON.parse(client.resolveOnlineCandidates(
+        handle, queryDocument, 1)) as NativeReply<OnlineApplyValue>;
+      if (resolved.ok === true && NativeReplyPolicy.hasValue(resolved.value)
+        && resolved.value.applied) this.render(resolved.value.view);
+    } catch (error) {
+      KeyboardLog.error(`AI seat unresolved: ${describeError(error)}`);
     }
   }
 
@@ -5037,14 +5196,20 @@ export class KeyboardSession implements HardwareKeyTarget {
    *
    * Null when the listing no longer belongs to the focused editor: the field changed while the request was out, or it is one that may not see cloud items. A late answer for another field is dropped rather than shown, since tapping one of its items would paste into a field it was never fetched for.
    */
-  async cloudClipboardItems(): Promise<CloudClipboardListing | null> {
+  async cloudClipboardItems(): Promise<CloudClipboardBoundListing | null> {
     const editor: number = this.attributeGeneration;
     if (!this.cloudClipboardVisible()) return null;
-    const listing: CloudClipboardListing = await this.cloudClipboard().list();
+    const client: CloudClipboardClient = this.cloudClipboard();
+    const listing: CloudClipboardBoundListing | null = await client.list();
+    if (listing === null || (listing.binding !== null && !(await client.matches(listing.binding)))) return null;
     if (!CloudClipboardPolicy.current(editor, this.attributeGeneration) || !this.cloudClipboardVisible()) {
       return null;
     }
     return listing;
+  }
+
+  async cloudClipboardBindingCurrent(binding: string): Promise<boolean> {
+    return await this.cloudClipboard().matches(binding);
   }
 
   /** Inserts a cloud item the way a local history entry is inserted, but only into the editor its listing was fetched for. */
@@ -5057,12 +5222,12 @@ export class KeyboardSession implements HardwareKeyTarget {
   }
 
   /** Uploads one local history entry the user chose; nothing reaches the cloud clipboard any other way. */
-  async sendToCloudClipboard(text: string): Promise<CloudClipboardSendOutcome> {
+  async sendToCloudClipboard(text: string, binding: string): Promise<CloudClipboardSendOutcome> {
     // 面板只在云端那一半可见时提供「发到云剪贴板」；如果隐私模式在提供之后才开启，这里守住这条线。
     if (!this.cloudClipboardVisible()) {
       return CloudClipboardSendOutcome.FAILED;
     }
-    return await this.cloudClipboard().add(text);
+    return await this.cloudClipboard().add(text, binding);
   }
 
   private cloudClipboard(): CloudClipboardClient {
@@ -5199,8 +5364,7 @@ export class KeyboardSession implements HardwareKeyTarget {
 
   /** Reads only the bounded, app-private reply templates explicitly shared by the settings app. */
   communityReplyTemplates(): CommunityReplyTemplate[] {
-    // KeyboardExtensionAbility passes files/state as stateDirectory; the settings process shares
-    // its explicit library one level above, at files/CommunityLibrary.json.
+    // KeyboardExtensionAbility passes files/state as stateDirectory, and the settings app writes its explicit library one level above, at files/CommunityLibrary.json. From API 12 the input method extension has its own sandbox (see platforms/harmony/README.md), so this is the settings app's file only once both sides use the shared group directory; until then the keyboard's own files/ holds no library and no template is offered.
     const file: string = `${this.stateDirectory}/../CommunityLibrary.json`;
     try {
       const parent: string = this.stateDirectory.substring(0, this.stateDirectory.lastIndexOf('/'));
@@ -5395,6 +5559,11 @@ export class KeyboardSession implements HardwareKeyTarget {
         }
       }
       this.writeCommonPhrasesMarker(marker, seeded);
+      // Seeding is deliberately a sequence of independently locked native operations. The settings
+      // process may edit the document between them, so do not return the last add response as if it
+      // were the complete current list; publish a fresh locked snapshot instead.
+      document = KeyboardSession.commonPhrasesDocument(
+        await KeyboardSession.commonPhrasesCall(directory, { operation: 'load' }));
     }
     const texts: string[] = [];
     for (const phrase of document.phrases ?? []) {
@@ -5712,7 +5881,7 @@ export class KeyboardSession implements HardwareKeyTarget {
   }
 
   /**
-   * 已安装符号集插件的组，读自 `<stateDirectory>/plugins`，与设置页交给插件管理的是同一个目录。
+   * 已安装符号集插件的组，读自 `<stateDirectory>/plugins`，即键盘自己沙箱里的插件目录。设置页把包装进设置应用的 `files/state/plugins`；API 12 起输入法扩展使用独立沙箱（见 platforms/harmony/README.md），要等两边都改用共享沙箱目录之后，这里才读得到设置页装的包，在那之前通常是空的。
    *
    * 不依赖 `msime-others.db`；读不出来时返回空表，表情面板照旧只显示内置内容。
    */
@@ -6104,7 +6273,7 @@ export class KeyboardSession implements HardwareKeyTarget {
 
   private typingSource(): string {
     return TypingStatisticsPolicy.source(this.schemeName, this.profileName, this.englishMode,
-      this.nineKeyMode, this.localMode);
+      this.keyGrid, this.localMode);
   }
 
   private clearSmartPunctuationRepeat(): void {

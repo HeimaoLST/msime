@@ -197,18 +197,16 @@ struct PersonalDictionaryView: View {
             Text(Self.requestStatus(latest)).lineLimit(1)
               .foregroundStyle(latest.status == .failed ? MetasequoiaTheme.danger : MetasequoiaTheme.sub)
           }
-          .font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+          .designSubtext()
         } else {
           Text(state.snapshotDate.map { "最近同步 \($0.formatted(date: .abbreviated, time: .standard))" }
                ?? "尚未收到键盘确认，保存的操作暂不会标记为已生效")
-            .font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+            .designSubtext()
             .fixedSize(horizontal: false, vertical: true)
         }
       }
       Spacer(minLength: 8)
-      Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
-        .foregroundStyle(MetasequoiaTheme.sub.opacity(0.6))
-        .accessibilityHidden(true)
+      DesignChevron(opacity: 0.6)
     }
     .frame(minHeight: 44)
     .contentShape(Rectangle())
@@ -231,7 +229,7 @@ struct PersonalDictionaryView: View {
                 .overlay(Capsule().stroke(MetasequoiaTheme.sub.opacity(0.5)))
             }
           }
-          Text(code).font(.system(size: 13)).foregroundStyle(MetasequoiaTheme.sub)
+          Text(code).designSubtext()
             .lineLimit(1).truncationMode(.tail)
         }
         Spacer(minLength: 8)

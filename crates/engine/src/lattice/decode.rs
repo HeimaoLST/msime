@@ -2,7 +2,7 @@
 //!
 //! A phrase graph and a Viterbi beam search over dictionary spans, after libpinyin's PinyinLookup2 (the unigram path score is a product of P(word), with a beam per syllable step) and sunpinyin's lattice columns. The unigram normaliser supplies the usual "fewer tokens win" bias.
 //!
-//! With a bigram table, each transition also earns `bigram_weight * ln(P(next|previous) / P(next))`. Without it every path spelling the same syllables is judged on its words' frequencies alone, which is why 配置于权限 used to beat 配置与权限: 于 is the commoner character and nothing else had an opinion. The term is a bonus rather than a replacement, so an absent pair leaves the path where the unigram score put it.
+//! With a bigram table, each transition also earns `bigram_weight * max(0, ln(P(next|previous) / P(next)))`. Without it every path spelling the same syllables is judged on its words' frequencies alone, which is why 配置于权限 used to beat 配置与权限: 于 is the commoner character and nothing else had an opinion. The term is a bonus rather than a replacement: an absent pair leaves the path where the unigram score put it, and so does a pair the table scores below zero, since the table keeps only pairs seen often enough and an absent one is no evidence of being likelier than an observed, unlikely one. On sentences-neutral-v1 dropping the negative side raised top-1 0.608 -> 0.617 and top-5 0.833 -> 0.847 with the reranker, 0.480 -> 0.490 and 0.789 -> 0.803 without it (#7583).
 //!
 //! A trigram cannot be searched the same way without carrying two words of history in every beam entry, so it is applied after the search: the n best paths are rescored with what the third word adds over the second, then reordered. That is the reason to decode more paths than are shown.
 
@@ -406,8 +406,8 @@ pub(super) fn decode_graph(
 
     // 同一列里很多假设经由同一个词到达，只是更早的历史不同；它们对每条出边查到的二元分完全一样。按前一个词把这一列所有出边的二元分记下来，同一个词只查一遍表。
     let row_capacity = options.beam.max(options.nbest);
-    let mut bigram_rows: Vec<(&str, Vec<f32>)> = Vec::with_capacity(row_capacity);
-    let mut bigram_row_indices: HashMap<&str, usize> = HashMap::with_capacity(row_capacity);
+    let mut bigram_rows: Vec<(&str, Vec<f32>)> = Vec::new();
+    let mut bigram_row_indices: HashMap<&str, usize> = HashMap::new();
     // 这一列的出边，按原来的顺序（先图里的，再 `extra` 的）收集一次，每个假设都按这个顺序展开。
     let mut outgoing: Vec<&Edge> = Vec::new();
     for pos in 0..n {
@@ -429,6 +429,10 @@ pub(super) fn decode_graph(
                 let row = if let Some(&row) = bigram_row_indices.get(previous) {
                     row
                 } else {
+                    if bigram_rows.is_empty() {
+                        bigram_rows.reserve_exact(row_capacity);
+                        bigram_row_indices.reserve(row_capacity);
+                    }
                     let scores = match memo.as_deref_mut() {
                         Some(memo) => outgoing
                             .iter()
@@ -460,7 +464,8 @@ pub(super) fn decode_graph(
                 let mut score = hyp.score + edge.log_prob;
                 let static_bonus = bonuses.map_or(0.0, |bonuses| f64::from(bonuses[at]));
                 if bigram.is_some() {
-                    score += options.bigram_weight * static_bonus;
+                    // Only a pair the table favours moves the path. A pair it calls less likely than chance counts the same as one it never kept: the table drops rare pairs, so an absent pair is usually rarer still, and penalising the observed one made a common word lose to a rarer one with no pair at all. 句首→一大 is -1.0 and 句首→益达 is absent, which put 益达拖 ahead of 一大拖 for yidatuo (#7583).
+                    score += options.bigram_weight * static_bonus.max(0.0);
                 }
                 if let (Some(personal), Some(context)) = (personal, context.as_ref()) {
                     if context.confidence > 0.0 {
@@ -652,6 +657,72 @@ pub(super) fn decode_typo_on_graph(
     })
 }
 
+/// 整句改字里的一段：音节 `start..end` 转换成 `word`，`key` 是它的读音（音节以 `'` 连接）。改字只处理一个汉字对应一个音节的句子，所以 `word` 的字数等于 `end - start`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedSpan {
+    pub start: usize,
+    pub end: usize,
+    pub word: String,
+    pub key: String,
+}
+
+/// 在 `pins` 的约束下重新转换 `syllables`：钉住的段原样出现，其余音节由词网格解出，不能跨过任何钉住的段。只用一个汉字对应一个音节的词，结果按音节切成首尾相接、覆盖全部音节的段。`pins` 须互不重叠且落在音节范围内；某个钉住的词不在词库里时按最低权重补一条边。解不出路径时为空。
+pub fn decode_pinned(
+    syllables: &[String],
+    lookup: &mut LatticeLookup<'_>,
+    options: &LatticeOptions<'_>,
+    pins: &[PinnedSpan],
+) -> Vec<PinnedSpan> {
+    let n = syllables.len();
+    if n == 0 || pins.iter().any(|pin| pin.start >= pin.end || pin.end > n) {
+        return Vec::new();
+    }
+    let mut graph = build_graph(syllables, lookup, options);
+    for (start, edges) in graph.iter_mut().enumerate() {
+        edges.retain(|edge| {
+            if edge.word.chars().count() != edge.end - start {
+                return false;
+            }
+            pins.iter().all(|pin| {
+                let overlaps = start < pin.end && pin.start < edge.end;
+                !overlaps || (start == pin.start && edge.end == pin.end && edge.word == pin.word)
+            })
+        });
+    }
+    for pin in pins {
+        let column = &mut graph[pin.start];
+        if !column.iter().any(|edge| edge.end == pin.end) {
+            column.push(Edge {
+                end: pin.end,
+                word: pin.word.clone(),
+                key: pin.key.clone(),
+                log_prob: edge_log_prob(1, pin.end - pin.start, options),
+                typo: false,
+            });
+        }
+    }
+    let Some(best) = decode_graph(&graph, options, None).into_iter().next() else {
+        return Vec::new();
+    };
+    let keys: Vec<&str> = best.key.split('\'').collect();
+    if keys.len() != n {
+        return Vec::new();
+    }
+    let mut spans = Vec::with_capacity(best.words.len());
+    let mut start = 0;
+    for word in best.words {
+        let end = start + word.chars().count();
+        spans.push(PinnedSpan {
+            start,
+            end,
+            key: keys[start..end].join("'"),
+            word,
+        });
+        start = end;
+    }
+    spans
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use std::collections::HashSet;
@@ -746,6 +817,18 @@ pub(super) mod tests {
         let extra = vec![vec![], vec![edge(2)], vec![]];
 
         assert_eq!(column_capacities(&graph, Some(&extra), 4, 2), [4, 4, 12, 4]);
+    }
+
+    #[test]
+    fn decode_without_bigram_does_not_allocate_bigram_rows() {
+        let graph = vec![Vec::new()];
+        let options = LatticeOptions::default();
+        let (paths, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            decode_graph(&graph, &options, None)
+        });
+
+        assert!(paths.is_empty());
+        assert_eq!(allocations, 4);
     }
 
     /// test_pinyin.cpp:540-548, like the other fake-lookup lattice cases of `test_word_lattice` (:534-677) ported here and in merge.rs; the SQLite lookup case (:641-666) is in dictionary/pinyin.rs.
@@ -934,6 +1017,33 @@ pub(super) mod tests {
         // The weight has to be able to turn the term off again.
         options.bigram_weight = 0.0;
         assert_eq!(best(text, &rows, &options), "配置于权限");
+    }
+
+    #[test]
+    fn an_unlikely_pair_does_not_lose_to_an_unseen_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let rows = table(&[
+            ("yi'da", &[("一大", 301240), ("益达", 200000)]),
+            ("tuo", &[("拖", 463823)]),
+        ]);
+        let text = "yi'da'tuo";
+        assert_eq!(best(text, &rows, &LatticeOptions::default()), "一大拖");
+
+        // The shipped table has 句首 -> 一大 at -1.0 and no 句首 -> 益达 at all (#7583).
+        let bigram = Arc::new(pair_table(
+            directory.path(),
+            "start.bin",
+            &[(SENTENCE_START, "一大", -1.0)],
+        ));
+        let options = LatticeOptions {
+            bigram: Some(bigram),
+            ..LatticeOptions::default()
+        };
+        assert_eq!(
+            best(text, &rows, &options),
+            "一大拖",
+            "a pair scored below chance weighs the same as a pair the table never kept"
+        );
     }
 
     #[test]
@@ -1163,5 +1273,71 @@ pub(super) mod tests {
             literal_score: 0.0,
         };
         assert!(!typo.leads(0.0));
+    }
+
+    fn pinned(start: usize, end: usize, word: &str, key: &str) -> PinnedSpan {
+        PinnedSpan {
+            start,
+            end,
+            word: word.to_owned(),
+            key: key.to_owned(),
+        }
+    }
+
+    fn pinned_words(spans: &[PinnedSpan]) -> Vec<&str> {
+        spans.iter().map(|span| span.word.as_str()).collect()
+    }
+
+    #[test]
+    fn pinned_decode_keeps_the_pin_and_reconverts_around_it() {
+        let rows = table(&[
+            ("bei", &[("被", 9000), ("北", 5000), ("背", 4000)]),
+            ("jing", &[("经", 9000), ("京", 3000), ("景", 2000)]),
+            ("bei'jing", &[("背景", 30000), ("北京", 20000)]),
+            ("qu", &[("去", 9000)]),
+        ]);
+        let options = LatticeOptions::default();
+        let text = syllables("qu'bei'jing");
+        let free = decode_pinned(&text, &mut lookup(&rows), &options, &[]);
+        assert_eq!(pinned_words(&free), ["去", "背景"]);
+        assert_eq!(free[1], pinned(1, 3, "背景", "bei'jing"));
+
+        // 钉住一个两字词：它原样出现，左边照常解码。
+        let word = decode_pinned(
+            &text,
+            &mut lookup(&rows),
+            &options,
+            &[pinned(1, 3, "北京", "bei'jing")],
+        );
+        assert_eq!(pinned_words(&word), ["去", "北京"]);
+
+        // 钉住词中间的一个字：跨过它的词不能再用，左边那个音节单独解码。
+        let character = decode_pinned(
+            &text,
+            &mut lookup(&rows),
+            &options,
+            &[pinned(2, 3, "京", "jing")],
+        );
+        assert_eq!(pinned_words(&character), ["去", "被", "京"]);
+        assert_eq!(character[2], pinned(2, 3, "京", "jing"));
+    }
+
+    #[test]
+    fn a_pin_missing_from_the_dictionary_still_decodes() {
+        let rows = table(&[("qu", &[("去", 9000)]), ("bei", &[("被", 9000)])]);
+        let spans = decode_pinned(
+            &syllables("qu'bei"),
+            &mut lookup(&rows),
+            &LatticeOptions::default(),
+            &[pinned(1, 2, "贝", "bei")],
+        );
+        assert_eq!(pinned_words(&spans), ["去", "贝"]);
+        assert!(decode_pinned(
+            &syllables("qu'bei"),
+            &mut lookup(&rows),
+            &LatticeOptions::default(),
+            &[pinned(1, 3, "贝", "bei")],
+        )
+        .is_empty());
     }
 }
