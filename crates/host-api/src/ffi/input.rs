@@ -224,11 +224,11 @@ pub extern "C" fn msime_client_command(handle: u64, command: u32) -> *mut c_char
                 Some(lifecycle::InputClass::HostCommit),
             )
         }
-        // 焦点即将离开，宿主替用户结束组字：对会话同 Finish，上屏来源记 FocusLoss，不出声不画。
+        // 焦点即将离开，宿主替用户结束组字：对会话同 Finish（高亮的是脚本插件行时改为原样上屏，见 `Action::FinishOnFocusLoss`），上屏来源记 FocusLoss，不出声不画。
         lifecycle::COMMAND_FINISH_ON_FOCUS_LOSS => {
             return dispatch_call(
                 handle,
-                Action::Finish,
+                Action::FinishOnFocusLoss,
                 Some(lifecycle::InputClass::FocusLoss),
             )
         }

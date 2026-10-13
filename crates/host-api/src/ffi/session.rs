@@ -51,12 +51,14 @@ pub unsafe extern "C" fn msime_client_create(options: *const u8, length: usize) 
         let plugin_roots = key_sound::PluginRoots::new(
             options.preferences_directory.as_deref(),
             options.sound_packs.as_deref(),
+            options.plugin_packs.as_deref(),
             &options.resources,
         );
         let edition = options.edition();
         let mut options = options.into_engine_options();
         let plugin_tables = plugin_tables::PluginTables::stamp(
             plugin_roots.installed.as_deref(),
+            plugin_roots.builtin_packs.as_deref(),
             &options,
             &applied.plugins,
         );

@@ -11,6 +11,7 @@ fn builtin_roots() -> PluginRoots {
     PluginRoots {
         installed: None,
         builtin_sounds: Some(builtin_sounds()),
+        builtin_packs: None,
     }
 }
 
@@ -117,7 +118,7 @@ fn plugin_roots_come_from_the_state_root_and_the_bundle() {
     let directory = tempfile::tempdir().unwrap();
     let resources = directory.path().join("EngineResources");
     let state = directory.path().join("state");
-    let roots = PluginRoots::new(state.to_str(), None, resources.to_str().unwrap());
+    let roots = PluginRoots::new(state.to_str(), None, None, resources.to_str().unwrap());
     assert_eq!(roots.installed, Some(state.join("plugins")));
     assert_eq!(
         roots.builtin_sounds, None,
@@ -125,7 +126,7 @@ fn plugin_roots_come_from_the_state_root_and_the_bundle() {
     );
 
     std::fs::create_dir_all(directory.path().join("sound-packs")).unwrap();
-    let roots = PluginRoots::new(None, None, resources.to_str().unwrap());
+    let roots = PluginRoots::new(None, None, None, resources.to_str().unwrap());
     assert_eq!(roots.installed, None);
     assert_eq!(
         roots.builtin_sounds,
@@ -133,9 +134,40 @@ fn plugin_roots_come_from_the_state_root_and_the_bundle() {
     );
 
     let named = directory.path().join("data/sound-packs");
-    let roots = PluginRoots::new(Some("relative"), named.to_str(), "relative");
+    let roots = PluginRoots::new(Some("relative"), named.to_str(), None, "relative");
     assert_eq!(roots.installed, None, "a relative state root names nothing");
     assert_eq!(roots.builtin_sounds, Some(named));
+}
+
+#[test]
+fn official_plugin_packs_are_named_or_found_beside_the_sound_packs() {
+    let directory = tempfile::tempdir().unwrap();
+    let sounds = directory.path().join("Resources/sound-packs");
+    std::fs::create_dir_all(&sounds).unwrap();
+    // 移动端和不带官方包的开发构建：音效包旁边没有 plugin-packs，什么都不认。
+    let roots = PluginRoots::new(None, sounds.to_str(), None, "");
+    assert_eq!(roots.builtin_packs, None);
+    assert_eq!(roots.builtin().packs, None);
+
+    // macOS 的 bundle 和 Linux 的安装：只传 sound_packs，旁边的 plugin-packs 就是官方包。
+    let packs = directory.path().join("Resources/plugin-packs");
+    std::fs::create_dir_all(&packs).unwrap();
+    let roots = PluginRoots::new(None, sounds.to_str(), None, "");
+    assert_eq!(roots.builtin_packs, Some(packs.clone()));
+    assert_eq!(roots.builtin().sounds, Some(sounds.as_path()));
+    assert_eq!(roots.builtin().packs, Some(packs.as_path()));
+
+    // 不传 sound_packs 时音效包按 resources 推出，官方包再从音效包推出。
+    let resources = directory.path().join("Resources/EngineResources");
+    let roots = PluginRoots::new(None, None, None, resources.to_str().unwrap());
+    assert_eq!(roots.builtin_packs, Some(packs.clone()));
+
+    // 显式给出的（Windows 的 Server 给 Program Files 下的目录）优先，不存在也照用，不再去音效包旁边找；相对路径什么都不认。
+    let named = directory.path().join("server/plugin-packs");
+    let roots = PluginRoots::new(None, sounds.to_str(), named.to_str(), "");
+    assert_eq!(roots.builtin_packs, Some(named));
+    let roots = PluginRoots::new(None, sounds.to_str(), Some("plugin-packs"), "");
+    assert_eq!(roots.builtin_packs, None);
 }
 
 #[test]
@@ -193,7 +225,7 @@ fn pack_files_reads_installed_packs_from_the_state_root() {
         "schema_version = 1\nkind = \"sound\"\nid = \"typewriter\"\nname = \"Typewriter\"\nversion = \"1\"\nlicense = \"CC0-1.0\"\n[sounds]\ndefault = \"key.wav\"\n",
     )
     .unwrap();
-    let roots = PluginRoots::new(state.path().to_str(), None, "");
+    let roots = PluginRoots::new(state.path().to_str(), None, None, "");
     let files = pack_files(&roots, "typewriter").unwrap();
     assert_eq!(files["builtin"], false);
     assert_eq!(
@@ -218,7 +250,7 @@ fn the_selected_effect_pack_replaces_the_preferences_style_and_follows_a_reimpor
     use msime_client_core::plugins::EffectStyle;
 
     let state = tempfile::tempdir().unwrap();
-    let roots = PluginRoots::new(state.path().to_str(), None, "");
+    let roots = PluginRoots::new(state.path().to_str(), None, None, "");
     let mut preferences = PluginPreferences {
         effect_style: EffectStyle::Flash,
         effect_intensity: 30,
@@ -569,7 +601,7 @@ mod playback {
         let (sender, receiver) = sync_channel(8);
         let mut worker = Worker::new(sender);
         let mut settings = SoundSettings {
-            roots: PluginRoots::new(state.path().to_str(), None, ""),
+            roots: PluginRoots::new(state.path().to_str(), None, None, ""),
             key: true,
             pack: "typewriter".into(),
             volume: 50,
@@ -726,7 +758,7 @@ mod playback {
         let (sender, receiver) = sync_channel(8);
         let mut worker = Worker::new(sender);
         let mut settings = keys_settings();
-        settings.roots = PluginRoots::new(state.path().to_str(), None, "");
+        settings.roots = PluginRoots::new(state.path().to_str(), None, None, "");
         settings.roots.builtin_sounds = Some(builtin_sounds());
         settings.pack = "broken".into();
         worker.configure(Arc::new(settings.clone()));

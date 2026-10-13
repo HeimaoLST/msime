@@ -4,6 +4,7 @@
 
 use super::runtime::empty_result;
 use super::*;
+use serde_json::json;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -878,6 +879,7 @@ fn dangling_segment_delimiter_cleanup_matches_windows_policy() {
     assert!(!needs_dangling_segment_delimiter_backspace("ni'", 9));
 }
 
+#[cfg(unix)]
 #[test]
 fn voice_control_rejects_zero_generation_without_connecting() {
     let directory = private_tempdir();
@@ -1630,6 +1632,40 @@ fn mixed_japanese_rows_keep_their_seat_like_english() {
             vec![0, 13, 4, 0, 2, 3]
         ),
         vec!["开始", "云候选", "AI联想", "開始", "kaishi", "开"]
+    );
+}
+
+/// 打拼音出符号的符号行和 emoji 行同一个来源（`CandidateSource::Emoji`），有云候选时按 emoji 的座位坐：第一行符号坐 emoji 座位（云候选之后），其余接在本地候选之后。这里锁定现状，免得以后有人只给 emoji 写特例。
+#[test]
+fn symbol_rows_take_the_emoji_seat_when_online_candidates_arrive() {
+    let seated = |words: &[&str], sources: Vec<u8>| {
+        let mut runtime = Runtime::new(
+            Fixture {
+                scheme: 0,
+                local_mode: "none".into(),
+                words: words.iter().map(|word| (*word).into()).collect(),
+                codes: (0..words.len()).map(|n| format!("code-{n}")).collect(),
+                sources,
+                ..Fixture::default()
+            },
+            9,
+        )
+        .unwrap();
+        runtime.focus(true).unwrap();
+        type_key(&mut runtime)
+            .view
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.text)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        seated(
+            &["平方米", "㎡", "m²", "平方", "云候选"],
+            vec![0, 6, 6, 0, 2]
+        ),
+        vec!["平方米", "云候选", "㎡", "平方", "m²"]
     );
 }
 
@@ -3401,7 +3437,7 @@ fn switching_the_language_drops_the_composition_being_spelled() {
 
 #[test]
 fn commit_context_precedes_mode_reset_for_every_selection_route() {
-    for route in 0..5 {
+    for route in 0..6 {
         let mut runtime = runtime();
         runtime.focus(true).unwrap();
         runtime.engine.local_mode = "unicode".into();
@@ -3412,6 +3448,8 @@ fn commit_context_precedes_mode_reset_for_every_selection_route() {
             1 => Action::SelectEdge(id, CandidateEdge::FirstHan),
             2 => Action::SelectHighlighted,
             3 => Action::Finish,
+            // 高亮的不是插件行时，失焦结束组字和 `Finish` 一样。
+            4 => Action::FinishOnFocusLoss,
             _ => Action::Character {
                 value: b'1',
                 shift: false,
@@ -3884,6 +3922,7 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         english_minimum_prefix: 2,
         mixed_emoji: false,
         mixed_kaomoji: false,
+        mixed_symbols: false,
         mixed_japanese: false,
         local_unicode: true,
         local_date_time: true,
@@ -3900,6 +3939,7 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         local_shift_letter_entry: true,
         chaizi_traditional_output: false,
         command_table: Vec::new(),
+        plugin_commands: Vec::new(),
         mention_entries: Vec::new(),
         quick_phrase_table: Vec::new(),
         helpcode_table: None,
@@ -7875,6 +7915,12 @@ fn the_reranker_never_weighs_ai_rows_or_their_placeholder() {
     all(target_os = "linux", not(target_env = "ohos"))
 ))]
 mod candidate_transform;
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+mod plugin_commands;
 /// 拼音拆不开、英文完全匹配时引擎把英文放在首位（如 `hello`），句子模型不把它偏爱的中文行转到英文前面。英文行不算词典命中，若不挡住，开了句子模型的用户就看不到引擎的这个安排。首行换成整句时模型照常提它偏爱的行。
 #[test]
 fn the_reranker_leaves_a_leading_english_word_in_place() {

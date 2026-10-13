@@ -561,7 +561,7 @@ fn the_turn_quota_spans_deliveries_and_refills_on_the_next_turn() {
 fn an_exhausted_turn_is_skipped_rather_than_failed() {
     // 宿主在同一轮里重建实例时交过来的剩余是 0（之前的投递已经花光，派发没经过 `msime_client_key` 开新一轮）：不运行，不算失败，实例照样可用。
     let mut script = instance(&burner(2_000), declaration(&[], &[Hook::Input]));
-    script.resume_turn(3, 0, limits::BEFORE_COMMIT_FUEL);
+    script.resume_turn(3, 0, limits::BEFORE_COMMIT_FUEL, limits::COMMAND_FUEL);
     assert_eq!(
         script.deliver(3, &input_event()),
         Outcome::TurnExhausted { fuel: 0 }
@@ -573,7 +573,7 @@ fn an_exhausted_turn_is_skipped_rather_than_failed() {
     ));
     // 本轮只剩一点：运行到一半被截断，不算失败，但实例不再可用；不够下一段指令的零头也记为用完。
     let mut cut = instance(&burner(2_000), declaration(&[], &[Hook::Input]));
-    cut.resume_turn(5, 100, limits::BEFORE_COMMIT_FUEL);
+    cut.resume_turn(5, 100, limits::BEFORE_COMMIT_FUEL, limits::COMMAND_FUEL);
     let outcome = cut.deliver(5, &input_event());
     assert!(
         matches!(outcome, Outcome::TurnExhausted { fuel } if fuel > 0 && fuel <= 100),
@@ -587,7 +587,7 @@ fn an_exhausted_turn_is_skipped_rather_than_failed() {
         &burner(2_000),
         declaration(&[], &[Hook::Input, Hook::BeforeCommit]),
     );
-    snapshot.resume_turn(6, limits::TURN_FUEL, 100);
+    snapshot.resume_turn(6, limits::TURN_FUEL, 100, limits::COMMAND_FUEL);
     let event = before_commit_event("abc", "abc");
     let outcome = snapshot.deliver(6, &event);
     assert!(
@@ -612,10 +612,13 @@ fn spinner() -> String {
     module_wat("", "", "(loop $spin (br $spin)) i32.const 0")
 }
 
-/// `hook` 这一次的事件：`before_commit` 带上屏文本，其余只有标量。
+/// `hook` 这一次的事件：`before_commit` 带上屏文本，`command` 带触发词，其余只有标量。
 fn event_for(hook: Hook) -> Event<'static> {
     if hook == Hook::BeforeCommit {
         return before_commit_event("abc", "abc");
+    }
+    if hook == Hook::Command {
+        return command_event("uuid", "", [0; limits::RANDOM_BYTES_PER_EVENT]);
     }
     let mut event = input_event();
     event.hook = hook;
@@ -660,14 +663,21 @@ fn a_loop_in_candidates_after_input_spent_fuel_is_a_failure() {
 
 #[test]
 fn a_cut_run_counts_as_a_failure_from_half_of_its_own_limit() {
-    for hook in [Hook::Input, Hook::Candidates, Hook::BeforeCommit] {
+    for hook in [
+        Hook::Input,
+        Hook::Candidates,
+        Hook::BeforeCommit,
+        Hook::Command,
+    ] {
         let half = limits::hook_fuel(hook) / 2;
-        let resume = |script: &mut ScriptInstance, left: u64| {
-            if hook == Hook::BeforeCommit {
-                script.resume_turn(1, limits::TURN_FUEL, left);
-            } else {
-                script.resume_turn(1, left, limits::BEFORE_COMMIT_FUEL);
+        let resume = |script: &mut ScriptInstance, left: u64| match hook {
+            Hook::BeforeCommit => {
+                script.resume_turn(1, limits::TURN_FUEL, left, limits::COMMAND_FUEL)
             }
+            Hook::Command => {
+                script.resume_turn(1, limits::TURN_FUEL, limits::BEFORE_COMMIT_FUEL, left)
+            }
+            _ => script.resume_turn(1, left, limits::BEFORE_COMMIT_FUEL, limits::COMMAND_FUEL),
         };
         let declared = declaration(&[], &[hook]);
         // 开头只剩一点（远不到自己上限的一半）：这是没经过 `msime_client_key` 的派发接着上一轮的零头，被截断不算失败。
@@ -697,13 +707,13 @@ fn a_cut_run_counts_as_a_failure_from_half_of_its_own_limit() {
             },
             "{hook:?}"
         );
-        // 两种情形里本轮这一份都记为用完；`before_commit` 跑在快照上，持久实例照样可用。
+        // 两种情形里本轮这一份都记为用完；`before_commit` 和 `command` 跑在快照上，持久实例照样可用。
         for script in [&below, &at] {
-            assert_eq!(script.is_usable(), hook == Hook::BeforeCommit, "{hook:?}");
-            let left = if hook == Hook::BeforeCommit {
-                script.before_commit_fuel_left()
-            } else {
-                script.turn_fuel_left()
+            assert_eq!(script.is_usable(), hook.runs_on_snapshot(), "{hook:?}");
+            let left = match hook {
+                Hook::BeforeCommit => script.before_commit_fuel_left(),
+                Hook::Command => script.command_fuel_left(),
+                _ => script.turn_fuel_left(),
             };
             assert_eq!(left, 0, "{hook:?}");
         }
@@ -751,12 +761,13 @@ fn before_commit_has_its_own_turn_quota() {
         script.before_commit_fuel_left(),
         limits::BEFORE_COMMIT_FUEL - spent
     );
-    // 新一轮两份都补满。
+    // 新一轮三份都补满。
     assert!(matches!(
         script.deliver(4, &input_event()),
         Outcome::Delivered { .. }
     ));
     assert_eq!(script.before_commit_fuel_left(), limits::BEFORE_COMMIT_FUEL);
+    assert_eq!(script.command_fuel_left(), limits::COMMAND_FUEL);
     assert_eq!(script.turn_fuel_left(), limits::TURN_FUEL - per_input);
 }
 
@@ -1382,6 +1393,7 @@ fn candidate_imports_stage_order_hide_and_annotations() {
             order: vec![2, 0],
             hidden: vec![1],
             annotations: vec![(2, "常用".to_owned())],
+            rows: Vec::new(),
         }
     );
 }
@@ -1534,6 +1546,87 @@ fn the_plugin_text_check_rejects_cc_cf_and_line_separators() {
     }
 }
 
+/// 不是 Cf、却看不见或只改字形的字符：组合用字形连接符、韩文填充符、高棉文固有元音、蒙古文自由变体选择符、盲文空白、变体选择符 VS1..VS14 和表意文字变体选择符。
+const INVISIBLE_NON_FORMAT: [char; 22] = [
+    '\u{34f}',
+    '\u{115f}',
+    '\u{1160}',
+    '\u{17b4}',
+    '\u{17b5}',
+    '\u{180b}',
+    '\u{180c}',
+    '\u{180d}',
+    '\u{180f}',
+    '\u{2800}',
+    '\u{3164}',
+    '\u{ffa0}',
+    '\u{fe00}',
+    '\u{fe01}',
+    '\u{fe07}',
+    '\u{fe0c}',
+    '\u{fe0d}',
+    '\u{e0100}',
+    '\u{e0101}',
+    '\u{e0150}',
+    '\u{e01ee}',
+    '\u{e01ef}',
+];
+
+/// 把文本写成 WAT 数据段里的逐字节转义。
+fn wat_bytes(text: &str) -> String {
+    text.bytes().map(|byte| format!("\\{byte:02x}")).collect()
+}
+
+#[test]
+fn the_plugin_text_check_rejects_invisible_fillers_and_variation_selectors() {
+    for c in INVISIBLE_NON_FORMAT {
+        assert!(abi::is_forbidden_plugin_char(c), "{c:?}");
+    }
+    // 范围的两端之外照旧放行：VS15、VS16 和表意文字变体选择符之后的第一个码位。
+    for c in [
+        '\u{fe0e}',
+        '\u{fe0f}',
+        '\u{e01f0}',
+        '\u{17b3}',
+        '\u{17b6}',
+        '\u{2801}',
+    ] {
+        assert!(!abi::is_forbidden_plugin_char(c), "{c:?}");
+    }
+}
+
+#[test]
+fn rewrites_and_annotations_with_invisible_fillers_are_invalid() {
+    let commit = before_commit_event("abc", "abc");
+    let candidates = candidates_event(Hook::Candidates, 0);
+    for c in INVISIBLE_NON_FORMAT {
+        let text = format!("a{c}b");
+        let data = wat_bytes(&text);
+        assert_eq!(
+            rewrite_status(&data, text.len(), &commit),
+            (7, None),
+            "{c:?}"
+        );
+        let annotate = format!(
+            "(i32.add (call $annotate (i32.const 0) (i32.const 0) (i32.const {})) (i32.const 10))",
+            text.len()
+        );
+        assert_eq!(transform_status(&data, &annotate, &candidates), 7, "{c:?}");
+    }
+    // 跟在 emoji 后面的 VS16 照常放行：改写和注释都成功。
+    let heart = "\u{2764}\u{fe0f}";
+    let data = wat_bytes(heart);
+    assert_eq!(
+        rewrite_status(&data, heart.len(), &commit),
+        (10, Some(heart.to_owned()))
+    );
+    let annotate = format!(
+        "(i32.add (call $annotate (i32.const 0) (i32.const 0) (i32.const {})) (i32.const 10))",
+        heart.len()
+    );
+    assert_eq!(transform_status(&data, &annotate, &candidates), 10);
+}
+
 /// 调试输出只旁观：修改类 import 照样返回 `DENIED`，`before_commit` 的快照实例上的调用也交给同一个输出，`msime_init` 里的 `log` 在实例化前接上的输出里。
 #[test]
 fn debug_sinks_observe_denied_modifications_and_init_logs() {
@@ -1683,6 +1776,612 @@ fn the_text_mode_whitelist_matches_u6() {
     }
     for mode in [6, 7, 8, 9, 10, 11, 12, 13, 255] {
         assert!(!abi::local_mode_allows_text(mode));
+    }
+}
+
+// ---- 插件指令 ----
+
+/// 一次 `command` 事件：用户在 `/` 指令里打了 `trigger` 和后面的 `argument`。
+fn command_event(
+    trigger: &'static str,
+    argument: &'static str,
+    random: [u8; limits::RANDOM_BYTES_PER_EVENT],
+) -> Event<'static> {
+    let mut event = Event::new(Hook::Command);
+    event.scalars.local_mode = Some(8);
+    event.command = Some(CommandEvent {
+        trigger,
+        argument,
+        random,
+    });
+    event
+}
+
+const COMMAND_IMPORTS: &str = r#"(import "msime" "command_text" (func $command_text (param i32 i32 i32) (result i32)))
+    (import "msime" "command_row" (func $row (param i32 i32 i32 i32) (result i32)))
+    (import "msime" "random_fill" (func $random (param i32 i32) (result i32)))"#;
+
+/// 指令插件：申请 `provide_commands`，声明 `command` 和 `hooks` 里的其余钩子，[0..) 是数据段 `data`。
+fn commander(data: &str, body: &str, hooks: &[Hook], grants: CapabilitySet) -> ScriptInstance {
+    let wat = module_wat(
+        COMMAND_IMPORTS,
+        &format!(r#"(data (i32.const 0) "{data}")"#),
+        body,
+    );
+    let module = compile_wat(&wat, declaration(&[Capability::ProvideCommands], hooks)).unwrap();
+    ScriptInstance::new(&module, grants, limits::INIT_FUEL).unwrap()
+}
+
+fn provides() -> CapabilitySet {
+    CapabilitySet::EMPTY.with(Capability::ProvideCommands)
+}
+
+#[test]
+fn the_new_capability_and_hook_have_their_names_and_numbers() {
+    assert_eq!(
+        Capability::parse("provide_commands"),
+        Some(Capability::ProvideCommands)
+    );
+    assert_eq!(Capability::ProvideCommands.as_str(), "provide_commands");
+    assert_eq!(Capability::ProvideCommands.requires(), None);
+    assert!(Capability::ProvideCommands.reads_text());
+    assert!(provides().check_rules().is_ok());
+    // `CapabilitySet` 是 u8：编译期断言守着第 9 项，这里核对现在正好 8 项、各占一位。
+    assert_eq!(Capability::ALL.len(), 8);
+    let all: CapabilitySet = Capability::ALL.into_iter().collect();
+    assert_eq!(all.iter().count(), 8);
+    assert_eq!(Hook::parse("command"), Some(Hook::Command));
+    assert_eq!(Hook::Command.as_str(), "command");
+    assert_eq!(Hook::Command.code(), 18);
+    assert_eq!(Hook::ALL.len(), 14);
+    assert!(Hook::Command.modifies() && Hook::Command.runs_on_snapshot());
+    assert!(Hook::BeforeCommit.runs_on_snapshot() && !Hook::Candidates.runs_on_snapshot());
+    assert_eq!(limits::hook_fuel(Hook::Command), limits::COMMAND_FUEL);
+    // 两个指令类 import 属于 `provide_commands`，`random_fill` 不需要能力。
+    let imports: Vec<_> = abi::imports().collect();
+    assert_eq!(imports.len(), 18);
+    assert_eq!(
+        &imports[15..],
+        [
+            ("command_text", Some(Capability::ProvideCommands)),
+            ("command_row", Some(Capability::ProvideCommands)),
+            ("random_fill", None),
+        ]
+    );
+}
+
+#[test]
+fn command_imports_follow_the_static_least_privilege_rules() {
+    let row_only = module_wat(
+        r#"(import "msime" "command_row" (func $row (param i32 i32 i32 i32) (result i32)))"#,
+        "",
+        "i32.const 0",
+    );
+    assert!(matches!(
+        compile_wat(&row_only, declaration(&[], &[Hook::Command])),
+        Err(ModuleError::ImportWithoutCapability {
+            import: "command_row",
+            capability: Capability::ProvideCommands,
+        })
+    ));
+    let random_only = module_wat(
+        r#"(import "msime" "random_fill" (func $random (param i32 i32) (result i32)))"#,
+        "",
+        "i32.const 0",
+    );
+    assert!(compile_wat(&random_only, declaration(&[], &[Hook::Command])).is_ok());
+    assert_eq!(
+        compile_wat(
+            &random_only,
+            declaration(&[Capability::ProvideCommands], &[Hook::Command])
+        )
+        .unwrap_err(),
+        ModuleError::UnusedCapability(Capability::ProvideCommands)
+    );
+}
+
+/// 三个 import 各调一次，返回值编码成 (`command_text` + 10) × 10000 + (`command_row` + 10) × 100 + (`random_fill` + 10)。
+const PROBE: &str = "(i32.add
+        (i32.add
+            (i32.mul (i32.add (call $command_text (i32.const 0) (i32.const 256) (i32.const 64)) (i32.const 10)) (i32.const 10000))
+            (i32.mul (i32.add (call $row (i32.const 0) (i32.const 3) (i32.const 0) (i32.const 0)) (i32.const 10)) (i32.const 100)))
+        (i32.add (call $random (i32.const 512) (i32.const 1)) (i32.const 10)))";
+
+#[test]
+fn command_imports_need_the_grant_and_the_command_hook() {
+    let hooks = [Hook::Command, Hook::Input];
+    let event = command_event("uuid", "", [7; limits::RANDOM_BYTES_PER_EVENT]);
+    // 授予了、在 `command` 里：读到 4 字节的触发词，暂存第 0 行，取到 1 字节随机数。
+    let mut granted = commander("abc", PROBE, &hooks, provides());
+    assert_eq!(
+        status_of(granted.deliver(1, &event)),
+        14 * 10000 + 10 * 100 + 11
+    );
+    assert_eq!(
+        granted.actions().rows,
+        vec![("abc".to_owned(), String::new())]
+    );
+    // 没授予：两个指令类 import 都是 DENIED；随机数不需要能力，照样有。
+    let mut ungranted = commander("abc", PROBE, &hooks, CapabilitySet::EMPTY);
+    assert_eq!(
+        status_of(ungranted.deliver(1, &event)),
+        9 * 10000 + 9 * 100 + 11
+    );
+    assert!(ungranted.actions().is_empty());
+    // 别的钩子里：没有触发词（ABSENT），不能给行（DENIED），没有随机数（LIMIT）。
+    let mut elsewhere = commander("abc", PROBE, &hooks, provides());
+    assert_eq!(
+        status_of(elsewhere.deliver(1, &input_event())),
+        8 * 10000 + 9 * 100 + 6
+    );
+    assert!(elsewhere.actions().is_empty());
+    // 宿主在别的钩子里误带了 `CommandEvent` 也一样：触发词、参数和随机数只交给 `command`。
+    let mut smuggled = input_event();
+    smuggled.command = command_event("uuid", "", [7; limits::RANDOM_BYTES_PER_EVENT]).command;
+    let mut misdelivered = commander("abc", PROBE, &hooks, provides());
+    assert_eq!(
+        status_of(misdelivered.deliver(1, &smuggled)),
+        8 * 10000 + 9 * 100 + 6
+    );
+    assert!(misdelivered.actions().is_empty());
+    // 别的钩子里取 0 字节随机数不算错。
+    let mut zero = commander(
+        "",
+        "(call $random (i32.const 0) (i32.const 0))",
+        &hooks,
+        provides(),
+    );
+    assert_eq!(status_of(zero.deliver(1, &input_event())), 0);
+}
+
+#[test]
+fn command_text_reads_the_trigger_and_the_argument() {
+    // 把参数复制到 [256..)，返回长度 × 1000 + 首字节；字段编号不对是 INVALID，放不下是 LIMIT。
+    let body = format!(
+        "(i32.add (i32.mul (call $command_text (i32.const {}) (i32.const 256) (i32.const 64)) (i32.const 1000))
+            (i32.load8_u (i32.const 256)))",
+        abi::command_field::ARGUMENT
+    );
+    let mut script = commander("", &body, &[Hook::Command], provides());
+    assert_eq!(
+        status_of(script.deliver(1, &command_event("cz", "huo", [0; 64]))),
+        3 * 1000 + i32::from(b'h')
+    );
+    // 参数为空（`/uuid`）：读到 0 字节，不是 ABSENT。
+    assert_eq!(
+        status_of(script.deliver(2, &command_event("uuid", "", [0; 64]))),
+        0
+    );
+    let mut invalid = commander(
+        "",
+        "(i32.sub (i32.const 0) (call $command_text (i32.const 2) (i32.const 0) (i32.const 64)))",
+        &[Hook::Command],
+        provides(),
+    );
+    assert_eq!(
+        status_of(invalid.deliver(1, &command_event("uuid", "", [0; 64]))),
+        -status::INVALID
+    );
+    let mut small = commander(
+        "",
+        "(i32.sub (i32.const 0) (call $command_text (i32.const 0) (i32.const 0) (i32.const 3)))",
+        &[Hook::Command],
+        provides(),
+    );
+    assert_eq!(
+        status_of(small.deliver(1, &command_event("uuid", "", [0; 64]))),
+        -status::LIMIT
+    );
+}
+
+#[test]
+fn a_command_event_carries_no_other_text() {
+    // 同时有 `read_commit`、`read_composition` 的插件在 `command` 里读不到宿主误填的上屏和组字：`command` 的输出只能取决于触发词、参数和随机数。
+    let wat = module_wat(
+        &format!(
+            r#"{COMMAND_IMPORTS}
+            (import "msime" "commit_text" (func $commit_text (param i32 i32 i32) (result i32)))
+            (import "msime" "composition_text" (func $composition_text (param i32 i32 i32) (result i32)))"#
+        ),
+        "",
+        &format!(
+            "(i32.add
+                (i32.mul (i32.add (call $commit_text (i32.const {}) (i32.const 0) (i32.const 64)) (i32.const 10)) (i32.const 100))
+                (i32.add (call $composition_text (i32.const {}) (i32.const 0) (i32.const 64)) (i32.const 10)))",
+            commit_field::COMMIT,
+            composition_field::PREEDIT
+        ),
+    );
+    let capabilities = [
+        Capability::ReadComposition,
+        Capability::ReadCommit,
+        Capability::ProvideCommands,
+    ];
+    let declared = declaration(&capabilities, &[Hook::Command, Hook::Commit]);
+    let module = compile_wat(&wat, declared).unwrap();
+    let mut script =
+        ScriptInstance::new(&module, declared.capabilities, limits::INIT_FUEL).unwrap();
+    let mut event = command_event("uuid", "", [0; 64]);
+    event.scalars.local_mode = Some(0);
+    event.commit.commit = Some("秘密");
+    event.composition.preedit = Some("mimi");
+    assert_eq!(
+        status_of(script.deliver(1, &event)),
+        (status::ABSENT + 10) * 100 + status::ABSENT + 10
+    );
+    // 对照：同一个实例在 `commit` 里两段都读得到。
+    let mut commit = commit_event("秘密");
+    commit.composition.preedit = Some("mimi");
+    assert_eq!(
+        status_of(script.deliver(2, &commit)),
+        ("秘密".len() as i32 + 10) * 100 + "mimi".len() as i32 + 10
+    );
+}
+
+#[test]
+fn a_command_event_carries_only_the_local_mode_among_the_scalars() {
+    // 返回 KIND × 10000 + LOCAL_MODE × 100 + 其余九个标量各自加 10 之和：宿主误填了上屏来源这类标量，插件在 `command` 里也只读到 ABSENT，`command` 的输出只能取决于触发词、参数和随机数。
+    let others = [
+        event_field::ORIGIN,
+        event_field::HOW,
+        event_field::OUTCOME,
+        event_field::REASON,
+        event_field::INPUT_CLASS,
+        event_field::RETRACTION,
+        event_field::REWRITABLE,
+        event_field::CONTINUES,
+        event_field::GENERATED,
+    ];
+    let sum = others
+        .iter()
+        .fold("(i64.const 0)".to_owned(), |sum, field| {
+            format!("(i64.add {sum} (i64.add (call $scalar (i32.const {field})) (i64.const 10)))")
+        });
+    let body = format!(
+        "(i32.wrap_i64 (i64.add
+            (i64.add
+                (i64.mul (call $scalar (i32.const {})) (i64.const 10000))
+                (i64.mul (call $scalar (i32.const {})) (i64.const 100)))
+            {sum}))",
+        event_field::KIND,
+        event_field::LOCAL_MODE
+    );
+    let wat = module_wat(
+        &format!(
+            r#"{COMMAND_IMPORTS}
+            (import "msime" "event_scalar" (func $scalar (param i32) (result i64)))"#
+        ),
+        "",
+        &body,
+    );
+    let declared = declaration(
+        &[Capability::ProvideCommands],
+        &[Hook::Command, Hook::Commit],
+    );
+    let module = compile_wat(&wat, declared).unwrap();
+    let mut script = ScriptInstance::new(&module, provides(), limits::INIT_FUEL).unwrap();
+    let filled = Scalars {
+        origin: Some(1),
+        how: Some(1),
+        outcome: Some(1),
+        reason: Some(1),
+        local_mode: Some(8),
+        input_class: Some(1),
+        retraction: Some(1),
+        rewritable: Some(true),
+        continues: Some(true),
+        generated: Some(true),
+    };
+    let mut event = command_event("uuid", "", [0; 64]);
+    event.scalars = filled;
+    assert_eq!(
+        status_of(script.deliver(1, &event)),
+        Hook::Command.code() * 10000 + 8 * 100 + 9 * (status::ABSENT + 10)
+    );
+    // 对照：同一个实例在 `commit` 里九个标量都读得到（各是 1）。
+    let mut commit = Event::new(Hook::Commit);
+    commit.scalars = filled;
+    assert_eq!(
+        status_of(script.deliver(2, &commit)),
+        Hook::Commit.code() * 10000 + 8 * 100 + 9 * 11
+    );
+}
+
+#[test]
+fn a_command_without_its_words_or_with_too_long_ones_does_not_run() {
+    let mut script = commander("", "unreachable", &[Hook::Command], provides());
+    assert_eq!(
+        script.deliver(1, &Event::new(Hook::Command)),
+        Outcome::NotSubscribed
+    );
+    let long: &'static str = "a".repeat(limits::MAX_COMMAND_ARGUMENT_BYTES + 1).leak();
+    assert_eq!(
+        script.deliver(1, &command_event("uuid", long, [0; 64])),
+        Outcome::NotSubscribed
+    );
+    let trigger: &'static str = "a".repeat(limits::MAX_COMMAND_TRIGGER_BYTES + 1).leak();
+    assert_eq!(
+        script.deliver(1, &command_event(trigger, "", [0; 64])),
+        Outcome::NotSubscribed
+    );
+    assert_eq!(script.command_fuel_left(), limits::COMMAND_FUEL);
+    // 正好 64 字节的参数照常投递（这个模块一运行就 trap）。
+    let longest: &'static str = "a".repeat(limits::MAX_COMMAND_ARGUMENT_BYTES).leak();
+    assert_eq!(
+        failure(script.deliver(1, &command_event("uuid", longest, [0; 64]))),
+        Failure::Unreachable
+    );
+}
+
+/// 暂存一行：文本在 [0, `text_len`)，注释在 [512, 512 + `note_len`)，两段都是 WAT 数据段的写法。返回 `command_row` 的返回码加 10 和暂存的行。
+fn row_status(
+    text: &str,
+    text_len: usize,
+    note: &str,
+    note_len: usize,
+) -> (i32, Vec<(String, String)>) {
+    let wat = module_wat(
+        COMMAND_IMPORTS,
+        &format!(r#"(data (i32.const 0) "{text}") (data (i32.const 512) "{note}")"#),
+        &format!(
+            "(i32.add (call $row (i32.const 0) (i32.const {text_len}) (i32.const 512) (i32.const {note_len})) (i32.const 10))"
+        ),
+    );
+    let module = compile_wat(
+        &wat,
+        declaration(&[Capability::ProvideCommands], &[Hook::Command]),
+    )
+    .unwrap();
+    let mut script = ScriptInstance::new(&module, provides(), limits::INIT_FUEL).unwrap();
+    let status = status_of(script.deliver(1, &command_event("uuid", "", [0; 64])));
+    (status, script.actions().rows.clone())
+}
+
+fn row_text(text: &str) -> i32 {
+    row_status(&wat_bytes(text), text.len(), "", 0).0
+}
+
+#[test]
+fn command_rows_are_checked_like_text_that_will_be_typed() {
+    let uuid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    assert_eq!(
+        row_status(
+            &wat_bytes(uuid),
+            uuid.len(),
+            &wat_bytes("小写"),
+            "小写".len()
+        ),
+        (10, vec![(uuid.to_owned(), "小写".to_owned())])
+    );
+    assert_eq!(row_text("焱"), 10);
+    // 空串、首尾空白、全是空白、换行、零宽字符、新增的不可见字符、不是 UTF-8：INVALID。
+    for text in [
+        "",
+        " a",
+        "a ",
+        "\u{3000}",
+        "  ",
+        "a\nb",
+        "a\u{200b}b",
+        "a\u{34f}b",
+    ] {
+        assert_eq!(row_text(text), 7, "{text:?}");
+    }
+    assert_eq!(row_status("\\ff", 1, "", 0).0, 7);
+    // 不让插件行成为链接：`://`、`www.`、`mailto:`，不分大小写。
+    for text in [
+        "https://example.com",
+        "a://b",
+        "WWW.example",
+        "MailTo:x",
+        "见www.x",
+    ] {
+        assert_eq!(row_text(text), 7, "{text:?}");
+    }
+    assert_eq!(row_text("www"), 10);
+    // 64 个码元正好，65 个放不下；按码元算，33 个 emoji 是 66 个。
+    assert_eq!(row_text(&"a".repeat(64)), 10);
+    assert_eq!(row_text(&"a".repeat(65)), 6);
+    assert_eq!(row_text(&"😀".repeat(32)), 10);
+    assert_eq!(row_text(&"😀".repeat(33)), 6);
+    // 注释：32 个码元正好，33 个放不下；含禁用字符 INVALID；首尾空白照注释的规则放行。
+    let a32 = "a".repeat(32);
+    assert_eq!(row_status("x", 1, &a32, 32).0, 10);
+    assert_eq!(row_status("x", 1, &"a".repeat(33), 33).0, 6);
+    let bidi = wat_bytes("a\u{202e}b");
+    assert_eq!(row_status("x", 1, &bidi, 5).0, 7);
+    assert_eq!(row_status("x", 1, " a", 2).0, 10);
+}
+
+#[test]
+fn a_command_gives_at_most_a_page_of_rows_and_numbers_them() {
+    // 连续暂存 10 行：前 9 行依次返回行号 0 到 8，第 10 行 LIMIT；返回值是 10 次返回码之和。
+    let mut calls = String::from("(local $sum i32)");
+    for _ in 0..10 {
+        calls.push_str(
+            "(local.set $sum (i32.add (local.get $sum) (call $row (i32.const 0) (i32.const 1) (i32.const 0) (i32.const 0))))",
+        );
+    }
+    calls.push_str("(local.get $sum)");
+    let mut script = commander("x", &calls, &[Hook::Command], provides());
+    assert_eq!(
+        status_of(script.deliver(1, &command_event("uuid", "", [0; 64]))),
+        (0..9).sum::<i32>() + status::LIMIT
+    );
+    assert_eq!(script.actions().rows.len(), limits::MAX_COMMAND_ROWS);
+}
+
+#[test]
+fn a_failed_command_hands_over_no_rows() {
+    let event = command_event("uuid", "", [0; 64]);
+    for (body, expected) in [
+        (
+            "(drop (call $row (i32.const 0) (i32.const 1) (i32.const 0) (i32.const 0))) (i32.const -1)",
+            Failure::NegativeReturn,
+        ),
+        (
+            "(drop (call $row (i32.const 0) (i32.const 1) (i32.const 0) (i32.const 0))) unreachable",
+            Failure::Unreachable,
+        ),
+        (
+            "(drop (call $row (i32.const 0) (i32.const 1) (i32.const 0) (i32.const 0)))
+             (drop (call $row (i32.const 0) (i32.const 1) (i32.const -8) (i32.const 100))) (i32.const 0)",
+            Failure::MemoryOutOfBounds,
+        ),
+    ] {
+        let mut script = commander("x", body, &[Hook::Command], provides());
+        assert_eq!(failure(script.deliver(1, &event)), expected, "{body}");
+        assert!(script.actions().rows.is_empty(), "{body}");
+        // 跑在快照上：持久实例不受影响。
+        assert!(script.is_usable(), "{body}");
+    }
+}
+
+#[test]
+fn random_fill_hands_out_the_events_bytes_in_order() {
+    let mut random = [0u8; limits::RANDOM_BYTES_PER_EVENT];
+    for (index, byte) in random.iter_mut().enumerate() {
+        *byte = index as u8 + 1;
+    }
+    // 取 16 字节到 [0..)，再取 44 字节到 [16..)，再要 5 字节放不下（只剩 4，什么都不写），然后取 4 字节到 [60..)，最后再要 1 字节放不下。返回值是取到的字节数之和，加上两次 LIMIT 之和加 10 再乘 100，加上 [0] 乘 1000、[63] 乘 100000。
+    let body = "(local $sum i32) (local $limits i32)
+        (local.set $sum (call $random (i32.const 0) (i32.const 16)))
+        (local.set $sum (i32.add (local.get $sum) (call $random (i32.const 16) (i32.const 44))))
+        (local.set $limits (call $random (i32.const 60) (i32.const 5)))
+        (local.set $sum (i32.add (local.get $sum) (call $random (i32.const 60) (i32.const 4))))
+        (local.set $limits (i32.add (local.get $limits) (call $random (i32.const 64) (i32.const 1))))
+        (i32.add
+            (i32.add (local.get $sum) (i32.mul (i32.add (local.get $limits) (i32.const 10)) (i32.const 100)))
+            (i32.add (i32.mul (i32.load8_u (i32.const 0)) (i32.const 1000))
+                (i32.mul (i32.load8_u (i32.const 63)) (i32.const 100000))))";
+    let mut script = commander("", body, &[Hook::Command], provides());
+    let expected = 64 + (2 * status::LIMIT + 10) * 100 + 1000 + 64 * 100_000;
+    let event = command_event("uuid", "", random);
+    assert_eq!(status_of(script.deliver(1, &event)), expected);
+    // 每次事件都是新的 64 字节，从头取。
+    assert_eq!(status_of(script.deliver(2, &event)), expected);
+}
+
+/// B1：`command` 跑在 `msime_init` 之后的快照上。模块在 `command` 里把计数加一、写进行的开头，再接上之前在 `commit` 里存下的上屏文本；快照上的计数总是从 0 起，持久实例存下的上屏文本也带不进来。
+#[test]
+fn command_runs_on_the_post_init_snapshot_and_cannot_carry_earlier_text() {
+    let wat = format!(
+        r#"(module
+            {COMMAND_IMPORTS}
+            (import "msime" "commit_text" (func $commit_text (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (global $count (mut i32) (i32.const 0))
+            (func (export "msime_abi") (result i32) i32.const 1)
+            (func (export "msime_on_event") (param $kind i32) (result i32)
+                (if (i32.eq (local.get $kind) (i32.const {commit}))
+                    (then
+                        (i32.store (i32.const 252)
+                            (call $commit_text (i32.const {field}) (i32.const 300) (i32.const 64)))
+                        (return (i32.load (i32.const 252)))))
+                (global.set $count (i32.add (global.get $count) (i32.const 1)))
+                (i32.store8 (i32.const 200) (i32.add (i32.load8_u (i32.const 200)) (i32.const 1)))
+                (i32.store8 (i32.const 299)
+                    (i32.add (i32.const 48) (i32.add (global.get $count) (i32.load8_u (i32.const 200)))))
+                (call $row (i32.const 299) (i32.add (i32.const 1) (i32.load (i32.const 252))) (i32.const 0) (i32.const 0))))"#,
+        commit = Hook::Commit.code(),
+        field = commit_field::COMMIT,
+    );
+    let capabilities = [Capability::ReadCommit, Capability::ProvideCommands];
+    let declared = declaration(&capabilities, &[Hook::Commit, Hook::Command]);
+    let module = compile_wat(&wat, declared).unwrap();
+    let mut script =
+        ScriptInstance::new(&module, declared.capabilities, limits::INIT_FUEL).unwrap();
+    let command = command_event("uuid", "", [0; 64]);
+    let rows = |script: &mut ScriptInstance, turn| {
+        status_of(script.deliver(turn, &command));
+        script.actions().rows.clone()
+    };
+    let first = vec![("2".to_owned(), String::new())];
+    for turn in 1..=3 {
+        assert_eq!(rows(&mut script, turn), first, "{turn}");
+    }
+    // 持久实例在 `commit` 里存下了上屏文本……
+    assert_eq!(
+        status_of(script.deliver(4, &commit_event("秘密"))),
+        "秘密".len() as i32
+    );
+    // ……之后的 `command` 照样只给出快照上的那一行，没有这段文本。
+    assert_eq!(rows(&mut script, 5), first);
+}
+
+#[test]
+fn command_has_its_own_turn_quota() {
+    // `input` 每次循环 1000 次，`command` 死循环。
+    let body = format!(
+        "(local $i i32)
+         (if (i32.eq (local.get $kind) (i32.const {command}))
+            (then (loop $spin (br $spin))))
+         (local.set $i (i32.const 1000))
+         (loop $again
+            (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+            (br_if $again (local.get $i)))
+         i32.const 0",
+        command = Hook::Command.code(),
+    );
+    let mut script = commander("", &body, &[Hook::Input, Hook::Command], provides());
+    let per_input = match script.deliver(3, &input_event()) {
+        Outcome::Delivered { fuel, .. } => fuel,
+        other => panic!("{other:?}"),
+    };
+    // `input` 把这一轮其余钩子的配额烧到放不下下一次。
+    while script.turn_fuel_left() >= per_input {
+        assert!(matches!(
+            script.deliver(3, &input_event()),
+            Outcome::Delivered { .. }
+        ));
+    }
+    let hooks_left = script.turn_fuel_left();
+    // 同一轮里 `command` 照样拿到完整的 100 000：死循环烧完自己的上限，按 fuel 耗尽失败，不是本轮配额耗尽；其余钩子的配额不动。
+    assert_eq!(script.command_fuel_left(), limits::COMMAND_FUEL);
+    let outcome = script.deliver(3, &command_event("uuid", "", [0; 64]));
+    assert!(
+        matches!(outcome, Outcome::Failed { failure: Failure::OutOfFuel, fuel }
+            if fuel > limits::COMMAND_FUEL - 10 && fuel > hooks_left),
+        "{outcome:?}"
+    );
+    assert_eq!(script.turn_fuel_left(), hooks_left);
+    assert!(script.command_fuel_left() < 10);
+    assert_eq!(script.before_commit_fuel_left(), limits::BEFORE_COMMIT_FUEL);
+    // 本轮的 `command` 配额只剩零头：被它截断，不算失败。新一轮补满。
+    assert!(matches!(
+        script.deliver(3, &command_event("uuid", "", [0; 64])),
+        Outcome::TurnExhausted { .. }
+    ));
+    assert_eq!(script.command_fuel_left(), 0);
+    assert!(matches!(
+        script.deliver(4, &command_event("uuid", "", [0; 64])),
+        Outcome::Failed {
+            failure: Failure::OutOfFuel,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn the_command_row_text_check() {
+    for text in [
+        "UUID",
+        "α",
+        "{0F8FAD5B-D9CB-469F-A165-70867728950E}",
+        "❤\u{fe0f}",
+    ] {
+        assert!(abi::valid_command_row_text(text), "{text:?}");
+    }
+    for text in [
+        "",
+        " x",
+        "x\t",
+        "ftp://x",
+        "xWwW.y",
+        "MAILTO:",
+        "a\u{2028}b",
+    ] {
+        assert!(!abi::valid_command_row_text(text), "{text:?}");
     }
 }
 

@@ -69,6 +69,26 @@ const INIT_FAILS: &str = r#"(module
   (func (export "msime_init") (result i32) (i32.const -1))
   (func (export "msime_on_event") (param $kind i32) (result i32) (i32.const 0)))"#;
 
+/// 指令插件：每次 `command` 先给出一行 `abc`（注释 `n`），参数不为空时再把参数作为一行，最后取 1 字节随机数、模 26 换成小写字母作为一行。
+const COMMANDER: &str = r#"(module
+  (import "msime" "command_text" (func $text (param i32 i32 i32) (result i32)))
+  (import "msime" "command_row" (func $row (param i32 i32 i32 i32) (result i32)))
+  (import "msime" "random_fill" (func $random (param i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "abcn")
+  (func (export "msime_abi") (result i32) (i32.const 1))
+  (func (export "msime_on_event") (param $kind i32) (result i32) (local $n i32)
+    (drop (call $row (i32.const 0) (i32.const 3) (i32.const 3) (i32.const 1)))
+    (local.set $n (call $text (i32.const 1) (i32.const 256) (i32.const 64)))
+    (if (i32.gt_s (local.get $n) (i32.const 0))
+      (then (drop (call $row (i32.const 256) (local.get $n) (i32.const 0) (i32.const 0)))))
+    (if (i32.eq (call $random (i32.const 512) (i32.const 1)) (i32.const 1))
+      (then
+        (i32.store8 (i32.const 513)
+          (i32.add (i32.const 97) (i32.rem_u (i32.load8_u (i32.const 512)) (i32.const 26))))
+        (drop (call $row (i32.const 513) (i32.const 1) (i32.const 0) (i32.const 0)))))
+    (i32.const 0)))"#;
+
 fn declaration(capabilities: &[Capability], hooks: &[Hook]) -> Declaration {
     Declaration {
         capabilities: capabilities.iter().copied().collect(),
@@ -348,6 +368,37 @@ fn an_exhausted_initialisation_budget_defers_until_the_next_turn() {
     }
 }
 
+/// `command` 事件：输出多一个 `rows`，每行是 `[文本, 注释]`；随机数取自夹具的 `random`，不写是全 0；别的事件没有 `rows`。没授权时两个指令类 import 都是 `denied`，`rows` 为空，随机数照样取得到。
+#[test]
+fn a_command_plugin_shows_its_rows() {
+    let declared = declaration(&[Capability::ProvideCommands], &[Hook::Command]);
+    let fixture = format!(
+        r#"{{"event":"command","key":true,"trigger":"uuid"}}
+{{"event":"command","trigger":"uuid","argument":"xyz","random":"19{}"}}
+{{"event":"input","key":true,"input_class":"character"}}
+"#,
+        "00".repeat(63)
+    );
+    let (status, out) = run_wat(COMMANDER, declared, declared.capabilities, &fixture);
+    assert_eq!(status, EXIT_OK);
+    assert_golden(
+        &out,
+        r#"{"seq":1,"event":"command","status":"ok","fuel":437,"init_fuel":2,"actions":[{"import":"command_row","result":"ok"},{"import":"command_row","result":"ok"}],"log":[],"rows":[["abc","n"],["a",""]]}
+{"seq":2,"event":"command","status":"ok","fuel":543,"actions":[{"import":"command_row","result":"ok"},{"import":"command_row","result":"ok"},{"import":"command_row","result":"ok"}],"log":[],"rows":[["abc","n"],["xyz",""],["z",""]]}
+{"seq":3,"event":"input","status":"not_subscribed","fuel":0,"actions":[],"log":[]}
+"#,
+    );
+    let (status, out) = run_wat(COMMANDER, declared, CapabilitySet::EMPTY, &fixture);
+    assert_eq!(status, EXIT_OK);
+    assert_golden(
+        &out,
+        r#"{"seq":1,"event":"command","status":"ok","fuel":436,"init_fuel":2,"actions":[{"import":"command_row","result":"denied"},{"import":"command_row","result":"denied"}],"log":[],"rows":[]}
+{"seq":2,"event":"command","status":"ok","fuel":436,"actions":[{"import":"command_row","result":"denied"},{"import":"command_row","result":"denied"}],"log":[],"rows":[]}
+{"seq":3,"event":"input","status":"not_subscribed","fuel":0,"actions":[],"log":[]}
+"#,
+    );
+}
+
 #[test]
 fn fixture_mistakes_name_the_line() {
     for (fixture, expected) in [
@@ -371,6 +422,27 @@ fn fixture_mistakes_name_the_line() {
         (
             "{\"event\":\"focus_in\",\"turn\":3}",
             "第 1 行：不是有效的事件：unknown field `turn`",
+        ),
+        ("{\"event\":\"command\"}", "第 1 行：command 事件必须写 trigger"),
+        (
+            "{\"event\":\"input\",\"input_class\":\"character\",\"trigger\":\"uuid\"}",
+            "第 1 行：input 事件没有 trigger 字段",
+        ),
+        (
+            "{\"event\":\"command\",\"trigger\":\"UU\"}",
+            "第 1 行：trigger 必须是 2 到 16 个小写字母",
+        ),
+        (
+            "{\"event\":\"command\",\"trigger\":\"uuid\",\"argument\":\"a1\"}",
+            "第 1 行：argument 只能是至多 64 个小写字母",
+        ),
+        (
+            "{\"event\":\"command\",\"trigger\":\"uuid\",\"random\":\"00\"}",
+            "第 1 行：random 必须是 128 位十六进制",
+        ),
+        (
+            "{\"event\":\"command\",\"trigger\":\"uuid\",\"local_mode\":\"none\"}",
+            "第 1 行：command 事件的 local_mode 只能是 command",
         ),
     ] {
         let error = parse_fixture(fixture).unwrap_err();
@@ -464,6 +536,117 @@ fn binary_module() -> Vec<u8> {
     code.extend_from_slice(&on_event);
     section(10, &code, &mut out);
     out
+}
+
+/// 按字节手写的指令插件：导入 `msime.command_row`，`msime_on_event` 什么都不做、返回 0。
+fn binary_commander() -> Vec<u8> {
+    let mut out = b"\0asm\x01\0\0\0".to_vec();
+    let mut section = |id: u8, content: &[u8]| {
+        out.push(id);
+        out.push(u8::try_from(content.len()).unwrap());
+        out.extend_from_slice(content);
+    };
+    // 类型：(i32 i32 i32 i32) -> i32、() -> i32、(i32) -> i32。
+    section(
+        1,
+        &[
+            3, 0x60, 4, 0x7f, 0x7f, 0x7f, 0x7f, 1, 0x7f, 0x60, 0, 1, 0x7f, 0x60, 1, 0x7f, 1, 0x7f,
+        ],
+    );
+    let mut imports = vec![1, 5];
+    imports.extend_from_slice(b"msime");
+    imports.push(11);
+    imports.extend_from_slice(b"command_row");
+    imports.extend_from_slice(&[0x00, 0]);
+    section(2, &imports);
+    section(3, &[2, 1, 2]);
+    section(5, &[1, 0x00, 1]);
+    let mut exports = vec![3];
+    for (export, kind, index) in [
+        ("memory", 2, 0),
+        ("msime_abi", 0, 1),
+        ("msime_on_event", 0, 2),
+    ] {
+        exports.push(u8::try_from(export.len()).unwrap());
+        exports.extend_from_slice(export.as_bytes());
+        exports.extend_from_slice(&[kind, index]);
+    }
+    section(7, &exports);
+    section(
+        10,
+        &[2, 4, 0x00, 0x41, 0x01, 0x0b, 4, 0x00, 0x41, 0x00, 0x0b],
+    );
+    out
+}
+
+const COMMANDER_MANIFEST: &str = "schema_version = 2\nkind = 'script'\nid = 'generator'\nname = 'UUID'\nversion = '1.0.0'\nlicense = 'MIT'\npermissions = ['provide_commands']\n[script]\nabi = 1\nmodule = 'main.wasm'\nhooks = ['command']\nmemory_pages = 1\n[[script.commands]]\ntrigger = 'uuid'\ntitle = 'UUID'\n";
+
+/// `validate` 按清单规则查 `[[script.commands]]`，`run` 只投递清单里声明过的触发词。
+#[test]
+fn slash_commands_are_validated_and_only_declared_triggers_run() {
+    let files = tempfile::tempdir().unwrap();
+    let pack = files.path().join("uuid");
+    fs::create_dir_all(&pack).unwrap();
+    fs::write(pack.join("plugin.toml"), COMMANDER_MANIFEST).unwrap();
+    fs::write(pack.join("main.wasm"), binary_commander()).unwrap();
+    let (status, out, _) = invoke(&[Path::new("validate"), &pack]);
+    assert_eq!(
+        (status, out.as_str()),
+        (EXIT_OK, "ok generator script 1.0.0\n")
+    );
+
+    let events = files.path().join("events.jsonl");
+    fs::write(
+        &events,
+        "{\"event\":\"command\",\"key\":true,\"trigger\":\"uuid\"}\n",
+    )
+    .unwrap();
+    let (status, out, err) = invoke(&[
+        Path::new("run"),
+        &pack,
+        Path::new("--events"),
+        &events,
+        Path::new("--grant"),
+        Path::new("all"),
+    ]);
+    assert_eq!((status, err.as_str()), (EXIT_OK, ""));
+    assert!(out.contains(r#""event":"command","status":"ok""#), "{out}");
+    assert!(out.trim_end().ends_with(r#""rows":[]}"#), "{out}");
+
+    let undeclared = files.path().join("undeclared.jsonl");
+    fs::write(
+        &undeclared,
+        "{\"event\":\"command\",\"key\":true,\"trigger\":\"uuid\"}\n{\"event\":\"command\",\"trigger\":\"guid\"}\n",
+    )
+    .unwrap();
+    let (status, out, err) = invoke(&[Path::new("run"), &pack, Path::new("--events"), &undeclared]);
+    assert_eq!(
+        (status, out.as_str(), err),
+        (
+            EXIT_USAGE,
+            "",
+            format!(
+                "error {}: 第 2 个事件的触发词 guid 不在清单的 commands 里\n",
+                undeclared.display()
+            )
+        )
+    );
+
+    // 和内置指令冲突的触发词：validate 报出原因。
+    fs::write(
+        pack.join("plugin.toml"),
+        COMMANDER_MANIFEST.replace("trigger = 'uuid'", "trigger = 'fy'"),
+    )
+    .unwrap();
+    let (status, out, _) = invoke(&[Path::new("validate"), &pack]);
+    assert_eq!(status, EXIT_INVALID);
+    assert_eq!(
+        out,
+        format!(
+            "error {}: plugin_invalid: 指令触发词 fy 和内置指令 /fy 相同或互为前缀\n",
+            pack.display()
+        )
+    );
 }
 
 const PACK_MANIFEST: &str = "schema_version = 2\nkind = 'script'\nid = 'logger'\nname = '记录'\nversion = '1.0.0'\nlicense = 'MIT'\npermissions = []\n[script]\nabi = 1\nmodule = 'main.wasm'\nhooks = ['commit', 'selection_retracted']\nmemory_pages = 1\n";
@@ -648,4 +831,93 @@ fn bad_packs_grants_and_command_lines_are_refused() {
         assert!(out.is_empty());
         assert!(err.starts_with("usage: msime-pack validate"), "{err}");
     }
+}
+
+#[test]
+fn hash_prints_the_content_hash_the_grants_bind() {
+    let files = tempfile::tempdir().unwrap();
+    let (pack, _) = pack_and_fixture(files.path(), COMMIT_THEN_RETRACT);
+    let (status, out, err) = invoke(&[Path::new("hash"), &pack]);
+    assert_eq!((status, err.as_str()), (EXIT_OK, ""));
+    let expected = msime_client_core::plugins::script_pack::content_hash(
+        PACK_MANIFEST.as_bytes(),
+        &binary_module(),
+    );
+    assert_eq!(out, format!("{expected}\n"));
+
+    // 不是脚本包、不是包、命令行写错。
+    let (status, out, _) = invoke(&[Path::new("hash"), &files.path().join("missing")]);
+    assert_eq!(status, EXIT_INVALID);
+    assert!(out.contains("plugin_unsupported_source"), "{out}");
+    for args in [
+        &[Path::new("hash")][..],
+        &[Path::new("hash"), &pack, &pack][..],
+        &[Path::new("hash"), Path::new("--builtin")][..],
+    ] {
+        let (status, _, err) = invoke(args);
+        assert_eq!(status, EXIT_USAGE, "{args:?}");
+        assert!(err.starts_with("usage: msime-pack validate"));
+    }
+}
+
+#[test]
+fn official_ids_need_the_builtin_flag_everywhere() {
+    let files = tempfile::tempdir().unwrap();
+    let (logger, events) = pack_and_fixture(files.path(), COMMIT_THEN_RETRACT);
+    // 随桌面安装包分发的官方脚本插件的 id：导入和社区库拒绝它，只有仓库的构建脚本加 `--builtin`。
+    let pack = files.path().join("uuid");
+    fs::create_dir_all(&pack).unwrap();
+    fs::write(
+        pack.join("plugin.toml"),
+        PACK_MANIFEST.replace("id = 'logger'", "id = 'uuid'"),
+    )
+    .unwrap();
+    fs::copy(logger.join("main.wasm"), pack.join("main.wasm")).unwrap();
+    let reserved = format!(
+        "error {}: plugin_reserved: 这个 id 属于内置插件，不能导入\n",
+        pack.display()
+    );
+
+    let (status, out, _) = invoke(&[Path::new("validate"), &pack]);
+    assert_eq!((status, out.as_str()), (EXIT_INVALID, reserved.as_str()));
+    let (status, out, _) = invoke(&[Path::new("validate"), Path::new("--builtin"), &pack]);
+    assert_eq!((status, out.as_str()), (EXIT_OK, "ok uuid script 1.0.0\n"));
+
+    let (status, out, _) = invoke(&[Path::new("hash"), &pack]);
+    assert_eq!((status, out.as_str()), (EXIT_INVALID, reserved.as_str()));
+    let (status, out, _) = invoke(&[Path::new("hash"), Path::new("--builtin"), &pack]);
+    assert_eq!(status, EXIT_OK);
+    assert_eq!(out.trim_end().len(), 64);
+
+    let (status, out, err) = invoke(&[Path::new("run"), &pack, Path::new("--events"), &events]);
+    assert_eq!(status, EXIT_INVALID);
+    assert!(out.is_empty());
+    assert_eq!(err, reserved);
+    let (status, out, err) = invoke(&[
+        Path::new("run"),
+        Path::new("--builtin"),
+        &pack,
+        Path::new("--events"),
+        &events,
+    ]);
+    // 和 logger 同一个模块：第二个事件 trap，所以是 1；要看的是它真的运行了。
+    assert_eq!((status, err.as_str()), (EXIT_INVALID, ""));
+    assert_eq!(out.lines().count(), 3, "{out}");
+
+    // `--builtin` 只能出现一次，也不能当作包。
+    let (status, _, _) = invoke(&[
+        Path::new("validate"),
+        Path::new("--builtin"),
+        Path::new("--builtin"),
+    ]);
+    assert_eq!(status, EXIT_USAGE);
+    let (status, _, _) = invoke(&[
+        Path::new("run"),
+        &pack,
+        Path::new("--builtin"),
+        Path::new("--builtin"),
+        Path::new("--events"),
+        &events,
+    ]);
+    assert_eq!(status, EXIT_USAGE);
 }

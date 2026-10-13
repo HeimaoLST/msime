@@ -94,7 +94,7 @@ pub(super) fn import_inner(
     #[cfg(not(unix))]
     let staging_directory: Option<File> = None;
     stage(source, archive, &staging.path, staging_directory.as_ref())?;
-    let mut summary = check_staged(&staging.path)?;
+    let mut summary = check_staged(&staging.path, ReservedIds::Refuse)?;
     let kind = summary.kind();
     if !allow_scripts && kind.is_script() {
         return Err(PluginError::Invalid(UNKNOWN_KIND.into()));
@@ -137,27 +137,44 @@ pub(super) fn import_inner(
     Ok(summary)
 }
 
+/// 校验时怎么对待安装包随带的保留 id（[`super::is_builtin`]）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReservedIds {
+    /// 导入和社区库的规则：保留 id 一律拒绝（`plugin_reserved`）。
+    Refuse,
+    /// 只给仓库自己的构建脚本（`msime-pack validate --builtin`）：官方包本来就用保留 id，除此之外的规则一条不少。
+    Allow,
+}
+
 /// Check the pack at `source` - a folder or a `.zip` file, as `import` takes them - by exactly the rules `import` installs it by, without a plugins root and without installing anything. The files are copied or extracted into a temporary directory first, as `import` stages them, so an archive is held to the same member, size and layout rules. The summary's `directory` is `source`.
 pub fn validate(source: &Path) -> Result<PluginSummary, PluginError> {
+    validate_with(source, ReservedIds::Refuse)
+}
+
+/// [`validate`]，按 `reserved` 决定保留 id 拒不拒绝。
+pub fn validate_with(source: &Path, reserved: ReservedIds) -> Result<PluginSummary, PluginError> {
     let archive = is_archive(source)?;
     let staging = tempfile::Builder::new().prefix("msime-pack-").tempdir()?;
     stage(source, archive, staging.path(), None)?;
-    let mut summary = check_staged(staging.path())?;
+    let mut summary = check_staged(staging.path(), reserved)?;
     summary.directory = source.to_path_buf();
     Ok(summary)
 }
 
-/// 按 [`validate`] 的规则暂存并检查 `source`（文件夹或 `.zip`），再从同一份暂存里读出脚本包的模块，交给调用方编译。只给 `msime-pack run` 用：它要运行的必须是 `validate` 接受的那个包，压缩包也一样。不是脚本包时返回 `plugin_invalid`。
+/// 按 [`validate_with`] 的规则暂存并检查 `source`（文件夹或 `.zip`），再从同一份暂存里读出脚本包的模块，交给调用方编译。只给 `msime-pack run` 和 `msime-pack hash` 用：它们处理的必须是 `validate` 接受的那个包，压缩包也一样。不是脚本包时返回 `plugin_invalid`。
 #[cfg(any(
     target_os = "macos",
     target_os = "windows",
     all(target_os = "linux", not(target_env = "ohos"))
 ))]
-pub fn load_script_source(source: &Path) -> Result<super::script_pack::LoadedScript, PluginError> {
+pub fn load_script_source(
+    source: &Path,
+    reserved: ReservedIds,
+) -> Result<super::script_pack::LoadedScript, PluginError> {
     let archive = is_archive(source)?;
     let staging = tempfile::Builder::new().prefix("msime-pack-").tempdir()?;
     stage(source, archive, staging.path(), None)?;
-    let summary = check_staged(staging.path())?;
+    let summary = check_staged(staging.path(), reserved)?;
     if !summary.kind().is_script() {
         return Err(PluginError::Invalid(format!(
             "这是 {} 插件，只有脚本插件（kind = \"script\"）能运行",
@@ -212,10 +229,10 @@ fn stage(
     }
 }
 
-/// The staged pack, checked by the rules `scan` lists packs by, and refused when its id is one the bundle ships.
-fn check_staged(staging: &Path) -> Result<PluginSummary, PluginError> {
+/// The staged pack, checked by the rules `scan` lists packs by, and refused when its id is one the bundle ships unless `reserved` allows it.
+fn check_staged(staging: &Path, reserved: ReservedIds) -> Result<PluginSummary, PluginError> {
     let summary = load_directory(staging).map_err(PluginError::Invalid)?;
-    if is_builtin(summary.kind(), &summary.id) {
+    if reserved == ReservedIds::Refuse && is_builtin(summary.kind(), &summary.id) {
         return Err(PluginError::Reserved);
     }
     Ok(summary)

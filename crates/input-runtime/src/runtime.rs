@@ -54,6 +54,8 @@ pub enum Action {
     },
     SelectHighlighted,
     Finish,
+    /// 焦点即将离开，宿主替用户结束组字（命令 20）。同 [`Action::Finish`]，只有一处不同：高亮行是插件指令行（来源 14）时原样上屏预编辑串（`/uuid`），因为这一次用户没在看候选窗。按键结束（`Finish`、标点）照旧上屏高亮行，和 `/rq` 一致。
+    FinishOnFocusLoss,
     NextPage,
     PreviousPage,
     NextCandidate,
@@ -602,6 +604,13 @@ impl<E: InputEngine> Runtime<E> {
     ) -> Result<(), RuntimeError> {
         self.advance()?;
         self.engine.set_quick_phrase_table(table)?;
+        self.refresh()
+    }
+
+    /// 把宿主算好的插件指令交给引擎；打开的 `/` 列表据此重建，所以视图要刷新。引擎缓存的插件行随之清掉。标题也由引擎保管，插件注释格画标题时向引擎要。
+    pub fn set_plugin_commands(&mut self, commands: &[PluginCommand]) -> Result<(), RuntimeError> {
+        self.advance()?;
+        self.engine.set_plugin_commands(commands)?;
         self.refresh()
     }
 
@@ -1567,7 +1576,22 @@ impl<E: InputEngine> Runtime<E> {
             script_conversion: script_conversion(self.cached.scheme, &self.cached.local_mode)
                 && !self.commits_mixed_japanese(),
             typing_statistics: local_mode_counts_as_typing(&self.cached.local_mode),
+            plugin_row: self.commits_plugin_row(),
         }
+    }
+
+    /// 这次上屏的是脚本插件在 `/` 指令里给的行（`CandidateSource::Plugin`）：它不进 AI 上文，宿主也不把它转成全角。
+    fn commits_plugin_row(&self) -> bool {
+        const PLUGIN: u8 = msime_engine::CandidateSource::Plugin as u8;
+        self.facts.selection.is_some_and(|selection| {
+            selection.source == PLUGIN && selection.outcome == SelectionOutcome::Committed
+        })
+    }
+
+    /// 高亮的是插件指令行。
+    fn highlights_plugin_row(&self) -> bool {
+        const PLUGIN: u8 = msime_engine::CandidateSource::Plugin as u8;
+        self.cached.candidate_sources.get(self.highlighted) == Some(&PLUGIN)
     }
 
     /// 这次上屏的是日文混输行（`CandidateSource::MixedJapanese`），前面也没有暂存的中文词段：上屏的整段都是日文，不做简繁转换。前面暂存着中文词段时，暂存段和日文一起上屏，宿主只能整段转或整段不转，这时照旧转换，中文不被漏掉。
@@ -1581,9 +1605,8 @@ impl<E: InputEngine> Runtime<E> {
     }
 
     fn transition(&mut self, result: EngineResult) -> Transition {
-        // Every commit passes through here, so this is the one place the AI
-        // context has to be fed from.
-        if result.has_commit {
+        // 每一次上屏都经过这里，所以 AI 上文只在这一处喂；插件给的行不是用户打的字，不进 AI 和重排的上文。
+        if result.has_commit && !self.commits_plugin_row() {
             self.remember_commit(&result.commit);
         }
         Transition {
@@ -1892,6 +1915,8 @@ impl<E: InputEngine> Runtime<E> {
     }
 
     pub(crate) fn refresh(&mut self) -> Result<(), RuntimeError> {
+        // 派发类调用里先问插件指令，行在取快照之前写进引擎：同一次派发，代次不变。
+        self.run_command_provider();
         self.snapshot_valid = false;
         let had_translations = !self.translations.is_empty();
         self.translations.clear();
@@ -2334,11 +2359,16 @@ impl<E: InputEngine> Runtime<E> {
             Action::Punctuation(value) => self.punctuation(value),
             Action::PunctuationAscii(value) => self.punctuation_ascii(value),
             // A bare `/` or `@` flushes as the literal prefix, as on the punctuation routes; finishing would commit the list's first row.
-            Action::Finish if self.bare_mode_prefix() => {
+            Action::Finish | Action::FinishOnFocusLoss if self.bare_mode_prefix() => {
                 raw_route = true;
                 self.engine.command(Command::CommitRaw)
             }
-            Action::Finish => {
+            // 失焦时用户没在看候选窗：插件给的行不替用户上屏，写进文档的是用户自己打的 `/xxx`。
+            Action::FinishOnFocusLoss if self.highlights_plugin_row() => {
+                raw_route = true;
+                self.engine.command(Command::CommitRaw)
+            }
+            Action::Finish | Action::FinishOnFocusLoss => {
                 pick = Some((SelectionHow::Finish, self.highlighted));
                 self.engine.finish(self.engine_index(self.highlighted))
             }

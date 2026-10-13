@@ -8,12 +8,14 @@ use crate::abi::Hook;
 pub const INIT_FUEL: u64 = 5_000_000;
 /// 每次 focus 之后所有插件初始化的合计。超出的插件推迟到下一轮再实例化，不算失败；由宿主一侧记账。
 pub const FOCUS_INIT_FUEL: u64 = 5_000_000;
-/// 每个插件每一轮（宿主的一次 `msime_client_key` 到下一次之间，跨同一轮内的多次 FFI），`before_commit` 之外的钩子合计。
+/// 每个插件每一轮（宿主的一次 `msime_client_key` 到下一次之间，跨同一轮内的多次 FFI），`before_commit` 和 `command` 之外的钩子合计。
 pub const TURN_FUEL: u64 = 125_000;
 /// 单次 `candidates` 的上限。
 pub const CANDIDATES_FUEL: u64 = 125_000;
 /// 单次 `before_commit` 的上限，也是每个插件每一轮 `before_commit` 的合计。它和 [`TURN_FUEL`] 分开记：快照上的改写能用多少 fuel 不能取决于持久实例这一轮用掉了多少，所以一个插件一轮最多用两者之和。
 pub const BEFORE_COMMIT_FUEL: u64 = 100_000;
+/// 单次 `command` 的上限，也是每个插件每一轮 `command` 的合计。和 [`BEFORE_COMMIT_FUEL`] 同一个理由单独记：`command` 跑在快照上，同一轮里 `input` 等观察类钩子先花掉多少 fuel，不该决定用户主动打开的指令里有没有候选；它也不扣其余钩子的配额。一个插件一轮最多用三份之和。
+pub const COMMAND_FUEL: u64 = 100_000;
 /// 其余观察类钩子单次的上限。
 pub const OBSERVE_FUEL: u64 = 25_000;
 
@@ -27,6 +29,7 @@ pub fn hook_fuel(hook: Hook) -> u64 {
     match hook {
         Hook::Candidates => CANDIDATES_FUEL,
         Hook::BeforeCommit => BEFORE_COMMIT_FUEL,
+        Hook::Command => COMMAND_FUEL,
         _ => OBSERVE_FUEL,
     }
 }
@@ -56,8 +59,19 @@ pub const MAX_ENABLED_SCRIPTS: usize = 8;
 /// 候选类事件里交给插件的行数上限（窗口内前 20 行）。
 pub const MAX_CANDIDATE_ROWS: usize = 20;
 
-/// 插件给一个候选加的注释最多几个 UTF-16 码元。
+/// 插件给一个候选加的注释最多几个 UTF-16 码元。`command_row` 的注释同一个上限。
 pub const MAX_ANNOTATION_UTF16: usize = 32;
+
+/// 一次 `command` 最多暂存几行：候选窗的一页。
+pub const MAX_COMMAND_ROWS: usize = 9;
+/// `command_row` 一行文本最多几个 UTF-16 码元。比 Windows 候选管道的 199 严得多，GUID 写法是 38 个：行越短，宿主在行尾截断、让「显示的」和「上屏的」不一样的机会越小。
+pub const MAX_COMMAND_ROW_UTF16: usize = 64;
+/// 每次 `command` 事件给插件的随机字节数。UUID v4 要 16 个。
+pub const RANDOM_BYTES_PER_EVENT: usize = 64;
+/// `command` 事件的参数（触发词后面的字母）最多几个字节，超过的不投递（[`crate::ScriptInstance::deliver`] 返回 `NotSubscribed`）。引擎的本地模式输入最多 64 字节，参数本来到不了这个长度，这里是第二道。
+pub const MAX_COMMAND_ARGUMENT_BYTES: usize = 64;
+/// `command` 事件的触发词最多几个字节，同清单的触发词规则（2 到 16 个小写字母）。
+pub const MAX_COMMAND_TRIGGER_BYTES: usize = 16;
 /// 改写后的 body 最多几个 UTF-8 字节。
 pub const MAX_REWRITE_BYTES: usize = 4096;
 /// 改写后的 body 最多是原文 UTF-16 码元数的几倍。

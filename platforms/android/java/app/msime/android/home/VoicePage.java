@@ -24,6 +24,7 @@ import app.msime.android.VoiceConfiguration;
 import app.msime.android.VoicePolishPolicy;
 import app.msime.android.VoicePolishSettingsPolicy;
 import app.msime.android.VoiceProviderPolicy;
+import app.msime.android.VoiceRecognitionActivity;
 import app.msime.android.core.InputViewValuePolicy;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import java.util.ArrayList;
@@ -50,6 +51,10 @@ import org.json.JSONObject;
  * <p>「上传语音以改进识别」（本地设置的 `platform.android.voice_contribute_audio`，只在本机、不同步）默认关闭；每次从关切到开都先弹确认框说明上传什么、保存多久，用户确认后才写（P19）。
  */
 public final class VoicePage extends ReloadingDetailPage {
+    @Override protected java.util.List<String> sectionTitles() {
+        return java.util.List.of("识别", "服务", "模型", "润色", "隐私");
+    }
+
     private static final String[] LANGUAGES = {"zh-cn", "yue", "en", "auto"};
     private static final String[] LANGUAGE_LABELS = {"普通话", "粤语", "英语", "普通话 + 英语"};
     private static final String[] TRIGGER_LABELS = {"长按空格", "工具栏按钮", "无"};
@@ -69,7 +74,8 @@ public final class VoicePage extends ReloadingDetailPage {
      */
     private record State(JSONObject preferences, AndroidLocalSettings.Snapshot local, boolean punctuationSupported,
             boolean runtimeReady, @Nullable ResourcePacks.Pack runtimePack, @Nullable String resolvedProvider,
-            List<LocalVoiceModels.Model> models, @Nullable String modelsError, boolean polishConfigured) {}
+            List<LocalVoiceModels.Model> models, @Nullable String modelsError, boolean polishConfigured,
+            boolean platformRecognizerAvailable) {}
 
     /** 一次「测试」的结果：{@code message} 是共享层给的中文结果，不含凭据。 */
 
@@ -143,7 +149,8 @@ public final class VoicePage extends ReloadingDetailPage {
             // 按用户选的服务判断，而不是按解析结果：选了豆包还没填密钥时开关照样能设，填好后生效，不该说「当前识别服务不支持」。
             DoubaoAsrPolicy.PROVIDER.equals(InputViewValuePolicy.textOr(preferences.optJSONObject("voice_input"),
                 "asr_provider", "")), runtimeReady, runtime, configuration.provider(),
-            models, modelsError, configuration.polish() != null);
+            models, modelsError, configuration.polish() != null,
+            VoiceRecognitionActivity.available(context));
     }
 
     /** 安装包自带语音运行库：按名字能载入。没带时载入失败，按需下载的资源包补上它。 */
@@ -174,7 +181,7 @@ public final class VoicePage extends ReloadingDetailPage {
         if (VoiceProviderPolicy.LOCAL.equals(InputViewValuePolicy.textOr(voice, "asr_provider", "")) || offline)
             modelsGroup(target, voice, state);
 
-        GroupCard recognition = GroupCard.add(target, "识别");
+        GroupCard recognition = GroupCard.add(sectionColumn(target, "识别"), "识别");
         String language = InputViewValuePolicy.textOr(voice, "language", "");
         GroupCard.Row[] languageRow = new GroupCard.Row[1];
         languageRow[0] = recognition.nav("识别语言", null, languageLabel(language),
@@ -201,7 +208,7 @@ public final class VoicePage extends ReloadingDetailPage {
 
         polishGroup(target, voice, state);
 
-        GroupCard privacy = GroupCard.add(target, "隐私");
+        GroupCard privacy = GroupCard.add(sectionColumn(target, "隐私"), "隐私");
         boolean contribute = local.bool(AndroidLocalSettings.VOICE_CONTRIBUTE_AUDIO);
         contributeRow = privacy.toggle("上传语音以改进识别", "语音片段匿名处理，可随时关闭", contribute,
             this::onContributeChanged);
@@ -210,10 +217,10 @@ public final class VoicePage extends ReloadingDetailPage {
     /** 「识别服务」组：服务选择，选了联网服务时再列出它要的密钥和可改的接口、模型。 */
     private void serviceGroup(LinearLayout target, JSONObject voice, State state) {
         String provider = InputViewValuePolicy.textOr(voice, "asr_provider", "");
-        GroupCard service = GroupCard.add(target, "识别服务");
+        GroupCard service = GroupCard.add(sectionColumn(target, "服务"), "识别服务");
         String status = VoiceProviderPolicy.LOCAL.equals(provider)
             ? VoiceProviderPolicy.localStatus(selectedModel(voice, state) != null, state.runtimeReady())
-            : VoiceProviderPolicy.status(provider, state.resolvedProvider());
+            : VoiceProviderPolicy.status(provider, state.resolvedProvider(), state.platformRecognizerAvailable());
         service.nav("识别服务", status, VoiceProviderPolicy.label(provider), () -> pickProvider(provider, state));
         if (!VoiceProviderPolicy.network(provider)) return;
 
@@ -293,7 +300,7 @@ public final class VoicePage extends ReloadingDetailPage {
 
     /** 「本地模型」组：运行库状态，再列出每个模型的下载、取消、选用和删除。 */
     private void modelsGroup(LinearLayout target, JSONObject voice, State state) {
-        GroupCard group = GroupCard.add(target, "本地模型");
+        GroupCard group = GroupCard.add(sectionColumn(target, "模型"), "本地模型");
         if (!state.runtimeReady()) runtimeRow(group, state);
         if (state.modelsError() != null) {
             group.note("读取模型列表失败（" + state.modelsError() + "），请稍后返回重试。");
@@ -554,7 +561,7 @@ public final class VoicePage extends ReloadingDetailPage {
 
     /** 「润色」组：开关，打开后是服务、密钥、模型、接口、方案和「测试」。键盘读的同样是这些 `polish_*` 字段。 */
     private void polishGroup(LinearLayout target, JSONObject voice, State state) {
-        GroupCard polish = GroupCard.add(target, "润色");
+        GroupCard polish = GroupCard.add(sectionColumn(target, "润色"), "润色");
         boolean enabled = VoicePolishPolicy.requested(voice.optBoolean("polish_enabled", false),
             voice.optBoolean("polish_text", false));
         String provider = InputViewValuePolicy.textOr(voice, "polish_provider", "");

@@ -426,6 +426,45 @@ fn a_finish_on_focus_loss_commits_like_a_finish_but_silently() {
     read(msime_client_destroy(handle));
 }
 
+/// 命令 20 时高亮的是脚本插件的行：用户这一次没在看候选窗，写进文档的是他打的 `/uuid`，生命周期照旧记 `commit{FocusLoss}`；命令 9（按键结束）上屏高亮的插件行。
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+#[test]
+fn a_finish_on_focus_loss_commits_the_typed_command_over_a_plugin_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut preferences = chinese_preferences();
+    preferences.local_modes.command = true;
+    let handle = test_host_preferences(dir.path(), preferences);
+    assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+    msime_client_set_field_traits(handle, TRAIT_KNOWN);
+    let trace = record(handle, FEEDBACK);
+    attach_plugin_rows(handle, &["甲乙"]);
+    for (command, expected) in [(20, "/uuid"), (9, "甲乙")] {
+        for key in b"/uuid" {
+            letter(handle, *key);
+        }
+        trace.borrow_mut().clear();
+        let finished = read(msime_client_command(handle, command));
+        assert_eq!(finished["ok"], true, "{finished}");
+        assert_eq!(finished["value"]["commit"], expected, "command {command}");
+        assert_eq!(finished["value"]["view"]["local_mode"], "none");
+        let commits: Vec<String> = names(&trace)
+            .into_iter()
+            .filter(|name| name.starts_with("commit"))
+            .collect();
+        if command == 20 {
+            assert_eq!(commits, ["commit{FocusLoss}"]);
+        } else {
+            assert_eq!(commits.len(), 1);
+            assert_ne!(commits[0], "commit{FocusLoss}");
+        }
+    }
+    read(msime_client_destroy(handle));
+}
+
 #[test]
 fn switching_to_dedicated_english_mid_composition_ends_it() {
     let dir = tempfile::tempdir().unwrap();

@@ -18,11 +18,11 @@ Status: implemented
 
 **授权页读到的形状归 client-core。** `ScriptGrantsView`、`ScriptGrantView`、`ScriptHealthView`、健康文件的读取（`script_grants::health`，只认 `invalid`、`init`、`failed`、`slow` 四个类别）和 `script_grants::view` 从 Tauri 的 `desktop_plugins.rs` 移进 `plugins::script_grants`，健康文件名 `HEALTH_FILE` 也在那里，host-api 的输入法进程（`scripts::process`）写文件时用同一个常量。桌面外壳的三条命令和 `msime_client_plugins` 调同一个函数，回答的 JSON 一样。授权规则（依赖、互斥、哈希绑定、准入、`revision`）仍只在 `script_grants::set` 和 `reorder` 里。
 
-**原生设置应用照共享页画。** 规则和文案逐条移进 `PluginPageModel.h`（不依赖 Windows 头文件）：能力的白话说明、钩子的白话名字、停用原因、`toggleCapability` 的依赖联动和互斥、`runningScriptIds`（启用的前 8 个里哈希对得上的）、列表标记、状态句、执行顺序的换位、授权对话框每一项的勾选、禁用和说明（新版本不再申请的一项不算勾着、不交出去），以及 `scriptResidualRisk` 的 Windows 那一句。`main.cpp` 只管调宿主和画控件：
+**原生设置应用照共享页画。** 规则和文案逐条移进 `PluginPageModel.h`（不依赖 Windows 头文件）：能力的白话说明（`script_capabilities` 按 `Capability::ALL` 的顺序，现在 8 项，第 8 项「提供 / 指令」的文案和共享页一字不差，见 [插件指令行](2026-10-13-script-plugin-command-rows.md)）、钩子的白话名字、停用原因、`toggleCapability` 的依赖联动和互斥、`runningScriptIds`（启用的前 8 个里哈希对得上的）、列表标记、状态句、执行顺序的换位、授权对话框每一项的勾选、禁用和说明（新版本不再申请的一项不算勾着、不交出去），以及 `scriptResidualRisk` 的 Windows 那一句。`main.cpp` 只管调宿主和画控件：
 
 - 「插件」页自己的目录、导入和授权请求带 `script_page`，`user_data` 取 `runtime-options.json` 的同名项（与 Tauri 的 `user_data` 同一项）。进入页面时和导入、删除之后，目录和授权一起重读。
 - 列表在八类之后画「脚本插件（实验）」一组：开头是脚本插件的说明和残余风险，行尾是授权状态和第几位。「导入插件」的说明换成区分数据插件和脚本插件的那一句。
-- 详情：信息（含内容哈希的前 12 位）、在这些时候运行、申请的权限和是否已授予、状态（启用时才写停用原因）、启用开关和「调整授权」、执行顺序（「提前」「推后」只在输入法会运行的插件之间换位，交给 `reorder_scripts`）、安全（沙箱说明和残余风险）、删除。关掉开关是 `set(enabled = false, granted = [])`。
+- 详情：信息（含内容哈希的前 12 位）、在这些时候运行、申请的权限和是否已授予、提供的 / 指令（每条的状态，`/` 指令关着时的说明和「打开 / 指令」按钮，见 [插件指令行](2026-10-13-script-plugin-command-rows.md) 的「投递」一节）、状态（启用时才写停用原因）、启用开关和「调整授权」、执行顺序（「提前」「推后」只在输入法会运行的插件之间换位，交给 `reorder_scripts`）、安全（沙箱说明和残余风险）、删除。关掉开关是 `set(enabled = false, granted = [])`。
 - 授权对话框是 `ContentDialog`，默认按钮是「取消」；勾选时复选框就地更新，不重建对话框，键盘焦点留在刚点的那一项。宿主拒绝时对话框留着并写明原因；`plugin_script_changed` 时先重读目录和授权，对话框换成新版本申请的那几项再说明。内容变过时写「已更新，需要重新授权」，对话框里也写残余风险。关上后焦点回到打开它的开关或按钮。
 
 **放开 Windows release 构建。** host-api `scripts` 的进程开关在三个桌面平台的开发构建和 release 构建里一样生效（`all(target_os = "windows", debug_assertions)` 换成 `target_os = "windows"`），`client-core` 的 `import_from_settings` 在所有桌面构建里接受脚本包，`host_surface.script_plugins` 在三个桌面平台为真（Windows 上的共享设置页如果显示，也和原生应用一致）。不变的：只有 Server 调 `msime_client_scripts_enable(true)`，Windows TIP 从不调用（`scripts/test-script-plugin-hosts.py`）；`ELEVATED`、`SECURE`、`PRIVATE` 字段里不运行脚本。

@@ -45,6 +45,7 @@ fn options(root: &Path) -> EngineOptions {
         english_minimum_prefix: 5,
         mixed_emoji: false,
         mixed_kaomoji: false,
+        mixed_symbols: false,
         mixed_japanese: false,
         local_unicode: true,
         local_date_time: true,
@@ -61,6 +62,7 @@ fn options(root: &Path) -> EngineOptions {
         local_shift_letter_entry: true,
         chaizi_traditional_output: false,
         command_table: Vec::new(),
+        plugin_commands: Vec::new(),
         mention_entries: Vec::new(),
         quick_phrase_table: Vec::new(),
         helpcode_table: None,
@@ -1907,6 +1909,7 @@ fn session_options_map_every_host_field() {
     value.english_minimum_prefix = 7;
     value.mixed_emoji = true;
     value.mixed_kaomoji = true;
+    value.mixed_symbols = true;
     value.mixed_japanese = true;
     value.local_date_time = false;
     value.local_temporary_japanese = false;
@@ -1950,6 +1953,7 @@ fn session_options_map_every_host_field() {
     assert!(!mapped.english.mixed_candidates);
     assert_eq!(mapped.english.minimum_prefix, 7);
     assert!(mapped.expressive.emoji_candidates && mapped.expressive.kaomoji_candidates);
+    assert!(mapped.expressive.symbol_candidates);
     assert!(mapped.japanese_mixing);
     assert!(!mapped.local_modes.date_time && !mapped.local_modes.temporary_japanese);
     assert!(mapped.local_modes.unicode && mapped.local_modes.temporary_english);
@@ -2215,6 +2219,9 @@ fn gloss_keys_follow_the_bridge_rules() {
     assert_eq!(candidate_gloss_key("天气", 7), None);
     // 日文混输行的汉字是日文，不当中文查释义。
     assert_eq!(candidate_gloss_key("私", 13), None);
+    // 脚本插件的行不交给任何释义来源，汉字和英文都一样。
+    assert_eq!(candidate_gloss_key("天气", 14), None);
+    assert_eq!(candidate_gloss_key("hello", 14), None);
     assert_eq!(candidate_gloss_key("- '", 4), None);
     assert_eq!(candidate_gloss_key("123", 0), None);
     assert_eq!(candidate_gloss_key("〇", 0), None);

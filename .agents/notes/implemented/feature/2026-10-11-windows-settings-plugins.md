@@ -10,7 +10,7 @@ Status: implemented
 
 - 「插件」页改成 Native，画共享页在 Windows 上的「我的插件」：两个入口、按八类分组的包和缺失的选择、导入、无法载入的文件夹，以及从列表在原处打开的「声音与效果」、包详情、缺失选择和「@ 名单」四种视图。Windows 的宿主能力（`host_surface.rs`）除辅助码随版本外全为真，所以只移植这些分支：HarmonyOS 的只闪光文案、「这台设备不播放音效」之类不会出现的分支不画；辅助码表沿用「输入」页辅助码组的条件（本版本提供全拼或双拼）。
 - 规则和文案照搬进头文件 `platforms/windows/settings/PluginPageModel.h`，不依赖 Windows 头文件，由 `tests/ui/plugin_page_model.cpp` 核对（C++17 和 C++20 都编过），并加进 `CMakeLists.txt`。`main.cpp` 只管读写文档、调宿主和画控件。
-- 不加 Rust：直接用现成的 `msime_client_plugins`。插件目录是数据目录下的 `plugins`（与 Tauri 的 `PluginsState` 相同），内置声音包是 `resolve_state_directory()/sound-packs`，与 Tauri 在 Windows 上取的 `server_state_directory()/sound-packs` 同一顺序；目录不在时传 null，只列已安装的包。所有调用都在工作线程上，进入页面时递增的序号作废上一次留下的回答。
+- 不加 Rust：直接用现成的 `msime_client_plugins`。插件目录是数据目录下的 `plugins`（与 Tauri 的 `PluginsState` 相同），内置声音包是 `resolve_state_directory()/sound-packs`，与 Tauri 在 Windows 上取的 `server_state_directory()/sound-packs` 同一顺序；目录不在时传 null，只列已安装的包。「插件」页自己的请求（列目录、读写授权）另带 `plugin_packs`：本程序所在 Server 目录（Program Files 下）的 `plugin-packs`，随桌面安装包分发的官方插件包在那里，见 [官方插件包随三个桌面安装包分发](../architecture/2026-10-13-official-plugin-packs-in-desktop-installers.md)。所有调用都在工作线程上，进入页面时递增的序号作废上一次留下的回答。
 - 导入用系统的 `IFileOpenDialog`，与 Tauri 一样分成「导入文件夹」（`FOS_PICKFOLDERS`）和「导入 .zip」两个按钮；对话框在 UI 线程上模态显示，选好的绝对路径交给工作线程上的 import。
 - 偏好按点分路径逐项读出、只写变了的项；指令表和短语表的顺序是用户的，原样写入。「声音与效果」里的开关从点下时存着的设置改起，因为滑块拖动后页面不重画，画出来时的那份已经旧了，否则拨一个开关会把刚拖过的音量写回去。
 - 名单编辑就地更新提示和「保存名单」，不重建页面；没存的改动在离开视图和页面后保留，进入页面重读名单时不覆盖它（共享页组件一直挂着时的行为）。

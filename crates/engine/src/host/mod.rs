@@ -21,6 +21,10 @@ pub use crate::shuangpin::custom::{
 };
 pub use crate::shuangpin::hints::ShuangpinKeyHint;
 // 九键双拼的表：内置方案、用户表的校验（编辑中的表用不留存的 `check_nine_key_shuangpin_table`）、按方案取表，以及键面提示。宿主拿到的 `NineKeyShuangpin` 经 `KeyGrid::NineKeyShuangpin` 交给会话。
+pub use crate::local::command::{
+    builtin_titles as builtin_command_titles, builtin_triggers as builtin_command_triggers,
+    usable_command_table, usable_plugin_commands,
+};
 pub use crate::nine_key_shuangpin::{
     builtin_table as nine_key_shuangpin_builtin_table,
     check_table as check_nine_key_shuangpin_table,
@@ -29,8 +33,8 @@ pub use crate::nine_key_shuangpin::{
     NineKeyShuangpinKeyHint,
 };
 pub use crate::types::{
-    CandidateEdge, CommandTableEntry, CommandTranslationQuery, MentionEntry, QuickPhraseEntry,
-    SentenceAssociationOptions, ShuangpinCustomTable,
+    CandidateEdge, CommandTableEntry, CommandTranslationQuery, MentionEntry, PluginCommand,
+    PluginCommandQuery, QuickPhraseEntry, SentenceAssociationOptions, ShuangpinCustomTable,
 };
 pub use crate::types::{NineKeyShuangpinKind, NineKeyShuangpinTable};
 // Hosts call one of these at shutdown (or before replacing a data directory) so the delayed personal-context writes reach the journal; the bridge had no counterpart because the C++ flushed from `atexit`.

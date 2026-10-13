@@ -5,13 +5,27 @@
 use crate::*;
 use key_sound::{KeyClass, PluginRoots, SessionSound};
 use msime_client_core::plugins::mentions::{MentionEntry, MentionStore};
+use msime_client_core::plugins::{self, PluginFailure};
 #[cfg(any(
     target_os = "macos",
     target_os = "windows",
     all(target_os = "linux", not(target_env = "ohos"))
 ))]
-use msime_client_core::plugins::script_grants;
-use msime_client_core::plugins::{self, PluginFailure};
+use msime_client_core::plugins::{script_commands, script_grants};
+
+/// 授权页说明插件指令的状态时用的用户指令表：状态目录 `state_root`（插件根目录的上一级，偏好文件也在这里）里偏好启用的指令表包，和输入法交给引擎的是同一份。偏好读不出时按没有启用任何指令表说明。
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+fn user_command_triggers(state_root: &str, root: &Path) -> Vec<String> {
+    let enabled = msime_client_core::preferences::PreferencesStore::new(state_root)
+        .load()
+        .map(|snapshot| snapshot.preferences.plugins.command_tables)
+        .unwrap_or_default();
+    script_commands::user_triggers(root, &enabled)
+}
 
 /// 拿会话的声音设置执行 `action`。未知会话、错线程、重入调用和 panic（不能越过 C 边界）都返回 false。会话开了生命周期的 FEEDBACK 时同样返回 false、什么都不做：声音由核心驱动，宿主再调一次会响两遍。
 fn with_sound(handle: u64, action: impl FnOnce(&SessionSound) -> bool) -> bool {
@@ -108,9 +122,11 @@ unsafe fn pack_request(
     if !absolute(&request.state_root) || !absolute(&request.sound_packs) {
         return Err(relative.into());
     }
+    // 这两个调用只认音效包和背景音乐包，官方插件包与它们无关。
     let roots = PluginRoots::new(
         request.state_root.as_deref(),
         request.sound_packs.as_deref(),
+        None,
         "",
     );
     Ok((roots, request.pack))
@@ -164,7 +180,7 @@ const MAX_PLUGINS_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 
 /// 插件页的包仓库和 @ 名单，给桌面外壳以外的设置宿主：Windows 的原生设置应用、鸿蒙的插件页，以及 Android、iOS 设置里导入辅助码表。所有规则和失败码都来自 client-core，与桌面外壳回答设置页的相同。
 ///
-/// 脚本插件只给有授权页的宿主：请求带 `script_page: true` 时目录列出脚本包、导入接受脚本包（`import_from_settings`），桌面上还能读写授权（`script_grants`、`set_script_grant`、`reorder_scripts`，回答和桌面外壳的同名命令一样是 `ScriptGrantsView`）。不带它时（Android、HarmonyOS 和各处的辅助码表导入）照旧：目录经 `without_scripts`，导入走 `import_without_script_page`。
+/// 脚本插件只给有授权页的宿主：请求带 `script_page: true` 时目录列出脚本包、导入接受脚本包（`import_from_settings`），桌面上还能读写授权（`script_grants`、`set_script_grant`、`reorder_scripts`，回答和桌面外壳的同名命令一样是 `ScriptGrantsView`，其中插件 `/` 指令的状态按 `state_root` 里偏好启用的指令表算）。不带它时（Android、HarmonyOS 和各处的辅助码表导入）照旧：目录经 `without_scripts`，导入走 `import_without_script_page`。
 /// # Safety
 /// `request` points to `length` readable UTF-8 JSON bytes. Null is rejected.
 /// The returned response must be released with `msime_client_string_free`.
@@ -175,6 +191,8 @@ pub unsafe extern "C" fn msime_client_plugins(request: *const u8, length: usize)
     struct Request {
         state_root: String,
         sound_packs: Option<String>,
+        /// 桌面安装包随带的官方插件包目录，同宿主选项的 `plugin_packs`：没有时取 `sound_packs` 旁边的 `plugin-packs`。目录、授权和授权页的指令状态都按它找官方包。
+        plugin_packs: Option<String>,
         /// 宿主有脚本插件的授权页（列出、授权、排序、写明残余风险）。没有时为假。
         #[serde(default)]
         script_page: bool,
@@ -241,6 +259,7 @@ pub unsafe extern "C" fn msime_client_plugins(request: *const u8, length: usize)
         .map_err(|_| invalid())?;
         if !absolute_path(&request.state_root)
             || !request.sound_packs.as_deref().is_none_or(absolute_path)
+            || !request.plugin_packs.as_deref().is_none_or(absolute_path)
             || !request.user_data.as_deref().is_none_or(absolute_path)
         {
             return Err(invalid());
@@ -248,9 +267,19 @@ pub unsafe extern "C" fn msime_client_plugins(request: *const u8, length: usize)
         let roots = PluginRoots::new(
             Some(&request.state_root),
             request.sound_packs.as_deref(),
+            request.plugin_packs.as_deref(),
             "",
         );
-        let root = roots.installed.ok_or_else(invalid)?;
+        let root = roots.installed.clone().ok_or_else(invalid)?;
+        #[cfg_attr(
+            not(any(
+                target_os = "macos",
+                target_os = "windows",
+                all(target_os = "linux", not(target_env = "ohos"))
+            )),
+            allow(unused_variables)
+        )]
+        let builtin_packs = roots.builtin_packs.as_deref();
         #[cfg_attr(
             not(any(
                 target_os = "macos",
@@ -263,7 +292,7 @@ pub unsafe extern "C" fn msime_client_plugins(request: *const u8, length: usize)
         let value = match request.action {
             // 没有授权页的宿主看不到脚本插件。
             PluginAction::Catalog => {
-                let catalog = plugins::scan(&root, roots.builtin_sounds.as_deref());
+                let catalog = plugins::scan(&root, roots.builtin());
                 serde_json::to_value(if request.script_page {
                     catalog
                 } else {
@@ -299,9 +328,13 @@ pub unsafe extern "C" fn msime_client_plugins(request: *const u8, length: usize)
                 target_os = "windows",
                 all(target_os = "linux", not(target_env = "ohos"))
             ))]
-            PluginAction::ScriptGrants => {
-                serde_json::to_value(script_grants::view(script_grants::read(&root), user_data))
-            }
+            PluginAction::ScriptGrants => serde_json::to_value(script_grants::view(
+                &root,
+                builtin_packs,
+                script_grants::read(&root),
+                user_data,
+                &user_command_triggers(&request.state_root, &root),
+            )),
             #[cfg(any(
                 target_os = "macos",
                 target_os = "windows",
@@ -314,8 +347,15 @@ pub unsafe extern "C" fn msime_client_plugins(request: *const u8, length: usize)
                 granted,
             } => {
                 let granted = script_grants::capabilities(&granted)?;
-                let grants = script_grants::set(&root, &id, &hash, enabled, granted)?;
-                serde_json::to_value(script_grants::view(grants, user_data))
+                let grants =
+                    script_grants::set(&root, builtin_packs, &id, &hash, enabled, granted)?;
+                serde_json::to_value(script_grants::view(
+                    &root,
+                    builtin_packs,
+                    grants,
+                    user_data,
+                    &user_command_triggers(&request.state_root, &root),
+                ))
             }
             #[cfg(any(
                 target_os = "macos",
@@ -323,8 +363,11 @@ pub unsafe extern "C" fn msime_client_plugins(request: *const u8, length: usize)
                 all(target_os = "linux", not(target_env = "ohos"))
             ))]
             PluginAction::ReorderScripts { ids } => serde_json::to_value(script_grants::view(
+                &root,
+                builtin_packs,
                 script_grants::reorder(&root, &ids)?,
                 user_data,
+                &user_command_triggers(&request.state_root, &root),
             )),
         };
         value.map_err(|_| PluginFailure::code("storage"))

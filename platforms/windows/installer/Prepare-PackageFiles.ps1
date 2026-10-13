@@ -344,6 +344,18 @@ if ($previewSource) {
         Copy-Item -LiteralPath $previewPdbSource -Destination (Join-Path $targetServer 'MSIME.pdb') -Force
     }
 }
+# 随桌面安装包分发的官方插件包（scripts/build-official-plugins.sh 构建到 target/plugin-packs/<kind>/<id>/）。放进 server_exe\plugin-packs，由 Inno 随 Server 装到 Program Files：那里只有管理员能写，Server 和设置应用都从自己所在的目录找它（src/system/PluginPackRoot.h）。不放 app_data：DataDir 普通用户可写，放在那里的「内置」包谁都能换。没有构建它时照旧打包、只是不带官方包；发版设 MSIME_REQUIRE_OFFICIAL_PLUGINS=1，那时缺了就失败。
+$pluginPacksSource = Join-Path $RepoRoot 'target/plugin-packs'
+$pluginPacksTarget = Join-Path $targetServer 'plugin-packs'
+if (Test-Path -LiteralPath $pluginPacksTarget) {
+    Remove-Item -LiteralPath $pluginPacksTarget -Recurse -Force
+}
+if ((Test-Path -LiteralPath (Join-Path $pluginPacksSource 'script') -PathType Container) -and
+    (Test-Path -LiteralPath (Join-Path $pluginPacksSource 'phrase_table') -PathType Container)) {
+    Copy-DirectoryContents -Source $pluginPacksSource -Destination $pluginPacksTarget
+} elseif ($env:MSIME_REQUIRE_OFFICIAL_PLUGINS -eq '1') {
+    throw "MSIME_REQUIRE_OFFICIAL_PLUGINS=1，但 $pluginPacksSource 里没有官方插件包，先运行 scripts/build-official-plugins.sh"
+}
 # Inno recursively installs server_exe under Program Files. Keep these verified read-only sources separate from app_data and per-user writable state.
 $targetResources = Join-Path $targetServer 'resources'
 if ($Light -and (Test-Path -LiteralPath $targetResources)) {

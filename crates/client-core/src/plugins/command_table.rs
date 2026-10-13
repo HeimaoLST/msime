@@ -170,7 +170,12 @@ pub fn enabled_commands(root: &std::path::Path, enabled: &[String]) -> Vec<Comma
     let mut rows = Vec::new();
     let mut triggers = HashSet::new();
     for id in enabled {
-        let Ok(package) = super::load_package(root, None, PluginKind::CommandTable, id) else {
+        let Ok(package) = super::load_package(
+            root,
+            super::BuiltinDirs::default(),
+            PluginKind::CommandTable,
+            id,
+        ) else {
             continue;
         };
         let super::PluginContent::CommandTable(table) = package.content else {

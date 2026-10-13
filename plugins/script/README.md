@@ -4,8 +4,9 @@
 
 - 只在桌面运行：macOS、Windows 和 Linux 的输入法进程。iOS、Android 和鸿蒙不认这个类型。
 - 导入后默认停用，要在设置的「插件 → 脚本插件（实验）」里打开，并在授权对话框里逐项勾选能力才会运行。
+- 官方包（`plugins/official-packs.json` 登记的，现在是 uuid）随 macOS、Windows、Linux 的桌面安装包分发，在插件页标「（内置）」、不能删除，同样默认停用、要授权才运行；其余插件从源码构建后自己导入。官方包的内容哈希锁在那个文件里，`scripts/build-official-plugins.sh` 构建时核对，见下面「官方包」一节。
 - 授权文件 `<数据目录>/plugins/script-grants.json` 在用户可写的目录下，不签名：同一用户下的其他程序能伪造一条授权，让脚本在输入法里运行。只装你信得过的脚本包；这里的包都从本仓库的源码构建，构建和测试脚本也在仓库里。
-- 不能发布到社区库，只能本地导入。
+- 不能发布到社区库，只能本地导入（官方包随安装包分发）。
 - 插件没有设置项、没有持久存储，也不能联网、读写文件或看时间；它只能经授权的函数读当前这一次的上屏文本或候选窗口，在宿主允许的范围内改写、重排、隐藏或注释。
 
 ## 插件
@@ -14,6 +15,7 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | [hide-rare-chars](hide-rare-chars/) | 隐藏生僻字 | `candidates` | `read_candidates`、`filter_candidates` | MIT AND Unicode-3.0 AND Apache-2.0 | 6.9 KiB | 2 页 |
 | [rare-chars-last](rare-chars-last/) | 生僻字靠后 | `candidates` | `read_candidates`、`rerank_candidates` | MIT AND Unicode-3.0 AND Apache-2.0 | 12.4 KiB | 2 页 |
+| [uuid](uuid/)（官方，参考样板） | UUID | `command` | `provide_commands` | MIT | 3.2 KiB | 2 页 |
 <!-- 插件表：每个插件一行，插在这条注释之上，按 id 字母序排列。模块大小和内存页数取 scripts/build-script-plugins.sh 打印的值。 -->
 
 几个插件一起启用时，执行顺序在「脚本插件（实验）」里调整，合成规则见 docs/plugins.md：重排是排在后面的插件优先，隐藏取并集，同一行的注释后面的覆盖前面的。落到这两个插件上：rare-chars-last 和 hide-rare-chars 二选一，两个都开时被隐藏的行不再显示，靠后白做。
@@ -33,7 +35,7 @@ scripts/test-script-plugins.sh --update <id>  # 把运行结果写回 <id>/expec
 ```
 
 - 构建产物都在仓库根的 `target/script-plugins/` 下：`cargo/` 是 cargo 的产物目录，`<id>/` 是可以导入的插件包文件夹，`<id>-<version>.zip` 是同样内容的压缩包（条目排序、时间固定、不压缩，同样的源码得到逐字节相同的压缩包）。
-- `test-script-plugins.sh` 先编出 `target/debug/msime-pack`，然后对每个插件：`msime-pack validate` 校验文件夹和压缩包；用 `fixture.jsonl` 跑 `msime-pack run --grant all`，输出去掉 `fuel`、`init_fuel` 后必须和 `expected.jsonl` 逐行相同，每一行的 fuel 不能超过钩子单次上限的一半（`candidates` 62 500，`before_commit` 50 000）；再不授予任何能力跑一遍，每个事件都不能有动作。最后跑 `scripts/test-script-plugin-data.py`，确认生成的数据文件没有漂移；`common-chars.bin` 要用锁定的 Unihan zip 重新生成，缓存里没有 zip 时这一项打印 skip，设 `MSIME_FETCH=1` 才下载。
+- `test-script-plugins.sh` 先编出 `target/debug/msime-pack`，然后对每个插件：`msime-pack validate` 校验文件夹和压缩包；用 `fixture.jsonl` 跑 `msime-pack run --grant all`，输出去掉 `fuel`、`init_fuel` 后必须和 `expected.jsonl` 逐行相同，每一行的 fuel 不能超过钩子单次上限的一半（`candidates` 62 500，`before_commit` 和 `command` 50 000）；再不授予任何能力跑一遍，每个事件都不能有动作；插件目录里有 `check_output.py` 时再用它按插件自己的规则核对输出（uuid 按 RFC 9562 从夹具的随机数独立算一遍）。官方包的 id 是保留的，`validate` 和 `run` 对它们加 `--builtin`。最后跑 `scripts/test-script-plugin-data.py`，确认生成的数据文件没有漂移；`common-chars.bin` 要用锁定的 Unihan zip 重新生成，缓存里没有 zip 时这一项打印 skip，设 `MSIME_FETCH=1` 才下载。
 - 没有 wasm 目标时测试脚本打印 `skip` 并以 0 退出；CI 设 `MSIME_REQUIRE_SCRIPT_PLUGINS=1`，缺目标就失败，生成数据的检查打印 skip 也算失败。CI 同时设 `MSIME_FETCH=1` 并缓存 Unihan zip，所以 `common-chars.bin` 在 CI 上每次都核对。
 - CI：`.github/workflows/ci-platforms.yml` 的「Script plugins」作业在 `plugins/`、模板与 SDK、`crates/script-runtime`、`crates/pack-tool`、这几个脚本、`resources/licenses/Unicode-License-V3.txt` 或 `resources/character-glosses.lock.json` 改动时运行 `test-script-plugins.sh`。
 
@@ -56,6 +58,7 @@ plugins/script/
     pack/               插件包里除模块以外的全部文件：plugin.toml、LICENSE.txt、需要时的 NOTICE.txt 和第三方许可证
     fixture.jsonl       给 msime-pack run 的事件
     expected.jsonl      去掉 fuel 之后的期望输出
+    check_output.py     可选：按插件自己的规则核对 msime-pack run 的输出
     README.md           行为、边界情况、最坏情况的 fuel
 ```
 
@@ -66,6 +69,19 @@ plugins/script/
 - 带第三方数据的插件把许可证原文放进 `pack/`：`Unicode-License-V3.txt` 复制自 `resources/licenses/Unicode-License-V3.txt`，`OpenCC-LICENSE.txt` 复制自 `crates/client-core/data/opencc/LICENSE`，组装时逐字节核对。`NOTICE.txt` 写明数据来源、版本和生成器。
 - 许可证义务由组装脚本按模块实际编进的数据核对（`tools/assemble.py` 的 `EMBEDDED_DATA`）：它顺着 `#[path]` 找到 crate 的全部源文件，收集 `include_bytes!` 的文件。编进 `data/common-chars.bin` 的包必须带 `Unicode-License-V3.txt` 和 `OpenCC-LICENSE.txt`，`license` 含 `Unicode-3.0` 和 `Apache-2.0`，`NOTICE.txt` 原文包含 `data/common-chars-NOTICE.txt`；编进 `traditional-glyph/data/s2t.bin` 的必须带 `OpenCC-LICENSE.txt`、`license` 含 `Apache-2.0`。每个包都要有 `LICENSE.txt`、`license` 含 `MIT`。新的数据文件先在 `EMBEDDED_DATA` 里登记义务，否则组装失败。
 - 插件代码用 MIT，全文在 `plugins/script/LICENSE`，每个包的 `pack/LICENSE.txt` 是它的副本；仓库其余部分是 GPL-3.0-only，这个目录和模板是写明的例外（README 的「许可证」一节）。生成数据的来源和许可证写在 docs/third-party.md 的「脚本插件合集」一节。
+
+## 官方包
+
+`plugins/official-packs.json` 登记随桌面安装包分发的包：这里的 uuid，和 `plugins/phrase_table/latex-symbols` 那个短语表。脚本包锁着内容哈希：授权绑定在它上面，哈希一变，所有用户在下一个版本里都要重新授权。锁让这件事在 PR 的 diff 里看得见，不会因为换了工具链或无关改动悄悄发生。
+
+```sh
+scripts/build-official-plugins.sh          # 构建、校验、核对哈希，写出 target/plugin-packs/<kind>/<id>/
+scripts/build-official-plugins.sh --check  # 只核对，不动 target/plugin-packs
+```
+
+- 脚本包用 `build-script-plugins.sh` 构建（确定的：strip、`panic = "abort"`、`codegen-units = 1`，压缩包条目排序、时间固定），短语表先跑生成器的 `--check`；每个包过 `msime-pack validate --builtin`，脚本包再用 `msime-pack hash --builtin` 和锁里的 `content_hash` 比对，不一致就失败并打印两个值。改了 uuid 的源码或清单、升级了编译器，把打印出的新值写进锁，同一个 PR 里提交。
+- 锁以 CI 的 ubuntu 构建为准（Script plugins 作业跑 `--check`）。同一份源码在 Mac Studio（macOS arm64）和 `rust:1.97.1-bookworm` 容器（Linux arm64）里编出的 wasm 和哈希逐字节相同。
+- 三个桌面平台的发版工作流各有一个 `official-plugins` 作业在 ubuntu 上构建一次，打包作业下载同一份 `target/plugin-packs`：macOS 放进输入法 bundle 的 `Resources/plugin-packs`，Windows 放进 Program Files 下 Server 目录的 `plugin-packs`，Linux 装进 `share/<client>/plugin-packs`。从源码构建的 Linux 发行版定义不带官方包。
 
 ## 共用的数据
 

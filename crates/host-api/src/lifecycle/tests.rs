@@ -601,6 +601,14 @@ fn input_classes_and_local_modes_map_from_the_runtime() {
         InputClass::of(&Action::Finish, Some(InputClass::FocusLoss)),
         InputClass::FocusLoss
     );
+    assert_eq!(
+        InputClass::of(&Action::FinishOnFocusLoss, Some(InputClass::FocusLoss)),
+        InputClass::FocusLoss
+    );
+    assert_eq!(
+        InputClass::of(&Action::FinishOnFocusLoss, None),
+        InputClass::Commit
+    );
     assert_eq!(LocalModeClass::of("none"), LocalModeClass::None);
     assert_eq!(LocalModeClass::of("url"), LocalModeClass::Url);
     assert_eq!(LocalModeClass::of("date_time"), LocalModeClass::DateTime);

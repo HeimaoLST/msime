@@ -69,6 +69,7 @@ permissions = []        # 可选，只能是空数组
 - 以下 id 属于内置包，安装的包不能使用：
   - 音效包：`default`、`twinkle`、`msime-typewriter`、`msime-bubble`、`msime-8bit`、`msime-woodblock`、`msime-pentatonic`、`msime-canon`、`msime-ode-to-joy`
   - 音乐包：`msime-music-lofi`、`msime-music-ambient`
+  - 短语表：`latex-symbols`；脚本插件：`uuid`（随桌面安装包分发的官方包，见[内置插件](#内置插件)）
 - 导入与已安装的包同类型、同 id 的包，会整包替换旧包。
 
 ## 音效包（`kind = "sound"`）
@@ -243,6 +244,7 @@ text = "电话号码"
 - 设置的「输入 → 快捷模式」里关闭了快捷短语时，短语表不起作用。
 - K 模式只在全拼、双拼和五笔方案下可用，其他方案下按 Shift+K 不会进入 K 模式，短语表也就不起作用。
 - 短语从不写进词库，删除短语表后直接消失。
+- 桌面安装包随带一个官方短语表「LaTeX 符号」（id `latex-symbols`）：按 LaTeX 命令名打符号，`Kalpha` 出 α、`Kgamma` 出 γ 和 Γ、`Kmathbbr` 出 ℝ。它和导入的短语表一样要在插件页打开「启用」，见[内置插件](#内置插件)；编码规则在仓库的 [plugins/phrase_table/latex-symbols](../plugins/phrase_table/latex-symbols/)。
 
 ## 辅助码表（`kind = "helpcode"`）
 
@@ -342,7 +344,7 @@ items = ["→", "←", "⇒"]
 
 ## 脚本插件（`kind = "script"`）
 
-脚本插件是唯一带可执行内容的类型：包里有一个 core wasm 模块，在桌面输入法进程里由沙箱解释器运行，按用户逐项授予的能力读组字、上屏文本和候选。它还是实验功能。想直接开始：复制 [script-plugin-template](script-plugin-template/)，那是一个用 Rust 写的完整例子（中英文之间加空格），附带 C 头文件和 Rust 绑定。拿来就能用的插件在仓库的 [plugins/script](../plugins/script/)：中英文之间加空格、生僻字靠后、隐藏生僻字、繁体字形注释和 Unicode 码位注释，从源码构建成插件包后导入，构建、测试和每个插件的行为见那里的 README。
+脚本插件是唯一带可执行内容的类型：包里有一个 core wasm 模块，在桌面输入法进程里由沙箱解释器运行，按用户逐项授予的能力读组字、上屏文本和候选，或者在自己声明的 `/` 指令里给出候选（见[`/` 指令](#-指令)）。它还是实验功能。想直接开始：复制 [script-plugin-template](script-plugin-template/)，那是一个用 Rust 写的完整例子（中英文之间加空格），附带 C 头文件和 Rust 绑定。拿来就能用的插件在仓库的 [plugins/script](../plugins/script/)：生僻字靠后、隐藏生僻字，从源码构建成插件包后导入；以及 UUID（`/uuid`），它是插件指令的参考样板，随桌面安装包分发（见[内置插件](#内置插件)）。构建、测试和每个插件的行为见那里的 README。
 
 ### 在哪里运行
 
@@ -371,17 +373,33 @@ hooks = ["before_commit"]       # 只投递声明过的钩子
 memory_pages = 4                # 可选，1 到 64，默认 16
 ```
 
+在 `/` 指令里给出候选的插件另外申请 `provide_commands`、声明 `command` 钩子，并在 `[[script.commands]]` 里写出触发词和标题：
+
+```toml
+permissions = ["provide_commands"]
+
+[script]
+abi = 1
+module = "uuid.wasm"
+hooks = ["command"]
+
+[[script.commands]]
+trigger = "uuid"                # 2 到 16 个小写字母
+title = "UUID"                  # 1 到 8 个字符，显示在插件行旁
+```
+
 - 通用字段同[上面](#通用字段)，只有 `schema_version` 和 `permissions` 不同。
 - `permissions` 只能是下表里的能力名，不能重复，依赖要一起申请，`rewrite_commit` 和 `read_composition` 不能同时申请。
 - 申请了的能力，模块里必须至少导入一个属于它的函数；导入了的函数，清单必须申请它所属的能力。两个方向都查。
-- `[script]` 只有这四个键。模块按数据文件的规则检查：必须存在、不能为空、扩展名 `.wasm`、算进 16 个文件里。
+- `[script]` 只有 `abi`、`module`、`hooks`、`memory_pages` 和 `commands` 五个键。模块按数据文件的规则检查：必须存在、不能为空、扩展名 `.wasm`、算进 16 个文件里。
+- `[[script.commands]]` 1 到 4 条，每条只有 `trigger` 和 `title`，规则见[`/` 指令](#-指令)。声明了指令就必须申请 `provide_commands` 并声明 `command` 钩子，反过来也一样。
 - 导入和 `msime-pack validate` 会按 ABI v1 校验模块（只编译，不执行），输入法加载时用的是同一份校验。
 
 ### 能力
 
 | 能力                  | 能读或能做                                                       | 依赖                                         | 函数                                                                                             |
 | --------------------- | ---------------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| 不需要                | 事件的枚举字段（类型、来源、选法、原因、本地模式等）；写日志     |                                              | `event_scalar`、`log`                                                                            |
+| 不需要                | 事件的枚举字段（类型、来源、选法、原因、本地模式等）；写日志；`command` 里取这次投递的随机数 |                                              | `event_scalar`、`log`、`random_fill`                                                             |
 | `read_composition`    | 预编辑串、读音、这次打的字符、光标位置                           |                                              | `composition_text`、`composition_scalar`                                                         |
 | `read_commit`         | 选中的候选、上屏文本、其中可改写的一段、座位                     |                                              | `commit_text`、`commit_scalar`                                                                   |
 | `read_candidates`     | 候选窗口里的前 20 行（文本、编码、注释、来源）、页码、高亮位置   |                                              | `candidate_count`、`candidate_text`、`candidate_code`、`candidate_annotation`、`candidate_meta` |
@@ -389,8 +407,11 @@ memory_pages = 4                # 可选，1 到 64，默认 16
 | `rerank_candidates`   | 重排候选                                                         | `read_candidates`                            | `candidates_order`                                                                               |
 | `filter_candidates`   | 把候选降到末尾并隐藏                                             | `read_candidates`                            | `candidates_hide`                                                                                |
 | `annotate_candidates` | 给候选加注释                                                     | `read_candidates`                            | `candidates_annotate`                                                                            |
+| `provide_commands`    | 在自己声明的 `/` 指令里读到触发词和后面的字母，给出候选行        |                                              | `command_text`、`command_row`                                                                    |
 
-后四项是修改类能力：`rewrite_commit` 只在 `before_commit` 里有效，其余三个只在 `candidates` 里有效，在别的钩子里调用返回 `DENIED`。`rewrite_commit` 还要事件的「能否改写」为真（选中候选、原样上屏或暂存段送出，本地模式 `none`，不是以词定字，输入框是普通输入框，宿主没把这一段暂存在自己手里），否则也返回 `DENIED`；它只改标点和顶字尾巴之前的那一段，后面的插件读到的是前面改写过的文本。几个插件的重排、隐藏和注释按授权顺序合成；被隐藏的候选不出现在列表里，也选不到；插件的注释由输入法另外显示，不替换候选原来的注释。
+授权页上「提供 / 指令」这一项的说明是：「你在 / 指令里输入它声明的触发词（例如 /uuid）之后打的字母会交给这个插件，它据此给出候选；给出的候选只取决于这些字母和随机数，带不走你之前打过的内容。你按序号、点选、按空格选中某一行，或者打标点结束输入时，高亮的那一行会输入；在有的系统上，按快捷键或 Tab 等键、用菜单或工具栏结束输入时也会输入这一行。按回车时只输入你打的原文（例如 /uuid），点到别的窗口时插件给出的行不会输入。它看不到你平时打的字、其他指令和别的插件的内容；它给出的文字不进入词库、不计入打字统计、不会作为上文发给 AI 候选，也不会拿去查释义或翻译。」
+
+`rewrite_commit` 到 `annotate_candidates` 这四项是修改类能力：`rewrite_commit` 只在 `before_commit` 里有效，其余三个只在 `candidates` 里有效，在别的钩子里调用返回 `DENIED`。`rewrite_commit` 还要事件的「能否改写」为真（选中候选、原样上屏或暂存段送出，本地模式 `none`，不是以词定字，输入框是普通输入框，宿主没把这一段暂存在自己手里），否则也返回 `DENIED`；它只改标点和顶字尾巴之前的那一段，后面的插件读到的是前面改写过的文本。几个插件的重排、隐藏和注释按授权顺序合成；被隐藏的候选不出现在列表里，也选不到；插件的注释由输入法另外显示，不替换候选原来的注释。改写结果和注释都不能含控制字符、格式字符（双向控制符、零宽字符等）、行和段分隔符，也不能含看不见的填充符和变体选择符（U+034F、韩文填充符、U+17B4、U+17B5、蒙古文自由变体选择符、盲文空白 U+2800、VS1–VS14 和表意文字变体选择符 U+E0100–U+E01EF），否则返回 `INVALID`；emoji 后面的 VS15、VS16 可以用。
 
 ### 钩子
 
@@ -409,9 +430,11 @@ memory_pages = 4                # 可选，1 到 64，默认 16
 | `candidates_shown`    | 14   | 候选窗口显示或换了内容                           | `read_candidates`：当前页、页码、高亮                      |
 | `candidates_hidden`   | 15   | 候选窗口隐藏                                     | 原因                                                       |
 | `candidates`          | 17   | 候选列表排好之后、显示之前（修改类）             | `read_candidates`：插件变换之前的顺序和注释               |
+| `command`             | 18   | 用户在 `/` 指令里打完这个插件的触发词（修改类）  | 本地模式（`command`）；`provide_commands`：触发词、参数；随机数 |
 
 - 每个事件都带本地模式，`candidate_selected` 和 `commit` 带的是上屏时的模式。
 - 同一次操作里的顺序：`input` → `selection_retracted` → `candidate_selected` → `before_commit` → `commit` → `composition_end` 或 `composition_start` → `composition_update` → `candidates_shown` 或 `candidates_hidden`。
+- `command` 不是生命周期事件：它只投递给触发词的主人，不和上面这些排在一起，见[`/` 指令](#-指令)。
 - 按键本身不投递，免得泄露打字节奏。在线候选、AI 候选、停顿后的重排这类不由按键触发的更新也不投递，免得泄露停顿和网络时序。
 - 事件本身不带文本。文本只能在钩子运行期间经授权的函数读取。
 
@@ -432,8 +455,11 @@ memory_pages = 4                # 可选，1 到 64，默认 16
 | 模块文件           | 1 字节到 256 KiB                                                                                                            |
 | 线性内存           | `memory_pages` 页（每页 64 KiB），实例化时一次预留，之后 `memory.grow` 越过它就 trap                                        |
 | 初始化             | 每个插件 5 000 000 fuel（`msime_abi` 加 `msime_init`）；每次聚焦和每一轮所有插件合计 5 000 000，超出的插件推迟到下一轮      |
-| 每一轮             | 每个插件 125 000 fuel，`before_commit` 另有自己的一份 100 000。一轮是宿主交来一个按键到下一个按键之间，同一个键引起的多次调用共用一轮                                |
-| 单次钩子           | `candidates` 125 000，`before_commit` 100 000，其余 25 000；实际可用的是这个和本轮剩下的（`before_commit` 看它自己那一份）较小者                               |
+| 每一轮             | 每个插件 125 000 fuel，`before_commit` 和 `command` 各有自己的一份 100 000。一轮是宿主交来一个按键到下一个按键之间，同一个键引起的多次调用共用一轮                                |
+| 单次钩子           | `candidates` 125 000，`before_commit` 和 `command` 各 100 000，其余 25 000；实际可用的是这个和本轮剩下的（`before_commit`、`command` 看各自那一份）较小者                               |
+| 指令行             | 每次 `command` 最多 9 行，每行最多 64 个 UTF-16 码元，行旁的注释最多 32 个；超出的那一次调用返回 `LIMIT`                    |
+| 随机数             | 每次 `command` 64 字节，按调用顺序取，取完返回 `LIMIT`；别的钩子里没有                                                     |
+| 指令参数           | 触发词后面最多 64 个小写字母（输入法的本地输入本来就不超过 64 字节）                                                       |
 | 函数调用           | 每次调用 `msime` 的函数扣 100 fuel，每复制 4 字节再扣 1                                                                     |
 | 值栈               | 64 KiB，递归最深 256 层                                                                                                     |
 | 表                 | 最多 4 张，每张 10 000 个元素                                                                                               |
@@ -450,12 +476,28 @@ memory_pages = 4                # 可选，1 到 64，默认 16
 - 没有授权的文本根本不会复制给插件。本地模式不是 `none`、临时英文、临时日文、超级简拼、emoji 或颜文字时（例如网址、命令、快捷短语、提及、拆字 `chaizi`），文本类函数一律返回 `ABSENT`，连光标位置、座位和页码也一样。
 - `before_commit` 每次都在 `msime_init` 刚结束时的快照上运行：其他钩子攒下的状态、上一次 `before_commit` 的改动都看不到，这一次的改动也留不下来。表和没有导出的 global 回到模块声明的初值，`msime_init` 对它们的改动不保留（Rust 编译出的栈指针在函数返回时已经复原，不受影响）；要在 `before_commit` 里用 `msime_init` 算好的东西，放在线性内存或导出的 global 里。
 - `rewrite_commit` 不能和 `read_composition` 同时申请，改写结果只能是这一次上屏文本的函数，不能夹带放弃的组字或更早的输入。
+- `command` 和 `before_commit` 一样每次在快照上运行，给出的行只取决于触发词、参数、随机数和模块本身：同时申请了读文本能力的插件在别的钩子里存下的内容，带不进任何一行。`command` 事件里只有本地模式这一个枚举字段，读不到上屏、组字和候选。
+- `command` 只投递给触发词的主人，别的插件收不到，也看不到插件行：`/` 指令是本地模式 `command`，别的插件在这里读文本一律是 `ABSENT`，`candidates` 也不运行。
 - `log` 在输入法里是空操作，不写任何日志；只有 `msime-pack run` 会打出来。插件可以往 `log` 里写读到的上屏或候选文本（模板和 plugins/script 的插件就靠它在 `msime-pack run` 里核对改写和注释的结果），所以输入法以后若要收集脚本日志，必须把它当作用户输入的文本处理，不能直接写进诊断日志。
+
+### `/` 指令
+
+申请了 `provide_commands` 的插件可以在 `/` 指令里注册自己的触发词：用户在 `/` 之后打完触发词（例如 `/uuid`），输入法把触发词和后面的字母交给这个插件的 `command` 钩子，插件用 `command_row` 给出几行，用户选中其中一行上屏。
+
+- **触发词**：2 到 16 个小写字母；不能等于、也不能和内置指令的触发词（日期 `rq`、`riqi`、`date`，时间 `sj`、`shijian`、`time`，星期 `xq`、`xingqi`、`week`，农历 `nl`、`nongli`、`yinli`，翻译 `fy`、`fanyi`、`translate`）互为前缀；同一个清单里的触发词不重复、不互为前缀。标题 1 到 8 个字符，不含不可见的字符、首尾不是空白、不等于内置指令的标题（日期、时间、星期、农历、翻译）。导入和 `msime-pack validate` 都按这些规则检查。
+- **和别的指令冲突**：用户自己启用的指令表永远赢；插件之间按执行顺序先到先得。两个触发词相等或一个是另一个的前缀都算冲突，输掉的那条不生效。授权页在插件详情里列出每条指令和它的状态，例如「与你的指令 /uu 冲突，未生效」「与插件 xx 的 /uui 冲突，未生效」。只算启用、授予了 `provide_commands` 的插件，触发词取自清单，不等模块编译好：模块还没就绪时 `/uuid` 只有原样的那一行，下一次按键再问。被输入法停用的插件（见[失败](#失败)）仍占着它的触发词，直到授权变化或输入法进程重启：这期间 `/uuid` 只有原样的那一行，排在后面、声明了同一个触发词的插件不会接手，用户在触发词后面打的字母不会改交给一个没排在前面的插件。
+- **什么时候投递**：只在一次按键或其他操作刷新列表时，并且这份输入（`/uuid`、`/uuida`……）还没问过这个插件时投递一次。插件给出的行由输入法按输入缓存起来，移动高亮、翻页、在线候选回来都不再投递；改一个字母再改回来会重新投递。打 `/uui` 时还不是触发词，不投递。密码框、隐私输入框和不运行脚本的地方不投递，`/uuid` 只有原样的那一行。
+- **事件里有什么**：`command_text(field, dst, cap)` 读 `TRIGGER`（0）和 `ARGUMENT`（1，触发词后面的字母，可以为空），别的钩子里是 `ABSENT`。`random_fill(dst, len)` 从这次投递的 64 字节系统随机数里按顺序取，不需要能力，取完返回 `LIMIT`，别的钩子里没有随机数。
+- **行**：`command_row(text, tlen, note, nlen)` 暂存一行和它的注释，只在 `command` 里可用（别的钩子里返回 `DENIED`），钩子正常返回才采用，失败时这一次的行全部作废。文本不能为空、首尾不能是空白、不能含不可见字符，也不能含 `://`、`www.`、`mailto:`；超出条数或长度返回 `LIMIT`，不合规返回 `INVALID`。注释和标题显示在插件行旁（「标题 注释」），不进候选本身。
+- **上屏**：选中、按序号、按空格，或者打标点结束输入时上屏高亮的那一行，原样上屏，全角模式下也不转全角。按回车上屏用户打的原文；输入法替失焦结束组字时（macOS），高亮的是插件行也上屏原文。插件行不进词库、不调词频、不计打字统计、不作为上文发给 AI 候选，页面上有插件行时整页不查释义、不交给翻译服务。
+- **`/` 指令默认是关的**：要在「输入 → 快捷模式」里打开「指令(/ 模式)」并使用中文标点，在全拼、双拼、五笔下没有输入时按 `/` 再输入触发词。授权从不替你打开它：提供指令的插件详情里在 `/` 关着时说明这一点，并给一个「打开 / 指令」按钮，点了才打开。
+- **残余风险**：授权文件不签名（见[在哪里运行](#在哪里运行)），伪造授权的插件多拿到的只是用户在它的触发词后面打的字母，而 `command` 跑在快照上、没有任何存储，拿到的字母留不到下一次，也带不到别的钩子里。
 
 ### 失败
 
 - 一次失败指 trap（`unreachable`、越界、除零等）、超出 fuel 配额、栈溢出、内存越过预留，或 `msime_on_event` 返回负数。失败时丢弃这个插件这一次的全部动作，上屏和候选保持原样，后面的插件照常运行。
-- 钩子运行到一半的失败（trap、fuel 用完、栈溢出、内存越过预留）之后实例丢弃，这个插件在当前输入框里不再运行，下一次聚焦时重新实例化。运行到一半被本轮配额截断时实例同样丢弃，这一次用掉的不到本钩子上限的一半时不算失败，达到一半算一次 fuel 用完的失败（见[限制](#限制)）。返回负数、本轮配额在调用之前就已用完（不运行，跳过）时实例照用；`before_commit` 每次都在一次性的快照实例上运行，它的失败也不影响插件的实例。
+- 钩子运行到一半的失败（trap、fuel 用完、栈溢出、内存越过预留）之后实例丢弃，这个插件在当前输入框里不再运行，下一次聚焦时重新实例化。运行到一半被本轮配额截断时实例同样丢弃，这一次用掉的不到本钩子上限的一半时不算失败，达到一半算一次 fuel 用完的失败（见[限制](#限制)）。返回负数、本轮配额在调用之前就已用完（不运行，跳过）时实例照用；`before_commit` 和 `command` 每次都在一次性的快照实例上运行，它们的失败也不影响插件的实例。
+- `command` 失败时这一次没有行，输入法把这份输入记成「问过了、没有行」，同一份输入不再投递，列表里只有原样的那一行。
 - 停用：初始化失败（含 `msime_abi` 不是 1、`msime_init` 返回负数）和模块不合规立即停用；否则最近 50 次投递里失败 3 次，或者最近 20 次里有 3 次超过 4 ms，就停用。停用持续到授权变化或输入法进程重启。
 - 输入法自己在投递时出错，会关掉本进程的全部脚本直到重启，上屏照常。
 - 停用的插件记在 `<数据目录>/script-health.json`，只有 id、内容哈希和类别（`invalid`、`init`、`failed`、`slow`），不记失败次数和原因。
@@ -498,6 +540,7 @@ target/debug/msime-pack run path/to/pack --events events.jsonl --grant all
   | `composition_end`、`candidates_hidden`   | **`reason`**                                                          |
   | `composition_start`、`composition_update` | `preedit`、`reading`（不写是空串）、`caret`（不写时插件读到 `ABSENT`） |
   | `candidates_shown`、`candidates`         | `candidates`（每行 `text`，可选 `code`、`annotation`、`source`）、`page`（不写是 0）、`highlighted` |
+  | `command`                                | **`trigger`**（清单里声明过的）、`argument`（小写字母，不写是空串）、`random`（128 位十六进制，不写是全 0）；`local_mode` 只能是 `command` |
 
 - 枚举字段写名字：`origin` 是 `selection`、`raw`、`held_flush`、`scheme_text`、`focus_loss`；`how`、`outcome`、`reason`、`input_class`、`retraction` 的名字同 SDK 里的常量名（小写），例如 `how` 的 `digit`、`reason` 的 `commit`。
 - 上屏文本是 `body` 接上 `tail`，`body` 是可改写的那一段。`before_commit` 不写 `rewritable` 时，来源是 `selection`、`raw` 或 `held_flush` 并且本地模式是 `none` 才算可改写；输入法还会看选法、输入框和宿主，夹具里需要时显式写。
@@ -512,6 +555,7 @@ target/debug/msime-pack run path/to/pack --events events.jsonl --grant all
 - `init_fuel` 只在这个事件之前实例化或尝试实例化时出现，是初始化用掉的 fuel。在 `init:<原因>` 和 `deferred` 行上，它是失败或被截断的那次尝试用掉的 fuel，同样从本轮的初始化预算里扣除，不要把它算成一次完成的实例化。
 - `actions` 是这次调用修改类函数的记录和输入法给的结果（`ok`、`denied`、`absent`、`invalid`、`limit`）；失败或被本轮配额截断时这些动作在输入法里全部丢弃。
 - `log` 是插件经 `log` 写的每一行，`msime_init` 里写的跟在实例化的那个事件上。
+- `command` 行多一个 `rows`：插件给出的每一行 `[文本, 注释]`，没有正常返回时为空。
 - `status`：`ok`；`not_subscribed`（清单没声明这个钩子）；本次钩子自己的 fuel 上限耗尽，或者被本轮配额截断时已经用掉本钩子上限的一半或更多，是失败原因 `out_of_fuel`，其他失败原因有 `stack_overflow`、`memory_limit`、`memory_out_of_bounds`、`unreachable`、`trap`、`negative_return`；本轮共享 fuel 配额先用完时是 `turn_exhausted`（调用之前就已用完，或者被截断时这一次用掉的不到本钩子上限的一半），它不算失败，若执行被截断导致实例不可用，下一次事件是 `suspended`；初始化失败 `init:<原因>`（如 `init:init_failed`、`init:abi_mismatch`），之后的事件是 `disabled`；实例因失败丢弃之后（见[失败](#失败)）、下一次 `focus_in` 之前是 `suspended`；初始化预算被本轮用完时是 `deferred`。
 
 实例的生命周期按输入法的规则：第一次需要投递时才实例化，`focus_in` 之前和 `focus_out` 之后丢弃实例，同一轮里重建的实例接着用这一轮剩下的配额。和输入法不同的地方：
@@ -519,6 +563,15 @@ target/debug/msime-pack run path/to/pack --events events.jsonl --grant all
 - 输入框永远按普通输入框处理，不模拟密码框和隐私字段。
 - 不做按次数和按耗时的停用，每次失败都报告，任何失败都让退出码为 1。
 - 不检查进程内存总账，单个插件总放得下。
+
+## 内置插件
+
+macOS、Windows 和 Linux 的桌面安装包随带两个官方插件包，在仓库的 [plugins/official-packs.json](../plugins/official-packs.json) 里登记：脚本插件「UUID」（id `uuid`，[`/` 指令](#-指令)的参考样板，打 `/uuid` 出一个随机 UUID 的四种写法）和短语表「LaTeX 符号」（id `latex-symbols`）。移动端安装包不带它们。
+
+- **位置**：macOS 在输入法 bundle 的 `Contents/Resources/plugin-packs`，Windows 在 Program Files 下 Server 目录的 `plugin-packs`，Linux 在 `share/<client>/plugin-packs`（例如 `/usr/share/msime-client/plugin-packs`），都按 `<kind>/<id>/` 排，布局同数据目录下的 `plugins/`。三处都是只读的：macOS 由 bundle 的签名封住，Windows 只有管理员能写，Linux 在系统前缀下。随输入法更新整体替换。从源码构建的 Linux 发行版定义（Arch `msime`、Gentoo、OBS、nix）不跑 wasm 构建，不带官方包；`msime-bin` 重新打包发布页的 deb，带。
+- **默认停用**：「插件 → 我的插件」里它们标着「（内置）」、没有删除按钮。短语表要打开「启用」才进 K 模式；脚本插件和导入的一样，要在「脚本插件（实验）」里逐项授权才运行，授权写在数据目录下的 `plugins/script-grants.json`，绑定内置那一份的内容哈希。
+- **更新**：新版本的输入法带来内容不同的脚本插件时（改了插件，或者升级了编译器），哈希变了，之前的授权作废，授权页显示「已随输入法更新，需要重新授权」。官方包的哈希锁在 `plugins/official-packs.json` 里，构建时核对，所以这件事只会在改了锁的版本里发生，发版说明会写。
+- **保留 id**：`uuid`（脚本插件）和 `latex-symbols`（短语表）和内置音效包的 id 一样保留，导入同 id 的包会被拒绝（`plugin_reserved`），也不能发布到社区。官方包随输入法分发之前导入过的同 id 包仍在数据目录里时，插件页把它列在「无法载入的插件」里，不会被使用；输入法和设置页永远读内置的那一份。
 
 ## 校验
 
@@ -543,6 +596,8 @@ target/debug/msime-pack validate path/to/my-keys path/to/other-pack.zip
   - `plugin_reserved`：用了内置包的 id
 - 退出码：全部通过为 0；有任何一个不通过为 1；命令行写错为 2。
 - 只检查，不安装，不会改动本机的插件目录。
+- `msime-pack hash <包>` 按同样的规则检查一个脚本包，通过时打印它的内容哈希（授权绑定的那个值）。
+- `--builtin`（`validate --builtin`、`hash --builtin`、`run ... --builtin`）只给仓库自己的构建脚本用：官方包本来就用保留 id，加上它不报 `plugin_reserved`，其余规则一条不少。
 
 ## 导入
 

@@ -25,6 +25,7 @@
 #include "FullscreenForeground.h"
 #include "HostApiDiagnosticLine.h"
 #include "SoundPackRoot.h"
+#include "PluginPackRoot.h"
 #include "MaintenanceHotkey.h"
 #include "ModeAuthority.h"
 #include "AppInputModeRules.h"
@@ -1267,6 +1268,7 @@ int wmain(int argc, wchar_t **argv) {
         };
     auto session_options = prepared.at("value");
     name_builtin_sound_packs(session_options, config.state_root);
+    name_official_plugin_packs(session_options, executable_directory());
     WindowsServer server(
         options, session_options.dump(),
         production

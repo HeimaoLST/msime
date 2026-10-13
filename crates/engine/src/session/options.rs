@@ -7,8 +7,9 @@ use crate::paths::RuntimePaths;
 use crate::types::{
     CandidateSource, CommandTableEntry, EnglishInputOptions, FrequencyAdjustmentOptions,
     FuzzyPinyinOptions, LocalInputMode, LocalModeOptions, MentionEntry, MixedExpressiveOptions,
-    QuickPhraseEntry, SchemeSet, SchemeType, SentenceAssociationOptions, ShuangpinCustomTable,
-    ShuangpinProfileKind, WordItem, WubiInputOptions, DEFAULT_FIRST_PAGE_ROWS,
+    PluginCommand, QuickPhraseEntry, SchemeSet, SchemeType, SentenceAssociationOptions,
+    ShuangpinCustomTable, ShuangpinProfileKind, WordItem, WubiInputOptions,
+    DEFAULT_FIRST_PAGE_ROWS,
 };
 use crate::vietnamese::{InputMethod as VietnameseInputMethod, ToneStyle as VietnameseToneStyle};
 
@@ -68,6 +69,8 @@ pub struct SessionOptions {
     pub rescoring_context: String,
     /// The `/` mode's commands beyond the built-in ones; `Session::set_command_table` replaces it live.
     pub command_table: Vec<CommandTableEntry>,
+    /// 脚本插件在 `/` 模式里的指令（只在桌面非空）；`Session::set_plugin_commands` 可以实时替换。
+    pub plugin_commands: Vec<PluginCommand>,
     /// The `@` mode's names and places; `Session::set_mention_entries` replaces it live.
     pub mention_entries: Vec<MentionEntry>,
     /// K 模式在数据库行之后追加的宿主短语；`Session::set_quick_phrase_table` 可以实时替换。
@@ -114,6 +117,7 @@ impl SessionOptions {
             sentence_association: SentenceAssociationOptions::default(),
             rescoring_context: String::new(),
             command_table: Vec::new(),
+            plugin_commands: Vec::new(),
             mention_entries: Vec::new(),
             quick_phrase_table: Vec::new(),
             chaizi_traditional_output: false,

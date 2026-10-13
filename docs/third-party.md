@@ -6,7 +6,7 @@
 
 ## 本项目
 
-源码为 **GPL-3.0-only**，全文在根目录 [LICENSE](../LICENSE)。Rust workspace 的 `license` 字段、Linux 打包元数据和共享客户端都声明同一许可证。例外是 `docs/script-plugin-template/`（脚本插件的模板与 SDK）和 `plugins/script/`（[脚本插件合集](#脚本插件合集pluginsscript)）的代码，用 MIT，全文在这两个目录各自的 `LICENSE`；它们不属于 Rust workspace，也不随输入法分发。
+源码为 **GPL-3.0-only**，全文在根目录 [LICENSE](../LICENSE)。Rust workspace 的 `license` 字段、Linux 打包元数据和共享客户端都声明同一许可证。例外是 `docs/script-plugin-template/`（脚本插件的模板与 SDK）、`plugins/script/`（[脚本插件合集](#脚本插件合集pluginsscript)）的代码和 `plugins/phrase_table/`（官方短语表）的数据，用 MIT，全文在这三个目录各自的 `LICENSE`；它们不属于 Rust workspace。其中 `plugins/official-packs.json` 登记的官方包（脚本插件 uuid、短语表 latex-symbols）随桌面安装包分发，每个包带着自己的 `LICENSE.txt`；其余只在源码里，由用户构建后导入。
 
 ## 输入引擎（`crates/engine`）
 
@@ -286,12 +286,20 @@ MDBG 每天用新导出覆盖同一个地址（`https://www.mdbg.net/chinese/exp
 
 ## 脚本插件合集（`plugins/script/`）
 
-这些插件不随输入法分发，由用户从源码构建后自己导入；插件代码用 MIT。带第三方数据的插件把数据变换成紧凑的二进制表，用 `include_bytes!` 编进 wasm 模块，生成器和产物都提交进仓库，`scripts/test-script-plugin-data.py` 检查两者一致（ci-platforms.yml 的 Script plugins 作业设 `MSIME_FETCH=1`，下载锁定的 Unihan zip 后也核对常用字集；不联网的 contracts 工作流只核对简繁对照表）。插件包里随附许可证原文和一份 `NOTICE.txt`，写明来源、版本和生成器。
+官方包（`plugins/official-packs.json` 列出的，现在是 uuid）随桌面安装包分发，其余插件由用户从源码构建后自己导入；插件代码用 MIT。uuid 不带第三方数据。带第三方数据的插件把数据变换成紧凑的二进制表，用 `include_bytes!` 编进 wasm 模块，生成器和产物都提交进仓库，`scripts/test-script-plugin-data.py` 检查两者一致（ci-platforms.yml 的 Script plugins 作业设 `MSIME_FETCH=1`，下载锁定的 Unihan zip 后也核对常用字集；不联网的 contracts 工作流只核对简繁对照表）。插件包里随附许可证原文和一份 `NOTICE.txt`，写明来源、版本和生成器。
 
 | 组件 | 许可证 | 位置与说明 |
 | --- | --- | --- |
 | Unicode Han Database（Unihan）17.0.0 的 `kTGH`（《通用规范汉字表》）与 `kTraditionalVariant` | Unicode-3.0（全文在 `resources/licenses/Unicode-License-V3.txt`） | `plugins/script/data/common-chars.bin`，生僻字类插件共用的常用字集（8105 字并上它们的繁体形，共 11 049 字，约 4 KiB）。`plugins/script/tools/gen_common_chars.py` 读 `resources/character-glosses.lock.json` 锁定的 `Unihan-17.0.0.zip`（校验 sha256）生成，来源说明在同目录的 `common-chars-NOTICE.txt`。插件包随附 `Unicode-License-V3.txt` |
 | [OpenCC](https://github.com/BYVoid/OpenCC) 词典，提交 `26753884f1984add422f3b0249ccee8613deaff6` | Apache-2.0（全文在 `crates/client-core/data/opencc/LICENSE`） | 读的是上面「编译进共享库的数据」里 vendored 的同一份文件。常用字集取 `STCharacters.txt` 里《通用规范汉字表》各字的繁体单字值（只由 OpenCC 补进集合的有 151 字）。插件包随附 `OpenCC-LICENSE.txt`，组装时（`plugins/script/tools/assemble.py`）逐字节核对它和仓库里的原件相同 |
+
+## 官方短语表（`plugins/phrase_table/`）
+
+`plugins/phrase_table/latex-symbols` 随桌面安装包分发（`plugins/official-packs.json`），数据用 MIT，全文在 `plugins/phrase_table/LICENSE`，包里随附同样的 `LICENSE.txt`。
+
+| 组件 | 许可证 | 位置与说明 |
+| --- | --- | --- |
+| LaTeX 命令名到 Unicode 码位的对照（369 条） | MIT（本项目） | `plugins/phrase_table/latex-symbols/symbols.tsv` 由本项目编写，命令名取自 LaTeX 内核、amssymb、amsmath、latexsym、stmaryrd、mathtools、gensymb 和 textcomp 的公开文档，名字与码位的对应是事实，不照录任何受版权保护的表：不用 unicode-math 的 `unicode-math-table.tex`（LPPL）、fcitx5 的 `latex.mb`（LGPL）或 Julia 的 `latex_symbols.jl`（许可未核实）。`plugins/phrase_table/tools/gen_latex_symbols.py` 生成包里的 `plugin.toml` |
 
 ## 本地语音识别
 

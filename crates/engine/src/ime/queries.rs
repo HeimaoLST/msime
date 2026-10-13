@@ -6,7 +6,8 @@ use crate::assets;
 use crate::dictionary::english::EnglishDictionary;
 use crate::local::chaizi::query_chaizi;
 use crate::local::command::{
-    command_title, query_command, translation_source, usable_command_table,
+    command_title, plugin_command_source, query_command, translation_source, usable_command_table,
+    usable_plugin_commands,
 };
 use crate::local::date_time::{query_date_time, LocalDateTime};
 use crate::local::emoji::{
@@ -19,18 +20,24 @@ use crate::local::mention::{mention_annotation, query_mentions, usable_mentions}
 use crate::local::quick_phrase::{
     merge_quick_phrases, query_quick_phrases, usable_quick_phrase_table,
 };
+use crate::local::symbol_candidates::{query_mixed_symbols, SymbolRow, MIXED_SYMBOL_LIMIT};
 use crate::local::unicode::query_unicode;
 use crate::local::LocalQueryResult;
 use crate::paths::RuntimePaths;
 use crate::shuangpin::ShuangpinProfile;
 use crate::types::{
     CandidateSource, CommandTableEntry, EnglishInputOptions, LocalInputMode, MentionEntry,
-    MixedExpressiveOptions, QuickPhraseEntry, SchemeType, WordItem,
+    MixedExpressiveOptions, PluginCommand, QuickPhraseEntry, SchemeType, WordItem,
 };
 
 pub const MIXED_ENGLISH_LIMIT: usize = 5;
 pub const MODE_ENGLISH_LIMIT: usize = 1_000;
-const MIXED_DEDUP_CAPACITY: usize = MIXED_ENGLISH_LIMIT + MIXED_FETCH_LIMIT * 2;
+const MIXED_DEDUP_CAPACITY: usize =
+    MIXED_ENGLISH_LIMIT + MIXED_SYMBOL_LIMIT + MIXED_FETCH_LIMIT * 2;
+/// 输入含糊（单音节名称派、度，两个字母的首字母 `ax`、`jf`）时符号最早排在第几位（下标）：这样的输入能指的词太多，排到第 4 位，前三个词不被挤动。
+const SYMBOL_AMBIGUOUS_SLOT: usize = 3;
+/// 名称那个词不在候选里时，符号排在第几位（下标）：默认每页 6 个，下标 5 是第一页最后一位，看得见又不挤掉前面的词。
+const SYMBOL_UNANCHORED_SLOT: usize = 5;
 /// 混入 emoji 和颜文字所需的最短输入：它们按拼音查，一个字母能匹配的太多。九宫格按数字个数算，同样是 2。
 pub(crate) const MIXED_EXPRESSIVE_MINIMUM_INPUT: usize = 2;
 /// 短候选列表直接线性找锚点，避免为索引表分配堆内存。
@@ -50,6 +57,10 @@ pub struct CandidateQueries {
     english: Option<EnglishDictionary>,
     /// The host's command table, usable rows only.
     command_table: Vec<CommandTableEntry>,
+    /// 宿主交来的插件指令，原样保留：指令表一换就要按新表重新过滤。
+    requested_plugin_commands: Vec<PluginCommand>,
+    /// 生效的插件指令，经过 `usable_plugin_commands`。
+    plugin_commands: Vec<PluginCommand>,
     /// 宿主的短语表（插件），只保留能用的行，按编码排序。
     quick_phrase_table: Vec<QuickPhraseEntry>,
     /// The host's mention list, usable entries only.
@@ -67,6 +78,8 @@ impl CandidateQueries {
             profile,
             english: None,
             command_table: Vec::new(),
+            requested_plugin_commands: Vec::new(),
+            plugin_commands: Vec::new(),
             quick_phrase_table: Vec::new(),
             mentions: Vec::new(),
             mention_places: false,
@@ -77,6 +90,28 @@ impl CandidateQueries {
     /// Keeps the rows `/` mode can use and drops the rest.
     pub fn set_command_table(&mut self, table: &[CommandTableEntry]) {
         self.command_table = usable_command_table(table);
+        // 用户的指令表永远赢：表变了，插件指令按新表重新过滤。
+        self.plugin_commands =
+            usable_plugin_commands(&self.command_table, &self.requested_plugin_commands);
+    }
+
+    /// 换上宿主算好的插件指令，只留下引擎能用的（见 `usable_plugin_commands`）。
+    pub fn set_plugin_commands(&mut self, commands: &[PluginCommand]) {
+        self.requested_plugin_commands = commands.to_vec();
+        self.plugin_commands = usable_plugin_commands(&self.command_table, commands);
+    }
+
+    /// 生效的插件指令里 `trigger` 的标题；`trigger` 不属于任何生效的插件指令时为 `None`。宿主交来的表里触发词重复、或者标题不合规时，标题以过滤之后留下的那一条为准。
+    pub fn plugin_command_title(&self, trigger: &str) -> Option<&str> {
+        self.plugin_commands
+            .iter()
+            .find(|command| command.trigger == trigger)
+            .map(|command| command.title.as_str())
+    }
+
+    /// `/` 之后的输入属于哪条生效的插件指令：（触发词，参数）。
+    pub fn plugin_command_source<'a>(&self, code: &'a str) -> Option<(&str, &'a str)> {
+        plugin_command_source(code, &self.plugin_commands)
     }
 
     /// 保留 K 模式能用的宿主短语行，丢弃其余。
@@ -112,7 +147,7 @@ impl CandidateQueries {
         translation_source(code, &self.command_table)
     }
 
-    /// The title of a `/` mode row, by the trigger its `pinyin` holds.
+    /// The title of a `/` mode row, by the trigger its `pinyin` holds. 插件指令的标题不在这里查：它由 runtime 画在插件注释格里，不进引擎的注释。
     pub fn command_title(&self, trigger: &str) -> Option<&str> {
         command_title(trigger, &self.command_table)
     }
@@ -178,6 +213,10 @@ impl CandidateQueries {
             LocalInputMode::TemporaryEnglish => rows(self.temporary_english(code)),
             LocalInputMode::TemporaryJapanese => rows(engine_candidates.to_vec()),
             LocalInputMode::Expression => rows(query_expression(code)),
+            // 输入属于某条插件指令时，引擎不列任何行：插件的行由宿主问过插件之后写进会话的缓存，在那之前由兜底行顶着。
+            LocalInputMode::Command if self.plugin_command_source(code).is_some() => {
+                LocalQueryResult::default()
+            }
             LocalInputMode::Command => rows(query_command(code, now, &self.command_table)),
             LocalInputMode::Mention => {
                 rows(query_mentions(code, &self.mentions, self.mention_places))
@@ -211,7 +250,7 @@ impl CandidateQueries {
         candidates
     }
 
-    /// 英文、emoji、颜文字和日文混输行混入拼音列表，规则见 `insert_mixed_rows_with_japanese`。英文第一行默认进 candidate_queries.cpp:101-195 的优先位置（首选之后）；只有 `english_may_lead` 为真、输入拆不成完整音节（全拼 `is_complete_pinyin_input`，双拼 `is_complete_input`），且去重后剩下的第一行英文正好就是整段输入时，它才占首位。这条规则从不比较英文和拼音的权重，两边不在一个尺度上（#1040、#1063）。`japanese` 是调用方已经判定要混入的那一行日文（见 `InputSession::mixed_japanese_row`），这里只决定它的位置。不是全拼、双拼，在本地模式或专用英文里，或者什么都没开时原样返回。
+    /// 英文、emoji、颜文字、符号和日文混输行混入拼音列表，规则见 `insert_mixed_rows_with_japanese`。英文第一行默认进 candidate_queries.cpp:101-195 的优先位置（首选之后）；只有 `english_may_lead` 为真、输入拆不成完整音节（全拼 `is_complete_pinyin_input`，双拼 `is_complete_input`），且去重后剩下的第一行英文正好就是整段输入时，它才占首位。这条规则从不比较英文和拼音的权重，两边不在一个尺度上（#1040、#1063）。`japanese` 是调用方已经判定要混入的那一行日文（见 `InputSession::mixed_japanese_row`），这里只决定它的位置。符号行（打拼音出符号）另要 `symbols_allowed`：调用方在光标前缀解码和辅助码激活时传假，这两种情况下整段输入不是用户打的名称。不是全拼、双拼，在本地模式或专用英文里，或者什么都没开时原样返回。
     #[allow(clippy::too_many_arguments)]
     pub fn mixed(
         &mut self,
@@ -223,11 +262,13 @@ impl CandidateQueries {
         dedicated_english: bool,
         local_mode: LocalInputMode,
         english_may_lead: bool,
+        symbols_allowed: bool,
         japanese: Option<MixedJapaneseRow>,
     ) -> Vec<WordItem> {
         let anything_enabled = english.mixed_candidates
             || expressive.emoji_candidates
             || expressive.kaomoji_candidates
+            || (expressive.symbol_candidates && symbols_allowed)
             || japanese.is_some();
         if !anything_enabled
             || dedicated_english
@@ -260,6 +301,11 @@ impl CandidateQueries {
         } else {
             Vec::new()
         };
+        let symbol_rows = if expressive.symbol_candidates && symbols_allowed && long_enough {
+            query_mixed_symbols(prefix, scheme, shuangpin)
+        } else {
+            Vec::new()
+        };
         // 只有查到了英文才算音节完整性：双拼的判定每段要分配一次。
         let english_lead = (english_may_lead
             && !english_rows.is_empty()
@@ -270,6 +316,7 @@ impl CandidateQueries {
             english_rows,
             emoji_rows,
             kaomoji_rows,
+            symbol_rows,
             english_lead,
             japanese,
         )
@@ -298,6 +345,7 @@ pub struct MixedJapaneseRow {
 }
 
 /// 每组先按文字与列表、与前面各组去重。英文的第一行放进优先位置（首选之后，有云候选、AI 候选时再往后），其余接在末尾；`english_lead` 是调用方判定英文可以领先的那段输入（拼音拆不开的整段），去重后剩下的第一行英文正好拼出它时占首位，有云候选、AI 候选时也一样，其余英文照旧接在末尾。完全匹配的那行因为和候选重复被去掉时不领先，不拿补全词顶上。emoji、颜文字接在它描绘的那个候选词后面，接不上的排在末尾，见 `anchor_expressive_rows`。
+#[cfg(test)]
 fn insert_mixed_rows(
     candidates: Vec<WordItem>,
     english: Vec<WordItem>,
@@ -305,27 +353,47 @@ fn insert_mixed_rows(
     kaomoji: Vec<ExpressiveRow>,
     english_lead: Option<&str>,
 ) -> Vec<WordItem> {
-    insert_mixed_rows_with_japanese(candidates, english, emoji, kaomoji, english_lead, None)
+    insert_mixed_rows_with_japanese(
+        candidates,
+        english,
+        emoji,
+        kaomoji,
+        Vec::new(),
+        english_lead,
+        None,
+    )
 }
 
-/// `insert_mixed_rows` 再加上日文混输的那一行：在英文之后、emoji 和颜文字之前放进列表。文字和已有候选（含刚放进去的英文）重复时不加。领先时占首位，英文已经按 `english_lead` 占了首位时排在它后面（下标 1）；不领先时进和英文相同的优先位置（`priority_slot`），排在英文那一行前面。
+/// `insert_mixed_rows` 再加上日文混输的那一行和符号行。日文行在英文之后、emoji 和颜文字之前放进列表，文字和已有候选（含刚放进去的英文）重复时不加；领先时占首位，英文已经按 `english_lead` 占了首位时排在它后面（下标 1）；不领先时进和英文相同的优先位置（`priority_slot`），排在英文那一行前面。符号行在英文之后、emoji 之前去重，所以和它文字相同的 emoji 行被去掉；比较时 emoji 去掉 U+FE0F，留下不带变体选择符的符号。符号行最后放，见 `place_symbol_rows`。
 fn insert_mixed_rows_with_japanese(
     mut candidates: Vec<WordItem>,
     mut english: Vec<WordItem>,
     mut emoji: Vec<ExpressiveRow>,
     mut kaomoji: Vec<ExpressiveRow>,
+    mut symbols: Vec<SymbolRow>,
     english_lead: Option<&str>,
     japanese: Option<MixedJapaneseRow>,
 ) -> Vec<WordItem> {
-    if english.is_empty() && emoji.is_empty() && kaomoji.is_empty() && japanese.is_none() {
+    if english.is_empty()
+        && emoji.is_empty()
+        && kaomoji.is_empty()
+        && symbols.is_empty()
+        && japanese.is_none()
+    {
         return candidates;
     }
     // 借用现有候选词并原地筛掉重复项；释放这些借用后再把候选行移入结果。
-    let (english_unique, emoji_unique, kaomoji_unique) = {
+    let (english_unique, symbol_unique, emoji_unique, kaomoji_unique) = {
         let mut seen = [None; MIXED_DEDUP_CAPACITY];
         let mut seen_length = 0;
         let english_unique = unique_mask(
             english.iter().map(|item| item.word.as_str()),
+            &candidates,
+            &mut seen,
+            &mut seen_length,
+        );
+        let symbol_unique = unique_mask(
+            symbols.iter().map(|row| row.item.word.as_str()),
             &candidates,
             &mut seen,
             &mut seen_length,
@@ -342,13 +410,27 @@ fn insert_mixed_rows_with_japanese(
             &mut seen,
             &mut seen_length,
         );
-        (english_unique, emoji_unique, kaomoji_unique)
+        (english_unique, symbol_unique, emoji_unique, kaomoji_unique)
     };
     retain_masked_rows(&mut english, english_unique);
+    retain_masked_rows(&mut symbols, symbol_unique);
     retain_masked_rows(&mut emoji, emoji_unique);
     retain_masked_rows(&mut kaomoji, kaomoji_unique);
-    candidates
-        .reserve(english.len() + emoji.len() + kaomoji.len() + usize::from(japanese.is_some()));
+    if !symbols.is_empty() {
+        // ✔️ 和符号 ✔ 是同一个字形的两种样式，只留符号行。
+        emoji.retain(|row| {
+            !symbols
+                .iter()
+                .any(|symbol| same_without_variation_selector(&row.item.word, &symbol.item.word))
+        });
+    }
+    candidates.reserve(
+        english.len()
+            + emoji.len()
+            + kaomoji.len()
+            + symbols.len()
+            + usize::from(japanese.is_some()),
+    );
 
     let mut english = english.into_iter();
     let mut english_led = false;
@@ -373,16 +455,121 @@ fn insert_mixed_rows_with_japanese(
         candidates.insert(slot, japanese.item);
     }
     anchor_expressive_rows(&mut candidates, emoji, kaomoji);
+    place_symbol_rows(&mut candidates, symbols);
     candidates
 }
 
-/// 九宫格的混排：英文行已经按九宫格自己的规则插进了列表，emoji 和颜文字按与 26 键相同的规则去重、定位（`insert_mixed_rows`）。
+/// 九宫格的混排：英文行已经按九宫格自己的规则插进了列表，emoji、颜文字和符号按与 26 键相同的规则去重、定位（`insert_mixed_rows_with_japanese`）。
 pub(crate) fn insert_expressive_rows(
     candidates: Vec<WordItem>,
     emoji: Vec<ExpressiveRow>,
     kaomoji: Vec<ExpressiveRow>,
+    symbols: Vec<SymbolRow>,
 ) -> Vec<WordItem> {
-    insert_mixed_rows(candidates, Vec::new(), emoji, kaomoji, None)
+    insert_mixed_rows_with_japanese(candidates, Vec::new(), emoji, kaomoji, symbols, None, None)
+}
+
+/// 两段文字去掉 U+FE0F（emoji 样式的变体选择符）后相同。
+fn same_without_variation_selector(left: &str, right: &str) -> bool {
+    left.chars()
+        .filter(|&character| character != '\u{FE0F}')
+        .eq(right.chars().filter(|&character| character != '\u{FE0F}'))
+}
+
+/// 符号行接在它名称那个词（锚定词）后面，同一个词后面先符号、再 emoji、再颜文字（emoji 已经接好，插在锚定词下标 + 1 就把它们推到后面）：
+///
+/// - 锚定词在候选里：紧跟在第一个锚定词后面，几个名称给出同一个符号时取其中排得最靠前的；输入含糊（单音节名称、两个字母的首字母）时最早排在 `SYMBOL_AMBIGUOUS_SLOT`。
+/// - 锚定词不在候选里：全拼两个音节以上和拉丁名称排在 `SYMBOL_UNANCHORED_SLOT`，单音节和首字母匹配不出。
+///
+/// 所有位置都 ≥ 1，列表空时不加，所以混排时符号不占首位。混排之后名称词还可能被挪走（只出单字、固定位置），那一步由 `keep_expressive_rows_off_the_lead` 兜住。位置超过列表长度时接在末尾。
+fn place_symbol_rows(list: &mut Vec<WordItem>, mut symbols: Vec<SymbolRow>) {
+    if symbols.is_empty() || list.is_empty() {
+        return;
+    }
+    debug_assert!(symbols.len() <= MIXED_SYMBOL_LIMIT);
+    // （插在第几行，组内第几行），排好序就是插入的先后。
+    let mut placed = [(0_usize, 0_usize); MIXED_SYMBOL_LIMIT];
+    let mut placed_length = 0;
+    let length = list.len();
+    with_first_position(list, |first_position| {
+        for (index, row) in symbols.iter().enumerate() {
+            let anchor = row
+                .anchors
+                .iter()
+                .filter_map(|anchor| first_position(anchor))
+                .min();
+            let slot = match anchor {
+                Some(anchor) if row.ambiguous => (anchor + 1).max(SYMBOL_AMBIGUOUS_SLOT),
+                Some(anchor) => anchor + 1,
+                None if row.unanchored => SYMBOL_UNANCHORED_SLOT,
+                None => continue,
+            };
+            placed[placed_length] = (slot.min(length), index);
+            placed_length += 1;
+        }
+    });
+    let placed = &mut placed[..placed_length];
+    placed.sort_unstable();
+    // 从后往前插：后面的插入不移动前面的位置；同一个位置倒着插，插完正好是查询的先后。
+    for &(slot, index) in placed.iter().rev() {
+        list.insert(slot, std::mem::take(&mut symbols[index].item));
+    }
+}
+
+/// 混排的 emoji、颜文字和符号行（来源 `Emoji`、`Kaomoji`）总跟在一个词后面，混排时不占首位；但混排之后列表还会变：只出单字筛掉了多字的名称词，固定位置把名称词挪到了后面，接在它后面的行就顶到了首位，空格会直接上屏它（W#842）。这一步在列表定型后补救：首位是这些行时，把后面第一个能挪的词提到首位，它前面的这些行各往后挪一位，填上它空出来的位置。
+///
+/// 能挪的词是没有固定位置、也不坐在线座位（云候选、AI）的行，前面夹着的固定词和在线行原地不动；没有这样的词时退而取第一个词。整个列表都是这些行时不动。
+pub(crate) fn keep_expressive_rows_off_the_lead(list: &mut [WordItem]) {
+    let expressive = |item: &WordItem| {
+        matches!(
+            item.source,
+            CandidateSource::Emoji | CandidateSource::Kaomoji
+        )
+    };
+    if !list.first().is_some_and(expressive) {
+        return;
+    }
+    let Some(word) = list
+        .iter()
+        .position(|item| {
+            !expressive(item) && item.fixed_position == 0 && !item.source.takes_online_seat()
+        })
+        .or_else(|| list.iter().position(|item| !expressive(item)))
+    else {
+        return;
+    };
+    // 从词的位置往前，逐个和前面的表情、符号行交换：词换到首位，这些行按原来的先后各占下一个这样的位置，中间的词不动。
+    let mut at = word;
+    for earlier in (0..word).rev() {
+        if expressive(&list[earlier]) {
+            list.swap(earlier, at);
+            at = earlier;
+        }
+    }
+}
+
+/// 把「某个词在列表里第一次出现的位置」交给 `use_positions`。短列表直接线性找，不分配堆内存；26 键的列表常有几百行（`ji` 七百多行），每个词都从头扫一遍太慢，先把候选词连同位置排好序再二分查找，同一个词出现几次时取最前面的位置。
+fn with_first_position<R>(
+    list: &[WordItem],
+    use_positions: impl FnOnce(&dyn Fn(&str) -> Option<usize>) -> R,
+) -> R {
+    if list.len() <= EXPRESSIVE_ANCHOR_LINEAR_LIMIT {
+        use_positions(&|word: &str| list.iter().position(|candidate| candidate.word == word))
+    } else {
+        let mut words: Vec<(&str, usize)> = list
+            .iter()
+            .enumerate()
+            .map(|(at, candidate)| (candidate.word.as_str(), at))
+            .collect();
+        words.sort_unstable();
+        use_positions(&|word: &str| {
+            let at = words.partition_point(|(known, _)| *known < word);
+            words
+                .get(at)
+                .filter(|(known, _)| *known == word)
+                .map(|(_, position)| *position)
+        })
+    }
 }
 
 /// 英文第一行默认的位置：首选之后；有云候选时在它之后，有 AI 候选或 AI 占位行时再往后一位。占位行和 AI 候选同样算，回答到达前后英文行的位置才不变（#6888）。拼音拆不开、英文完全匹配时不用它，英文直接占首位（见 `insert_mixed_rows`）。
@@ -435,27 +622,7 @@ fn anchor_expressive_rows(
                 }
             }
         };
-        if list.len() <= EXPRESSIVE_ANCHOR_LINEAR_LIMIT {
-            let first_position =
-                |keyword: &str| list.iter().position(|candidate| candidate.word == keyword);
-            add_anchors(&first_position);
-        } else {
-            // 26 键的列表常有几百行（`ji` 七百多行），每行 emoji 的每个关键词都从头扫一遍列表太慢：先把候选词连同位置排好序，关键词二分查找；同一个词出现几次时取最前面的位置。
-            let mut words: Vec<(&str, usize)> = list
-                .iter()
-                .enumerate()
-                .map(|(at, candidate)| (candidate.word.as_str(), at))
-                .collect();
-            words.sort_unstable();
-            let first_position = |keyword: &str| {
-                let at = words.partition_point(|(word, _)| *word < keyword);
-                words
-                    .get(at)
-                    .filter(|(word, _)| *word == keyword)
-                    .map(|(_, position)| *position)
-            };
-            add_anchors(&first_position);
-        }
+        with_first_position(list, |first_position| add_anchors(first_position));
     }
     let anchored = &mut anchored[..anchored_length];
     anchored.sort_unstable();
@@ -827,17 +994,23 @@ mod tests {
             ]
         };
         assert_eq!(
-            insert_expressive_rows(list(), emoji(), kaomoji()),
+            insert_expressive_rows(list(), emoji(), kaomoji(), Vec::new()),
             insert_mixed_rows(list(), Vec::new(), emoji(), kaomoji(), None)
         );
         assert_eq!(
-            words(&insert_expressive_rows(list(), emoji(), kaomoji())),
+            words(&insert_expressive_rows(
+                list(),
+                emoji(),
+                kaomoji(),
+                Vec::new()
+            )),
             vec!["里", "鸡", "🐔", "😁", "(^_^)"]
         );
         // 与列表里已有的行重复的不再出现。
         let duplicate = insert_expressive_rows(
             chinese(),
             vec![depicting("倪", CandidateSource::Emoji, "你")],
+            Vec::new(),
             Vec::new(),
         );
         assert_eq!(words(&duplicate), vec!["你", "倪"]);
@@ -930,6 +1103,7 @@ mod tests {
         let expressive_on = MixedExpressiveOptions {
             emoji_candidates: true,
             kaomoji_candidates: true,
+            symbol_candidates: true,
         };
         let cases = [
             (
@@ -998,6 +1172,7 @@ mod tests {
                 expressive,
                 dedicated,
                 local,
+                true,
                 true,
                 None,
             );
@@ -1072,6 +1247,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             None,
             japanese("開始", true),
         );
@@ -1081,6 +1257,7 @@ mod tests {
             kaishi_chinese(),
             vec![english("kaishi", "kaishi")],
             vec![depicting("🎬", CandidateSource::Emoji, "开始")],
+            Vec::new(),
             Vec::new(),
             None,
             japanese("開始", false),
@@ -1099,6 +1276,7 @@ mod tests {
             vec![english("kaishi", "kaishi")],
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             None,
             japanese("開始", false),
         );
@@ -1113,6 +1291,7 @@ mod tests {
             vec![english("hello", "hello")],
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             Some("hello"),
             japanese("へっぉ", true),
         );
@@ -1121,6 +1300,7 @@ mod tests {
         let list = insert_mixed_rows_with_japanese(
             hello_chinese(),
             vec![english("hellos", "hellos")],
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Some("hello"),
@@ -1150,6 +1330,7 @@ mod tests {
                 vec![english("kaishi", "kaishi")],
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
                 None,
                 japanese("開始", false),
             );
@@ -1157,6 +1338,7 @@ mod tests {
             assert_eq!(slotted[slot + 1].word, "kaishi", "{ai:?}");
             let led = insert_mixed_rows_with_japanese(
                 with_online(),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -1183,6 +1365,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             None,
             japanese("開始", true),
         );
@@ -1194,6 +1377,7 @@ mod tests {
         let merged = insert_mixed_rows_with_japanese(
             kaishi_chinese(),
             vec![english("kaishi", "OK")],
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             None,
@@ -1218,6 +1402,7 @@ mod tests {
             MixedExpressiveOptions::default(),
             false,
             LocalInputMode::None,
+            true,
             true,
             japanese("開始", false),
         );
@@ -1365,6 +1550,7 @@ mod tests {
             false,
             LocalInputMode::None,
             english_may_lead,
+            true,
             None,
         )
     }
@@ -1458,5 +1644,318 @@ mod tests {
             true,
         );
         assert_eq!(words(&list), vec!["火么", "home"]);
+    }
+
+    // ---- 打拼音出符号 ----
+
+    /// 一行符号，`anchor` 是它名称那个词。
+    fn symbol(word: &str, anchor: &'static str, ambiguous: bool, unanchored: bool) -> SymbolRow {
+        SymbolRow {
+            item: WordItem::new("x", word, 0, CandidateSource::Emoji, ""),
+            anchors: vec![anchor],
+            ambiguous,
+            unanchored,
+        }
+    }
+
+    fn database(words: &[&str]) -> Vec<WordItem> {
+        words
+            .iter()
+            .map(|word| row(word, CandidateSource::Database))
+            .collect()
+    }
+
+    fn with_symbols(list: Vec<WordItem>, symbols: Vec<SymbolRow>) -> Vec<WordItem> {
+        insert_mixed_rows_with_japanese(
+            list,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            symbols,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn symbols_follow_their_name_ahead_of_emoji_and_kaomoji() {
+        let merged = insert_mixed_rows_with_japanese(
+            database(&["正负", "政府", "正副"]),
+            Vec::new(),
+            vec![depicting("➕", CandidateSource::Emoji, "正负")],
+            vec![depicting("(+_-)", CandidateSource::Kaomoji, "正负")],
+            vec![symbol("±", "正负", false, true)],
+            None,
+            None,
+        );
+        assert_eq!(
+            words(&merged),
+            vec!["正负", "±", "➕", "(+_-)", "政府", "正副"]
+        );
+        // 名称不在首位时接在它后面。
+        let merged = with_symbols(
+            database(&["政府", "正负", "正副"]),
+            vec![symbol("±", "正负", false, true)],
+        );
+        assert_eq!(words(&merged), vec!["政府", "正负", "±", "正副"]);
+        // 同一个名称的几个符号按查询的先后排在一起。
+        let merged = with_symbols(
+            database(&["平方米", "平方", "平房"]),
+            vec![
+                symbol("㎡", "平方米", false, true),
+                symbol("m²", "平方米", false, true),
+            ],
+        );
+        assert_eq!(words(&merged), vec!["平方米", "㎡", "m²", "平方", "平房"]);
+    }
+
+    #[test]
+    fn single_syllable_symbols_wait_until_the_fourth_place() {
+        let merged = with_symbols(
+            database(&["派", "排", "牌", "拍", "怕"]),
+            vec![symbol("π", "派", true, false)],
+        );
+        assert_eq!(words(&merged), vec!["派", "排", "牌", "π", "拍", "怕"]);
+        // 名称本来就排在后面时照样紧跟它。
+        let merged = with_symbols(
+            database(&["排", "牌", "拍", "怕", "派"]),
+            vec![symbol("π", "派", true, false)],
+        );
+        assert_eq!(words(&merged), vec!["排", "牌", "拍", "怕", "派", "π"]);
+        // 列表只有两行时接在末尾。
+        let merged = with_symbols(
+            database(&["派", "排"]),
+            vec![symbol("π", "派", true, false)],
+        );
+        assert_eq!(words(&merged), vec!["派", "排", "π"]);
+        // 名称不在候选里时不出。
+        let merged = with_symbols(
+            database(&["排", "牌"]),
+            vec![symbol("π", "派", true, false)],
+        );
+        assert_eq!(words(&merged), vec!["排", "牌"]);
+    }
+
+    #[test]
+    fn a_symbol_shared_by_several_names_follows_the_earliest_of_them() {
+        let shared = || SymbolRow {
+            item: WordItem::new("dg", "√", 0, CandidateSource::Emoji, ""),
+            anchors: vec!["对钩", "打钩"],
+            ambiguous: false,
+            unanchored: false,
+        };
+        let merged = with_symbols(database(&["打钩", "大哥", "对钩"]), vec![shared()]);
+        assert_eq!(words(&merged), vec!["打钩", "√", "大哥", "对钩"]);
+        // 表里靠前的名称不在候选里时跟着在的那个，不因此消失。
+        let merged = with_symbols(database(&["大哥", "打钩"]), vec![shared()]);
+        assert_eq!(words(&merged), vec!["大哥", "打钩", "√"]);
+    }
+
+    #[test]
+    fn unanchored_symbols_take_the_last_place_of_the_first_page_or_nothing() {
+        let seven = || database(&["一", "二", "三", "四", "五", "六", "七"]);
+        let merged = with_symbols(seven(), vec![symbol("◎", "同心圆", false, true)]);
+        assert_eq!(words(&merged)[5], "◎");
+        assert_eq!(merged.len(), 8);
+        // 列表短时接在末尾。
+        let merged = with_symbols(
+            database(&["一", "二"]),
+            vec![symbol("◎", "同心圆", false, true)],
+        );
+        assert_eq!(words(&merged), vec!["一", "二", "◎"]);
+        // 首字母匹配和单音节在名称不在时不出。
+        let merged = with_symbols(
+            seven(),
+            vec![
+                symbol("℃", "摄氏度", false, false),
+                symbol("π", "派", true, false),
+            ],
+        );
+        assert_eq!(merged, seven());
+        // 列表空时不加，空格键不会上屏符号。
+        assert!(with_symbols(Vec::new(), vec![symbol("±", "正负", false, true)]).is_empty());
+    }
+
+    #[test]
+    fn a_symbol_never_takes_the_first_place() {
+        // 线性同余伪随机：列表长短不一、名称有时在首位、有时在中间、有时不在。
+        let mut state = 0x2545_f491_u64;
+        let mut next = |bound: usize| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            ((state >> 33) as usize) % bound
+        };
+        let names = ["正负", "派", "摄氏度", "同心圆"];
+        for _ in 0..500 {
+            let length = next(80);
+            let mut list: Vec<WordItem> = (0..length)
+                .map(|index| row(&format!("词{index}"), CandidateSource::Database))
+                .collect();
+            for name in names {
+                if length > 0 && next(2) == 0 {
+                    let at = next(length);
+                    list[at] = row(name, CandidateSource::Database);
+                }
+            }
+            let symbols = vec![
+                symbol("±", "正负", false, true),
+                symbol("π", "派", true, false),
+                symbol("℃", "摄氏度", false, false),
+                symbol("◎", "同心圆", false, true),
+            ];
+            let merged = with_symbols(list, symbols);
+            if let Some(first) = merged.first() {
+                assert_ne!(first.source, CandidateSource::Emoji, "{:?}", words(&merged));
+            }
+        }
+    }
+
+    #[test]
+    fn leading_expressive_rows_move_behind_the_first_word() {
+        let mut list = vec![
+            row(">", CandidateSource::Emoji),
+            row("(>_<)", CandidateSource::Kaomoji),
+            row("大于", CandidateSource::Database),
+            row("大", CandidateSource::Database),
+        ];
+        keep_expressive_rows_off_the_lead(&mut list);
+        assert_eq!(words(&list), vec!["大于", ">", "(>_<)", "大"]);
+        // 首位已经是词时不动；整个列表都是这些行时也不动。
+        keep_expressive_rows_off_the_lead(&mut list);
+        assert_eq!(words(&list), vec!["大于", ">", "(>_<)", "大"]);
+        let mut only = vec![
+            row("😀", CandidateSource::Emoji),
+            row("(^_^)", CandidateSource::Kaomoji),
+        ];
+        keep_expressive_rows_off_the_lead(&mut only);
+        assert_eq!(words(&only), vec!["😀", "(^_^)"]);
+        keep_expressive_rows_off_the_lead(&mut []);
+
+        // 固定在第 3 位的词和第 2 位的云候选原地不动，提到首位的是后面第一个普通词。
+        let mut fixed = row("大于", CandidateSource::Database);
+        fixed.fixed_position = 3;
+        let mut list = vec![
+            row(">", CandidateSource::Emoji),
+            row("大鱼", CandidateSource::CloudSuggestion),
+            fixed,
+            row("＞", CandidateSource::Emoji),
+            row("大", CandidateSource::Database),
+            row("达", CandidateSource::Database),
+        ];
+        keep_expressive_rows_off_the_lead(&mut list);
+        assert_eq!(words(&list), vec!["大", "大鱼", "大于", ">", "＞", "达"]);
+        // 只剩固定词时退而取第一个词。
+        let mut fixed = row("大于", CandidateSource::Database);
+        fixed.fixed_position = 3;
+        let mut list = vec![row(">", CandidateSource::Emoji), fixed];
+        keep_expressive_rows_off_the_lead(&mut list);
+        assert_eq!(words(&list), vec!["大于", ">"]);
+    }
+
+    #[test]
+    fn symbols_are_deduplicated_and_win_over_emoji_presentation() {
+        // 列表里已有同样文字时不再加。
+        let merged = with_symbols(
+            database(&["大于", ">"]),
+            vec![
+                symbol(">", "大于", false, true),
+                symbol("＞", "大于", false, true),
+            ],
+        );
+        assert_eq!(words(&merged), vec!["大于", "＞", ">"]);
+        // ✔️ 与符号 ✔ 只差 U+FE0F：留符号行，去掉 emoji 行；文字完全相同的 emoji 行同样去掉。
+        let merged = insert_mixed_rows_with_japanese(
+            database(&["对号", "对好"]),
+            Vec::new(),
+            vec![
+                depicting("✔\u{FE0F}", CandidateSource::Emoji, "对号"),
+                depicting("√", CandidateSource::Emoji, "对号"),
+                depicting("👍", CandidateSource::Emoji, "对号"),
+            ],
+            Vec::new(),
+            vec![
+                symbol("√", "对号", false, true),
+                symbol("✔", "对号", false, true),
+            ],
+            None,
+            None,
+        );
+        assert_eq!(words(&merged), vec!["对号", "√", "✔", "👍", "对好"]);
+    }
+
+    #[test]
+    fn latin_symbols_follow_the_english_row_of_their_name() {
+        let merged = insert_mixed_rows_with_japanese(
+            database(&["嘎嘛", "噶"]),
+            vec![english("gamma", "gamma")],
+            Vec::new(),
+            Vec::new(),
+            vec![
+                symbol("γ", "gamma", false, true),
+                symbol("Γ", "gamma", false, true),
+            ],
+            Some("gamma"),
+            None,
+        );
+        assert_eq!(words(&merged), vec!["gamma", "γ", "Γ", "嘎嘛", "噶"]);
+        // 英文不领先时进优先位置，符号照样跟着它。
+        let merged = insert_mixed_rows_with_japanese(
+            database(&["嘎嘛", "噶"]),
+            vec![english("gamma", "gamma")],
+            Vec::new(),
+            Vec::new(),
+            vec![symbol("γ", "gamma", false, true)],
+            None,
+            None,
+        );
+        assert_eq!(words(&merged), vec!["嘎嘛", "gamma", "γ", "噶"]);
+    }
+
+    #[test]
+    fn mixed_adds_symbols_only_when_switched_on_and_allowed() {
+        let mut queries = CandidateQueries::new(&RuntimePaths::default(), default_profile());
+        let list = || database(&["政府", "正负", "正副"]);
+        let symbols_on = MixedExpressiveOptions {
+            symbol_candidates: true,
+            ..MixedExpressiveOptions::default()
+        };
+        let mix = |queries: &mut CandidateQueries, expressive, allowed, scheme| {
+            queries.mixed(
+                list(),
+                "zhengfu",
+                scheme,
+                EnglishInputOptions::default(),
+                expressive,
+                false,
+                LocalInputMode::None,
+                true,
+                allowed,
+                None,
+            )
+        };
+        assert_eq!(
+            words(&mix(&mut queries, symbols_on, true, SchemeType::Quanpin)),
+            vec!["政府", "正负", "±", "正副"]
+        );
+        // 开关关着、调用方不允许（光标前缀解码、辅助码激活）、五笔：列表原样。
+        assert_eq!(
+            mix(
+                &mut queries,
+                MixedExpressiveOptions::default(),
+                true,
+                SchemeType::Quanpin
+            ),
+            list()
+        );
+        assert_eq!(
+            mix(&mut queries, symbols_on, false, SchemeType::Quanpin),
+            list()
+        );
+        assert_eq!(
+            mix(&mut queries, symbols_on, true, SchemeType::Wubi),
+            list()
+        );
+        assert!(queries.english.is_none());
     }
 }

@@ -19,6 +19,7 @@ const COMMIT_SCALAR: Import = ("commit_scalar", &[I32], &[I64]);
 const COMMIT_TEXT: Import = ("commit_text", &[I32, I32, I32], &[I32]);
 const REWRITE_COMMIT: Import = ("rewrite_commit", &[I32, I32], &[I32]);
 const COMPOSITION_SCALAR: Import = ("composition_scalar", &[I32], &[I64]);
+const COMMAND_ROW: Import = ("command_row", &[I32, I32, I32, I32], &[I32]);
 
 fn leb(mut value: usize, out: &mut Vec<u8>) {
     loop {
@@ -484,7 +485,7 @@ fn load_script_source_hands_over_what_validate_accepted() {
     let files = tempdir().unwrap();
     let (script, wasm) = reader("pangu");
     let directory = write_pack(files.path(), "pangu", &script, &wasm);
-    let loaded = load_script_source(&directory).unwrap();
+    let loaded = load_script_source(&directory, ReservedIds::Refuse).unwrap();
     assert_eq!(loaded.id, "pangu");
     assert_eq!(loaded.wasm, wasm);
     assert_eq!(
@@ -497,17 +498,19 @@ fn load_script_source_hands_over_what_validate_accepted() {
         .join("tests/fixtures/plugin-packs/valid/phrase_table-basic");
     assert!(validate(&phrases).is_ok());
     assert!(matches!(
-        load_script_source(&phrases),
+        load_script_source(&phrases, ReservedIds::Refuse),
         Err(PluginError::Invalid(reason)) if reason.contains("只有脚本插件")
     ));
 
     fs::write(directory.join("main.wasm"), b"not wasm").unwrap();
     assert_eq!(
-        load_script_source(&directory).unwrap_err().to_string(),
+        load_script_source(&directory, ReservedIds::Refuse)
+            .unwrap_err()
+            .to_string(),
         validate(&directory).unwrap_err().to_string()
     );
     assert!(matches!(
-        load_script_source(&files.path().join("missing")),
+        load_script_source(&files.path().join("missing"), ReservedIds::Refuse),
         Err(PluginError::UnsupportedSource)
     ));
 }
@@ -521,17 +524,17 @@ fn load_hands_over_the_module_it_hashed_and_scan_lists_scripts_that_pages_leave_
     let hash = import_pack(files.path(), &root, "pangu", &script, &wasm);
     assert!(root.join("script/pangu/main.wasm").is_file());
 
-    let loaded = script_pack::load(&root, "pangu").unwrap();
+    let loaded = script_pack::load(&root, None, "pangu").unwrap();
     assert_eq!(loaded.id, "pangu");
     assert_eq!(loaded.wasm, wasm);
     assert_eq!(loaded.pack.content_hash, hash);
     assert_eq!(loaded.pack.module_bytes, None);
-    assert!(script_pack::load(&root, "missing").is_err());
-    assert!(script_pack::load(&root, "../pangu").is_err());
+    assert!(script_pack::load(&root, None, "missing").is_err());
+    assert!(script_pack::load(&root, None, "../pangu").is_err());
 
     // 目录里列得出脚本包和坏掉的脚本文件夹，设置页的目录命令把它们都去掉。
     fs::create_dir_all(root.join("script/broken")).unwrap();
-    let catalog = scan(&root, None);
+    let catalog = scan(&root, BuiltinDirs::default());
     assert_eq!(catalog.packages.len(), 1);
     assert_eq!(catalog.packages[0].kind(), PluginKind::Script);
     assert_eq!(catalog.issues.len(), 1);
@@ -589,7 +592,7 @@ fn grants_are_bound_to_the_content_hash() {
     let hash = import_pack(files.path(), &root, "pangu", &script, &wasm);
     assert_eq!(script_grants::read(&root), ScriptGrants::default());
 
-    let grants = script_grants::set(&root, "pangu", &hash, true, read_commit()).unwrap();
+    let grants = script_grants::set(&root, None, "pangu", &hash, true, read_commit()).unwrap();
     // 每次写入 revision 都变大，不小于当前时间的微秒数。
     let mut revision = grants.revision;
     assert!(revision > 1 << 50 && revision < script_grants::MAX_REVISION);
@@ -608,11 +611,11 @@ fn grants_are_bound_to_the_content_hash() {
 
     // 授权页展示之后包被换过：哈希对不上就不写。
     assert!(matches!(
-        script_grants::set(&root, "pangu", &"0".repeat(64), true, read_commit()),
+        script_grants::set(&root, None, "pangu", &"0".repeat(64), true, read_commit()),
         Err(ScriptGrantError::Changed)
     ));
     assert!(matches!(
-        script_grants::set(&root, "other", &hash, true, read_commit()),
+        script_grants::set(&root, None, "other", &hash, true, read_commit()),
         Err(ScriptGrantError::Missing(_))
     ));
 
@@ -639,12 +642,12 @@ fn grants_are_bound_to_the_content_hash() {
     assert_eq!(grants.enabled().count(), 0);
 
     // 用新哈希重新授权。
-    let grants = script_grants::set(&root, "pangu", &new_hash, true, read_commit()).unwrap();
+    let grants = script_grants::set(&root, None, "pangu", &new_hash, true, read_commit()).unwrap();
     advanced(&grants);
     assert_eq!(grants.get("pangu").unwrap().hash, new_hash);
     // 撤销：条目还在，停用。
     let grants =
-        script_grants::set(&root, "pangu", &new_hash, false, CapabilitySet::EMPTY).unwrap();
+        script_grants::set(&root, None, "pangu", &new_hash, false, CapabilitySet::EMPTY).unwrap();
     advanced(&grants);
     assert!(!grants.get("pangu").unwrap().enabled);
 }
@@ -656,7 +659,7 @@ fn removing_a_script_pack_drops_its_grant_so_a_reimport_starts_ungranted() {
     let root = state.path().join("plugins");
     let (script, wasm) = reader("pangu");
     let hash = import_pack(files.path(), &root, "pangu", &script, &wasm);
-    let granted = script_grants::set(&root, "pangu", &hash, true, read_commit()).unwrap();
+    let granted = script_grants::set(&root, None, "pangu", &hash, true, read_commit()).unwrap();
 
     remove_named(&root, "script", "pangu").unwrap();
     assert!(!root.join("script/pangu").exists());
@@ -668,7 +671,7 @@ fn removing_a_script_pack_drops_its_grant_so_a_reimport_starts_ungranted() {
     assert!(script_grants::read(&root).plugins.is_empty());
 
     // 包目录被手工删掉之后再导入同样的内容，留下的条目也不会复活。
-    script_grants::set(&root, "pangu", &hash, true, read_commit()).unwrap();
+    script_grants::set(&root, None, "pangu", &hash, true, read_commit()).unwrap();
     fs::remove_dir_all(root.join("script/pangu")).unwrap();
     import_pack(files.path(), &root, "pangu", &script, &wasm);
     let grants = script_grants::read(&root);
@@ -687,11 +690,12 @@ fn granted_capabilities_are_a_subset_of_the_manifest_and_follow_the_rules() {
         &manifest("pangu", "'read_commit', 'rewrite_commit'", SCRIPT),
         &module(&[COMMIT_TEXT, REWRITE_COMMIT]),
     );
-    let refused =
-        |granted: CapabilitySet| match script_grants::set(&root, "pangu", &hash, true, granted) {
-            Err(ScriptGrantError::Invalid(reason)) => reason,
-            other => panic!("{granted:?}: {other:?}"),
-        };
+    let refused = |granted: CapabilitySet| match script_grants::set(
+        &root, None, "pangu", &hash, true, granted,
+    ) {
+        Err(ScriptGrantError::Invalid(reason)) => reason,
+        other => panic!("{granted:?}: {other:?}"),
+    };
     assert!(refused(read_commit().with(Capability::ReadComposition))
         .contains("清单没有申请 read_composition"));
     assert!(
@@ -699,9 +703,10 @@ fn granted_capabilities_are_a_subset_of_the_manifest_and_follow_the_rules() {
             .contains("申请 rewrite_commit 必须同时申请 read_commit")
     );
     // 少授几项可以：实际生效的是交集。
-    script_grants::set(&root, "pangu", &hash, true, read_commit()).unwrap();
+    script_grants::set(&root, None, "pangu", &hash, true, read_commit()).unwrap();
     script_grants::set(
         &root,
+        None,
         "pangu",
         &hash,
         true,
@@ -709,7 +714,7 @@ fn granted_capabilities_are_a_subset_of_the_manifest_and_follow_the_rules() {
     )
     .unwrap();
     assert!(matches!(
-        script_grants::set(&root, "../pangu", &hash, true, read_commit()),
+        script_grants::set(&root, None, "../pangu", &hash, true, read_commit()),
         Err(ScriptGrantError::Invalid(_))
     ));
     // 设置页传来的能力名：认识的换成集合，不认识的整个拒绝，而不是悄悄丢掉一项。
@@ -746,13 +751,13 @@ fn unreadable_or_unknown_grant_files_enable_nothing() {
     .unwrap();
     assert_eq!(script_grants::read(&root), ScriptGrants::default());
     assert!(matches!(
-        script_grants::set(&root, "pangu", &hash, true, read_commit()),
+        script_grants::set(&root, None, "pangu", &hash, true, read_commit()),
         Err(ScriptGrantError::Format)
     ));
     // 不是合法 JSON：什么都不启用，写入时整份重写。
     fs::write(&document, b"{\"format_version\":1,").unwrap();
     assert_eq!(script_grants::read(&root), ScriptGrants::default());
-    script_grants::set(&root, "pangu", &hash, true, read_commit()).unwrap();
+    script_grants::set(&root, None, "pangu", &hash, true, read_commit()).unwrap();
     assert_eq!(script_grants::read(&root).enabled().count(), 1);
 
     // 未知字段照常读；不合规的条目只跳过它自己；同一个 id 只认第一条；不认识的能力名丢掉。
@@ -805,15 +810,15 @@ fn enabling_is_bounded_by_the_script_count_and_the_memory_budget() {
     }
     let (last, rest) = hashes.split_last().unwrap();
     for (id, hash) in rest {
-        script_grants::set(&root, id, hash, true, read_commit()).unwrap();
+        script_grants::set(&root, None, id, hash, true, read_commit()).unwrap();
     }
     assert!(matches!(
-        script_grants::set(&root, &last.0, &last.1, true, read_commit()),
+        script_grants::set(&root, None, &last.0, &last.1, true, read_commit()),
         Err(ScriptGrantError::Limit)
     ));
     // 停用一个就腾出位置；停用不受上限约束。
-    script_grants::set(&root, &rest[0].0, &rest[0].1, false, read_commit()).unwrap();
-    script_grants::set(&root, &last.0, &last.1, true, read_commit()).unwrap();
+    script_grants::set(&root, None, &rest[0].0, &rest[0].1, false, read_commit()).unwrap();
+    script_grants::set(&root, None, &last.0, &last.1, true, read_commit()).unwrap();
     let grants = script_grants::read(&root);
     assert_eq!(grants.enabled().count(), limits::MAX_ENABLED_SCRIPTS);
     // 新条目排在最后执行。
@@ -844,13 +849,13 @@ fn enabling_is_bounded_by_the_script_count_and_the_memory_budget() {
     }
     let (last, rest) = hashes.split_last().unwrap();
     for (id, hash) in rest {
-        script_grants::set(&root, id, hash, true, read_commit()).unwrap();
+        script_grants::set(&root, None, id, hash, true, read_commit()).unwrap();
     }
     assert!(matches!(
-        script_grants::set(&root, &last.0, &last.1, true, read_commit()),
+        script_grants::set(&root, None, &last.0, &last.1, true, read_commit()),
         Err(ScriptGrantError::Memory)
     ));
-    script_grants::set(&root, &last.0, &last.1, false, read_commit()).unwrap();
+    script_grants::set(&root, None, &last.0, &last.1, false, read_commit()).unwrap();
 }
 
 #[test]
@@ -928,7 +933,7 @@ fn reordering_changes_the_execution_order() {
     for id in ["first", "second", "third"] {
         let (script, wasm) = reader(id);
         let hash = import_pack(files.path(), &root, id, &script, &wasm);
-        script_grants::set(&root, id, &hash, true, read_commit()).unwrap();
+        script_grants::set(&root, None, id, &hash, true, read_commit()).unwrap();
         ids.push(id.to_owned());
     }
     let order = |grants: &ScriptGrants| -> Vec<String> {
@@ -962,25 +967,26 @@ fn a_new_content_hash_voids_the_grant_even_when_the_file_still_names_the_old_one
     let root = state.path().join("plugins");
     let (script, wasm) = reader("pangu");
     let hash = import_pack(files.path(), &root, "pangu", &script, &wasm);
-    script_grants::set(&root, "pangu", &hash, true, read_commit()).unwrap();
+    script_grants::set(&root, None, "pangu", &hash, true, read_commit()).unwrap();
     // 包被换了内容（不经导入，直接改文件）：条目仍写着旧哈希，读出来和已安装的包对不上（宿主据此不运行它，见 host-api 的 `a_grant_whose_hash_no_longer_matches_the_pack_never_runs`）。授权页拿旧哈希写入被拒绝，拿现在的哈希重新授权才生效。
     fs::write(
         root.join("script/pangu/plugin.toml"),
         script.replace("version = '1.0.0'", "version = '1.0.1'"),
     )
     .unwrap();
-    let installed = script_pack::load(&root, "pangu").unwrap();
+    let installed = script_pack::load(&root, None, "pangu").unwrap();
     assert_ne!(installed.pack.content_hash, hash);
     let grants = script_grants::read(&root);
     let entry = grants.get("pangu").unwrap();
     assert_eq!(entry.hash, hash);
     assert_ne!(entry.hash, installed.pack.content_hash);
     assert!(matches!(
-        script_grants::set(&root, "pangu", &hash, true, read_commit()),
+        script_grants::set(&root, None, "pangu", &hash, true, read_commit()),
         Err(ScriptGrantError::Changed)
     ));
     let grants = script_grants::set(
         &root,
+        None,
         "pangu",
         &installed.pack.content_hash,
         true,
@@ -1017,20 +1023,20 @@ fn a_forged_revision_neither_freezes_nor_rewinds_the_writer() {
         script_grants::read(&root),
         script_grants::ScriptGrants::default()
     );
-    let first = script_grants::set(&root, "pangu", &hash, true, read_commit()).unwrap();
-    let second = script_grants::set(&root, "pangu", &hash, false, read_commit()).unwrap();
+    let first = script_grants::set(&root, None, "pangu", &hash, true, read_commit()).unwrap();
+    let second = script_grants::set(&root, None, "pangu", &hash, false, read_commit()).unwrap();
     assert!(first.revision < script_grants::MAX_REVISION);
     assert!(second.revision > first.revision);
     assert!(second.revision < script_grants::MAX_REVISION);
 
     // 把 revision 改小（或者放回一份旧文件）之后，下一次写入的 revision 仍然比以前写出的都大，宿主的熔断照样随它复位。
-    let written = script_grants::set(&root, "pangu", &hash, true, read_commit()).unwrap();
+    let written = script_grants::set(&root, None, "pangu", &hash, true, read_commit()).unwrap();
     fs::write(
         &document,
         "{\"format_version\":1,\"revision\":1,\"plugins\":[]}",
     )
     .unwrap();
-    let after = script_grants::set(&root, "pangu", &hash, true, read_commit()).unwrap();
+    let after = script_grants::set(&root, None, "pangu", &hash, true, read_commit()).unwrap();
     assert!(after.revision > written.revision);
 
     // 合法范围内的最后一个 revision 触发回绕：写入方推进纪元，之后
@@ -1043,10 +1049,10 @@ fn a_forged_revision_neither_freezes_nor_rewinds_the_writer() {
         ),
     )
     .unwrap();
-    let wrapped = script_grants::set(&root, "pangu", &hash, true, read_commit()).unwrap();
+    let wrapped = script_grants::set(&root, None, "pangu", &hash, true, read_commit()).unwrap();
     assert_eq!(wrapped.revision_epoch, 1);
     assert!(wrapped.revision < script_grants::MAX_REVISION - 1);
-    let next = script_grants::set(&root, "pangu", &hash, false, read_commit()).unwrap();
+    let next = script_grants::set(&root, None, "pangu", &hash, false, read_commit()).unwrap();
     assert_eq!(next.revision_epoch, 1);
     assert!(next.revision > wrapped.revision);
 }
@@ -1065,7 +1071,7 @@ fn admission_counts_every_place_the_input_method_fills() {
     }
     let (last, rest) = packs.split_last().unwrap();
     for (id, hash, _) in rest {
-        script_grants::set(&root, id, hash, true, read_commit()).unwrap();
+        script_grants::set(&root, None, id, hash, true, read_commit()).unwrap();
     }
     // 一个包被直接改了内容：它的条目哈希对不上、不会运行，但输入法取前 8 个启用条目时它占着一个位置，新启用的插件会排在第 9 位、永远不运行，所以照样拒绝。
     let (stale, _, script) = &rest[0];
@@ -1075,13 +1081,13 @@ fn admission_counts_every_place_the_input_method_fills() {
     )
     .unwrap();
     assert!(matches!(
-        script_grants::set(&root, &last.0, &last.1, true, read_commit()),
+        script_grants::set(&root, None, &last.0, &last.1, true, read_commit()),
         Err(ScriptGrantError::Limit)
     ));
     // 一个包目录被直接删掉：写入时顺带去掉它的条目，腾出的位置给新启用的插件。
     let (gone, _, _) = &rest[1];
     fs::remove_dir_all(root.join("script").join(gone)).unwrap();
-    let grants = script_grants::set(&root, &last.0, &last.1, true, read_commit()).unwrap();
+    let grants = script_grants::set(&root, None, &last.0, &last.1, true, read_commit()).unwrap();
     assert!(grants.get(gone).is_none());
     assert!(grants.get(stale).is_some());
     assert!(grants.enabled().any(|grant| grant.id == last.0));
@@ -1144,7 +1150,10 @@ fn the_grants_view_keeps_the_order_and_the_capability_names() {
         granted,
     };
     let rewriting = capabilities(&["rewrite_commit", "read_commit"]);
+    let root = tempdir().unwrap();
     let view = script_grants::view(
+        root.path(),
+        None,
         ScriptGrants {
             revision_epoch: 0,
             revision: 4,
@@ -1154,6 +1163,7 @@ fn the_grants_view_keeps_the_order_and_the_capability_names() {
             ],
         },
         None,
+        &[],
     );
     assert_eq!(view.revision, 4);
     // 文件里的顺序就是执行顺序，原样交给页面；能力名按 `Capability::ALL` 的顺序。
@@ -1175,4 +1185,498 @@ fn the_grants_view_keeps_the_order_and_the_capability_names() {
         ]
     );
     assert!(view.health.is_empty());
+    assert!(view.commands.is_empty());
+}
+
+/// 在 `/` 指令里给出候选的包：申请 `provide_commands`、声明 `command` 钩子，`commands` 是接在 `[script]` 后面的 `[[script.commands]]`。
+fn commander(commands: &str) -> String {
+    manifest(
+        "generator",
+        "'provide_commands'",
+        &format!("abi = 1\nmodule = 'main.wasm'\nhooks = ['command']\n{commands}"),
+    )
+}
+
+fn command(trigger: &str, title: &str) -> String {
+    format!("[[script.commands]]\ntrigger = '{trigger}'\ntitle = '{title}'\n")
+}
+
+#[test]
+fn a_script_pack_declares_its_slash_commands() {
+    let files = tempdir().unwrap();
+    let script = commander(&format!(
+        "{}{}",
+        command("uuid", "UUID"),
+        command("guid", "GUID")
+    ));
+    let directory = write_pack(files.path(), "uuid", &script, &module(&[COMMAND_ROW]));
+    let summary = validate(&directory).unwrap();
+    let pack = script_content(&summary);
+    assert_eq!(
+        pack.commands,
+        [
+            script_pack::ScriptCommand {
+                trigger: "uuid".into(),
+                title: "UUID".into(),
+            },
+            script_pack::ScriptCommand {
+                trigger: "guid".into(),
+                title: "GUID".into(),
+            },
+        ]
+    );
+    assert_eq!(
+        pack.permissions,
+        CapabilitySet::EMPTY.with(Capability::ProvideCommands)
+    );
+    let json = serde_json::to_value(&summary).unwrap();
+    assert_eq!(json["permissions"], serde_json::json!(["provide_commands"]));
+    assert_eq!(json["hooks"], serde_json::json!(["command"]));
+    assert_eq!(
+        json["commands"],
+        serde_json::json!([
+            {"trigger": "uuid", "title": "UUID"},
+            {"trigger": "guid", "title": "GUID"},
+        ])
+    );
+    // 内容哈希的算法不变：清单字节本来就计入。
+    assert_eq!(
+        pack.content_hash,
+        script_pack::content_hash(script.as_bytes(), &module(&[COMMAND_ROW]))
+    );
+
+    // 不声明指令的旧包：摘要里没有 `commands`。
+    let (reader, wasm) = reader("pangu");
+    let directory = write_pack(files.path(), "pangu", &reader, &wasm);
+    let json = serde_json::to_value(validate(&directory).unwrap()).unwrap();
+    assert!(json.get("commands").is_none());
+}
+
+#[test]
+fn slash_commands_that_could_not_work_are_refused_with_the_reason() {
+    let files = tempdir().unwrap();
+    let wasm = module(&[COMMAND_ROW]);
+    let five: String = ["aa", "bb", "cc", "dd", "ee"]
+        .iter()
+        .map(|trigger| command(trigger, "五"))
+        .collect();
+    let cases: Vec<(String, &str)> = vec![
+        // 内置触发词：相等、插件触发词是它的前缀、它是插件触发词的前缀。
+        (
+            commander(&command("rq", "日")),
+            "和内置指令 /rq 相同或互为前缀",
+        ),
+        (
+            commander(&command("fan", "翻")),
+            "和内置指令 /fanyi 相同或互为前缀",
+        ),
+        (
+            commander(&command("riqix", "日")),
+            "和内置指令 /riqi 相同或互为前缀",
+        ),
+        (
+            commander(&command("dates", "日")),
+            "和内置指令 /date 相同或互为前缀",
+        ),
+        // 同一清单里重复、互为前缀。
+        (
+            commander(&format!(
+                "{}{}",
+                command("uuid", "甲"),
+                command("uuid", "乙")
+            )),
+            "指令触发词 uuid 重复了",
+        ),
+        (
+            commander(&format!("{}{}", command("uu", "甲"), command("uuid", "乙"))),
+            "指令触发词 uuid 和 uu 互为前缀",
+        ),
+        // 单字母、17 个字母、大写、不是字母。
+        (commander(&command("u", "U")), "必须是 2 到 16 个小写字母"),
+        (
+            commander(&command(&"u".repeat(17), "U")),
+            "必须是 2 到 16 个小写字母",
+        ),
+        (
+            commander(&command("UUID", "U")),
+            "必须是 2 到 16 个小写字母",
+        ),
+        (commander(&command("uu1", "U")), "必须是 2 到 16 个小写字母"),
+        // 标题：9 个字、空、内置标题、首尾空白、不可见字符。
+        (
+            commander(&command("uuid", "一二三四五六七八九")),
+            "标题必须是 1 到 8 个字符",
+        ),
+        (commander(&command("uuid", "")), "标题必须是 1 到 8 个字符"),
+        (
+            commander(&command("uuid", "翻译")),
+            "不能和内置指令的标题「翻译」相同",
+        ),
+        (commander(&command("uuid", " U")), "标题首尾不能是空白"),
+        (
+            commander("[[script.commands]]\ntrigger = 'uuid'\ntitle = \"U\\u200BU\"\n"),
+            "标题含有不允许的字符",
+        ),
+        // 结构：多出来的键、缺标题、空表、超过 4 条、不是表的数组。
+        (
+            commander("[[script.commands]]\ntrigger = 'uuid'\ntitle = 'U'\ntemplate = 'x'\n"),
+            "script.commands 里有未知的键 template",
+        ),
+        (
+            commander("[[script.commands]]\ntrigger = 'uuid'\n"),
+            "需要字符串 title",
+        ),
+        (commander("commands = []\n"), "要有 1 到 4 条指令"),
+        (commander(&five), "要有 1 到 4 条指令"),
+        (commander("commands = 'uuid'\n"), "必须是表的数组"),
+        // 指令、能力和钩子三者缺一不可。
+        (
+            commander(&command("uuid", "U")).replace("'provide_commands'", ""),
+            "声明了 script.commands 就必须申请 provide_commands",
+        ),
+        (
+            commander(&command("uuid", "U")).replace("['command']", "['commit']"),
+            "声明了 script.commands 就必须声明 command 钩子",
+        ),
+        (
+            commander(""),
+            "申请了 provide_commands 就必须在 script.commands 里声明指令",
+        ),
+        (
+            commander("").replace("'provide_commands'", ""),
+            "声明了 command 钩子就必须在 script.commands 里声明指令",
+        ),
+    ];
+    for (script, expected) in &cases {
+        let directory = write_pack(files.path(), "uuid", script, &wasm);
+        let reason = refusal(&directory);
+        assert!(reason.contains(expected), "{expected}: {reason}");
+    }
+    // 四条、各不相关、标题用到 8 个字，可以。
+    let four: String = [
+        ("uuid", "八个字的标题也行"),
+        ("guid", "G"),
+        ("lorem", "L"),
+        ("ipsum", "I"),
+    ]
+    .iter()
+    .map(|(trigger, title)| command(trigger, title))
+    .collect();
+    let directory = write_pack(files.path(), "uuid", &commander(&four), &wasm);
+    assert_eq!(
+        script_content(&validate(&directory).unwrap())
+            .commands
+            .len(),
+        4
+    );
+}
+
+/// 没有 `commands` 的旧包：清单键和能力都加了一项，内容哈希一个字节都不变，已有的授权继续有效。固定值是这份夹具按现在的哈希公式（`commands` 没有让公式多出任何一段）算出的，以后谁改了公式或夹具，这里就会变红。
+#[test]
+fn the_content_hash_of_a_pack_without_commands_is_unchanged() {
+    let (script, wasm) = reader("pangu");
+    assert_eq!(
+        script_pack::content_hash(script.as_bytes(), &wasm),
+        "b49377d0055743c345a30b9fed4890f404557d8def290cb7430563755c6f3315"
+    );
+}
+
+/// client-core 复制的内置指令规则在清单里生效：每个内置触发词本身、以及在它后面加一个字母，都不能声明。
+#[test]
+fn every_builtin_trigger_is_reserved() {
+    let files = tempdir().unwrap();
+    let wasm = module(&[COMMAND_ROW]);
+    for builtin in script_pack::BUILTIN_COMMAND_TRIGGERS {
+        for trigger in [builtin.to_owned(), format!("{builtin}x")] {
+            let directory = write_pack(
+                files.path(),
+                "uuid",
+                &commander(&command(&trigger, "U")),
+                &wasm,
+            );
+            let reason = refusal(&directory);
+            assert!(reason.contains("和内置指令"), "{trigger}: {reason}");
+        }
+    }
+    for title in script_pack::BUILTIN_COMMAND_TITLES {
+        let directory = write_pack(
+            files.path(),
+            "uuid",
+            &commander(&command("uuid", title)),
+            &wasm,
+        );
+        assert!(
+            refusal(&directory).contains("不能和内置指令的标题"),
+            "{title}"
+        );
+    }
+}
+
+/// `id` 的指令插件清单，`commands` 是接在 `[script]` 后面的 `[[script.commands]]`。
+fn commander_named(id: &str, commands: &str) -> String {
+    manifest(
+        id,
+        "'provide_commands'",
+        &format!("abi = 1\nmodule = 'main.wasm'\nhooks = ['command']\n{commands}"),
+    )
+}
+
+/// 授权页和输入法算进来的是启用、授予了 `provide_commands`、清单能载入的插件，按执行顺序；状态按「用户指令表赢、插件先到先得」。
+#[test]
+fn granted_commands_and_their_states_follow_the_grants_and_the_user_table() {
+    let files = tempdir().unwrap();
+    let root = tempdir().unwrap();
+    let wasm = module(&[COMMAND_ROW]);
+    let provide = CapabilitySet::EMPTY.with(Capability::ProvideCommands);
+    let mut hashes = Vec::new();
+    for (id, commands) in [
+        ("first", command("uuid", "UUID")),
+        (
+            "second",
+            format!("{}{}", command("uuidx", "长"), command("sig", "签")),
+        ),
+        ("ungranted", command("abc", "甲")),
+        ("disabled", command("def", "乙")),
+        ("broken", command("ghi", "丙")),
+    ] {
+        hashes.push(import_pack(
+            files.path(),
+            root.path(),
+            id,
+            &commander_named(id, &commands),
+            &wasm,
+        ));
+    }
+    for (index, (id, enabled, granted)) in [
+        ("first", true, provide),
+        ("second", true, provide),
+        ("ungranted", true, CapabilitySet::EMPTY),
+        ("disabled", false, provide),
+        ("broken", true, provide),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        script_grants::set(root.path(), None, id, &hashes[index], enabled, granted).unwrap();
+    }
+    // 授权之后模块文件没了：清单载入不了，不算进来。
+    fs::remove_file(kind_directory(root.path(), PluginKind::Script).join("broken/main.wasm"))
+        .unwrap();
+    let grants = script_grants::read(root.path());
+    let granted = super::script_commands::granted_commands(root.path(), None, &grants);
+    let ids: Vec<&str> = granted.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(ids, ["first", "second"]);
+    assert_eq!(granted[1].1.len(), 2);
+
+    // 用户的指令表包：`sig` 归用户。
+    let table = files.path().join("mine");
+    fs::create_dir_all(&table).unwrap();
+    fs::write(
+        table.join(MANIFEST_FILE),
+        "schema_version = 1\nkind = 'command_table'\nid = 'mine'\nname = '我的'\nversion = '1.0.0'\nlicense = 'MIT'\n[[commands]]\ntrigger = 'si'\ntitle = '我的'\ntemplate = '张三'\n",
+    )
+    .unwrap();
+    import(&table, root.path()).unwrap();
+    let user = super::script_commands::user_triggers(root.path(), &["mine".to_owned()]);
+    assert_eq!(user, ["si"]);
+    let view = script_grants::view(root.path(), None, grants, None, &user);
+    assert_eq!(
+        serde_json::to_value(&view.commands).unwrap(),
+        serde_json::json!([
+            {"id": "first", "trigger": "uuid", "title": "UUID", "status": "active"},
+            {"id": "second", "trigger": "uuidx", "title": "长", "status": "shadowed_by_plugin", "conflict_id": "first", "conflict": "uuid"},
+            {"id": "second", "trigger": "sig", "title": "签", "status": "shadowed_by_user_table", "conflict": "si"},
+        ])
+    );
+    // 没启用指令表时 `sig` 生效。
+    let view = script_grants::view(
+        root.path(),
+        None,
+        script_grants::read(root.path()),
+        None,
+        &super::script_commands::user_triggers(root.path(), &[]),
+    );
+    assert_eq!(
+        view.commands[2].status,
+        super::script_commands::CommandStatus::Active
+    );
+}
+
+/// 只算执行顺序上会运行的前 `MAX_ENABLED_SCRIPTS` 个：排在后面的插件声明的指令不进来。
+#[test]
+fn only_the_scripts_the_input_method_runs_count() {
+    let files = tempdir().unwrap();
+    let root = tempdir().unwrap();
+    let wasm = module(&[COMMAND_ROW]);
+    let provide = CapabilitySet::EMPTY.with(Capability::ProvideCommands);
+    let ids: Vec<String> = (0..=limits::MAX_ENABLED_SCRIPTS)
+        .map(|index| format!("p{}", char::from(b'a' + index as u8)))
+        .collect();
+    for id in &ids {
+        let trigger = format!("{id}{id}");
+        let hash = import_pack(
+            files.path(),
+            root.path(),
+            id,
+            &commander_named(id, &command(&trigger, "T")),
+            &wasm,
+        );
+        // 准入按个数拒绝第 9 个；授权文件照样可以列着它（同一用户的程序能写），输入法只取前 8 个。
+        if script_grants::set(root.path(), None, id, &hash, true, provide).is_err() {
+            let mut grants = script_grants::read(root.path());
+            assert_eq!(grants.plugins.len(), limits::MAX_ENABLED_SCRIPTS);
+            grants.plugins.push(script_grants::ScriptGrant {
+                id: id.clone(),
+                hash,
+                enabled: true,
+                granted: provide,
+            });
+            let document = serde_json::json!({
+                "format_version": 1,
+                "revision": grants.revision + 1,
+                "plugins": grants.plugins.iter().map(|grant| serde_json::json!({
+                    "id": grant.id, "hash": grant.hash, "enabled": grant.enabled,
+                    "granted": grant.granted.iter().map(Capability::as_str).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            });
+            fs::write(
+                script_grants::document_path(root.path()),
+                serde_json::to_vec(&document).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+    let granted = super::script_commands::granted_commands(
+        root.path(),
+        None,
+        &script_grants::read(root.path()),
+    );
+    assert_eq!(granted.len(), limits::MAX_ENABLED_SCRIPTS);
+    assert!(granted.iter().all(|(id, _)| id != ids.last().unwrap()));
+}
+
+/// 官方脚本插件（`BUILTIN_SCRIPT_PACKS`）：从内置目录读，授权照样写在插件目录里、绑定内置那一份的哈希；影子副本不被使用，删它不动授权；宿主不知道内置目录时，授权条目不当作「包已不在」清掉。
+#[test]
+fn official_script_packs_are_granted_from_the_packs_directory() {
+    let root = tempdir().unwrap();
+    let bundle = tempdir().unwrap();
+    let packs = bundle.path().join("plugin-packs");
+    let builtin = Some(packs.as_path());
+    let wasm = module(&[COMMAND_ROW]);
+    let official = commander(&command("uuid", "UUID")).replace("id = 'generator'", "id = 'uuid'");
+    let directory = write_pack(&packs.join("script"), "uuid", &official, &wasm);
+    let hash = script_pack::content_hash(official.as_bytes(), &wasm);
+
+    let loaded = script_pack::load(root.path(), builtin, "uuid").unwrap();
+    assert_eq!(loaded.pack.content_hash, hash);
+    assert!(script_pack::load(root.path(), None, "uuid").is_err());
+    let catalog = scan(root.path(), BuiltinDirs::packs(builtin));
+    assert_eq!(catalog.packages.len(), 1);
+    assert!(catalog.packages[0].builtin);
+    assert_eq!(script_content(&catalog.packages[0]).content_hash, hash);
+
+    // 默认停用：没有授权条目就不算进指令。
+    let provide = CapabilitySet::EMPTY.with(Capability::ProvideCommands);
+    assert!(super::script_commands::granted_commands(
+        root.path(),
+        builtin,
+        &script_grants::read(root.path())
+    )
+    .is_empty());
+    let grants = script_grants::set(root.path(), builtin, "uuid", &hash, true, provide).unwrap();
+    assert_eq!(grants.plugins[0].hash, hash);
+    let commands = super::script_commands::granted_commands(root.path(), builtin, &grants);
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].1[0].trigger, "uuid");
+    let view = script_grants::view(root.path(), builtin, grants, None, &[]);
+    assert_eq!(view.commands.len(), 1);
+    // 不知道内置目录的读法看不到它的指令，但授权还在。
+    assert!(super::script_commands::granted_commands(
+        root.path(),
+        None,
+        &script_grants::read(root.path())
+    )
+    .is_empty());
+
+    // 另一个插件授权时，宿主没给内置目录：官方条目不算「包已不在」。
+    let (reader, reader_wasm) = reader("pangu");
+    let reader_hash = import_pack(bundle.path(), root.path(), "pangu", &reader, &reader_wasm);
+    let grants = script_grants::set(
+        root.path(),
+        None,
+        "pangu",
+        &reader_hash,
+        true,
+        read_commit(),
+    )
+    .unwrap();
+    assert_eq!(
+        grants
+            .plugins
+            .iter()
+            .map(|grant| grant.id.as_str())
+            .collect::<Vec<_>>(),
+        ["uuid", "pangu"]
+    );
+
+    // 官方包随安装包分发之前导入过的同 id 副本：载入、授权都只认内置的那一份，删它不动授权。
+    let shadow = write_pack(
+        &root.path().join("script"),
+        "uuid",
+        &official.replace("UUID", "影子"),
+        &wasm,
+    );
+    assert_eq!(
+        script_pack::load(root.path(), builtin, "uuid")
+            .unwrap()
+            .pack
+            .content_hash,
+        hash
+    );
+    remove(root.path(), PluginKind::Script, "uuid").unwrap();
+    assert!(!shadow.exists());
+    assert!(directory.join(MANIFEST_FILE).is_file());
+    assert!(script_grants::read(root.path()).get("uuid").is_some());
+
+    // 宿主给了内置目录、包却真的不在了（新版本去掉了它）：条目照常清掉。
+    fs::remove_dir_all(&directory).unwrap();
+    let grants = script_grants::set(
+        root.path(),
+        builtin,
+        "pangu",
+        &reader_hash,
+        true,
+        read_commit(),
+    )
+    .unwrap();
+    assert_eq!(
+        grants
+            .plugins
+            .iter()
+            .map(|grant| grant.id.as_str())
+            .collect::<Vec<_>>(),
+        ["pangu"]
+    );
+}
+
+/// 从没导入过插件的用户：状态目录下还没有插件目录，官方脚本插件照样能授权，授权时把插件目录建出来，授权文件写在里面。
+#[test]
+fn an_official_script_pack_is_granted_before_the_plugin_root_exists() {
+    let state = tempdir().unwrap();
+    let root = state.path().join("plugins");
+    let bundle = tempdir().unwrap();
+    let packs = bundle.path().join("plugin-packs");
+    let builtin = Some(packs.as_path());
+    let wasm = module(&[COMMAND_ROW]);
+    let official = commander(&command("uuid", "UUID")).replace("id = 'generator'", "id = 'uuid'");
+    write_pack(&packs.join("script"), "uuid", &official, &wasm);
+    let hash = script_pack::content_hash(official.as_bytes(), &wasm);
+    assert!(!root.exists());
+
+    let provide = CapabilitySet::EMPTY.with(Capability::ProvideCommands);
+    let grants = script_grants::set(&root, builtin, "uuid", &hash, true, provide).unwrap();
+    assert_eq!(grants.plugins[0].id, "uuid");
+    assert!(root.is_dir());
+    assert!(script_grants::document_path(&root).is_file());
+    assert_eq!(script_grants::read(&root), grants);
 }

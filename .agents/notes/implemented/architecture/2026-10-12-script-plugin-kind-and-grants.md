@@ -14,7 +14,7 @@ Status: implemented
 
 **清单规则按类型。** 桌面上先看版本：既不是 1 也不是 2 时照旧报"不支持这个 schema_version"（报错顺序与移动端一致）；再认类型；然后 `script` 必须写 2，其余 8 种仍只认 1。旧客户端和移动端在 `schema_version != 1` 处就拒绝 v2 包，服务端的 `community_plugin_archive.go` 同样只收 1 且拒绝非空 `permissions`。`permissions` 只对 `script` 放行：每项必须在 `Capability` 白名单里、不能重复，依赖必须一起申请，`rewrite_commit` 与 `read_composition` 不能同时申请；数据类插件照旧"插件不能申请权限，permissions 必须为空"。
 
-**`script_pack.rs`。** `[script]` 只有 4 个键：`abi`（只能是 1）、`module`（平铺的 `.wasm` 文件名）、`hooks`（非空、不重复的钩子名）、`memory_pages`（可选，1 到 64，默认 16）。模块按 `DataFile{max_bytes: 256 KiB, extension: "wasm"}` 登记（上限由运行时的 `limits::MAX_MODULE_BYTES` 定，理由见沙箱运行时那篇），走现有的 `check_files`，文件数上限仍是 `MAX_PACK_FILES`。完整载入（导入、`validate`、`scan`）时读出模块，用 `msime_script_runtime::validate` 按 ABI v1 校验（只编译，不执行），所以 `msime-pack validate` 和导入天然是同一份校验。`load(root, id)` 给输入法进程用：清单和文件照常检查，模块读出来但不在这里编译，字节和内容哈希出自同一次读取，交给调用方的 `compile`（那就是同一份校验，不必先校验一遍再编译一遍）。
+**`script_pack.rs`。** `[script]` 只有 5 个键：`abi`（只能是 1）、`module`（平铺的 `.wasm` 文件名）、`hooks`（非空、不重复的钩子名）、`memory_pages`（可选，1 到 64，默认 16）、`commands`（可选，`[[script.commands]]`，插件在 `/` 指令里声明的触发词和标题，和能力 `provide_commands`、钩子 `command` 三者缺一不可，规则见 [插件指令行](2026-10-13-script-plugin-command-rows.md)）。能力白名单现在是 8 项，第 8 项是 `provide_commands`。模块按 `DataFile{max_bytes: 256 KiB, extension: "wasm"}` 登记（上限由运行时的 `limits::MAX_MODULE_BYTES` 定，理由见沙箱运行时那篇），走现有的 `check_files`，文件数上限仍是 `MAX_PACK_FILES`。完整载入（导入、`validate`、`scan`）时读出模块，用 `msime_script_runtime::validate` 按 ABI v1 校验（只编译，不执行），所以 `msime-pack validate` 和导入天然是同一份校验。`load(root, id)` 给输入法进程用：清单和文件照常检查，模块读出来但不在这里编译，字节和内容哈希出自同一次读取，交给调用方的 `compile`（那就是同一份校验，不必先校验一遍再编译一遍）。
 
 **内容哈希。** `sha256("msime-script\0" ‖ len ‖ plugin.toml ‖ len ‖ 模块)`，`len` 是后一段的字节数、8 字节小端，64 位小写十六进制；说明文件不计入。前缀做域分隔，长度做段分隔，字节在两段之间挪动不会得到同一个哈希。哈希用的清单字节就是刚解析的那一份。
 
@@ -56,3 +56,5 @@ Status: implemented
 - 导入命令不拦脚本包。页面的类型表随授权页加上了 `script`（「脚本插件」），导入脚本包后的提示写得出类型名。
 
 相关：[桌面端生命周期核心](../../implemented/architecture/2026-10-11-desktop-lifecycle-core.md) 产生投递给脚本的事件；[沙箱运行时](2026-10-12-script-runtime-sandbox.md) 提供本篇用到的 `Capability`、`Hook`、模块校验和 `limits`；数据类插件的门控与诊断见 [插件门控如实显示](../../implemented/bug-fix/2026-10-09-plugin-gates-and-wubi-table-modes.md)；社区可发布类型见 [特效包可分享](../../implemented/feature/2026-10-10-community-effect-packs-shareable.md)。
+
+后续：官方脚本插件（`BUILTIN_SCRIPT_PACKS`）随桌面安装包分发，从只读的内置目录读，授权照样写在本篇的 `script-grants.json`、绑定内置那一份的哈希，导入同 id 的包按本篇的保留 id 规则拒绝，见 [官方插件包随三个桌面安装包分发](2026-10-13-official-plugin-packs-in-desktop-installers.md)。

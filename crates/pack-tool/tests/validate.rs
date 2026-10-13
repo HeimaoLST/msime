@@ -188,3 +188,26 @@ fn the_shared_fixture_packs_validate_as_their_folder_says() {
         }
     }
 }
+
+/// 仓库里随桌面安装包分发的短语表：它用保留 id，导入和社区库拒绝，`--builtin`（只给 scripts/build-official-plugins.sh 用）放行，其余规则照查。
+#[test]
+fn the_official_phrase_table_needs_the_builtin_flag() {
+    let pack =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/phrase_table/latex-symbols/pack");
+    let (status, out, _) = invoke(&[Path::new("validate"), &pack]);
+    assert_eq!(
+        (status, out),
+        (
+            EXIT_INVALID,
+            format!(
+                "error {}: plugin_reserved: 这个 id 属于内置插件，不能导入\n",
+                pack.display()
+            )
+        )
+    );
+    let (status, out, err) = invoke(&[Path::new("validate"), Path::new("--builtin"), &pack]);
+    assert_eq!(
+        (status, out.as_str(), err.as_str()),
+        (EXIT_OK, "ok latex-symbols phrase_table 1.0.0\n", "")
+    );
+}

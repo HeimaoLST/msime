@@ -48,9 +48,15 @@ docker run --rm --init \
       mkdir -p "/build/$configuration/.cmake/api/v1/query"
       touch "/build/$configuration/.cmake/api/v1/query/codemodel-v2"
     done
+    # scripts/build-official-plugins.sh 构建过官方插件包时，按打包的方式装进 share/<client>/plugin-packs，安装步骤之后核对两个包都到了；没有时显式清空这个选项，免得沿用上一次配置留在缓存里的路径。
+    plugin_packs=
+    if [ -d target/plugin-packs/script ] && [ -d target/plugin-packs/phrase_table ]; then
+      plugin_packs=/source/target/plugin-packs
+    fi
     cmake -S platforms/linux -B /build/cmake -G Ninja \
       -DBUILD_TESTING=ON \
       -DMSIME_ENABLE_FCITX5=ON \
+      -DMSIME_PLUGIN_PACKS="$plugin_packs" \
       -DMSIME_HOST_LIBRARY=/build/cargo/debug/libmsime_host_api.so
     cmake --build /build/cmake
     ctest --test-dir /build/cmake --output-on-failure --output-junit /build/native-tests.xml
@@ -76,6 +82,16 @@ PY
     rm -rf /build/stage-full /build/stage-wubi
     DESTDIR=/build/stage-full cmake --install /build/cmake --prefix /usr >/dev/null
     DESTDIR=/build/stage-wubi cmake --install /build/cmake-wubi >/dev/null
+    if [ -n "$plugin_packs" ]; then
+      for pack in script/uuid phrase_table/latex-symbols; do
+        installed=/build/stage-full/usr/share/msime-client/plugin-packs/$pack
+        if [ ! -f "$installed/plugin.toml" ] || ! diff -r "$plugin_packs/$pack" "$installed" >/dev/null; then
+          echo "the official plugin pack $pack was not installed into share/msime-client/plugin-packs as built" >&2
+          exit 1
+        fi
+      done
+      echo "official plugin packs installed: $(cd /build/stage-full/usr/share/msime-client/plugin-packs && find . -name plugin.toml | sort | tr "\n" " ")" >&2
+    fi
     shared=$(comm -12 <(cd /build/stage-full && find . ! -type d | sort) <(cd /build/stage-wubi && find . ! -type d | sort))
     if [ -n "$shared" ]; then
       echo "full and wubi install the same paths:" >&2

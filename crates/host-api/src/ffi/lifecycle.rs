@@ -81,12 +81,15 @@ pub extern "C" fn msime_client_set_lifecycle(handle: u64, flags: u32) -> u32 {
                 let mut state = lifecycle::LifecycleState::new(handle, flags);
                 state.bind_scripts(
                     session.plugin_roots.installed.clone(),
+                    session.plugin_roots.builtin_packs.clone(),
                     &session.options.user_data,
                 );
-                // 脚本插件的候选变换挂在 runtime 上，只在派发类调用里运行；移动端什么都不挂。
+                // 脚本插件的候选变换和插件指令的提供者挂在 runtime 上，只在派发类调用里运行；移动端什么都不挂。
                 state.attach_scripts(&mut session.runtime);
                 let accepted = state.flags();
                 session.lifecycle = Some(Box::new(state));
+                // 选择加入之前聚焦过的会话，插件指令不等下一次聚焦。
+                session.refresh_plugin_commands();
                 accepted
             }
         };

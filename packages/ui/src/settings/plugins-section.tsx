@@ -41,6 +41,8 @@ export type {
   PluginSettingsPage,
   PluginSymbolGroup,
   ScriptCapability,
+  ScriptCommand,
+  ScriptCommandState,
   ScriptGrant,
   ScriptGrantsResult,
   ScriptHealth,
@@ -49,6 +51,9 @@ export {
   SCRIPT_CAPABILITIES,
   ScriptGrantDialog,
   capabilityLabels,
+  SCRIPT_BUILTIN_NOTE,
+  SCRIPT_COMMAND_MODE_NOTE,
+  scriptCommandStatus,
   scriptGrantState,
   scriptResidualRisk,
   toggleCapability,
@@ -437,6 +442,10 @@ export function PluginsSection({
               running={runningScripts}
               platform={platform}
               working={working}
+              commandMode={commandMode}
+              onLocalMode={onLocalMode}
+              onOpenPage={onOpenPage}
+              nameOf={(id) => scriptPacks.find((candidate) => candidate.id === id)?.name ?? id}
               onGrant={(granted) => grantScript(pack, granted)}
               onRevoke={() => void revokeScript(pack)}
               onMove={(offset) => void moveScript(pack.id, offset)}

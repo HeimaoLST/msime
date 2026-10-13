@@ -319,6 +319,14 @@ pub extern "C" fn msime_client_translation_query(handle: u64) -> *mut c_char {
             {
                 return Ok(Value::Null);
             }
+            // 当前页有脚本插件的行（来源 14）时整页都不请求：插件的文字不能交给释义服务、用户的翻译服务，也不查离线释义，免得它经释义写回学到的词库。回答和页面按下标对齐，所以不逐行剔除；这时页上只有插件行，至多还有一行原样的兜底行，整页不请求没有损失。
+            if candidates_view
+                .candidates
+                .iter()
+                .any(|candidate| candidate.source == msime_engine::CandidateSource::Plugin as u8)
+            {
+                return Ok(Value::Null);
+            }
             // Whether the online gloss endpoint may be asked about each candidate,
             // answered once here so every host applies the same rule. Only Chinese
             // candidates qualify: a gloss model has nothing to say about "cun",

@@ -95,6 +95,14 @@ pub mod candidate_field {
     pub const HIGHLIGHTED: i32 = 17;
 }
 
+/// `command_text(field, dst, cap)` 的字段，需要 `provide_commands`，只在 `command` 钩子里有值。
+pub mod command_field {
+    /// 用户打的触发词，即清单 `[[script.commands]]` 里的某个 `trigger`。
+    pub const TRIGGER: i32 = 0;
+    /// 触发词后面用户打的字母，可以为空（`/uuid`），只含小写 ASCII 字母，最多 [`crate::limits::MAX_COMMAND_ARGUMENT_BYTES`] 字节。
+    pub const ARGUMENT: i32 = 1;
+}
+
 /// `log(level, src, len)` 的级别。产品里 `log` 是空操作，只有设了调试输出（`msime-pack run`）才打印。
 pub mod log_level {
     pub const DEBUG: i32 = 0;
@@ -209,10 +217,15 @@ pub enum Capability {
     AnnotateCandidates = 5,
     /// 把候选降到末尾并隐藏。依赖 `read_candidates`。
     FilterCandidates = 6,
+    /// 在自己声明的 `/` 指令里给出候选：读用户在触发词后面打的字母，交回最多 [`crate::limits::MAX_COMMAND_ROWS`] 行。没有依赖。
+    ProvideCommands = 7,
 }
 
+// `CapabilitySet` 是 u8，按判别值取位：第 9 项能力（判别值 8）的 `1 << 8` 在 debug 构建里 panic、在 release 构建里取模撞到第 1 项上。加第 9 项之前先把 `CapabilitySet` 扩宽，授权文件存的是能力名，扩宽不影响格式。
+const _: () = assert!(Capability::ALL.len() <= u8::BITS as usize);
+
 impl Capability {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::ReadComposition,
         Self::ReadCommit,
         Self::ReadCandidates,
@@ -220,6 +233,7 @@ impl Capability {
         Self::RerankCandidates,
         Self::AnnotateCandidates,
         Self::FilterCandidates,
+        Self::ProvideCommands,
     ];
 
     /// 清单和授权文件里的名字。
@@ -232,6 +246,7 @@ impl Capability {
             Self::RerankCandidates => "rerank_candidates",
             Self::AnnotateCandidates => "annotate_candidates",
             Self::FilterCandidates => "filter_candidates",
+            Self::ProvideCommands => "provide_commands",
         }
     }
 
@@ -248,15 +263,18 @@ impl Capability {
             Self::RerankCandidates | Self::AnnotateCandidates | Self::FilterCandidates => {
                 Some(Self::ReadCandidates)
             }
-            Self::ReadComposition | Self::ReadCommit | Self::ReadCandidates => None,
+            Self::ReadComposition
+            | Self::ReadCommit
+            | Self::ReadCandidates
+            | Self::ProvideCommands => None,
         }
     }
 
-    /// 能读到文本的能力。授予了其中任何一项，实例在每次 focus 和 destroy 时都整个丢弃。
+    /// 能读到文本的能力。授予了其中任何一项，实例在每次 focus 和 destroy 时都整个丢弃。`provide_commands` 读的是用户在它的触发词后面打的字母，也算。
     pub fn reads_text(self) -> bool {
         matches!(
             self,
-            Self::ReadComposition | Self::ReadCommit | Self::ReadCandidates
+            Self::ReadComposition | Self::ReadCommit | Self::ReadCandidates | Self::ProvideCommands
         )
     }
 
@@ -376,7 +394,7 @@ impl std::error::Error for CapabilityRuleError {}
 
 /// 投递给脚本的事件，也是清单 `hooks` 里的名字。
 ///
-/// 编号沿用 host-api `LifecycleEvent` 的判别值：0 和 1 是 focus，6-15 是派发类事件；2-5（字段属性、激活、停用、按键）和 16（会话结束）只给核心，不投递给脚本，编号保留不用。`candidates` 不是生命周期事件，是 runtime 内部的候选变换，排在最后。只能追加。
+/// 编号沿用 host-api `LifecycleEvent` 的判别值：0 和 1 是 focus，6-15 是派发类事件；2-5（字段属性、激活、停用、按键）和 16（会话结束）只给核心，不投递给脚本，编号保留不用。`candidates` 不是生命周期事件，是 runtime 内部的候选变换，排在后面。`command` 也不是生命周期事件：用户在 `/` 指令里打了某个插件声明的触发词时，宿主只把它投递给这个触发词的主人，排在最后。只能追加。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Hook {
@@ -393,10 +411,11 @@ pub enum Hook {
     CandidatesShown = 14,
     CandidatesHidden = 15,
     Candidates = 17,
+    Command = 18,
 }
 
 impl Hook {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::FocusIn,
         Self::FocusOut,
         Self::Input,
@@ -410,6 +429,7 @@ impl Hook {
         Self::CandidatesShown,
         Self::CandidatesHidden,
         Self::Candidates,
+        Self::Command,
     ];
 
     /// 清单 `hooks` 里的名字。
@@ -428,6 +448,7 @@ impl Hook {
             Self::CandidatesShown => "candidates_shown",
             Self::CandidatesHidden => "candidates_hidden",
             Self::Candidates => "candidates",
+            Self::Command => "command",
         }
     }
 
@@ -440,9 +461,14 @@ impl Hook {
         self as i32
     }
 
-    /// 可修改的钩子。修改类 import 只在这两个钩子里可用，别的钩子里返回 `DENIED`：`rewrite_commit` 只在 `before_commit`，三个候选类只在 `candidates`。
+    /// 可修改的钩子。修改类 import 只在这几个钩子里可用，别的钩子里返回 `DENIED`：`rewrite_commit` 只在 `before_commit`，三个候选类只在 `candidates`，`command_row` 只在 `command`。真正的门控在每个 import 自己的检查里（授权加上所在的钩子），这里只是把它们归成一类。
     pub fn modifies(self) -> bool {
-        matches!(self, Self::BeforeCommit | Self::Candidates)
+        matches!(self, Self::BeforeCommit | Self::Candidates | Self::Command)
+    }
+
+    /// 跑在 `msime_init` 之后的快照上、看不到之前任何事件留下的状态的钩子：输出只能是这一次输入的函数。`before_commit` 改写的只能是这一次的上屏文本；`command` 给出的行只能取决于触发词、参数、随机数和模块本身，夹带不了同一个字段里早先的组字或上屏。
+    pub fn runs_on_snapshot(self) -> bool {
+        matches!(self, Self::BeforeCommit | Self::Command)
     }
 
     fn bit(self) -> u32 {
@@ -496,16 +522,40 @@ pub fn local_mode_allows_text(local_mode: u8) -> bool {
     local_mode <= 5
 }
 
-/// 修改类 import 的约定。它们只暂存动作，钩子正常返回（非负）之后宿主才采用；trap、fuel 耗尽或返回负数时，这个插件这一次暂存的动作全部丢弃。
+/// 修改类 import 的约定。它们只暂存动作，钩子正常返回（非负）之后宿主才采用；trap、fuel 耗尽或返回负数时，这个插件这一次暂存的动作全部丢弃（包括 `command_row` 暂存的行）。
 ///
-/// - `rewrite_commit(src, len) -> i32`：只在 `before_commit` 里、这次上屏可改写（`event_scalar(REWRITABLE) == 1`）时可用，否则 `DENIED`。把 `[src, src + len)` 的 UTF-8 文本作为新的 body，tail（标点、顶字的尾巴）由宿主原样接回。区间越界直接 trap；超过 [`crate::limits::MAX_REWRITE_BYTES`] 字节或 [`crate::limits::rewrite_utf16_limit`] 个 UTF-16 码元返回 `LIMIT`；不是 UTF-8、为空、含控制字符（Cc）、格式字符（Cf）或行、段分隔符（U+2028、U+2029）返回 `INVALID`。成功返回 0，再调一次覆盖上一次。多个插件依次改写，后面的插件读到的 body 是前面改写过的，长度上限仍按原文算。
+/// - `rewrite_commit(src, len) -> i32`：只在 `before_commit` 里、这次上屏可改写（`event_scalar(REWRITABLE) == 1`）时可用，否则 `DENIED`。把 `[src, src + len)` 的 UTF-8 文本作为新的 body，tail（标点、顶字的尾巴）由宿主原样接回。区间越界直接 trap；超过 [`crate::limits::MAX_REWRITE_BYTES`] 字节或 [`crate::limits::rewrite_utf16_limit`] 个 UTF-16 码元返回 `LIMIT`；不是 UTF-8、为空、含 [`is_forbidden_plugin_char`] 拦下的字符（控制字符、格式字符、行和段分隔符、不显示的填充符和变体选择符）返回 `INVALID`。成功返回 0，再调一次覆盖上一次。多个插件依次改写，后面的插件读到的 body 是前面改写过的，长度上限仍按原文算。
 /// - `candidates_order(src, count) -> i32`、`candidates_hide(src, count) -> i32`：只在 `candidates` 里可用，否则 `DENIED`。`[src, src + 4 × count)` 是 `count` 个小端 u32 行号，指 `read_candidates` 读到的那份窗口（插件变换之前的顺序）。行号越界、重复或 `count` 超过窗口行数返回 `INVALID`，区间越界 trap。`order` 把这些行按给出的顺序排到前面，其余行保持原来的相对顺序，再调一次覆盖上一次；`hide` 把这些行降到列表末尾并隐藏，多次调用取并集。锁定的座位（固定了位置的词、云和 AI 行、五笔四码唯一时的首位）和引擎下标 0 的行由宿主静默忽略，插件看不出来，返回值照样是 0。
-/// - `candidates_annotate(index, src, len) -> i32`：只在 `candidates` 里可用。给窗口第 `index` 行加注释，不超过 [`crate::limits::MAX_ANNOTATION_UTF16`] 个 UTF-16 码元（超出返回 `LIMIT`），不含 Cc、Cf、U+2028 和 U+2029（否则 `INVALID`），空串表示不加；同一行再调一次覆盖。注释另放一格显示，不改引擎的注释，其他插件也读不到它。
+/// - `candidates_annotate(index, src, len) -> i32`：只在 `candidates` 里可用。给窗口第 `index` 行加注释，不超过 [`crate::limits::MAX_ANNOTATION_UTF16`] 个 UTF-16 码元（超出返回 `LIMIT`），不含 [`is_forbidden_plugin_char`] 拦下的字符（否则 `INVALID`），空串表示不加；同一行再调一次覆盖。注释另放一格显示，不改引擎的注释，其他插件也读不到它。
 ///
-/// 多个插件的候选操作都针对同一份原始窗口、按候选身份（文本加来源）记下，再按授权顺序合成：重排后面的插件优先，隐藏取并集，注释后面的覆盖前面的。
+/// - `command_row(text, tlen, note, nlen) -> i32`：只在 `command` 里、授予了 `provide_commands` 时可用，否则 `DENIED`。暂存一行候选：`[text, text + tlen)` 是行的文本，用户选中时原样上屏；`[note, note + nlen)` 是插件注释，画在插件注释格里，可以为空。两个区间越界直接 trap。已经暂存了 [`crate::limits::MAX_COMMAND_ROWS`] 行、文本超过 [`crate::limits::MAX_COMMAND_ROW_UTF16`] 个 UTF-16 码元或注释超过 [`crate::limits::MAX_ANNOTATION_UTF16`] 个返回 `LIMIT`；不是 UTF-8、文本为空、首尾是空白、含 [`is_forbidden_plugin_char`] 拦下的字符或者含 `://`、`www.`、`mailto:`（不让插件行成为链接），注释含拦下的字符，返回 `INVALID`。成功返回这一行的行号（从 0 起）。行按暂存的顺序排；同文的行由引擎去掉后一行。
+/// - `random_fill(dst, len) -> i32`：不需要能力。每次 `command` 事件宿主给 [`crate::limits::RANDOM_BYTES_PER_EVENT`] 字节随机数，插件按调用顺序取：把接下来的 `len` 个字节写进 `[dst, dst + len)`，返回 `len`；剩下的不够 `len` 个返回 `LIMIT`，什么都不写。别的钩子里没有随机数，`len` 不为 0 时一律 `LIMIT`。区间越界直接 trap。产品里随机数取自操作系统的 CSPRNG，`msime-pack run` 取自夹具的 `random` 字段。
+///
+/// 多个插件的候选操作都针对同一份原始窗口、按候选身份（文本加来源）记下，再按授权顺序合成：重排后面的插件优先，隐藏取并集，注释后面的覆盖前面的。`command` 只投递给触发词的主人，它的行不和别的插件合成。
 pub mod modification {}
 
-/// 插件交回的文本（改写后的上屏、候选注释）里不许出现的字符：控制字符（Cc）、格式字符（Cf），以及行分隔符 U+2028（Zl）和段分隔符 U+2029（Zp）。Cf 包括双向控制符（U+202A..U+202E、U+2066..U+2069）、零宽字符（U+200B..U+200F、U+2060..U+2064、U+FEFF）和标签字符，它们能让显示的文本和实际写进文档的不一样。U+2028 和 U+2029 不是 Cc，却和换行一样断行：macOS 的宿主把候选释义交给会话时就拿 U+2028 当换行（`InputController.mm` 的 `MSIMEGlossLineSeparator`），不拦它们，拦 `\n` 就没有意义。Cf 的列表按 Unicode 15.1 写死，标准库没有通用类别的查询；以后的版本新增的 Cf 字符不在表里。
+/// `command_row` 的文本里不许出现的片段：插件行不能成为可点的链接或伪装成网址。按 ASCII 不分大小写比较。
+pub const COMMAND_ROW_FORBIDDEN_FRAGMENTS: [&str; 3] = ["://", "www.", "mailto:"];
+
+/// `command_row` 的文本是否合规（长度另查）：非空、首尾不是空白、不含 [`is_forbidden_plugin_char`] 拦下的字符和 [`COMMAND_ROW_FORBIDDEN_FRAGMENTS`]。
+pub fn valid_command_row_text(text: &str) -> bool {
+    !text.is_empty()
+        && text.trim() == text
+        && !has_forbidden_plugin_char(text)
+        && !COMMAND_ROW_FORBIDDEN_FRAGMENTS
+            .iter()
+            .any(|fragment| contains_ignore_ascii_case(text, fragment))
+}
+
+fn contains_ignore_ascii_case(text: &str, fragment: &str) -> bool {
+    text.as_bytes()
+        .windows(fragment.len())
+        .any(|window| window.eq_ignore_ascii_case(fragment.as_bytes()))
+}
+
+/// 插件交回的文本（改写后的上屏、候选注释）里不许出现的字符：控制字符（Cc）、格式字符（Cf），行分隔符 U+2028（Zl）和段分隔符 U+2029（Zp），以及一批不是 Cf、却同样看不见或只改字形的字符。Cf 包括双向控制符（U+202A..U+202E、U+2066..U+2069）、零宽字符（U+200B..U+200F、U+2060..U+2064、U+FEFF）和标签字符，它们能让显示的文本和实际写进文档的不一样。U+2028 和 U+2029 不是 Cc，却和换行一样断行：macOS 的宿主把候选释义交给会话时就拿 U+2028 当换行（`InputController.mm` 的 `MSIMEGlossLineSeparator`），不拦它们，拦 `\n` 就没有意义。Cf 的列表按 Unicode 15.1 写死，标准库没有通用类别的查询；以后的版本新增的 Cf 字符不在表里。
+///
+/// 不是 Cf 但同样拦下的：组合用字形连接符 U+034F（Mn，不显示）；韩文填充符 U+115F、U+1160、U+3164、U+FFA0（Lo，显示成空白）；高棉文固有元音 U+17B4、U+17B5（Mn，不显示）；蒙古文自由变体选择符 U+180B..U+180D、U+180F（Mn）；盲文空白 U+2800（So，显示成空白）；变体选择符 U+FE00..U+FE0D 和表意文字变体选择符 U+E0100..U+E01EF（Mn，只改前一个字的字形）。它们能让一段看起来相同的文本在字节上不同，或者让一行看起来是空的。U+FE0E、U+FE0F（VS15、VS16）放行：这里是逐字符判断，分不出它是不是跟在 emoji 后面，而 emoji 注释离不开 VS16；单独出现的 VS15、VS16 不改变字义。表意文字变体选择符拦下之后，改写类插件不能再输出带异体选择符的汉字。
 ///
 /// 这条规则是插件专用的，不改 client-core 的 `text` 模块：那里的检查用在别的输入边界上。
 pub fn is_forbidden_plugin_char(c: char) -> bool {
@@ -513,19 +563,26 @@ pub fn is_forbidden_plugin_char(c: char) -> bool {
         || matches!(
             u32::from(c),
             0x00AD
+                | 0x034F
                 | 0x0600..=0x0605
                 | 0x061C
                 | 0x06DD
                 | 0x070F
                 | 0x0890..=0x0891
                 | 0x08E2
-                | 0x180E
+                | 0x115F..=0x1160
+                | 0x17B4..=0x17B5
+                | 0x180B..=0x180F
                 | 0x200B..=0x200F
                 | 0x2028..=0x2029
                 | 0x202A..=0x202E
                 | 0x2060..=0x2064
                 | 0x2066..=0x206F
+                | 0x2800
+                | 0x3164
+                | 0xFE00..=0xFE0D
                 | 0xFEFF
+                | 0xFFA0
                 | 0xFFF9..=0xFFFB
                 | 0x110BD
                 | 0x110CD
@@ -534,6 +591,7 @@ pub fn is_forbidden_plugin_char(c: char) -> bool {
                 | 0x1D173..=0x1D17A
                 | 0xE0001
                 | 0xE0020..=0xE007F
+                | 0xE0100..=0xE01EF
         )
 }
 
@@ -553,7 +611,7 @@ pub(crate) enum Ty {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ImportSpec {
     pub name: &'static str,
-    /// `None` 表示不需要能力（`event_scalar`、`log`）。
+    /// `None` 表示不需要能力（`event_scalar`、`log`、`random_fill`）。
     pub capability: Option<Capability>,
     pub params: &'static [Ty],
     pub results: &'static [Ty],
@@ -576,7 +634,7 @@ const fn spec(
 }
 
 /// `msime` 命名空间的全部 import。表里有的才能导入。修改类 import 的约定见 [`modification`]。
-pub(crate) const IMPORTS: [ImportSpec; 15] = [
+pub(crate) const IMPORTS: [ImportSpec; 18] = [
     spec("event_scalar", None, I32_TO_I64),
     spec("log", None, (&[Ty::I32, Ty::I32, Ty::I32], &[])),
     spec(
@@ -636,6 +694,13 @@ pub(crate) const IMPORTS: [ImportSpec; 15] = [
         Some(Capability::AnnotateCandidates),
         (&[Ty::I32, Ty::I32, Ty::I32], &[Ty::I32]),
     ),
+    spec("command_text", Some(Capability::ProvideCommands), TEXT_COPY),
+    spec(
+        "command_row",
+        Some(Capability::ProvideCommands),
+        (&[Ty::I32, Ty::I32, Ty::I32, Ty::I32], &[Ty::I32]),
+    ),
+    spec("random_fill", None, (&[Ty::I32, Ty::I32], &[Ty::I32])),
 ];
 
 /// 白名单里全部 import 的名字和所属能力（`None` 表示不需要能力），按 ABI 的顺序。作者文档和 SDK 的一致性测试按它核对。

@@ -1,6 +1,6 @@
 //! `msime-pack run`：按夹具里的事件运行一个脚本插件，每个事件输出一行 JSON。
 //!
-//! 读包、校验和编译走的是导入和输入法进程用的同一份代码（`plugins::load_script_source`、`msime_script_runtime::compile`），执行走的是同一个 `ScriptInstance`：按授权和本地模式复制文本、授权与清单取交集、`before_commit` 在快照上运行、每轮和每个钩子的 fuel 配额、修改类 import 的返回码，全都不是这里重写的。这里只做输入法进程里 `scripts::ScriptSet` 对一个插件做的那几件事：第一次需要投递时实例化（受本轮初始化预算约束），每次聚焦在任何事件之前、失焦在 `focus_out` 之后丢弃实例，trap 之后这次聚焦里不再重建，本轮配额用完时跳过、运行到一半被截断时同样不再重建，这一次用掉的不到本钩子上限的一半时不算失败（达到一半时 runtime 报 fuel 耗尽，和其余失败一样），同一轮里重建的实例接着用这一轮剩下的两份配额，初始化失败之后停用。
+//! 读包、校验和编译走的是导入和输入法进程用的同一份代码（`plugins::load_script_source`、`msime_script_runtime::compile`），执行走的是同一个 `ScriptInstance`：按授权和本地模式复制文本、授权与清单取交集、`before_commit` 和 `command` 在快照上运行、每轮和每个钩子的 fuel 配额、修改类 import 的返回码，全都不是这里重写的。这里只做输入法进程里 `scripts::ScriptSet` 对一个插件做的那几件事：第一次需要投递时实例化（受本轮初始化预算约束），每次聚焦在任何事件之前、失焦在 `focus_out` 之后丢弃实例，trap 之后这次聚焦里不再重建，本轮配额用完时跳过、运行到一半被截断时同样不再重建，这一次用掉的不到本钩子上限的一半时不算失败（达到一半时 runtime 报 fuel 耗尽，和其余失败一样），同一轮里重建的实例接着用这一轮剩下的三份配额，初始化失败之后停用。
 //!
 //! 和输入法进程不同的地方（夹具表达不了，或者故意更严）：字段永远是普通字段（属性已确认、不是 SECURE、PRIVATE 或 ELEVATED）；不做按次数和按墙钟的熔断，每次失败都报告；进程内存总账不检查，一个插件总放得下。
 
@@ -8,11 +8,12 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use msime_client_core::plugins::{self, script_pack};
+use msime_client_core::plugins::{self, script_pack, ReservedIds};
 use msime_script_runtime::abi::{scalar_values as values, status};
 use msime_script_runtime::{
-    limits, CandidateRow, Candidates, Capability, CapabilitySet, CommitTexts, Composition,
-    DebugSinks, Event, Failure, Hook, InitFailure, Outcome, Scalars, ScriptInstance, ScriptModule,
+    limits, CandidateRow, Candidates, Capability, CapabilitySet, CommandEvent, CommitTexts,
+    Composition, DebugSinks, Event, Failure, Hook, InitFailure, Outcome, Scalars, ScriptInstance,
+    ScriptModule,
 };
 use serde::{Deserialize, Serialize};
 
@@ -96,6 +97,12 @@ struct Line {
     candidates: Option<Vec<Row>>,
     page: Option<u32>,
     highlighted: Option<u32>,
+    /// `command`：用户打的触发词，必须是清单 `[[script.commands]]` 里的某一个。
+    trigger: Option<String>,
+    /// `command`：触发词后面的字母，不写是空串。
+    argument: Option<String>,
+    /// `command`：这一次的 64 字节随机数，128 位十六进制；不写是全 0。
+    random: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,9 +132,16 @@ pub struct Step {
     /// 完整的上屏文本和其中可改写的那一段。
     commit: Option<(String, String)>,
     candidates: Option<(Vec<Row>, Option<u32>, Option<u32>)>,
+    /// `command` 的触发词、参数和随机数。
+    command: Option<(String, String, [u8; limits::RANDOM_BYTES_PER_EVENT])>,
 }
 
 impl Step {
+    /// `command` 事件的触发词。
+    pub fn trigger(&self) -> Option<&str> {
+        self.command.as_ref().map(|(trigger, ..)| trigger.as_str())
+    }
+
     /// 借用这一步的文本构造投递给插件的事件。`rows` 是调用方准备的候选行。
     fn event<'a>(&'a self, rows: &'a [CandidateRow<'a>]) -> Event<'a> {
         let mut event = Event::new(self.hook);
@@ -153,6 +167,14 @@ impl Step {
                 rows,
                 page: *page,
                 highlighted: *highlighted,
+            });
+        event.command = self
+            .command
+            .as_ref()
+            .map(|(trigger, argument, random)| CommandEvent {
+                trigger,
+                argument,
+                random: *random,
             });
         event
     }
@@ -192,7 +214,30 @@ fn fields(hook: Hook) -> (&'static [&'static str], &'static [&'static str]) {
         Hook::CompositionEnd | Hook::CandidatesHidden => (&["reason"], &["reason"]),
         Hook::CompositionStart | Hook::CompositionUpdate => (&["preedit", "reading", "caret"], &[]),
         Hook::CandidatesShown | Hook::Candidates => (&["candidates", "page", "highlighted"], &[]),
+        Hook::Command => (&["trigger", "argument", "random"], &["trigger"]),
     }
+}
+
+/// `random` 字段：恰好 [`limits::RANDOM_BYTES_PER_EVENT`] 字节的十六进制，不写是全 0。
+fn random_bytes(text: Option<&str>) -> Result<[u8; limits::RANDOM_BYTES_PER_EVENT], String> {
+    let mut bytes = [0; limits::RANDOM_BYTES_PER_EVENT];
+    let Some(text) = text else {
+        return Ok(bytes);
+    };
+    let message = || {
+        format!(
+            "random 必须是 {} 位十六进制",
+            limits::RANDOM_BYTES_PER_EVENT * 2
+        )
+    };
+    if text.len() != bytes.len() * 2 || !text.is_ascii() {
+        return Err(message());
+    }
+    for (byte, pair) in bytes.iter_mut().zip(text.as_bytes().chunks(2)) {
+        let pair = std::str::from_utf8(pair).map_err(|_| message())?;
+        *byte = u8::from_str_radix(pair, 16).map_err(|_| message())?;
+    }
+    Ok(bytes)
 }
 
 fn scalar(
@@ -235,6 +280,9 @@ fn parse_line(text: &str) -> Result<Step, String> {
         ("candidates", line.candidates.is_some()),
         ("page", line.page.is_some()),
         ("highlighted", line.highlighted.is_some()),
+        ("trigger", line.trigger.is_some()),
+        ("argument", line.argument.is_some()),
+        ("random", line.random.is_some()),
     ];
     let (allowed, required) = fields(hook);
     for (field, is_present) in present {
@@ -251,8 +299,45 @@ fn parse_line(text: &str) -> Result<Step, String> {
         }
     }
 
-    let local_mode =
-        scalar(values::LOCAL_MODE, "local_mode", line.local_mode.as_deref())?.unwrap_or(0);
+    let command_mode = values::value(values::LOCAL_MODE, "command").unwrap_or_default();
+    let local_mode = scalar(values::LOCAL_MODE, "local_mode", line.local_mode.as_deref())?;
+    // 输入法只在 `/` 指令里投递 `command`。
+    let local_mode = if hook == Hook::Command {
+        if local_mode.is_some_and(|mode| mode != command_mode) {
+            return Err("command 事件的 local_mode 只能是 command".into());
+        }
+        command_mode
+    } else {
+        local_mode.unwrap_or(0)
+    };
+    // 输入法只投递清单里的触发词（2 到 16 个小写字母）和只含小写字母的参数，夹具不测产品里到不了的情形。
+    let command = match &line.trigger {
+        Some(trigger) => {
+            let argument = line.argument.clone().unwrap_or_default();
+            if !(2..=limits::MAX_COMMAND_TRIGGER_BYTES).contains(&trigger.len())
+                || !trigger.bytes().all(|byte| byte.is_ascii_lowercase())
+            {
+                return Err(format!(
+                    "trigger 必须是 2 到 {} 个小写字母",
+                    limits::MAX_COMMAND_TRIGGER_BYTES
+                ));
+            }
+            if argument.len() > limits::MAX_COMMAND_ARGUMENT_BYTES
+                || !argument.bytes().all(|byte| byte.is_ascii_lowercase())
+            {
+                return Err(format!(
+                    "argument 只能是至多 {} 个小写字母",
+                    limits::MAX_COMMAND_ARGUMENT_BYTES
+                ));
+            }
+            Some((
+                trigger.clone(),
+                argument,
+                random_bytes(line.random.as_deref())?,
+            ))
+        }
+        None => None,
+    };
     let origin = scalar(values::ORIGIN, "origin", line.origin.as_deref())?;
     let mut scalars = Scalars {
         origin,
@@ -309,6 +394,7 @@ fn parse_line(text: &str) -> Result<Step, String> {
         seat: line.seat,
         commit,
         candidates,
+        command,
     })
 }
 
@@ -329,6 +415,9 @@ struct LogLine {
     text: String,
 }
 
+/// `command` 这一次交回的一行：文本和插件注释。
+type CommandRow = (String, String);
+
 #[derive(Serialize)]
 struct ActionLine {
     import: &'static str,
@@ -347,6 +436,9 @@ struct Report {
     init_fuel: Option<u64>,
     actions: Vec<ActionLine>,
     log: Vec<LogLine>,
+    /// 只有 `command` 行有：插件交回的行，每行是 `[文本, 注释]`。没有正常返回时为空。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rows: Option<Vec<CommandRow>>,
 }
 
 fn level_name(level: i32) -> String {
@@ -381,10 +473,12 @@ struct Session<'m> {
     disabled: bool,
     turn: u64,
     init_left: u64,
-    /// 插件最近一次投递所在的轮次，和那一轮其余钩子、`before_commit` 各还剩的 fuel，同一轮里重建的实例接着用。
-    plugin_turn: Option<(u64, u64, u64)>,
+    /// 插件最近一次投递所在的轮次，和那一轮其余钩子、`before_commit`、`command` 各还剩的 fuel，同一轮里重建的实例接着用。
+    plugin_turn: Option<(u64, u64, u64, u64)>,
     logs: Arc<Mutex<Vec<LogLine>>>,
     actions: Arc<Mutex<Vec<ActionLine>>>,
+    /// 最近一次 `command` 正常返回时交回的行。
+    rows: Vec<CommandRow>,
 }
 
 impl<'m> Session<'m> {
@@ -400,6 +494,7 @@ impl<'m> Session<'m> {
             plugin_turn: None,
             logs: Arc::default(),
             actions: Arc::default(),
+            rows: Vec::new(),
         }
     }
 
@@ -453,11 +548,11 @@ impl<'m> Session<'m> {
             return ("not_subscribed".into(), 0, None, false);
         }
         // 本轮里这个钩子所用的那份配额已经用完：跳过到下一轮，也不为它重新初始化。
-        if let Some((turn, left, before_commit_left)) = self.plugin_turn {
-            let left = if step.hook == Hook::BeforeCommit {
-                before_commit_left
-            } else {
-                left
+        if let Some((turn, left, before_commit_left, command_left)) = self.plugin_turn {
+            let left = match step.hook {
+                Hook::BeforeCommit => before_commit_left,
+                Hook::Command => command_left,
+                _ => left,
             };
             if turn == self.turn && left == 0 {
                 return ("turn_exhausted".into(), 0, None, false);
@@ -476,10 +571,10 @@ impl<'m> Session<'m> {
                 Ok(mut instance) => {
                     self.init_left = budget.saturating_sub(instance.init_fuel());
                     init_fuel = Some(instance.init_fuel());
-                    if let Some((turn, left, before_commit_left)) =
+                    if let Some((turn, left, before_commit_left, command_left)) =
                         self.plugin_turn.filter(|(turn, ..)| *turn == self.turn)
                     {
-                        instance.resume_turn(turn, left, before_commit_left);
+                        instance.resume_turn(turn, left, before_commit_left, command_left);
                     }
                     self.instance = Some(instance);
                 }
@@ -504,11 +599,15 @@ impl<'m> Session<'m> {
                 self.turn,
                 instance.turn_fuel_left(),
                 instance.before_commit_fuel_left(),
+                instance.command_fuel_left(),
             ));
         }
         match outcome {
             Outcome::NotSubscribed => ("not_subscribed".into(), 0, init_fuel, false),
-            Outcome::Delivered { fuel, .. } => ("ok".into(), fuel, init_fuel, false),
+            Outcome::Delivered { fuel, .. } => {
+                self.rows.clone_from(&instance.actions().rows);
+                ("ok".into(), fuel, init_fuel, false)
+            }
             // 本轮配额用完不算失败；运行到一半被截断的实例丢弃，这次聚焦里不再重建。被截断时已经用掉本钩子上限一半的是 `Failed`，走下面的分支。
             Outcome::TurnExhausted { fuel } => {
                 if !instance.is_usable() {
@@ -559,6 +658,7 @@ pub fn run_module(
             status = EXIT_INVALID;
         }
         let (actions, log) = session.drain();
+        let rows = std::mem::take(&mut session.rows);
         let report = Report {
             seq: index + 1,
             event: step.hook.as_str(),
@@ -567,6 +667,7 @@ pub fn run_module(
             init_fuel,
             actions,
             log,
+            rows: (step.hook == Hook::Command).then_some(rows),
         };
         let line = serde_json::to_string(&report).unwrap_or_default();
         if writeln!(out, "{line}").is_err() {
@@ -576,15 +677,16 @@ pub fn run_module(
     status
 }
 
-/// `msime-pack run <pack> --events <fixture> [--grant ...]` 的实现。
+/// `msime-pack run <pack> --events <fixture> [--grant ...] [--builtin]` 的实现。`reserved` 是 `--builtin` 给的保留 id 处理方式。
 pub fn command(
     pack: &Path,
     fixture: &Path,
     grant: &GrantSpec,
+    reserved: ReservedIds,
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> i32 {
-    let loaded = match plugins::load_script_source(pack) {
+    let loaded = match plugins::load_script_source(pack, reserved) {
         Ok(loaded) => loaded,
         Err(error) => {
             let _ = writeln!(err, "error {}: {}", pack.display(), reason(&error));
@@ -624,5 +726,24 @@ pub fn command(
             return EXIT_USAGE;
         }
     };
+    // 输入法只把清单里声明过的触发词投递给这个插件。
+    for (index, step) in steps.iter().enumerate() {
+        if let Some(trigger) = step.trigger() {
+            if !loaded
+                .pack
+                .commands
+                .iter()
+                .any(|command| command.trigger == trigger)
+            {
+                let _ = writeln!(
+                    err,
+                    "error {}: 第 {} 个事件的触发词 {trigger} 不在清单的 commands 里",
+                    fixture.display(),
+                    index + 1
+                );
+                return EXIT_USAGE;
+            }
+        }
+    }
     run_module(&module, grants, &steps, out)
 }

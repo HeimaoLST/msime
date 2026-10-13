@@ -4,7 +4,7 @@
 //!
 //! 唯一的例外是桌面上的脚本插件（`kind = "script"`，见 `script_pack`）：它带一个 core wasm 模块，只在桌面输入法进程里由沙箱解释器按用户逐项授予的能力运行。它只在 macOS、Windows 和非 ohos 的 Linux 上编译，清单必须写 `schema_version = 2`，`permissions` 只对它放行白名单里的能力；授权记在 `script-grants.json`（`script_grants`）。移动端没有这个类型，上面的原则在移动端原样成立。
 //!
-//! 一个包放在 `<root>/<kind>/<id>/`：`root` 是宿主状态根目录下的 `plugins` 目录，`kind` 是 `PluginKind::as_str` 给出的名字（`sound`、`music`、`command_table`、`effect`、`phrase_table` 等）。目录里只有 `plugin.toml`、清单点名的平铺文件（音频或数据文件）和可选的说明文本，别的一律没有：没有子目录、没有符号链接、没有清单不认账的文件。内置音效包随各平台的安装包分发，不在 `root` 下，而在宿主指定的目录里（仓库中是 `resources/sound-packs`），与已安装的包并列列出。
+//! 一个包放在 `<root>/<kind>/<id>/`：`root` 是宿主状态根目录下的 `plugins` 目录，`kind` 是 `PluginKind::as_str` 给出的名字（`sound`、`music`、`command_table`、`effect`、`phrase_table` 等）。目录里只有 `plugin.toml`、清单点名的平铺文件（音频或数据文件）和可选的说明文本，别的一律没有：没有子目录、没有符号链接、没有清单不认账的文件。内置音效包随各平台的安装包分发，不在 `root` 下，而在宿主指定的目录里（仓库中是 `resources/sound-packs`），与已安装的包并列列出。桌面安装包另外随带官方插件包（`plugins/official-packs.json` 登记的脚本插件和短语表），在宿主指定的只读目录里按 `<kind>/<id>/` 排（[`BuiltinDirs::packs`]）；它们的 id 和内置音效包一样保留，载入时永远从那里读，默认停用。
 //!
 //! `mentions.json` beside the kind directories is the @ mode's name list, kept by `mentions`. It lives here rather than in the preferences document because that document is the one hosts copy and account sync reads from, and a contact list belongs to neither.
 
@@ -17,6 +17,12 @@ mod import;
 pub mod mentions;
 pub mod music_pack;
 pub mod phrase_table;
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+pub mod script_commands;
 #[cfg(any(
     target_os = "macos",
     target_os = "windows",
@@ -40,7 +46,9 @@ pub use failure::{remove_named, PluginFailure};
     all(target_os = "linux", not(target_env = "ohos"))
 ))]
 pub use import::load_script_source;
-pub use import::{import, import_from_settings, import_without_script_page, validate};
+pub use import::{
+    import, import_from_settings, import_without_script_page, validate, validate_with, ReservedIds,
+};
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -74,6 +82,10 @@ pub const BUILTIN_SOUND_PACKS: [&str; 9] = [
 ];
 /// Music pack ids the bundle ships, in the same built-in directory as the sound packs, reserved the same way.
 pub const BUILTIN_MUSIC_PACKS: [&str; 2] = ["msime-music-lofi", "msime-music-ambient"];
+/// 桌面安装包随带的官方脚本插件（`plugins/official-packs.json`）。和内置音效包一样保留：导入的包不能用这些 id，这个 id 永远从内置目录（[`BuiltinDirs::packs`]）读。默认停用，要在授权页逐项授权才运行。
+pub const BUILTIN_SCRIPT_PACKS: [&str; 1] = ["uuid"];
+/// 桌面安装包随带的官方短语表（`plugins/official-packs.json`），保留方式同 [`BUILTIN_SCRIPT_PACKS`]。不在 `phrase_tables` 偏好里就不进 K 模式。
+pub const BUILTIN_PHRASE_TABLES: [&str; 1] = ["latex-symbols"];
 /// The sound pack a fresh profile selects.
 pub const DEFAULT_SOUND_PACK: &str = "default";
 /// The melody pack a fresh profile selects.
@@ -199,14 +211,14 @@ const _: () = assert!(PluginKind::ALL.len() == 8);
 ))]
 const _: () = assert!(PluginKind::ALL.len() == 9);
 
-/// Whether `id` of `kind` names a pack the bundle ships. Only sound and music packs are built in: an effect has nothing to ship, since the styles themselves are in the hosts and `effect_style` already selects one without a pack.
+/// `id` 是不是安装包随带的 `kind` 类包：音效包和背景音乐包（所有平台的安装包都带），以及官方脚本插件和官方短语表（只有桌面安装包带）。保留的 id 在所有平台上都生效：导入的包不能用它，载入时永远从内置目录读。特效包没有内置的：样式本身在宿主里，`effect_style` 不靠包就能选。
 pub fn is_builtin(kind: PluginKind, id: &str) -> bool {
     match kind {
         PluginKind::Sound => BUILTIN_SOUND_PACKS.contains(&id),
         PluginKind::Music => BUILTIN_MUSIC_PACKS.contains(&id),
+        PluginKind::PhraseTable => BUILTIN_PHRASE_TABLES.contains(&id),
         PluginKind::CommandTable
         | PluginKind::Effect
-        | PluginKind::PhraseTable
         | PluginKind::Helpcode
         | PluginKind::Wordbook
         | PluginKind::SymbolSet => false,
@@ -215,8 +227,62 @@ pub fn is_builtin(kind: PluginKind, id: &str) -> bool {
             target_os = "windows",
             all(target_os = "linux", not(target_env = "ohos"))
         ))]
-        PluginKind::Script => false,
+        PluginKind::Script => BUILTIN_SCRIPT_PACKS.contains(&id),
     }
+}
+
+/// `id` 是不是官方插件包：内置的、但不是音效包或背景音乐包。它放在 [`BuiltinDirs::packs`] 下的 `<kind>/<id>/`，而不是音效包那个目录。
+pub fn is_official(kind: PluginKind, id: &str) -> bool {
+    is_builtin(kind, id) && !matches!(kind, PluginKind::Sound | PluginKind::Music)
+}
+
+/// 宿主随安装包带的两个内置目录，都是只读的（macOS 在签了名的 bundle 里，Windows 在只有管理员能写的 Program Files 里，Linux 在系统前缀下）。宿主没有时为 `None`，例如移动端和不带官方包的开发构建：这时对应的内置包列不出来，也载不入。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BuiltinDirs<'a> {
+    /// 内置音效包和背景音乐包：每个包一个 `<id>/` 文件夹（仓库里是 `resources/sound-packs`）。
+    pub sounds: Option<&'a Path>,
+    /// 官方插件包：按 `<kind>/<id>/` 排，布局同用户的插件目录（构建产物是 `target/plugin-packs`）。
+    pub packs: Option<&'a Path>,
+}
+
+impl<'a> BuiltinDirs<'a> {
+    /// 只有官方插件包目录。
+    pub fn packs(packs: Option<&'a Path>) -> Self {
+        Self {
+            sounds: None,
+            packs,
+        }
+    }
+}
+
+/// `kind` 类的包 `id` 所在的上级目录，以及它是不是内置的：内置 id 是内置目录（宿主没有这个目录时报错），其他 id 是 `<root>/<kind>`。
+fn pack_parent(
+    root: &Path,
+    builtin: BuiltinDirs<'_>,
+    kind: PluginKind,
+    id: &str,
+) -> Result<(PathBuf, bool), String> {
+    if is_official(kind, id) {
+        let packs = builtin.packs.ok_or("内置插件包不可用")?;
+        Ok((kind_directory(packs, kind), true))
+    } else if is_builtin(kind, id) {
+        let sounds = builtin.sounds.ok_or("内置音效包不可用")?;
+        Ok((sounds.to_path_buf(), true))
+    } else {
+        Ok((kind_directory(root, kind), false))
+    }
+}
+
+/// `kind` 类的包 `id` 的文件夹，按载入时的规则（[`load_package`]）找：内置 id 在内置目录里，其他 id 在 `<root>/<kind>/<id>`。不检查它在不在；内置目录没有时为 `None`。宿主按它盖清单的戳。
+pub fn pack_directory(
+    root: &Path,
+    builtin: BuiltinDirs<'_>,
+    kind: PluginKind,
+    id: &str,
+) -> Option<PathBuf> {
+    pack_parent(root, builtin, kind, id)
+        .ok()
+        .map(|(parent, _)| parent.join(id))
 }
 
 /// The typing effect a host draws on keys and commits. Closed: every style is built into the hosts, and an effect pack (`PluginKind::Effect`) only selects one of them and tunes it within `effect_pack`'s bounds, so no pack can supply a style of its own.
@@ -362,11 +428,14 @@ pub fn kind_directory(root: &Path, kind: PluginKind) -> PathBuf {
     root.join(kind.as_str())
 }
 
-/// Every pack under `root`, and the built-in sound packs under `builtin_sounds` when the host has them, with what is wrong with each folder that is not a pack. Folders whose name starts with a dot are install and removal leftovers and are not reported.
-pub fn scan(root: &Path, builtin_sounds: Option<&Path>) -> PluginCatalog {
+/// Every pack under `root`, and the built-in packs in `builtin` when the host has them (sound and music packs under `sounds`, official packs under `packs`), with what is wrong with each folder that is not a pack. Folders whose name starts with a dot are install and removal leftovers and are not reported.
+pub fn scan(root: &Path, builtin: BuiltinDirs<'_>) -> PluginCatalog {
     let mut catalog = PluginCatalog::default();
-    if let Some(builtin) = builtin_sounds {
-        scan_builtin(builtin, &mut catalog);
+    if let Some(sounds) = builtin.sounds {
+        scan_builtin(sounds, &mut catalog);
+    }
+    if let Some(packs) = builtin.packs {
+        scan_official(packs, &mut catalog);
     }
     // Do not enumerate through an untrusted root link: even though each pack
     // is checked again below, read_dir would otherwise expose names from
@@ -433,6 +502,44 @@ fn scan_builtin(directory: &Path, catalog: &mut PluginCatalog) {
     }
 }
 
+/// 官方插件包：`packs` 下按 `<kind>/<id>/` 排，布局同用户的插件目录。只认官方 id（[`is_official`]）：别的文件夹不会被 [`load_package`] 从这里读到，列出来就成了一个用不了的「内置」包，所以报为问题。
+fn scan_official(packs: &Path, catalog: &mut PluginCatalog) {
+    // 同 `scan_builtin`：不经过符号链接列目录。
+    if crate::storage::reject_symlink(packs).is_err() {
+        return;
+    }
+    for kind in PluginKind::ALL {
+        let directory = kind_directory(packs, kind);
+        if crate::storage::reject_symlink(&directory).is_err() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let folder = entry.file_name().to_string_lossy().into_owned();
+            if folder.starts_with('.') {
+                continue;
+            }
+            let loaded = match entry.file_type() {
+                Ok(_) if !is_official(kind, &folder) => Err("不是随输入法分发的插件".to_owned()),
+                Ok(file_type) if file_type.is_dir() => {
+                    load_installed(&directory, &folder, kind, true, DataFiles::Summarize)
+                }
+                _ => Err("不是插件文件夹".to_owned()),
+            };
+            match loaded {
+                Ok(package) => catalog.packages.push(package),
+                Err(reason) => catalog.issues.push(PluginIssue {
+                    kind,
+                    folder,
+                    reason,
+                }),
+            }
+        }
+    }
+}
+
 /// `root` 下某一类型能载入的已安装包，载不入的略过：只要一种类型时不必读整个插件目录。
 pub(crate) fn scan_kind_packages(root: &Path, kind: PluginKind) -> Vec<PluginSummary> {
     let directory = kind_directory(root, kind);
@@ -470,45 +577,32 @@ fn scan_kind(directory: &Path, kind: PluginKind, builtin: bool, catalog: &mut Pl
     }
 }
 
-/// Validate one pack by the rules `scan` lists packs by, without reading the rest of the root. Hosts resolve the selected pack through this. A built-in sound or music pack id is read from `builtin_sounds`, never from `root`.
+/// Validate one pack by the rules `scan` lists packs by, without reading the rest of the root. Hosts resolve the selected pack through this. A built-in sound or music pack id is read from `builtin.sounds` and an official pack id from `builtin.packs`, never from `root`.
 pub fn load_package(
     root: &Path,
-    builtin_sounds: Option<&Path>,
+    builtin: BuiltinDirs<'_>,
     kind: PluginKind,
     id: &str,
 ) -> Result<PluginSummary, String> {
     if !safe_id(id) {
         return Err("插件 id 无效".into());
     }
-    if is_builtin(kind, id) {
-        let builtin = builtin_sounds.ok_or("内置音效包不可用")?;
-        return load_installed(builtin, id, kind, true, DataFiles::Summarize);
-    }
-    load_installed(
-        &kind_directory(root, kind),
-        id,
-        kind,
-        false,
-        DataFiles::Summarize,
-    )
+    let (parent, builtin) = pack_parent(root, builtin, kind, id)?;
+    load_installed(&parent, id, kind, builtin, DataFiles::Summarize)
 }
 
 /// 与 [`load_package`] 同样校验一个已安装的包（清单、文件清单、数据文件的存在与大小），但不读数据文件的内容：`content` 里的摘要是占位值。只给自己要完整解析数据文件的调用方用（`wordbook_pack::load_book`、`helpcode_pack::load_codes`），它们的解析就是对内容的校验，这样一个最大 4 MiB 的文件只解析一遍。
 pub(crate) fn load_package_unread(
     root: &Path,
+    builtin: BuiltinDirs<'_>,
     kind: PluginKind,
     id: &str,
 ) -> Result<PluginSummary, String> {
     if !safe_id(id) {
         return Err("插件 id 无效".into());
     }
-    load_installed(
-        &kind_directory(root, kind),
-        id,
-        kind,
-        false,
-        DataFiles::Unread,
-    )
+    let (parent, builtin) = pack_parent(root, builtin, kind, id)?;
+    load_installed(&parent, id, kind, builtin, DataFiles::Unread)
 }
 
 /// 载入包时是否读出数据文件（辅助码表、单词本、脚本模块）的内容。
@@ -1055,12 +1149,15 @@ pub(crate) fn only_keys(
     }
 }
 
-/// Delete an installed pack. A built-in id is refused; removing a pack that is not installed succeeds.
+/// Delete an installed pack. A built-in sound or music id is refused; removing a pack that is not installed succeeds.
+///
+/// 官方插件包的 id 只删 `root` 下同名的影子副本（官方包随安装包分发之前导入过的同 id 包，`scan` 把它报为问题），内置目录永远不碰，也不动这个 id 的授权条目：授权现在归内置的那一份，影子副本的哈希本来就对不上它。
 pub fn remove(root: &Path, kind: PluginKind, id: &str) -> Result<(), PluginError> {
     if !safe_id(id) {
         return Err(PluginError::Invalid("插件 id 无效".into()));
     }
-    if is_builtin(kind, id) {
+    let official = is_official(kind, id);
+    if is_builtin(kind, id) && !official {
         return Err(PluginError::Reserved);
     }
     let directory = kind_directory(root, kind);
@@ -1076,7 +1173,7 @@ pub fn remove(root: &Path, kind: PluginKind, id: &str) -> Result<(), PluginError
         target_os = "windows",
         all(target_os = "linux", not(target_env = "ohos"))
     ))]
-    if kind.is_script() {
+    if kind.is_script() && !official {
         script_grants::removing(root, &_writes, id)?;
     }
     let target = directory.join(id);

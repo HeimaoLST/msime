@@ -17,6 +17,7 @@
 #
 # Environment:
 #   MSIME_SPARKLE_ROOT            required; directory containing the pinned Sparkle.framework (see README.md)
+#   MSIME_REQUIRE_OFFICIAL_PLUGINS 1 refuses to package without the official plugin packs in target/plugin-packs (scripts/build-official-plugins.sh builds them; release-macos.yml sets it); otherwise the bundle carries them when they are there
 #   CARGO_TARGET_DIR              defaults to target/ in the repository
 #   MSIME_MACOS_BUILD_DIR         CMake build tree; defaults to target/macos-release
 #   MACOS_SIGNING_IDENTITY        a "Developer ID Application: ... (TEAMID)" identity in the keychain. Without it everything is signed ad-hoc: the package builds and the settings app runs, but macOS will not register the embedded input method as an input source (see scripts/install.sh)
@@ -144,7 +145,8 @@ CFLAGS="-mmacosx-version-min=13.0" CXXFLAGS="-mmacosx-version-min=13.0" CMAKE_OS
 # MSIME_HOST_LIBRARY is explicit: the CMake default is target/debug, which would link the debug Rust library into a Release bundle.
 cmake -S platforms/macos -B "$build_dir" -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
   -DCMAKE_OSX_ARCHITECTURES="$(IFS=';'; echo "${architectures[*]}")" \
-  -DMSIME_SPARKLE_ROOT="$MSIME_SPARKLE_ROOT" -DMSIME_HOST_LIBRARY="$universal_dir/libmsime_host_api.a"
+  -DMSIME_SPARKLE_ROOT="$MSIME_SPARKLE_ROOT" -DMSIME_HOST_LIBRARY="$universal_dir/libmsime_host_api.a" \
+  -DMSIME_REQUIRE_OFFICIAL_PLUGINS="$([ "${MSIME_REQUIRE_OFFICIAL_PLUGINS:-}" = 1 ] && echo ON || echo OFF)"
 # An explicit job count: a bare --parallel with the Makefile generator starts every compile at once and runs a 7 GB runner out of memory (ci-macos.yml).
 cmake --build "$build_dir" --config Release --parallel "$(sysctl -n hw.logicalcpu)"
 # `backend-library-load` 加载 bundle 里的 MSIMEBackend.dylib（Release 构建会对它做优化、dead strip 和剥离符号，见 scripts/build_backend_swift.sh），确认输入法按名字查找的 Objective-C 类和 selector 都还在。

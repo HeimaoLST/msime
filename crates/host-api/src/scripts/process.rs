@@ -141,8 +141,8 @@ pub(super) fn lookup(hash: &str) -> Lookup {
     }
 }
 
-/// 登记一个要编译的模块。已经编译好、正在编译或确定不合规的不重复登记；`Retry` 的重新登记。
-pub(super) fn request(root: &Path, id: &str, hash: &str) {
+/// 登记一个要编译的模块。已经编译好、正在编译或确定不合规的不重复登记；`Retry` 的重新登记。官方插件的包从 `builtin_packs` 读。
+pub(super) fn request(root: &Path, builtin_packs: Option<&Path>, id: &str, hash: &str) {
     {
         let mut cache = lock(&CACHE);
         match cache.get_mut(hash) {
@@ -165,6 +165,7 @@ pub(super) fn request(root: &Path, id: &str, hash: &str) {
     }
     let sent = send(Job::Compile {
         root: root.to_owned(),
+        builtin_packs: builtin_packs.map(Path::to_path_buf),
         id: id.to_owned(),
         hash: hash.to_owned(),
     });
@@ -207,6 +208,7 @@ pub(crate) fn insert_ready(root: &Path, hash: &str, module: ScriptModule) {
 enum Job {
     Compile {
         root: PathBuf,
+        builtin_packs: Option<PathBuf>,
         id: String,
         hash: String,
     },
@@ -254,7 +256,12 @@ fn send(job: Job) -> bool {
 
 fn run(job: Job) {
     match job {
-        Job::Compile { root, id, hash } => compile(&root, &id, &hash),
+        Job::Compile {
+            root,
+            builtin_packs,
+            id,
+            hash,
+        } => compile(&root, builtin_packs.as_deref(), &id, &hash),
         Job::WriteHealth { path, bytes } => {
             if let Err(error) = file_lock::replace_private_file(&path, &bytes) {
                 crate::diagnostics::report("script health not written", &error.to_string());
@@ -263,13 +270,13 @@ fn run(job: Job) {
     }
 }
 
-/// 读出已安装的包、核对哈希、按 ABI v1 校验并 Eager 编译，结果放回缓存。
-fn compile(root: &Path, id: &str, hash: &str) {
+/// 读出包（官方插件从内置目录读）、核对哈希、按 ABI v1 校验并 Eager 编译，结果放回缓存。
+fn compile(root: &Path, builtin_packs: Option<&Path>, id: &str, hash: &str) {
     #[cfg(test)]
     if id == TEST_COMPILE_PANIC_ID {
         panic!("injected compile panic");
     }
-    let (slot, bytecode) = match script_pack::load(root, id) {
+    let (slot, bytecode) = match script_pack::load(root, builtin_packs, id) {
         Err(_) => (Slot::Retry, 0),
         Ok(loaded) if loaded.pack.content_hash != hash => (Slot::Retry, 0),
         Ok(loaded) => {

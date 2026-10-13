@@ -5,8 +5,12 @@
 use crate::DictionaryHostOptions;
 use msime_client_core::plugins::mentions::{MentionEntry, MentionStore};
 use msime_client_core::plugins::script_grants::{self, ScriptGrantsView};
-use msime_client_core::plugins::{self, PluginCatalog, PluginFailure, PluginSummary};
+use msime_client_core::plugins::{
+    self, script_commands, BuiltinDirs, PluginCatalog, PluginFailure, PluginSummary,
+};
+use msime_client_core::preferences::PreferencesStore;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
@@ -68,6 +72,23 @@ fn builtin_sound_packs(
     directory.filter(|directory| directory.is_dir())
 }
 
+/// 桌面安装包随带的官方插件包目录（`<kind>/<id>/`），在才用；开发运行没有它时只列已安装的包，官方包列不出来也授权不了。
+///
+/// macOS 和 Linux 放在内置音效包目录旁边的 `plugin-packs`（输入法 bundle 的 `Contents/Resources/plugin-packs`、`share/<client>/plugin-packs`），和 host-api 不给 `plugin_packs` 时的推导相同。Windows 放在本程序所在的 Server 目录（Program Files 下，只有管理员能写）的 `plugin-packs`，不放音效包所在的数据目录：那里普通用户可写，与 Server 写进会话选项的 `plugin_packs` 是同一个目录。
+fn builtin_plugin_packs(
+    #[cfg_attr(target_os = "windows", allow(unused_variables))] app: &tauri::AppHandle,
+    #[cfg_attr(target_os = "windows", allow(unused_variables))] options: &DictionaryHostOptions,
+) -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let directory = std::env::current_exe()
+        .ok()
+        .and_then(|executable| Some(executable.parent()?.join("plugin-packs")));
+    #[cfg(not(target_os = "windows"))]
+    let directory = builtin_sound_packs(app, options)
+        .and_then(|sounds| Some(sounds.parent()?.join("plugin-packs")));
+    directory.filter(|directory| directory.is_dir())
+}
+
 /// `<prefix>/share/msime-client/sound-packs` for an executable installed as `<prefix>/bin/<name>`, where the Linux package installs the built-in packs. 目录名随本安装包所属的版本（full 是 `msime-client`）。
 #[cfg(any(target_os = "linux", test))]
 fn linux_installed_sound_packs(executable: &Path) -> Option<PathBuf> {
@@ -112,9 +133,14 @@ pub async fn plugin_catalog(
     let root = state.0.clone();
     let options = options.inner().clone();
     blocking(move || {
+        let sounds = builtin_sound_packs(&app, &options);
+        let packs = builtin_plugin_packs(&app, &options);
         Ok(plugins::scan(
             &root,
-            builtin_sound_packs(&app, &options).as_deref(),
+            BuiltinDirs {
+                sounds: sounds.as_deref(),
+                packs: packs.as_deref(),
+            },
         ))
     })
     .await
@@ -154,7 +180,7 @@ fn import_pack_at(source: &Path, root: &Path) -> Result<PluginSummary, PluginFai
     Ok(plugins::import_from_settings(source, root)?)
 }
 
-/// Remove an installed pack. A built-in sound pack cannot be removed.
+/// Remove an installed pack. A built-in sound pack cannot be removed; an official pack's id removes only an imported copy left in the plugins directory (client-core's `remove`).
 #[tauri::command]
 pub async fn remove_plugin_pack(
     state: State<'_, PluginsState>,
@@ -175,29 +201,66 @@ fn user_data(options: &DictionaryHostOptions) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// 脚本插件的授权、执行顺序和输入法记下的停用。
+/// 授权页说明插件指令的状态时用的用户指令表：偏好里启用的指令表包，和输入法交给引擎的是同一份。偏好读不出时按没有启用任何指令表说明。
+fn user_command_triggers(store: &PreferencesStore, root: &Path) -> Vec<String> {
+    let enabled = store
+        .load()
+        .map(|snapshot| snapshot.preferences.plugins.command_tables)
+        .unwrap_or_default();
+    script_commands::user_triggers(root, &enabled)
+}
+
+/// 交给授权页的整份授权，带上停用记录和插件 `/` 指令的状态。官方脚本插件从 `packs` 读。
+fn grants_view(
+    root: &Path,
+    packs: Option<&Path>,
+    grants: script_grants::ScriptGrants,
+    options: &DictionaryHostOptions,
+    store: &PreferencesStore,
+) -> ScriptGrantsView {
+    let user_data = user_data(options);
+    script_grants::view(
+        root,
+        packs,
+        grants,
+        user_data.as_deref(),
+        &user_command_triggers(store, root),
+    )
+}
+
+/// 脚本插件的授权、执行顺序、输入法记下的停用和插件 `/` 指令的状态。
 #[tauri::command]
 pub async fn script_grants(
+    app: tauri::AppHandle,
     state: State<'_, PluginsState>,
     options: State<'_, DictionaryHostOptions>,
+    store: State<'_, Arc<PreferencesStore>>,
 ) -> Result<ScriptGrantsView, PluginFailure> {
     let root = state.0.clone();
     let options = options.inner().clone();
+    let store = Arc::clone(store.inner());
     blocking(move || {
-        let user_data = user_data(&options);
-        Ok(script_grants::view(
+        let packs = builtin_plugin_packs(&app, &options);
+        Ok(grants_view(
+            &root,
+            packs.as_deref(),
             script_grants::read(&root),
-            user_data.as_deref(),
+            &options,
+            &store,
         ))
     })
     .await
 }
 
 /// 授予、调整或撤销一个脚本插件的授权。`hash` 是页面展示给用户的那个内容哈希，包在这之后被换过时返回 `plugin_script_changed`；启用时超出同时启用的个数或内存总账分别返回 `plugin_script_limit`、`plugin_script_memory`。
+// 后四个参数是前端调用这条命令时传的字段，合并成结构体会改掉 IPC 契约；多出的一个是官方插件包目录要用的 AppHandle。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn set_script_grant(
+    app: tauri::AppHandle,
     state: State<'_, PluginsState>,
     options: State<'_, DictionaryHostOptions>,
+    store: State<'_, Arc<PreferencesStore>>,
     id: String,
     hash: String,
     enabled: bool,
@@ -205,11 +268,18 @@ pub async fn set_script_grant(
 ) -> Result<ScriptGrantsView, PluginFailure> {
     let root = state.0.clone();
     let options = options.inner().clone();
+    let store = Arc::clone(store.inner());
     blocking(move || {
-        let user_data = user_data(&options);
+        let packs = builtin_plugin_packs(&app, &options);
         let granted = script_grants::capabilities(&granted)?;
-        let grants = script_grants::set(&root, &id, &hash, enabled, granted)?;
-        Ok(script_grants::view(grants, user_data.as_deref()))
+        let grants = script_grants::set(&root, packs.as_deref(), &id, &hash, enabled, granted)?;
+        Ok(grants_view(
+            &root,
+            packs.as_deref(),
+            grants,
+            &options,
+            &store,
+        ))
     })
     .await
 }
@@ -217,17 +287,24 @@ pub async fn set_script_grant(
 /// 调整执行顺序：`ids` 按给出的顺序排在最前。
 #[tauri::command]
 pub async fn reorder_scripts(
+    app: tauri::AppHandle,
     state: State<'_, PluginsState>,
     options: State<'_, DictionaryHostOptions>,
+    store: State<'_, Arc<PreferencesStore>>,
     ids: Vec<String>,
 ) -> Result<ScriptGrantsView, PluginFailure> {
     let root = state.0.clone();
     let options = options.inner().clone();
+    let store = Arc::clone(store.inner());
     blocking(move || {
-        let user_data = user_data(&options);
-        Ok(script_grants::view(
-            script_grants::reorder(&root, &ids)?,
-            user_data.as_deref(),
+        let packs = builtin_plugin_packs(&app, &options);
+        let grants = script_grants::reorder(&root, &ids)?;
+        Ok(grants_view(
+            &root,
+            packs.as_deref(),
+            grants,
+            &options,
+            &store,
         ))
     })
     .await
@@ -281,11 +358,13 @@ mod tests {
         assert_eq!(imported.id, "signature");
         assert_eq!(imported.kind(), PluginKind::CommandTable);
         assert!(root.join("command_table/signature/plugin.toml").is_file());
-        let catalog = plugins::scan(&root, None);
+        let catalog = plugins::scan(&root, BuiltinDirs::default());
         assert_eq!(catalog.packages.len(), 1);
 
         plugins::remove_named(&root, "command_table", "signature").unwrap();
-        assert!(plugins::scan(&root, None).packages.is_empty());
+        assert!(plugins::scan(&root, BuiltinDirs::default())
+            .packages
+            .is_empty());
     }
 
     #[test]

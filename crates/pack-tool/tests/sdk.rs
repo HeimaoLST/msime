@@ -1,4 +1,4 @@
-//! 作者 SDK（`docs/script-plugin-template/sdk/` 下的 C 头文件和 Rust 绑定）与运行时的 ABI 逐项一致：版本、返回码、钩子、字段编号、枚举取值、日志级别和 import 白名单。SDK 是给作者复制走的独立文件，不能直接引用运行时的常量，所以靠这里守着。
+//! 作者 SDK（`docs/script-plugin-template/sdk/` 下的 C 头文件和 Rust 绑定）与运行时的 ABI 逐项一致：版本、返回码、钩子、字段编号（含 `command_text` 的字段）、枚举取值、日志级别和 import 白名单。SDK 是给作者复制走的独立文件，不能直接引用运行时的常量，所以靠这里守着。
 
 #![cfg(any(
     target_os = "macos",
@@ -11,7 +11,7 @@ use std::fs;
 use std::path::Path;
 
 use msime_script_runtime::abi::{
-    self, candidate_field, commit_field, composition_field, event_field, log_level,
+    self, candidate_field, command_field, commit_field, composition_field, event_field, log_level,
     scalar_values as values, status,
 };
 use msime_script_runtime::Hook;
@@ -107,6 +107,14 @@ fn expected() -> Vec<(String, String, i64)> {
             ("ANNOTATION_LEN", candidate_field::ANNOTATION_LEN.into()),
             ("PAGE", candidate_field::PAGE.into()),
             ("HIGHLIGHTED", candidate_field::HIGHLIGHTED.into()),
+        ],
+    );
+    group(
+        "MSIME_COMMAND_",
+        "command",
+        &[
+            ("TRIGGER", command_field::TRIGGER.into()),
+            ("ARGUMENT", command_field::ARGUMENT.into()),
         ],
     );
     group(

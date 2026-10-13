@@ -17,7 +17,8 @@ use crate::pinyin::glide::{GlideKeyboard, GlidePoint};
 use crate::pinyin::segment::is_complete_pinyin_input;
 use crate::types::{
     CandidateEdge, CandidateSource, CommandTableEntry, CommandTranslationQuery, FirstPageRows,
-    KeyResult, LocalInputMode, MentionEntry, OnlineQuery, QuickPhraseEntry, SchemeType,
+    KeyResult, LocalInputMode, MentionEntry, OnlineQuery, PluginCommand, PluginCommandQuery,
+    QuickPhraseEntry, SchemeType,
 };
 use crate::user_dictionary::ngram_store::flush_journal;
 use crate::user_dictionary::removal::learn_entered_english_word;
@@ -378,6 +379,19 @@ impl Session {
         }
     }
 
+    /// 实时替换脚本插件的 `/` 指令，清掉缓存的插件行；`EngineOptions::plugin_commands` 是重建的会话的起点。
+    pub fn set_plugin_commands(&mut self, commands: &[PluginCommand]) -> Result<()> {
+        match self.inner.set_plugin_commands(commands) {
+            Some(diagnostic) => Err(EngineError::failed(&diagnostic)),
+            None => Ok(()),
+        }
+    }
+
+    /// 生效的插件指令里 `trigger` 的标题：引擎丢掉用不了的、重复的插件指令之后留下的那一条。插件指令行（来源 14）的 `pinyin` 就是它的触发词。
+    pub fn plugin_command_title(&self, trigger: &str) -> Option<&str> {
+        self.inner.plugin_command_title(trigger)
+    }
+
     /// 实时替换宿主给的辅助码表（辅助码表插件）；`None` 回到 `helpcode_schema` 对应的表。重建的会话从 `EngineOptions::helpcode_table` 开始。
     ///
     /// 从不失败：回退的表读不出来（典型是 `custom/<stem>` 的文件已被删掉）时装上空表并记一条日志。宿主在获得焦点时调用它，这里报错会让每一次聚焦都失败。
@@ -457,6 +471,20 @@ impl Session {
         translation: &str,
     ) -> bool {
         self.inner.apply_command_translation(query, translation)
+    }
+
+    /// 插件指令要宿主去问的那一次；没有要问的时候是 `None`（不在 `/` 模式、输入不属于插件指令、这份预编辑串已经问过）。
+    pub fn plugin_command_query(&self) -> Option<PluginCommandQuery> {
+        self.inner.plugin_command_query()
+    }
+
+    /// 把插件给的行（文本，插件注释）放到 `/` 列表前面；过期的查询返回 false。
+    pub fn apply_plugin_command_rows(
+        &mut self,
+        query: &PluginCommandQuery,
+        rows: &[(String, String)],
+    ) -> bool {
+        self.inner.apply_plugin_command_rows(query, rows)
     }
 
     /// False for an unavailable query or a source other than 0 (cloud) and 1 (AI).

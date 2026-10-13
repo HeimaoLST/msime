@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """核对一个插件的 msime-pack run 输出，由 scripts/test-script-plugins.sh 调用。
 
-- 授予全部能力的输出去掉 fuel、init_fuel 两个字段后，和插件目录里的 expected.jsonl 逐行相同。fuel 随编译器版本和优化选项变化，不能直接比；--update 时改为把去掉后的结果写进 expected.jsonl。
-- 每一行的 fuel 不超过所在钩子单次上限的一半（candidates 62 500，before_commit 50 000，其余 12 500）。单次投递被本轮配额截断时，用掉一半以上就算一次失败，所以插件的最坏情况要留在一半以内。
-- 不授予任何能力时，每一行的 status 都是 ok（或者 not_subscribed），没有任何修改动作。
+- 授予全部能力的输出去掉 fuel、init_fuel 两个字段后，和插件目录里的 expected.jsonl 逐行相同（command 行的 rows 也在其中逐行核对）。fuel 随编译器版本和优化选项变化，不能直接比；--update 时改为把去掉后的结果写进 expected.jsonl。
+- 每一行的 fuel 不超过所在钩子单次上限的一半（candidates 62 500，before_commit 和 command 50 000，其余 12 500）。单次投递被本轮配额截断时，用掉一半以上就算一次失败，所以插件的最坏情况要留在一半以内。
+- 不授予任何能力时，每一行的 status 都是 ok（或者 not_subscribed），没有任何修改动作，command 行也没有给出任何行。
 
 usage: check_run.py <plugin-dir> <granted.jsonl> <ungranted.jsonl> [--update]
 """
@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 # crates/script-runtime/src/limits.rs 的单次钩子上限的一半。
-FUEL_CEILING = {"candidates": 62_500, "before_commit": 50_000}
+FUEL_CEILING = {"candidates": 62_500, "before_commit": 50_000, "command": 50_000}
 OBSERVE_CEILING = 12_500
 
 
@@ -54,7 +54,7 @@ def main(argv: list[str]) -> int:
             problems.append(f"seq {row['seq']} {row['event']} 用了 {row['fuel']} fuel，超过 {ceiling}")
 
     for row in read(ungranted):
-        if row["status"] not in ("ok", "not_subscribed") or row["actions"]:
+        if row["status"] not in ("ok", "not_subscribed") or row["actions"] or row.get("rows"):
             problems.append(f"不授权时 seq {row['seq']} 应该什么都不做：{stripped(row)}")
 
     for problem in problems:

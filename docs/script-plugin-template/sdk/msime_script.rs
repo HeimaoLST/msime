@@ -1,6 +1,6 @@
 //! 水杉输入法桌面脚本插件 ABI v1 的 Rust 绑定：单文件，只用 `core`，可以直接放进 `#![no_std]` 的 crate（`#[path = "…/msime_script.rs"] mod msime_script;`）。
 //!
-//! 模块按能力域分组，和清单 `permissions` 一一对应：`event`、`log` 不需要能力；`composition` 要 `read_composition`；`commit` 要 `read_commit`；`candidates` 要 `read_candidates`；`rewrite`、`rerank`、`filter`、`annotate` 分别要 `rewrite_commit`、`rerank_candidates`、`filter_candidates`、`annotate_candidates`。只有真正调用到的函数才会成为模块的 import，校验要求导入了的函数都有对应的能力、申请了的能力都至少导入一个函数，所以用到哪一组就申请哪一项。
+//! 模块按能力域分组，和清单 `permissions` 一一对应：`event`、`log`、`random` 不需要能力；`composition` 要 `read_composition`；`commit` 要 `read_commit`；`candidates` 要 `read_candidates`；`rewrite`、`rerank`、`filter`、`annotate` 分别要 `rewrite_commit`、`rerank_candidates`、`filter_candidates`、`annotate_candidates`；`command` 要 `provide_commands`。只有真正调用到的函数才会成为模块的 import，校验要求导入了的函数都有对应的能力、申请了的能力都至少导入一个函数，所以用到哪一组就申请哪一项。
 //!
 //! 插件自己要导出 `msime_abi`（返回 [`ABI_VERSION`]）和 `msime_on_event(kind: i32) -> i32`（`kind` 是 [`hook`] 里的编号，返回负数算这一次失败），可选导出 `msime_init`。完整说明见仓库的 docs/plugins.md「脚本插件」一节。编号只会追加，不会改值。
 
@@ -36,6 +36,8 @@ pub mod hook {
     pub const CANDIDATES_SHOWN: i32 = 14;
     pub const CANDIDATES_HIDDEN: i32 = 15;
     pub const CANDIDATES: i32 = 17;
+    /// 用户在 `/` 指令里打了这个插件声明的触发词。只投递给触发词的主人，跑在 `msime_init` 之后的快照上。
+    pub const COMMAND: i32 = 18;
 }
 
 /// `event::ORIGIN`：上屏文本从哪来（`commit`、`before_commit`）。
@@ -186,6 +188,9 @@ mod sys {
         pub fn candidates_order(rows: *const u32, count: i32) -> i32;
         pub fn candidates_hide(rows: *const u32, count: i32) -> i32;
         pub fn candidates_annotate(index: i32, text: *const u8, len: i32) -> i32;
+        pub fn command_text(field: i32, dst: *mut u8, cap: i32) -> i32;
+        pub fn command_row(text: *const u8, text_len: i32, note: *const u8, note_len: i32) -> i32;
+        pub fn random_fill(dst: *mut u8, len: i32) -> i32;
     }
 }
 
@@ -398,6 +403,45 @@ pub mod annotate {
         let len = i32::try_from(text.len()).map_err(|_| Error::Limit)?;
         check(i64::from(unsafe {
             sys::candidates_annotate(index as i32, text.as_ptr(), len)
+        }))
+        .map(drop)
+    }
+}
+
+/// `provide_commands`：在自己声明的 `/` 指令里给出候选。清单 `[[script.commands]]` 声明触发词，`hooks` 里要有 `command`；只在 `command` 里有效。
+pub mod command {
+    use super::{cap, check, sys, text as decoded, Error};
+
+    /// 用户打的触发词，即清单里的某个 `trigger`。
+    pub const TRIGGER: i32 = 0;
+    /// 触发词后面用户打的小写字母，可以为空（`/uuid`），最多 64 字节。
+    pub const ARGUMENT: i32 = 1;
+
+    /// 复制 `TRIGGER` 或 `ARGUMENT` 到 `buffer`。别的钩子里是 `Err(Error::Absent)`。
+    pub fn text(field: i32, buffer: &mut [u8]) -> Result<&str, Error> {
+        let code = unsafe { sys::command_text(field, buffer.as_mut_ptr(), cap(buffer)) };
+        decoded(code, buffer)
+    }
+
+    /// 给出一行候选，返回它的行号。`text` 是选中时上屏的文本：1 到 64 个 UTF-16 码元，首尾不能是空白，不能含控制、格式和不可见字符，也不能含 `://`、`www.`、`mailto:`。`note` 是画在插件注释格里的说明，最多 32 个 UTF-16 码元，可以为空。第 10 行或太长是 `Err(Error::Limit)`，不合规是 `Err(Error::Invalid)`。钩子正常返回之后这些行才会显示。
+    pub fn row(text: &str, note: &str) -> Result<u64, Error> {
+        let text_len = i32::try_from(text.len()).map_err(|_| Error::Limit)?;
+        let note_len = i32::try_from(note.len()).map_err(|_| Error::Limit)?;
+        check(i64::from(unsafe {
+            sys::command_row(text.as_ptr(), text_len, note.as_ptr(), note_len)
+        }))
+    }
+}
+
+/// 不需要能力：随机数。每次 `command` 事件有 64 字节，按调用顺序取；别的钩子里没有。
+pub mod random {
+    use super::{check, sys, Error};
+
+    /// 用接下来的 `buffer.len()` 个随机字节填满 `buffer`；剩下的不够时是 `Err(Error::Limit)`，什么都不写。
+    pub fn fill(buffer: &mut [u8]) -> Result<(), Error> {
+        let len = i32::try_from(buffer.len()).map_err(|_| Error::Limit)?;
+        check(i64::from(unsafe {
+            sys::random_fill(buffer.as_mut_ptr(), len)
         }))
         .map(drop)
     }

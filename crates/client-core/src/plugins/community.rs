@@ -602,7 +602,8 @@ pub fn pack(root: &Path, kind: PluginKind, id: &str) -> Result<PackedPlugin, Plu
     if is_builtin(kind, id) {
         return Err(PluginError::Reserved.into());
     }
-    let summary = load_package(root, None, kind, id).map_err(PluginError::Invalid)?;
+    let summary = load_package(root, super::BuiltinDirs::default(), kind, id)
+        .map_err(PluginError::Invalid)?;
     let files = list_files(&summary.directory).map_err(PluginError::Invalid)?;
     // The pack rules allow ASCII letters of either case, and the server stores archive members case-insensitively, so two names that differ only by case cannot both be shared.
     let mut lowercase = HashSet::with_capacity(files.len());

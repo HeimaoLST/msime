@@ -6,6 +6,7 @@
 //! - **不能动的行。** 引擎下标 0 的行不可隐藏：引擎有自己按首位取词的路径（失焦上屏、14 键原样上屏等），它取的永远是这一行，所以它必须可见，也因此至少留一行可见。锁定的座位既不移动也不隐藏：固定了位置的词、云和 AI（含占位）行、五笔四码唯一时的 0 号座位（第四键自动上屏的就是它）。
 //! - **跳过**：平行数组长度不一致、整句改字中、方案的候选列表打开着（韩文汉字）。本地模式的白名单是插件一侧的规则，由宿主的实现判断。
 //! - **暂停**（[`Runtime::suspend_candidate_transform`]）：派发里不运行插件，旁路调用也不重放，记下的操作清掉，列表保持内置排序。宿主在上屏只能观察（`COMMIT_OBSERVE_ONLY`）时暂停：Windows 上 TIP 在自己的会话里选词的列表按那个会话的顺序选，这边重排或隐藏，显示的顺序就和数字选中的对不上。
+//! - **插件指令**（[`CommandProvider`]）：`/` 模式里输入以某个插件触发词开头时，由触发词的主人给出行（来源 14）。只在派发类调用的 refresh 开头、取快照之前、没有暂停、引擎有要问的查询（[`InputEngine::plugin_command_query`]）时调用；行在同一次派发里写进引擎，代次不变。引擎按预编辑串缓存这些行，所以旁路调用、方向键和翻页都不再调用插件。行的文字只画在插件注释格（「标题 注释」），引擎注释格留空。
 //!
 //! 只在桌面编译（macOS、Windows、非 ohos 的 Linux）。移动端和网页引擎里同名的几个方法什么都不做，可见前缀就是整个列表。
 
@@ -20,7 +21,10 @@ pub(crate) use desktop::PluginState;
     target_os = "windows",
     all(target_os = "linux", not(target_env = "ohos"))
 ))]
-pub use desktop::{CandidateOps, CandidateTransform, TransformRow, MAX_TRANSFORM_ROWS};
+pub use desktop::{
+    CandidateOps, CandidateTransform, CommandOutcome, CommandProvider, TransformRow,
+    MAX_ANNOTATION_UTF16, MAX_TRANSFORM_ROWS,
+};
 
 #[cfg(any(
     target_os = "macos",
@@ -35,9 +39,13 @@ mod desktop {
     /// 交给插件的窗口最多几行。
     pub const MAX_TRANSFORM_ROWS: usize = 20;
 
+    /// 插件注释格最多几个 UTF-16 码元，和 script-runtime 的 `limits::MAX_ANNOTATION_UTF16` 同值。插件指令行的「标题 注释」按它截断。
+    pub const MAX_ANNOTATION_UTF16: usize = 32;
+
     const CLOUD: u8 = 2;
     const AI: u8 = 3;
     const AI_PENDING: u8 = 12;
+    const PLUGIN: u8 = msime_engine::CandidateSource::Plugin as u8;
 
     /// 窗口里的一行，插件变换之前的样子：内置排序之后的顺序，引擎原始的注释。
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -69,6 +77,27 @@ mod desktop {
             local_mode: &str,
             out: &mut Vec<CandidateOps>,
         );
+    }
+
+    /// 插件指令这一次有没有运行。
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum CommandOutcome {
+        /// 插件运行完了，`out` 就是它的行（可以是 0 行）。引擎把结果缓存起来，同一份预编辑串不再问。
+        Ran,
+        /// 插件没有运行：模块还在编译、已经熔断、本轮配额用完、没有这个触发词的主人。不写缓存，下一次派发再问。
+        NotRun,
+    }
+
+    /// 宿主实现的插件指令：把触发词和参数交给拥有这个触发词的那一个插件，把它给的行（文本，插件注释）放进 `out`。
+    ///
+    /// 只在派发类调用里被调用；实现不能回调 runtime。
+    pub trait CommandProvider {
+        fn provide(
+            &mut self,
+            trigger: &str,
+            argument: &str,
+            out: &mut Vec<(String, String)>,
+        ) -> CommandOutcome;
     }
 
     /// 候选的身份：文本、来源、编码和同组在引擎原始顺序中的序号。
@@ -120,8 +149,12 @@ mod desktop {
         identities: Vec<Identity>,
         /// 降到末尾、不显示的行数。
         hidden_rows: usize,
-        /// 宿主暂停了候选变换：不运行、不重放。
+        /// 宿主暂停了候选变换：不运行、不重放。插件指令同样不调用。
         suspended: bool,
+        /// 插件指令的提供者，见 [`CommandProvider`]。
+        commands: Option<Box<dyn CommandProvider>>,
+        /// 最近一次写进引擎的插件行的注释，按行文本；同文的行引擎只留第一行，这里也只记第一条。
+        command_notes: HashMap<String, String>,
     }
 
     impl PluginState {
@@ -143,6 +176,72 @@ mod desktop {
                 self.plugins.clear_recorded();
             }
             self.plugins.transform = transform;
+        }
+
+        /// 挂上或去掉插件指令的提供者。宿主（host-api）在挂候选变换的同一处挂上；去掉时记下的注释一并清掉。
+        pub fn set_command_provider(&mut self, provider: Option<Box<dyn CommandProvider>>) {
+            if provider.is_none() {
+                self.plugins.command_notes.clear();
+            }
+            self.plugins.commands = provider;
+        }
+
+        /// refresh 开头、取快照之前调用：派发类调用里、没有暂停、挂着提供者、引擎有要问的查询时问插件，插件运行了就把行写进引擎。旁路调用一概不问，引擎缓存的行照样显示。
+        pub(crate) fn run_command_provider(&mut self) {
+            if !self.plugins.live || self.plugins.suspended {
+                return;
+            }
+            let Some(provider) = self.plugins.commands.as_mut() else {
+                return;
+            };
+            let Some(query) = self.engine.plugin_command_query() else {
+                return;
+            };
+            let mut rows = Vec::new();
+            if provider.provide(&query.trigger, &query.argument, &mut rows)
+                == CommandOutcome::NotRun
+            {
+                return;
+            }
+            if self.engine.apply_plugin_command_rows(&query, &rows) {
+                let notes = &mut self.plugins.command_notes;
+                notes.clear();
+                for (text, note) in rows {
+                    notes.entry(text).or_insert(note);
+                }
+            }
+        }
+
+        /// 插件指令行的插件注释：「标题 注释」，没有注释时只有标题，截到 [`MAX_ANNOTATION_UTF16`] 个码元；含控制字符的注释不显示。标题向引擎要（`InputEngine::plugin_command_title`），不在这里另记一份：宿主交来的表里触发词重复或标题不合规时，只有引擎知道哪一条生效。
+        fn plugin_row_annotation(&self, seat: usize) -> Option<String> {
+            let text = self.cached.candidates.get(seat)?;
+            let trigger = self.cached.candidate_codes.get(seat)?;
+            let title = self
+                .engine
+                .plugin_command_title(trigger)
+                .unwrap_or_default();
+            let note = self
+                .plugins
+                .command_notes
+                .get(text)
+                .map(String::as_str)
+                .filter(|note| !note.chars().any(char::is_control))
+                .unwrap_or_default();
+            let joined = match (title.is_empty(), note.is_empty()) {
+                (true, true) => return None,
+                (false, true) => title.to_owned(),
+                (true, false) => note.to_owned(),
+                (false, false) => format!("{title} {note}"),
+            };
+            let mut units = 0;
+            let cut: String = joined
+                .chars()
+                .take_while(|character| {
+                    units += character.len_utf16();
+                    units <= MAX_ANNOTATION_UTF16
+                })
+                .collect();
+            Some(cut)
         }
 
         /// 暂停或恢复候选变换。暂停期间派发里的 refresh 和展开不运行插件，旁路调用也不重放，记下的操作在下一次排列时清掉，列表保持内置排序；恢复之后从下一次派发起重新运行。宿主在上屏只能观察时暂停，见模块说明。
@@ -364,8 +463,14 @@ mod desktop {
             apply_order(&mut self.plugins.identities, &order);
         }
 
-        /// `seat` 上可见的行的插件注释；没有、为空或者列表现在不做变换时为 `None`。
+        /// `seat` 上可见的行的插件注释；没有、为空或者列表现在不做变换时为 `None`。插件指令行（来源 14）的注释是「标题 注释」，不经过候选变换。
         pub(crate) fn script_annotation(&self, seat: usize) -> Option<String> {
+            if self.cached.candidate_sources.get(seat) == Some(&PLUGIN) {
+                if seat >= self.visible_len() {
+                    return None;
+                }
+                return self.plugin_row_annotation(seat);
+            }
             if self.plugins.annotations.is_empty()
                 || seat >= self.visible_len()
                 || !self.transform_ready()
@@ -409,5 +514,7 @@ mod inert {
         pub(crate) fn transform_candidates(&mut self) -> bool {
             false
         }
+
+        pub(crate) fn run_command_provider(&mut self) {}
     }
 }

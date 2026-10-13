@@ -133,7 +133,12 @@ pub(crate) fn parse_table(bytes: &[u8], name: &str) -> Result<Vec<HelpcodeEntry>
 
 /// 已安装的辅助码表包 `id` 的整张码表（字到码），按 `scan` 列出包的规则校验过。宿主用它构建 Engine 的辅助码表；包缺失或载入失败时返回原因，宿主据此退回方案原来的 `schema`。读一个最大 1 MiB 的文件，只解析一遍：不要在按键路径上调用。
 pub fn load_codes(root: &Path, id: &str) -> Result<HashMap<String, String>, String> {
-    let package = super::load_package_unread(root, PluginKind::Helpcode, id)?;
+    let package = super::load_package_unread(
+        root,
+        super::BuiltinDirs::default(),
+        PluginKind::Helpcode,
+        id,
+    )?;
     let PluginContent::Helpcode(pack) = package.content else {
         unreachable!("load_package_unread checks the kind");
     };

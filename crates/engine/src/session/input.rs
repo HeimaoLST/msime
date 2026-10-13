@@ -31,8 +31,8 @@ use crate::time::Instant;
 use crate::types::{
     CandidateSource, Command, CommandTableEntry, EnglishInputOptions, FirstPageRows,
     FrequencyAdjustmentOptions, KeyResult, LocalInputMode, LocalModeOptions, MentionEntry,
-    MixedExpressiveOptions, OnlineQuery, QuickPhraseEntry, SchemeKey, SchemeType, WordItem,
-    WubiInputOptions,
+    MixedExpressiveOptions, OnlineQuery, PluginCommand, QuickPhraseEntry, SchemeKey, SchemeType,
+    WordItem, WubiInputOptions,
 };
 use crate::user_dictionary::ngram_store::PersonalNgramStore;
 use crate::user_dictionary::removal::learn_entered_english_word;
@@ -88,6 +88,8 @@ pub(super) struct InputSession {
     pub temporary_original_scheme: Option<SchemeType>,
     pub local_preedit: String,
     pub local_candidates: Vec<WordItem>,
+    /// 插件指令行的缓存：（问的是哪一份本地预编辑串，插件给的行）。只有一槽，预编辑串一变就清掉，所以 `/uuid` 退成 `/uui` 再打回 `/uuid` 会重新问插件；预编辑串不变时（方向键、翻页、列表重建）行一直在，不再问。0 行也缓存成空表。
+    pub plugin_rows: Option<(String, Vec<WordItem>)>,
     pub online_requests: OnlineRequestGuard,
     /// 宿主为这个会话开着 AI 候选：可以问 AI 的组字先在 AI 座位上放占位行（#6888）。
     pub ai_seat: bool,
@@ -169,6 +171,7 @@ impl InputSession {
             temporary_original_scheme: None,
             local_preedit: String::new(),
             local_candidates: Vec::new(),
+            plugin_rows: None,
             online_requests: OnlineRequestGuard::new(),
             ai_seat: false,
             ai_seat_resolved: None,
@@ -212,6 +215,9 @@ impl InputSession {
         session.english_options = options.english;
         session.set_local_mode_options(options.local_modes);
         session.queries.set_command_table(&options.command_table);
+        session
+            .queries
+            .set_plugin_commands(&options.plugin_commands);
         session.queries.set_mentions(&options.mention_entries);
         session
             .queries
@@ -314,8 +320,14 @@ impl InputSession {
         let microsoft_final =
             value == b';' && scheme == SchemeType::Shuangpin && self.profile.uses_semicolon_key();
         let japanese_long_vowel = value == b'-' && scheme == SchemeType::JapaneseRomaji;
+        let starts_pinyin_with_shift = shift_only
+            && self.local_mode_options.shift_letter_entry
+            && !matches!(
+                value,
+                b'U' | b'T' | b'K' | b'E' | b'M' | b'J' | b'Y' | b'R' | b'V' | b'C'
+            );
         let composing_pinyin_uppercase = value.is_ascii_uppercase()
-            && self.has_composition()
+            && (self.has_composition() || starts_pinyin_with_shift)
             && matches!(scheme, SchemeType::Quanpin | SchemeType::Shuangpin);
         if !lowercase_letter
             && !composing_pinyin_uppercase
@@ -1064,6 +1076,23 @@ impl InputSession {
         result
     }
 
+    /// Shifted capitals can start mixed English input. When that input cannot be a complete
+    /// pinyin spelling, finishing it must preserve the typed word instead of choosing a Chinese
+    /// correction as punctuation or blur does.
+    pub(super) fn shifted_incomplete_pinyin_is_literal(&self) -> bool {
+        if self.dedicated_english
+            || self.local_mode != LocalInputMode::None
+            || !matches!(self.scheme(), SchemeType::Quanpin | SchemeType::Shuangpin)
+        {
+            return false;
+        }
+        self.raw_with_cases()
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_uppercase)
+            && !self.is_all_complete_pure_pinyin()
+    }
+
     /// One apostrophe, right after a unit letter, splits `3jin'g` into the unit and its target.
     fn expression_takes_unit_separator(&self) -> bool {
         let preedit = self.local_preedit.as_bytes();
@@ -1193,6 +1222,17 @@ impl InputSession {
     /// Replaces the `/` mode's command table, refreshing the list on screen when that mode is open.
     pub fn set_command_table(&mut self, table: &[CommandTableEntry]) -> Option<String> {
         self.queries.set_command_table(table);
+        // 表变了，生效的插件指令可能跟着变：缓存的行不再可信。
+        self.plugin_rows = None;
+        (self.local_mode == LocalInputMode::Command)
+            .then(|| self.update_local_candidates())
+            .flatten()
+    }
+
+    /// 换上插件指令，清掉缓存的插件行（授权撤销之后旧行不能再插回来）；`/` 模式打开时刷新屏幕上的列表。
+    pub fn set_plugin_commands(&mut self, commands: &[PluginCommand]) -> Option<String> {
+        self.queries.set_plugin_commands(commands);
+        self.plugin_rows = None;
         (self.local_mode == LocalInputMode::Command)
             .then(|| self.update_local_candidates())
             .flatten()
@@ -1362,6 +1402,7 @@ impl InputSession {
         self.local_mode = LocalInputMode::None;
         self.local_preedit.clear();
         self.local_candidates.clear();
+        self.plugin_rows = None;
         self.dedicated_english_preedit.clear();
         self.dedicated_english_candidates.clear();
         self.mixed_candidates.clear();
@@ -1715,6 +1756,7 @@ impl InputSession {
         self.local_mode = mode;
         self.local_preedit = (letter as char).to_string();
         self.local_candidates.clear();
+        self.plugin_rows = None;
         self.chain.reset();
         // The command and mention lists are worth showing before a letter narrows them.
         if matches!(mode, LocalInputMode::Command | LocalInputMode::Mention) {

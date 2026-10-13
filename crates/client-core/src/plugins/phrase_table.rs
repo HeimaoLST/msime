@@ -88,11 +88,20 @@ pub fn validate(phrase: &PhraseRow) -> Result<(), String> {
     Ok(())
 }
 
-/// `root` 下按 `enabled` 顺序启用的短语表的全部行，最多 `MAX_ENABLED_PHRASES` 行：宿主交给 Engine 的表。缺失或载入失败的包不贡献任何行，设置页会报告它。
-pub fn enabled_phrases(root: &std::path::Path, enabled: &[String]) -> Vec<PhraseRow> {
+/// 按 `enabled` 顺序启用的短语表的全部行，最多 `MAX_ENABLED_PHRASES` 行：宿主交给 Engine 的表。已安装的包在 `root` 下，官方短语表（`super::BUILTIN_PHRASE_TABLES`）在内置目录 `builtin_packs` 下。缺失或载入失败的包不贡献任何行，设置页会报告它。
+pub fn enabled_phrases(
+    root: &std::path::Path,
+    builtin_packs: Option<&std::path::Path>,
+    enabled: &[String],
+) -> Vec<PhraseRow> {
     let mut rows = Vec::new();
     for id in enabled {
-        let Ok(package) = super::load_package(root, None, PluginKind::PhraseTable, id) else {
+        let Ok(package) = super::load_package(
+            root,
+            super::BuiltinDirs::packs(builtin_packs),
+            PluginKind::PhraseTable,
+            id,
+        ) else {
             continue;
         };
         let super::PluginContent::PhraseTable(table) = package.content else {

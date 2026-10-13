@@ -1594,24 +1594,28 @@ static void TestMixedInputPreferences() {
     // Emoji mixed-input starts on like the source's `emoji_mixed_input = true`; kaomoji starts off.
     assert(preferences.mixedEnglishInput && preferences.mixedEnglishMinimumPrefix == 5 &&
            preferences.mixedEmojiInput && !preferences.mixedKaomojiInput);
+    // Symbol mixed input starts on; like client-core, the merged object only carries `symbols` once it is off.
+    assert(preferences.mixedSymbolInput);
     NSDictionary *initial = [preferences sharedPreferencesByMerging:@{}][@"mixed_input"];
     assert([initial[@"english"] isEqual:@YES] && [initial[@"minimum_prefix"] isEqual:@5] &&
-           [initial[@"emoji"] isEqual:@YES] && [initial[@"kaomoji"] isEqual:@NO]);
+           [initial[@"emoji"] isEqual:@YES] && [initial[@"kaomoji"] isEqual:@NO] && initial[@"symbols"] == nil);
     [preferences applySharedInputPreferences:@{ @"mixed_input": @{
-        @"english": @NO, @"minimum_prefix": @7, @"emoji": @YES, @"kaomoji": @YES } }];
+        @"english": @NO, @"minimum_prefix": @7, @"emoji": @YES, @"kaomoji": @YES, @"symbols": @NO } }];
     assert(!preferences.mixedEnglishInput && preferences.mixedEnglishMinimumPrefix == 7 &&
-           preferences.mixedEmojiInput && preferences.mixedKaomojiInput);
+           preferences.mixedEmojiInput && preferences.mixedKaomojiInput && !preferences.mixedSymbolInput);
     assert([defaults objectForKey:@"MSIMEClientMixedInput"] == nil);
     [preferences applySharedInputPreferences:@{ @"mixed_input": @{
-        @"english": @1, @"minimum_prefix": @9, @"emoji": @"true", @"kaomoji": NSNull.null } }];
+        @"english": @1, @"minimum_prefix": @9, @"emoji": @"true", @"kaomoji": NSNull.null, @"symbols": @"true" } }];
     assert(!preferences.mixedEnglishInput && preferences.mixedEnglishMinimumPrefix == 7 &&
-           preferences.mixedEmojiInput && preferences.mixedKaomojiInput);
+           preferences.mixedEmojiInput && preferences.mixedKaomojiInput && !preferences.mixedSymbolInput);
     NSButton *english = (id)PreferenceControl(preferences, @selector(mixedEnglishChanged:));
     NSPopUpButton *prefix = (id)PreferenceControl(preferences, @selector(mixedEnglishPrefixChanged:));
     NSButton *emoji = (id)PreferenceControl(preferences, @selector(mixedEmojiChanged:));
     NSButton *kaomoji = (id)PreferenceControl(preferences, @selector(mixedKaomojiChanged:));
+    NSButton *symbols = (id)PreferenceControl(preferences, @selector(mixedSymbolChanged:));
     assert(english.state == NSControlStateValueOff && prefix.indexOfSelectedItem == 6 && !prefix.enabled &&
-           emoji.state == NSControlStateValueOn && kaomoji.state == NSControlStateValueOn);
+           emoji.state == NSControlStateValueOn && kaomoji.state == NSControlStateValueOn &&
+           symbols.state == NSControlStateValueOff);
     english.state = NSControlStateValueOn;
     [NSApp sendAction:english.action to:english.target from:english];
     [prefix selectItemAtIndex:4];
@@ -1622,14 +1626,29 @@ static void TestMixedInputPreferences() {
     [NSApp sendAction:kaomoji.action to:kaomoji.target from:kaomoji];
     assert(preferences.mixedEnglishInput && preferences.mixedEnglishMinimumPrefix == 5 &&
            !preferences.mixedEmojiInput && !preferences.mixedKaomojiInput && prefix.enabled);
+    // Turned off in the shared page, symbol mixed input stays off after the other switches change here: the object is rewritten whole.
+    assert(!preferences.mixedSymbolInput);
     NSDictionary *edited = [preferences sharedPreferencesByMerging:@{}][@"mixed_input"];
-    assert(([edited isEqual:@{ @"english": @YES, @"minimum_prefix": @5, @"emoji": @NO, @"kaomoji": @NO }]));
+    assert(([edited isEqual:@{ @"english": @YES, @"minimum_prefix": @5, @"emoji": @NO, @"kaomoji": @NO, @"symbols": @NO }]));
     assert([defaults dictionaryForKey:@"MSIMEClientMixedInput"] != nil);
     // An explicitly stored NO for emoji survives reopening instead of falling back to the on default.
     MSIMEAppearancePreferences *reopened = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
     assert(reopened.mixedEnglishInput && reopened.mixedEnglishMinimumPrefix == 5 &&
-           !reopened.mixedEmojiInput && !reopened.mixedKaomojiInput);
+           !reopened.mixedEmojiInput && !reopened.mixedKaomojiInput && !reopened.mixedSymbolInput);
     assert([[reopened sharedPreferencesByMerging:@{}][@"mixed_input"][@"emoji"] isEqual:@NO]);
+    // Turning symbols back on here drops the key again; a shared object without the key reads as on.
+    symbols.state = NSControlStateValueOn;
+    [NSApp sendAction:symbols.action to:symbols.target from:symbols];
+    assert(preferences.mixedSymbolInput && [preferences sharedPreferencesByMerging:@{}][@"mixed_input"][@"symbols"] == nil);
+    [preferences applySharedInputPreferences:@{ @"mixed_input": @{
+        @"english": @YES, @"minimum_prefix": @5, @"emoji": @NO, @"kaomoji": @NO, @"symbols": @NO } }];
+    assert(!preferences.mixedSymbolInput);
+    [preferences applySharedInputPreferences:@{ @"mixed_input": @{
+        @"english": @YES, @"minimum_prefix": @5, @"emoji": @NO, @"kaomoji": @NO, @"symbols": NSNull.null } }];
+    assert(!preferences.mixedSymbolInput);
+    [preferences applySharedInputPreferences:@{ @"mixed_input": @{
+        @"english": @YES, @"minimum_prefix": @5, @"emoji": @NO, @"kaomoji": @NO } }];
+    assert(preferences.mixedSymbolInput);
     MSIMERemoveTestPreferenceSuite(defaults, suite);
 }
 
@@ -1790,6 +1809,32 @@ static void TestDedicatedEnglish(MSIMEAppearancePreferences *appearance) {
     assert(session.dedicatedEnglish != dedicated);
     assert([controller handleEvent:LayoutKey(2, @"E", flags) client:client]);
     assert(session.dedicatedEnglish == dedicated);
+}
+
+static void TestPunctuationAfterCompositionKeepsRawInput(MSIMEAppearancePreferences *appearance) {
+    ModeController *controller = [ModeController alloc];
+    ShortcutSession *session = [ShortcutSession new];
+    ShortcutClient *client = [ShortcutClient new];
+    NSDictionary *composing = @{
+        @"focused": @YES, @"scheme": @0, @"editing_text": @"Observable",
+        @"candidates": @[@{@"text": @"白色", @"highlighted": @YES}],
+    };
+    NSDictionary *idle = @{@"focused": @YES, @"scheme": @0, @"editing_text": @"", @"candidates": @[]};
+    [controller setValue:appearance forKey:@"appearance"];
+    [controller setValue:session forKey:@"session"];
+    [controller setValue:client forKey:@"activeClient"];
+    [controller setValue:composing forKey:@"view"];
+    appearance.englishMode = NO;
+    session.nextTransition = @{@"handled": @NO, @"view": composing};
+    session.rawTransition = @{@"handled": @YES, @"commit": @"Observable", @"view": idle};
+    NSEvent *less = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
+        modifierFlags:NSEventModifierFlagShift timestamp:0 windowNumber:0 context:nil
+        characters:@"<" charactersIgnoringModifiers:@"<" isARepeat:NO keyCode:33];
+
+    // 标点由应用接收，组字则用原文提交，不能选择高亮的「白色」。
+    assert(![controller handleEvent:less client:client]);
+    assert(session.rawCommitCalls == 1 && session.lastCommand == MSIME_COMMIT_RAW);
+    assert([client.committed isEqual:@"Observable"]);
 }
 
 static void TestFullWidth(NSUserDefaults *defaults, MSIMEAppearancePreferences *appearance) {
@@ -2565,6 +2610,26 @@ static void TestJapaneseConversionKeys(MSIMEAppearancePreferences *appearance) {
     session.lastCommand = UINT32_MAX;
     [controller handleEvent:ModeKey(36, NSEventModifierFlagControl, NO) client:client];
     assert(session.lastCommand != MSIME_COMMIT_READING);
+}
+
+static void TestConsecutiveUppercaseDoesNotOpenShortcut(MSIMEAppearancePreferences *appearance) {
+    ModeController *controller = [ModeController alloc];
+    ShortcutClient *client = [ShortcutClient new];
+    ShortcutSession *session = [ShortcutSession new];
+    [controller setValue:appearance forKey:@"appearance"];
+    [controller setValue:client forKey:@"activeClient"];
+    [controller setValue:session forKey:@"session"];
+    [controller setValue:@{ @"scheme": @0, @"local_mode": @"none", @"editing_text": @"", @"candidates": @[] }
+                   forKey:@"view"];
+    session.nextTransition = @{ @"handled": @NO,
+                                @"view": @{ @"scheme": @0, @"local_mode": @"none",
+                                             @"editing_text": @"", @"candidates": @[] } };
+
+    assert(![controller handleEvent:LayoutKey(46, @"M", NSEventModifierFlagShift) client:client]);
+    NSUInteger asciiCalls = session.asciiCalls;
+    assert([controller handleEvent:LayoutKey(15, @"R", NSEventModifierFlagShift) client:client]);
+    assert(session.asciiCalls == asciiCalls);
+    assert([client.insertions.lastObject isEqualToString:@"R"]);
 }
 
 static void TestGlossSensePage(MSIMEAppearancePreferences *appearance) {
@@ -7363,6 +7428,26 @@ static void TestCloudCandidateConsent() {
 }
 @end
 
+@interface StaleGlossSnapshotSession : ServiceSnapshotSession
+@end
+@implementation StaleGlossSnapshotSession
+- (NSDictionary *)translationQueryWithError:(NSError **)error {
+    (void)error;
+    return @{ @"generation": @3, @"target_language": @"en", @"target_languages": @[ @"en" ],
+        @"translation_account": @NO };
+}
+- (NSDictionary *)viewWithError:(NSError **)error {
+    (void)error;
+    return @{ @"generation": @3, @"scheme": @0, @"local_mode": @"none",
+        @"candidates": @[ @{ @"text": @"hello", @"source": @4 } ] };
+}
+- (NSDictionary *)applyTranslations:(NSArray *)translations generation:(uint64_t)generation error:(NSError **)error {
+    (void)translations; (void)generation; (void)error;
+    ++self.applications;
+    return @{ @"applied": @YES, @"view": [self viewWithError:nil] };
+}
+@end
+
 @interface PreferenceSnapshotController : ModeController
 @property(nonatomic, copy) NSDictionary *snapshot;
 @property(nonatomic) NSUInteger completions;
@@ -7439,6 +7524,27 @@ static void TestApplyCandidateTranslationSnapshotsAreReused() {
     session.viewCalls = 0;
     [controller applyCandidateTranslationResults];
     assert(session.translationQueryCalls == 1 && session.viewCalls == 1);
+    MSIMERemoveTestPreferenceSuite(defaults, suite);
+}
+
+static void TestEmptyGlossDoesNotApplyAStaleServiceGeneration() {
+    NSString *suite = [@"msime.empty-gloss-generation." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *appearance = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    appearance.candidateTranslations = YES;
+    appearance.candidateEnglishGloss = YES;
+    StaleGlossSnapshotSession *session = [StaleGlossSnapshotSession new];
+    MSIMEInputController *controller = [MSIMEInputController alloc];
+    [controller setValue:appearance forKey:@"appearance"];
+    [controller setValue:session forKey:@"session"];
+    [controller setValue:[ShortcutClient new] forKey:@"activeClient"];
+    [controller setValue:@NO forKey:@"glossEnabled"];
+    [controller setValue:@{ @"generation": @2, @"scheme": @0, @"local_mode": @"none",
+        @"candidates": @[ @{ @"text": @"hello", @"source": @4 } ] } forKey:@"view"];
+    [controller applyCandidateTranslationResults];
+    assert(session.applications == 0);
+    NSDictionary *view = [controller valueForKey:@"view"];
+    assert([view[@"generation"] integerValue] == 2);
     MSIMERemoveTestPreferenceSuite(defaults, suite);
 }
 
@@ -8229,6 +8335,7 @@ static void TestTencentCandidateScheduling() {
 // nothing - which is the "it appears the second time, not the first" symptom, the second time happening to
 // reuse the same instance.
 static void TestAccountGlossCacheIsSharedAcrossControllers() {
+    [[MSIMETranslationCache sharedCache] clear];
     NSString *suite = [@"msime.account-gloss-shared." stringByAppendingString:NSUUID.UUID.UUIDString];
     MSIMEAppearancePreferences *prefs =
         [[MSIMEAppearancePreferences alloc] initWithDefaults:[[NSUserDefaults alloc] initWithSuiteName:suite]];
@@ -8243,11 +8350,18 @@ static void TestAccountGlossCacheIsSharedAcrossControllers() {
     [fetcher setValue:fetcherSession forKey:@"session"];
     [fetcher synchronizeAccountGloss:[fetcher currentAccountGlossRequest]];
 
+    // A reply captured under a different login must not enter the process-wide cache after the
+    // settings app switches accounts while the request is in flight.
+    [fetcher accountCandidateTranslationsDidArrive:
+        [NSNotification notificationWithName:@"MSIMEBackendCandidateTranslationsDidArrive" object:nil
+            userInfo:@{@"generation":@1, @"marker":@1, @"target":@"en", @"translations":@{@"\u6d4b\u8bd5":@"old-account"}}]];
+    assert(([[MSIMETranslationCache sharedCache] valueForIdentity:@[@"account", @"0", @"en", @"测试"]] == nil));
+
     // The reply carries the same payload the Swift backend posts. Delivered straight to the instance that
     // asked, because these controllers are built without the activation that registers the observer.
     [fetcher accountCandidateTranslationsDidArrive:
         [NSNotification notificationWithName:@"MSIMEBackendCandidateTranslationsDidArrive" object:nil
-            userInfo:@{@"generation":@1, @"target":@"en", @"translations":@{@"\u6d4b\u8bd5":@"test"}}]];
+            userInfo:@{@"generation":@1, @"marker":@0, @"target":@"en", @"translations":@{@"\u6d4b\u8bd5":@"test"}}]];
     assert([[[fetcher valueForKey:@"accountGlossResults"] valueForKey:@"translation"] containsObject:@"test"]);
 
     // A different controller, as a different text field would get, and it must not have to ask again.
@@ -8272,7 +8386,7 @@ static void TestAccountGlossCacheIsSharedAcrossControllers() {
     fetcherSession.applied = nil;
     [fetcher accountCandidateTranslationsDidArrive:
         [NSNotification notificationWithName:@"MSIMEBackendCandidateTranslationsDidArrive" object:nil
-            userInfo:@{@"generation":@1, @"target":@"en", @"translations":@{@"\u6d4b\u8bd5":@"ignored"}}]];
+            userInfo:@{@"generation":@1, @"marker":@0, @"target":@"en", @"translations":@{@"\u6d4b\u8bd5":@"ignored"}}]];
     assert(fetcherSession.applied == nil);
 
     // A reply for an earlier generation still answers the same word on the current page. The cache key is language and word, as on Windows, so the generation it was asked under does not make the answer wrong.
@@ -8282,11 +8396,11 @@ static void TestAccountGlossCacheIsSharedAcrossControllers() {
     fetcherSession.applied = nil;
     [fetcher accountCandidateTranslationsDidArrive:
         [NSNotification notificationWithName:@"MSIMEBackendCandidateTranslationsDidArrive" object:nil
-            userInfo:@{@"generation":@1, @"target":@"en", @"translations":@{@"\u6d4b\u8bd5":@"stale"}}]];
+            userInfo:@{@"generation":@1, @"marker":@0, @"target":@"en", @"translations":@{@"\u6d4b\u8bd5":@"stale"}}]];
     assert([[[fetcher valueForKey:@"accountGlossResults"] firstObject][@"translation"] isEqual:@"stale"]);
     [fetcher accountCandidateTranslationsDidArrive:
         [NSNotification notificationWithName:@"MSIMEBackendCandidateTranslationsDidArrive" object:nil
-            userInfo:@{@"generation":@2, @"target":@"en", @"translations":@{@"\u6d4b\u8bd5":@"fresh"}}]];
+            userInfo:@{@"generation":@2, @"marker":@0, @"target":@"en", @"translations":@{@"\u6d4b\u8bd5":@"fresh"}}]];
     assert([[[fetcher valueForKey:@"accountGlossResults"] firstObject][@"translation"] isEqual:@"fresh"]);
 }
 
@@ -8305,7 +8419,7 @@ static void TestAccountGlossLateReplyAndNegatives() {
     [controller setValue:session forKey:@"session"];
     void (^reply)(NSUInteger, NSDictionary *) = ^(NSUInteger generation, NSDictionary *translations) {
         [controller accountCandidateTranslationsDidArrive:[NSNotification notificationWithName:@"MSIMEBackendCandidateTranslationsDidArrive"
-            object:nil userInfo:@{@"generation":@(generation), @"target":@"en", @"translations":translations}]];
+            object:nil userInfo:@{@"generation":@(generation), @"marker":@0, @"target":@"en", @"translations":translations}]];
     };
     void (^show)(NSUInteger, NSArray<NSString *> *) = ^(NSUInteger generation, NSArray<NSString *> *texts) {
         NSMutableArray *candidates = [NSMutableArray array];
@@ -8321,15 +8435,15 @@ static void TestAccountGlossLateReplyAndNegatives() {
     // The answer for the page the user typed past lands in the cache, but the current page, which does not show that word, is left alone.
     session.applied = nil;
     reply(1, @{@"测试":@"test"});
-    assert(([[MSIMETranslationCache sharedCache] valueForIdentity:@[@"account", @"en", @"测试"]]));
+    assert(([[MSIMETranslationCache sharedCache] valueForIdentity:@[@"account", @"0", @"en", @"测试"]]));
     assert([[controller valueForKey:@"accountGlossResults"] count] == 0 && session.applied == nil);
     // The account had nothing for 你好: remembered as a negative entry, with nothing shown.
     reply(2, @{@"你好":@""});
-    assert(([[MSIMETranslationCache sharedCache] valueForIdentity:@[@"account", @"en", @"你好"]] == NSNull.null));
+    assert(([[MSIMETranslationCache sharedCache] valueForIdentity:@[@"account", @"0", @"en", @"你好"]] == NSNull.null));
     assert([[controller valueForKey:@"accountGlossResults"] count] == 0);
     // A later empty answer for a word that already has a gloss does not evict it.
     reply(1, @{@"测试":@""});
-    assert(([[[MSIMETranslationCache sharedCache] valueForIdentity:@[@"account", @"en", @"测试"]] isEqual:@"test"]));
+    assert(([[[MSIMETranslationCache sharedCache] valueForIdentity:@[@"account", @"0", @"en", @"测试"]] isEqual:@"test"]));
 
     // Backing up to a page with both words asks about neither: one is answered from the cache, the other is known to have no answer.
     show(3, @[@"测试", @"你好"]);
@@ -8389,7 +8503,7 @@ static void TestAccountGlossIdleDelay() {
 
     // A page whose words are all cached shows them at once and schedules nothing.
     [controller accountCandidateTranslationsDidArrive:[NSNotification notificationWithName:@"MSIMEBackendCandidateTranslationsDidArrive"
-        object:nil userInfo:@{@"generation":@2, @"target":@"en", @"translations":@{@"你好":@"hello"}}]];
+        object:nil userInfo:@{@"generation":@2, @"marker":@0, @"target":@"en", @"translations":@{@"你好":@"hello"}}]];
     show(3, @[@"你好"]);
     assert(![controller valueForKey:@"accountGlossTimer"] && controller.accountFetches.count == 1);
     NSArray *results = [controller valueForKey:@"accountGlossResults"];
@@ -8480,7 +8594,7 @@ static void TestAccountGlossWaitsForDictionary() {
     // 账号回复的日文行要和词典的英文行并到同一个候选下。以前按词去重，词典已经列出了 你好，账号那条就被丢掉，于是只显示英文释义。
     session.delivered = nil;
     [controller accountCandidateTranslationsDidArrive:[NSNotification notificationWithName:@"MSIMEBackendCandidateTranslationsDidArrive"
-        object:nil userInfo:@{@"generation":@2, @"target":@"ja", @"translations":@{@"你好":@"こんにちは"}}]];
+        object:nil userInfo:@{@"generation":@2, @"marker":@0, @"target":@"ja", @"translations":@{@"你好":@"こんにちは"}}]];
     NSDictionary *greeting = nil;
     for (NSDictionary *entry in session.delivered) if ([entry[@"text"] isEqual:@"你好"]) greeting = entry;
     assert([greeting[@"translation"] isEqual:@"hello\u2028こんにちは"]);
@@ -8518,7 +8632,7 @@ static void TestAccountGlossPersistsOnArrival() {
     void (^reply)(CustomTranslationController *, NSUInteger, NSString *, NSDictionary *) =
         ^(CustomTranslationController *controller, NSUInteger generation, NSString *target, NSDictionary *translations) {
         [controller accountCandidateTranslationsDidArrive:[NSNotification notificationWithName:@"MSIMEBackendCandidateTranslationsDidArrive"
-            object:nil userInfo:@{@"generation":@(generation), @"target":target, @"translations":translations}]];
+            object:nil userInfo:@{@"generation":@(generation), @"marker":@0, @"target":target, @"translations":translations}]];
     };
     NSArray *(^lookup)(NSString *) = ^(NSString *directory) {
         __block NSDictionary *found;
@@ -9317,7 +9431,7 @@ static void TestGlossSurvivesHighlightMove() {
     [controller cancelCandidateTranslations];
 
     // The account: the pending idle timer is kept, not restarted, and the cached gloss is applied to the new generation.
-    [[MSIMETranslationCache sharedCache] rememberTranslation:@"hello" identity:@[@"account", @"en", @"你好"]];
+    [[MSIMETranslationCache sharedCache] rememberTranslation:@"hello" identity:@[@"account", @"0", @"en", @"你好"]];
     session.account = YES; session.generation = 5;
     settle();
     NSTimer *accountTimer = [controller valueForKey:@"accountGlossTimer"];
@@ -9604,6 +9718,7 @@ int main(int argc, char **argv) {
             @autoreleasepool { TestPreferenceLoadReusesCandidateServiceSnapshots(); }
             @autoreleasepool { TestCandidateServiceSnapshotsAreReused(); }
             @autoreleasepool { TestApplyCandidateTranslationSnapshotsAreReused(); }
+            @autoreleasepool { TestEmptyGlossDoesNotApplyAStaleServiceGeneration(); }
             @autoreleasepool { TestGlossScheduling(); }
             @autoreleasepool { TestGlossSurvivesHighlightMove(); }
             @autoreleasepool { TestAccountGlossSkipsNonChineseCandidates(); }
@@ -11263,6 +11378,7 @@ int main(int argc, char **argv) {
         @autoreleasepool { TestInputModeStatusItem(); }
         @autoreleasepool { TestModifierTapSurvivesALostRelease(); }
         @autoreleasepool { TestCapsLockTap(); }
+        @autoreleasepool { TestPunctuationAfterCompositionKeepsRawInput(appearance); }
         @autoreleasepool { TestStaleClientDeactivation(); }
         @autoreleasepool { TestStaleDeactivationLeavesTheCurrentPairOpen(); }
         @autoreleasepool { TestSoundsFollowKeysCommitsAndActivation(); }
@@ -11315,6 +11431,7 @@ int main(int argc, char **argv) {
         @autoreleasepool { TestMixedInputPreferences(); }
         @autoreleasepool { TestCharacterSetShortcut(); }
         @autoreleasepool { TestDedicatedEnglish(appearance); }
+        @autoreleasepool { TestConsecutiveUppercaseDoesNotOpenShortcut(appearance); }
         @autoreleasepool { TestSystemInputModeReport(appearance); }
         @autoreleasepool { TestOptInSchemeModes(); }
         @autoreleasepool { TestKeymap(defaults, appearance); }

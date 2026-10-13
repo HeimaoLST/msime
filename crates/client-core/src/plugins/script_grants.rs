@@ -10,7 +10,7 @@
 //! - **只有一个写入方**，就是这里。写入时持有 `import::lock_plugin_root`（和导入、删包同一把锁），整份文件原子替换，每次写入都推进 `(revision_epoch, revision)`；读取方因此不加锁，看到的要么是旧文件，要么是新文件。删包、重新导入时在同一把锁里更新条目。宿主只在这个代次对比以前看到过的都大时恢复被熔断的插件。
 //! - **读取方容忍未知字段**（不用 `deny_unknown_fields`），给以后的版本加字段留余地；但 `format_version` 不认识、文件读不出或不是合法 JSON 时，一律按"没有任何脚本启用"处理。单个条目不合规（id 或哈希格式不对、授权违反依赖或互斥规则）只跳过这一条。早期开发构建在条目里写过的 `mac` 字段同样当作未知字段忽略，下一次写入时不再写出。
 //! - **授权不签名，所有桌面平台一样**：同一用户下的任何进程都能手写一条带正确哈希的授权，这是设计接受的残余风险，由授权页在三个桌面平台上写明（macOS 和 Linux 是共享设置页，Windows 是原生设置应用）。曾经考虑过在 macOS 上用钥匙串里的密钥给条目签 MAC，用户决定授权不使用钥匙串，取舍见 `.agents/notes/implemented/architecture/` 下本阶段的授权笔记。Windows 的提权窗口里永远不运行脚本。
-//! - 授权页读到的形状（[`ScriptGrantsView`]，带 `script-health.json` 里的停用记录）也在这里，桌面外壳的授权命令和 host-api 的 `msime_client_plugins` 共用。
+//! - 授权页读到的形状（[`ScriptGrantsView`]，带 `script-health.json` 里的停用记录和插件 `/` 指令的状态）也在这里，桌面外壳的授权命令和 host-api 的 `msime_client_plugins` 共用。
 
 use std::fs;
 use std::io;
@@ -21,6 +21,7 @@ use msime_script_runtime::{limits, Capability, CapabilitySet};
 use serde::{Deserialize, Serialize};
 
 use super::import::{lock_plugin_root, RootWrites};
+use super::script_commands::{self, ResolvedCommand};
 use super::script_pack::{self, rule_message};
 use crate::skin::catalog::safe_id;
 
@@ -142,8 +143,11 @@ pub fn read(root: &Path) -> ScriptGrants {
 /// 授予、调整或撤销脚本插件 `id` 的授权，返回写入后的整份授权。
 ///
 /// `hash` 是授权页展示给用户的那个内容哈希：写入前在锁里重新读一遍包、算一遍哈希，不一致时返回 [`ScriptGrantError::Changed`]，免得用户授权的是一个版本、生效的是另一个。`granted` 必须是清单 `permissions` 的子集，并满足依赖和互斥规则。启用时检查同时启用的个数和进程内存总账。新条目排在最后执行。包目录已经不在的条目顺带去掉（和删包时一样）：它们永远不会运行，却占着输入法运行的前 `limits::MAX_ENABLED_SCRIPTS` 个位置，页面上又列不出来、撤销不了。
+///
+/// 官方脚本插件（`super::BUILTIN_SCRIPT_PACKS`）从内置目录 `builtin_packs` 读，授权照样写在 `root` 下，绑定内置那一份的内容哈希。宿主没给内置目录时，官方 id 的条目不算「包已不在」：这里只是看不见它，不能替用户收回授权。
 pub fn set(
     root: &Path,
+    builtin_packs: Option<&Path>,
     id: &str,
     hash: &str,
     enabled: bool,
@@ -152,12 +156,13 @@ pub fn set(
     if !safe_id(id) {
         return Err(ScriptGrantError::Invalid("插件 id 无效".into()));
     }
-    crate::storage::reject_symlink(root).map_err(|_| ScriptGrantError::Storage)?;
-    if !fs::symlink_metadata(root).is_ok_and(|metadata| metadata.is_dir()) {
-        return Err(ScriptGrantError::Missing("插件文件夹不存在".into()));
+    // 插件目录只在导入插件或保存 @ 名单时建出来，官方脚本插件不经导入：从没导入过插件的用户第一次授权它时，这里还没有插件目录。和导入一样先建好它，链接或不是目录照样拒绝。
+    if !crate::storage::create_directory_and_check(root).map_err(|_| ScriptGrantError::Storage)? {
+        return Err(ScriptGrantError::Storage);
     }
     let writes = lock_plugin_root(root)?;
-    let installed = script_pack::load(root, id).map_err(ScriptGrantError::Missing)?;
+    let installed =
+        script_pack::load(root, builtin_packs, id).map_err(ScriptGrantError::Missing)?;
     if installed.pack.content_hash != hash {
         return Err(ScriptGrantError::Changed);
     }
@@ -188,12 +193,17 @@ pub fn set(
         Stored::Missing | Stored::Unreadable => ScriptGrants::default(),
         Stored::UnknownFormat => return Err(ScriptGrantError::Format),
     };
-    let packs = super::kind_directory(root, super::PluginKind::Script);
+    let builtin = super::BuiltinDirs::packs(builtin_packs);
     grants.plugins.retain(|grant| {
-        !matches!(fs::symlink_metadata(packs.join(&grant.id)), Err(error) if error.kind() == io::ErrorKind::NotFound)
+        let Some(directory) =
+            super::pack_directory(root, builtin, super::PluginKind::Script, &grant.id)
+        else {
+            return true;
+        };
+        !matches!(fs::symlink_metadata(directory), Err(error) if error.kind() == io::ErrorKind::NotFound)
     });
     if enabled {
-        admit(root, &grants, &installed)?;
+        admit(root, builtin_packs, &grants, &installed)?;
     }
     let entry = ScriptGrant {
         id: id.to_owned(),
@@ -271,12 +281,14 @@ pub struct ScriptHealthView {
     pub disabled: String,
 }
 
-/// 授权页读到的全部：授权（按执行顺序）和输入法记下的停用。桌面外壳的授权命令和 host-api 的 `msime_client_plugins`（Windows 的原生设置应用）回答的都是它。
+/// 授权页读到的全部：授权（按执行顺序）、输入法记下的停用，以及会运行的插件提供的 `/` 指令和各自的状态。桌面外壳的授权命令和 host-api 的 `msime_client_plugins`（Windows 的原生设置应用）回答的都是它。
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct ScriptGrantsView {
     pub revision: u64,
     pub plugins: Vec<ScriptGrantView>,
     pub health: Vec<ScriptHealthView>,
+    /// 启用、授予了 `provide_commands`、清单能载入的插件声明的指令，按执行顺序，带上在用户指令表之下的状态（[`script_commands::resolve`]）。没有授予这项能力的插件不在里面。
+    pub commands: Vec<ResolvedCommand>,
 }
 
 /// 输入法写下的停用记录。`user_data` 没有、不是绝对路径，文件不在、读不出、格式不认识时为空：那只是说没有停用记录。
@@ -330,8 +342,18 @@ pub fn health(user_data: Option<&Path>) -> Vec<ScriptHealthView> {
         .collect()
 }
 
-/// 交给授权页的整份授权：条目原样按执行顺序、能力名原样，加上 `user_data` 下的停用记录。
-pub fn view(grants: ScriptGrants, user_data: Option<&Path>) -> ScriptGrantsView {
+/// 交给授权页的整份授权：条目原样按执行顺序、能力名原样，加上 `user_data` 下的停用记录，和会运行的插件（`root` 下已安装的，官方的在 `builtin_packs` 下）声明的指令在用户指令表 `user_triggers`（[`script_commands::user_triggers`]）之下的状态。
+pub fn view(
+    root: &Path,
+    builtin_packs: Option<&Path>,
+    grants: ScriptGrants,
+    user_data: Option<&Path>,
+    user_triggers: &[String],
+) -> ScriptGrantsView {
+    let commands = script_commands::resolve(
+        user_triggers,
+        &script_commands::granted_commands(root, builtin_packs, &grants),
+    );
     ScriptGrantsView {
         revision: grants.revision,
         plugins: grants
@@ -345,12 +367,14 @@ pub fn view(grants: ScriptGrants, user_data: Option<&Path>) -> ScriptGrantsView 
             })
             .collect(),
         health: health(user_data),
+        commands,
     }
 }
 
 /// 启用 `installed` 之前的准入检查：同时启用的个数，和进程内存总账。个数按输入法占位置的方式算：其他启用的条目，不管包载不载得了、哈希对不对得上，它们都占着输入法运行的前 `limits::MAX_ENABLED_SCRIPTS` 个位置（输入法取前几个之后才核对哈希），少算一个就会让新启用的插件排到位置之外、永远不运行。内存只算其中真会占内存的：包还在、哈希对得上的。
 fn admit(
     root: &Path,
+    builtin_packs: Option<&Path>,
     grants: &ScriptGrants,
     installed: &script_pack::LoadedScript,
 ) -> Result<(), ScriptGrantError> {
@@ -364,7 +388,7 @@ fn admit(
     let others: Vec<script_pack::LoadedScript> = others
         .into_iter()
         .filter_map(|grant| {
-            script_pack::load(root, &grant.id)
+            script_pack::load(root, builtin_packs, &grant.id)
                 .ok()
                 .filter(|other| other.pack.content_hash == grant.hash)
         })

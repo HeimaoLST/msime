@@ -1,10 +1,10 @@
-//! 每个会话、每个插件一个实例：实例化、按轮和按钩子的 fuel 配额、`before_commit` 的快照复位，以及观察类和修改类 import。
+//! 每个会话、每个插件一个实例：实例化、按轮和按钩子的 fuel 配额、`before_commit` 和 `command` 的快照复位，以及观察类和修改类 import。
 //!
 //! import 只读写本次调用的上下文，从不回调宿主：宿主的会话正借给这次调用，回调只会撞上 `"reentrant host call"`。上下文在调用前按授权复制、调用后清空；没有授权的文本根本不复制进来，屏蔽和缺失对插件来说同样是 `ABSENT`。
 
 use crate::abi::{
-    self, candidate_field, commit_field, composition_field, event_field, status, Capability,
-    CapabilitySet, Hook,
+    self, candidate_field, command_field, commit_field, composition_field, event_field, status,
+    Capability, CapabilitySet, Hook,
 };
 use crate::limits;
 use crate::module::ScriptModule;
@@ -66,6 +66,17 @@ pub struct Candidates<'a> {
     pub highlighted: Option<u32>,
 }
 
+/// `command` 事件的内容：用户在 `/` 指令里打的触发词和后面的字母，以及宿主这一次给的随机数。只投递给这个触发词的主人。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandEvent<'a> {
+    /// 触发词，不超过 [`limits::MAX_COMMAND_TRIGGER_BYTES`] 字节。
+    pub trigger: &'a str,
+    /// 触发词后面的字母，可以为空，不超过 [`limits::MAX_COMMAND_ARGUMENT_BYTES`] 字节。
+    pub argument: &'a str,
+    /// 插件经 `random_fill` 按顺序取用。产品里取自操作系统的 CSPRNG。
+    pub random: [u8; limits::RANDOM_BYTES_PER_EVENT],
+}
+
 /// 投递给一个插件的一次事件。宿主按事件填它拥有的字段；每个插件按自己的授权各取一份。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Event<'a> {
@@ -74,6 +85,8 @@ pub struct Event<'a> {
     pub composition: Composition<'a>,
     pub commit: CommitTexts<'a>,
     pub candidates: Option<Candidates<'a>>,
+    /// 只有 `command` 事件有，别的事件里填了也不交给插件。
+    pub command: Option<CommandEvent<'a>>,
 }
 
 impl<'a> Event<'a> {
@@ -85,6 +98,7 @@ impl<'a> Event<'a> {
             composition: Composition::default(),
             commit: CommitTexts::default(),
             candidates: None,
+            command: None,
         }
     }
 }
@@ -182,6 +196,8 @@ pub struct Actions {
     pub hidden: Vec<u32>,
     /// `candidates_annotate`：窗口行号和注释，每行最多一条。
     pub annotations: Vec<(u32, String)>,
+    /// `command_row`：（文本，插件注释），按暂存的顺序，最多 [`limits::MAX_COMMAND_ROWS`] 行。
+    pub rows: Vec<(String, String)>,
 }
 
 impl Actions {
@@ -190,6 +206,7 @@ impl Actions {
         self.order.clear();
         self.hidden.clear();
         self.annotations.clear();
+        self.rows.clear();
     }
 
     /// 什么动作都没有。
@@ -198,10 +215,11 @@ impl Actions {
             && self.order.is_empty()
             && self.hidden.is_empty()
             && self.annotations.is_empty()
+            && self.rows.is_empty()
     }
 }
 
-/// 调试输出：修改类 import（`rewrite_commit`、`candidates_*`）的一次调用和宿主交还给插件的返回码。产品里不设；`msime-pack run` 用它把每次改写、重排、隐藏和注释的结果列进输出。只是旁观：返回码由 import 本身决定，设不设它都一样。
+/// 调试输出：修改类 import（`rewrite_commit`、`candidates_*`、`command_row`）的一次调用和宿主交还给插件的返回码。产品里不设；`msime-pack run` 用它把每次改写、重排、隐藏和注释的结果列进输出。只是旁观：返回码由 import 本身决定，设不设它都一样。
 pub type ActionSink = Box<dyn FnMut(&'static str, i32) + Send>;
 
 /// 实例化之前就接上的调试输出，`msime_init` 里的 `log` 也能看到。只有作者工具设它。
@@ -266,20 +284,35 @@ struct CallContext {
     row_count: usize,
     page: Option<u32>,
     highlighted: Option<u32>,
+    /// `command` 事件的触发词和参数，只在授予了 `provide_commands` 时复制进来。
+    trigger: OwnedText,
+    argument: OwnedText,
+    /// `command` 事件的随机数和已经取走的字节数。没有 `command` 事件时为空。
+    random: Vec<u8>,
+    random_used: usize,
     /// 修改类 import 暂存的动作，钩子正常返回后才交出去。
     actions: Actions,
 }
 
 impl CallContext {
-    /// 按授权和本地模式复制这一次能看的字段；不能看的根本不复制。
+    /// 按授权和本地模式复制这一次能看的字段；不能看的根本不复制。`command` 事件只带触发词、参数和随机数，标量只留本地模式（事件类型由钩子给出）：宿主就算填了组字、上屏、候选或上屏来源这类标量，也不复制，`command` 的输出只能取决于这几样。
     fn load(&mut self, grants: CapabilitySet, event: &Event<'_>) {
         self.hook = Some(event.hook);
-        self.scalars = event.scalars;
+        self.scalars = if event.hook == Hook::Command {
+            Scalars {
+                local_mode: event.scalars.local_mode,
+                ..Scalars::default()
+            }
+        } else {
+            event.scalars
+        };
         self.actions.clear();
-        let text_allowed = event
-            .scalars
-            .local_mode
-            .is_some_and(abi::local_mode_allows_text);
+        let command = event.command.filter(|_| event.hook == Hook::Command);
+        let text_allowed = event.hook != Hook::Command
+            && event
+                .scalars
+                .local_mode
+                .is_some_and(abi::local_mode_allows_text);
         let allowed = |capability| text_allowed && grants.contains(capability);
 
         let composition = if allowed(Capability::ReadComposition) {
@@ -329,6 +362,15 @@ impl CallContext {
             self.page = candidates.page;
             self.highlighted = candidates.highlighted;
         }
+
+        let words = command.filter(|_| grants.contains(Capability::ProvideCommands));
+        self.trigger.load(words.map(|command| command.trigger));
+        self.argument.load(words.map(|command| command.argument));
+        self.random.clear();
+        self.random_used = 0;
+        if let Some(command) = command {
+            self.random.extend_from_slice(&command.random);
+        }
     }
 
     /// 调用结束后清空，文本不在两次调用之间留在插件的上下文里。
@@ -353,6 +395,11 @@ impl CallContext {
         self.row_count = 0;
         self.page = None;
         self.highlighted = None;
+        self.trigger.clear();
+        self.argument.clear();
+        self.random.fill(0);
+        self.random.clear();
+        self.random_used = 0;
         self.actions.clear();
     }
 
@@ -418,6 +465,15 @@ impl CallContext {
             },
         };
         value.unwrap_or(i64::from(status::ABSENT))
+    }
+
+    fn command_text(&self, field: i32) -> Result<&str, i32> {
+        let text = match field {
+            command_field::TRIGGER => &self.trigger,
+            command_field::ARGUMENT => &self.argument,
+            _ => return Err(status::INVALID),
+        };
+        text.get().ok_or(status::ABSENT)
     }
 
     fn row(&self, index: i32) -> Result<&OwnedRow, i32> {
@@ -608,6 +664,8 @@ pub struct ScriptInstance {
     turn_fuel_left: u64,
     /// `before_commit` 本轮还剩的 fuel，和其余钩子的轮配额分开记，见 [`Self::deliver`]。
     before_commit_fuel_left: u64,
+    /// `command` 本轮还剩的 fuel，同样单独记。
+    command_fuel_left: u64,
     init_fuel: u64,
     snapshot: Option<Snapshot>,
     /// 最近一次投递暂存的动作。
@@ -615,7 +673,7 @@ pub struct ScriptInstance {
 }
 
 impl ScriptInstance {
-    /// 实例化并初始化：预留线性内存、检查 `msime_abi()`、调用 `msime_init()`（有的话），声明了 `before_commit` 时取快照。`grants` 和清单申请的能力取交集。`init_fuel` 不超过 [`limits::INIT_FUEL`]，宿主按 focus 的初始化合计传入剩余额度。
+    /// 实例化并初始化：预留线性内存、检查 `msime_abi()`、调用 `msime_init()`（有的话），声明了 `before_commit` 或 `command` 时取快照。`grants` 和清单申请的能力取交集。`init_fuel` 不超过 [`limits::INIT_FUEL`]，宿主按 focus 的初始化合计传入剩余额度。
     pub fn new(
         module: &ScriptModule,
         grants: CapabilitySet,
@@ -682,7 +740,8 @@ impl ScriptInstance {
         let snapshot = module
             .declaration
             .hooks
-            .contains(Hook::BeforeCommit)
+            .iter()
+            .any(Hook::runs_on_snapshot)
             .then(|| Snapshot::take(&store, instance, memory, data_extent));
         Ok(Self {
             module: module.clone(),
@@ -692,6 +751,7 @@ impl ScriptInstance {
             turn: None,
             turn_fuel_left: limits::TURN_FUEL,
             before_commit_fuel_left: limits::BEFORE_COMMIT_FUEL,
+            command_fuel_left: limits::COMMAND_FUEL,
             init_fuel,
             snapshot,
             actions: Actions::default(),
@@ -712,7 +772,7 @@ impl ScriptInstance {
         self.init_fuel
     }
 
-    /// 本轮还剩多少 fuel（`before_commit` 之外的钩子）。轮次还没开始时是完整的一轮。
+    /// 本轮还剩多少 fuel（`before_commit` 和 `command` 之外的钩子）。轮次还没开始时是完整的一轮。
     pub fn turn_fuel_left(&self) -> u64 {
         self.turn_fuel_left
     }
@@ -722,11 +782,32 @@ impl ScriptInstance {
         self.before_commit_fuel_left
     }
 
-    /// 接着插件这一轮已经用掉的配额。宿主在同一轮里重建实例时（上一个实例因为换字段或属性变化被丢弃）把这一轮两份配额各还剩多少交给新实例，轮配额按插件算，不按实例算。
-    pub fn resume_turn(&mut self, turn: u64, fuel_left: u64, before_commit_fuel_left: u64) {
+    /// `command` 本轮还剩多少 fuel。轮次还没开始时是完整的一份。
+    pub fn command_fuel_left(&self) -> u64 {
+        self.command_fuel_left
+    }
+
+    /// 接着插件这一轮已经用掉的配额。宿主在同一轮里重建实例时（上一个实例因为换字段或属性变化被丢弃）把这一轮三份配额各还剩多少交给新实例，轮配额按插件算，不按实例算。
+    pub fn resume_turn(
+        &mut self,
+        turn: u64,
+        fuel_left: u64,
+        before_commit_fuel_left: u64,
+        command_fuel_left: u64,
+    ) {
         self.turn = Some(turn);
         self.turn_fuel_left = fuel_left.min(limits::TURN_FUEL);
         self.before_commit_fuel_left = before_commit_fuel_left.min(limits::BEFORE_COMMIT_FUEL);
+        self.command_fuel_left = command_fuel_left.min(limits::COMMAND_FUEL);
+    }
+
+    /// 这一个钩子所用的那份本轮配额：`before_commit`、`command` 各一份，其余钩子合用一份。
+    fn quota(&mut self, hook: Hook) -> &mut u64 {
+        match hook {
+            Hook::BeforeCommit => &mut self.before_commit_fuel_left,
+            Hook::Command => &mut self.command_fuel_left,
+            _ => &mut self.turn_fuel_left,
+        }
     }
 
     /// 持久实例上出过 trap 之后返回 false：wasm 的状态（例如影子栈指针）可能停在一半，宿主应当丢弃这个实例。
@@ -744,12 +825,22 @@ impl ScriptInstance {
         self.store.data_mut().log_sink = sink;
     }
 
-    /// 投递一个事件。`turn` 是宿主的轮次计数（每个非 PASSTHROUGH 的 `msime_client_key` 加一），换了轮次就重新给满本轮配额；本次能用的 fuel 是本轮剩余和本钩子上限中较小的那个。本轮已经用完时不运行，是 [`Outcome::TurnExhausted`]；被本轮剩下的配额截断时，这一次用掉的不到本钩子上限的一半也是 [`Outcome::TurnExhausted`]，达到一半就和超出本钩子上限一样是 fuel 耗尽的 [`Outcome::Failed`]。`before_commit` 在 `msime_init` 之后的快照上运行，看不到之前任何事件留下的状态。
+    /// 投递一个事件。`turn` 是宿主的轮次计数（每个非 PASSTHROUGH 的 `msime_client_key` 加一），换了轮次就重新给满本轮配额；本次能用的 fuel 是本轮剩余和本钩子上限中较小的那个。本轮已经用完时不运行，是 [`Outcome::TurnExhausted`]；被本轮剩下的配额截断时，这一次用掉的不到本钩子上限的一半也是 [`Outcome::TurnExhausted`]，达到一半就和超出本钩子上限一样是 fuel 耗尽的 [`Outcome::Failed`]。`before_commit` 和 `command` 在 `msime_init` 之后的快照上运行，看不到之前任何事件留下的状态。
     ///
-    /// `before_commit` 用自己的一份按轮配额（[`limits::BEFORE_COMMIT_FUEL`]），不从其余钩子的轮配额里扣，也不让它们扣：要是共用一份，持久实例在同一轮里先烧掉多少 fuel 就能决定快照上的改写会不会因为 fuel 耗尽被丢掉，之前事件攒下的状态借此影响上屏。它只被同一轮里之前的 `before_commit` 用掉，那些同样只看得到各自的上屏文本。
+    /// `before_commit` 用自己的一份按轮配额（[`limits::BEFORE_COMMIT_FUEL`]），不从其余钩子的轮配额里扣，也不让它们扣：要是共用一份，持久实例在同一轮里先烧掉多少 fuel 就能决定快照上的改写会不会因为 fuel 耗尽被丢掉，之前事件攒下的状态借此影响上屏。它只被同一轮里之前的 `before_commit` 用掉，那些同样只看得到各自的上屏文本。`command` 同理另有一份（[`limits::COMMAND_FUEL`]）。
+    ///
+    /// `command` 事件没带 [`CommandEvent`]、触发词超过 [`limits::MAX_COMMAND_TRIGGER_BYTES`] 或参数超过 [`limits::MAX_COMMAND_ARGUMENT_BYTES`] 字节时不运行，返回 [`Outcome::NotSubscribed`]：宿主本来就不该这样投递，这里是第二道。
     pub fn deliver(&mut self, turn: u64, event: &Event<'_>) -> Outcome {
         self.actions.clear();
         if !self.module.declaration.hooks.contains(event.hook) {
+            return Outcome::NotSubscribed;
+        }
+        if event.hook == Hook::Command
+            && !event.command.is_some_and(|command| {
+                command.trigger.len() <= limits::MAX_COMMAND_TRIGGER_BYTES
+                    && command.argument.len() <= limits::MAX_COMMAND_ARGUMENT_BYTES
+            })
+        {
             return Outcome::NotSubscribed;
         }
         if !self.usable {
@@ -762,19 +853,15 @@ impl ScriptInstance {
             self.turn = Some(turn);
             self.turn_fuel_left = limits::TURN_FUEL;
             self.before_commit_fuel_left = limits::BEFORE_COMMIT_FUEL;
+            self.command_fuel_left = limits::COMMAND_FUEL;
         }
-        let before_commit = event.hook == Hook::BeforeCommit;
-        let left = if before_commit {
-            self.before_commit_fuel_left
-        } else {
-            self.turn_fuel_left
-        };
+        let left = *self.quota(event.hook);
         let hook_limit = limits::hook_fuel(event.hook);
         let allowed = left.min(hook_limit);
         if allowed == 0 {
             return Outcome::TurnExhausted { fuel: 0 };
         }
-        let (result, fuel) = if before_commit && self.snapshot.is_some() {
+        let (result, fuel) = if event.hook.runs_on_snapshot() && self.snapshot.is_some() {
             self.run_on_snapshot(allowed, event)
         } else {
             let result = run(
@@ -789,22 +876,14 @@ impl ScriptInstance {
             }
             result
         };
-        if before_commit {
-            self.before_commit_fuel_left -= fuel;
-        } else {
-            self.turn_fuel_left -= fuel;
-        }
+        *self.quota(event.hook) -= fuel;
         match result {
             Ok(status) => Outcome::Delivered { status, fuel },
-            // 截断它的是本轮剩下的配额，不是本钩子的上限。wasmi 在剩下的 fuel 不够下一段指令时就停，留下的零头本轮也用不上，记为用完，宿主据此在本轮里不再为它重建实例。用完的是这个钩子所用的那一份：`before_commit` 的配额截断不影响其余钩子的，反过来也一样。
+            // 截断它的是本轮剩下的配额，不是本钩子的上限。wasmi 在剩下的 fuel 不够下一段指令时就停，留下的零头本轮也用不上，记为用完，宿主据此在本轮里不再为它重建实例。用完的是这个钩子所用的那一份：`before_commit`、`command` 的配额截断不影响其余钩子的，反过来也一样。
             //
             // 这一次自己用掉的不到本钩子上限的一半时不算失败：没经过 `msime_client_key` 的派发只拿到上一次按键剩下的零头，被截断怪不到插件。用掉的达到一半就和超出自己上限一样算失败，否则轮配额和单次上限相等（`candidates`）或相近时，一个死循环只要同一轮里之前的钩子花过一点 fuel，就总是先撞上轮配额，熔断永远落不到它身上。
             Err(Failure::OutOfFuel) if allowed < hook_limit => {
-                if before_commit {
-                    self.before_commit_fuel_left = 0;
-                } else {
-                    self.turn_fuel_left = 0;
-                }
+                *self.quota(event.hook) = 0;
                 if fuel >= hook_limit / 2 {
                     Outcome::Failed {
                         failure: Failure::OutOfFuel,
@@ -900,6 +979,9 @@ pub(crate) fn linker(engine: &Engine) -> Linker<HostState> {
     define(linker.func_wrap(module, "candidates_order", candidates_order));
     define(linker.func_wrap(module, "candidates_hide", candidates_hide));
     define(linker.func_wrap(module, "candidates_annotate", candidates_annotate));
+    define(linker.func_wrap(module, "command_text", command_text));
+    define(linker.func_wrap(module, "command_row", command_row));
+    define(linker.func_wrap(module, "random_fill", random_fill));
     linker
 }
 
@@ -1023,6 +1105,18 @@ fn commit_text(
 fn commit_scalar(caller: Caller<'_, HostState>, field: i32) -> Result<i64, Error> {
     scalar(caller, Some(Capability::ReadCommit), |context| {
         context.commit_scalar(field)
+    })
+}
+
+/// `command` 的文本字段。不受本地模式白名单的限制：指令模式（本地模式 8）对别的钩子和别的插件照旧屏蔽，只有触发词的主人在 `command` 里经这个 import 读得到自己触发词后面的字母。
+fn command_text(
+    caller: Caller<'_, HostState>,
+    field: i32,
+    dst: i32,
+    cap: i32,
+) -> Result<i32, Error> {
+    copy_text(caller, Capability::ProvideCommands, dst, cap, |context| {
+        context.command_text(field)
     })
 }
 
@@ -1246,6 +1340,71 @@ fn try_candidates_annotate(
     Ok(0)
 }
 
+fn try_command_row(
+    caller: &mut Caller<'_, HostState>,
+    text: i32,
+    text_len: i32,
+    note: i32,
+    note_len: i32,
+) -> Result<i32, Error> {
+    charge(caller, 0)?;
+    if !modification_allowed(caller, Capability::ProvideCommands, Hook::Command)
+        || caller.data().context.trigger.get().is_none()
+    {
+        return Ok(status::DENIED);
+    }
+    let (memory, text_start, text_len) = checked_range(caller, text, text_len)?;
+    let (_, note_start, note_len) = checked_range(caller, note, note_len)?;
+    let rows = caller.data().context.actions.rows.len();
+    // 每个 UTF-16 码元最多 3 个 UTF-8 字节，更长的不用解码就知道放不下。
+    if rows >= limits::MAX_COMMAND_ROWS
+        || text_len > limits::MAX_COMMAND_ROW_UTF16 * 3
+        || note_len > limits::MAX_ANNOTATION_UTF16 * 3
+    {
+        return Ok(status::LIMIT);
+    }
+    charge_exact(
+        caller,
+        (text_len + note_len) as u64 / limits::IMPORT_BYTES_PER_FUEL,
+    )?;
+    let (data, state) = memory.data_and_store_mut(&mut *caller);
+    let (Ok(row), Ok(annotation)) = (
+        std::str::from_utf8(&data[text_start..text_start + text_len]),
+        std::str::from_utf8(&data[note_start..note_start + note_len]),
+    ) else {
+        return Ok(status::INVALID);
+    };
+    if !abi::valid_command_row_text(row) || abi::has_forbidden_plugin_char(annotation) {
+        return Ok(status::INVALID);
+    }
+    if row.encode_utf16().count() > limits::MAX_COMMAND_ROW_UTF16
+        || annotation.encode_utf16().count() > limits::MAX_ANNOTATION_UTF16
+    {
+        return Ok(status::LIMIT);
+    }
+    state
+        .context
+        .actions
+        .rows
+        .push((row.to_owned(), annotation.to_owned()));
+    Ok(rows as i32)
+}
+
+/// 按调用顺序交出这次事件的随机字节。不需要能力：随机数和用户输入无关；只有 `command` 事件有，别处一律取完。
+fn random_fill(mut caller: Caller<'_, HostState>, dst: i32, len: i32) -> Result<i32, Error> {
+    let (memory, start, len) = checked_range(&caller, dst, len)?;
+    charge(&mut caller, len)?;
+    let (data, state) = memory.data_and_store_mut(&mut caller);
+    let context = &mut state.context;
+    let used = context.random_used;
+    if len > context.random.len() - used {
+        return Ok(status::LIMIT);
+    }
+    data[start..start + len].copy_from_slice(&context.random[used..used + len]);
+    context.random_used = used + len;
+    Ok(len as i32)
+}
+
 /// 设了调试输出时，把修改类 import 的这次调用和交还给插件的返回码交给它。只是旁观：返回码由 import 本身决定，设不设它都一样；trap 不是返回码，不报告。
 fn observed(
     caller: &mut Caller<'_, HostState>,
@@ -1281,4 +1440,15 @@ fn candidates_annotate(
 ) -> Result<i32, Error> {
     let result = try_candidates_annotate(&mut caller, index, src, len);
     observed(&mut caller, "candidates_annotate", result)
+}
+
+fn command_row(
+    mut caller: Caller<'_, HostState>,
+    text: i32,
+    text_len: i32,
+    note: i32,
+    note_len: i32,
+) -> Result<i32, Error> {
+    let result = try_command_row(&mut caller, text, text_len, note, note_len);
+    observed(&mut caller, "command_row", result)
 }

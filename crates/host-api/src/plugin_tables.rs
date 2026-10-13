@@ -3,7 +3,8 @@
 //! 它们都是设置页在输入进程运行期间写的文件：导入的指令表包、短语表包、辅助码表包和 `mentions.json`。会话记下读过的每个文件的修改时间、长度和（Unix 上的）inode，输入框获得焦点和偏好应用时再看一遍，有变动才重新读。关着的模式什么都不读。
 
 use msime_client_core::plugins::{
-    command_table, helpcode_pack, kind_directory, mentions, phrase_table, PluginKind, MANIFEST_FILE,
+    command_table, helpcode_pack, kind_directory, mentions, pack_directory, phrase_table,
+    BuiltinDirs, PluginKind, MANIFEST_FILE,
 };
 use msime_client_core::preferences::PluginPreferences;
 use msime_engine::host::{
@@ -11,7 +12,7 @@ use msime_engine::host::{
     QuickPhraseEntry, SharedKeymap,
 };
 use msime_engine::SchemeType;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -59,23 +60,31 @@ pub(crate) struct PluginTables {
     phrases: Option<Vec<(String, FileStamp)>>,
     /// 辅助码打开、当前方案是全拼或双拼并选了辅助码表包时，包 id、回退用的 `helpcode_schema` 与包目录的戳。回退方案也算在戳里：包坏掉时用的是它，换了方案就要重新决定用哪张表。
     helpcode: Option<HelpcodeStamp>,
+    /// 官方插件包目录（`PluginRoots::builtin_packs`）：启用的官方短语表从这里读、在这里盖戳。会话里不变。
+    builtin_packs: Option<PathBuf>,
 }
 
 impl PluginTables {
     /// Stamp the files `options` would be filled from. Cheap: a few `stat`s, and none for a mode that is off or a session without a plugins directory.
     pub(crate) fn stamp(
         root: Option<&Path>,
+        builtin_packs: Option<&Path>,
         options: &EngineOptions,
         plugins: &PluginPreferences,
     ) -> Self {
         let Some(root) = root else {
             return Self::default();
         };
+        // 官方短语表的清单在内置目录里，其余在插件目录里；内置目录没有时它没有戳（读不到）。
         let manifests = |kind: PluginKind, enabled: &[String]| -> Vec<(String, FileStamp)> {
-            let directory = kind_directory(root, kind);
             enabled
                 .iter()
-                .map(|id| (id.clone(), stamp(&directory.join(id).join(MANIFEST_FILE))))
+                .map(|id| {
+                    let manifest =
+                        pack_directory(root, BuiltinDirs::packs(builtin_packs), kind, id)
+                            .map(|directory| directory.join(MANIFEST_FILE));
+                    (id.clone(), manifest.as_deref().and_then(stamp))
+                })
                 .collect()
         };
         Self {
@@ -96,6 +105,7 @@ impl PluginTables {
                     directory_stamp(&directory),
                 )
             }),
+            builtin_packs: builtin_packs.map(Path::to_path_buf),
         }
     }
 
@@ -166,7 +176,7 @@ impl PluginTables {
             return Vec::new();
         };
         let enabled: Vec<String> = phrases.iter().map(|(id, _)| id.clone()).collect();
-        phrase_table::enabled_phrases(root, &enabled)
+        phrase_table::enabled_phrases(root, self.builtin_packs.as_deref(), &enabled)
             .into_iter()
             .map(|row| QuickPhraseEntry {
                 key: row.key,

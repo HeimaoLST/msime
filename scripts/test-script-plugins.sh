@@ -7,7 +7,10 @@
 # 1. 插件包文件夹和 .zip 都用 msime-pack validate 校验，输出必须是 `ok <id> script <version>`。
 # 2. 用插件目录里的 fixture.jsonl 跑 msime-pack run --grant all，退出码必须为 0（没有任何失败）；输出去掉 fuel、init_fuel 后和 expected.jsonl 逐行相同，每行的 fuel 不超过钩子单次上限的一半。
 # 3. 不授予任何能力再跑一遍，每个事件都不能有动作。
+# 4. 插件目录里有 check_output.py 时，再用它按插件自己的规则核对第 2 步的输出（uuid 按 RFC 9562 从夹具的随机数独立算一遍）。
 # 核对在 plugins/script/tools/check_run.py。--update 把第 2 步的结果写回 expected.jsonl（写完逐行看过再提交）。
+#
+# plugins/official-packs.json 登记的官方脚本插件（随桌面安装包分发）用的是保留 id，validate 和 run 对它们加 --builtin，其余插件不加：保留 id 出现在别的插件上照样报 plugin_reserved。
 #
 # 最后运行 scripts/test-script-plugin-data.py，确认提交进仓库的生成数据没有漂移。common-chars.bin 的检查要锁定的 Unihan zip：缓存里没有时打印 skip，设 MSIME_FETCH=1 才下载；设了 MSIME_REQUIRE_SCRIPT_PLUGINS=1 时 skip 算失败（CI 两个都设）。
 #
@@ -75,14 +78,22 @@ fi
 
 scratch="$root/target/script-plugins/test"
 mkdir -p "$scratch"
+official="$(python3 -c 'import json,sys; print(" ".join(p["id"] for p in json.load(open(sys.argv[1]))["packs"] if p["kind"] == "script"))' plugins/official-packs.json)" || {
+  echo "FAIL: plugins/official-packs.json 读不出"
+  exit 1
+}
 for id in ${ids[@]+"${ids[@]}"}; do
   echo "== $id"
   dir="plugins/script/$id"
   folder="target/script-plugins/$id"
   version="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$dir/pack/plugin.toml")"
   archive="target/script-plugins/$id-$version.zip"
+  builtin=()
+  case " $official " in
+    *" $id "*) builtin=(--builtin) ;;
+  esac
 
-  if ! "$pack_tool" validate "$folder" "$archive" >"$scratch/$id.validate" 2>&1; then
+  if ! "$pack_tool" validate ${builtin[@]+"${builtin[@]}"} "$folder" "$archive" >"$scratch/$id.validate" 2>&1; then
     cat "$scratch/$id.validate"
     fail "$id: msime-pack validate"
     continue
@@ -97,14 +108,17 @@ for id in ${ids[@]+"${ids[@]}"}; do
     fail "$id: 缺少 fixture.jsonl"
     continue
   fi
-  if ! "$pack_tool" run "$folder" --events "$dir/fixture.jsonl" --grant all >"$scratch/$id.granted.jsonl"; then
+  if ! "$pack_tool" run "$folder" --events "$dir/fixture.jsonl" --grant all ${builtin[@]+"${builtin[@]}"} >"$scratch/$id.granted.jsonl"; then
     fail "$id: msime-pack run --grant all 报告了失败（输出在 $scratch/$id.granted.jsonl）"
   fi
-  if ! "$pack_tool" run "$folder" --events "$dir/fixture.jsonl" >"$scratch/$id.ungranted.jsonl"; then
+  if ! "$pack_tool" run "$folder" --events "$dir/fixture.jsonl" ${builtin[@]+"${builtin[@]}"} >"$scratch/$id.ungranted.jsonl"; then
     fail "$id: 不授权的 msime-pack run 报告了失败（输出在 $scratch/$id.ungranted.jsonl）"
   fi
   if ! python3 plugins/script/tools/check_run.py "$dir" "$scratch/$id.granted.jsonl" "$scratch/$id.ungranted.jsonl" ${update[@]+"${update[@]}"}; then
     fail "$id: 输出和 expected.jsonl 不一致或超出 fuel 上限"
+  fi
+  if [ -f "$dir/check_output.py" ] && ! python3 "$dir/check_output.py" "$dir/fixture.jsonl" "$scratch/$id.granted.jsonl"; then
+    fail "$id: check_output.py 的核对没有通过"
   fi
 done
 

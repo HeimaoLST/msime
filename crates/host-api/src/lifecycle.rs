@@ -61,7 +61,7 @@ pub const KEY_PASSTHROUGH: u32 = 0x400;
 
 /// `msime_client_command` 的命令 19：宿主自己写入文本后丢弃组字。
 pub const COMMAND_CANCEL_AFTER_HOST_COMMIT: u32 = 19;
-/// `msime_client_command` 的命令 20：焦点即将离开或会话即将关闭，宿主替用户结束组字。对会话同 `MSIME_FINISH_COMPOSITION`，上屏来源记 `FocusLoss`。
+/// `msime_client_command` 的命令 20：焦点即将离开或会话即将关闭，宿主替用户结束组字。对会话同 `MSIME_FINISH_COMPOSITION`（高亮的是脚本插件行时原样上屏，见 `Action::FinishOnFocusLoss`），上屏来源记 `FocusLoss`。
 pub const COMMAND_FINISH_ON_FOCUS_LOSS: u32 = 20;
 
 /// 一次物理按下，来自 `msime_client_key`。
@@ -125,7 +125,7 @@ impl InputClass {
             Action::SegmentBackspace | Action::SegmentMoveLeft | Action::SegmentMoveRight => {
                 Self::Edit
             }
-            Action::Finish => Self::Commit,
+            Action::Finish | Action::FinishOnFocusLoss => Self::Commit,
             Action::Command(command) => match command {
                 Command::Backspace
                 | Command::DeleteForward
@@ -593,8 +593,13 @@ impl LifecycleState {
     }
 
     /// 记下脚本插件的位置：`root` 是 `<state root>/plugins`（宿主没给状态根目录时为 `None`，脚本不运行），健康文件写在 `user_data` 下。
-    pub(crate) fn bind_scripts(&mut self, root: Option<std::path::PathBuf>, user_data: &str) {
-        self.with_scripts(|scripts| scripts.bind(root, user_data));
+    pub(crate) fn bind_scripts(
+        &mut self,
+        root: Option<std::path::PathBuf>,
+        builtin_packs: Option<std::path::PathBuf>,
+        user_data: &str,
+    ) {
+        self.with_scripts(|scripts| scripts.bind(root, builtin_packs, user_data));
     }
 
     /// 把脚本集合挂到 runtime 上，作为它在派发类调用里的候选变换。
@@ -605,6 +610,14 @@ impl LifecycleState {
     /// `msime_client_focus(true)` 开始时：丢弃上一个字段的脚本实例，按戳重读授权。
     pub(crate) fn scripts_focus_in(&mut self) {
         self.with_scripts(ScriptSet::focus_in);
+    }
+
+    /// 要交给引擎的插件指令（按戳重读授权之后），见 `ScriptSet::plugin_commands`。移动端恒为空。脚本集合正借给别处时为 `None`，调用方保留引擎现有的那一份，而不是把它清空。
+    pub(crate) fn plugin_commands(&self) -> Option<Vec<msime_input_runtime::PluginCommand>> {
+        self.scripts
+            .try_borrow_mut()
+            .ok()
+            .map(|mut scripts| scripts.plugin_commands())
     }
 
     /// 测量和测试直接对着脚本集合投递。只有桌面上有这些测试。
@@ -618,6 +631,19 @@ impl LifecycleState {
     ))]
     pub(crate) fn scripts_mut(&mut self) -> std::cell::RefMut<'_, ScriptSet> {
         self.scripts.borrow_mut()
+    }
+
+    /// 测试在别处借着脚本集合时调用会话的方法，借用不能经过会话本身。只有桌面上有这些测试。
+    #[cfg(all(
+        test,
+        any(
+            target_os = "macos",
+            target_os = "windows",
+            all(target_os = "linux", not(target_env = "ohos"))
+        )
+    ))]
+    pub(crate) fn scripts_handle(&self) -> Rc<RefCell<ScriptSet>> {
+        self.scripts.clone()
     }
 
     /// 借脚本集合用一次。它只在会话线程上、一次调用之内被借；万一已经借着（runtime 的候选变换正在用）就跳过，不 panic。
@@ -1106,6 +1132,24 @@ impl crate::HostSession {
             }
         }
         result
+    }
+
+    /// 让引擎的插件指令跟上脚本授权：在聚焦时插件表刷新的最后、以及会话刚选择加入生命周期时调用。没有选择加入的会话（移动端宿主、设置应用、MCP）什么都不做，引擎的插件指令保持空表。授权读出来的表和 `options` 里记着的一样时什么都不交；换表失败只报告，不让聚焦失败（同 `refresh_plugin_tables`），照样记进 `options`，重建的引擎从这里开始。
+    pub(crate) fn refresh_plugin_commands(&mut self) {
+        let Some(commands) = self
+            .lifecycle
+            .as_deref()
+            .and_then(LifecycleState::plugin_commands)
+        else {
+            return;
+        };
+        if commands == self.options.plugin_commands {
+            return;
+        }
+        if let Err(error) = self.runtime.set_plugin_commands(&commands) {
+            crate::diagnostics::report("plugin commands view not refreshed", &error.to_string());
+        }
+        self.options.plugin_commands = commands;
     }
 
     /// `msime_client_focus(true)` 开始时，紧挨着插件表的刷新：丢弃上一个字段留下的脚本实例，按戳重读脚本授权。

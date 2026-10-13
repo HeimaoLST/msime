@@ -35,6 +35,8 @@ The speech recognition models are not part of this package; the settings page do
 
 The built-in sound packs in share/msime-client/sound-packs are this project's own work, synthesized by scripts/generate_sound_packs.py, and dedicated to the public domain under CC0-1.0 (the license field of each plugin.toml).
 
+The official plugin packs in share/msime-client/plugin-packs (the uuid script plugin and the latex-symbols phrase table, listed in plugins/official-packs.json of the source tree), when the package carries them, are this project's own work under the MIT License, not GPL-3.0; each pack carries that license as LICENSE.txt beside its plugin.toml. They are off until the user grants or enables them.
+
 Compiled into the native IBus engine, the provider programs and the Fcitx5 addon without a runtime package of their own:
 
 * nlohmann/json, header-only — MIT (nlohmann_json-MIT.txt).

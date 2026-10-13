@@ -4,6 +4,8 @@
 
 这个例子能编译、能通过校验、能在 `msime-pack run` 里看到它的改写和宿主给的结果。
 
+这个例子演示的是改写上屏（`rewrite_commit`）。要在自己的 `/` 指令里出候选（`provide_commands`、`command` 钩子、`command_text`、`command_row` 和随机数 `random_fill`），照着仓库里的 [plugins/script/uuid](../../plugins/script/uuid/) 写：它是插件指令的参考样板，随桌面安装包分发，目录结构、夹具和按 RFC 核对输出的脚本都在那里。
+
 ## 文件
 
 ```text

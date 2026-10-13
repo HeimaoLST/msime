@@ -200,7 +200,7 @@ if ! rg -q 'optBoolean\("paired_punctuation"' \
   echo "Android must honour the shared paired_punctuation preference on punctuation keys and in the symbol panel" >&2
   exit 1
 fi
-# 中英混输和候选带 emoji / 颜文字都是 Engine 已有的混输（共享偏好 mixed_input.english / minimum_prefix / emoji / kaomoji），Android 设置曾经没有开关（emoji / 颜文字见 #5667，中英混输和触发字母数见 #7081）。`MixedInputPreferences` 四个字段都必填，只写一个字段的对象会让整份偏好被拒绝，所以写之前要补齐。
+# 中英混输、候选带符号和候选带 emoji / 颜文字都是 Engine 的混输（共享偏好 mixed_input.english / minimum_prefix / symbols / emoji / kaomoji），Android 设置曾经没有开关（emoji / 颜文字见 #5667，中英混输和触发字母数见 #7081）。`MixedInputPreferences` 四个字段必填，只写一个字段的对象会让整份偏好被拒绝，所以写之前要补齐；`symbols` 是可选字段，缺省按开处理，不用补。
 expression_page="$repo_root/platforms/android/java/app/msime/android/home/ExpressionPage.java"
 for field in english minimum_prefix emoji kaomoji; do
   if ! rg -q "mixed\.has\(\"$field\"\)" "$expression_page"; then
@@ -211,8 +211,9 @@ done
 if ! rg -q 'mixedInput\(edit\)\.put\("english"' "$expression_page" \
   || ! rg -q 'mixedInput\(edit\)\.put\("minimum_prefix"' "$expression_page" \
   || ! rg -q 'mixedInput\(edit\)\.put\("emoji"' "$expression_page" \
-  || ! rg -q 'mixedInput\(edit\)\.put\("kaomoji"' "$expression_page"; then
-  echo "Android expression page must offer the shared mixed English, minimum prefix, emoji and kaomoji candidate settings" >&2
+  || ! rg -q 'mixedInput\(edit\)\.put\("kaomoji"' "$expression_page" \
+  || ! rg -q 'mixedInput\(edit\)\.put\("symbols"' "$expression_page"; then
+  echo "Android expression page must offer the shared mixed English, minimum prefix, symbol, emoji and kaomoji candidate settings" >&2
   exit 1
 fi
 # The fullwidth state belongs to the runtime, not to a private SharedPreferences file: the Engine
@@ -825,6 +826,13 @@ if ! sed -n '/private void startEngineSession(String optionsText, String livePre
   || ! rg -q '"handwriting_theme", "touch_toolbar"\}' "$account_service" \
   || ! rg -q 'live \|\| rememberedToolbar == null' "$account_service"; then
   echo "Android toolbar must not start each editor from the factory-default preference copy" >&2
+  exit 1
+fi
+# 输入框切换会让旧的启动任务失效；旧任务不能继续占住单线程偏好工作队列，否则新的会话会一直显示「共享运行时准备中」（#7728）。
+startup_body=$(sed -n '/private void scheduleEngineStartup(String options, long generation)/,/^    }$/p' "$account_service")
+if ! rg -q 'private volatile long engineStartGeneration;' "$account_service" \
+  || [[ "$(printf '%s\n' "$startup_body" | rg -c 'if \(generation != engineStartGeneration\) return;')" -lt 3 ]]; then
+  echo "Android engine startup must abandon stale generations before and after background work (#7728)" >&2
   exit 1
 fi
 # 候选条的配色和字号同理（#5933）：副本是出厂的薄荷设计，按它重算会让每个新输入框的候选条先铺一层薄荷底、字号回到出厂的 18/15，实时偏好到了才换回来。只有实时偏好重算候选条外观，冷启动的第一帧按皮肤片段算，片段里要记着候选条用到的字段；按片段着色之前要先读本地设置，否则应用主题种子按默认值缓存。

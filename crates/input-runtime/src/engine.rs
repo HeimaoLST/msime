@@ -54,6 +54,26 @@ pub trait InputEngine {
     ) -> bool {
         false
     }
+    /// 脚本插件在 `/` 模式里的指令；没有 `/` 模式的引擎忽略它。
+    fn set_plugin_commands(&mut self, _commands: &[PluginCommand]) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+    /// 插件指令要宿主去问的那一次；没有 `/` 模式的引擎永远没有。
+    fn plugin_command_query(&self) -> Option<PluginCommandQuery> {
+        None
+    }
+    /// 生效的插件指令里 `trigger` 的标题；没有 `/` 模式的引擎永远没有。
+    fn plugin_command_title(&self, _trigger: &str) -> Option<&str> {
+        None
+    }
+    /// 把插件给的行（文本，插件注释）放到 `/` 列表前面；过期的查询返回 false。没有 `/` 模式的引擎一律拒绝。
+    fn apply_plugin_command_rows(
+        &mut self,
+        _query: &PluginCommandQuery,
+        _rows: &[(String, String)],
+    ) -> bool {
+        false
+    }
     fn reset_cache(&mut self) -> Result<(), RuntimeError> {
         Err(RuntimeError::Engine(
             "Engine cache reset is unsupported".into(),
@@ -270,6 +290,23 @@ impl InputEngine for Session {
         translation: &str,
     ) -> bool {
         Session::apply_command_translation(self, query, translation)
+    }
+    fn set_plugin_commands(&mut self, commands: &[PluginCommand]) -> Result<(), RuntimeError> {
+        Session::set_plugin_commands(self, commands)
+            .map_err(|error| RuntimeError::Engine(error.to_string()))
+    }
+    fn plugin_command_query(&self) -> Option<PluginCommandQuery> {
+        Session::plugin_command_query(self)
+    }
+    fn plugin_command_title(&self, trigger: &str) -> Option<&str> {
+        Session::plugin_command_title(self, trigger)
+    }
+    fn apply_plugin_command_rows(
+        &mut self,
+        query: &PluginCommandQuery,
+        rows: &[(String, String)],
+    ) -> bool {
+        Session::apply_plugin_command_rows(self, query, rows)
     }
     fn reset_cache(&mut self) -> Result<(), RuntimeError> {
         Session::reset_cache(self);

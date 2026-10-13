@@ -933,6 +933,15 @@ endif()
 # The built-in sound packs, synthesized by scripts/generate_sound_packs.py and dedicated to the public domain, beside the resource directory rather than in it: that directory has to hold exactly what the dictionary lock pins. The hosts and the settings window name this directory to client-core as the built-in pack root.
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/sound-packs/"
         DESTINATION "${CMAKE_INSTALL_DATADIR}/${MSIME_CLIENT_DIRECTORY}/sound-packs")
+# 随桌面安装包分发的官方插件包（plugins/official-packs.json 登记的脚本插件和短语表），由 scripts/build-official-plugins.sh 构建到 target/plugin-packs，装在内置音效包旁边：IBus 和 Fcitx5 只传 sound_packs，host-api 和设置窗口从那里推出 plugin-packs。选项给了才装：发布页的 deb、rpm 由 package-container.sh 传它；从源码构建的发行版定义（Arch、Gentoo、nix、OBS）不跑 wasm 构建，不带官方包。
+set(MSIME_PLUGIN_PACKS "" CACHE PATH "Official plugin packs built by scripts/build-official-plugins.sh, e.g. target/plugin-packs")
+if(MSIME_PLUGIN_PACKS)
+  if(NOT EXISTS "${MSIME_PLUGIN_PACKS}/script" OR NOT EXISTS "${MSIME_PLUGIN_PACKS}/phrase_table")
+    message(FATAL_ERROR "MSIME_PLUGIN_PACKS holds no official plugin packs: ${MSIME_PLUGIN_PACKS}")
+  endif()
+  install(DIRECTORY "${MSIME_PLUGIN_PACKS}/"
+          DESTINATION "${CMAKE_INSTALL_DATADIR}/${MSIME_CLIENT_DIRECTORY}/plugin-packs")
+endif()
 # 桌面入口的 Icon=msime-linux、Fcitx5 输入法条目的 Icon 和 IBus 组件的 <icon> 都按名字
 # 解析，所以这些文件决定了托盘、输入法列表和启动器上显示的是 logo 还是占位图。它们此前
 # 装在桌面二进制那个分支里，于是只装输入法、不装设置窗口的安装一张图标都没有，而那恰恰

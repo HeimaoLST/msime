@@ -34,12 +34,17 @@ Status: implemented
 
 动作只暂存在本次调用的上下文里，钩子正常返回（非负）时才交给宿主（`ScriptInstance::actions()`），trap、fuel 耗尽或返回负数时全部丢弃；每次投递开始时清空。约定写在 `abi::modification`：
 
-- `rewrite_commit(src, len)`：只在 `before_commit` 里、`REWRITABLE == 1` 时可用，否则 `DENIED`；需要授予 `rewrite_commit`。区间越界 trap；超过 4096 字节或 `max(4 × 原 body 的 UTF-16 码元, 256)` 返回 `LIMIT`；不是 UTF-8、为空、含 Cc、Cf、U+2028 或 U+2029 返回 `INVALID`；再调一次覆盖。"原 body"指改写之前的原文：多个插件依次改写时，宿主在事件里带上原文的码元数（`CommitTexts::original_body_utf16`，插件读不到），后面的插件拿到的 body 已经被改过，上限仍按原文算，`LIMIT` 和宿主采不采用的判断一致。
+- `rewrite_commit(src, len)`：只在 `before_commit` 里、`REWRITABLE == 1` 时可用，否则 `DENIED`；需要授予 `rewrite_commit`。区间越界 trap；超过 4096 字节或 `max(4 × 原 body 的 UTF-16 码元, 256)` 返回 `LIMIT`；不是 UTF-8、为空、含 `abi::is_forbidden_plugin_char` 拦下的字符（见下）返回 `INVALID`；再调一次覆盖。"原 body"指改写之前的原文：多个插件依次改写时，宿主在事件里带上原文的码元数（`CommitTexts::original_body_utf16`，插件读不到），后面的插件拿到的 body 已经被改过，上限仍按原文算，`LIMIT` 和宿主采不采用的判断一致。
 - `candidates_order(src, count)`、`candidates_hide(src, count)`：只在 `candidates` 里可用。`count` 个小端 u32 窗口行号，越界、重复或多于窗口行数返回 `INVALID`。`order` 覆盖上一次，`hide` 取并集。锁定座位和引擎下标 0 由 runtime 静默忽略，返回值照样是 0。
-- `candidates_annotate(index, src, len)`：只在 `candidates` 里可用，≤ 32 个 UTF-16 码元（超出 `LIMIT`），不含 Cc、Cf、U+2028 和 U+2029（否则 `INVALID`），空串表示不加，同一行再调覆盖。
+- `candidates_annotate(index, src, len)`：只在 `candidates` 里可用，≤ 32 个 UTF-16 码元（超出 `LIMIT`），不含 `abi::is_forbidden_plugin_char` 拦下的字符（否则 `INVALID`），空串表示不加，同一行再调覆盖。
 - 本地模式不在白名单里时窗口按屏蔽处理（`ABSENT`），三种候选修改都做不了。
 
-Cc 用 `char::is_control`，Cf 是按 Unicode 15.1 写死的码位表，再加上行分隔符 U+2028 和段分隔符 U+2029（`abi::is_forbidden_plugin_char`），只给插件用，不改 client-core 的 `text` 模块。U+2028、U+2029 不是 Cc，却和换行一样断行，macOS 宿主就拿 U+2028 当释义的换行（`InputController.mm` 的 `MSIMEGlossLineSeparator`）；只拦 `\n` 不拦它们，插件照样能往上屏里塞换行。
+`abi::is_forbidden_plugin_char` 拦这几类，只给插件用，不改 client-core 的 `text` 模块：
+
+- Cc（`char::is_control`）和 Cf（按 Unicode 15.1 写死的码位表）。
+- 行分隔符 U+2028 和段分隔符 U+2029。它们不是 Cc，却和换行一样断行，macOS 宿主就拿 U+2028 当释义的换行（`InputController.mm` 的 `MSIMEGlossLineSeparator`）；只拦 `\n` 不拦它们，插件照样能往上屏里塞换行。
+- 不是 Cf、却看不见或只改前一个字字形的字符：U+034F（组合用字形连接符）、U+115F、U+1160、U+3164、U+FFA0（韩文填充符）、U+17B4、U+17B5（高棉文固有元音）、U+180B–U+180D、U+180F（蒙古文自由变体选择符）、U+2800（盲文空白）、U+FE00–U+FE0D（VS1–VS14）、U+E0100–U+E01EF（表意文字变体选择符）。它们能让一段看起来一样的文本在字节上不同，或者让一行看起来是空的；插件在 `/` 指令里给的行（见 [插件在自己的 `/` 指令里出候选](2026-10-13-script-plugin-command-rows.md)）也要过这一关。
+- U+FE0E、U+FE0F（VS15、VS16）放行。这里是逐字符的判断，分不出它是不是跟在 emoji 后面，而 emoji 注释离不开 VS16（❤️ 是 U+2764 加 VS16）；单独出现的 VS15、VS16 不改变字义。
 
 ### 宿主一侧（host-api）
 
@@ -51,7 +56,7 @@ Cc 用 `char::is_control`，Cf 是按 Unicode 15.1 写死的码位表，再加�
 
 每次 `before_commit` 都在复位到 `msime_init` 之后快照的新实例上运行（见 [沙箱运行时](2026-10-12-script-runtime-sandbox.md)），只改 body：`DispatchFacts::split_commit` 按字符数从末尾切出 tail，改写后的 body 接上原来的 tail 写回 `transition.commit`。多个插件按授权顺序依次改写，后面的插件读到的 body 和 COMMIT 是前面改写过的；每次改写的长度上限都按原 body 算，超出的那一次不采用。`commit` 事件带改写后的字符数和 `rewritten`，观察类插件读到的是改写后的文本；`candidate_selected` 的选中文本仍是原文。runtime 在 `dispatch` 里已经按原文调过 `remember_commit`（AI 上文和引擎的上文），改写不回灌引擎学习。插件 trap、fuel 耗尽、返回负数或结果不合规时上屏用原文。
 
-**`before_commit` 的 fuel 单独记。** 每个插件每轮给 `before_commit` 另一份 100 000 的配额，不从其余钩子每轮 125 000 的配额里扣，也不让它们扣；宿主在同一轮里重建实例时两份剩余都交回去（`resume_turn`）。共用一份时，持久实例在同一轮里先收到 `input`、`candidate_selected`、`candidates`，它按之前攒下的状态烧掉多少 fuel，就决定了快照上的改写会不会因为 fuel 耗尽被丢掉，改写结果不再只是本次 body 的函数。分开之后 `before_commit` 能用多少只取决于同一轮里之前的 `before_commit`，它们同样只看得到各自的上屏文本。被这一份截断时和其余钩子同一条规则：这一次用掉不少于 50 000（单次上限的一半）算 fuel 耗尽的失败，计入熔断，持久实例照用；不到一半是 `TurnExhausted`。
+**`before_commit` 的 fuel 单独记。** 每个插件每轮给 `before_commit` 另一份 100 000 的配额，不从其余钩子每轮 125 000 的配额里扣，也不让它们扣；宿主在同一轮里重建实例时各份剩余都交回去（`resume_turn`，`command` 另有一份，见 [插件指令的行](2026-10-13-script-plugin-command-rows.md)）。共用一份时，持久实例在同一轮里先收到 `input`、`candidate_selected`、`candidates`，它按之前攒下的状态烧掉多少 fuel，就决定了快照上的改写会不会因为 fuel 耗尽被丢掉，改写结果不再只是本次 body 的函数。分开之后 `before_commit` 能用多少只取决于同一轮里之前的 `before_commit`，它们同样只看得到各自的上屏文本。被这一份截断时和其余钩子同一条规则：这一次用掉不少于 50 000（单次上限的一半）算 fuel 耗尽的失败，计入熔断，持久实例照用；不到一半是 `TurnExhausted`。
 
 ### Linux 宿主怎么画插件注释（IBus、Fcitx5）
 
@@ -60,7 +65,7 @@ Cc 用 `char::is_control`，Cf 是按 Unicode 15.1 写死的码位表，再加�
 - **IBus**：追加在 `render` 拼好的行文本末尾，皮肤给了序号颜色时用这一行序号的颜色（高亮行用高亮序号色）给它自己的区间加一条前景属性，追加在行颜色之后所以盖过它；没给时不加颜色，只靠括号。
 - **Fcitx5**：`candidateRowText` 在译文之后 `append` 一段，只标 `DontCommit`（和训音一样只供显示，斜体留给训音和 AI 占位行）。选中用的 `FcitxCandidate::text()` 仍是引擎文本。
 
-宿主在画之前再查一遍：合法 UTF-8、不超过 32 个 UTF-16 码元、不含 Cc、行和段分隔符、双向控制符（U+061C、U+200E、U+200F、U+202A–U+202E、U+2066–U+2069）、零宽字符和 BOM，不合规就整条不画、不截断。runtime 已经按完整的 Cf 表拦过（`abi::is_forbidden_plugin_char`），这一道只防契约走样时插件文本把候选行折断或把整行的方向翻过来；它只拦影响排版的那几类，不复制 Cf 表。
+宿主在画之前再查一遍：合法 UTF-8、不超过 32 个 UTF-16 码元、不含 Cc、行和段分隔符、双向控制符（U+061C、U+200E、U+200F、U+202A–U+202E、U+2066–U+2069）、零宽字符和 BOM，不合规就整条不画、不截断。runtime 已经按完整的 Cf 表拦过（`abi::is_forbidden_plugin_char`），这一道只防契约走样时插件文本把候选行折断或把整行的方向翻过来；它只拦影响排版的那几类，不复制 Cf 表，也不跟着 runtime 追加上面那批填充符和变体选择符：宿主这一道的职责是契约走样时防断行和方向翻转，那批字符既不断行也不改方向，runtime 是插件文本的唯一权威，两边各维护一份只会漂移。macOS 的 `CandidateChrome.h` 同理。
 
 ### dev 构建里 wasmi 关掉 debug-assertions
 
@@ -77,7 +82,7 @@ Cc 用 `char::is_control`，Cf 是按 Unicode 15.1 写死的码位表，再加�
 ## Testing
 
 - `crates/input-runtime/src/tests/candidate_transform.rs`（桌面 cfg）用记下引擎下标的测试引擎和按预设交回操作的变换：重排、隐藏后 7 个平行数组和 `engine_order` 一起动，视图、分页和 `all_candidates` 只有可见行；用 `Select` 和数字选第 k 行，上屏和引擎收到的下标都是显示的第 k 行，被隐藏的座位的 ID 报 `StaleCandidate`；只剩引擎下标 0 可见时，结束组字、空格、两条标点路由、数字、移动高亮或翻页之后再选、以词定字都只交给引擎下标 0；引擎下标 0 隐藏不了但能挪动；固定位置的词、云和 AI 行不动；五笔唯一码的 0 号座位锁住、第四键自动上屏的是引擎首位；五笔顶字取显示的首行；多插件按授权顺序合成、第二次派发看到的仍是原始窗口和引擎注释；整句改字、打开的候选列表、平行数组不等长时不调用变换；`rerank_settled`（带一个偏向某字的测试模型）、`refresh_online_candidates`（所有 `apply_online_*` 的刷新）、`all_candidates` 的展开、`set_caret`、`apply_translations` 都不调用变换，只重放；派发里的展开会再调用一次，展开时插件多藏了几行、翻页又让高亮原地不动时，空格、结束组字和标点仍只交给可见的行；只改注释也推进 epoch；组字结束后记录清空；暂停时派发不调用变换、旁路调用不重放，恢复后下一次派发重新调用。
-- `crates/script-runtime/src/tests.rs`：改写只在可改写的 `before_commit` 里、授予了能力时可用；换行、U+202E、U+200B、U+2028、U+2029、空串、非 UTF-8 被拒，256 个码元的上限和 4096 字节的上限，前一个插件缩短或放大了 body 时上限仍按原文算；持久实例把这一轮的配额烧到连一次 `input` 都放不下之后，`before_commit` 仍能用掉比剩余更多的 fuel、不扣其余钩子的配额，新一轮两份都补满；返回负数、trap、越界之后不交出动作，下一次观察类投递清掉上一次的动作；三种候选修改的暂存结果、坏行号、重复、超长和带 Cf 或 U+2028 的注释、错的钩子、没授权、本地模式屏蔽；Cc、Cf 和行、段分隔符的判定；同一轮里 `input` 先花过 fuel 之后 `candidates` 死循环被轮配额截断，算 fuel 耗尽的失败；原生栈。
+- `crates/script-runtime/src/tests.rs`：改写只在可改写的 `before_commit` 里、授予了能力时可用；换行、U+202E、U+200B、U+2028、U+2029、空串、非 UTF-8 被拒，256 个码元的上限和 4096 字节的上限，前一个插件缩短或放大了 body 时上限仍按原文算；持久实例把这一轮的配额烧到连一次 `input` 都放不下之后，`before_commit` 仍能用掉比剩余更多的 fuel、不扣其余钩子的配额，新一轮两份都补满；返回负数、trap、越界之后不交出动作，下一次观察类投递清掉上一次的动作；三种候选修改的暂存结果、坏行号、重复、超长和带 Cf 或 U+2028 的注释、错的钩子、没授权、本地模式屏蔽；Cc、Cf 和行、段分隔符的判定；不是 Cf 的填充符和变体选择符逐个经 `rewrite_commit` 和 `candidates_annotate` 得到 `INVALID`，跟在 emoji 后面的 VS16 两条路都放行，VS15、VS16 和各个范围两端之外的码位不算禁用；同一轮里 `input` 先花过 fuel 之后 `candidates` 死循环被轮配额截断，算 fuel 耗尽的失败；原生栈。
 - `crates/host-api/src/tests/script_plugins.rs`：`input` 之后 `candidates` 死循环的插件每次聚焦失败一次，第 3 次被熔断停用（`out_of_fuel`）；两个插件依次改写、tail 原样接回、`commit` 观察者读到改写后的文本；第一个插件把 2 个码元的原文放大到 256 个，第二个插件的 600 个字母拿到 `LIMIT`，上屏停在第一个插件的结果；trap、返回负数、fuel 耗尽、改写成 `\n` 或 U+202E 都上屏原文；Windows 式在派发前后切换 `COMMIT_OBSERVE_ONLY` 时空格选词和回车原样上屏都只能看（`REWRITABLE == 0`，改写 `DENIED`），清掉后同样两条路径能改写，以词定字永远不能；设着 `HOST_HOLDS_PIECES` 时部分选词的那一段和补齐它的那一段都只能看，组字结束后的下一个整词照样能改写，不设时部分选词能改写；`tests/lifecycle_traces.rs` 的 `a_piece_the_host_holds_sounds_only_when_the_whole_phrase_goes_out` 经 C ABI（`FEEDBACK | HOST_HOLDS_PIECES`）选部分词：这一段没有上屏音、`feedback.typing_effect` 为 0，补齐整个词的那次出一次上屏音；Windows 式每次派发前后切换 `COMMIT_OBSERVE_ONLY` 时插件一次都不运行、数字选的是引擎顺序的首行，设着它时云候选到达也不重放之前的对调；SECURE、PRIVATE、ELEVATED 和未知字段不改写也不投递；经 C ABI 重排之后空格上屏显示的首行，`script_annotation` 跟着行走，读窗口的插件读不到别的插件的注释和顺序；隐藏的行不出现在视图里、数字选不到、引擎下标 0 隐藏不了；`apply_online_candidates` 和 `rerank_settled` 不运行脚本、重排按身份重放；本地模式不在白名单里时一个插件都不运行。
 - Linux 宿主：`platforms/linux/tests/candidate/candidate_script_annotation.cpp`（`linux-candidate-script-annotation`）测共用的读取和检查：只读 `script_annotation`、占位行不画、32 个 UTF-16 码元的上限（含辅助平面字符）、折行和改方向的字符、坏 UTF-8 都整条不画、行尾那一段的格式；`platforms/linux/fcitx5/tests/native.cpp` 的 `scriptAnnotationRow` 用真实的 `FcitxCandidate` 查 Fcitx5 的行：辅助码设置关着也画、是单独一段 `DontCommit`、引擎注释和译文都在、韩文汉字行训音之后再画、选中的文本不变，它和纠错标记、训音两个行用例一起以 `fcitx5-native-test --rows`（`fcitx5-candidate-rows`）注册在构建门禁里，之前它们只在有已验证词库的验收运行里跑；IBus 的 `render` 离不开 IBus 对象，由 `tests/core/fcitx5_contract.py` 按源码检查它经同一个头文件读、追加在引擎注释之后、不经 `traditional_display`、用序号颜色只画自己的区间。
 
@@ -104,7 +109,7 @@ Cc 用 `char::is_control`，Cf 是按 Unicode 15.1 写死的码位表，再加�
 - 代价：声明了 `before_commit` 的插件每次派发类上屏都要重新实例化一次，不可改写时也一样；候选变换每次派发多一次窗口构造和按身份的线性查找（最多 20 行）；dev 构建里 wasmi 自己的 debug 断言不再运行。
 - `script_annotation` 由各宿主自己画，三个桌面平台都已接上：macOS 把它画在释义行的最后一行（斜体，见 [macOS 候选窗把脚本插件的注释画在释义行的最后一行](../feature/2026-10-12-macos-script-annotations.md)）；Linux 的 IBus 和 Fcitx5 在行尾画（见上面的 Linux 一节）；Windows 的 Server 候选窗接在引擎注释后面、换成次要色，不经 TIP 的管道（见 [Windows 候选窗](../feature/2026-10-10-windows-candidate-window-mac-parity.md)）。Linux 上插件注释让候选行变宽，横排时一页更容易超出屏幕；从右到左的注释没有做双向隔离；IBus 面板是否认区间前景属性由面板决定，没在真实的 GNOME Shell、KDE 和 ibus-ui-gtk3 面板上看过。
 - `candidates_shown` 能看到别的插件造成的顺序和隐藏，构成插件之间约 1 bit 量级的顺序通道；文本（注释）不经这里传递。
-- Cf 表按 Unicode 15.1 写死，之后版本新增的格式字符不在表里；ZWJ（U+200D）和标签字符是 Cf，含它们的 emoji 组合序列和旗帜不能出现在改写结果和注释里。
+- Cf 表按 Unicode 15.1 写死，之后版本新增的格式字符不在表里；ZWJ（U+200D）和标签字符是 Cf，含它们的 emoji 组合序列和旗帜不能出现在改写结果和注释里。表意文字变体选择符也拦下之后，改写类插件不能再输出带异体选择符的汉字（例如 葛 加 U+E0100）；仓库里的插件都不输出它。不用工作区已有的 `unicode-general-category` 按类别判断，是因为它对 script-runtime 是一条新的依赖边，要另外批准；批准之后 Cf 表和 Mn 类的变体选择符都可以改成按类别查。
 - 改写不回灌引擎学习和 AI 上文，这一点由调用顺序保证（runtime 在 `dispatch` 里按原文记下，host-api 之后才改写），没有单独的测试；宿主之后照常做繁体转换和统计，作者文档要写明。
 - Windows Server 在派发前后切换 `COMMIT_OBSERVE_ONLY` 是第 2b 阶段的宿主改动，这里只验证了核心按位行事；整句改字时的空格和回车走同一个位，没有单独构造整句改字的会话。
 - 一个插件一轮最多用 225 000 fuel（其余钩子 125 000 加 `before_commit` 100 000），8 个插件合计 1 800 000，比设计 §4.4 的每轮合计 1 000 000 多；只有同时声明了 `before_commit` 并且每个钩子都烧满的插件才到这个数，按 wall-clock 的熔断照样管它。

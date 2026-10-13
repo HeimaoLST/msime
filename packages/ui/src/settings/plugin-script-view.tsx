@@ -13,7 +13,9 @@ import { ActionButton } from "./action-button";
 import { pluginErrorMessage } from "./plugin-catalog-helpers";
 import type {
   PluginPackage,
+  PluginSettingsPage,
   ScriptCapability,
+  ScriptCommand,
   ScriptGrant,
   ScriptGrantsResult,
   ScriptHealth,
@@ -28,6 +30,7 @@ export const SCRIPT_CAPABILITIES: readonly ScriptCapability[] = [
   "rerank_candidates",
   "annotate_candidates",
   "filter_candidates",
+  "provide_commands",
 ];
 
 /** 授予一项之前必须一起授予的能力：`Capability::requires`。 */
@@ -74,6 +77,12 @@ export const capabilityLabels: Record<ScriptCapability, { title: string; descrip
     title: "隐藏候选",
     description: "能把某些候选移到末尾并隐藏起来。",
   },
+  // 授权文案和 Windows 原生页（`PluginPageModel.h` 的 `capability_label`）、`docs/plugins.md` 一字不差。回车在 `/` 指令里各桌面宿主都发 `MSIME_COMMIT_RAW`，上屏的是原文；失焦时 macOS 上屏原文，Windows 和 Linux 丢弃组字，都不上屏插件行。快捷键各宿主不一致：macOS 的 Cmd、Ctrl、Option 组合键和候选窗不可见时的 Tab、Fcitx5 没被前面处理的非字符键发 `MSIME_FINISH_COMPOSITION`，上屏高亮行，Windows Server 的 `translate_key` 对组合键发 `MSIME_CANCEL`，所以写「在有的系统上」。
+  provide_commands: {
+    title: "提供 / 指令",
+    description:
+      "你在 / 指令里输入它声明的触发词（例如 /uuid）之后打的字母会交给这个插件，它据此给出候选；给出的候选只取决于这些字母和随机数，带不走你之前打过的内容。你按序号、点选、按空格选中某一行，或者打标点结束输入时，高亮的那一行会输入；在有的系统上，按快捷键或 Tab 等键、用菜单或工具栏结束输入时也会输入这一行。按回车时只输入你打的原文（例如 /uuid），点到别的窗口时插件给出的行不会输入。它看不到你平时打的字、其他指令和别的插件的内容；它给出的文字不进入词库、不计入打字统计、不会作为上文发给 AI 候选，也不会拿去查释义或翻译。",
+  },
 };
 
 /** 清单里钩子的白话名字：插件在什么时候运行。不认识的名字原样显示。 */
@@ -91,6 +100,7 @@ export const hookLabels: Record<string, string> = {
   candidates_shown: "候选窗口出现时",
   candidates_hidden: "候选窗口消失时",
   candidates: "生成候选时（可以调整候选）",
+  command: "你在 / 指令里输入它的触发词时（给出候选）",
 };
 
 /** 输入法停用一个插件的原因：`script-health.json` 的四个类别。 */
@@ -204,7 +214,7 @@ export function scriptMarker(
     case "ungranted":
       return "未授权";
     case "stale":
-      return "已更新，需要重新授权";
+      return scriptStaleLabel(pack);
     case "disabled":
       return "未启用";
     case "enabled": {
@@ -212,6 +222,51 @@ export function scriptMarker(
       const position = running.indexOf(pack.id);
       return position < 0 ? "已启用 · 超过 8 个，不运行" : `已启用 · 第 ${position + 1} 位`;
     }
+  }
+}
+
+/** 脚本插件在 `/` 指令里声明的指令（清单 `[[script.commands]]`），按清单顺序；不提供指令的插件为空。 */
+export function scriptCommands(pack: PluginPackage): ScriptCommand[] {
+  return pack.kind === "script" ? ((pack.commands ?? []) as ScriptCommand[]) : [];
+}
+
+/** 随输入法分发的官方脚本插件（`builtin` 为真）详情里「来源」一行：它不能删除，和导入的插件一样默认不运行。Windows 原生设置应用（`PluginPageModel.h`）用同一句。 */
+export const SCRIPT_BUILTIN_NOTE = "随输入法安装和更新，不能删除；需要你授权后才会运行。";
+
+/** 授权之后包的内容变了时的标记。内置插件的内容只会随输入法更新而变，说法跟着改。 */
+export function scriptStaleLabel(pack: Pick<PluginPackage, "builtin">): string {
+  return pack.builtin ? "已随输入法更新，需要重新授权" : "已更新，需要重新授权";
+}
+
+/** / 指令关着时，提供指令的插件详情里的说明，后面跟着「打开 / 指令」按钮。授权本身从不改这个开关。 */
+export const SCRIPT_COMMAND_MODE_NOTE =
+  "需要先打开 / 指令，并使用中文标点；在全拼、双拼、五笔下没有输入时按 / 再输入触发词。";
+
+/**
+ * 一条插件指令现在的状态，白话：没启用或没授予「提供 / 指令」时说要怎样才生效；输入法停用了插件时照实说；否则按宿主算出的状态（`ScriptGrantsResult.commands`）说生效，或者和谁冲突、没生效。`nameOf` 把冲突的插件 id 换成它的名字。
+ */
+export function scriptCommandStatus(
+  pack: PluginPackage,
+  trigger: string,
+  grants: ScriptGrantsResult | null,
+  nameOf: (id: string) => string = (id) => id,
+): string {
+  const grant = grants?.plugins.find((entry) => entry.id === pack.id);
+  if (scriptGrantState(pack, grant) !== "enabled") return "授权并启用后生效";
+  if (!grant?.granted.includes("provide_commands")) return "没有授予「提供 / 指令」，不会生效";
+  if (scriptHealth(grants, pack)) return "插件已被输入法停用，不会给出候选";
+  const resolved = grants?.commands.find(
+    (entry) => entry.id === pack.id && entry.trigger === trigger,
+  );
+  switch (resolved?.status) {
+    case "active":
+      return "生效";
+    case "shadowed_by_user_table":
+      return `与你的指令 /${resolved.conflict} 冲突，未生效`;
+    case "shadowed_by_plugin":
+      return `与插件 ${nameOf(resolved.conflict_id)} 的 /${resolved.conflict} 冲突，未生效`;
+    case undefined:
+      return "未生效";
   }
 }
 
@@ -236,6 +291,8 @@ export interface ScriptGrantDialogProps {
   /** 授权过、但插件的内容已经变了。 */
   stale: boolean;
   platform?: string;
+  /** 插件指令现在的状态（`scriptCommandStatus`）；调整授权时由详情页给，新授权时没有。 */
+  commandStatus?: (trigger: string) => string;
   /** 写入授权并启用；失败时抛出宿主的 `{code, detail}`，对话框留着并说明原因。 */
   onConfirm: (granted: ScriptCapability[]) => Promise<void>;
   onCancel: () => void;
@@ -247,10 +304,12 @@ export function ScriptGrantDialog({
   initial,
   stale,
   platform,
+  commandStatus,
   onConfirm,
   onCancel,
 }: ScriptGrantDialogProps) {
   const requested = sortCapabilities(pack.permissions ?? []);
+  const commands = scriptCommands(pack);
   const [granted, setGranted] = useState<ScriptCapability[]>(() =>
     sortCapabilities(initial.filter((item) => requested.includes(item))),
   );
@@ -322,12 +381,25 @@ export function ScriptGrantDialog({
         </h2>
         {stale && (
           <p className={dialogStyle.warning} role="status">
-            已更新，需要重新授权：这个插件的内容和你上次授权时不同，之前的授权已经作废。
+            {scriptStaleLabel(pack)}：这个插件的内容和你上次授权时不同，之前的授权已经作废。
           </p>
         )}
         <p className="m-0 leading-relaxed text-secondary">
           脚本插件是第三方代码，会在输入法里运行。只勾选你愿意让它做的事；没有勾选的，它一律做不到。在密码框和隐私输入框里它不会运行。
         </p>
+        {commands.length > 0 && (
+          <div className="flex flex-col gap-1">
+            <p className="m-0 leading-relaxed text-secondary">它在 / 指令里提供：</p>
+            <ul className="m-0 pl-5 leading-relaxed text-secondary" aria-label="它提供的 / 指令">
+              {commands.map((command) => (
+                <li key={command.trigger}>
+                  /{command.trigger} {command.title}
+                  {commandStatus ? `：${commandStatus(command.trigger)}` : ""}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {requested.length > 0 ? (
           <Checks
             legend="允许这个插件"
@@ -379,6 +451,13 @@ export interface ScriptPluginDetailViewProps {
   running: readonly string[];
   platform?: string;
   working: boolean;
+  /** / 指令是否打开（`local_modes.command`）；提供指令的插件在它关着时说明并给出「打开 / 指令」按钮。 */
+  commandMode?: boolean;
+  /** 打开「输入 → 快捷模式」里的 / 指令，留在当前页面；没有时改为「前往输入设置」（`onOpenPage`）。 */
+  onLocalMode?: (mode: "command" | "mention") => void;
+  onOpenPage?: (page: PluginSettingsPage) => void;
+  /** 冲突说明里把另一个插件的 id 换成名字。 */
+  nameOf?: (id: string) => string;
   /** 写入授权并启用；失败时抛出，由授权对话框说明原因。 */
   onGrant: (granted: ScriptCapability[]) => Promise<void>;
   /** 停用并撤销全部授权。 */
@@ -396,12 +475,18 @@ export function ScriptPluginDetailView({
   running,
   platform,
   working,
+  commandMode = false,
+  onLocalMode,
+  onOpenPage,
+  nameOf,
   onGrant,
   onRevoke,
   onMove,
   onRemove,
   onBack,
 }: ScriptPluginDetailViewProps) {
+  const commands = scriptCommands(pack);
+  const commandStatus = (trigger: string) => scriptCommandStatus(pack, trigger, grants, nameOf);
   const [dialog, setDialog] = useState(false);
   // 打开对话框的那个控件（启用开关或「调整授权」），对话框关掉后焦点回到它。
   const opener = useRef<HTMLElement | null>(null);
@@ -415,7 +500,7 @@ export function ScriptPluginDetailView({
   const risk = scriptResidualRisk(platform);
   const stateText: Record<ScriptGrantState, string> = {
     ungranted: "还没有授权，不会运行。",
-    stale: "已更新，需要重新授权：插件的内容和授权时不同，之前的授权已经作废，不会运行。",
+    stale: `${scriptStaleLabel(pack)}：插件的内容和授权时不同，之前的授权已经作废，不会运行。`,
     enabled: "已启用。",
     disabled: "已停用，不会运行。",
   };
@@ -433,6 +518,11 @@ export function ScriptPluginDetailView({
     <>
       <PluginViewHeader title={pack.name} onBack={onBack} />
       <PluginInfoGroup pack={pack} kindLabel="脚本插件（实验）">
+        {pack.builtin && (
+          <SummaryRow title="来源" breakAnywhere>
+            {SCRIPT_BUILTIN_NOTE}
+          </SummaryRow>
+        )}
         <SummaryRow
           title="内容指纹"
           description="插件内容的哈希前 12 位；内容一变，指纹就变，之前的授权随之作废。"
@@ -462,6 +552,35 @@ export function ScriptPluginDetailView({
           ))
         )}
       </GroupList>
+      {commands.length > 0 && (
+        <GroupList title="提供的 / 指令">
+          {commands.map((command) => (
+            <SummaryRow
+              key={command.trigger}
+              title={`/${command.trigger}`}
+              description={command.title}
+            >
+              {commandStatus(command.trigger)}
+            </SummaryRow>
+          ))}
+          {!commandMode && (
+            <SettingsManagerBlock>
+              <SettingsManagerNote>{SCRIPT_COMMAND_MODE_NOTE}</SettingsManagerNote>
+              {onLocalMode ? (
+                <SettingsManagerActions>
+                  <ActionButton action={() => onLocalMode("command")} label="打开 / 指令" />
+                </SettingsManagerActions>
+              ) : (
+                onOpenPage && (
+                  <SettingsManagerActions>
+                    <ActionButton action={() => onOpenPage("input")} label="前往输入设置" />
+                  </SettingsManagerActions>
+                )
+              )}
+            </SettingsManagerBlock>
+          )}
+        </GroupList>
+      )}
       <GroupList title="状态">
         <SettingsGroupNote role="status">
           {stateText[state]}
@@ -514,28 +633,31 @@ export function ScriptPluginDetailView({
         </SettingsGroupNote>
         {risk && <SettingsGroupNote>{risk}</SettingsGroupNote>}
       </GroupList>
-      <GroupList>
-        <SettingsManagerBlock>
-          <SettingsManagerNote>
-            删除后插件的文件会从本机移除，它的授权也一起去掉。
-          </SettingsManagerNote>
-          <SettingsManagerActions>
-            <ActionButton
-              action={() => onRemove(pack)}
-              ariaBusy={working}
-              ariaLabel={`删除${pack.name}`}
-              disabled={working}
-              label="删除"
-            />
-          </SettingsManagerActions>
-        </SettingsManagerBlock>
-      </GroupList>
+      {!pack.builtin && (
+        <GroupList>
+          <SettingsManagerBlock>
+            <SettingsManagerNote>
+              删除后插件的文件会从本机移除，它的授权也一起去掉。
+            </SettingsManagerNote>
+            <SettingsManagerActions>
+              <ActionButton
+                action={() => onRemove(pack)}
+                ariaBusy={working}
+                ariaLabel={`删除${pack.name}`}
+                disabled={working}
+                label="删除"
+              />
+            </SettingsManagerActions>
+          </SettingsManagerBlock>
+        </GroupList>
+      )}
       {dialog && (
         <ScriptGrantDialog
           pack={pack}
           initial={granted}
           stale={state === "stale"}
           platform={platform}
+          commandStatus={state === "enabled" ? commandStatus : undefined}
           onCancel={closeDialog}
           onConfirm={async (next) => {
             await onGrant(next);

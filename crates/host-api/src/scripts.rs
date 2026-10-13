@@ -3,6 +3,7 @@
 //! - **进程开关** `msime_client_scripts_enable`：只有 4 个桌面入口在启动时打开它，即 macOS 的 IMK 进程、Windows Server、IBus 引擎进程和 Fcitx5 addon。Windows TIP（与 Server 共用同一份 DLL，被注入每个应用进程）、设置应用和 MCP 从不调用。移动端恒为关。三个桌面平台的开发构建和 release 构建都能打开：授权文件（client-core 的 `script_grants`）不签名，同一用户下的进程能伪造授权，这一残余风险写在授权页上，macOS 和 Linux 是共享设置页，Windows 是原生设置应用（platforms/windows/settings，经 `msime_client_plugins` 的 `script_page` 列出脚本包并读写授权）。Windows 的提权窗口（`ELEVATED`）里不运行脚本。
 //! - **运行条件**，五项同时满足：进程开关开着；会话经 `msime_client_set_lifecycle` 选择加入（没选择加入的会话没有 `LifecycleState`，也就没有这里的任何东西）；字段属性带 KNOWN；不是 SECURE 或 PRIVATE；不是 ELEVATED。属性未知按不满足处理；属性变得不满足时正在跑的实例当场丢弃。每次聚焦之后属性还要重新确认（聚焦前报告过属性，或者聚焦后第一个不带 PASSTHROUGH 的键），否则新字段在第一个键之前沿用的是上一个字段的属性。
 //! - **投递哪些事件**：`focus_in`、`focus_out`、`input`、`selection_retracted`、`candidate_selected`、`commit`、`composition_start`、`composition_update`、`composition_end`、`candidates_shown`、`candidates_hidden`，只来自派发类调用、focus 和 destroy。按键（`key_down`）不投递，免得泄露击键节奏；字段属性、激活和旁路调用（`apply_online_*`、`rerank_settled`、设置类调用）产生的视图事件也不投递，免得泄露停顿和网络时序。
+//! - **插件指令**（`command`）：输入法在聚焦时把计划里各插件声明的 `/` 指令交给引擎（`ScriptSet::plugin_commands`，引擎按用户指令表和先到先得过滤）；用户打完某个触发词时，runtime 在派发的 refresh 开头经 [`CommandProvider`](msime_input_runtime::CommandProvider) 问一次，只投递给计划里第一个声明这个触发词的插件，事件带触发词、参数和 64 字节的系统随机数，在快照上运行。插件给的行由引擎按预编辑串缓存，旁路调用、方向键和翻页都不再投递。
 //! - **修改类钩子**：`candidates` 由 runtime 在派发类调用的 refresh 和展开之后经 [`CandidateTransform`](msime_input_runtime::CandidateTransform) 调用，插件交回的重排、隐藏和注释由 runtime 按候选身份记下、按授权顺序合成，旁路调用只重放；`before_commit` 在派发类调用的 `complete_transition`（全角转换）之后、`commit` 之前，每次在复位到快照的新实例上运行，只改 body，tail 原样接回。可改写的条件见 `lifecycle::rewritable`；改写不回灌引擎学习和 AI 上文（runtime 在这之前已经按原文记下）。trap、fuel 耗尽或结果不合规时用原文。
 //! - **实例**挂在会话上，第一次需要投递时才实例化，按授权顺序，受每轮的初始化预算约束。每次 `msime_client_focus`（两个方向）和 destroy 都把整个集合丢弃：失焦在 `focus_out` 送达之后丢，聚焦在任何事件之前丢。一个插件 trap 之后，这次聚焦里不再重建它的实例；每轮的 fuel 配额按插件记，同一轮里重建的实例接着用剩下的。没有经 `msime_client_key` 开新一轮的派发（修饰键组合、快捷键、失焦命令）和上一次按键共用一轮；本轮配额用完时跳过这个插件，不算失败；运行到一半被截断的实例丢弃、这次聚焦里不再重建，这一次用掉的不到本钩子上限的一半时同样不算失败，达到一半由 runtime 报成 fuel 耗尽的失败，计入熔断。
 //! - **模块缓存、熔断和健康文件是进程级的**，见 `process`。
@@ -43,7 +44,7 @@ pub(crate) use {
     set::{TEST_PANIC, TEST_SCRIPT_LOG},
 };
 
-/// 会话选择加入生命周期时把脚本集合挂到 runtime 上，作为它的候选变换。移动端什么都不做。
+/// 会话选择加入生命周期时把脚本集合挂到 runtime 上，作为它的候选变换和插件指令的提供者。移动端什么都不做。
 #[cfg(any(
     target_os = "macos",
     target_os = "windows",
@@ -54,6 +55,7 @@ pub(crate) fn attach(
     runtime: &mut msime_input_runtime::Runtime,
 ) {
     runtime.set_candidate_transform(Some(Box::new(set::ScriptTransform::new(scripts.clone()))));
+    runtime.set_command_provider(Some(Box::new(set::ScriptTransform::new(scripts.clone()))));
 }
 
 #[cfg(not(any(
@@ -207,7 +209,13 @@ mod inert {
     pub(crate) struct ScriptSet;
 
     impl ScriptSet {
-        pub(crate) fn bind(&mut self, _root: Option<PathBuf>, _user_data: &str) {}
+        pub(crate) fn bind(
+            &mut self,
+            _root: Option<PathBuf>,
+            _builtin_packs: Option<PathBuf>,
+            _user_data: &str,
+        ) {
+        }
         pub(crate) fn next_turn(&mut self) {}
         pub(crate) fn traits_reported(&mut self, _context: Context) {}
         pub(crate) fn key_reported(&mut self) {}
@@ -234,6 +242,9 @@ mod inert {
             _request: &super::RewriteRequest<'_>,
         ) -> Option<String> {
             None
+        }
+        pub(crate) fn plugin_commands(&mut self) -> Vec<msime_input_runtime::PluginCommand> {
+            Vec::new()
         }
     }
 }

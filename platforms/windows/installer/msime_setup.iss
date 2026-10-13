@@ -160,6 +160,8 @@ Type: files; Name: "{commonpf64}\{#MyEditionInstallDir}\server\MetasequoiaImeTsf
 ; 手写模型和落定重排模型改为由设置应用按需下载到数据目录的 resource-packs 之前，包把它们装在 Server 目录的 handwriting 和 settled-model 下。升级时删掉这两份旧副本：宿主优先用随包的那份，留着它们会让按锁更新过的下载永远轮不到，还白占约 50 MB。
 Type: filesandordirs; Name: "{commonpf64}\{#MyEditionInstallDir}\server\handwriting"
 Type: filesandordirs; Name: "{commonpf64}\{#MyEditionInstallDir}\server\settled-model"
+; 官方插件包（server_exe\plugin-packs）每次整个换掉：新版去掉或改名的包不残留在 Server 目录里，被当作内置包列出。
+Type: filesandordirs; Name: "{commonpf64}\{#MyEditionInstallDir}\server\plugin-packs"
 
 [Icons]
 Name: "{group}\{#MyAppName}"; \

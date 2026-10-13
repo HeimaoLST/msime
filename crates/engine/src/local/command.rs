@@ -7,7 +7,7 @@ use time::format_description::parse_strftime_borrowed;
 use time::{Date, Month, PrimitiveDateTime, Time};
 
 use super::date_time::{query_date_time, LocalDateTime, WEEKDAYS};
-use crate::types::{CandidateSource, CommandTableEntry, WordItem};
+use crate::types::{CandidateSource, CommandTableEntry, PluginCommand, WordItem};
 
 /// Two pages of the nine-row Windows candidate window; typing more of a trigger narrows the list.
 pub const RESULT_LIMIT: usize = 18;
@@ -16,6 +16,10 @@ pub const TABLE_LIMIT: usize = 256;
 pub const TRIGGER_LIMIT: usize = 32;
 /// The Windows candidate pipe's text field (`CandidateTextMaxLength` in `shared/contracts/ipc_protocol_limits.h`, the same bound as a quick phrase): a template, and the text it expands to, longer than this could not be delivered.
 pub const TEXT_UTF16_LIMIT: usize = 199;
+/// 插件触发词的长度：至少 2 个字母，免得占掉单个字母；最多 16 个。
+pub const PLUGIN_TRIGGER_LENGTH: std::ops::RangeInclusive<usize> = 2..=16;
+/// 插件指令标题的字符数。
+pub const PLUGIN_TITLE_CHARS: std::ops::RangeInclusive<usize> = 1..=8;
 // 短命令表直接扫描此前的触发词，避免为常见小表创建哈希状态。
 const SMALL_COMMAND_TABLE: usize = 64;
 
@@ -212,6 +216,73 @@ pub fn command_title<'a>(trigger: &str, table: &'a [CommandTableEntry]) -> Optio
         .iter()
         .find(|(aliases, _)| aliases.contains(&trigger))
         .map(|(_, title)| *title)
+}
+
+/// 内置指令的全部触发词（日期、时间、星期、农历和翻译）。插件触发词不能等于它们，也不能和它们互为前缀；client-core 校验插件清单时复制了一份，由一致性测试守着。
+pub fn builtin_triggers() -> impl Iterator<Item = &'static str> {
+    BUILTINS
+        .iter()
+        .flat_map(|(aliases, _)| aliases.iter().copied())
+}
+
+/// 内置指令的标题，同 [`builtin_triggers`] 一样由 client-core 复制一份。
+pub fn builtin_titles() -> impl Iterator<Item = &'static str> {
+    BUILTINS.iter().map(|(_, title)| *title)
+}
+
+/// 两个触发词相等或一个是另一个的前缀：用户打着其中一个时，分不清是在打哪一个。
+fn triggers_overlap(left: &str, right: &str) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+fn valid_plugin_trigger(trigger: &str) -> bool {
+    PLUGIN_TRIGGER_LENGTH.contains(&trigger.len())
+        && trigger.bytes().all(|byte| byte.is_ascii_lowercase())
+}
+
+fn valid_plugin_title(title: &str) -> bool {
+    PLUGIN_TITLE_CHARS.contains(&title.chars().count())
+        && !title.chars().any(char::is_control)
+        && title.trim() == title
+}
+
+/// 宿主交来的插件指令里引擎能用的那些，按原顺序：触发词是 2 到 16 个小写字母、标题是 1 到 8 个字符（不含控制字符，首尾不是空白），并且触发词不等于、也不和任何内置触发词、用户指令表的触发词、排在前面的插件触发词互为前缀。用户的指令表永远赢，插件之间先到先得。过滤之后任何两个生效的触发词都没有前缀关系，所以一段输入至多匹配一个。client-core 算有效触发词时，触发词用同一套规则；标题以这里为下限（只拒控制字符和首尾空白），client-core 可以更严。触发词重复时只留第一条合规的，它的标题就是行旁显示的标题（`CandidateQueries::plugin_command_title`）。`table` 必须先经过 `usable_command_table`。
+pub fn usable_plugin_commands(
+    table: &[CommandTableEntry],
+    plugin: &[PluginCommand],
+) -> Vec<PluginCommand> {
+    let mut usable: Vec<PluginCommand> = Vec::new();
+    for command in plugin {
+        let trigger = command.trigger.as_str();
+        if valid_plugin_trigger(trigger)
+            && valid_plugin_title(&command.title)
+            && !builtin_triggers().any(|builtin| triggers_overlap(trigger, builtin))
+            && !table
+                .iter()
+                .any(|entry| triggers_overlap(trigger, &entry.trigger))
+            && !usable
+                .iter()
+                .any(|earlier| triggers_overlap(trigger, &earlier.trigger))
+        {
+            usable.push(command.clone());
+        }
+    }
+    usable
+}
+
+/// `/` 之后的输入以某个插件触发词开头、剩下的全是小写字母时，返回（触发词，参数），参数可以为空（`/uuid`）。`plugin` 必须先经过 [`usable_plugin_commands`]，所以至多一个匹配，不需要最长匹配。
+pub fn plugin_command_source<'a, 'b>(
+    code: &'b str,
+    plugin: &'a [PluginCommand],
+) -> Option<(&'a str, &'b str)> {
+    let command = plugin
+        .iter()
+        .find(|command| code.starts_with(command.trigger.as_str()))?;
+    let argument = &code[command.trigger.len()..];
+    argument
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase())
+        .then_some((command.trigger.as_str(), argument))
 }
 
 fn fits(text: &str) -> bool {
@@ -548,5 +619,100 @@ mod tests {
     #[test]
     fn translation_words_join_without_empty_segments() {
         assert_eq!(join_translation_words("'hello''world'"), "hello world");
+    }
+
+    fn plugin(trigger: &str, title: &str) -> PluginCommand {
+        PluginCommand {
+            trigger: trigger.to_owned(),
+            title: title.to_owned(),
+        }
+    }
+
+    fn triggers(commands: &[PluginCommand]) -> Vec<&str> {
+        commands
+            .iter()
+            .map(|command| command.trigger.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn builtin_triggers_and_titles_list_every_command() {
+        let all: Vec<&str> = builtin_triggers().collect();
+        assert_eq!(
+            all,
+            [
+                "rq",
+                "riqi",
+                "date",
+                "sj",
+                "shijian",
+                "time",
+                "xq",
+                "xingqi",
+                "week",
+                "nl",
+                "nongli",
+                "yinli",
+                "translate",
+                "fanyi",
+                "fy"
+            ]
+        );
+        let titles: Vec<&str> = builtin_titles().collect();
+        assert_eq!(titles, ["日期", "时间", "星期", "农历", "翻译"]);
+    }
+
+    #[test]
+    fn plugin_triggers_must_not_overlap_builtins_the_table_or_earlier_plugins() {
+        let table = usable_command_table(&[entry("uu", "我的", "x"), entry("sig", "签名", "x")]);
+        let usable = usable_plugin_commands(
+            &table,
+            &[
+                // 和内置触发词相等、内置是它的前缀、它是内置的前缀。
+                plugin("rq", "日期二"),
+                plugin("fyx", "翻译二"),
+                plugin("tim", "时间二"),
+                // 和用户指令表相等或互为前缀。
+                plugin("uuid", "UUID"),
+                plugin("si", "签"),
+                plugin("sig", "签名二"),
+                // 插件之间：先到先得，相等和互为前缀的后来者都丢掉。
+                plugin("cz", "拆字"),
+                plugin("czh", "拆字二"),
+                plugin("c", "单字母"),
+                plugin("cz", "重复"),
+                plugin("guid", "GUID"),
+                plugin("gu", "前缀"),
+                // 触发词不合规：太短、太长、大写、数字。
+                plugin("a", "短"),
+                plugin(&"q".repeat(17), "长"),
+                plugin("Abc", "大写"),
+                plugin("ab1", "数字"),
+                // 标题不合规：空、9 个字符、控制字符、首尾空白。
+                plugin("ka", ""),
+                plugin("kb", "一二三四五六七八九"),
+                plugin("kc", "a\nb"),
+                plugin("kd", " 空白"),
+                // 合规的边界：16 个字母、8 个字符。
+                plugin(&"p".repeat(16), "一二三四五六七八"),
+            ],
+        );
+        let sixteen = "p".repeat(16);
+        assert_eq!(triggers(&usable), ["cz", "guid", sixteen.as_str()]);
+        assert_eq!(usable[0].title, "拆字");
+    }
+
+    #[test]
+    fn plugin_commands_match_a_trigger_followed_by_letters() {
+        let usable = usable_plugin_commands(&[], &[plugin("uuid", "UUID"), plugin("cz", "拆字")]);
+        assert_eq!(plugin_command_source("uuid", &usable), Some(("uuid", "")));
+        assert_eq!(
+            plugin_command_source("czhuohuo", &usable),
+            Some(("cz", "huohuo"))
+        );
+        for code in ["", "u", "uui", "c", "zz", "czhuo'huo"] {
+            assert_eq!(plugin_command_source(code, &usable), None, "{code:?}");
+        }
+        assert_eq!(plugin_command_source("uuid", &[]), None);
     }
 }

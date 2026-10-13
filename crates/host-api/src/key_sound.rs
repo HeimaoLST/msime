@@ -16,8 +16,8 @@
 
 use msime_client_core::plugins::effect_pack::TypingEffect;
 use msime_client_core::plugins::{
-    self, music_pack, sound_pack, EffectStyle, PluginContent, PluginKind, PluginSummary,
-    MANIFEST_FILE,
+    self, music_pack, sound_pack, BuiltinDirs, EffectStyle, PluginContent, PluginKind,
+    PluginSummary, MANIFEST_FILE,
 };
 use msime_client_core::preferences::{KeySoundMode, PluginPreferences};
 use serde_json::{json, Value};
@@ -82,13 +82,18 @@ pub(crate) struct PluginRoots {
     pub installed: Option<PathBuf>,
     /// The built-in sound packs of the host's bundle.
     pub builtin_sounds: Option<PathBuf>,
+    /// 桌面安装包随带的官方插件包（`<kind>/<id>/`）。
+    pub builtin_packs: Option<PathBuf>,
 }
 
 impl PluginRoots {
     /// `state_root` is HostOptions' `preferences_directory`, `sound_packs` its `sound_packs`. Without `sound_packs` the built-in packs are looked for in `sound-packs` beside `resources`, where the macOS bundle and the Linux install put them; a relative path names nothing.
+    ///
+    /// `plugin_packs` 是宿主选项里的同名项。没给时取内置音效包目录旁边的 `plugin-packs`（存在才用），macOS 的 bundle 和 Linux 的安装都把官方插件包放在那里，这两个宿主已经在传 `sound_packs`，不用另外传。Windows 的 Server 和设置应用总是显式给出（在 Program Files 里）：它的内置音效包在普通用户可写的数据目录里，旁边的目录不能当作安装包的东西。
     pub(crate) fn new(
         state_root: Option<&str>,
         sound_packs: Option<&str>,
+        plugin_packs: Option<&str>,
         resources: &str,
     ) -> Self {
         let absolute = |path: &str| {
@@ -101,22 +106,40 @@ impl PluginRoots {
                 .and_then(|resources| Some(resources.parent()?.join("sound-packs")))
                 .filter(|path| path.is_dir()),
         };
+        let builtin_packs = match plugin_packs {
+            Some(path) => absolute(path),
+            None => builtin_sounds
+                .as_deref()
+                .and_then(Path::parent)
+                .map(|parent| parent.join("plugin-packs"))
+                .filter(|path| path.is_dir()),
+        };
         Self {
             installed: state_root
                 .and_then(absolute)
                 .map(|root| root.join("plugins")),
             builtin_sounds,
+            builtin_packs,
+        }
+    }
+
+    /// 两个内置目录，交给 client-core 的载入和列目录。
+    pub(crate) fn builtin(&self) -> BuiltinDirs<'_> {
+        BuiltinDirs {
+            sounds: self.builtin_sounds.as_deref(),
+            packs: self.builtin_packs.as_deref(),
         }
     }
 
     /// The manifest a pack of `kind` would be loaded from, without checking anything: a built-in id names the bundle's copy, any other id the installed one. `None` where `load` would refuse for want of a root.
     fn manifest(&self, kind: PluginKind, id: &str) -> Option<PathBuf> {
         let directory = if plugins::is_builtin(kind, id) {
-            self.builtin_sounds.clone()?
+            // 内置 id 不看插件根目录。
+            plugins::pack_directory(Path::new(""), self.builtin(), kind, id)?
         } else {
-            plugins::kind_directory(self.installed.as_deref()?, kind)
+            plugins::kind_directory(self.installed.as_deref()?, kind).join(id)
         };
-        Some(directory.join(id).join(MANIFEST_FILE))
+        Some(directory.join(MANIFEST_FILE))
     }
 
     /// A validated pack of `kind` by client-core's rules. Only a built-in sound or music pack resolves without a state root: every other pack is only ever installed under it, and looking one up without it would read `<kind>/<id>` against the working directory and hand back relative paths.
@@ -127,7 +150,7 @@ impl PluginRoots {
             None if builtin => Path::new(""),
             None => return Err(format!("{} packs need a state root", kind.as_str())),
         };
-        plugins::load_package(installed, self.builtin_sounds.as_deref(), kind, id)
+        plugins::load_package(installed, self.builtin(), kind, id)
     }
 }
 

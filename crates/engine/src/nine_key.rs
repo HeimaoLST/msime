@@ -11,7 +11,9 @@ use crate::assets;
 use crate::diagnostics;
 use crate::dictionary::english::EnglishDictionary;
 use crate::error::EngineError;
-use crate::ime::queries::{insert_expressive_rows, MIXED_EXPRESSIVE_MINIMUM_INPUT};
+use crate::ime::queries::{
+    insert_expressive_rows, keep_expressive_rows_off_the_lead, MIXED_EXPRESSIVE_MINIMUM_INPUT,
+};
 use crate::language_dictionary::{self, LanguageDictionary};
 use crate::lattice::decode::PHRASE_LENGTH_BONUS;
 use crate::lattice::neural::{
@@ -21,6 +23,7 @@ use crate::lattice::personal::PersonalTransition;
 use crate::lattice::SentencePath;
 use crate::local::date_time::{inline_date_time_keyword, insert_inline_date_time};
 use crate::local::emoji::{query_emoji_readings, query_kaomoji_readings, ExpressiveRow};
+use crate::local::symbol_candidates::{query_symbol_readings, SymbolRow, MIXED_SYMBOL_LIMIT};
 use crate::nine_key_shuangpin::NineKeyShuangpin;
 use crate::paths::RuntimePaths;
 use crate::pinyin::segment::{cut_one_piece_min_segments, split_segments};
@@ -249,7 +252,7 @@ pub struct NineKeySession {
     frequency: FrequencyAdjustmentOptions,
     fuzzy: FuzzyPinyinOptions,
     english_options: EnglishInputOptions,
-    /// 候选里混入 emoji、颜文字（共享偏好 `mixed_input.emoji` / `mixed_input.kaomoji`），默认都关。
+    /// 候选里混入 emoji、颜文字和符号（共享偏好 `mixed_input.emoji` / `mixed_input.kaomoji` / `mixed_input.symbols`）。引擎层默认都关，宿主按偏好打开。
     expressive: MixedExpressiveOptions,
     /// 组字里的日期时间行（#5952）读的墙钟；`None` 时不出这些行。跟日期时间模式同一个开关。
     inline_date_time: Option<LocalClock>,
@@ -1361,9 +1364,9 @@ impl NineKeySession {
             &mut seeds,
         );
         self.seed_buffer = std::mem::replace(&mut self.sentence_seeds, seeds);
-        // emoji、颜文字按拼音查，读法的先后要参照排好的拼音候选，所以在插入英文行之前查；插入在英文行之后，它们也可以接在英文词后面。单字、笔画筛选针对的是汉字，筛选时不混入。
-        let (emoji, kaomoji) = if filtering {
-            (Vec::new(), Vec::new())
+        // emoji、颜文字和符号按拼音查，读法的先后要参照排好的拼音候选，所以在插入英文行之前查；插入在英文行之后，它们也可以接在英文词后面。单字、笔画筛选针对的是汉字，筛选时不混入。
+        let (emoji, kaomoji, symbols) = if filtering {
+            (Vec::new(), Vec::new(), Vec::new())
         } else {
             self.expressive_candidates(&alternatives, &candidates)
         };
@@ -1387,7 +1390,7 @@ impl NineKeySession {
             candidates.insert(slot, first);
             candidates.extend(english);
         }
-        let mut candidates = insert_expressive_rows(candidates, emoji, kaomoji);
+        let mut candidates = insert_expressive_rows(candidates, emoji, kaomoji, symbols);
         // 选了首字母或在筛选时用户是在逐字拼，不加日期时间行。
         if let Some(clock) = self
             .inline_date_time
@@ -1409,6 +1412,7 @@ impl NineKeySession {
             None,
             false,
         );
+        keep_expressive_rows_off_the_lead(&mut candidates);
         // One digit is predictive; after that, keep a likely reading visible
         // only once its digits are complete. An unfinished longer syllable
         // must not hide readings already spelled in full.
@@ -1502,17 +1506,19 @@ impl NineKeySession {
         );
     }
 
-    /// 按数字串可能的读法查要混入的 emoji 和颜文字，开关都关、数字不足 `MIXED_EXPRESSIVE_MINIMUM_INPUT` 个时不查。
+    /// 按数字串可能的读法查要混入的 emoji、颜文字和符号，开关都关、数字不足 `MIXED_EXPRESSIVE_MINIMUM_INPUT` 个时不查。符号要读法与名称的全拼完全相等（`query_symbol_readings`），不认首字母。
     ///
     /// 读法是锁定的拼写加上一条拼满其余数字的切分路径（`alternatives` 已经按切分和左列选的首字母筛过），只保留各个字母；只拼了开头一个音节、供部分选择用的路径不算，它对应的不是整串数字。读法按支持它的拼音候选在列表里的位置排先后（候选的全拼以这个读法开头），没有候选支持的按路径原来的先后排在后面，只查前 `EXPRESSIVE_READING_LIMIT` 种。命中的编码还要能在已确定的音节边界（锁定拼写的结尾、用户打的切分）处切成完整音节，见 `splits_into_syllables_at`。
     fn expressive_candidates(
         &self,
         alternatives: &[Path],
         candidates: &[WordItem],
-    ) -> (Vec<ExpressiveRow>, Vec<ExpressiveRow>) {
-        let enabled = self.expressive.emoji_candidates || self.expressive.kaomoji_candidates;
+    ) -> (Vec<ExpressiveRow>, Vec<ExpressiveRow>, Vec<SymbolRow>) {
+        let enabled = self.expressive.emoji_candidates
+            || self.expressive.kaomoji_candidates
+            || self.expressive.symbol_candidates;
         if !enabled || self.digits.len() < MIXED_EXPRESSIVE_MINIMUM_INPUT {
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new());
         }
         let mut boundaries: Vec<usize> = self
             .locked
@@ -1536,6 +1542,7 @@ impl NineKeySession {
         let others = self.paths.resource(assets::OTHER_DICTIONARY);
         let mut emoji = Vec::new();
         let mut kaomoji = Vec::new();
+        let mut symbols: Vec<SymbolRow> = Vec::new();
         for (letters, readings) in &groups {
             let accept = |key: &str| splits_into_syllables_at(key, letters);
             // 与 26 键相同，资源打不开或查询失败时只是没有这些行，不报诊断。
@@ -1548,12 +1555,26 @@ impl NineKeySession {
                     query_kaomoji_readings(readings, &others, &accept),
                 );
             }
+            if self.expressive.symbol_candidates {
+                for row in query_symbol_readings(readings, &accept) {
+                    if symbols.len() < MIXED_SYMBOL_LIMIT
+                        && !symbols.iter().any(|known| known.item.word == row.item.word)
+                    {
+                        symbols.push(row);
+                    }
+                }
+            }
         }
         // 选中后吃掉全部数字，与覆盖整串数字的拼音候选一样结束组字。
-        for row in emoji.iter_mut().chain(kaomoji.iter_mut()) {
-            row.item.pinyin.clone_from(&self.digits);
+        for item in emoji
+            .iter_mut()
+            .chain(kaomoji.iter_mut())
+            .map(|row| &mut row.item)
+            .chain(symbols.iter_mut().map(|row| &mut row.item))
+        {
+            item.pinyin.clone_from(&self.digits);
         }
-        (emoji, kaomoji)
+        (emoji, kaomoji, symbols)
     }
 
     /// 见 `expressive_candidates`。每种读法带着 `boundaries`（数字位置）在它里面的字母位置。
@@ -5528,6 +5549,7 @@ CREATE TABLE tbl_2_y(key TEXT,jp TEXT,value TEXT,weight INTEGER);INSERT INTO tbl
     const BOTH_EXPRESSIVE: MixedExpressiveOptions = MixedExpressiveOptions {
         emoji_candidates: true,
         kaomoji_candidates: true,
+        symbol_candidates: false,
     };
 
     fn expressive_fixture() -> Fixture {
@@ -5604,6 +5626,7 @@ CREATE TABLE tbl_2_y(key TEXT,jp TEXT,value TEXT,weight INTEGER);INSERT INTO tbl
             MixedExpressiveOptions {
                 emoji_candidates: true,
                 kaomoji_candidates: false,
+                symbol_candidates: false,
             },
         );
         type_digits(&mut emoji_only, "634486");
@@ -5779,6 +5802,100 @@ CREATE TABLE tbl_2_y(key TEXT,jp TEXT,value TEXT,weight INTEGER);INSERT INTO tbl
         assert_eq!(readings[0], "xiang");
         // 只拼了开头一个音节的路径不算读法。
         assert!(readings.iter().all(|reading| reading.len() == 5));
+    }
+
+    // ---- 打拼音出符号 ----
+
+    /// 正负（zheng'fu）排在 政府 后面；派（pai）是单音节名称，前面另有三个 pai 的字。
+    const SYMBOL_MAIN_FIXTURE: &str = "CREATE TABLE tbl_1_z(key TEXT,jp TEXT,value TEXT,weight INTEGER);INSERT INTO tbl_1_z VALUES('zheng','z','正',300),('zheng','z','政',200);CREATE TABLE tbl_1_f(key TEXT,jp TEXT,value TEXT,weight INTEGER);INSERT INTO tbl_1_f VALUES('fu','f','负',300),('fu','f','府',200);CREATE TABLE tbl_2_z(key TEXT,jp TEXT,value TEXT,weight INTEGER);INSERT INTO tbl_2_z VALUES('zheng''fu','zf','政府',1000),('zheng''fu','zf','正负',500);CREATE TABLE tbl_1_p(key TEXT,jp TEXT,value TEXT,weight INTEGER);INSERT INTO tbl_1_p VALUES('pai','p','派',900),('pai','p','排',800),('pai','p','牌',700),('pai','p','拍',600);";
+
+    const SYMBOLS_ONLY: MixedExpressiveOptions = MixedExpressiveOptions {
+        emoji_candidates: false,
+        kaomoji_candidates: false,
+        symbol_candidates: true,
+    };
+
+    fn has_symbol_row(session: &NineKeySession, symbol: &str) -> bool {
+        sources(session)
+            .iter()
+            .zip(words(session))
+            .any(|(source, word)| *source == CandidateSource::Emoji && word == symbol)
+    }
+
+    #[test]
+    fn digits_spelling_a_whole_symbol_name_add_its_symbol_after_the_name() {
+        let fixture = fixture_with(SYMBOL_MAIN_FIXTURE);
+        let mut session = open_expressive(&fixture, EnglishInputOptions::default(), SYMBOLS_ONLY);
+        // 9436438 读作 zhengfu：± 紧跟在 正负 后面，不占首位。
+        type_digits(&mut session, "9436438");
+        let listed = words(&session);
+        assert_eq!(listed[..3], ["政府", "正负", "±"]);
+        assert_eq!(sources(&session)[2], CandidateSource::Emoji);
+        assert_eq!(session.snapshot().candidates[2].pinyin, "9436438");
+        session.command(Command::Cancel);
+
+        // 没打完整的名称不出。
+        type_digits(&mut session, "943643");
+        assert!(!has_symbol_row(&session, "±"));
+        session.command(Command::Cancel);
+
+        // 单音节名称最早排第 4 位（下标 3）。
+        type_digits(&mut session, "724");
+        let listed = words(&session);
+        assert_eq!(listed[0], "派");
+        assert_eq!(listed[3], "π");
+        session.command(Command::Cancel);
+
+        // 单字筛选时不出。
+        type_digits(&mut session, "9436438");
+        assert!(session.set_filter(true, "").handled);
+        assert!(!has_symbol_row(&session, "±"));
+        session.command(Command::Cancel);
+
+        // 开关关着时不出，其余候选逐项相同。
+        let mut off = open_expressive(
+            &fixture,
+            EnglishInputOptions::default(),
+            MixedExpressiveOptions::default(),
+        );
+        let mut on = open_expressive(&fixture, EnglishInputOptions::default(), SYMBOLS_ONLY);
+        type_digits(&mut off, "9436438");
+        type_digits(&mut on, "9436438");
+        assert!(!has_symbol_row(&off, "±"));
+        let mut without_symbols = on.snapshot().candidates;
+        without_symbols.retain(|item| item.source != CandidateSource::Emoji);
+        assert_eq!(without_symbols, off.snapshot().candidates);
+    }
+
+    #[test]
+    fn choosing_a_symbol_row_commits_it_and_eats_every_digit() {
+        let fixture = fixture_with(SYMBOL_MAIN_FIXTURE);
+        let mut session = open_expressive(&fixture, EnglishInputOptions::default(), SYMBOLS_ONLY);
+        type_digits(&mut session, "9436438");
+        let chosen = session.select(index_of(&session, "±"));
+        assert_eq!(chosen.commit.as_deref(), Some("±"));
+        assert!(!session.active());
+        // 不能置顶、删除或固定位置。
+        type_digits(&mut session, "9436438");
+        let index = index_of(&session, "±");
+        assert!(!session.pin(index).handled);
+        assert!(!session.remove(index).handled);
+        assert!(!session.set_position(index, 2).handled);
+    }
+
+    /// 名称词被固定到后面的位置时，接在它后面的符号不能顶到首位。
+    #[test]
+    fn a_symbol_row_never_leads_after_its_name_is_fixed_further_down() {
+        let fixture = fixture_with("CREATE TABLE tbl_1_d(key TEXT,jp TEXT,value TEXT,weight INTEGER);INSERT INTO tbl_1_d VALUES('da','d','大',300);CREATE TABLE tbl_1_y(key TEXT,jp TEXT,value TEXT,weight INTEGER);INSERT INTO tbl_1_y VALUES('yu','y','于',300);CREATE TABLE tbl_2_d(key TEXT,jp TEXT,value TEXT,weight INTEGER);INSERT INTO tbl_2_d VALUES('da''yu','dy','大于',900);");
+        let mut session = open_expressive(&fixture, EnglishInputOptions::default(), SYMBOLS_ONLY);
+        type_digits(&mut session, "3298");
+        assert_eq!(words(&session)[..3], ["大于", ">", "＞"]);
+        assert!(session.set_position(0, 3).handled);
+        // 名称词留在固定的第 3 位。
+        let listed = words(&session);
+        assert_ne!(sources(&session)[0], CandidateSource::Emoji, "{listed:?}");
+        assert_eq!(listed[2], "大于", "{listed:?}");
+        assert!(listed.contains(&">".to_owned()) && listed.contains(&"＞".to_owned()));
     }
 
     #[test]

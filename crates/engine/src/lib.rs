@@ -56,8 +56,8 @@ pub use types::{
     Command, CommandTranslationQuery, EnglishInputOptions, FrequencyAdjustmentMode,
     FrequencyAdjustmentOptions, FuzzyPinyinOptions, KeyResult, LocalInputMode, LocalModeOptions,
     MixedExpressiveOptions, NineKeyShuangpinKind, NineKeyShuangpinTable, OnlineQuery,
-    PersonalDictionaryEntry, PersonalDictionaryKind, SchemeSet, SchemeType,
-    SentenceAssociationOptions, ShuangpinCustomTable, ShuangpinProfileKind, WordItem,
+    PersonalDictionaryEntry, PersonalDictionaryKind, PluginCommand, PluginCommandQuery, SchemeSet,
+    SchemeType, SentenceAssociationOptions, ShuangpinCustomTable, ShuangpinProfileKind, WordItem,
     WubiInputOptions, WubiProfileKind, DEFAULT_FIRST_PAGE_ROWS,
 };
 pub use user_dictionary::bundled::{

@@ -13,6 +13,7 @@ pub enum CandidateSource {
     AiSuggestion = 3,
     EnglishDictionary = 4,
     QuickPhrase = 5,
+    /// emoji 行，也用于混排的符号行（打拼音出符号，`local::symbol_candidates`）：两者选中时都整段上屏、结束组字，不学习、不调频，也不能置顶、固定或删除。
     Emoji = 6,
     Kaomoji = 7,
     Generated = 8,
@@ -23,6 +24,8 @@ pub enum CandidateSource {
     AiPending = 12,
     /// 日文混输（实验选项，默认关）混进全拼、双拼候选的那一行：整段输入按罗马字转换出的最佳日文。它不属于下面任何一个谓词，所以选中时整段上屏并结束组字（与混输英文同一条路），不调词频、不记整句、不进个人上下文，也不能置顶、固定或删除；宿主不对它做简繁转换。
     MixedJapanese = 13,
+    /// 脚本插件在自己的 `/` 指令里给出的行，只在桌面产生（宿主经 `Session::apply_plugin_command_rows` 写进来）。它不属于下面任何一个谓词：选中时整段上屏并结束组字，不调词频、不记整句、不进个人上下文，不能置顶、固定或删除；runtime 不把它的上屏喂进 AI 上文，宿主不为它请求释义或翻译，上屏也不转全角。
+    Plugin = 14,
 }
 
 impl CandidateSource {
@@ -41,6 +44,7 @@ impl CandidateSource {
             11 => Self::NeuralKeyboard,
             12 => Self::AiPending,
             13 => Self::MixedJapanese,
+            14 => Self::Plugin,
             _ => return None,
         })
     }
@@ -1244,6 +1248,15 @@ pub struct CommandTableEntry {
     pub template: String,
 }
 
+/// 一条脚本插件指令（`/` 模式）：插件在清单里声明的触发词和标题。宿主把会运行的插件声明的指令按执行顺序交给引擎，引擎按 `local::command::usable_plugin_commands` 决定哪些生效（用户指令表赢、插件先到先得），不照单全收。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginCommand {
+    /// 2..=16 个小写 ASCII 字母，即 `/` 之后输入的触发词。
+    pub trigger: String,
+    /// 1..=8 个字符，由 runtime 画在插件注释格里，不进引擎的注释。
+    pub title: String,
+}
+
 /// 宿主提供的一条 K 模式短语（来自已启用的短语表插件）。宿主已经校验过；Engine 仍然跳过它用不了的行，而不是照单全收。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuickPhraseEntry {
@@ -1282,6 +1295,8 @@ impl Default for EnglishInputOptions {
 pub struct MixedExpressiveOptions {
     pub emoji_candidates: bool,
     pub kaomoji_candidates: bool,
+    /// 打拼音出符号：整段组字正好拼出某个符号的名称时混入符号行（`local::symbol_candidates`）。
+    pub symbol_candidates: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1311,6 +1326,17 @@ pub struct OnlineQuery {
 pub struct CommandTranslationQuery {
     pub session_id: u64,
     pub text: String,
+}
+
+/// 插件指令要宿主去问的那一次：`/` 模式里输入以某个生效的插件触发词开头、这份预编辑串还没有缓存的行时才有。宿主把触发词和参数交给触发词的主人，再把结果连同这个值交回 `Session::apply_plugin_command_rows`；会话或预编辑串已经变了的回答被拒绝。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PluginCommandQuery {
+    pub session_id: u64,
+    /// 整段本地预编辑串，含开头的 `/`。
+    pub preedit: String,
+    pub trigger: String,
+    /// 触发词后面的小写字母，可以为空（`/uuid`）。
+    pub argument: String,
 }
 
 /// Which dictionary a personal entry or journal row belongs to. The ordinal is the host ABI value.
@@ -1412,7 +1438,7 @@ mod tests {
         for value in 0..=u8::MAX {
             match CandidateSource::from_u8(value) {
                 Some(source) => assert_eq!(source as u8, value),
-                None => assert!(value == 10 || value > 13, "{value}"),
+                None => assert!(value == 10 || value > 14, "{value}"),
             }
         }
         let japanese = CandidateSource::MixedJapanese;
@@ -1423,6 +1449,20 @@ mod tests {
         assert!(!japanese.is_online());
         assert!(!japanese.takes_online_seat());
         assert!(!japanese.holds_ai_seat());
+    }
+
+    /// 插件指令行（14）同样不属于任何谓词：不学习、不坐在线座位。
+    #[test]
+    fn plugin_rows_match_no_predicate() {
+        let plugin = CandidateSource::Plugin;
+        assert_eq!(CandidateSource::from_u8(14), Some(plugin));
+        assert_eq!(plugin as u8, 14);
+        assert!(!plugin.is_dictionary());
+        assert!(!plugin.is_generated_or_fallback());
+        assert!(!plugin.is_sentence_learning());
+        assert!(!plugin.is_online());
+        assert!(!plugin.takes_online_seat());
+        assert!(!plugin.holds_ai_seat());
     }
 
     type Row = (&'static str, fn(SchemeType) -> bool, [bool; 5]);

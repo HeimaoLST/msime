@@ -69,7 +69,7 @@ jobs:
             esac
             # 脚本插件合集：插件本身、它们引用的 SDK 与模板、运行它们的沙箱和 msime-pack、几个脚本，以及插件包逐字节复制的 Unicode 许可证和常用字集生成器读的 Unihan 锁。plugins/ 和 docs/ 不在下面任何一条里，没有这一条时只改插件的 PR 什么都不跑；那两个 resources/ 文件在下面只触发 web 或什么都不触发，改了它们包就过期了。
             case "$path" in
-              plugins/*|docs/script-plugin-template/*|crates/script-runtime/*|crates/pack-tool/*|scripts/build-script-plugins.sh|scripts/test-script-plugins.sh|scripts/test-script-plugin-data.py|resources/licenses/Unicode-License-V3.txt|resources/character-glosses.lock.json)
+              plugins/*|docs/script-plugin-template/*|crates/script-runtime/*|crates/pack-tool/*|scripts/build-script-plugins.sh|scripts/test-script-plugins.sh|scripts/test-script-plugin-data.py|scripts/build-official-plugins.sh|resources/licenses/Unicode-License-V3.txt|resources/character-glosses.lock.json)
                 plugins=true ;;
             esac
             case "$path" in
@@ -299,6 +299,8 @@ jobs:
           rustup toolchain install
           rustup target add wasm32-unknown-unknown
           bash scripts/test-script-plugins.sh
+          # 随桌面安装包分发的官方插件包：重新构建，核对 latex-symbols 的生成器没有漂移、每个包过 msime-pack validate --builtin、uuid 的内容哈希等于 plugins/official-packs.json 锁定的值。锁以这台 ubuntu 的构建为准，和发版工作流的 official-plugins 作业相同；工具链或插件源码一变哈希就变，所有用户的授权随之作废，这一步让它在 PR 里变红、在 diff 里看得见。
+          bash scripts/build-official-plugins.sh --check
       - name: Script plugins unchanged
         if: ${{ needs.changes.outputs.plugins != 'true' }}
         run: echo 'No script plugin, SDK, runtime or shared changes; script plugin tests skipped.'

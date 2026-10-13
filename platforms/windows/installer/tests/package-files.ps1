@@ -65,6 +65,9 @@ try {
         'resources/helpcodes/NOTICE.md',
         'resources/sound-packs/default/plugin.toml',
         'resources/sound-packs/default/key.wav',
+        'target/plugin-packs/script/uuid/plugin.toml',
+        'target/plugin-packs/script/uuid/uuid.wasm',
+        'target/plugin-packs/phrase_table/latex-symbols/plugin.toml',
         'target/offline-glosses/zh-fr.db',
         'target/offline-glosses/offline-glosses-NOTICE.txt',
         'target/pronunciations/en-phonetic.db',
@@ -161,9 +164,14 @@ try {
                          'server_exe/character-glosses/character-glosses-NOTICE.txt',
                          'app_data/helpcodes/helpcode.txt',
                          'app_data/sound-packs/default/plugin.toml', 'app_data/sound-packs/default/key.wav',
+                         'server_exe/plugin-packs/script/uuid/plugin.toml',
+                         'server_exe/plugin-packs/script/uuid/uuid.wasm',
+                         'server_exe/plugin-packs/phrase_table/latex-symbols/plugin.toml',
                          'THIRD_PARTY_NOTICES.txt', 'LICENSE.txt')) {
         if (-not (Test-Path (Join-Path $installer $file))) { throw "Missing packaged file: $file" }
     }
+    # 官方插件包只进 Program Files 下的 Server 目录，不进普通用户可写的 DataDir。
+    if (Test-Path (Join-Path $installer 'app_data/plugin-packs')) { throw 'Staged the official plugin packs into the user-writable data directory' }
     Assert-NoOnDemandModels 'Full package'
     # 读音和英文释义表只随授权声明一起装：夹具里 word-glosses 没有声明，就不装。
     if (Test-Path (Join-Path $installer 'server_exe/word-glosses')) { throw 'Packaged word glosses without their notice' }

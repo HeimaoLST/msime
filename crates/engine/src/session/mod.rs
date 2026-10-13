@@ -14,6 +14,7 @@ mod input;
 mod learning;
 mod online;
 pub mod options;
+mod plugin_commands;
 #[cfg(test)]
 mod tests;
 
@@ -25,7 +26,8 @@ use crate::nine_key::{KeyGrid, NineKeySession};
 use crate::pinyin::glide::{GlideKeyboard, GlidePoint};
 use crate::types::{
     CandidateEdge, CandidateSource, Command, CommandTableEntry, CommandTranslationQuery, KeyResult,
-    LocalInputMode, MentionEntry, OnlineQuery, QuickPhraseEntry, SchemeType,
+    LocalInputMode, MentionEntry, OnlineQuery, PluginCommand, PluginCommandQuery, QuickPhraseEntry,
+    SchemeType,
 };
 
 use crate::types::FirstPageRows;
@@ -314,7 +316,7 @@ impl Session {
         self.input.set_candidate_position(index, 0)
     }
 
-    /// Finish the whole composition starting with the host-highlighted candidate (0 when none is highlighted); remaining segments use their leading candidate, and an invalid index commits the raw input.
+    /// Finish the whole composition starting with the host-highlighted candidate (0 when none is highlighted); remaining segments use their leading candidate, and an invalid index commits the raw input. A shifted capital that starts an incomplete pinyin spelling also uses the raw input so mixed English is not replaced by a Chinese correction.
     pub fn finish(&mut self, first_index: usize) -> KeyResult {
         if self.nine_key.active() {
             let result = self.nine_key.finish(first_index);
@@ -371,6 +373,16 @@ impl Session {
     /// Replace the `/` mode's command table; rows it cannot use are dropped. A diagnostic only if the open command list could not be refreshed.
     pub fn set_command_table(&mut self, table: &[CommandTableEntry]) -> Option<String> {
         self.input.set_command_table(table)
+    }
+
+    /// 替换脚本插件的 `/` 指令；用不了的被丢弃（`local::command::usable_plugin_commands`），缓存的插件行清掉。只有打开的 `/` 列表刷新失败时才返回诊断。
+    pub fn set_plugin_commands(&mut self, commands: &[PluginCommand]) -> Option<String> {
+        self.input.set_plugin_commands(commands)
+    }
+
+    /// 生效的插件指令里 `trigger` 的标题，见 `CandidateQueries::plugin_command_title`。
+    pub fn plugin_command_title(&self, trigger: &str) -> Option<&str> {
+        self.input.queries.plugin_command_title(trigger)
     }
 
     /// 替换 K 模式的宿主短语表；用不了的行被丢弃。只有打开的 K 模式列表刷新失败时才返回诊断。
@@ -548,6 +560,26 @@ impl Session {
             return false;
         }
         self.input.apply_command_translation(query, translation)
+    }
+
+    /// 插件指令要宿主去问的那一次；见 `InputSession::plugin_command_query`。
+    pub fn plugin_command_query(&self) -> Option<PluginCommandQuery> {
+        if self.nine_key.active() {
+            return None;
+        }
+        self.input.plugin_command_query()
+    }
+
+    /// 插件的行是否写进了会话；过期的查询返回 false（不是错误）。
+    pub fn apply_plugin_command_rows(
+        &mut self,
+        query: &PluginCommandQuery,
+        rows: &[(String, String)],
+    ) -> bool {
+        if self.nine_key.active() {
+            return false;
+        }
+        self.input.apply_plugin_command_rows(query, rows)
     }
 
     /// Whether the rows now show; false (not an error) for a stale query.

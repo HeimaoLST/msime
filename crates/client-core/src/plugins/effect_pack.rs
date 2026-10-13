@@ -163,7 +163,12 @@ impl TypingEffect {
             return Self::from_preferences(style, intensity);
         }
         let loaded = match root {
-            Some(root) => super::load_package(root, None, PluginKind::Effect, pack),
+            Some(root) => super::load_package(
+                root,
+                super::BuiltinDirs::default(),
+                PluginKind::Effect,
+                pack,
+            ),
             None => Err("没有插件目录，无法载入特效包".to_owned()),
         };
         match loaded {

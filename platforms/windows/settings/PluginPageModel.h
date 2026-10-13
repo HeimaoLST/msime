@@ -699,9 +699,9 @@ inline std::wstring imported_notice(Package const &pack) {
 // 「脚本插件（实验）」分组、详情和授权对话框，照 `plugin-script-view.tsx` 和 `plugin-list-view.tsx` 的脚本分组移植。规则（依赖、互斥、哈希绑定、准入）的权威在 client-core 的 `script_grants`，这里只是让页面先按同样的规则勾选和说明，宿主还会再查一遍。
 
 // 脚本插件的能力，按 `msime_script_runtime::Capability::ALL` 的顺序（`SCRIPT_CAPABILITIES`）。
-inline constexpr std::array<std::wstring_view, 7> script_capabilities{
-    L"read_composition",  L"read_commit",         L"read_candidates",  L"rewrite_commit",
-    L"rerank_candidates", L"annotate_candidates", L"filter_candidates"};
+inline constexpr std::array<std::wstring_view, 8> script_capabilities{
+    L"read_composition",  L"read_commit",         L"read_candidates",   L"rewrite_commit",
+    L"rerank_candidates", L"annotate_candidates", L"filter_candidates", L"provide_commands"};
 
 // 输入法同时运行的脚本插件个数上限（`limits::MAX_ENABLED_SCRIPTS`）。
 inline constexpr std::size_t max_enabled_scripts = 8;
@@ -745,6 +745,10 @@ inline CapabilityLabel capability_label(std::wstring_view capability) {
     return {L"给候选加注释", L"能在候选旁边显示一小段说明。"};
   if (capability == L"filter_candidates")
     return {L"隐藏候选", L"能把某些候选移到末尾并隐藏起来。"};
+  // 和共享页的 `capabilityLabels`、`docs/plugins.md` 一字不差。
+  if (capability == L"provide_commands")
+    return {L"提供 / 指令",
+            L"你在 / 指令里输入它声明的触发词（例如 /uuid）之后打的字母会交给这个插件，它据此给出候选；给出的候选只取决于这些字母和随机数，带不走你之前打过的内容。你按序号、点选、按空格选中某一行，或者打标点结束输入时，高亮的那一行会输入；在有的系统上，按快捷键或 Tab 等键、用菜单或工具栏结束输入时也会输入这一行。按回车时只输入你打的原文（例如 /uuid），点到别的窗口时插件给出的行不会输入。它看不到你平时打的字、其他指令和别的插件的内容；它给出的文字不进入词库、不计入打字统计、不会作为上文发给 AI 候选，也不会拿去查释义或翻译。"};
   return {std::wstring(capability), {}};
 }
 
@@ -776,6 +780,8 @@ inline std::wstring hook_label(std::wstring_view hook) {
     return L"候选窗口消失时";
   if (hook == L"candidates")
     return L"生成候选时（可以调整候选）";
+  if (hook == L"command")
+    return L"你在 / 指令里输入它的触发词时（给出候选）";
   return std::wstring(hook);
 }
 
@@ -854,10 +860,16 @@ struct ScriptHealth {
   std::wstring id, hash, disabled;
 };
 
-// 授权页读到的全部（`ScriptGrantsView`）。`plugins` 的顺序就是执行顺序。
+// 一条插件 `/` 指令在输入法里的状态（client-core 的 `script_commands::ResolvedCommand`，`ScriptCommandState`）。`status` 是 `active`、`shadowed_by_user_table`（和用户指令表里的 `/conflict` 冲突）或 `shadowed_by_plugin`（和执行顺序在前的插件 `conflict_id` 的 `/conflict` 冲突）；用不到的字段是空串。
+struct ScriptCommandState {
+  std::wstring id, trigger, title, status, conflict, conflict_id;
+};
+
+// 授权页读到的全部（`ScriptGrantsView`）。`plugins` 的顺序就是执行顺序；`commands` 是启用、授予了「提供 / 指令」、清单能载入的插件声明的指令和状态。
 struct ScriptGrants {
   std::vector<ScriptGrant> plugins;
   std::vector<ScriptHealth> health;
+  std::vector<ScriptCommandState> commands;
 };
 
 inline ScriptGrant const *script_grant(ScriptGrants const *grants, std::wstring_view id) {
@@ -916,6 +928,15 @@ inline std::ptrdiff_t running_position(std::vector<std::wstring> const &running,
   return found == running.end() ? -1 : found - running.begin();
 }
 
+// 随输入法分发的官方脚本插件（`builtin` 为真）详情里「来源」一行，与共享页的 `SCRIPT_BUILTIN_NOTE` 一字不差：它不能删除，和导入的插件一样默认不运行。
+inline constexpr std::wstring_view script_builtin_note =
+    L"随输入法安装和更新，不能删除；需要你授权后才会运行。";
+
+// 授权之后包的内容变了时的标记（`scriptStaleLabel`）。内置插件的内容只会随输入法更新而变，说法跟着改。
+inline std::wstring script_stale_label(Package const &pack) {
+  return pack.builtin ? L"已随输入法更新，需要重新授权" : L"已更新，需要重新授权";
+}
+
 // 列表里这一行的标记（`scriptMarker`）。
 inline std::wstring script_marker(Package const &pack, ScriptGrants const *grants,
                                   std::vector<std::wstring> const &running) {
@@ -923,7 +944,7 @@ inline std::wstring script_marker(Package const &pack, ScriptGrants const *grant
   case ScriptGrantState::ungranted:
     return L"未授权";
   case ScriptGrantState::stale:
-    return L"已更新，需要重新授权";
+    return script_stale_label(pack);
   case ScriptGrantState::disabled:
     return L"未启用";
   case ScriptGrantState::enabled:
@@ -946,6 +967,50 @@ inline std::wstring script_row_description(Package const &pack) {
   return joined(parts, L" · ");
 }
 
+// / 指令关着时，提供指令的插件详情里的说明，后面跟着「打开 / 指令」按钮（`SCRIPT_COMMAND_MODE_NOTE`）。授权本身从不改这个开关。
+inline constexpr std::wstring_view script_command_mode_note =
+    L"需要先打开 / 指令，并使用中文标点；在全拼、双拼、五笔下没有输入时按 / 再输入触发词。";
+
+// 包里冲突说明要用的名字：已安装的脚本插件 `id` 的名字，找不到时用 id。
+inline std::wstring script_name(std::vector<Package> const &packages, std::wstring_view id) {
+  for (auto const &pack : packages)
+    if (pack.kind == L"script" && pack.id == id)
+      return pack.name;
+  return std::wstring(id);
+}
+
+// 一条插件指令现在的状态，白话（`scriptCommandStatus`）：没启用或没授予「提供 / 指令」时说要怎样才生效；输入法停用了插件时照实说；否则按宿主算出的状态说生效，或者和谁冲突、没生效。
+inline std::wstring script_command_status(Package const &pack, std::wstring_view trigger,
+                                          ScriptGrants const *grants,
+                                          std::vector<Package> const &packages) {
+  auto const *grant = script_grant(grants, pack.id);
+  if (script_grant_state(pack, grant) != ScriptGrantState::enabled)
+    return L"授权并启用后生效";
+  if (!contains(grant->granted, L"provide_commands"))
+    return L"没有授予「提供 / 指令」，不会生效";
+  if (script_health(grants, pack))
+    return L"插件已被输入法停用，不会给出候选";
+  for (auto const &command : grants->commands) {
+    if (command.id != pack.id || command.trigger != trigger)
+      continue;
+    if (command.status == L"active")
+      return L"生效";
+    if (command.status == L"shadowed_by_user_table")
+      return L"与你的指令 /" + command.conflict + L" 冲突，未生效";
+    if (command.status == L"shadowed_by_plugin")
+      return L"与插件 " + script_name(packages, command.conflict_id) + L" 的 /" + command.conflict +
+             L" 冲突，未生效";
+    break;
+  }
+  return L"未生效";
+}
+
+// 授权对话框里列出的一条指令（`ScriptGrantDialog` 的列表）：「/uuid UUID」，调整授权时后面接着「：」和状态。
+inline std::wstring script_command_line(Command const &command, std::wstring const &status) {
+  auto line = L"/" + command.trigger + L" " + command.title;
+  return status.empty() ? line : line + L"：" + status;
+}
+
 // 授权页上的平台说明（`scriptResidualRisk` 的 Windows 分支）。授权文件不签名，以同一用户身份运行的程序都能绕过授权页自己写授权，这是设计接受的残余风险，要写在用户做决定的地方：列表分组、详情和授权对话框。
 inline constexpr std::wstring_view script_residual_risk =
     L"在 Windows 上，以你的身份运行的其他程序可以不经过这个页面，直接写入授权，让脚本插件读取或改写你输入的文字。只安装你信任的脚本插件。以管理员身份运行的窗口里不会运行脚本插件。";
@@ -961,12 +1026,14 @@ inline constexpr std::wstring_view import_description =
     L"数据插件只含音频、指令模板等数据；脚本插件（实验）带可执行代码，导入后要经授权才会运行。每个包须声明许可证";
 
 // 详情「状态」里的一句：授权状态，启用时再接输入法停用它的原因（停用原因只在启用时显示）。
-inline std::wstring script_status(ScriptGrantState state, ScriptHealth const *health) {
+inline std::wstring script_status(Package const &pack, ScriptGrantState state,
+                                  ScriptHealth const *health) {
   switch (state) {
   case ScriptGrantState::ungranted:
     return L"还没有授权，不会运行。";
   case ScriptGrantState::stale:
-    return L"已更新，需要重新授权：插件的内容和授权时不同，之前的授权已经作废，不会运行。";
+    return script_stale_label(pack) +
+           L"：插件的内容和授权时不同，之前的授权已经作废，不会运行。";
   case ScriptGrantState::disabled:
     return L"已停用，不会运行。";
   case ScriptGrantState::enabled:
@@ -1042,8 +1109,10 @@ inline std::vector<std::wstring> grant_dialog_initial(Package const &pack, Scrip
 
 inline std::wstring grant_dialog_title(Package const &pack) { return L"授权「" + pack.name + L"」"; }
 
-inline constexpr std::wstring_view grant_dialog_stale =
-    L"已更新，需要重新授权：这个插件的内容和你上次授权时不同，之前的授权已经作废。";
+// 授权对话框开头的提醒：这次授权给的是变过的内容。
+inline std::wstring grant_dialog_stale(Package const &pack) {
+  return script_stale_label(pack) + L"：这个插件的内容和你上次授权时不同，之前的授权已经作废。";
+}
 inline constexpr std::wstring_view grant_dialog_intro =
     L"脚本插件是第三方代码，会在输入法里运行。只勾选你愿意让它做的事；没有勾选的，它一律做不到。在密码框和隐私输入框里它不会运行。";
 inline constexpr std::wstring_view grant_dialog_no_permissions =

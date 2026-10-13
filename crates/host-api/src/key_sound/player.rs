@@ -708,7 +708,7 @@ mod tests {
         )
         .unwrap();
         SoundSettings {
-            roots: PluginRoots::new(state.to_str(), None, ""),
+            roots: PluginRoots::new(state.to_str(), None, None, ""),
             music: true,
             music_pack: "calm".into(),
             music_volume: 30,

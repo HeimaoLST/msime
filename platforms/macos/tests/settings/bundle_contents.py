@@ -6,10 +6,11 @@ elsewhere. None of that says the bundle came out right: a resource can be declar
 localisation can exist in the tree and not be copied, and a provider can be compiled into a library that
 the executable was never linked against. Every one of those is invisible until someone installs the thing.
 
-Usage: bundle_contents.py <path/to/App.app> [--languages zh-Hans,en]
+Usage: bundle_contents.py <path/to/App.app> [--languages zh-Hans,en] [--plugin-packs target/plugin-packs]
 """
 
 import argparse
+import json
 import os
 import plistlib
 import re
@@ -53,6 +54,8 @@ def main() -> int:
     # The languages the build stages. Without this a bundle that shipped none of them would pass by
     # having nothing left to check.
     parser.add_argument("--languages", default="")
+    # 这次构建放进 bundle 的官方插件包（scripts/build-official-plugins.sh 的产物）。给了才核对：开发构建可以不带它们。
+    parser.add_argument("--plugin-packs", type=Path)
     arguments = parser.parse_args()
     bundle = arguments.bundle
     contents = bundle / "Contents"
@@ -134,6 +137,20 @@ def main() -> int:
     for pack in sorted(path.name for path in packs.iterdir() if path.is_dir()):
         if not (resources / "sound-packs" / pack / "plugin.toml").is_file():
             failures.append(f"sound-packs/{pack} was not staged; the built-in sound pack is missing")
+
+    # 官方插件包（plugins/official-packs.json 登记的）要一个不少地到 Resources/plugin-packs/<kind>/<id>/，文件和构建出的逐字节相同：输入法和设置页从这里读它们，授权绑定在脚本包的内容哈希上。
+    if arguments.plugin_packs is not None:
+        lock = json.loads((Path(__file__).resolve().parents[4] / "plugins/official-packs.json").read_text(encoding="utf-8"))
+        for pack in lock["packs"]:
+            built = arguments.plugin_packs / pack["kind"] / pack["id"]
+            staged = resources / "plugin-packs" / pack["kind"] / pack["id"]
+            if not built.is_dir():
+                failures.append(f"{built} was not built; run scripts/build-official-plugins.sh")
+                continue
+            for source in sorted(path for path in built.iterdir() if path.is_file()):
+                copy = staged / source.name
+                if not copy.is_file() or copy.read_bytes() != source.read_bytes():
+                    failures.append(f"plugin-packs/{pack['kind']}/{pack['id']}/{source.name} was not staged as built; the official plugin pack is missing or stale")
 
     # A macOS framework is mostly symlinks - Headers, Resources and the binary all point into
     # Versions/Current. A copy that follows them produces a directory codesign calls ambiguous and refuses

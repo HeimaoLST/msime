@@ -191,6 +191,8 @@
 
 **Emoji 混输在 Windows 与 macOS 上默认开启，其余宿主默认关闭。** 来源的 `config.default.toml` 出厂就是 `emoji_mixed_input = true`。共享默认 `source_mixed_emoji_default()` 写成 `cfg!(any(windows, target_os = "macos"))`，让 Windows 与 macOS 的全新 profile 都得到同样的答案。macOS 原生侧 `mixedEmojiInput` 在共享快照或本地值出现之前的回退值与之一致。颜文字混输在所有宿主上仍默认关闭，与来源相同。Linux、Android、iOS、HarmonyOS 保持原样，理由同智能标点那一条；已存下来的值不受影响。判据在 `scripts/test-default-config-parity.py`。
 
+**符号混输在所有宿主上默认开启。** 符号混输（`mixed_input.symbols`，整段打出符号的名称时在候选里接着那个词给出符号，如 `zhengfu` → ±）是本客户端新增的，来源没有对应项，所以不分平台，共享文档只在关掉时写这个键。它不在 `scripts/test-default-config-parity.py` 的判据里，缺键读作开、只在关掉时写出由 client-core 的 `mixed_input_symbols_default_on_and_are_written_only_when_off` 守着。
+
 **润色服务与 AI 助手在 Windows 与 macOS 上默认指向 DeepSeek，AI 助手默认开启；其余宿主保持 SiliconFlow / Qwen 与 AI 关闭。** 来源的 `config.default.toml` 出厂把 `polish_provider` 设为 `deepseek`、`polish_endpoint` 设为 `https://api.deepseek.com/chat/completions`、`polish_model` 设为 `deepseek-v4-flash`，`[ai_assistant]` 为 `enabled = true` 并用同一个 provider、接口与模型，Windows 随包模板也一样；运行中的宿主读的是共享偏好文档，共享默认若不跟随，模板的值就到不了全新 profile，与语音开关是同一个道理。共享默认里润色三项由 `default_polish_service()` 成组给出（沿用 `source_voice_default()` 的判定），AI 助手由 `source_ai_default()`（`cfg!(any(windows, target_os = "macos"))`）决定开关并附带 DeepSeek 接口与模型，`enabled` 缺键时的 serde 默认也用它；接口与模型缺键时仍为空，已存下来的空值不被重新解释。AI 助手默认开启但不带 Token，`chat_completion_http_request` 在 Token 为空或是占位值时返回 `InvalidConfiguration`，不会发出任何请求；原生 AI 设置窗口要求开启时接口有效，默认接口满足这一点。macOS 原生侧在共享快照写进 NSUserDefaults 之前的润色回退值（`SharedVoicePreferences.h` 的 `MSIMEVoicePolishDefault*`，供语音设置窗口、备用 provider 窗口和录音请求共用）与之一致。Linux、Android、iOS、HarmonyOS 保持原样，理由同智能标点那一条；已存下来的值不受影响。判据在 `scripts/test-default-config-parity.py`，它同时核对来源模板、Windows 模板与共享默认。
 
 **智能标点的三个子开关不走独立 opcode。** 来源 `windows_ipc.h` 的 22/24/25 三个 opcode 在这边由一帧打包的标点配置携带。
@@ -2158,3 +2160,7 @@ Windows 的安装位置、资源目录和用户状态目录可能包含中文、
 - **按键路由不改**：TIP 把 A–Z 一律交给 Server；`'` 在本地模式里走标点路由（`EditPolicy.h` 只在 `none` 里把它当字符），由 runtime 的 `takes_local_separator` 交给 Engine 当部件分隔符。
 - **声明**：`Collect-Notices.ps1` 收集 `resources/licenses/kfcd-chaizi-CC-BY-3.0.txt`（CC BY 3.0 的署名、改动说明与全文）和表中 Unihan 读音的 `resources/licenses/Unicode-License-V3.txt`，`tests/tools/collect_notices.ps1` 的合成清单同步。
 - **验证层级**：`windows-session-smoke` 的本地模式路由用例经 `ReplyComposer::configured_key` 覆盖缺键时 Shift+C 交还应用、打开后进入、`'` 走标点路由仍作分隔符、空格上屏焱并计入打字统计；新增的 `--local-modes` 参数只跑这一段，在 Studio 的 `build-cross-container.sh x64` 产物上用模拟的 Wine 跑通（整套冒烟在模拟的 Wine 下 500 秒内跑不完，仍在 `scripts/known-failures.txt`）。带锁定词库的 `local_mode_tests` 表也加了 C，但没有在 Wine 下跑到。`settings/main.cpp` 依赖 WinUI 3，交叉构建不编译它，交给 Windows CI。没有在 Windows 上实机按键验证。
+
+### 词库页补上「导入词库文件」与搜狗细胞词库（2026-10-13）
+
+原生设置窗口的「词库」页此前只有查询、编辑、云词库入口、学习数据和背单词，没有从文件导入词库，上面 2026-09-20 那条记录里「导入、导出俱全」说的是共享设置页时代的状态。现在「本地词库管理」组补上「导入词库文件」（标准 TSV、Windows TSV、Rime、汉字自动注音，以及新支持的搜狗细胞词库 `.scel`），行为与共享页的导入相同，见 `platforms/windows/settings/README.md`；导出仍缺。

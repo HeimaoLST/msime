@@ -155,6 +155,9 @@ pub struct OutputContext {
     pub script_conversion: bool,
     /// Whether the host counts this commit in typing statistics. False for text the Engine generated in the expression, command and mention modes, which the user did not type out.
     pub typing_statistics: bool,
+    /// 这次上屏的是脚本插件在 `/` 指令里给的行（来源 14）。只给 host-api 判断要不要转全角（插件行同网址一样原样上屏），不上线缆。
+    #[serde(skip)]
+    pub plugin_row: bool,
 }
 
 #[derive(Debug, Serialize)]

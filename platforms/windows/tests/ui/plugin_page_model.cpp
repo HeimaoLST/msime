@@ -222,6 +222,16 @@ int main() {
   check((sort_capabilities({L"filter_candidates", L"x", L"read_composition", L"read_composition"}) ==
          Caps{L"read_composition", L"filter_candidates"}),
         "capabilities sort in the runtime's order");
+  // provide_commands 是第 8 项：排在最后，没有依赖、不和任何一项互斥，页面认得它，不会把它当成不认识的能力丢掉。
+  check(script_capabilities.size() == 8 && script_capabilities.back() == L"provide_commands",
+        "provide_commands is the eighth capability");
+  check((sort_capabilities({L"provide_commands", L"read_commit"}) == Caps{L"read_commit", L"provide_commands"}),
+        "provide_commands sorts last");
+  check(capability_requires(L"provide_commands").empty() && exclusive_partner(L"provide_commands").empty(),
+        "provide_commands needs nothing and excludes nothing");
+  check((toggle_capability({L"read_commit"}, L"provide_commands", true, all) ==
+         Caps{L"read_commit", L"provide_commands"}),
+        "checking provide_commands keeps the rest");
 
   // 对话框：依赖和互斥的说明，互斥的那一项勾着时禁用；新版本不再申请的一项不算勾着。
   auto items = grant_items({L"rewrite_commit", L"read_commit", L"read_composition"},
@@ -279,11 +289,23 @@ int main() {
   check(script_marker(scripts[7], &grants, running_script_ids(&grants, scripts)) == L"未启用", "disabled");
   ScriptGrants empty;
   check(script_marker(scripts[0], &empty, {}) == L"未授权", "ungranted");
-  check(script_status(ScriptGrantState::enabled, script_health(&grants, scripts[7])) ==
+  check(script_status(scripts[7], ScriptGrantState::enabled, script_health(&grants, scripts[7])) ==
             L"已启用。运行太慢，输入法已停用它，重新授权或重启输入法后恢复。" &&
-            script_status(ScriptGrantState::stale, nullptr) ==
+            script_status(scripts[9], ScriptGrantState::stale, nullptr) ==
                 L"已更新，需要重新授权：插件的内容和授权时不同，之前的授权已经作废，不会运行。",
         "status lines");
+  // 随输入法分发的官方插件：内容只会随输入法更新而变，标记、状态和授权对话框都这样说；共享页用同一句「来源」。
+  auto official = scripts[9];
+  official.builtin = true;
+  check(script_marker(official, &grants, running) == L"已随输入法更新，需要重新授权" &&
+            script_status(official, ScriptGrantState::stale, nullptr) ==
+                L"已随输入法更新，需要重新授权：插件的内容和授权时不同，之前的授权已经作废，不会运行。" &&
+            grant_dialog_stale(official) ==
+                L"已随输入法更新，需要重新授权：这个插件的内容和你上次授权时不同，之前的授权已经作废。" &&
+            grant_dialog_stale(scripts[9]) ==
+                L"已更新，需要重新授权：这个插件的内容和你上次授权时不同，之前的授权已经作废。" &&
+            script_builtin_note == L"随输入法安装和更新，不能删除；需要你授权后才会运行。",
+        "official script packs");
   check(script_order_note(-1, 8) == L"同时启用的脚本插件超过 8 个，这个插件排在第 8 个之后，不会运行。" &&
             script_order_note(0, 3) == L"第 1 位，共 3 个。多个插件按这个顺序依次处理同一件事。",
         "order notes");
@@ -303,8 +325,19 @@ int main() {
   check(grant_dialog_initial(scripts[0], nullptr).empty(), "a new grant starts with nothing checked");
 
   // 文案：钩子、停用原因、指纹、残余风险。
-  check(hook_label(L"before_commit") == L"文字输入到应用之前（可以改写）" && hook_label(L"x") == L"x",
+  check(hook_label(L"before_commit") == L"文字输入到应用之前（可以改写）" && hook_label(L"x") == L"x" &&
+            hook_label(L"command") == L"你在 / 指令里输入它的触发词时（给出候选）",
         "hook labels");
+  {
+    const auto label = capability_label(L"provide_commands");
+    check(label.title == L"提供 / 指令" &&
+              label.description.find(L"按回车时只输入你打的原文（例如 /uuid），点到别的窗口时插件给出的行不会输入") != std::wstring::npos,
+          "the provide_commands label");
+    auto commands = grant_items({L"provide_commands"}, {}, false);
+    check(commands.size() == 1 && commands[0].title == L"提供 / 指令" && !commands[0].disabled &&
+              commands[0].description == label.description,
+          "the grant dialog offers provide_commands without notes");
+  }
   check(health_label(L"init") == L"初始化失败，输入法已停用它", "health labels");
   check(short_hash(L"0123456789abcdef") == L"0123456789ab" && short_hash(L"ab") == L"ab", "short hash");
   check(std::wstring(script_residual_risk).find(L"以管理员身份运行的窗口里不会运行脚本插件") !=
@@ -315,6 +348,42 @@ int main() {
   authored.author = L"甲";
   check(script_row_description(authored) == L"1.0.0 · 作者 甲", "script row description");
   check(grant_dialog_title(authored) == L"授权「名a」", "dialog title");
+
+  // 插件 / 指令的状态（共享页的 scriptCommandStatus）：没启用、没授予、被停用、宿主算出的三种状态和没列出的。
+  {
+    auto uuid = script(L"uuid", h1);
+    uuid.permissions = {L"provide_commands"};
+    uuid.commands = {{L"uuid", L"UUID", L""}, {L"guid", L"GUID", L""}, {L"xid", L"X", L""}};
+    auto other = script(L"other", h1);
+    std::vector<Package> packages{uuid, other};
+    ScriptGrants granted;
+    check(script_command_status(uuid, L"uuid", &granted, packages) == L"授权并启用后生效" &&
+              script_command_status(uuid, L"uuid", nullptr, packages) == L"授权并启用后生效",
+          "a command of a pack not yet granted");
+    granted.plugins.push_back({L"uuid", h1, true, {}});
+    check(script_command_status(uuid, L"uuid", &granted, packages) == L"没有授予「提供 / 指令」，不会生效",
+          "enabled without provide_commands");
+    granted.plugins[0].granted = {L"provide_commands"};
+    granted.commands = {{L"other", L"uu", L"U", L"active", L"", L""},
+                        {L"uuid", L"uuid", L"UUID", L"shadowed_by_plugin", L"uu", L"other"},
+                        {L"uuid", L"guid", L"GUID", L"shadowed_by_user_table", L"gu", L""}};
+    check(script_command_status(uuid, L"uuid", &granted, packages) == L"与插件 名other 的 /uu 冲突，未生效",
+          "shadowed by another plugin, named");
+    check(script_command_status(uuid, L"guid", &granted, packages) == L"与你的指令 /gu 冲突，未生效",
+          "shadowed by the user's table");
+    check(script_command_status(uuid, L"xid", &granted, packages) == L"未生效", "not listed by the host");
+    granted.commands.push_back({L"uuid", L"xid", L"X", L"active", L"", L""});
+    check(script_command_status(uuid, L"xid", &granted, packages) == L"生效", "active");
+    granted.health.push_back({L"uuid", h1, L"failed"});
+    check(script_command_status(uuid, L"xid", &granted, packages) == L"插件已被输入法停用，不会给出候选",
+          "stopped by the input method");
+    check(script_command_line(uuid.commands[0], L"") == L"/uuid UUID" &&
+              script_command_line(uuid.commands[0], L"生效") == L"/uuid UUID：生效",
+          "dialog lines");
+    check(script_command_mode_note ==
+              L"需要先打开 / 指令，并使用中文标点；在全拼、双拼、五笔下没有输入时按 / 再输入触发词。",
+          "the slash mode note");
+  }
 
   if (failures == 0)
     std::puts("plugin page model: ok");

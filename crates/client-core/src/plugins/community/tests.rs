@@ -4,7 +4,7 @@ use super::*;
 use crate::account::{
     AccountChallenge, AccountProfile, AccountTokens, AccountUser, SavedAccountSession,
 };
-use crate::plugins::{kind_directory, MANIFEST_FILE};
+use crate::plugins::{kind_directory, BuiltinDirs, MANIFEST_FILE};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpListener;
@@ -194,7 +194,13 @@ fn install_imports_a_verified_download() {
     .unwrap();
     assert_eq!(summary.id, "signature");
     assert_eq!(summary.kind(), PluginKind::CommandTable);
-    let loaded = load_package(root.path(), None, PluginKind::CommandTable, "signature").unwrap();
+    let loaded = load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::CommandTable,
+        "signature",
+    )
+    .unwrap();
     assert_eq!(loaded.version, "1.0");
     assert!(kind_directory(root.path(), PluginKind::CommandTable)
         .join("signature")
@@ -217,7 +223,13 @@ fn install_imports_a_downloaded_effect_pack() {
     .unwrap();
     assert_eq!(summary.id, "neon");
     assert_eq!(summary.kind(), PluginKind::Effect);
-    let loaded = load_package(root.path(), None, PluginKind::Effect, "neon").unwrap();
+    let loaded = load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::Effect,
+        "neon",
+    )
+    .unwrap();
     assert_eq!(loaded.version, "1");
     assert!(loaded.directory.join("LICENSE.txt").is_file());
 }
@@ -324,7 +336,13 @@ fn install_replaces_an_installed_pack_whole() {
         "signature",
     )
     .unwrap();
-    let loaded = load_package(root.path(), None, PluginKind::CommandTable, "signature").unwrap();
+    let loaded = load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::CommandTable,
+        "signature",
+    )
+    .unwrap();
     assert_eq!(loaded.version, "1.0");
     assert!(!loaded.directory.join("OLD.txt").exists());
 }

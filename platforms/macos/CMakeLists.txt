@@ -269,6 +269,29 @@ foreach(MSIME_SOUND_PACK_DIRECTORY ${MSIME_SOUND_PACK_DIRECTORIES})
   target_sources(MSIMEClientInputMethod PRIVATE ${MSIME_SOUND_PACK_FILES})
   set_source_files_properties(${MSIME_SOUND_PACK_FILES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/sound-packs/${MSIME_SOUND_PACK}")
 endforeach()
+# 随桌面安装包分发的官方插件包（plugins/official-packs.json 登记的脚本插件和短语表），由 scripts/build-official-plugins.sh 构建到 target/plugin-packs/<kind>/<id>/，原样放进 Resources/plugin-packs/<kind>/<id>/。它在内置音效包旁边：宿主只传 sound_packs，host-api 和设置页从那里推出 plugin-packs，所以输入法代码不用改。bundle 的签名封住这些文件，随 app 更新整体替换；它们默认停用，脚本插件要授权、短语表要启用才生效。
+# 目录不在时（没先跑构建脚本的开发构建）不带官方包；发版设 MSIME_REQUIRE_OFFICIAL_PLUGINS=ON，那时目录不在就配置失败。
+set(MSIME_PLUGIN_PACKS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../target/plugin-packs" CACHE PATH "Official plugin packs built by scripts/build-official-plugins.sh, staged into Resources/plugin-packs when present")
+option(MSIME_REQUIRE_OFFICIAL_PLUGINS "Fail the configure when MSIME_PLUGIN_PACKS_DIR holds no official plugin packs" OFF)
+set(MSIME_STAGED_PLUGIN_PACKS "")
+if(IS_DIRECTORY "${MSIME_PLUGIN_PACKS_DIR}")
+  file(GLOB MSIME_PLUGIN_PACK_DIRECTORIES LIST_DIRECTORIES true CONFIGURE_DEPENDS "${MSIME_PLUGIN_PACKS_DIR}/*/*")
+  foreach(MSIME_PLUGIN_PACK_DIRECTORY ${MSIME_PLUGIN_PACK_DIRECTORIES})
+    if(NOT IS_DIRECTORY "${MSIME_PLUGIN_PACK_DIRECTORY}")
+      continue()
+    endif()
+    get_filename_component(MSIME_PLUGIN_PACK "${MSIME_PLUGIN_PACK_DIRECTORY}" NAME)
+    get_filename_component(MSIME_PLUGIN_PACK_KIND_DIRECTORY "${MSIME_PLUGIN_PACK_DIRECTORY}" DIRECTORY)
+    get_filename_component(MSIME_PLUGIN_PACK_KIND "${MSIME_PLUGIN_PACK_KIND_DIRECTORY}" NAME)
+    file(GLOB MSIME_PLUGIN_PACK_FILES CONFIGURE_DEPENDS "${MSIME_PLUGIN_PACK_DIRECTORY}/*")
+    target_sources(MSIMEClientInputMethod PRIVATE ${MSIME_PLUGIN_PACK_FILES})
+    set_source_files_properties(${MSIME_PLUGIN_PACK_FILES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/plugin-packs/${MSIME_PLUGIN_PACK_KIND}/${MSIME_PLUGIN_PACK}")
+    list(APPEND MSIME_STAGED_PLUGIN_PACKS "${MSIME_PLUGIN_PACK_KIND}/${MSIME_PLUGIN_PACK}")
+  endforeach()
+endif()
+if(MSIME_REQUIRE_OFFICIAL_PLUGINS AND NOT MSIME_STAGED_PLUGIN_PACKS)
+  message(FATAL_ERROR "MSIME_REQUIRE_OFFICIAL_PLUGINS is on but ${MSIME_PLUGIN_PACKS_DIR} holds no plugin packs; run scripts/build-official-plugins.sh first")
+endif()
 # LaunchServices takes the Dock and menu bar name from a localized InfoPlist.strings, not from the
 # CFBundleDisplayName in the plist; without these the Dock falls back to the executable's filename.
 # The TIS identifier keys name the entry in the system input menu.
@@ -1050,12 +1073,18 @@ add_test(
   COMMAND "${Python3_EXECUTABLE}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/settings/preference_coverage.py"
           "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+# 官方插件包随这次构建放进了 bundle 时，bundle-contents 逐个核对它们到位、内容和构建出的一致。
+set(MSIME_BUNDLE_PLUGIN_PACKS_ARGUMENTS "")
+if(MSIME_STAGED_PLUGIN_PACKS)
+  set(MSIME_BUNDLE_PLUGIN_PACKS_ARGUMENTS --plugin-packs "${MSIME_PLUGIN_PACKS_DIR}")
+endif()
 add_test(
   NAME bundle-contents
   COMMAND "${Python3_EXECUTABLE}"
           "${CMAKE_CURRENT_SOURCE_DIR}/tests/settings/bundle_contents.py"
           "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>"
-          --languages zh-Hans,en)
+          --languages zh-Hans,en
+          ${MSIME_BUNDLE_PLUGIN_PACKS_ARGUMENTS})
 add_test(
   NAME info-plist-icons
   COMMAND "${Python3_EXECUTABLE}"
@@ -1158,7 +1187,7 @@ endforeach()
 set(MSIME_OPTIONAL_BACKEND_SYMBOLS
   _MSIMEAccountPaneView _MSIMEAccountPaneAttach _MSIMEAccountPaneClose
   _MSIMEEnsureAnonymousAccount _MSIMEFetchAccountCandidateGlosses _MSIMECancelAccountCandidateGlosses
-  _MSIMEFetchOnDeviceCandidateGlosses
+  _MSIMEFetchOnDeviceCandidateGlosses _MSIMEBackendAccountTranslationMarker
   _msime_macos_uninstall_input_source)
 # The input method links MSIMEBackend.dylib itself, but a toolchain older than Swift 6.2 builds that without the on-device translation entry point (BackendOnDeviceGloss.swift), which the controller then finds null.
 target_link_options(MSIMEClientInputMethod PRIVATE "LINKER:-U,_MSIMEFetchOnDeviceCandidateGlosses")

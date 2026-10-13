@@ -53,6 +53,7 @@
 #define MSIME_HOOK_CANDIDATES_SHOWN 14
 #define MSIME_HOOK_CANDIDATES_HIDDEN 15
 #define MSIME_HOOK_CANDIDATES 17
+#define MSIME_HOOK_COMMAND 18
 
 /* ---- 不需要能力：事件的枚举字段和日志 ---- */
 
@@ -208,5 +209,24 @@ MSIME_IMPORT(candidates_hide) int32_t msime_candidates_hide(const uint32_t *rows
 
 /* annotate_candidates（依赖 read_candidates）：给第 index 行加注释，只在 candidates 里。 */
 MSIME_IMPORT(candidates_annotate) int32_t msime_candidates_annotate(int32_t index, const char *text, int32_t len);
+
+/* ---- provide_commands：在自己声明的 / 指令里给出候选（清单 [[script.commands]] 声明触发词，hooks 里要有 command）。command 只投递给触发词的主人，跑在 msime_init 之后的快照上，每次都看不到之前任何事件留下的状态 ---- */
+
+/* msime_command_text 的字段。 */
+/* 用户打的触发词，即清单里的某个 trigger。 */
+#define MSIME_COMMAND_TRIGGER 0
+/* 触发词后面用户打的小写字母，可以为空（/uuid），最多 64 字节。 */
+#define MSIME_COMMAND_ARGUMENT 1
+
+/* 复制触发词或参数，只在 command 里有值，别处返回 MSIME_ABSENT。 */
+MSIME_IMPORT(command_text) int32_t msime_command_text(int32_t field, char *dst, int32_t cap);
+
+/* 给出一行候选：text 是选中时上屏的文本（1 到 64 个 UTF-16 码元，首尾不能是空白，不能含控制、格式和不可见字符，也不能含 ://、www.、mailto:），note 是画在插件注释格里的说明（最多 32 个 UTF-16 码元，可以为空）。只在 command 里有效，别处返回 MSIME_DENIED；第 10 行或太长返回 MSIME_LIMIT，不合规返回 MSIME_INVALID；成功返回行号。钩子正常返回之后这些行才会显示。 */
+MSIME_IMPORT(command_row) int32_t msime_command_row(const char *text, int32_t text_len, const char *note, int32_t note_len);
+
+/* ---- 不需要能力：随机数 ---- */
+
+/* 每次 command 事件有 64 字节随机数，按调用顺序取：把接下来的 len 个字节写进 dst，返回 len；剩下的不够时返回 MSIME_LIMIT，什么都不写。别的钩子里没有随机数。 */
+MSIME_IMPORT(random_fill) int32_t msime_random_fill(uint8_t *dst, int32_t len);
 
 #endif /* MSIME_SCRIPT_H */

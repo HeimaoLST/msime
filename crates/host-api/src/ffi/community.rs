@@ -514,7 +514,7 @@ pub unsafe extern "C" fn msime_client_community(request: *const u8, length: usiz
         let skins = optional_directory(request.skins_directory.as_deref())?;
         optional_directory(request.state_root.as_deref())?;
         // `<state_root>/plugins`, the root `msime_client_plugins` lists and imports into.
-        let plugins = PluginRoots::new(request.state_root.as_deref(), None, "").installed;
+        let plugins = PluginRoots::new(request.state_root.as_deref(), None, None, "").installed;
         let services = services_for(directory, legacy).map_err(account)?;
         run(&services, skins, plugins.as_deref(), request.action)
     })

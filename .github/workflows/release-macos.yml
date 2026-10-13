@@ -8,7 +8,27 @@ on:
 permissions: {contents: write}
 concurrency: {group: release-macos, cancel-in-progress: false}
 jobs:
+  # 随桌面安装包分发的官方插件包（plugins/official-packs.json），只在这里构建一次，打包作业下载同一份：scripts/build-official-plugins.sh 编出 wasm，并和锁定的内容哈希比对（授权绑定在它上面），所以装进安装包的就是评审过的那一份；锁以这台 ubuntu 的构建为准，和 CI 的 Script plugins 作业一致。打包的 runner 不用装 wasm 目标。
+  official-plugins:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {ref: "${{ github.sha }}", persist-credentials: false}
+      - name: Build the official plugin packs
+        run: |
+          set -euo pipefail
+          # 安装 rust-toolchain.toml 钉住的工具链，再给它加上 wasm 目标。
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+          bash scripts/build-official-plugins.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: official-plugin-packs
+          path: target/plugin-packs/
+          if-no-files-found: error
   release:
+    needs: official-plugins
     # 发布包是 universal 的（arm64 + x86_64），在 Apple 芯片的 runner 上交叉编出 x86_64。Rust 引擎不再链接只有 arm64 的 Homebrew 库，C/C++ 部分只用系统 SDK，所以一台机器就能编出两种架构。
     # 留在 GitHub 托管的 runner 上，不要搬到 Depot：这个 job 用到Developer ID 证书、公证用的 Apple ID 密码这些长期凭据。只做构建、不碰长期凭据的 job 才放 Depot。
     runs-on: macos-15
@@ -104,11 +124,17 @@ jobs:
       # Fetches the pinned dictionaries, builds the Release host library, the input method bundle and the Tauri settings app that embeds both, signs them (Developer ID when the secrets are present, ad-hoc otherwise), checks the embedded resources and signatures inside the mounted DMG, notarizes when the Apple ID secrets are present, and writes SHA256SUMS.
       # 包里只带核心词库；日文词典、粤拼/注音词库和手写模型由 App 首次用到时下载。package-release.sh 在编译之前先用 App 的同一个安装器把三个资源包装一遍，地址失效或哈希不符就在这里失败，不会发出一个补不齐数据的包。
       # package-release.sh 按这两个 target 各编一次 Rust 产物再合并；rust-toolchain.toml 只固定编译器版本，不带这两个标准库。
+      # 官方插件包（official-plugins 作业构建、核对过哈希的那一份）放到打包脚本找它的位置；MSIME_REQUIRE_OFFICIAL_PLUGINS=1 让缺了它的安装包打不出来。
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: official-plugin-packs
+          path: target/plugin-packs
       - name: Add the Rust targets for the universal package
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Build macOS package
         env:
           VERSION: "${{ steps.version.outputs.value }}"
+          MSIME_REQUIRE_OFFICIAL_PLUGINS: '1'
           APPLE_ID: "${{ secrets.MACOS_NOTARY_APPLE_ID }}"
           APPLE_TEAM_ID: "${{ secrets.MACOS_NOTARY_TEAM_ID }}"
           APPLE_APP_SPECIFIC_PASSWORD: "${{ secrets.MACOS_NOTARY_APP_SPECIFIC_PASSWORD }}"

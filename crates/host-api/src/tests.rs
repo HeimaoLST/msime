@@ -183,6 +183,7 @@ fn local_mode_resource_gates_preserve_unrelated_modes() {
         english_minimum_prefix: 2,
         mixed_emoji: false,
         mixed_kaomoji: false,
+        mixed_symbols: false,
         mixed_japanese: true,
         local_unicode: true,
         local_date_time: true,
@@ -199,6 +200,7 @@ fn local_mode_resource_gates_preserve_unrelated_modes() {
         local_shift_letter_entry: true,
         chaizi_traditional_output: false,
         command_table: Vec::new(),
+        plugin_commands: Vec::new(),
         mention_entries: Vec::new(),
         quick_phrase_table: Vec::new(),
         helpcode_table: None,
@@ -1074,6 +1076,7 @@ fn mixed_input_changes_defer_until_composition_ends() {
             emoji: true,
             kaomoji: true,
             japanese: true,
+            symbols: false,
         },
         ..Preferences::default()
     };
@@ -1086,6 +1089,8 @@ fn mixed_input_changes_defer_until_composition_ends() {
         assert!(!options.mixed_emoji);
         assert!(!options.mixed_kaomoji);
         assert!(!options.mixed_japanese);
+        // 符号混输默认开。
+        assert!(options.mixed_symbols);
     });
     read(msime_client_command(handle, 3));
     SESSIONS.with(|sessions| {
@@ -1095,6 +1100,7 @@ fn mixed_input_changes_defer_until_composition_ends() {
         assert_eq!(options.english_minimum_prefix, 8);
         assert!(options.mixed_emoji && options.mixed_kaomoji);
         assert!(options.mixed_japanese);
+        assert!(!options.mixed_symbols);
     });
     preferences.mixed_input.minimum_prefix = 9;
     assert_eq!(update(handle, 2, &preferences)["ok"], false);
@@ -1833,6 +1839,170 @@ fn tibetan_scheme_crosses_the_host_boundary() {
     read(msime_client_destroy(handle));
 }
 
+/// 测试用的插件指令提供者：不论触发词和参数，交回固定的行。
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+struct FixedPluginRows(Vec<(String, String)>);
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+impl msime_input_runtime::CommandProvider for FixedPluginRows {
+    fn provide(
+        &mut self,
+        _trigger: &str,
+        _argument: &str,
+        out: &mut Vec<(String, String)>,
+    ) -> msime_input_runtime::CommandOutcome {
+        out.extend(self.0.iter().cloned());
+        msime_input_runtime::CommandOutcome::Ran
+    }
+}
+
+/// 在 crate 内部给会话挂上插件指令 `/uuid` 和一个交回固定行的提供者，代替 host-api 以后经授权算出的那一份。
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+fn attach_plugin_rows(handle: u64, rows: &[&str]) {
+    let rows = rows
+        .iter()
+        .map(|text| ((*text).to_owned(), String::new()))
+        .collect();
+    SESSIONS.with(|sessions| {
+        let mut sessions = sessions.borrow_mut();
+        let session = sessions.get_mut(&handle).unwrap();
+        session
+            .runtime
+            .set_plugin_commands(&[msime_input_runtime::PluginCommand {
+                trigger: "uuid".into(),
+                title: "UUID".into(),
+            }])
+            .unwrap();
+        session
+            .runtime
+            .set_command_provider(Some(Box::new(FixedPluginRows(rows))));
+    });
+}
+
+/// 打一串字母，返回最后的视图。
+fn type_letters(handle: u64, keys: &[u8]) -> Value {
+    let mut view = Value::Null;
+    for key in keys {
+        let result = read(msime_client_character(handle, *key, false));
+        assert_eq!(result["ok"], true, "{result}");
+        view = result["value"]["view"].clone();
+    }
+    view
+}
+
+/// 页上有脚本插件的行（来源 14）时整页不请求释义和翻译：不论开的是在线翻译、英文释义还是离线释义。对照组是同一偏好下的 `/rq`，它照常请求，确认拦下它的是插件行本身。
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+#[test]
+fn plugin_rows_ask_for_no_gloss_or_translation() {
+    type Configure = fn(&mut Preferences);
+    let variants: [(&str, Configure); 3] = [
+        ("translation", |preferences| {
+            preferences.candidate_translations = true;
+        }),
+        ("english gloss", |preferences| {
+            preferences.candidate_english_gloss = true;
+        }),
+        ("offline gloss", |preferences| {
+            preferences.candidate_english_gloss = true;
+            preferences.translation_target_language =
+                msime_client_core::preferences::TranslationTargetLanguage::Fr;
+        }),
+    ];
+    for (label, configure) in variants {
+        let dir = tempfile::tempdir().unwrap();
+        offline_gloss_fixture(&dir.path().join("offline-glosses/zh-fr.db"), "fr");
+        let mut preferences = chinese_preferences();
+        preferences.local_modes.command = true;
+        preferences.candidate_translations = false;
+        preferences.candidate_english_gloss = false;
+        preferences.tencent_tmt.enabled = false;
+        configure(&mut preferences);
+        let handle = test_host_preferences(dir.path(), preferences);
+        assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+        attach_plugin_rows(handle, &["你好", "hello"]);
+
+        let view = type_letters(handle, b"/rq");
+        assert!(!view["candidates"].as_array().unwrap().is_empty());
+        assert!(
+            !read(msime_client_translation_query(handle))["value"].is_null(),
+            "{label}: the control asks"
+        );
+        read(msime_client_command(handle, 3));
+
+        let view = type_letters(handle, b"/uuid");
+        assert_eq!(view["candidates"][0]["text"], "你好", "{label}");
+        assert_eq!(view["candidates"][0]["source"], 14, "{label}");
+        assert!(
+            read(msime_client_translation_query(handle))["value"].is_null(),
+            "{label}"
+        );
+        read(msime_client_destroy(handle));
+    }
+}
+
+/// 全角输出开着时插件行原样上屏（半角 ASCII），候选窗里显示的就是上屏的；同一个会话里内置指令 `/rq` 的上屏照旧转全角。
+#[cfg(any(
+    target_os = "macos",
+    target_os = "windows",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
+#[test]
+fn plugin_rows_commit_half_width_in_full_width_mode() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut preferences = chinese_preferences();
+    preferences.local_modes.command = true;
+    let handle = test_host_preferences(directory.path(), preferences);
+    assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+    read(msime_client_set_character_width(handle, true));
+    attach_plugin_rows(handle, &["0f8fad5b-d9cb-469f"]);
+
+    let view = type_letters(handle, b"/uuid");
+    assert_eq!(view["candidates"][0]["text"], "0f8fad5b-d9cb-469f");
+    let committed = read(msime_client_command(handle, 1));
+    assert_eq!(committed["value"]["commit"], "0f8fad5b-d9cb-469f");
+    assert_eq!(
+        committed["value"]["commit_context"]["local_mode"],
+        "command"
+    );
+    assert!(
+        committed["value"]["commit_context"]
+            .get("plugin_row")
+            .is_none(),
+        "the flag stays off the wire"
+    );
+
+    let view = type_letters(handle, b"/rq");
+    let date = view["candidates"][0]["text"].as_str().unwrap().to_owned();
+    let widened: String = date
+        .chars()
+        .map(|character| match character {
+            '!'..='~' => char::from_u32(character as u32 + 0xfee0).unwrap(),
+            ' ' => '\u{3000}',
+            other => other,
+        })
+        .collect();
+    assert!(date.chars().any(|character| character.is_ascii_digit()));
+    let committed = read(msime_client_command(handle, 1));
+    assert_eq!(committed["value"]["commit"], widened.as_str());
+    assert_eq!(read(msime_client_destroy(handle))["ok"], true);
+}
+
 // 全角输出开着时，中文方案的上屏都转成全角，网址例外：上屏后 view 已回到 `none`，所以按上屏前的 `commit_context.local_mode` 豁免。
 #[test]
 fn url_commits_stay_half_width_in_full_width_mode() {
@@ -1910,6 +2080,7 @@ fn completed_commit(
                     local_mode: local_mode.to_owned(),
                     script_conversion: true,
                     typing_statistics: true,
+                    plugin_row: false,
                 }),
                 diagnostic: None,
                 view,
@@ -2237,6 +2408,39 @@ fn glide_request(word: &str) -> String {
     let [x, y] = keys[usize::from(word.as_bytes()[word.len() - 1] - b'a')];
     points.push([x, y, points.len() as f32 * 8.0]);
     json!({"keys": keys, "key_width": 80.0, "key_height": 120.0, "points": points}).to_string()
+}
+
+/// 共享偏好 `mixed_input.symbols` 决定 Engine 的 `mixed_symbols`：默认开，打 `zhengfu` 时 ± 接在 正负 后面；关掉后（不在组字时立即生效）不再出现。
+#[test]
+fn symbol_candidates_follow_the_mixed_input_preference() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut preferences = chinese_preferences();
+    assert!(preferences.mixed_input.symbols);
+    let handle = test_host_with_pinyin_fixture(dir.path(), preferences.clone());
+    read(msime_client_focus(handle, true));
+    let typed = |handle: u64| {
+        let mut view = Value::Null;
+        for byte in b"zhengfu" {
+            view = read(msime_client_character(handle, *byte, false))["value"]["view"].clone();
+        }
+        view["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|candidate| candidate["text"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let texts = typed(handle);
+    assert_eq!(texts[..3], ["政府", "正负", "±"], "{texts:?}");
+    SESSIONS.with(|sessions| assert!(sessions.borrow()[&handle].options.mixed_symbols));
+    read(msime_client_command(handle, 3));
+
+    preferences.mixed_input.symbols = false;
+    assert_eq!(update(handle, 1, &preferences)["ok"], true);
+    let texts = typed(handle);
+    assert!(!texts.contains(&"±".to_owned()), "{texts:?}");
+    SESSIONS.with(|sessions| assert!(!sessions.borrow()[&handle].options.mixed_symbols));
+    read(msime_client_destroy(handle));
 }
 
 #[test]
@@ -2933,6 +3137,7 @@ fn nine_key_digits_offer_ranked_english_across_the_host_boundary() {
                 emoji: false,
                 kaomoji: false,
                 japanese: false,
+                symbols: false,
             },
             ..chinese_preferences()
         },
@@ -5277,6 +5482,8 @@ fn test_host_with_pinyin_fixture(root: &std::path::Path, preferences: Preference
     let dictionaries = path("dictionaries");
     let fixture = "CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
                    INSERT INTO tbl_2_n VALUES('ni''hao','nh','本地',100),('ni''hao','nh','拟好',80);
+                   CREATE TABLE tbl_2_z(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                   INSERT INTO tbl_2_z VALUES('zheng''fu','zf','政府',100),('zheng''fu','zf','正负',80);
                    CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);
                    CREATE TABLE quick_parases(key TEXT,value TEXT,weight INTEGER);
                    CREATE INDEX idx_quick_parases_key_weight ON quick_parases(key,weight DESC);";
@@ -12252,6 +12459,82 @@ fn phrase_tables_reach_the_quick_phrase_mode_from_the_plugins_directory() {
     assert_eq!(read(msime_client_destroy(handle))["ok"], true);
 }
 
+/// 官方短语表（随桌面安装包分发的 latex-symbols）从内置目录读：宿主选项给了 `plugin_packs` 时读那里，没给时读内置音效包旁边的 `plugin-packs`（macOS 的 bundle、Linux 的安装就是这样放的）。不在 `phrase_tables` 里就不进 K 模式；插件目录里同 id 的旧副本不顶替它。
+#[test]
+fn an_official_phrase_table_comes_from_the_bundle_and_only_once_enabled() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["resources", "dictionaries"] {
+        let directory = dir.path().join(name);
+        std::fs::create_dir_all(&directory).unwrap();
+        rusqlite::Connection::open(directory.join("msime-pinyin.db"))
+            .unwrap()
+            .execute_batch("CREATE TABLE quick_parases(key TEXT,value TEXT,weight INTEGER);")
+            .unwrap();
+    }
+    let bundle = dir.path().join("bundle");
+    let sounds = bundle.join("sound-packs");
+    std::fs::create_dir_all(&sounds).unwrap();
+    let official = bundle.join("plugin-packs/phrase_table/latex-symbols");
+    std::fs::create_dir_all(&official).unwrap();
+    std::fs::write(
+        official.join("plugin.toml"),
+        "schema_version = 1\nkind = \"phrase_table\"\nid = \"latex-symbols\"\nname = \"LaTeX 符号\"\nversion = \"1.0.0\"\nlicense = \"MIT\"\n[[phrases]]\nkey = \"gamma\"\ntext = \"γ\"\n[[phrases]]\nkey = \"gamma\"\ntext = \"Γ\"\n",
+    )
+    .unwrap();
+    // 官方包随安装包分发之前导入过的同 id 副本。
+    install_phrase_table(dir.path(), "latex-symbols", &[("gamma", "旧副本")]);
+    let path = |name: &str| {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    };
+    let create = |preferences: &Preferences, plugin_packs: Option<&std::path::Path>| {
+        let mut options = json!({ "api_version": 1, "resources": path("resources"), "user_data": path("user"), "cache": path("cache"), "dictionaries": path("dictionaries"), "preferences": preferences, "preferences_directory": path("state"), "sound_packs": sounds });
+        if let Some(packs) = plugin_packs {
+            options["plugin_packs"] = json!(packs);
+        }
+        let options = options.to_string();
+        let created = read(unsafe { msime_client_create(options.as_ptr(), options.len()) });
+        assert_eq!(created["ok"], true, "{created}");
+        created["value"]["session"].as_u64().unwrap()
+    };
+
+    // 没启用：K 模式里没有它。
+    let mut preferences = chinese_preferences();
+    let handle = create(&preferences, None);
+    assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+    let rows = quick_phrase_candidates(handle, b"gamma");
+    assert!(
+        !rows
+            .iter()
+            .any(|row| ["γ", "Γ", "旧副本"].contains(&row.as_str())),
+        "{rows:?}"
+    );
+    // 启用之后读的是内置那一份。
+    preferences.plugins.phrase_tables = vec!["latex-symbols".into()];
+    assert_eq!(update(handle, 1, &preferences)["value"]["deferred"], false);
+    assert_eq!(quick_phrase_candidates(handle, b"gamma"), ["γ", "Γ"]);
+    SESSIONS.with(|sessions| {
+        assert_eq!(
+            sessions.borrow()[&handle].plugin_roots.builtin_packs,
+            Some(bundle.join("plugin-packs"))
+        );
+    });
+    assert_eq!(read(msime_client_destroy(handle))["ok"], true);
+
+    // 显式给出的目录优先；它不在时什么都不读，也不退回插件目录里的副本。
+    let handle = create(&preferences, Some(&dir.path().join("elsewhere")));
+    assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+    let rows = quick_phrase_candidates(handle, b"gamma");
+    assert!(
+        !rows
+            .iter()
+            .any(|row| ["γ", "Γ", "旧副本"].contains(&row.as_str())),
+        "{rows:?}"
+    );
+    assert_eq!(read(msime_client_destroy(handle))["ok"], true);
+}
+
 /// K 模式开着、数据库短语又查不了（这里没有主词库文件 `msime-pinyin.db`，查询返回 `QUICK_PHRASE_UNAVAILABLE`）时设置页换了短语表：Engine 已换上新表，只是刷新打开的列表时返回了诊断。聚焦不因此失败，会话记下的戳就是磁盘上的现状，之后的聚焦看不到变动、不会再换一次表；新表照常生效，偏好更新重建 Engine 后仍是新表。
 #[test]
 fn a_phrase_table_that_cannot_refresh_the_open_list_does_not_fail_focus() {
@@ -12275,6 +12558,7 @@ fn a_phrase_table_that_cannot_refresh_the_open_list_does_not_fail_focus() {
         let session = &sessions[&handle];
         let current = plugin_tables::PluginTables::stamp(
             session.plugin_roots.installed.as_deref(),
+            session.plugin_roots.builtin_packs.as_deref(),
             &session.options,
             &session.applied.plugins,
         );
@@ -14436,6 +14720,55 @@ fn common_phrases_and_collections_forward_to_client_core() {
         json!({"options": empty_host_options(directory.path()), "action": {"operation": "delete", "id": "builtin:pinyin"}}),
     );
     assert_eq!(locked["error"], "builtin_locked");
+}
+
+/// Android 和鸿蒙手机经命名词库送细胞词库的字节：一个 8 MiB 的文件经 base64 后连同宿主选项仍在 17 MiB 的请求上限之内，导入成一个集合，装满两万条后停下并说明。
+#[test]
+fn a_cell_dictionary_at_its_size_limit_fits_one_collections_request() {
+    use msime_client_core::dictionary::scel::MAX_SCEL_BYTES;
+    let mut bytes = crate::dictionary::scel_fixture::scel(&[(&["ce", "shi"], &["测试"])]);
+    let mut groups = 1u32;
+    let mut index = 0u32;
+    // 每组一个两字词，26 字节；词两两不同，所以不会被当成重复。
+    while bytes.len() + 26 <= MAX_SCEL_BYTES {
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&(0x4e00 + (index % 20_000) as u16).to_le_bytes());
+        bytes.extend_from_slice(&(0x4e01 + (index / 20_000) as u16).to_le_bytes());
+        bytes.extend_from_slice(&10u16.to_le_bytes());
+        bytes.extend_from_slice(&[0; 10]);
+        groups += 1;
+        index += 1;
+    }
+    bytes[0x120..0x124].copy_from_slice(&groups.to_le_bytes());
+    bytes[0x124..0x128].copy_from_slice(&groups.to_le_bytes());
+    let directory = tempfile::tempdir().unwrap();
+    let request = serde_json::to_vec(&json!({
+        "options": empty_host_options(directory.path()),
+        "action": {
+            "operation": "import",
+            "name": "合成词库",
+            "kind": "pinyin",
+            "format": "scel",
+            "bytes_base64": crate::dictionary::scel_fixture::base64(&bytes),
+        },
+    }))
+    .unwrap();
+    assert!(request.len() <= 17 * 1024 * 1024, "{}", request.len());
+    let imported =
+        read(unsafe { msime_client_dictionary_collections(request.as_ptr(), request.len()) });
+    assert_eq!(imported["ok"], true, "{}", imported["error"]);
+    let report = &imported["value"]["import"];
+    assert_eq!(report["imported"], 20_000);
+    assert_eq!(report["truncated"], true);
+    assert_eq!(report["failed"], 0);
+    assert_eq!(
+        imported["value"]["collections"][0]["source"],
+        json!({"type": "import", "format": "scel"})
+    );
 }
 
 #[test]

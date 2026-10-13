@@ -37,6 +37,7 @@
 #include "CandidateWindowStyle.h"
 #include "CommunityPageModel.h"
 #include "GameProcessList.h"
+#include "LexiconImportModel.h"
 #include "PluginPageModel.h"
 #include "PreferencePath.h"
 #include "AccountPageModel.h"
@@ -408,6 +409,9 @@ std::wstring lexicon_key_hint(std::wstring_view kind) {
 // The shared page's sentence for a dictionary refusal code (dictionaryErrorMessage in packages/ui/src/dictionary/dictionary-errors.ts).
 std::wstring dictionary_error_text(std::wstring const &code, std::wstring_view kind,
                                    std::wstring const &fallback) {
+  // 细胞词库转换（msime_client_dictionary_scel_text）的出错说明。
+  if (auto scel = msime::settings::lexicon_import::scel_error_text(code); !scel.empty())
+    return scel;
   if (code == L"dictionary_busy")
     return L"词库正在被输入法占用，请关闭正在使用输入法的程序后重试。";
   if (code == L"dictionary_import_rejected")
@@ -1261,6 +1265,23 @@ std::filesystem::path builtin_sound_packs() {
   return std::filesystem::is_directory(directory, error) ? directory : std::filesystem::path();
 }
 
+// 桌面安装包随带的官方插件包（uuid 脚本插件、latex-symbols 短语表）：本程序所在目录（安装后是 Program Files 下的 Server 目录，只有管理员能写）的 plugin-packs，与 Server 写进会话选项的 plugin_packs（src/system/PluginPackRoot.h）、Tauri 的 builtin_plugin_packs 在 Windows 上取的是同一个目录。目录不在（开发运行）时也照样给出：不给的话 client-core 会去内置音效包旁边找，而内置音效包在普通用户可写的数据目录里。只取模块路径，不碰文件系统。
+std::filesystem::path official_plugin_packs() {
+  std::wstring buffer(MAX_PATH, L'\0');
+  for (;;) {
+    const DWORD length =
+        GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (length == 0)
+      return {};
+    if (length < buffer.size()) {
+      buffer.resize(length);
+      break;
+    }
+    buffer.resize(buffer.size() * 2);
+  }
+  return std::filesystem::path(buffer).parent_path() / L"plugin-packs";
+}
+
 // 输入法宿主选项（runtime-options.json）里的 user_data：输入法把停用了的脚本插件记在它下面的 script-health.json 里，与 Tauri 的 user_data 取的是同一项。还没有宿主选项或不是绝对路径时为空，授权页就不显示停用记录。读文件，只在 UI 线程之外调用。
 std::wstring runtime_user_data() {
   const auto options = runtime_options_document();
@@ -1274,7 +1295,7 @@ std::wstring runtime_user_data() {
   }
 }
 
-// 一次 msime_client_plugins 请求：插件目录是数据目录下的 plugins，与 Tauri 的 PluginsState 相同；sounds 为真时带上内置声音包的目录。script_page 为真时这是「插件」页自己的请求：本窗口有脚本插件的授权页，目录列出脚本包、导入接受脚本包，并带上输入法的 user_data 读停用记录；社区发布、辅助码方案这些别处的请求不带它，看不到脚本包。读写文件，只在 UI 线程之外调用。
+// 一次 msime_client_plugins 请求：插件目录是数据目录下的 plugins，与 Tauri 的 PluginsState 相同；sounds 为真时带上内置声音包的目录。script_page 为真时这是「插件」页自己的请求：本窗口有脚本插件的授权页，目录列出脚本包、导入接受脚本包，并带上输入法的 user_data 读停用记录；社区发布、辅助码方案这些别处的请求不带它，看不到脚本包。这两种请求都带上官方插件包的目录：目录要列出官方包，授权要从那里读官方脚本插件、核对它的哈希。读写文件，只在 UI 线程之外调用。
 Response plugins_call(JsonObject const &action, bool sounds, bool script_page = false) {
   const auto root = state_directory();
   if (root.empty() || !root.is_absolute())
@@ -1285,6 +1306,10 @@ Response plugins_call(JsonObject const &action, bool sounds, bool script_page = 
   request.SetNamedValue(L"sound_packs", packs.empty()
                                             ? JsonValue::CreateNullValue()
                                             : JsonValue::CreateStringValue(hstring(packs.wstring())));
+  if (sounds || script_page) {
+    if (const auto official = official_plugin_packs(); official.is_absolute())
+      request.SetNamedValue(L"plugin_packs", JsonValue::CreateStringValue(hstring(official.wstring())));
+  }
   if (script_page) {
     request.SetNamedValue(L"script_page", JsonValue::CreateBooleanValue(true));
     if (const auto user_data = runtime_user_data(); !user_data.empty())
@@ -1417,6 +1442,10 @@ std::optional<msime::settings::plugins::ScriptGrants> plugin_script_grants(Respo
     for (auto const &item : named_objects(value, L"health"))
       grants.health.push_back(
           {named_string(item, L"id"), named_string(item, L"hash"), named_string(item, L"disabled")});
+    for (auto const &item : named_objects(value, L"commands"))
+      grants.commands.push_back({named_string(item, L"id"), named_string(item, L"trigger"),
+                                 named_string(item, L"title"), named_string(item, L"status"),
+                                 named_string(item, L"conflict"), named_string(item, L"conflict_id")});
     return grants;
   } catch (...) {
     return std::nullopt;
@@ -2024,6 +2053,22 @@ SkinScan read_skin_catalog(std::filesystem::path const &root) {
   scan.directory = root.wstring();
   return scan;
 }
+
+// 共享页解不出 UTF-8 时按 GB18030 读（代码页 54936），与 decodeDictionaryBytes 的最后一步相同；读不出时为空。调用方已把文件限制在 32 MB 以内。
+std::optional<std::string> gb18030_to_utf8(std::string_view bytes) {
+  if (bytes.empty())
+    return std::string();
+  const int length = static_cast<int>(bytes.size());
+  const int units = MultiByteToWideChar(54936, 0, bytes.data(), length, nullptr, 0);
+  if (units <= 0)
+    return std::nullopt;
+  std::wstring wide(static_cast<size_t>(units), L'\0');
+  if (MultiByteToWideChar(54936, 0, bytes.data(), length, wide.data(), units) != units)
+    return std::nullopt;
+  return to_string(std::wstring_view(wide));
+}
+
+namespace li = msime::settings::lexicon_import;
 
 // ---- 社区 ----
 
@@ -10808,6 +10853,10 @@ private:
              L"mixed_input.english", true, true);
     slider_row(candidates, 0xE8CB, L"触发字符数", L"预编辑字母达到该长度后才出现英文候选项",
                L"mixed_input.minimum_prefix", 1, 8, 5);
+    // 符号混输是后加的可选键，默认开，文档里平时没有它，回退值必须是 true。
+    bool_row(candidates, 0xE8EF, L"符号混输",
+             L"打出符号的名称时在候选项中加入对应的符号，紧跟在那个词后面（如「正负」后面是 ±、「平方米」后面是 ㎡）；要打完整的名称才出现",
+             L"mixed_input.symbols", true);
     bool_row(candidates, 0xE76E, L"emoji 混输",
              L"中文输入时在候选项中加入匹配的 emoji，紧跟在它描绘的那个词后面（如「美国」后面是 🇺🇸），对不上候选词的排在末尾",
              L"mixed_input.emoji", false);
@@ -11871,6 +11920,189 @@ private:
     });
   }
 
+  // 导入词库文件的文件对话框：先列所选格式的文件，再列所有文件（改过扩展名的细胞词库按文件头认）。取消时为空。
+  std::optional<std::filesystem::path> pick_lexicon_file(std::wstring const &format) {
+    const auto *chosen = li::find_format(format);
+    if (!chosen)
+      return std::nullopt;
+    com_ptr<IFileOpenDialog> dialog;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(dialog.put()))))
+      return std::nullopt;
+    const std::wstring name(chosen->filter_name);
+    const std::wstring spec(chosen->filter);
+    const COMDLG_FILTERSPEC filters[] = {{name.c_str(), spec.c_str()}, {L"所有文件", L"*.*"}};
+    dialog->SetFileTypes(2, filters);
+    dialog->SetTitle(L"导入词库文件");
+    FILEOPENDIALOGOPTIONS options = 0;
+    if (SUCCEEDED(dialog->GetOptions(&options)))
+      dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST);
+    std::optional<std::filesystem::path> picked;
+    com_ptr<IShellItem> item;
+    PWSTR raw = nullptr;
+    if (dialog->Show(GetActiveWindow()) == S_OK && SUCCEEDED(dialog->GetResult(item.put())) &&
+        SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &raw)) && raw)
+      picked = std::filesystem::path(raw);
+    CoTaskMemFree(raw);
+    return picked;
+  }
+
+  // 导入词库文件：选文件，在工作线程上读、解码并导入，结果写在页面顶上的通知里；导入成功且列表开着时重读当前页。
+  void import_lexicon_file() {
+    if (lexicon_busy_)
+      return;
+    const auto options = runtime_options_document();
+    if (!options) {
+      lexicon_message_ = L"输入法尚未完成初始化，完成设置向导后即可管理词库。";
+      lexicon_error_ = true;
+      redraw_lexicon();
+      return;
+    }
+    const auto kind = lexicon_kind_;
+    const auto chosen = std::wstring(li::usable_format(kind, lexicon_import_format_));
+    const auto picked = pick_lexicon_file(chosen);
+    if (!picked)
+      return;
+    const auto format = std::wstring(li::format_for_file(picked->filename().wstring(), chosen));
+    if (format != chosen && (format != L"scel" || kind == L"pinyin"))
+      lexicon_import_format_ = format;
+    lexicon_busy_ = true;
+    run_worker<LexiconImportOutcome>(
+        [options = *options, kind, format, path = *picked] {
+          return import_lexicon_on_worker(options, kind, format, path);
+        },
+        [this, kind](LexiconImportOutcome &outcome) {
+          lexicon_busy_ = false;
+          show_notice(outcome.message,
+                      outcome.ok ? InfoBarSeverity::Success : InfoBarSeverity::Error);
+          if (outcome.ok && lexicon_listed_ && kind == lexicon_kind_)
+            lexicon_list(lexicon_offset_);
+          else
+            redraw_lexicon();
+        });
+    redraw_lexicon();
+  }
+
+  struct LexiconImportOutcome {
+    bool ok = false;
+    std::wstring message;
+  };
+
+  // 在工作线程上：读文件，按格式转成 UTF-8 文本（细胞词库经 msime_client_dictionary_scel_text 转成标准文本），再以一次 import 请求交给 msime_client_settings_dictionary。返回给页面的一句话，措辞与共享页的 importPhrases 相同。
+  static LexiconImportOutcome import_lexicon_on_worker(std::string const &options,
+                                                       std::wstring const &kind,
+                                                       std::wstring format,
+                                                       std::filesystem::path const &path) {
+    LexiconImportOutcome outcome;
+    const auto label = lexicon_kind_label(kind);
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    if (error) {
+      outcome.message = L"无法读取所选文件，请重新选择。";
+      return outcome;
+    }
+    if (format == L"scel" && size > li::max_scel_file_bytes) {
+      outcome.message = li::scel_too_large();
+      return outcome;
+    }
+    if (size > li::max_text_file_bytes) {
+      outcome.message = li::text_too_large();
+      return outcome;
+    }
+    std::string bytes(static_cast<size_t>(size), '\0');
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) {
+      outcome.message = L"无法读取所选文件，请重新选择。";
+      return outcome;
+    }
+    // 改过扩展名的细胞词库按文件头认出来。
+    if (li::is_scel_bytes(bytes))
+      format = L"scel";
+    std::string body;
+    std::wstring source;
+    if (format == L"scel") {
+      if (kind != L"pinyin") {
+        outcome.message = std::wstring(li::scel_needs_pinyin);
+        return outcome;
+      }
+      if (bytes.size() > li::max_scel_file_bytes) {
+        outcome.message = li::scel_too_large();
+        return outcome;
+      }
+      const auto *first = reinterpret_cast<uint8_t const *>(bytes.data());
+      const auto buffer = Windows::Security::Cryptography::CryptographicBuffer::CreateFromByteArray(
+          array_view<uint8_t const>(first, first + bytes.size()));
+      JsonObject request;
+      request.SetNamedValue(L"bytes_base64",
+                            JsonValue::CreateStringValue(
+                                Windows::Security::Cryptography::CryptographicBuffer::
+                                    EncodeToBase64String(buffer)));
+      const auto document = utf8(request.Stringify());
+      const auto converted = take_response(msime_client_dictionary_scel_text(
+          reinterpret_cast<const uint8_t *>(document.data()), document.size()));
+      if (!converted.ok) {
+        const auto reason = dictionary_error_text(response_error(converted), kind, L"");
+        outcome.message = reason.empty() ? L"细胞词库读取失败，请重新选择文件。" : reason;
+        return outcome;
+      }
+      try {
+        const auto value = JsonObject::Parse(text(converted.text)).GetNamedObject(L"value");
+        body = utf8(value.GetNamedString(L"text"));
+        source = li::scel_source(named_string(value, L"name"), named_count(value, L"entries"));
+      } catch (...) {
+        outcome.message = L"细胞词库读取失败，请重新选择文件。";
+        return outcome;
+      }
+      format = L"standard";
+    } else {
+      auto decoded = li::decode_text(bytes, gb18030_to_utf8);
+      if (!decoded) {
+        outcome.message = label + L"导入失败：文件不是 UTF-8、UTF-16 或 GB18030 编码的文本。";
+        return outcome;
+      }
+      body = std::move(*decoded);
+    }
+    JsonObject action;
+    action.SetNamedValue(L"operation", JsonValue::CreateStringValue(L"import"));
+    action.SetNamedValue(L"kind", JsonValue::CreateStringValue(hstring(kind)));
+    action.SetNamedValue(L"format", JsonValue::CreateStringValue(hstring(format)));
+    action.SetNamedValue(L"text", JsonValue::CreateStringValue(text(body)));
+    action.SetNamedValue(L"request_id", JsonValue::CreateStringValue(hstring(request_id(L"ui-import-"))));
+    const auto response = settings_dictionary_call(options, utf8(action.Stringify()));
+    if (!response.ok) {
+      // importFailureMessage：认得的码给出原因，其余是通用的一句。
+      const auto reason = dictionary_error_text(response_error(response), kind, L"");
+      outcome.message = reason.empty() ? label + L"导入失败，请检查文本格式。"
+                                       : label + L"导入失败：" + reason;
+      return outcome;
+    }
+    try {
+      const auto value = JsonObject::Parse(text(response.text)).GetNamedObject(L"value");
+      li::ImportReport report;
+      report.applied = named_count(value, L"applied");
+      report.failed = named_count(value, L"failed");
+      report.truncated = value.GetNamedBoolean(L"truncated", false);
+      report.swapped = value.GetNamedBoolean(L"swapped", false);
+      if (value.HasKey(L"first_failures") &&
+          value.GetNamedValue(L"first_failures").ValueType() == JsonValueType::Array) {
+        for (auto const &item : value.GetNamedArray(L"first_failures")) {
+          if (item.ValueType() != JsonValueType::Object)
+            continue;
+          const auto failure = item.GetObject();
+          report.first_failures.emplace_back(named_count(failure, L"line"),
+                                             named_string(failure, L"issue"));
+        }
+      }
+      outcome.message = li::describe_import(label, report, source);
+      outcome.ok = true;
+    } catch (...) {
+      // 已经导入了，只是读不懂报告。
+      outcome.message = label + L"导入完成。";
+      outcome.ok = true;
+    }
+    return outcome;
+  }
+
   // A yes-or-no question before something that cannot be undone.
   Windows::Foundation::IAsyncOperation<bool> confirm(std::wstring title, std::wstring message, std::wstring action) {
     ContentDialog dialog;
@@ -12127,6 +12359,25 @@ private:
       results.Children().Append(pager);
     }
     add_row(manage, 0xE721, L"编码前缀", lexicon_key_hint(lexicon_kind_), controls, results);
+
+    // 导入词库文件：共享页「导入与导出」的导入。格式只列这一类词库能用的，选文件时按扩展名再换一次；导入经 msime_client_settings_dictionary，它让 Server 放开会话并分批送进去。
+    const auto import_format = std::wstring(li::usable_format(lexicon_kind_, lexicon_import_format_));
+    std::vector<Option> import_formats;
+    for (auto const &format : li::formats_for(lexicon_kind_))
+      import_formats.push_back({std::wstring(format.id), std::wstring(format.label)});
+    StackPanel importer;
+    importer.Orientation(Orientation::Horizontal);
+    importer.Spacing(8);
+    importer.Children().Append(select_control(
+        L"导入文件格式", std::move(import_formats), import_format,
+        [this](std::wstring const &format) { lexicon_import_format_ = format; }, !lexicon_busy_));
+    importer.Children().Append(
+        button_control(L"选择文件…", [this] { import_lexicon_file(); }, !lexicon_busy_));
+    add_row(manage, 0xE8B5, L"导入词库文件",
+            lexicon_kind_ == L"pinyin"
+                ? L"导入到上面所选类型的词库；支持标准、Windows TSV、Rime、汉字自动注音和搜狗细胞词库（.scel）。"
+                : L"导入到上面所选类型的词库；支持标准、Windows TSV 和 Rime。",
+            importer);
 
     // 云词库 is a panel of its own on every desktop, as in the shared app.
     auto cloud = add_group(page, L"云词库");
@@ -15459,8 +15710,25 @@ private:
     dialog.Title(box_value(hstring(pg::grant_dialog_title(*pack))));
     if (pg::script_grant_state(*pack, pg::script_grant(plugin_grants(), pack->id)) ==
         pg::ScriptGrantState::stale)
-      form.Children().Append(account_message(std::wstring(pg::grant_dialog_stale), InfoBarSeverity::Warning));
+      form.Children().Append(account_message(pg::grant_dialog_stale(*pack), InfoBarSeverity::Warning));
     form.Children().Append(make_text(pg::grant_dialog_intro, 14, palette_.sub));
+    // 提供 / 指令的插件：列出它的指令；调整授权时（已启用）每条后面接着现在的状态。
+    if (pack->kind == L"script" && !pack->commands.empty()) {
+      const bool enabled = pg::script_grant_state(*pack, pg::script_grant(plugin_grants(), pack->id)) ==
+                           pg::ScriptGrantState::enabled;
+      StackPanel commands;
+      commands.Spacing(2);
+      A11y::SetName(commands, L"它提供的 / 指令");
+      commands.Children().Append(make_text(L"它在 / 指令里提供：", 14, palette_.sub));
+      for (auto const &command : pack->commands)
+        commands.Children().Append(make_text(
+            pg::script_command_line(command, enabled ? pg::script_command_status(*pack, command.trigger,
+                                                                                   plugin_grants(),
+                                                                                   plugin_catalog_.packages)
+                                                     : std::wstring()),
+            14, palette_.sub));
+      form.Children().Append(commands);
+    }
     const auto requested = pg::sort_capabilities(pack->permissions);
     if (requested.empty()) {
       form.Children().Append(make_text(pg::grant_dialog_no_permissions, 14, palette_.sub));
@@ -15569,6 +15837,8 @@ private:
     if (!pack.author.empty())
       plugin_summary_row(info, 0xE77B, L"作者", L"", pack.author);
     plugin_summary_row(info, 0xE8D7, L"许可证", L"", pack.license);
+    if (pack.builtin)
+      plugin_summary_row(info, 0xE7B8, L"来源", L"", std::wstring(pg::script_builtin_note));
     plugin_summary_row(info, 0xE928, L"内容指纹",
                        L"插件内容的哈希前 12 位；内容一变，指纹就变，之前的授权随之作废。",
                        pg::short_hash(pack.content_hash));
@@ -15592,8 +15862,21 @@ private:
                          pg::contains(granted, capability) ? L"已授予" : L"未授予");
     }
 
+    // 提供的 / 指令：每条一行，右边是现在的状态；/ 指令关着时说明并给「打开 / 指令」，授权本身从不改这个开关。
+    if (!pack.commands.empty()) {
+      auto commands = add_group(page, L"提供的 / 指令");
+      for (auto const &command : pack.commands)
+        plugin_summary_row(commands, 0xE756, L"/" + command.trigger, command.title,
+                           pg::script_command_status(pack, command.trigger, grants, plugin_catalog_.packages));
+      if (!document_.Boolean(L"local_modes.command", false))
+        plugin_action_block(
+            commands, std::wstring(pg::script_command_mode_note),
+            {button_control(L"打开 / 指令", [this] { enable_local_mode(L"command"); }, loaded_)});
+    }
+
     auto status = add_group(page, L"状态");
-    auto note = group_note(pg::script_status(state, active ? pg::script_health(grants, pack) : nullptr));
+    auto note =
+        group_note(pg::script_status(pack, state, active ? pg::script_health(grants, pack) : nullptr));
     A11y::SetLiveSetting(note, Automation::Peers::AutomationLiveSetting::Polite);
     status.Children().Append(note);
     auto control = toggle_control(L"启用", active,
@@ -15633,9 +15916,12 @@ private:
         L"脚本插件在输入法里的沙箱中运行，只能做你授予的事，读不到文件和网络，也不会在密码框里运行。"));
     safety.Children().Append(group_note(pg::script_residual_risk));
 
-    auto remove = button_control(L"删除", [this, pack] { remove_plugin_pack(pack); }, !plugins_busy_);
-    A11y::SetName(remove, hstring(L"删除" + pack.name));
-    plugin_action_block(add_group(page, L""), L"删除后插件的文件会从本机移除，它的授权也一起去掉。", {remove});
+    // 随输入法分发的官方插件不能删除，同共享页。
+    if (!pack.builtin) {
+      auto remove = button_control(L"删除", [this, pack] { remove_plugin_pack(pack); }, !plugins_busy_);
+      A11y::SetName(remove, hstring(L"删除" + pack.name));
+      plugin_action_block(add_group(page, L""), L"删除后插件的文件会从本机移除，它的授权也一起去掉。", {remove});
+    }
 
     // 授权对话框关上、撤销或换位之后，焦点回到刚才那个控件；它不在了（调整授权在停用后消失）就落到启用开关上。
     if (!indexing_ && plugin_pending_focus_.starts_with(L"script-")) {
@@ -18423,7 +18709,7 @@ private:
 
     auto privacy = add_group(page, L"许可与隐私");
     bool_row(privacy, 0xE9D2, L"匿名使用统计",
-             L"默认开启，可随时关闭。开启时向 https://api.msime.app/v1/telemetry/events 发送匿名事件：每天一条活跃记录；输入法服务每次正常结束一条会话记录；服务崩溃后，下次启动时补发一条崩溃记录，含异常摘要和调用栈（只有模块文件名和偏移，不含文件夹路径）。每条事件只带随机事件 id、本机随机生成的安装 id、平台名 windows 和版本号，不含输入内容、候选、剪贴板、账号或设备信息。关闭后不再发送，并删除尚未发送的记录。",
+             L"仅发送匿名使用记录和崩溃摘要，不含输入内容、候选、剪贴板、账号或设备信息；关闭后不再发送，并清空待发记录。",
              L"usage_reporting", true);
     url_row(privacy, 0xEA18, L"隐私政策", L"设置保存到当前输入法数据目录，详细说明见隐私政策。",
             L"查看", privacy_url);
@@ -18647,6 +18933,8 @@ private:
   bool lexicon_busy_ = false;
   bool lexicon_error_ = false;
   std::wstring lexicon_message_;
+  // 导入词库文件的格式，跨重画保留；换到不能用它的词库类型时按标准格式显示。
+  std::wstring lexicon_import_format_ = L"standard";
   // 背单词: the last status the host answered with; one request is in flight at a time.
   std::optional<VocabularyStatus> vocabulary_;
   bool vocabulary_busy_ = false;

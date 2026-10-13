@@ -87,11 +87,19 @@ fn installed_commands(root: &Path, id: &str, rows: &str) -> PathBuf {
 }
 
 fn reason(root: &Path, kind: PluginKind, id: &str) -> String {
-    load_package(root, None, kind, id).unwrap_err()
+    load_package(root, BuiltinDirs::default(), kind, id).unwrap_err()
 }
 
 fn builtin_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/sound-packs")
+}
+
+/// 只有内置音效包目录的 [`BuiltinDirs`]。
+fn sounds(path: &Path) -> BuiltinDirs<'_> {
+    BuiltinDirs {
+        sounds: Some(path),
+        packs: None,
+    }
 }
 
 #[test]
@@ -101,7 +109,7 @@ fn builtin_root() -> PathBuf {
 )]
 fn the_built_in_packs_the_bundles_ship_are_valid() {
     let root = tempdir().unwrap();
-    let catalog = scan(root.path(), Some(&builtin_root()));
+    let catalog = scan(root.path(), sounds(&builtin_root()));
     assert!(catalog.issues.is_empty(), "{:?}", catalog.issues);
     let ids: Vec<_> = catalog.packages.iter().map(|p| p.id.as_str()).collect();
     assert_eq!(
@@ -115,7 +123,7 @@ fn the_built_in_packs_the_bundles_ship_are_valid() {
         for id in builtins {
             assert!(ids.contains(id), "{id}");
             assert!(is_builtin(kind, id), "{id}");
-            let pack = load_package(root.path(), Some(&builtin_root()), kind, id).unwrap();
+            let pack = load_package(root.path(), sounds(&builtin_root()), kind, id).unwrap();
             assert!(pack.builtin);
             assert_eq!(pack.kind(), kind, "{id}");
             assert_eq!(pack.license, "CC0-1.0");
@@ -125,13 +133,13 @@ fn the_built_in_packs_the_bundles_ship_are_valid() {
                 _ => PluginKind::Sound,
             };
             assert!(!is_builtin(other, id), "{id}");
-            assert!(load_package(root.path(), Some(&builtin_root()), other, id).is_err());
+            assert!(load_package(root.path(), sounds(&builtin_root()), other, id).is_err());
         }
     }
     assert!(!is_builtin(PluginKind::CommandTable, DEFAULT_SOUND_PACK));
     let PluginContent::Sound(default) = load_package(
         root.path(),
-        Some(&builtin_root()),
+        sounds(&builtin_root()),
         PluginKind::Sound,
         DEFAULT_SOUND_PACK,
     )
@@ -147,7 +155,7 @@ fn the_built_in_packs_the_bundles_ship_are_valid() {
     assert!(default.sounds.commit.is_some() && default.sounds.achievement.is_some());
     let PluginContent::Sound(melody) = load_package(
         root.path(),
-        Some(&builtin_root()),
+        sounds(&builtin_root()),
         PluginKind::Sound,
         DEFAULT_MELODY_PACK,
     )
@@ -191,7 +199,7 @@ fn scan_lists_each_kind_and_reports_what_is_not_a_pack() {
         .unwrap();
     fs::create_dir_all(kind_directory(root.path(), PluginKind::Music).join("empty")).unwrap();
 
-    let catalog = scan(root.path(), None);
+    let catalog = scan(root.path(), BuiltinDirs::default());
     let listed: Vec<_> = catalog
         .packages
         .iter()
@@ -245,7 +253,7 @@ fn unknown_kinds_on_disk_never_fail_the_catalog() {
     )
     .unwrap();
 
-    let catalog = scan(root.path(), None);
+    let catalog = scan(root.path(), BuiltinDirs::default());
     let listed: Vec<_> = catalog.packages.iter().map(|p| p.id.as_str()).collect();
     assert_eq!(listed, ["typewriter"]);
     assert_eq!(catalog.issues.len(), 1, "{:?}", catalog.issues);
@@ -258,7 +266,7 @@ fn unknown_kinds_on_disk_never_fail_the_catalog() {
 fn a_nonexistent_root_is_an_empty_catalog() {
     let root = tempdir().unwrap();
     assert_eq!(
-        scan(&root.path().join("plugins"), None),
+        scan(&root.path().join("plugins"), BuiltinDirs::default()),
         PluginCatalog::default()
     );
 }
@@ -414,7 +422,13 @@ fn sequences_are_bounded() {
     assert!(reason(root.path(), PluginKind::Sound, "tune")
         .contains("space.wav 没有在 plugin.toml 里用到"));
     fs::remove_file(kind_directory(root.path(), PluginKind::Sound).join("tune/space.wav")).unwrap();
-    let pack = load_package(root.path(), None, PluginKind::Sound, "tune").unwrap();
+    let pack = load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::Sound,
+        "tune",
+    )
+    .unwrap();
     let PluginContent::Sound(sound) = pack.content else {
         panic!("a sound pack");
     };
@@ -436,7 +450,13 @@ fn pack_directories_hold_only_plain_files_the_manifest_accounts_for() {
     // Notices are allowed, within their size.
     fs::write(pack.join("LICENSE.txt"), b"synthetic").unwrap();
     fs::write(pack.join("README.md"), b"synthetic").unwrap();
-    assert!(load_package(root.path(), None, PluginKind::Sound, "typewriter").is_ok());
+    assert!(load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::Sound,
+        "typewriter"
+    )
+    .is_ok());
     fs::write(
         pack.join("README.md"),
         vec![b'x'; MAX_NOTICE_BYTES as usize + 1],
@@ -477,7 +497,13 @@ fn pack_directories_hold_only_plain_files_the_manifest_accounts_for() {
     // What Finder leaves behind is ignored, and never read.
     fs::write(pack.join(".DS_Store"), b"finder").unwrap();
     fs::create_dir(pack.join(".git")).unwrap();
-    assert!(load_package(root.path(), None, PluginKind::Sound, "typewriter").is_ok());
+    assert!(load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::Sound,
+        "typewriter"
+    )
+    .is_ok());
 
     fs::create_dir(pack.join("nested")).unwrap();
     assert!(reason(root.path(), PluginKind::Sound, "typewriter").contains("nested 是子文件夹"));
@@ -546,7 +572,13 @@ fn music_packs_are_bounded() {
     assert!(reason(root.path(), PluginKind::Music, "rain").contains("加起来太大"));
     fs::remove_file(pack.join(&names[4])).unwrap();
     fs::write(pack.join(MANIFEST_FILE), manifest(&quoted[..4].join(","))).unwrap();
-    let loaded = load_package(root.path(), None, PluginKind::Music, "rain").unwrap();
+    let loaded = load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::Music,
+        "rain",
+    )
+    .unwrap();
     let PluginContent::Music(music) = loaded.content else {
         panic!("a music pack");
     };
@@ -638,7 +670,13 @@ fn command_tables_follow_the_rules_the_engine_expands_them_by() {
             row("tag", &format!("{long}{{date:%d}}"))
         ),
     );
-    let loaded = load_package(root.path(), None, PluginKind::CommandTable, "sig").unwrap();
+    let loaded = load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::CommandTable,
+        "sig",
+    )
+    .unwrap();
     let PluginContent::CommandTable(table) = loaded.content else {
         panic!("a command table");
     };
@@ -788,7 +826,7 @@ fn symbolic_links_are_never_followed_into_or_out_of_a_pack() {
     )
     .unwrap();
     assert!(reason(root.path(), PluginKind::Sound, "typewriter").contains("不是插件文件夹"));
-    let catalog = scan(root.path(), None);
+    let catalog = scan(root.path(), BuiltinDirs::default());
     assert!(catalog.packages.is_empty());
     assert_eq!(catalog.issues[0].folder, "typewriter");
     fs::remove_file(kind_directory(root.path(), PluginKind::Sound).join("typewriter")).unwrap();
@@ -810,7 +848,13 @@ fn a_linked_kind_directory_cannot_load_a_pack_outside_the_plugins_root() {
     )
     .unwrap();
 
-    assert!(load_package(root.path(), None, PluginKind::Sound, "typewriter").is_err());
+    assert!(load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::Sound,
+        "typewriter"
+    )
+    .is_err());
     assert!(pack.join(MANIFEST_FILE).is_file());
 }
 
@@ -827,8 +871,11 @@ fn a_linked_plugins_root_is_not_scanned() {
     installed_sound(outside.path(), SOUND);
     msime_path_trust::untrusted_symlink(outside.path(), &root).unwrap();
 
-    assert_eq!(scan(&root, None), PluginCatalog::default());
-    let catalog = scan(&root, Some(&builtin_root()));
+    assert_eq!(
+        scan(&root, BuiltinDirs::default()),
+        PluginCatalog::default()
+    );
+    let catalog = scan(&root, sounds(&builtin_root()));
     assert!(catalog.issues.is_empty(), "{:?}", catalog.issues);
     assert_eq!(
         catalog.packages.len(),
@@ -846,7 +893,7 @@ fn a_linked_builtin_root_is_not_scanned() {
     let linked = state.path().join("builtin-sounds");
     msime_path_trust::untrusted_symlink(outside.path(), &linked).unwrap();
 
-    let catalog = scan(state.path(), Some(&linked));
+    let catalog = scan(state.path(), sounds(&linked));
     assert_eq!(catalog, PluginCatalog::default());
 }
 
@@ -859,18 +906,24 @@ fn built_in_ids_are_reserved_and_resolved_only_from_the_bundle() {
     let root = tempdir().unwrap();
     installed_sound(root.path(), &SOUND.replace("typewriter", "default"));
     assert!(reason(root.path(), PluginKind::Sound, "default").contains("内置音效包不可用"));
-    let catalog = scan(root.path(), None);
+    let catalog = scan(root.path(), BuiltinDirs::default());
     assert!(catalog.issues[0].reason.contains("属于内置插件"));
     let resolved = load_package(
         root.path(),
-        Some(&builtin_root()),
+        sounds(&builtin_root()),
         PluginKind::Sound,
         "default",
     )
     .unwrap();
     assert!(resolved.builtin);
     assert_ne!(resolved.name, "打字机");
-    assert!(load_package(root.path(), None, PluginKind::Sound, "../default").is_err());
+    assert!(load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::Sound,
+        "../default"
+    )
+    .is_err());
 }
 
 #[test]
@@ -900,7 +953,7 @@ fn import_installs_a_picked_folder_and_replaces_an_older_version_whole() {
     assert_eq!(installed.kind(), PluginKind::Sound);
     assert_eq!(installed.directory, root.join("sound").join("typewriter"));
     assert!(!installed.directory.join(".DS_Store").exists());
-    assert_eq!(scan(&root, None).packages.len(), 1);
+    assert_eq!(scan(&root, BuiltinDirs::default()).packages.len(), 1);
 
     // A new version without `space.wav` leaves no trace of the old one.
     let newer = tempdir().unwrap();
@@ -1425,7 +1478,7 @@ fn remove_deletes_an_installed_pack_and_nothing_else() {
     let root = state.path().join("plugins");
     import(&picked_folder(files.path(), SOUND), &root).unwrap();
     remove(&root, PluginKind::Sound, "typewriter").unwrap();
-    assert!(scan(&root, None).packages.is_empty());
+    assert!(scan(&root, BuiltinDirs::default()).packages.is_empty());
     assert!(fs::read_dir(root.join("sound")).unwrap().next().is_none());
     // Removing what is not installed succeeds; ids that are not ids and built-in packs do not.
     remove(&root, PluginKind::Sound, "typewriter").unwrap();
@@ -1567,7 +1620,7 @@ fn remove_named_refuses_unknown_kinds_and_built_in_sound_packs() {
         Err(PluginFailure::code("plugin_reserved"))
     );
     remove_named(&root, "sound", "typewriter").unwrap();
-    assert!(scan(&root, None).packages.is_empty());
+    assert!(scan(&root, BuiltinDirs::default()).packages.is_empty());
 }
 
 fn effect_manifest(id: &str, effect: &str) -> String {
@@ -1590,7 +1643,13 @@ fn effect_packs_carry_only_bounded_parameters() {
         "style = 'power_mode'\nintensity = 100\ncolors = ['#FFB000', '#ff4060', '#00C2FF', '#7a5cff']\nduration_ms = 1500\nparticles = 64\n",
     );
     fs::write(pack.join("LICENSE.txt"), b"CC0").unwrap();
-    let loaded = load_package(root.path(), None, PluginKind::Effect, "neon").unwrap();
+    let loaded = load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::Effect,
+        "neon",
+    )
+    .unwrap();
     assert_eq!(loaded.kind(), PluginKind::Effect);
     assert!(!is_builtin(PluginKind::Effect, "neon"));
     let PluginContent::Effect(effect) = &loaded.content else {
@@ -1609,9 +1668,14 @@ fn effect_packs_carry_only_bounded_parameters() {
 
     // Only the style is required; the rest are the host's own.
     installed_effect(root.path(), "plain", "style = 'flash'\n");
-    let PluginContent::Effect(plain) = load_package(root.path(), None, PluginKind::Effect, "plain")
-        .unwrap()
-        .content
+    let PluginContent::Effect(plain) = load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::Effect,
+        "plain",
+    )
+    .unwrap()
+    .content
     else {
         panic!("an effect pack");
     };
@@ -1689,7 +1753,7 @@ fn effect_packs_carry_only_bounded_parameters() {
     assert!(reason(root.path(), PluginKind::Effect, "bad")
         .contains("spark.wav 没有在 plugin.toml 里用到"));
 
-    assert_eq!(scan(root.path(), None).packages.len(), 2);
+    assert_eq!(scan(root.path(), BuiltinDirs::default()).packages.len(), 2);
 }
 
 #[test]
@@ -2184,7 +2248,13 @@ fn phrase_tables_hold_bounded_rows_and_merge_in_priority_order() {
     };
     install("full", &many(phrase_table::MAX_PHRASES));
     install("over", &many(phrase_table::MAX_PHRASES + 1));
-    assert!(load_package(root.path(), None, PluginKind::PhraseTable, "full").is_ok());
+    assert!(load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::PhraseTable,
+        "full"
+    )
+    .is_ok());
     assert_eq!(
         reason(root.path(), PluginKind::PhraseTable, "over"),
         "短语表的条数不在允许范围内"
@@ -2192,6 +2262,7 @@ fn phrase_tables_hold_bounded_rows_and_merge_in_priority_order() {
 
     let rows: Vec<_> = phrase_table::enabled_phrases(
         root.path(),
+        None,
         &["home".into(), "missing".into(), "office".into()],
     )
     .into_iter()
@@ -2208,11 +2279,12 @@ fn phrase_tables_hold_bounded_rows_and_merge_in_priority_order() {
     );
     let enabled = vec!["office".to_owned()];
     assert_eq!(
-        phrase_table::enabled_phrases(root.path(), &enabled).capacity(),
+        phrase_table::enabled_phrases(root.path(), None, &enabled).capacity(),
         2
     );
     let merged = phrase_table::enabled_phrases(
         root.path(),
+        None,
         &[
             "office".into(),
             "missing".into(),
@@ -2224,19 +2296,26 @@ fn phrase_tables_hold_bounded_rows_and_merge_in_priority_order() {
     assert_eq!(merged.capacity(), 4);
     assert_eq!(merged[0].text, "电话");
     assert_eq!(merged[3].text, "地址");
-    let saturated = phrase_table::enabled_phrases(root.path(), &vec!["full".into(); 5]);
+    let saturated = phrase_table::enabled_phrases(root.path(), None, &vec!["full".into(); 5]);
     assert_eq!(saturated.len(), phrase_table::MAX_ENABLED_PHRASES);
     assert_eq!(saturated.capacity(), phrase_table::MAX_ENABLED_PHRASES);
     assert_eq!(saturated.last().unwrap().text, "191");
     assert_eq!(
-        phrase_table::enabled_phrases(root.path(), &["missing".into(), "over".into()]).capacity(),
+        phrase_table::enabled_phrases(root.path(), None, &["missing".into(), "over".into()])
+            .capacity(),
         0
     );
     assert_eq!(
-        phrase_table::enabled_phrases(root.path(), &[]).capacity(),
+        phrase_table::enabled_phrases(root.path(), None, &[]).capacity(),
         0
     );
-    let summary = load_package(root.path(), None, PluginKind::PhraseTable, "office").unwrap();
+    let summary = load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::PhraseTable,
+        "office",
+    )
+    .unwrap();
     let json = serde_json::to_value(&summary).unwrap();
     assert_eq!(json["kind"], "phrase_table");
     assert_eq!(json["phrases"][1]["text"], "邮箱");
@@ -2271,7 +2350,13 @@ fn helpcode_tables_are_bounded_and_load_as_codes() {
     assert_eq!(detail.entries, 30_000);
     assert_eq!(detail.preview.len(), helpcode_pack::PREVIEW_ENTRIES);
     assert_eq!(detail.preview.capacity(), helpcode_pack::PREVIEW_ENTRIES);
-    let full = load_package(root.path(), None, PluginKind::Helpcode, "full").unwrap();
+    let full = load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::Helpcode,
+        "full",
+    )
+    .unwrap();
     let json = serde_json::to_value(&full).unwrap();
     assert_eq!(json["kind"], "helpcode");
     assert_eq!(json["table"], "table.txt");
@@ -2295,7 +2380,13 @@ fn helpcode_tables_are_bounded_and_load_as_codes() {
     large.extend_from_slice("\n啊=a".as_bytes());
     assert_eq!(large.len() as u64, helpcode_pack::MAX_TABLE_BYTES);
     installed_helpcode(root.path(), "large", &large);
-    assert!(load_package(root.path(), None, PluginKind::Helpcode, "large").is_ok());
+    assert!(load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::Helpcode,
+        "large"
+    )
+    .is_ok());
     large.push(b'\n');
     installed_helpcode(root.path(), "larger", &large);
     assert_eq!(
@@ -2383,7 +2474,13 @@ fn wordbooks_are_bounded_and_load_as_books() {
     };
     installed_wordbook(root.path(), "full", &words(20_000));
     installed_wordbook(root.path(), "over", &words(20_001));
-    let full = load_package(root.path(), None, PluginKind::Wordbook, "full").unwrap();
+    let full = load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::Wordbook,
+        "full",
+    )
+    .unwrap();
     let json = serde_json::to_value(&full).unwrap();
     assert_eq!(json["kind"], "wordbook");
     assert_eq!(json["word_count"], 20_000);
@@ -2402,7 +2499,13 @@ fn wordbooks_are_bounded_and_load_as_books() {
     large.extend_from_slice(b"\nab\tn. c");
     assert_eq!(large.len() as u64, wordbook_pack::MAX_FILE_BYTES);
     installed_wordbook(root.path(), "large", &large);
-    assert!(load_package(root.path(), None, PluginKind::Wordbook, "large").is_ok());
+    assert!(load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::Wordbook,
+        "large"
+    )
+    .is_ok());
     large.push(b'\n');
     installed_wordbook(root.path(), "larger", &large);
     assert_eq!(
@@ -2546,7 +2649,13 @@ fn symbol_sets_list_their_groups_by_pack_name_in_manifest_order() {
     );
     assert_eq!(groups[1].keywords, "suan");
     assert_eq!(groups[0].keywords, "");
-    let summary = load_package(root.path(), None, PluginKind::SymbolSet, "math").unwrap();
+    let summary = load_package(
+        root.path(),
+        BuiltinDirs::default(),
+        PluginKind::SymbolSet,
+        "math",
+    )
+    .unwrap();
     let json = serde_json::to_value(&summary).unwrap();
     assert_eq!(json["kind"], "symbol_set");
     assert_eq!(json["groups"][1]["tab"], "kaomoji");
@@ -2623,9 +2732,14 @@ fn an_imported_helpcode_table_is_named_by_its_header_within_the_manifest_bounds(
             .unwrap();
     assert_eq!(quoted.name, "say \"hi\" \\ 'x'");
     assert_eq!(
-        load_package(root.path(), None, PluginKind::Helpcode, &quoted.id)
-            .unwrap()
-            .name,
+        load_package(
+            root.path(),
+            BuiltinDirs::default(),
+            PluginKind::Helpcode,
+            &quoted.id
+        )
+        .unwrap()
+        .name,
         quoted.name
     );
 
@@ -2673,7 +2787,9 @@ fn an_imported_helpcode_table_is_held_to_the_strict_rules_with_line_numbers() {
         other => panic!("{other:?}"),
     }
     // 被拒的码表什么都不装，也不留暂存目录。
-    assert!(scan(root.path(), None).packages.is_empty());
+    assert!(scan(root.path(), BuiltinDirs::default())
+        .packages
+        .is_empty());
     assert!(!root.path().exists() || staging_leftovers(root.path()).is_empty());
 }
 
@@ -2695,7 +2811,7 @@ fn importing_a_helpcode_table_again_replaces_the_pack_and_leaves_no_staging() {
     assert_eq!(codes.len(), 2);
     assert_eq!(codes["你"], "cd");
 
-    let catalog = scan(root.path(), None);
+    let catalog = scan(root.path(), BuiltinDirs::default());
     assert_eq!(catalog.issues, []);
     assert_eq!(catalog.packages.len(), 1);
     let json = serde_json::to_value(&catalog.packages[0]).unwrap();
@@ -2707,4 +2823,213 @@ fn importing_a_helpcode_table_again_replaces_the_pack_and_leaves_no_staging() {
         staging_leftovers(&kind_directory(root.path(), PluginKind::Helpcode)),
         Vec::<String>::new()
     );
+}
+
+/// 官方短语表的清单：`packs` 下的 `phrase_table/<id>/plugin.toml`（官方插件包目录的布局），或者用户插件目录里同 id 的影子副本。
+fn official_phrase_table(kind_parent: &Path, id: &str, text: &str) -> PathBuf {
+    let pack = kind_parent.join(id);
+    fs::create_dir_all(&pack).unwrap();
+    fs::write(
+        pack.join(MANIFEST_FILE),
+        format!("schema_version = 1\nkind = 'phrase_table'\nid = '{id}'\nname = 'LaTeX 符号'\nversion = '1.0.0'\nlicense = 'MIT'\n[[phrases]]\nkey = 'alpha'\ntext = '{text}'\n"),
+    )
+    .unwrap();
+    pack
+}
+
+#[test]
+#[cfg_attr(
+    target_os = "android",
+    ignore = "读主机仓库里的文件，设备上没有这份检出"
+)]
+fn official_packs_match_the_repository_lock() {
+    #[derive(serde::Deserialize)]
+    struct Lock {
+        format_version: u64,
+        packs: Vec<Entry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        kind: String,
+        id: String,
+    }
+    let lock: Lock =
+        serde_json::from_str(include_str!("../../../../plugins/official-packs.json")).unwrap();
+    assert_eq!(lock.format_version, 1);
+    let ids = |kind: &str| -> Vec<String> {
+        lock.packs
+            .iter()
+            .filter(|entry| entry.kind == kind)
+            .map(|entry| entry.id.clone())
+            .collect()
+    };
+    assert_eq!(ids("script"), BUILTIN_SCRIPT_PACKS);
+    assert_eq!(ids("phrase_table"), BUILTIN_PHRASE_TABLES);
+    assert_eq!(
+        lock.packs.len(),
+        BUILTIN_SCRIPT_PACKS.len() + BUILTIN_PHRASE_TABLES.len(),
+        "official-packs.json 只登记脚本插件和短语表"
+    );
+    for id in BUILTIN_PHRASE_TABLES {
+        assert!(
+            is_builtin(PluginKind::PhraseTable, id) && is_official(PluginKind::PhraseTable, id)
+        );
+    }
+    // 官方 id 和内置音效包、背景音乐包的 id 不重叠，也不是别的类型的保留 id。
+    for id in BUILTIN_SCRIPT_PACKS
+        .iter()
+        .chain(BUILTIN_PHRASE_TABLES.iter())
+    {
+        assert!(!BUILTIN_SOUND_PACKS.contains(id) && !BUILTIN_MUSIC_PACKS.contains(id));
+        assert!(!is_builtin(PluginKind::CommandTable, id));
+    }
+    assert!(!is_official(PluginKind::Sound, DEFAULT_SOUND_PACK));
+}
+
+#[test]
+#[cfg_attr(
+    target_os = "android",
+    ignore = "读主机仓库里的文件，设备上没有这份检出"
+)]
+fn official_phrase_tables_come_from_the_packs_directory_and_stay_off_until_enabled() {
+    let root = tempdir().unwrap();
+    let bundle = tempdir().unwrap();
+    let packs = bundle.path().join("plugin-packs");
+    let sounds = builtin_root();
+    let both = BuiltinDirs {
+        sounds: Some(&sounds),
+        packs: Some(&packs),
+    };
+    official_phrase_table(
+        &kind_directory(&packs, PluginKind::PhraseTable),
+        "latex-symbols",
+        "α",
+    );
+    // 内置目录里不是官方 id 的文件夹：载入时不会从这里读到它，列出来只会是一个用不了的「内置」包。
+    official_phrase_table(
+        &kind_directory(&packs, PluginKind::PhraseTable),
+        "stray",
+        "β",
+    );
+
+    let catalog = scan(root.path(), both);
+    let official: Vec<_> = catalog
+        .packages
+        .iter()
+        .filter(|package| package.kind() == PluginKind::PhraseTable)
+        .map(|package| (package.id.as_str(), package.builtin))
+        .collect();
+    assert_eq!(official, [("latex-symbols", true)]);
+    assert_eq!(
+        catalog
+            .packages
+            .iter()
+            .filter(|package| package.kind() == PluginKind::Sound && package.builtin)
+            .count(),
+        BUILTIN_SOUND_PACKS.len()
+    );
+    assert_eq!(
+        catalog
+            .issues
+            .iter()
+            .map(|issue| (issue.kind, issue.folder.as_str(), issue.reason.as_str()))
+            .collect::<Vec<_>>(),
+        [(PluginKind::PhraseTable, "stray", "不是随输入法分发的插件")]
+    );
+
+    // 载入永远从内置目录读；宿主没有内置目录（移动端、不带官方包的开发构建）时载不入，也列不出来。
+    let loaded = load_package(root.path(), both, PluginKind::PhraseTable, "latex-symbols").unwrap();
+    assert!(loaded.builtin);
+    assert!(loaded.directory.starts_with(&packs));
+    assert_eq!(
+        load_package(
+            root.path(),
+            BuiltinDirs::default(),
+            PluginKind::PhraseTable,
+            "latex-symbols"
+        )
+        .unwrap_err(),
+        "内置插件包不可用"
+    );
+    assert!(scan(root.path(), BuiltinDirs::default())
+        .packages
+        .is_empty());
+    assert_eq!(
+        pack_directory(root.path(), both, PluginKind::PhraseTable, "latex-symbols"),
+        Some(packs.join("phrase_table").join("latex-symbols"))
+    );
+    assert_eq!(
+        pack_directory(root.path(), both, PluginKind::PhraseTable, "office"),
+        Some(root.path().join("phrase_table").join("office"))
+    );
+
+    // K 模式只读 `enabled` 里点名的表：不启用就没有行。
+    let enabled = ["latex-symbols".to_owned()];
+    assert!(phrase_table::enabled_phrases(root.path(), Some(&packs), &[]).is_empty());
+    let rows = phrase_table::enabled_phrases(root.path(), Some(&packs), &enabled);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].key.as_str(), rows[0].text.as_str()),
+        ("alpha", "α")
+    );
+    assert!(phrase_table::enabled_phrases(root.path(), None, &enabled).is_empty());
+
+    // 官方包随安装包分发之前导入过的同 id 副本：报为问题、不被使用，能删，删的只是这份副本。
+    let shadow = official_phrase_table(
+        &kind_directory(root.path(), PluginKind::PhraseTable),
+        "latex-symbols",
+        "影子",
+    );
+    let catalog = scan(root.path(), both);
+    assert!(catalog
+        .issues
+        .iter()
+        .any(|issue| issue.kind == PluginKind::PhraseTable
+            && issue.folder == "latex-symbols"
+            && issue.reason.contains("属于内置插件")));
+    let rows = phrase_table::enabled_phrases(root.path(), Some(&packs), &enabled);
+    assert_eq!(rows[0].text, "α");
+    remove(root.path(), PluginKind::PhraseTable, "latex-symbols").unwrap();
+    assert!(!shadow.exists());
+    assert!(packs
+        .join("phrase_table/latex-symbols/plugin.toml")
+        .is_file());
+    // 再删一次（没有副本）照样成功，内置的仍在。
+    remove(root.path(), PluginKind::PhraseTable, "latex-symbols").unwrap();
+    assert!(packs
+        .join("phrase_table/latex-symbols/plugin.toml")
+        .is_file());
+    // 音效包的内置 id 照旧拒绝删除。
+    assert!(matches!(
+        remove(root.path(), PluginKind::Sound, DEFAULT_SOUND_PACK),
+        Err(PluginError::Reserved)
+    ));
+
+    // 导入和社区库照旧拒绝官方 id。
+    let source = official_phrase_table(bundle.path(), "latex-symbols", "导入");
+    assert!(matches!(
+        import(&source, root.path()),
+        Err(PluginError::Reserved)
+    ));
+    assert!(matches!(validate(&source), Err(PluginError::Reserved)));
+    assert_eq!(
+        validate_with(&source, ReservedIds::Allow).unwrap().id,
+        "latex-symbols"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_official_packs_directory_is_not_scanned() {
+    let state = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    official_phrase_table(
+        &kind_directory(outside.path(), PluginKind::PhraseTable),
+        "latex-symbols",
+        "α",
+    );
+    let linked = state.path().join("plugin-packs");
+    msime_path_trust::untrusted_symlink(outside.path(), &linked).unwrap();
+    let catalog = scan(state.path(), BuiltinDirs::packs(Some(&linked)));
+    assert_eq!(catalog, PluginCatalog::default());
 }

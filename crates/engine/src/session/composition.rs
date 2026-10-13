@@ -645,6 +645,10 @@ impl InputSession {
                 .candidates()
                 .iter()
                 .map(|item| match self.local_mode {
+                    // 插件行的标题和插件自己的注释由 runtime 画在插件注释格里；引擎注释格只放引擎的内容，留空。
+                    LocalInputMode::Command if item.source == CandidateSource::Plugin => {
+                        String::new()
+                    }
                     LocalInputMode::Command => self
                         .queries
                         .command_title(&item.pinyin)

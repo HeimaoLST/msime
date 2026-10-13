@@ -520,7 +520,7 @@ TSF 在收到 Server 回复之前就要决定一个键是组合输入还是选�
 
 密码框：TSF 不读取输入范围（InputScope），靠的是键盘上下文。经典 Edit 的 ES_PASSWORD 控件会停用输入法；Chromium 与 Firefox 的密码框按它们的实现也挂在停用的上下文上（这一点没有在真机上逐个验证）。`_IsKeyboardDisabled()` 为真时 TSF 不接手任何键，Server 也就收不到，按键音不会泄露密码节奏。协商到可选能力 `FanyImeProtocol::FieldTraits` 后，TSF 在每个 ClientActivated、按键、状态快照和 FocusRestored 之前比较一次字段属性，变了就先发 Main 事件 `FieldTraits`（17，keycode 是 `FanyImeFieldTraits` 的位）：停用的键盘、空上下文和安全桌面是 `SECURE`，`TokenElevation` 报提权的客户端进程是 `ELEVATED`。焦点换进密码框时 TSF 会发状态快照，所以不用等一个永远不会到来的按键，音乐在进入密码框时就停。这个事件属于客户端，Server 不管它此刻是否持有焦点都收下（`InputState::set_field_traits`），记在客户端上，词库维护后重建的会话也拿得到；Server 交给核心时加上 `KNOWN`。新 TSF 配旧 Server、旧 TSF 配新 Server 都协商不到这一位，TSF 不发（旧 Server 会把未知事件当非法帧断开），Server 那边的属性保持未知、不带 `KNOWN`，只有全屏前台照常生效。
 
-内置音效包由安装器放在 DataDir 的 `sound-packs`（与提示音 `audios` 同级），Server 通过 `src/system/SoundPackRoot.h` 在会话选项里写入 `sound_packs`；开发运行的状态目录里没有它时不写，由共享库按 resources 旁边的默认位置查找。
+内置音效包由安装器放在 DataDir 的 `sound-packs`（与提示音 `audios` 同级），Server 通过 `src/system/SoundPackRoot.h` 在会话选项里写入 `sound_packs`；开发运行的状态目录里没有它时不写，由共享库按 resources 旁边的默认位置查找。官方插件包（uuid 脚本插件、latex-symbols 短语表，`plugins/official-packs.json` 登记的那些）不放 DataDir，而由安装器从 `server_exe/plugin-packs` 装到 Program Files 下 Server 目录的 `plugin-packs`：那里只有管理员能写。Server 通过 `src/system/PluginPackRoot.h` 在会话选项里写入 `plugin_packs`，目录不在（开发运行）时也照样写上，免得共享库退回到可写的 DataDir 旁边去找；原生设置应用和 Tauri 设置壳都取自己所在目录的 `plugin-packs`。它们默认停用：脚本插件要在授权页授权，短语表要在插件页启用。
 
 ### 打字特效
 

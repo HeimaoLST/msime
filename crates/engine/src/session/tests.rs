@@ -16,6 +16,7 @@ use crate::types::{
     LocalInputMode, SchemeKey, SchemeSet, SchemeType, ShuangpinProfileKind,
     DEFAULT_FIRST_PAGE_ROWS,
 };
+use crate::user_dictionary::ngram_store::flush_all;
 use crate::KeyGrid;
 
 /// test_input_session.cpp:390-430 (fixture M), the rows the portable-selection, caret and edge cases read.
@@ -702,6 +703,49 @@ INSERT INTO english_words VALUES('he','he',500);",
     type_text(&mut session, "he");
     assert_eq!(words(&session)[0], "和", "{:?}", words(&session));
     assert_eq!(words(&session)[1], "he", "{:?}", words(&session));
+}
+
+#[test]
+fn shifted_uppercase_starts_pinyin_and_mixes_the_cased_english_word() {
+    let fixture = Fixture::new(HELLO_FIXTURE)
+        .with_english("INSERT INTO english_words VALUES('observable','Observable',100);");
+    let mut session = fixture.session_with(|options| {
+        options.english.mixed_candidates = true;
+        options.english.minimum_prefix = 1;
+    });
+
+    assert!(session.character(b'O', true).handled);
+    assert_eq!(session.snapshot().preedit, "O");
+    type_text(&mut session, "bservable");
+    assert!(words(&session).contains(&"Observable".to_owned()));
+    assert_eq!(session.snapshot().preedit, "Observable");
+}
+
+#[test]
+fn punctuation_after_unspellable_shifted_word_commits_typed_text() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = fixture.session_with(|options| {
+        options.english.mixed_candidates = true;
+        options.english.minimum_prefix = 1;
+    });
+
+    assert!(session.character(b'N', true).handled);
+    type_text(&mut session, "ih");
+
+    let result = session.punctuation(b'<');
+    assert_eq!(result.commit.as_deref(), Some("Nih《"), "{result:?}");
+}
+
+#[test]
+fn punctuation_after_complete_shifted_pinyin_keeps_candidate_commit() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = fixture.session();
+
+    assert!(session.character(b'N', true).handled);
+    type_text(&mut session, "i");
+
+    let result = session.punctuation(b'<');
+    assert_eq!(result.commit.as_deref(), Some("你《"), "{result:?}");
 }
 
 /// 辅助码激活时大写的辅助码被转成小写拼进查英文的输入（`niC` 查的是 `nic`），光标前缀解码时选英文会扔掉光标后的输入：两种情况英文都不领先。
@@ -5212,6 +5256,247 @@ fn the_translate_command_asks_for_its_english_and_commits_the_answer() {
     assert_eq!(words(&session), ["hellox"]);
 }
 
+// ---- 脚本插件的 `/` 指令 ----
+
+fn plugin_command(trigger: &str, title: &str) -> crate::types::PluginCommand {
+    crate::types::PluginCommand {
+        trigger: trigger.to_owned(),
+        title: title.to_owned(),
+    }
+}
+
+fn plugin_commands() -> Vec<crate::types::PluginCommand> {
+    vec![plugin_command("uuid", "UUID"), plugin_command("cz", "拆字")]
+}
+
+fn plugin_rows(rows: &[(&str, &str)]) -> Vec<(String, String)> {
+    rows.iter()
+        .map(|(text, note)| ((*text).to_owned(), (*note).to_owned()))
+        .collect()
+}
+
+fn plugin_session(fixture: &Fixture, configure: impl FnOnce(&mut SessionOptions)) -> Session {
+    let mut session = fixture.session_with(|options| {
+        options.local_modes.command = true;
+        options.plugin_commands = plugin_commands();
+        configure(options);
+    });
+    TestClock::install(&mut session);
+    session
+}
+
+/// 打 `/uuid`：引擎自己不列行，只有兜底行，并且要宿主去问插件。
+fn open_uuid(session: &mut Session) -> crate::types::PluginCommandQuery {
+    assert!(session.character(b'/', false).handled);
+    type_text(session, "uuid");
+    assert_eq!(words(session), ["/uuid"]);
+    assert_eq!(candidate_sources(session), [CandidateSource::Fallback]);
+    session
+        .plugin_command_query()
+        .expect("a plugin command query")
+}
+
+#[test]
+fn plugin_rows_replace_the_fallback_row() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = plugin_session(&fixture, |_| {});
+    let query = open_uuid(&mut session);
+    assert_eq!(query.preedit, "/uuid");
+    assert_eq!(query.trigger, "uuid");
+    assert_eq!(query.argument, "");
+    // 用不了的行被丢掉：同文、空白、控制字符、超过 199 个码元。
+    let long = "字".repeat(200);
+    assert!(session.apply_plugin_command_rows(
+        &query,
+        &plugin_rows(&[
+            ("a-b", "小写"),
+            ("A-B", "大写"),
+            ("a-b", "重复"),
+            (" ", "空白"),
+            ("x\ny", "换行"),
+            (&long, "太长"),
+        ]),
+    ));
+    assert_eq!(words(&session), ["a-b", "A-B"]);
+    let snapshot = session.snapshot();
+    assert!(snapshot
+        .candidates
+        .iter()
+        .all(|item| item.source == CandidateSource::Plugin && item.pinyin == "uuid"));
+    // 标题和插件注释由 runtime 画在插件注释格里，引擎注释格留空。
+    assert_eq!(snapshot.candidate_annotations, ["", ""]);
+    // 同一份预编辑串问过了，不再问；同一个查询再交一次被拒绝。
+    assert!(session.plugin_command_query().is_none());
+    assert!(!session.apply_plugin_command_rows(&query, &plugin_rows(&[("c", "")])));
+    assert_eq!(words(&session), ["a-b", "A-B"]);
+
+    // 参数跟在触发词后面。
+    session.command(Command::Cancel);
+    session.character(b'/', false);
+    type_text(&mut session, "czhuohuo");
+    let query = session
+        .plugin_command_query()
+        .expect("a plugin command query");
+    assert_eq!(
+        (query.trigger.as_str(), query.argument.as_str()),
+        ("cz", "huohuo")
+    );
+}
+
+#[test]
+fn zero_plugin_rows_keep_the_fallback_and_are_not_asked_again() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = plugin_session(&fixture, |_| {});
+    let query = open_uuid(&mut session);
+    assert!(session.apply_plugin_command_rows(&query, &[]));
+    assert_eq!(words(&session), ["/uuid"]);
+    assert!(session.plugin_command_query().is_none());
+    // 只剩不能用的行，也按 0 行缓存。
+    session.command(Command::Cancel);
+    let query = open_uuid(&mut session);
+    assert!(session.apply_plugin_command_rows(&query, &plugin_rows(&[("", "")])));
+    assert_eq!(words(&session), ["/uuid"]);
+    assert!(session.plugin_command_query().is_none());
+}
+
+/// 方向键和列表重建不丢行、不再问；退一个字母再打回来是新的一份预编辑串，重新问（`/uuid` 删掉重打换一个 UUID）。
+#[test]
+fn plugin_rows_survive_caret_moves_and_rebuilds_but_not_an_edit() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = plugin_session(&fixture, |_| {});
+    let query = open_uuid(&mut session);
+    assert!(session.apply_plugin_command_rows(&query, &plugin_rows(&[("甲", ""), ("乙", "")])));
+    session.command(Command::MoveLeft);
+    session.command(Command::MoveRight);
+    assert_eq!(words(&session), ["甲", "乙"]);
+    assert!(session.input.update_local_candidates().is_none());
+    assert_eq!(words(&session), ["甲", "乙"]);
+    assert!(session.plugin_command_query().is_none());
+
+    assert!(session.command(Command::Backspace).handled);
+    assert_eq!(session.snapshot().preedit, "/uui");
+    assert!(session.plugin_command_query().is_none());
+    assert_eq!(words(&session), ["/uui"]);
+    type_text(&mut session, "d");
+    assert_eq!(words(&session), ["/uuid"]);
+    let again = session.plugin_command_query().expect("asked again");
+    assert_eq!(again, query);
+    assert!(session.apply_plugin_command_rows(&again, &plugin_rows(&[("丙", "")])));
+    assert_eq!(words(&session), ["丙"]);
+}
+
+#[test]
+fn replacing_the_plugin_commands_or_the_command_table_drops_the_cached_rows() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = plugin_session(&fixture, |_| {});
+    let query = open_uuid(&mut session);
+    assert!(session.apply_plugin_command_rows(&query, &plugin_rows(&[("甲", "")])));
+    assert_eq!(session.set_plugin_commands(&plugin_commands()), None);
+    assert_eq!(words(&session), ["/uuid"]);
+    let query = session.plugin_command_query().expect("asked again");
+    assert!(session.apply_plugin_command_rows(&query, &plugin_rows(&[("甲", "")])));
+    assert_eq!(session.set_command_table(&[]), None);
+    assert_eq!(words(&session), ["/uuid"]);
+    assert!(session.plugin_command_query().is_some());
+
+    // 用户的指令表有 `uu`：插件的 `uuid` 不再生效。
+    assert_eq!(
+        session.set_command_table(&[crate::types::CommandTableEntry {
+            trigger: "uu".to_owned(),
+            title: "我的".to_owned(),
+            template: "我的".to_owned(),
+        }]),
+        None
+    );
+    assert!(session.plugin_command_query().is_none());
+    assert_eq!(session.set_command_table(&[]), None);
+    // 授权撤销：插件指令清空之后 `/uuid` 什么都不问。
+    assert_eq!(session.set_plugin_commands(&[]), None);
+    assert!(session.plugin_command_query().is_none());
+    assert_eq!(words(&session), ["/uuid"]);
+}
+
+#[test]
+fn stale_plugin_command_answers_are_refused() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = plugin_session(&fixture, |_| {});
+    let query = open_uuid(&mut session);
+    let mut other_session = query.clone();
+    other_session.session_id += 1;
+    assert!(!session.apply_plugin_command_rows(&other_session, &plugin_rows(&[("甲", "")])));
+    // 预编辑串变了。
+    type_text(&mut session, "x");
+    assert!(!session.apply_plugin_command_rows(&query, &plugin_rows(&[("甲", "")])));
+    assert_eq!(words(&session), ["/uuidx"]);
+    // 模式已经关了。
+    session.command(Command::Cancel);
+    assert!(!session.apply_plugin_command_rows(&query, &plugin_rows(&[("甲", "")])));
+    assert!(session.snapshot().candidates.is_empty());
+}
+
+/// 不属于插件指令的 `/` 输入照旧：内置和用户的指令照常列出、带标题，从不要宿主去问插件。插件指令也不在 `/u` 这样的前缀里列出。
+#[test]
+fn other_commands_are_untouched_by_plugin_commands() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = plugin_session(&fixture, |_| {});
+    session.character(b'/', false);
+    assert!(session.plugin_command_query().is_none());
+    type_text(&mut session, "u");
+    assert_eq!(words(&session), ["/u"]);
+    assert!(session.plugin_command_query().is_none());
+    session.command(Command::Cancel);
+    session.character(b'/', false);
+    type_text(&mut session, "rq");
+    assert!(session.plugin_command_query().is_none());
+    assert_eq!(session.snapshot().candidate_annotations[0], "日期");
+    assert!(candidate_sources(&session)
+        .iter()
+        .all(|source| *source == CandidateSource::Generated));
+}
+
+/// 选中插件行只上屏这一行的文字，不学习、不能置顶固定删除；开着个人上下文和词频调整时，选中前后用户日志的行数和主词库的字节都不变。指令模式的上屏不计打字统计。
+///
+/// 能从外面看出来的是调词频这条路：插件行要是被当成词库行（`is_dictionary`），选中会去调词频，而 `/` 模式没有拼音可作键，调词频失败、带回诊断，所以这里要求没有诊断。整句学习那条路看不出来：`can_learn_sentence_candidate` 在本地模式里一律拒绝，来源 14 误进 `is_sentence_learning` 也不会写任何东西，那条由 `types.rs` 的 `plugin_rows_match_no_predicate` 守着。
+#[test]
+fn selecting_a_plugin_row_commits_its_text_and_learns_nothing() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = plugin_session(&fixture, |options| {
+        options.personal_context = true;
+        options.frequency.mode = FrequencyAdjustmentMode::Promote;
+        options.frequency.trigger_count = 1;
+    });
+    type_text(&mut session, "nihao");
+    assert_eq!(session.select(0).commit.as_deref(), Some("你好"));
+    let journal_before = journal_rows(&fixture.journal());
+    let dictionary_before = std::fs::read(fixture.main_db()).unwrap();
+
+    let query = open_uuid(&mut session);
+    assert!(session.apply_plugin_command_rows(&query, &plugin_rows(&[("甲", ""), ("乙", "")])));
+    assert!(!session.pin(1).handled);
+    assert!(!session.remove(1).handled);
+    assert!(!session.fix_position(1, 1).handled);
+    assert_eq!(words(&session), ["甲", "乙"]);
+    let item = session.snapshot().candidates[1].clone();
+    assert!(!session.input.is_editable_source(&item));
+
+    // 选第二行，不是首选：开着 Promote、触发次数 1，词库行在这里会调词频。
+    let result = session.select(1);
+    assert_eq!(result.commit.as_deref(), Some("乙"));
+    assert_eq!(result.diagnostic, None);
+    assert_eq!(session.snapshot().local_mode, LocalInputMode::None);
+    assert!(session.plugin_command_query().is_none());
+    assert_eq!(journal_rows(&fixture.journal()), journal_before);
+    assert_eq!(std::fs::read(fixture.main_db()).unwrap(), dictionary_before);
+    assert!(!crate::host::local_mode_counts_as_typing(
+        LocalInputMode::Command.name()
+    ));
+
+    // 再进 `/uuid` 是一次新的组字：重新问插件。
+    let query = open_uuid(&mut session);
+    assert!(session.apply_plugin_command_rows(&query, &plugin_rows(&[("丁", "")])));
+    assert_eq!(session.select(0).commit.as_deref(), Some("丁"));
+}
+
 // ---- Vietnamese ----
 
 #[test]
@@ -7416,6 +7701,230 @@ INSERT INTO kaomoji_catalog VALUES('(•̀ᴗ•́)و','mei guo'),('(ﾟДﾟ≡
         item.source,
         CandidateSource::Emoji | CandidateSource::Kaomoji
     )));
+}
+
+// ---- 打拼音出符号（local/symbol_candidates.rs） ----
+
+/// 正负（zheng'fu）排在 政府 后面；大于 供部分选择后再选符号；派（pai）可以由 pa 加辅助码 I 拼出。
+const SYMBOL_FIXTURE: &str = "CREATE TABLE tbl_1_z(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_z VALUES('zheng','z','正',300),('zheng','z','政',200);\
+CREATE TABLE tbl_1_f(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_f VALUES('fu','f','负',300),('fu','f','府',200);\
+CREATE TABLE tbl_1_d(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_d VALUES('da','d','大',300);\
+CREATE TABLE tbl_1_y(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_y VALUES('yu','y','于',300);\
+CREATE TABLE tbl_1_p(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_p VALUES('pai','p','派',300),('pa','p','怕',300);\
+INSERT INTO tbl_1_p VALUES('ping','p','平',300);\
+CREATE TABLE tbl_1_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_m VALUES('mi','m','米',300);\
+CREATE TABLE tbl_2_p(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_2_p VALUES('ping''mi','pm','平米',500);\
+CREATE TABLE tbl_2_z(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_2_z VALUES('zheng''fu','zf','政府',1000),('zheng''fu','zf','正负',500);\
+CREATE TABLE tbl_2_d(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_2_d VALUES('da''yu','dy','大于',900);\
+CREATE TABLE tbl_4_z(key TEXT,jp TEXT,value TEXT,weight INTEGER);";
+
+fn symbol_session(fixture: &Fixture, configure: impl FnOnce(&mut SessionOptions)) -> Session {
+    fixture.session_with(|options| {
+        options.expressive.symbol_candidates = true;
+        configure(options);
+    })
+}
+
+/// 列表里文字为 `symbol` 的符号行（来源 Emoji）的位置。
+fn symbol_index(session: &Session, symbol: &str) -> Option<usize> {
+    session
+        .snapshot()
+        .candidates
+        .iter()
+        .position(|item| item.source == CandidateSource::Emoji && item.word == symbol)
+}
+
+#[test]
+fn a_whole_symbol_name_offers_its_symbol_after_the_name() {
+    let fixture = Fixture::new(SYMBOL_FIXTURE);
+    let mut session = symbol_session(&fixture, |_| {});
+    type_text(&mut session, "zhengfu");
+    assert_eq!(words(&session)[..3], ["政府", "正负", "±"]);
+    assert_eq!(symbol_index(&session, "±"), Some(2));
+    session.command(Command::Cancel);
+    // 没打完整的名称不出。
+    type_text(&mut session, "zhengf");
+    assert_eq!(symbol_index(&session, "±"), None, "{:?}", words(&session));
+    session.command(Command::Cancel);
+
+    // 双拼小鹤 vgfu 归一成 zhengfu。
+    let mut shuangpin = symbol_session(&fixture, |options| {
+        options.scheme = SchemeType::Shuangpin;
+        options.shuangpin_profile = ShuangpinProfileKind::Xiaohe;
+    });
+    type_text(&mut shuangpin, "vgfu");
+    assert!(
+        symbol_index(&shuangpin, "±").is_some(),
+        "{:?}",
+        words(&shuangpin)
+    );
+
+    // 开关关着时没有符号行。
+    let mut off = fixture.session();
+    type_text(&mut off, "zhengfu");
+    assert_eq!(symbol_index(&off, "±"), None);
+}
+
+#[test]
+fn microsoft_semicolon_spelling_offers_the_symbol_after_its_name() {
+    let fixture = Fixture::new(SYMBOL_FIXTURE);
+    let mut session = symbol_session(&fixture, |options| {
+        options.scheme = SchemeType::Shuangpin;
+        options.shuangpin_profile = ShuangpinProfileKind::Microsoft;
+    });
+    type_text(&mut session, "p;mi");
+    let name = words(&session)
+        .iter()
+        .position(|word| *word == "平米")
+        .unwrap();
+    assert_eq!(symbol_index(&session, "㎡"), Some(name + 1));
+}
+
+#[test]
+fn committing_a_symbol_ends_the_composition_and_learns_nothing() {
+    let fixture = Fixture::new(SYMBOL_FIXTURE);
+    let mut session = symbol_session(&fixture, |options| {
+        options.frequency.mode = FrequencyAdjustmentMode::Promote;
+        options.frequency.trigger_count = 1;
+    });
+    // 先上屏一个中文词，个人上下文链有了上一个词。
+    type_text(&mut session, "zhengfu");
+    assert_eq!(session.select(0).commit.as_deref(), Some("政府"));
+    assert_eq!(session.input.chain.previous.as_deref(), Some("政府"));
+    // 个人上下文由后台线程延迟写入，并行的测试随时可能 `flush_all` 把它提前写下；比较前先写完，前后差的才只是选符号这一步。
+    flush_all();
+    let before = journal_rows(&fixture.journal());
+
+    type_text(&mut session, "zhengfu");
+    let index = symbol_index(&session, "±").unwrap();
+    assert!(!session.pin(index).handled);
+    assert!(!session.remove(index).handled);
+    assert!(!session.fix_position(index, 1).handled);
+    assert_eq!(symbol_index(&session, "±"), Some(index));
+    assert!(!session
+        .input
+        .is_editable_source(&session.snapshot().candidates[index]));
+    let ranking = session.input.ranking_index(index).unwrap();
+    assert_eq!(session.input.learn_candidate(ranking), None);
+
+    let result = session.select(index);
+    assert_eq!(result.commit.as_deref(), Some("±"));
+    let snapshot = session.snapshot();
+    assert!(snapshot.editing_text.is_empty() && snapshot.candidates.is_empty());
+    assert_eq!(session.input.chain.previous, None);
+    flush_all();
+    assert_eq!(journal_rows(&fixture.journal()), before);
+}
+
+#[test]
+fn a_symbol_after_a_partial_pick_makes_no_word() {
+    let fixture = Fixture::new(SYMBOL_FIXTURE);
+    let mut session = symbol_session(&fixture, |_| {});
+    type_text(&mut session, "zhengfudayu");
+    select_word(&mut session, "正负");
+    assert!(!session.snapshot().editing_text.is_empty());
+    flush_all();
+    let before = journal_rows(&fixture.journal());
+    let index = symbol_index(&session, "＞").unwrap_or_else(|| panic!("{:?}", words(&session)));
+    let result = session.select(index);
+    assert!(
+        result
+            .commit
+            .as_deref()
+            .is_some_and(|text| text.ends_with('＞')),
+        "{result:?}"
+    );
+    assert!(session.snapshot().editing_text.is_empty());
+    flush_all();
+    assert_eq!(journal_rows(&fixture.journal()), before);
+    type_text(&mut session, "zhengfudayu");
+    assert!(!words(&session).iter().any(|word| word.contains('＞')));
+}
+
+#[test]
+fn symbols_stay_out_of_helpcode_caret_prefix_and_dedicated_english() {
+    let fixture = Fixture::new(SYMBOL_FIXTURE);
+    let mut session = symbol_session(&fixture, |_| {});
+    // 对照：pai 出 π。
+    type_text(&mut session, "pai");
+    assert!(
+        symbol_index(&session, "π").is_some(),
+        "{:?}",
+        words(&session)
+    );
+    session.command(Command::Cancel);
+    // 大写的 I 是辅助码，转成小写正好是 pai，但输入里混着辅助码字母。
+    type_text(&mut session, "pa");
+    assert!(session.character(b'I', false).handled);
+    assert!(session.input.has_active_helpcode());
+    assert_eq!(symbol_index(&session, "π"), None, "{:?}", words(&session));
+    session.command(Command::Cancel);
+
+    type_text(&mut session, "zhengfudayu");
+    session.set_caret(Some(7));
+    assert!(session.input.prefix_active);
+    assert_eq!(symbol_index(&session, "±"), None, "{:?}", words(&session));
+    session.command(Command::Cancel);
+
+    session.set_dedicated_english(true);
+    type_text(&mut session, "zhengfu");
+    assert_eq!(symbol_index(&session, "±"), None, "{:?}", words(&session));
+}
+
+/// 符号跟在名称词后面，名称词被挪走时符号不能顶到首位：只出单字筛掉了多字的名称词，或者用户把名称词固定到了后面的位置。两种情况下空格都不能直接上屏符号。
+#[test]
+fn a_symbol_never_leads_once_its_name_moves_away() {
+    let fixture = Fixture::new(SYMBOL_FIXTURE);
+    let mut single = symbol_session(&fixture, |options| options.single_character_only = true);
+    type_text(&mut single, "zhengfu");
+    assert_eq!(words(&single)[0], "正");
+    assert!(
+        symbol_index(&single, "±").is_some_and(|index| index > 0),
+        "{:?}",
+        words(&single)
+    );
+    single.command(Command::Cancel);
+    type_text(&mut single, "dayu");
+    assert_eq!(words(&single)[0], "大");
+    single.command(Command::Cancel);
+
+    let mut session = symbol_session(&fixture, |_| {});
+    type_text(&mut session, "dayu");
+    assert_eq!(words(&session)[..3], ["大于", ">", "＞"]);
+    let result = session.fix_position(0, 3);
+    assert!(result.handled && result.diagnostic.is_none(), "{result:?}");
+    // 名称词留在固定的第 3 位，首位换成后面第一个没固定的词，符号依次补进空位。
+    let listed = words(&session);
+    assert_eq!(listed[..4], ["大", ">", "大于", "＞"], "{listed:?}");
+    assert_eq!(
+        session.snapshot().candidates[0].source,
+        CandidateSource::Database
+    );
+}
+
+/// 五笔不混排，符号开关开着时四码唯一候选照样自动上屏。
+#[test]
+fn the_wubi_unique_four_code_ignores_the_symbol_switch() {
+    let fixture = Fixture::new(
+        "CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);\
+INSERT INTO wubi86 VALUES('dayu','大鱼',100);",
+    );
+    let mut session = symbol_session(&fixture, |options| {
+        options.scheme = SchemeType::Wubi;
+        options.wubi.mixed_pinyin = false;
+    });
+    type_text(&mut session, "dayu");
+    assert_eq!(words(&session), vec!["大鱼".to_owned()]);
+    assert!(session.snapshot().wubi_unique_four_code);
 }
 
 // ---- 整句改字（session/conversion.rs） ----

@@ -13,9 +13,9 @@ use crate::session::SessionOptions;
 use crate::types::{
     autocorrect_type, fuzzy_rule, CommandTableEntry, EnglishInputOptions, FrequencyAdjustmentMode,
     FrequencyAdjustmentOptions, FuzzyPinyinOptions, LocalModeOptions, MentionEntry,
-    MixedExpressiveOptions, QuickPhraseEntry, SchemeSet, SchemeType, SentenceAssociationOptions,
-    ShuangpinCustomTable, ShuangpinProfileKind, WubiInputOptions, WubiProfileKind,
-    DEFAULT_FIRST_PAGE_ROWS,
+    MixedExpressiveOptions, PluginCommand, QuickPhraseEntry, SchemeSet, SchemeType,
+    SentenceAssociationOptions, ShuangpinCustomTable, ShuangpinProfileKind, WubiInputOptions,
+    WubiProfileKind, DEFAULT_FIRST_PAGE_ROWS,
 };
 use crate::user_dictionary::generation::prepare_runtime_paths_for;
 use crate::vietnamese::{InputMethod as VietnameseInputMethod, ToneStyle as VietnameseToneStyle};
@@ -89,6 +89,8 @@ pub struct EngineOptions {
     pub english_minimum_prefix: u8,
     pub mixed_emoji: bool,
     pub mixed_kaomoji: bool,
+    /// 打拼音出符号（`MixedExpressiveOptions::symbol_candidates`）。默认关，宿主按共享偏好 `mixed_input.symbols` 打开；引擎层关着，golden 基准、句子转换评测和网页引擎才不受影响。
+    pub mixed_symbols: bool,
     /// 日文混输（实验，`SessionOptions::japanese_mixing`）。宿主只在会话带日文、日文模型在场时打开它。
     pub mixed_japanese: bool,
     pub local_unicode: bool,
@@ -113,6 +115,8 @@ pub struct EngineOptions {
     pub chaizi_traditional_output: bool,
     /// The `/` mode's commands beyond the built-in ones. Rows the engine cannot use are dropped, and at most `local::command::TABLE_LIMIT` are kept.
     pub command_table: Vec<CommandTableEntry>,
+    /// 脚本插件在 `/` 模式里的指令，宿主按执行顺序交来；`Session::set_plugin_commands` 实时替换，重建的会话从这里开始。哪些生效由引擎决定，用不了的被丢弃（`local::command::usable_plugin_commands`）。只有桌面宿主会填，移动端永远是空表。
+    pub plugin_commands: Vec<PluginCommand>,
     /// The `@` mode's names and places, the user's own list. Entries the engine cannot use are dropped, and at most `local::mention::LIST_LIMIT` are kept.
     pub mention_entries: Vec<MentionEntry>,
     /// K 模式在数据库行之后追加的宿主短语（已启用的短语表插件）。用不了的行被丢弃，最多保留 `local::quick_phrase::TABLE_LIMIT` 行。
@@ -197,6 +201,7 @@ pub fn prepare_options_for(
         english_minimum_prefix: 5,
         mixed_emoji: false,
         mixed_kaomoji: false,
+        mixed_symbols: false,
         mixed_japanese: false,
         local_unicode: true,
         local_date_time: true,
@@ -213,6 +218,7 @@ pub fn prepare_options_for(
         local_shift_letter_entry: true,
         chaizi_traditional_output: false,
         command_table: Vec::new(),
+        plugin_commands: Vec::new(),
         mention_entries: Vec::new(),
         quick_phrase_table: Vec::new(),
         sentence_association: SentenceAssociationOptions::default(),
@@ -293,6 +299,7 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
     session.expressive = MixedExpressiveOptions {
         emoji_candidates: options.mixed_emoji,
         kaomoji_candidates: options.mixed_kaomoji,
+        symbol_candidates: options.mixed_symbols,
     };
     session.japanese_mixing = options.mixed_japanese;
     session.local_modes = LocalModeOptions {
@@ -312,6 +319,7 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
     };
     session.chaizi_traditional_output = options.chaizi_traditional_output;
     session.command_table = options.command_table.clone();
+    session.plugin_commands = options.plugin_commands.clone();
     session.mention_entries = options.mention_entries.clone();
     session.quick_phrase_table = options.quick_phrase_table.clone();
     session.sentence_alternatives = options.sentence_alternatives;

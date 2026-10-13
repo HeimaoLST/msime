@@ -49,6 +49,7 @@ import java.nio.file.StandardOpenOption;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import javax.net.ssl.HttpsURLConnection;
@@ -59,8 +60,13 @@ import javax.net.ssl.HttpsURLConnection;
  * <p>数据全部来自 {@link DeviceDataApi}。注销账号和删除云端数据要求最近登录：收到 {@link DeviceDataApi.RecentLoginRequired} 时弹登录面板，用户重新登录同一个账号后自动重试一次；登录成了别的账号时不重试，免得删错。关联登录方式走登录面板的 `link` 用途，回来后按关联列表的变化说出关联了哪一种。
  */
 public final class ProfilePage extends ReloadingDetailPage {
+    @Override protected java.util.List<String> sectionTitles() {
+        return java.util.List.of("账号", "登录方式", "数据");
+    }
+
     private static final String[][] PROVIDERS = {{"apple", "Apple"}, {"google", "Google"}, {"email", "邮箱"}};
     private static final String EXPORTS = "exports";
+    private static final long EXPORT_RETENTION_MILLIS = 24L * 60 * 60 * 1000;
     /** 头像解码后的长边上限（像素）：最大的头像画 88dp，xxxhdpi 下约 352 像素，留一点余量。 */
     private static final int AVATAR_DECODE_EDGE = 384;
     /** 允许上传的头像长边上限（像素）：1 MiB 的平涂 PNG 可以有上万像素宽，解码会吃掉上 GB 内存。 */
@@ -218,14 +224,14 @@ public final class ProfilePage extends ReloadingDetailPage {
         }
         DeviceDataApi.Profile profile = state.profile();
         Context context = requireContext();
-        target.addView(header(context, profile, state.avatar()));
+        sectionColumn(target, "账号").addView(header(context, profile, state.avatar()));
 
-        GroupCard account = GroupCard.add(target, "账号").withDividers(16);
+        GroupCard account = GroupCard.add(sectionColumn(target, "账号"), "账号").withDividers(16);
         account.nav("昵称", null, profile.displayName(), this::rename);
         account.nav("水杉 ID", null, profile.id(), () -> copy("水杉 ID", profile.id()));
         if (!profile.email().isEmpty()) account.value("邮箱", null, profile.email());
 
-        GroupCard methods = GroupCard.add(target, "登录方式").withDividers(16);
+        GroupCard methods = GroupCard.add(sectionColumn(target, "登录方式"), "登录方式").withDividers(16);
         for (String[] provider : PROVIDERS) {
             boolean linked = profile.linked(provider[0]);
             if (!linked && !offered(state.providers(), provider[0])) continue;
@@ -233,14 +239,14 @@ public final class ProfilePage extends ReloadingDetailPage {
         }
         methods.footer("关联后可以用任意一种方式登录同一个账号");
 
-        GroupCard data = GroupCard.add(target, "数据").withDividers(16);
+        GroupCard data = GroupCard.add(sectionColumn(target, "数据"), "数据").withDividers(16);
         data.nav("云端数据", null, state.data() == null ? null : DeviceDataApi.formatBytes(state.data().bytes()),
             this::confirmDeleteData);
         data.nav("导出我的数据", null, null, this::export);
 
-        GroupCard signOut = GroupCard.add(target, null);
+        GroupCard signOut = GroupCard.add(sectionColumn(target, "账号"), null);
         signOut.addView(dangerButton(context, "退出登录", this::confirmSignOut));
-        GroupCard delete = GroupCard.add(target, null);
+        GroupCard delete = GroupCard.add(sectionColumn(target, "账号"), null);
         delete.addView(dangerButton(context, "注销账号", this::confirmDeleteAccount));
         delete.footer("注销后云端的词库、皮肤、设置和社区作品会立即永久删除，无法恢复");
     }
@@ -413,13 +419,19 @@ public final class ProfilePage extends ReloadingDetailPage {
         if (state == null || state.profile() == null || state.sessionId().isEmpty()) return;
         String expectedSessionId = state.sessionId();
         long request = generation;
-        String name = DeviceDataApi.exportFileName(LocalDate.now(ZoneId.systemDefault()));
+        String name = DeviceDataApi.exportCacheFileName(LocalDate.now(ZoneId.systemDefault()), UUID.randomUUID());
         execute(context -> {
             File directory = new File(context.getCacheDir(), EXPORTS);
             if (!directory.isDirectory() && !directory.mkdirs()) return "没有导出，存储空间不可用";
-            // 导出包里是个人数据，只留最新这一份给分享用：先删掉以前导出的，不让它们一直堆在缓存目录里。
+            // 已分享的 URI 必须保持指向原来的归档；只清理超过一天的旧导出。
             File[] previous = directory.listFiles();
-            if (previous != null) for (File stale : previous) FilePolicy.deleteQuietly(stale);
+            long cutoff = System.currentTimeMillis() - EXPORT_RETENTION_MILLIS;
+            if (previous != null) for (File stale : previous) {
+                if (stale.getName().startsWith("msime-data-")
+                        && stale.getName().endsWith(".zip")
+                        && Files.isRegularFile(stale.toPath(), LinkOption.NOFOLLOW_LINKS)
+                        && stale.lastModified() < cutoff) FilePolicy.deleteQuietly(stale);
+            }
             File file = new File(directory, name);
             java.nio.file.Path temporary = null;
             try {
