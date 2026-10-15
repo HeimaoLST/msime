@@ -99,6 +99,7 @@ export function createMsimeEngine(options = {}) {
   const errorListeners = new Set();
   let failure = null;
   let waitingReady = null;
+  let pendingSchemes = 0;
   let info = null;
 
   const fail = (error) => {
@@ -120,11 +121,21 @@ export function createMsimeEngine(options = {}) {
       case "progress":
         options.onProgress?.(msg.loaded, msg.total);
         return;
-      case "ready":
-        info = msg;
-        waitingReady?.resolve(msg);
-        waitingReady = null;
+      case "ready": {
+        // 初始加载没有编号；方案切换只唤醒自己的请求，不能覆盖其他切换的等待者。
+        if (msg.seq !== undefined) {
+          const entry = pending.get(msg.seq);
+          if (!entry) return;
+          pending.delete(msg.seq);
+          info = msg;
+          entry.resolve(msg);
+        } else {
+          info = msg;
+          waitingReady?.resolve(msg);
+          waitingReady = null;
+        }
         return;
+      }
       case "frame": {
         const entry = pending.get(msg.seq);
         pending.delete(msg.seq);
@@ -192,16 +203,19 @@ export function createMsimeEngine(options = {}) {
     async setScheme(next) {
       if (failure) throw failure;
       if (!SCHEMES.includes(next)) throw new MsimeError("engine", `unknown scheme: ${next}`);
-      if (next === scheme) return;
+      if (next === scheme && pendingSchemes === 0) return;
       // 五笔和拼音用不同的词库，换词库要重新下载，建一个新引擎更简单也更省内存（wasm 内存不会缩小）。
       // 只有全拼和两种双拼共用一个词库；五笔、日语和韩文各要自己的资源，换过去得新建引擎。
       if (!PINYIN.has(next) || !PINYIN.has(scheme)) {
         throw new MsimeError("unsupported", `switching between ${scheme} and ${next} needs a new engine: dispose() this one and call createMsimeEngine({ scheme: "${next}" })`);
       }
-      const ready = waitReady();
-      worker.postMessage({ type: "scheme", seq: ++seq, scheme: next });
-      await ready;
-      scheme = next;
+      pendingSchemes += 1;
+      try {
+        await request({ type: "scheme", scheme: next });
+        scheme = next;
+      } finally {
+        pendingSchemes -= 1;
+      }
     },
     async setHelpcode(next) {
       if (failure) throw failure;

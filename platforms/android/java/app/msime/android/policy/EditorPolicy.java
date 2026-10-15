@@ -7,6 +7,8 @@ public final class EditorPolicy {
     private EditorPolicy() {}
     /** 文本框都走引擎，只有密码框不走。`TYPE_TEXT_FLAG_NO_SUGGESTIONS` 只是「别给输入建议」，不是「不能组字」：Chrome 的地址栏（同时是搜索框）就带着它，排除它会让那里只能打英文字母、切不到中文和日语。 */
     public static boolean useEngine(int type) {
+        // 自定义聊天控件（例如直播间弹幕）常用 TYPE_NULL，但仍提供可组字的 InputConnection；把它当作非文本框会让九键和 26 键都落入「直接输入」而无法输入中文。
+        if (type == 0) return true;
         if ((type & InputType.TYPE_MASK_CLASS) != InputType.TYPE_CLASS_TEXT) return false;
         int variation = type & InputType.TYPE_MASK_VARIATION;
         return variation != InputType.TYPE_TEXT_VARIATION_PASSWORD

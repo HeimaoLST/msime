@@ -118,6 +118,7 @@ class CCompositionProcessorEngine
 
     // Punctuation
     BOOL IsPunctuation(WCHAR wch);
+    // 按当前的引号与方头括号样式出字（Global::CornerQuotes、Global::HollowBrackets）。
     const WCHAR *GetPunctuation(WCHAR wch);
     // Smart punctuation (rime digit_separators-style): after ASCII letters/digits,
     // keep ',' '.' ':' as ASCII instead of mapping to Chinese punctuation.
@@ -196,6 +197,8 @@ class CCompositionProcessorEngine
     void SetupLanguageBar(_In_ ITfThreadMgr *pThreadMgr, TfClientId tfClientId, BOOL isSecureMode);
     void SetKeystrokeTable(_Inout_ CMetasequoiaImeArray<_KEYSTROKE> *pKeystroke);
     void SetupPunctuationPair();
+    // 标点表查到的字（含交替与嵌套），还没按引号与方头括号样式换字；GetPunctuation 在它之上换字。
+    const WCHAR *_GetContractPunctuation(WCHAR wch);
     void CreateLanguageBarButton(DWORD dwEnable, GUID guidLangBar, _In_z_ LPCWSTR pwszDescriptionValue,
                                  _In_z_ LPCWSTR pwszTooltipValue, DWORD dwOnIconIndex, DWORD dwOffIconIndex,
                                  _Outptr_result_maybenull_ CLangBarItemButton **ppLangBarItemButton, BOOL isSecureMode);

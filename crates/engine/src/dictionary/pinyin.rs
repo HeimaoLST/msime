@@ -8,7 +8,9 @@ use rusqlite::{params_from_iter, Connection, OpenFlags, Row};
 
 use super::{column_i64, column_text, sql_limit, DictRow};
 use crate::error::{EngineError, Result};
-use crate::format::{build_table_name, quanpin_table, SHIPPED_INITIALS};
+use crate::format::{
+    build_table_name, quanpin_table, MAXIMUM_NUMBERED_SYLLABLES, SHIPPED_INITIALS,
+};
 use crate::pinyin::jianpin::{
     build_key_like_pattern, build_mixed_jianpin_scan_limit, can_match_exact_key, is_pure_jianpin,
     key_prefix_upper_bound, matches_mixed_segments, needs_mixed_jianpin_query, QuerySource,
@@ -150,7 +152,7 @@ impl PinyinDatabase {
         self.rows(&sql, [prefix, upper_bound.as_str()], query_capacity(limit))
     }
 
-    /// Whole-syllable continuations of complete `segments` over 1..=`extra_syllables` more syllables, deduplicated by value, weight-sorted, at most `limit` (QQ:1305-1343).
+    /// 完整音节续接（QQ:1305-1343）：按追加音节数查编号表，溢出桶只查一次；按词值去重、权重排序，最多返回 `limit` 行。
     pub fn query_longer_phrases(
         &self,
         segments: &[String],
@@ -165,12 +167,15 @@ impl PinyinDatabase {
         {
             return Vec::new();
         }
+        // 超过编号上限都落到同一个溢出桶，循环和容量预算只计不同表。
+        let pages =
+            extra_syllables.min(MAXIMUM_NUMBERED_SYLLABLES.saturating_sub(segments.len()) + 1);
         // Keys separate syllables with `'`, so the trailing `'` admits only whole-syllable continuations: ping'guo' reaches ping'guo'ji and nothing spelled differently.
         let prefix = longer_phrase_prefix(segments);
         let upper_bound = key_prefix_upper_bound(&prefix);
         let initial = segments[0].as_bytes()[0];
         let mut rows = Vec::new();
-        for extra in 1..=extra_syllables {
+        for extra in 1..=pages {
             let Some(table) = quanpin_table(segments.len() + extra, initial) else {
                 continue;
             };
@@ -186,7 +191,7 @@ impl PinyinDatabase {
                     continue;
                 }
                 // 短页只按实际行数预留，满页才按剩余页的上限一次性预留。
-                let remaining_pages = extra_syllables - extra + 1;
+                let remaining_pages = pages - extra + 1;
                 let planned = if page.len() == limit {
                     remaining_pages.saturating_mul(limit)
                 } else {
@@ -1654,3 +1659,7 @@ mod jianpin_inline_page_tests;
 #[cfg(test)]
 #[path = "pinyin/mixed_jianpin_filter_tests.rs"]
 mod mixed_jianpin_filter_tests;
+
+#[cfg(test)]
+#[path = "pinyin/longer_overflow_page_tests.rs"]
+mod longer_overflow_page_tests;

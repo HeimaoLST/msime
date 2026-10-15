@@ -1,25 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback } from "react";
+import { useTimedValue } from "./use-timed-value";
 
-/** A transient UI flag whose deadline restarts whenever it is shown again. */
+/** 每次展示都会重新计时的临时 UI 标记。 */
 export function useTemporaryFlag(durationMs: number) {
-  const [active, setActive] = useState(false);
-  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const mounted = useRef(false);
-
-  const show = useCallback(() => {
-    if (!mounted.current) return;
-    clearTimeout(timer.current);
-    setActive(true);
-    timer.current = setTimeout(() => setActive(false), durationMs);
-  }, [durationMs]);
-
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-      clearTimeout(timer.current);
-    };
-  }, []);
+  const [active, update] = useTimedValue(false);
+  const show = useCallback(() => update(true, durationMs), [durationMs, update]);
 
   return [active, show] as const;
 }

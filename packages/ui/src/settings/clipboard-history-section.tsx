@@ -17,6 +17,7 @@ import { cloudClipboardE2e } from "../keyboard/cloud-response";
 import { ActionButton } from "./action-button";
 import { SwitchRow } from "./switch-row";
 import { useAsyncGeneration } from "./use-async-generation";
+import { formatDateTime } from "../core/format-date";
 
 export type ClipboardHistoryEntry = { text: string; timestampMs: number; pinned: boolean };
 
@@ -296,7 +297,7 @@ export function ClipboardHistorySection({
                     <small>
                       {entry.pinned ? "已固定 · " : ""}
                       {entry.timestampMs > 1_000_000_000_000
-                        ? new Date(entry.timestampMs).toLocaleString()
+                        ? formatDateTime(entry.timestampMs)
                         : "旧记录"}
                     </small>
                   </span>

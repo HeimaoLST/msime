@@ -66,7 +66,7 @@ fn add_variant(
     });
 }
 
-/// ST:56-99. The edits are made on the syllable as written while variants and the typed syllable are compared in their normalised spelling, so no variant is the typed syllable under its other spelling.
+/// ST:56-99：按原始拼写编辑，以规范拼写比较变体与输入，排除只是别名不同的同一音节。
 fn compute_typos(syllable: &str) -> Vec<SyllableTypo> {
     let typed = normalized_syllable(syllable);
     if typed.len() < 2 {
@@ -86,16 +86,19 @@ fn compute_typos(syllable: &str) -> Vec<SyllableTypo> {
         + letters.len()
         + letters.len().saturating_add(1).saturating_mul(26);
     let mut variants = Vec::with_capacity(capacity);
+    // 所有编辑从原字节恢复；多出的一个字节容纳插入，循环中不重新申请存储。
+    let mut edited = Vec::with_capacity(letters.len() + 1);
     for i in 0..letters.len() - 1 {
         if letters[i] == letters[i + 1] {
             continue;
         }
-        let mut swapped = letters.to_vec();
-        swapped.swap(i, i + 1);
+        edited.clear();
+        edited.extend_from_slice(letters);
+        edited.swap(i, i + 1);
         add_variant(
             &mut variants,
             &typed,
-            &swapped,
+            &edited,
             SyllableTypoKind::Transposition,
         );
     }
@@ -104,34 +107,32 @@ fn compute_typos(syllable: &str) -> Vec<SyllableTypo> {
             if key == letters[i] || !keys_adjacent(key, letters[i]) {
                 continue;
             }
-            let mut substituted = letters.to_vec();
-            substituted[i] = key;
-            add_variant(
-                &mut variants,
-                &typed,
-                &substituted,
-                SyllableTypoKind::Neighbor,
-            );
+            edited.clear();
+            edited.extend_from_slice(letters);
+            edited[i] = key;
+            add_variant(&mut variants, &typed, &edited, SyllableTypoKind::Neighbor);
         }
     }
     for i in 0..letters.len() {
-        let mut shortened = letters.to_vec();
-        shortened.remove(i);
+        edited.clear();
+        edited.extend_from_slice(letters);
+        edited.remove(i);
         add_variant(
             &mut variants,
             &typed,
-            &shortened,
+            &edited,
             SyllableTypoKind::MissingOrExtra,
         );
     }
     for i in 0..=letters.len() {
         for key in b'a'..=b'z' {
-            let mut lengthened = letters.to_vec();
-            lengthened.insert(i, key);
+            edited.clear();
+            edited.extend_from_slice(letters);
+            edited.insert(i, key);
             add_variant(
                 &mut variants,
                 &typed,
-                &lengthened,
+                &edited,
                 SyllableTypoKind::MissingOrExtra,
             );
         }
@@ -322,3 +323,7 @@ mod tests {
         assert!((discounted(20.0, 1000) - 8.0).abs() < 1e-12);
     }
 }
+
+#[cfg(test)]
+#[path = "typos/edit_buffer_tests.rs"]
+mod edit_buffer_tests;

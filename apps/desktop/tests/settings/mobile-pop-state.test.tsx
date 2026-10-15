@@ -43,3 +43,72 @@ test("does not listen on desktop and removes the listener on unmount", () => {
   window.dispatchEvent(new PopStateEvent("popstate"));
   expect(onPopState).not.toHaveBeenCalled();
 });
+
+test("settings navigation reuses the shared mobile popstate lifecycle", () => {
+  const source = Object.values(
+    import.meta.glob<string>("../../../../packages/ui/src/settings/use-settings-navigation.ts", {
+      eager: true,
+      query: "?raw",
+      import: "default",
+    }),
+  )[0];
+
+  expect(source).toContain('from "./use-mobile-pop-state"');
+  expect(source).toContain("useMobilePopState");
+  expect(source).not.toContain('window.addEventListener("popstate"');
+});
+
+test("移动端返回 Hook 复用公共窗口事件订阅", () => {
+  const source = Object.values(
+    import.meta.glob<string>("../../../../packages/ui/src/settings/use-mobile-pop-state.ts", {
+      eager: true,
+      query: "?raw",
+      import: "default",
+    }),
+  )[0];
+
+  expect(source).toContain("subscribeToWindowEvent");
+  expect(source).not.toContain('window.addEventListener("popstate"');
+});
+
+test("onboarding reuses the shared mobile popstate lifecycle", () => {
+  const source = Object.values(
+    import.meta.glob<string>("../../../../packages/ui/src/account/onboarding-page.tsx", {
+      eager: true,
+      query: "?raw",
+      import: "default",
+    }),
+  )[0];
+
+  expect(source).toContain('from "../settings/use-mobile-pop-state"');
+  expect(source).toContain("useMobilePopState");
+  expect(source).not.toContain('window.addEventListener("popstate"');
+  expect(source).toContain('subscribeToWindowEvent("popstate"');
+});
+
+test("设置外壳始终复用公共返回监听，与宿主能力发现时机无关", () => {
+  const source = Object.values(
+    import.meta.glob<string>("../../src/main.tsx", {
+      eager: true,
+      query: "?raw",
+      import: "default",
+    }),
+  )[0];
+
+  expect(source).toContain("useMobilePopState(true,");
+  expect(source).not.toContain('window.addEventListener("popstate"');
+});
+
+test("桌面宿主自定义窗口事件复用公共订阅生命周期", () => {
+  const source = Object.values(
+    import.meta.glob<string>("../../src/main.tsx", {
+      eager: true,
+      query: "?raw",
+      import: "default",
+    }),
+  )[0];
+
+  expect(source).toContain("subscribeToWindowEvent");
+  expect(source).not.toContain('window.addEventListener("msime-mobile-panel"');
+  expect(source).not.toContain('window.addEventListener("msime-settings-page"');
+});

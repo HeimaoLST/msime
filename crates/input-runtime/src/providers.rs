@@ -162,14 +162,26 @@ fn exchange_panel_request(
     read_bounded_line(stream, deadline, response_limit, true)
 }
 
-// Retain incomplete UTF-8/JSON lines across polling timeouts. Bound the
-// buffer while reading, rather than after read_line has allocated the payload.
+// 跨轮询保留未完成的 UTF-8/JSON 行，读取时限制缓冲，避免先分配完整响应再检查。
 #[cfg(unix)]
 fn read_voice_provider_line(
     stream: &mut UnixStream,
     pending: &mut Vec<u8>,
     deadline: std::time::Instant,
+    cancelled: Option<&mut VoiceCancellation<'_>>,
+) -> Option<String> {
+    read_voice_provider_line_with(pending, deadline, cancelled, |timeout, chunk| {
+        stream.set_read_timeout(Some(timeout)).ok()?;
+        Some(stream.read(chunk))
+    })
+}
+
+#[cfg(unix)]
+fn read_voice_provider_line_with(
+    pending: &mut Vec<u8>,
+    deadline: std::time::Instant,
     mut cancelled: Option<&mut VoiceCancellation<'_>>,
+    mut read: impl FnMut(std::time::Duration, &mut [u8]) -> Option<std::io::Result<usize>>,
 ) -> Option<String> {
     loop {
         if cancelled.as_mut().is_some_and(|value| value.is_cancelled()) {
@@ -188,22 +200,28 @@ fn read_voice_provider_line(
         if pending.len() >= 16_384 {
             return None;
         }
-        stream
-            .set_read_timeout(Some(remaining.min(std::time::Duration::from_millis(100))))
-            .ok()?;
         let mut chunk = [0_u8; 1024];
-        match stream.read(&mut chunk) {
+        match read(
+            remaining.min(std::time::Duration::from_millis(100)),
+            &mut chunk,
+        )? {
             Ok(0) => return None,
             Ok(count) => pending.extend_from_slice(&chunk[..count]),
             Err(error)
                 if matches!(
                     error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
                 ) => {}
             Err(_) => return None,
         }
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "provider_voice_line_tests.rs"]
+mod voice_line_tests;
 
 #[cfg(unix)]
 enum VoiceCancellation<'a> {

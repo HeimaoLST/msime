@@ -1,4 +1,5 @@
 #include "keyboard.h"
+#include "../../../platforms/macos/src/core/ScreenKeyboardWindowAppearance.h"
 
 @interface MSIMEDetachedWindowContent : NSObject
 @property(strong) NSWindow *window;
@@ -91,4 +92,15 @@ extern "C" bool msime_macos_activate_panel_target(int pid, double launched) {
         }
         return [target activateWithOptions:0];
     }
+}
+
+extern "C" bool msime_macos_prepare_keyboard_window(uintptr_t address) {
+    if (!NSThread.isMainThread) return false;
+    for (NSWindow *window in NSApp.windows) {
+        // 只接受当前应用的活窗口，不解引用调用者传入的地址。
+        if ((uintptr_t)(__bridge void *)window != address || !window.contentView) continue;
+        MSIMEConfigureScreenKeyboardWindow(window);
+        return true;
+    }
+    return false;
 }

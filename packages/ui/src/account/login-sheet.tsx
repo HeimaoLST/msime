@@ -28,25 +28,41 @@ export function BottomSheet({
   children: ReactNode;
 }) {
   const dialog = useRef<HTMLDivElement>(null);
+  const focusedControl = useRef<HTMLElement | null>(null);
   const titleId = useId();
   const subtitleId = useId();
 
   useLayoutEffect(() => {
     const active = document.activeElement;
     const opener = active instanceof HTMLElement ? active : null;
-    // 标了 `data-sheet-autofocus` 的输入框优先获得焦点；否则由第一个可用按钮获得。
+    // 标记的输入框优先获得焦点，其次是可用按钮；全部禁用时由容器接住键盘导航。
     const target =
       dialog.current?.querySelector<HTMLElement>("[data-sheet-autofocus]:not(:disabled)") ??
       dialog.current?.querySelector<HTMLElement>("button:not(:disabled)");
-    target?.focus();
+    (target ?? dialog.current)?.focus();
     return () => {
       if (
         opener?.isConnected &&
-        (!document.activeElement || document.activeElement === document.body)
+        (!document.activeElement ||
+          document.activeElement === document.body ||
+          dialog.current?.contains(document.activeElement))
       )
         opener.focus();
     };
   }, []);
+
+  useLayoutEffect(() => {
+    const panel = dialog.current;
+    const previous = focusedControl.current;
+    // 浏览器禁用或移除当前控件时可能把焦点交给 body，先由面板接住下一次 Tab。
+    if (
+      panel &&
+      previous &&
+      panel.ownerDocument.activeElement === panel.ownerDocument.body &&
+      (!previous.isConnected || previous.matches(":disabled"))
+    )
+      panel.focus();
+  });
 
   const close = () => {
     if (!closeDisabled) onClose();
@@ -62,10 +78,46 @@ export function BottomSheet({
         aria-labelledby={titleId}
         aria-describedby={subtitle ? subtitleId : undefined}
         className={account.sheet}
+        tabIndex={-1}
+        onFocusCapture={(event) => {
+          focusedControl.current = event.target;
+        }}
+        onBlurCapture={(event) => {
+          if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget))
+            focusedControl.current = null;
+        }}
         onKeyDown={(event) => {
-          if (event.key !== "Escape") return;
-          event.stopPropagation();
-          close();
+          if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+          if (event.key === "Escape") {
+            event.stopPropagation();
+            close();
+            return;
+          }
+          if (event.key !== "Tab") return;
+          // 表单内容和禁用状态会变化，按当前可参与 Tab 导航的控件循环焦点。
+          const focusable = Array.from(
+            event.currentTarget.querySelectorAll<HTMLElement>(
+              'a[href], button, input:not([type="hidden"]), select, textarea, [tabindex]',
+            ),
+          ).filter(
+            (element) =>
+              element.tabIndex >= 0 &&
+              !element.matches(":disabled") &&
+              !element.closest("[hidden], [inert]"),
+          );
+          const first = focusable[0];
+          const last = focusable.at(-1);
+          const active = event.currentTarget.ownerDocument.activeElement;
+          if (!first || !last) {
+            event.preventDefault();
+            event.currentTarget.focus();
+          } else if (event.shiftKey && (active === first || active === event.currentTarget)) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && (active === last || active === event.currentTarget)) {
+            event.preventDefault();
+            first.focus();
+          }
         }}
       >
         <span className={account.sheetGrabber} aria-hidden="true" />

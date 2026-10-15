@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { subscribeMediaQuery } from "../core/media-query";
 import type { SurfaceTheme, ThemeMode } from "../index";
 
 export function useCandidatePreviewTheme(
@@ -12,8 +13,7 @@ export function useCandidatePreviewTheme(
     const media = window.matchMedia("(prefers-color-scheme: light)");
     const update = () => setSystemLight(media.matches);
     update();
-    media.addEventListener("change", update);
-    return () => media.removeEventListener("change", update);
+    return subscribeMediaQuery(media, update);
   }, [mode, surface]);
   if (surface !== "follow") return surface;
   return mode === "system" ? (systemLight ? "light" : "dark") : mode;

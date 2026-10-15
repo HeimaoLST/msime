@@ -22,6 +22,25 @@ function query(matches: boolean) {
     },
   };
 }
+
+function legacyQuery(matches: boolean) {
+  const listeners = new Set<() => void>();
+  const addListener = vi.fn((fn: () => void) => listeners.add(fn));
+  const removeListener = vi.fn((fn: () => void) => listeners.delete(fn));
+  const value = {
+    matches,
+    addListener,
+    removeListener,
+  };
+  return {
+    media: value as unknown as MediaQueryList,
+    listeners,
+    change(next: boolean) {
+      value.matches = next;
+      for (const fn of Array.from(listeners)) fn();
+    },
+  };
+}
 test("nested conditions preserve source order, share listeners and clean up only owned fonts", () => {
   const outside = {} as FontFace,
     first = {} as FontFace,
@@ -68,4 +87,23 @@ test("registration failures roll back fonts and listeners", () => {
   ).toThrow("font installation failed");
   expect([...fonts]).toEqual([outside]);
   expect(media.listeners.size).toBe(0);
+});
+
+test("legacy media query listeners refresh fonts and clean up", () => {
+  const outside = {} as FontFace,
+    conditional = {} as FontFace;
+  const fonts = new Set([outside]);
+  vi.stubGlobal("document", { fonts });
+  const media = legacyQuery(false);
+  const remove = installConditionalFonts([{ face: conditional, media: [media.media] }]);
+
+  expect(media.media.addListener).toHaveBeenCalledTimes(1);
+  expect([...fonts]).toEqual([outside]);
+  media.change(true);
+  expect([...fonts]).toEqual([outside, conditional]);
+  remove();
+  expect(media.media.removeListener).toHaveBeenCalledTimes(1);
+  media.change(false);
+  media.change(true);
+  expect([...fonts]).toEqual([outside]);
 });

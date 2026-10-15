@@ -684,6 +684,14 @@ bool IsManualPinyinSeparatorInComposition(WCHAR wch, BOOL fComposing, CANDIDATE_
 
 const WCHAR *CCompositionProcessorEngine::GetPunctuation(WCHAR wch)
 {
+    // 所有调用点（空闲标点、候选带标点、英文模式、智能标点重复）都经过这里，所以样式只在这一处换字。
+    return Global::StyledPunctuation(_GetContractPunctuation(wch),
+                                     Global::CornerQuotes.load(std::memory_order_relaxed),
+                                     Global::HollowBrackets.load(std::memory_order_relaxed));
+}
+
+const WCHAR *CCompositionProcessorEngine::_GetContractPunctuation(WCHAR wch)
+{
     for (int i = 0; i < ARRAYSIZE(Global::PunctuationTable); i++)
     {
         if (Global::PunctuationTable[i]._Code == wch)

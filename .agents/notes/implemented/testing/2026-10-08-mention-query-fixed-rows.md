@@ -21,3 +21,7 @@ Status: implemented
 ## Consequences
 
 每次 `@` 查询不再为 exact/prefix 行或已有地点名称创建临时堆容器；结果内容、顺序和 18 行上限保持不变。
+
+## Related output decision
+
+[@ 查询与地点补全直接投影固定匹配行](2026-10-15-mention-match-output-buffer.md)接替后续的堆上输出合并；本篇的 exact/prefix 收集、排序和去重约束继续保留。

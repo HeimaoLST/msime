@@ -188,6 +188,9 @@ struct MetasequoiaInputSnapshot: Equatable, Sendable {
   /// The Engine's ASCII spelling and the caret inside it, as a byte offset. The caret leaves the end only when the user moves it (dragging the space bar while composing), which is the Windows host's ← / → editing of the input string.
   let editingText: String
   let caretPosition: Int
+  /// View 的 `punctuation_marks`：中文标点下 `'` 出「」、`"` 出『』（直角引号），`[` `]` 出〖〗（空心括号）。host-api 已按繁体输出开关解析好 `corner_when_traditional`，键盘画键面和补全成对标点时读它，不自己解析偏好。
+  let cornerQuotes: Bool
+  let hollowBrackets: Bool
 
   var isInLocalMode: Bool { !localMode.isEmpty && localMode != "none" }
 
@@ -205,7 +208,8 @@ struct MetasequoiaInputSnapshot: Equatable, Sendable {
        candidatePageCount: Int = 0, answeredByPinyinFallback: Bool = false,
        diagnosticText: String? = nil, localMode: String = "none",
        nineKeySpellings: [String] = [], nineKeyReading: String = "", nineKeySingleCharacter: Bool = false,
-       nineKeyStrokes: String = "", editingText: String = "", caretPosition: Int = 0) {
+       nineKeyStrokes: String = "", editingText: String = "", caretPosition: Int = 0,
+       cornerQuotes: Bool = false, hollowBrackets: Bool = false) {
     self.isHandled = isHandled
     self.commitText = commitText
     self.preedit = preedit
@@ -227,6 +231,8 @@ struct MetasequoiaInputSnapshot: Equatable, Sendable {
     self.nineKeyStrokes = nineKeyStrokes
     self.editingText = editingText
     self.caretPosition = caretPosition
+    self.cornerQuotes = cornerQuotes
+    self.hollowBrackets = hollowBrackets
   }
 }
 
@@ -385,6 +391,8 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     "single_character_only",
     // 标点页的「中英文之间加空格」：会话在上屏时读最新请求的偏好，交给活着的会话后下一次上屏就生效。
     "chinese_english_spacing",
+    // 标点页的引号样式、方头括号样式：会话空闲时重建 Engine 换字，View 的 `punctuation_marks` 随之更新键面。
+    "quote_style", "bracket_style",
     // Whole objects: the app merges single fields into them, and the document's copy is the one it wrote.
     "quanpin", "mixed_input", "quanpin_helpcode", "shuangpin_helpcode", "local_modes",
     // 整句联想 on the 输入 page: the session attaches or drops the keyboard sentence model once idle, so turning 增强 off stops it in the keyboard that is already open.
@@ -1521,6 +1529,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     let pageCount = try strictInt(view["page_count"], fallback: 0, range: 0...Int.max)
     let editingText = view["editing_text"] as? String ?? ""
     let caretPosition = try strictInt(view["caret_position"], fallback: 0, range: 0...editingText.utf8.count)
+    let marks = view["punctuation_marks"] as? [String: Any] ?? [:]
     return MetasequoiaInputSnapshot(isHandled: try strictBool(value["handled"], fallback: false),
       commitText: value["commit"] as? String, preedit: view["preedit"] as? String ?? "",
       reading: view["reading"] as? String ?? "",
@@ -1540,7 +1549,9 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
       nineKeySingleCharacter: try strictBool(view["nine_key_single_character"], fallback: false),
       nineKeyStrokes: view["nine_key_strokes"] as? String ?? "",
       editingText: editingText,
-      caretPosition: caretPosition)
+      caretPosition: caretPosition,
+      cornerQuotes: marks["quotes"] as? String == "corner",
+      hollowBrackets: marks["brackets"] as? String == "hollow")
   }
 
   private static func strictInt(_ value: Any?, fallback: Int, range: ClosedRange<Int>) throws -> Int {

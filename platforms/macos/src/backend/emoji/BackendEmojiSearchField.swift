@@ -12,7 +12,7 @@ struct MacEmojiSearchPresentation {
     case "home": placeholder = "Search emoji, kaomoji, and symbols"
     case "", "recent": placeholder = "Search emojis"
     case "kaomoji": placeholder = "Search kaomoji"
-    case "symbols": placeholder = "Search symbols"
+    case "symbols": placeholder = "搜索符号、名称或分类"
     case "clipboard": placeholder = "搜索剪贴板"
     default: placeholder = "Search"
     }

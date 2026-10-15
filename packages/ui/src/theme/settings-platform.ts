@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { subscribeMediaQuery } from "../core/media-query";
 import { settingsPlatformOf, type SettingsPlatform } from "./platform-tokens";
 
 // The stylesheet's phone breakpoint (`--breakpoint-phone`): an iOS host wider than this is an iPad.
@@ -7,12 +8,7 @@ const wideViewport = "(min-width: 601px)";
 function subscribeWide(onChange: () => void): () => void {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") return () => {};
   const media = window.matchMedia(wideViewport);
-  if (typeof media.addEventListener === "function") {
-    media.addEventListener("change", onChange);
-    return () => media.removeEventListener("change", onChange);
-  }
-  media.addListener(onChange);
-  return () => media.removeListener(onChange);
+  return subscribeMediaQuery(media, onChange);
 }
 
 function wideSnapshot(): boolean {

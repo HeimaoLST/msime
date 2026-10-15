@@ -20,6 +20,11 @@ using Texts = std::vector<std::string>;
 
 int main() {
   try {
+    for (unsigned source : {6u, 7u, 13u, 14u})
+      REQUIRE(source_gets_no_translation(source));
+    for (unsigned source : {0u, 1u, 2u, 12u})
+      REQUIRE(!source_gets_no_translation(source));
+
     // The whole point of the rule: a candidate the packaged dictionary already
     // answered is not sent to a provider. The worker appends provider answers
     // to the same list, so asking again both spends a request and can leave one

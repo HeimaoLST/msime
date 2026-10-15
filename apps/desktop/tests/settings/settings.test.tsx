@@ -1197,11 +1197,12 @@ test("traditional Chinese output toggle persists", async () => {
   await settingsReady();
   fireEvent.click(screen.getByRole("button", { name: "输入" }));
   selectSettingsTab("输出");
-  const toggle = (await screen.findByRole("switch", {
-    name: "繁体输出",
+  const traditional = (await screen.findByRole("radio", {
+    name: "繁体",
   })) as HTMLInputElement;
-  expect(toggle.checked).toBe(false);
-  fireEvent.click(toggle);
+  expect(traditional.checked).toBe(false);
+  expect((screen.getByRole("radio", { name: "简体" }) as HTMLInputElement).checked).toBe(true);
+  fireEvent.click(traditional);
   saveSettingsNow();
   await screen.findByText("已保存");
   expect(client.save).toHaveBeenCalledWith(7, {
@@ -6735,7 +6736,7 @@ const referenceSections: {
       "翻页方式",
       "默认中英文",
       "中英文状态",
-      "繁体输出",
+      "中文输出",
       "中英文之间加空格",
       "云候选",
       "中英混输",
@@ -7389,7 +7390,7 @@ test.each(optionHosts)(
       "以词定字",
       "翻页方式",
       "云候选",
-      "繁体输出",
+      "中文输出",
       "中英文之间加空格",
       "拼音方案调频",
     ];
@@ -7605,10 +7606,17 @@ test("the expand candidates switch is macOS only, starts off and saves expand_ca
   const toggle = screen.getByLabelText("展开候选") as HTMLInputElement;
   // 默认关闭，缺字段也按关显示。
   expect(toggle.checked).toBe(false);
+  expect(screen.queryByLabelText("显示展开键")).toBeNull();
   fireEvent.click(toggle);
+  const expandButton = screen.getByLabelText("显示展开键") as HTMLInputElement;
+  expect(expandButton.checked).toBe(true);
+  fireEvent.click(expandButton);
   saveSettingsNow();
   await screen.findByText("已保存");
-  expect(save).toHaveBeenLastCalledWith(7, expect.objectContaining({ expand_candidates: true }));
+  expect(save).toHaveBeenLastCalledWith(
+    7,
+    expect.objectContaining({ expand_candidates: true, show_candidate_expand_button: false }),
+  );
 });
 
 test("中英混输 sits on the input page's 候选与联想 group, not on 标点与翻译", async () => {

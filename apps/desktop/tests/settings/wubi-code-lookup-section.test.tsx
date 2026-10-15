@@ -2,6 +2,7 @@
 import { testHost } from "../support/host";
 import { settingsFormReady } from "../support/settings-form";
 import { afterEach, expect, test, vi } from "vitest";
+import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import {
   SettingsPage,
@@ -30,6 +31,84 @@ function rows() {
     .getAllByRole("row")
     .map((row) => row.textContent);
 }
+
+function deferredLookup() {
+  let resolve!: (value: WubiCodeLookup) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<WubiCodeLookup>((accept, fail) => {
+    resolve = accept;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+test.each(["成功", "失败"])("更换查码宿主后忽略旧请求的%s并允许立即查询", async (outcome) => {
+  const old = deferredLookup();
+  const oldLookup = vi.fn().mockReturnValue(old.promise);
+  const current = deferredLookup();
+  const currentLookup = vi.fn().mockReturnValue(current.promise);
+  const view = render(<WubiCodeLookupSection lookup={oldLookup} />);
+  fireEvent.change(screen.getByLabelText("要查五笔编码的文字"), { target: { value: "你好" } });
+  const button = screen.getByRole<HTMLButtonElement>("button", { name: "查码" });
+  fireEvent.click(button);
+  expect(button.disabled).toBe(true);
+
+  view.rerender(<WubiCodeLookupSection lookup={currentLookup} />);
+  expect(button.disabled).toBe(false);
+  fireEvent.click(button);
+  expect(currentLookup).toHaveBeenCalledWith("你好");
+  await act(async () => {
+    if (outcome === "成功") old.resolve(answer);
+    else old.reject(new Error("synthetic stale failure"));
+  });
+  expect(button.disabled).toBe(true);
+  expect(screen.queryByRole("table", { name: "五笔编码" })).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
+
+  await act(async () => current.resolve(answer));
+  expect(rows()[1]).toContain("你好");
+  expect(button.disabled).toBe(false);
+});
+
+test("StrictMode 下同一轮重复点击只发起一次查码，完成后可再次查询", async () => {
+  const request = deferredLookup();
+  const lookup = vi.fn().mockReturnValueOnce(request.promise).mockResolvedValue(answer);
+  render(
+    <StrictMode>
+      <WubiCodeLookupSection lookup={lookup} />
+    </StrictMode>,
+  );
+  fireEvent.change(screen.getByLabelText("要查五笔编码的文字"), { target: { value: "你好" } });
+  const button = screen.getByRole<HTMLButtonElement>("button", { name: "查码" });
+  await act(async () => {
+    fireEvent.click(button);
+    fireEvent.click(button);
+  });
+  expect(lookup).toHaveBeenCalledTimes(1);
+  await act(async () => request.resolve(answer));
+  expect(button.disabled).toBe(false);
+  fireEvent.click(button);
+  await act(async () => {});
+  expect(lookup).toHaveBeenCalledTimes(2);
+});
+
+test("编辑文字后旧查码失败不会解除新请求的忙碌状态或显示错误", async () => {
+  const old = deferredLookup();
+  const current = deferredLookup();
+  const lookup = vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
+  render(<WubiCodeLookupSection lookup={lookup} />);
+  const input = screen.getByLabelText("要查五笔编码的文字");
+  const button = screen.getByRole<HTMLButtonElement>("button", { name: "查码" });
+  fireEvent.change(input, { target: { value: "你好" } });
+  fireEvent.click(button);
+  fireEvent.change(input, { target: { value: "世" } });
+  fireEvent.click(button);
+  await act(async () => old.reject(new Error("synthetic stale failure")));
+  expect(button.disabled).toBe(true);
+  expect(screen.queryByRole("alert")).toBeNull();
+  await act(async () => current.resolve({ ...answer, phrase: null }));
+  expect(button.disabled).toBe(false);
+});
 
 test("查码 lists the whole word first, then every character with both profiles", async () => {
   const lookup = vi.fn().mockResolvedValue(answer);
@@ -182,4 +261,24 @@ test("the input page leaves 五笔查码 out without Wubi or without a host look
   await openInputPage({ scheme: "wubi" }, dictionary());
   expect(screen.getByRole("switch", { name: "五笔拼音混输" })).toBeTruthy();
   expect(screen.queryByRole("region", { name: "五笔查码" })).toBeNull();
+});
+
+test("输入页修改其他五笔设置不作废当前宿主的查码请求，调用保留客户端接收者", async () => {
+  const request = deferredLookup();
+  const client = dictionary(function (this: DictionaryClient) {
+    expect(this).toBe(client);
+    return request.promise;
+  });
+  await openInputPage({ scheme: "wubi" }, client);
+  const group = screen.getByRole("region", { name: "五笔查码" });
+  fireEvent.change(within(group).getByLabelText("要查五笔编码的文字"), {
+    target: { value: "你好" },
+  });
+  const button = within(group).getByRole<HTMLButtonElement>("button", { name: "查码" });
+  fireEvent.click(button);
+  fireEvent.click(screen.getByRole("switch", { name: "五笔拼音混输" }));
+  expect(button.disabled).toBe(true);
+  await act(async () => request.resolve(answer));
+  expect(within(group).getByRole("table", { name: "五笔编码" })).toBeTruthy();
+  expect(button.disabled).toBe(false);
 });

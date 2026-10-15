@@ -41,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut dump: Option<PathBuf> = None;
     let mut grid: Option<KeyGrid> = None;
     let mut segmentation_filter: Option<KeyGrid> = None;
+    let mut keyboard_neural = false;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut index = 0;
@@ -60,6 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--update-baseline" => update = true,
             "--dump" => dump = Some(PathBuf::from(take(&mut index)?)),
             "--grid" => grid = Some(grid_keys::parse_grid(&take(&mut index)?)?),
+            "--keyboard-neural" => keyboard_neural = true,
             // `--grid nine` 的旧写法，verify-local.sh 和笔记里都用过。
             "--nine-key" => grid = Some(KeyGrid::NineKey),
             // 只留全拼切成音节只有一种切法的用例，与九键双拼量的是同一批。
@@ -102,7 +104,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("{} cases from {} set(s)", cases.len(), sets.len());
 
     let state = tempfile::tempdir()?;
-    let report = run(&resources, state.path(), &cases, dump.as_deref(), grid)?;
+    let report = run(
+        &resources,
+        state.path(),
+        &cases,
+        dump.as_deref(),
+        grid,
+        keyboard_neural,
+    )?;
     let json = render(&report, &cases);
 
     if let Some(path) = &report_path {
@@ -171,6 +180,7 @@ fn run(
     cases: &[Case],
     dump: Option<&Path>,
     grid: Option<KeyGrid>,
+    keyboard_neural: bool,
 ) -> Result<Report, Box<dyn std::error::Error>> {
     // Optional JSONL of the real candidate lists, for offline experiments that must not be able
     // to change what the harness measures.
@@ -215,6 +225,7 @@ fn run(
     options.local_temporary_japanese = false;
     // Measure the shipped path: the host asks for every reading and crops the list itself.
     options.sentence_alternatives = true;
+    options.sentence_association.neural_keyboard = keyboard_neural;
 
     let engine = Session::new(&options)?;
     // page_size is capped at 9 by the runtime, but all_candidates() is not paginated.

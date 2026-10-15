@@ -23,4 +23,4 @@ Shift+大写字母现在可以成为拼音组字的首键，后续英文字符�
 
 ## Verification
 
-`cargo test -p msime-engine shifted_uppercase_starts_pinyin_and_mixes_the_cased_english_word` 覆盖 `Observable` 的首个大写、完整预编辑和英文候选；`cargo test -p msime-engine punctuation_after_` 覆盖不完整大写原文保留与完整拼音选词；`cargo fmt --all` 已运行。
+`cargo test -p msime-engine shifted_uppercase_starts_pinyin_and_mixes_the_cased_english_word` 覆盖 `Observable` 的首个大写、完整预编辑和英文候选；`cargo test -p msime-engine punctuation_after_` 覆盖不完整大写原文保留与完整拼音选词；macOS 原生 `shortcut` 测试经真实 `MSIMEInputController`、`MSIMEClientSession` 和文本客户端路径发送 Shift+`O` + `bservable`，确认组字区保持完整 `Observable` 且回车一次性提交；`cargo fmt --all` 已运行。

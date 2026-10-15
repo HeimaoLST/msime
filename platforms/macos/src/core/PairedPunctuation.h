@@ -8,18 +8,6 @@
 
 namespace msime::mac {
 
-inline std::optional<std::string> paired_closing_for_key(char key, bool fullwidth) {
-  switch (key) {
-    case '"': return std::string("”");
-    case '\'': return std::string("’");
-    case ')': return std::string("）");
-    case ']': return std::string("】");
-    case '}': return fullwidth ? std::string("｝") : std::string("}");
-    case '>': return std::string("〉");
-    default: return std::nullopt;
-  }
-}
-
 // Tracks only closing marks inserted by this host, so a later key can skip
 // one without consuming text that belonged to the document already.
 class PairedPunctuationTracker {
@@ -36,6 +24,10 @@ class PairedPunctuationTracker {
     closings_.push_back(std::move(closing));
   }
 
+  bool matches(std::string_view closing) const {
+    return !closings_.empty() && closings_.back() == closing;
+  }
+
   bool consume(std::string_view closing, std::string_view following,
                bool followingKnown, bool modifiersAllowed = true) {
     if (!modifiersAllowed || closings_.empty() || closings_.back() != closing) return false;
@@ -47,6 +39,23 @@ class PairedPunctuationTracker {
  private:
   std::vector<std::string> closings_;
 };
+
+// 这个键能跨过的后半个。引号和方头括号有两组字（quote_style、bracket_style），样式可能在一对还开着时换掉，所以按 tracker 栈顶挑：栈顶是其中之一就给它，否则给缺省那个。
+inline std::optional<std::string> paired_closing_for_key(char key, bool fullwidth,
+                                                         const PairedPunctuationTracker &tracker) {
+  const auto either = [&tracker](const char *first, const char *second) -> std::string {
+    return tracker.matches(second) ? second : first;
+  };
+  switch (key) {
+    case '"': return either("”", "』");
+    case '\'': return either("’", "」");
+    case ')': return std::string("）");
+    case ']': return either("】", "〗");
+    case '}': return fullwidth ? std::string("｝") : std::string("}");
+    case '>': return std::string("〉");
+    default: return std::nullopt;
+  }
+}
 
 inline bool paired_closing_modifiers_allowed(unsigned long long flags,
                                              unsigned long long control,

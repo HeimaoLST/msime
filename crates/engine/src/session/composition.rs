@@ -638,7 +638,7 @@ impl InputSession {
     }
 
     /// input_session.cpp:775-793.
-    pub(super) fn candidate_annotations(&self) -> Vec<String> {
+    pub(super) fn candidate_annotations(&self, hide_helpcode: bool) -> Vec<String> {
         // Rows the engine generated are not spelled by pinyin, so a helpcode would say nothing about them; a command row shows its command's title instead, and a place offered in `@` mode the division it belongs to. 拆字行注释这个字的读音：用户就是不会读才来查的。
         if self.local_mode.annotates_rows() {
             return self
@@ -681,6 +681,7 @@ impl InputSession {
                 let helpcode = match keymap {
                     Some(keymap)
                         if enabled
+                            && !hide_helpcode
                             && !matches!(
                                 item.source,
                                 CandidateSource::EnglishDictionary | CandidateSource::MixedJapanese
@@ -690,7 +691,7 @@ impl InputSession {
                     }
                     _ => String::new(),
                 };
-                if helpcode.is_empty() {
+                if helpcode.is_empty() || hide_helpcode {
                     item.corrected_from.clone()
                 } else {
                     helpcode

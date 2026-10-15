@@ -344,6 +344,32 @@ fn initial_letter_expands_past_the_cap() {
 }
 
 #[test]
+fn initial_letter_expansion_reuses_warm_candidate_buffer() {
+    let mut sql =
+        String::from("BEGIN;CREATE TABLE tbl_1_s(key TEXT, jp TEXT, value TEXT, weight INTEGER);");
+    for index in 0..30 {
+        sql.push_str(&format!(
+            "INSERT INTO tbl_1_s VALUES('shi', 's', '字{index:02}', {});",
+            1000 - index
+        ));
+    }
+    sql.push_str("COMMIT;");
+    let fixture = Fixture::new(&sql);
+    let mut engine = fixture.engine(ShuangpinProfileKind::Xiaohe);
+    let typed = request("u", false);
+    let mut candidates = engine.query(&typed, None);
+    candidates.reserve(256);
+
+    assert!(engine.expand_initial_candidates(&typed, &mut candidates));
+    assert_eq!(candidates.len(), 30);
+    assert!(
+        candidates.capacity() >= 256,
+        "预留候选容量不应在首字母展开时被丢弃：{}",
+        candidates.capacity()
+    );
+}
+
+#[test]
 fn fuzzy_rows_take_the_typed_keys() {
     let fixture = Fixture::new(
         "BEGIN;CREATE TABLE tbl_1_z(key TEXT, jp TEXT, value TEXT, weight INTEGER);INSERT INTO tbl_1_z VALUES('zi', 'z', '字', 50);INSERT INTO tbl_1_z VALUES('zhi', 'z', '之', 100);COMMIT;",
@@ -445,14 +471,21 @@ fn word_lattice_switch_controls_the_sentence_row() {
     assert!(words(&without).contains(&"你"));
 }
 
-/// test_shuangpin.cpp:144-159: an exact dictionary entry for the whole code keeps row 0; the lattice sentence is inserted after it.
+/// 完整词条保持首位；显示整句备选时，其他词网格读法仍排在它后面。
 #[test]
 fn exact_entry_leads_the_lattice_sentence() {
     let fixture = Fixture::new(
         "BEGIN;CREATE TABLE tbl_4_a(key TEXT, jp TEXT, value TEXT, weight INTEGER);INSERT INTO tbl_4_a VALUES('an''quan''bao''wei', 'aqbw', '安全保卫', 6000);CREATE TABLE tbl_2_a(key TEXT, jp TEXT, value TEXT, weight INTEGER);INSERT INTO tbl_2_a VALUES('an''quan', 'aq', '安全', 9000);CREATE TABLE tbl_2_b(key TEXT, jp TEXT, value TEXT, weight INTEGER);INSERT INTO tbl_2_b VALUES('bao''wei', 'bw', '包围', 9000);COMMIT;",
     );
     let mut engine = fixture.engine(ShuangpinProfileKind::Xiaohe);
-    let candidates = engine.query(&request("anqrbcww", false), None);
+    let mut typed = request("anqrbcww", false);
+    let best_only = engine.query(&typed, None);
+    assert_eq!(words(&best_only).first(), Some(&"安全保卫"));
+    assert!(best_only
+        .iter()
+        .all(|item| item.source != CandidateSource::Generated));
+    typed.sentence_alternatives = true;
+    let candidates = engine.query(&typed, None);
     assert_eq!(
         words(&candidates).first(),
         Some(&"安全保卫"),

@@ -30,6 +30,11 @@ public final class LetterHintTableSmoke {
             check(LetterHintTable.routesThroughEngine(hint) == chinese.containsKey(letter),
                 "Engine route of " + letter);
         }
+        // 直角引号样式下 l 键的 " 提示画『，ASCII 时不变。
+        app.msime.android.ChineseSymbolFaces.Marks corner = app.msime.android.ChineseSymbolFaces.Marks.of("corner", "solid");
+        check("『".equals(LetterHintTable.face("l", true, corner)), "corner face of l");
+        check("\"".equals(LetterHintTable.face("l", false, corner)), "ASCII face of l under corner quotes");
+        check("（".equals(LetterHintTable.face("j", true, corner)), "corner quotes leave ( alone");
         check(LetterHintTable.face("1", true) == null && LetterHintTable.face(null, false) == null,
             "non-letters have no face");
         check(!LetterHintTable.routesThroughEngine(null) && !LetterHintTable.routesThroughEngine("")

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { InputSourceStartupStatus, SettingsClient } from "../index";
 import { inputSourceNeedsAdding } from "./input-source-startup-notice";
 import { useAsyncGeneration } from "./use-async-generation";
+import { subscribeToWindowFocus } from "../core/window-focus";
+import { useInterval } from "../core/use-interval";
 
 /** How often the settings page reads the input source list again while the notice waits for the user to act in System Settings or Finder; a focus change reads it at once. */
 export const INPUT_SOURCE_RECHECK_MS = 3000;
@@ -57,25 +59,21 @@ export function useMacosSettings({ client, macos, setError }: UseMacosSettingsOp
     }
     const refresh = () => void refreshInputSourceStartup();
     refresh();
-    window.addEventListener("focus", refresh);
+    const stopFocus = subscribeToWindowFocus(refresh);
     return () => {
       inputSourceRequest.current++;
-      window.removeEventListener("focus", refresh);
+      stopFocus();
     };
   }, [client, macos, refreshInputSourceStartup]);
 
-  // System Settings may sit beside the window rather than in front of it, so focus alone can miss the moment the source is added; while the notice is waiting on the user, read again on a short interval as well.
+  // 系统设置可能与本窗口并排，添加输入源不一定带来焦点变化；提示等待用户操作时也定期重查。
   const waitingOnUser =
     inputSourceNeedsAdding(inputSourceStartup) ||
     Boolean(inputSourceStartup?.system_bundles?.length);
-  useEffect(() => {
-    if (!waitingOnUser || typeof window === "undefined") return;
-    const timer = window.setInterval(
-      () => void refreshInputSourceStartup(),
-      INPUT_SOURCE_RECHECK_MS,
-    );
-    return () => window.clearInterval(timer);
-  }, [waitingOnUser, refreshInputSourceStartup]);
+  useInterval(
+    () => void refreshInputSourceStartup(),
+    waitingOnUser && typeof window !== "undefined" ? INPUT_SOURCE_RECHECK_MS : null,
+  );
 
   // The input method records missing pairs when it next translates, so read again whenever the
   // window comes back, typically from System Settings after a download.
@@ -97,9 +95,9 @@ export function useMacosSettings({ client, macos, setError }: UseMacosSettingsOp
         });
     };
     refresh();
-    window.addEventListener("focus", refresh);
+    const stopFocus = subscribeToWindowFocus(refresh);
     return () => {
-      window.removeEventListener("focus", refresh);
+      stopFocus();
     };
   }, [client, macos, onDeviceRequest]);
 

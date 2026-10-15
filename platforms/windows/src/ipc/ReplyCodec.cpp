@@ -232,9 +232,16 @@ void apply_local_mode_switches(TsfLocalConfig &config, int scheme, bool expressi
   config.mention_mode = scheme::OpensTableModes(scheme) && mention;
 }
 
+void apply_punctuation_marks(TsfLocalConfig &config, std::string_view quote_style, std::string_view bracket_style,
+                             bool traditional_output) {
+  config.corner_quotes =
+      quote_style == "corner" || (quote_style == "corner_when_traditional" && traditional_output);
+  config.hollow_brackets = bracket_style == "hollow";
+}
+
 std::vector<std::vector<uint8_t>> tsf_config_frames(const TsfLocalConfig &config) {
   std::vector<std::vector<uint8_t>> frames;
-  frames.reserve(11);
+  frames.reserve(12);
   // The paging frame carries the preedit style after a '|', which is how the
   // TIP receives it - there is no separate message type for it.
   std::wstring paging = config.paging_comma_period ? L"1" : L"0";
@@ -284,6 +291,10 @@ std::vector<std::vector<uint8_t>> tsf_config_frames(const TsfLocalConfig &config
   // 放在最后，前面每一帧的位置不变；不认识这个类型的旧 TIP 丢掉它，两个键照常是标点。
   frames.push_back(worker_flag_frame(
       FanyImeWorkerReplyType::SecondThirdCandidateChanged, config.second_third_candidate));
+  // 同样追加在最后。载荷 "q<0|1>b<0|1>"；旧 TIP 丢掉这个帧，照旧出弯引号和实心括号。
+  frames.push_back(worker_text_frame(
+      FanyImeWorkerReplyType::PunctuationMarksChanged,
+      std::wstring{L'q', config.corner_quotes ? L'1' : L'0', L'b', config.hollow_brackets ? L'1' : L'0'}));
   return frames;
 }
 

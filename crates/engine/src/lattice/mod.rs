@@ -1,10 +1,13 @@
-//! The word lattice, the only whole-sentence source now that the Google decoder is gone (quanpin.md §10, §12, overlays.md §1.2, §1.6): graph, beam search, trigram rescoring, the typo sentence, the merge into the candidate list, the n-gram tables, the personal n-gram model and neural reranking of the lattice's n-best. Quanpin and shuangpin share it through `make_sentence_lattice_options`; the lookup is a closure so tests can drive it without SQLite.
+//! 词网格是移除 Google 解码器后的整句来源（quanpin.md §10、§12，overlays.md §1.2、§1.6）：包括图构造、束搜索、三元重排、纠错整句、候选合并、n 元表、个人模型及神经重排。全拼和双拼通过 `SentenceNgramTables` 共用已加载的表和整句配置；查词用闭包注入，测试无需依赖 SQLite。
 
 mod cxx_sort;
 pub mod decode;
 pub mod merge;
 pub mod neural;
 pub mod ngram;
+
+#[cfg(test)]
+pub(crate) mod active_tables_tests;
 pub mod personal;
 
 pub use decode::{LatticeLexeme, SentencePath, TypoEdge};

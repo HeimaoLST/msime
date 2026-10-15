@@ -5,6 +5,11 @@ on:
       version: {description: Semantic version (defaults to platforms/android/version.txt), required: false, type: string}
       prerelease: {description: Mark as prerelease, required: false, default: false, type: boolean}
       publish: {description: Publish the build as an android-v release (otherwise it is only uploaded as a workflow artifact), required: false, default: true, type: boolean}
+  workflow_call:
+    inputs:
+      version: {description: Semantic version, required: false, default: '', type: string}
+      prerelease: {description: Mark as prerelease, required: false, default: false, type: boolean}
+      publish: {description: Publish the build, required: false, default: false, type: boolean}
 permissions: {contents: write}
 concurrency: {group: release-android, cancel-in-progress: false}
 jobs:
@@ -58,14 +63,7 @@ jobs:
       # build-native.sh 需要固定提交的 vcpkg（只用来装 nlohmann-json）和 arm64 的 Android Rust target（build-apk.sh 默认只打 arm64-v8a）；runner 上都没有。bootstrap-vcpkg.sh 放在 platforms/windows 下但不限平台，装到 build-native.sh 默认读取的 target/tooling/vcpkg。
       # build-native.sh 只认固定的 NDK 28.2.13676358。此前一直靠 ubuntu-24.04 镜像碰巧预装它，镜像 20261002 起不再带这个版本，Android 0.2.1 第一次发布就因此失败。缺了就用 runner 自带的 sdkmanager 装上，装完再核对一次版本。
       - name: Install the pinned Android NDK
-        run: |
-          set -euo pipefail
-          ndk="$ANDROID_SDK_ROOT/ndk/28.2.13676358"
-          if ! grep -qs '28.2.13676358' "$ndk/source.properties"; then
-            # sdkmanager 退出后 yes 再写会收到 SIGPIPE（退出码 141），在 pipefail 下让整步失败；它的退出码不算数，装没装上由下一行的版本核对判断。
-            { yes || true; } | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install 'ndk;28.2.13676358' >/dev/null
-          fi
-          grep -q '28.2.13676358' "$ndk/source.properties"
+        run: bash platforms/android/install-ndk.sh
       - name: Prepare pinned vcpkg and Rust targets
         run: |
           set -euo pipefail
@@ -76,14 +74,19 @@ jobs:
         env:
           MSIME_ANDROID_VERSION: "${{ steps.version.outputs.value }}"
           MSIME_EDITION: "${{ matrix.edition }}"
+          PUBLISH: "${{ inputs.publish }}"
           RELEASE_KEYSTORE_BASE64: "${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}"
           MSIME_ANDROID_RELEASE_KEYSTORE_PASSWORD: "${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}"
         run: |
           set -euo pipefail
-          [[ -n "$RELEASE_KEYSTORE_BASE64" && -n "$MSIME_ANDROID_RELEASE_KEYSTORE_PASSWORD" ]] || { echo "ANDROID_RELEASE_KEYSTORE_BASE64 and ANDROID_RELEASE_KEYSTORE_PASSWORD secrets are required" >&2; exit 1; }
-          export MSIME_ANDROID_RELEASE_KEYSTORE="$RUNNER_TEMP/msime-release.p12"
-          trap 'rm -f "$MSIME_ANDROID_RELEASE_KEYSTORE"' EXIT
-          printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$MSIME_ANDROID_RELEASE_KEYSTORE"
+          if [[ "$PUBLISH" == true ]]; then
+            [[ -n "$RELEASE_KEYSTORE_BASE64" && -n "$MSIME_ANDROID_RELEASE_KEYSTORE_PASSWORD" ]] || { echo "ANDROID_RELEASE_KEYSTORE_BASE64 and ANDROID_RELEASE_KEYSTORE_PASSWORD must be provided together" >&2; exit 1; }
+            export MSIME_ANDROID_RELEASE_KEYSTORE="$RUNNER_TEMP/msime-release.p12"
+            trap 'rm -f "$MSIME_ANDROID_RELEASE_KEYSTORE"' EXIT
+            printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$MSIME_ANDROID_RELEASE_KEYSTORE"
+          else
+            echo '::notice::nightly/non-published Android build uses the local development keystore'
+          fi
           mkdir -p target/resources
           resource_dir="$(cargo run --quiet -p msime-client-core --example install_resources -- target/resources)"
           bash platforms/android/build-apk.sh "$resource_dir"

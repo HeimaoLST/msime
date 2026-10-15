@@ -24,4 +24,10 @@ source "$repo_root/platforms/android/scripts/signing.sh"
 "$tools_dir/apksigner" sign "${android_signing[@]}" --out "$build_dir/signed.apk" "$build_dir/aligned.apk"
 "$tools_dir/apksigner" verify "$build_dir/signed.apk"
 cp "$build_dir/signed.apk" target/android/editor-test.apk
-echo "Synthetic editor APK built; no device changed"
+# 首帧回归需要能独立强停的编辑器；复用合成控件的 dex，另用专用包名。
+"$tools_dir/aapt2" link -I "$android_jar" --manifest platforms/android/tests/device/InitialKeyboardEditorManifest.xml -o "$build_dir/first-frame-unsigned.apk"
+(cd "$build_dir/dex" && zip -q -0 "$build_dir/first-frame-unsigned.apk" classes.dex)
+"$tools_dir/zipalign" -P 16 4 "$build_dir/first-frame-unsigned.apk" "$build_dir/first-frame-aligned.apk"
+"$tools_dir/apksigner" sign "${android_signing[@]}" --out target/android/first-frame-editor.apk "$build_dir/first-frame-aligned.apk"
+"$tools_dir/apksigner" verify target/android/first-frame-editor.apk
+echo "Synthetic editor APKs built; no device changed"

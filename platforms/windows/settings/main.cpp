@@ -11074,6 +11074,15 @@ private:
     auto punctuation = add_group(page, L"标点");
     bool_row(punctuation, 0xE8C1, L"中文标点", L"在中文模式下使用全角标点。",
              L"chinese_punctuation", true);
+    // 两项只在中文标点下起作用，所以紧跟在「中文标点」之后。取值与共享设置页、偏好文档相同。
+    select_row(punctuation, 0xE8C1, L"引号样式",
+               L"中文标点下 ' 键和 Shift+' 键输出的引号。直角引号：' 出「」，Shift+' 出『』",
+               L"quote_style",
+               {{L"curly", L"弯引号 “ ” ‘ ’"}, {L"corner", L"直角引号 「 」『 』"},
+                {L"corner_when_traditional", L"繁体输出时用直角引号"}},
+               L"curly");
+    select_row(punctuation, 0xE8C1, L"方头括号样式", L"中文标点下 [ ] 键输出的括号",
+               L"bracket_style", {{L"solid", L"实心 【 】"}, {L"hollow", L"空心 〖 〗"}}, L"solid");
     select_row(punctuation, 0xE72E, L"固定标点", L"切换中英文时的标点形态，三者互斥",
                L"punctuation_lock",
                {{L"follow", L"跟随中英文状态"}, {L"chinese", L"始终使用中文标点"},
@@ -12920,6 +12929,7 @@ private:
     stats_busy_ = true;
     stats_request_ = 0;
     stats_last_request_ = {};
+    stats_day_.reset();
     stats_selected_.reset();
     stats_tab_ = L"keys";
     stats_calendar_offset_ = 0;
@@ -12991,6 +13001,13 @@ private:
   void poll_statistics() {
     if (closed_ || current_page_ != "stats" || window_minimized())
       return;
+    const auto today = typing::day_key(local_civil_day());
+    const bool date_changed = typing::statistics_date_changed(stats_day_, today);
+    if (date_changed) {
+      stats_day_ = today;
+      if (stats_)
+        redraw_stats();
+    }
     const auto now = std::chrono::steady_clock::now();
     if ((stats_request_ != 0 && now - stats_request_started_ <= std::chrono::seconds(15)) ||
         now - stats_last_request_ < std::chrono::seconds(1))
@@ -19081,6 +19098,7 @@ private:
   std::wstring stats_error_;
   bool stats_busy_ = true;
   std::optional<std::string> stats_selected_;
+  std::optional<std::string> stats_day_;
   std::wstring stats_tab_ = L"keys";
   // 日历热力图和按日明细的横向滚动位置，跨重画保留。
   double stats_calendar_offset_ = 0;

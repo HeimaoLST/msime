@@ -20,6 +20,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <vector>
+#include <xkbcommon/xkbcommon-keysyms.h>
 #include "../voice/voice_provider_fixture.h"
 #include "../dictionary/translation_provider_fixture.h"
 
@@ -373,6 +374,10 @@ int main(int argc, char **argv) {
     require(temporary != nullptr, "Cannot create test directory");
     std::filesystem::path root(temporary);
     g_free(temporary);
+    const auto compose_file = root / "compose.fixture";
+    std::ofstream(compose_file) << "include \"%L\"\n"
+                                << "<dead_circumflex> <e> : \"ê\"\n";
+    g_setenv("XCOMPOSEFILE", compose_file.c_str(), TRUE);
     struct Cleanup {
       std::filesystem::path path;
       ~Cleanup() {
@@ -713,7 +718,24 @@ int main(int argc, char **argv) {
       return 0;
     }
     if (argc == 3 && std::string(argv[2]) == "--ctrl-space") {
+      // 初始英文模式不创建 Engine 会话，正是系统 Compose 需要覆盖的空 view 生命周期。
+      auto english_options = options;
+      english_options["preferences"]["default_ime_mode"] = "english";
+      ibus_object_destroy(IBUS_OBJECT(engine));
+      g_object_unref(engine);
+      msime_ibus_configure(english_options.dump());
+      engine = create_engine();
+      seen = Observation{};
+      invoke("FocusIn");
+      require(wait_until([&] { return !seen.input_enabled; }), "English default mode fixture failed");
+      require(key(XKB_KEY_dead_circumflex), "Compose dead key was not consumed in initial English mode");
+      require(key(XKB_KEY_e), "Compose completion was not consumed in initial English mode");
+      require(seen.committed == "ê", "Initial English Compose did not commit its composed text");
+      ibus_object_destroy(IBUS_OBJECT(engine));
+      g_object_unref(engine);
       msime_ibus_configure(options.dump());
+      engine = create_engine();
+      seen = Observation{};
       invoke("FocusIn");
       const auto chord = [&] {
         const bool pressed = key(IBUS_space, IBUS_CONTROL_MASK);

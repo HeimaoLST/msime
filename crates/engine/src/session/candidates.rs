@@ -157,10 +157,9 @@ impl InputSession {
         if rows.is_empty() {
             return;
         }
-        let rows = rows.clone();
         self.local_candidates
             .retain(|item| !rows.iter().any(|row| row.word == item.word));
-        self.local_candidates.splice(0..0, rows);
+        self.local_candidates.splice(0..0, rows.iter().cloned());
     }
 
     pub(super) fn add_local_fallback_candidate(&mut self) {

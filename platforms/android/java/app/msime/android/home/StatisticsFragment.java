@@ -29,7 +29,6 @@ import app.msime.android.DrawablePolicy;
 import app.msime.android.JsonPolicy;
 import app.msime.android.BoundsPolicy;
 import app.msime.android.DictionaryCollectionsStore;
-import app.msime.android.KeyPressIds;
 import app.msime.android.KeyboardGeometry;
 import app.msime.android.NumberPolicy;
 import app.msime.android.R;
@@ -71,8 +70,6 @@ public final class StatisticsFragment extends HomeTabFragment {
     private record Snapshot(@Nullable TypingStatisticsModel model, @Nullable TypingStatisticsSummary summary) {}
 
     private static final Map<String, String> RETENTIONS = retentions();
-    private static final int WEEK = 7;
-
     private Tab tab = Tab.OVERVIEW;
     @Nullable private TypingStatisticsModel statistics;
     @Nullable private TypingStatisticsSummary summary;
@@ -357,15 +354,10 @@ public final class StatisticsFragment extends HomeTabFragment {
 
     /** 近 7 天每个键的按键次数，和按键 KPI 同一个时间窗。 */
     private Map<String, Long> weekKeys() {
-        Map<String, Long> result = new LinkedHashMap<>(KeyPressIds.KEY_IDS.size());
-        if (statistics == null) return result;
-        LocalDate today = LocalDate.now();
-        for (int offset = 0; offset < WEEK; offset++) {
-            for (Map.Entry<String, Long> entry : statistics.keys(today.minusDays(offset).toString()).entrySet()) {
-                result.merge(entry.getKey(), entry.getValue(), Long::sum);
-            }
-        }
-        return result;
+        if (statistics == null || summary == null) return Map.of();
+        List<String> days = new ArrayList<>(summary.overview().last7().size());
+        for (TypingStatisticsSummary.DayCount day : summary.overview().last7()) days.add(day.day());
+        return statistics.keysForDays(days);
     }
 
     // ---- 成就 ----

@@ -238,6 +238,7 @@ impl InputSession {
         session
             .punctuation
             .set_paired_enabled(options.paired_punctuation);
+        session.punctuation.set_marks(options.punctuation_marks);
         session.punctuation_lock = options.punctuation_lock;
         session.learning_enabled = options.learning;
         session

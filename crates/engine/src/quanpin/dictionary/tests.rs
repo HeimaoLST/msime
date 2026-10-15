@@ -4,6 +4,22 @@ use rusqlite::params;
 use std::borrow::Cow;
 
 use super::*;
+
+#[test]
+fn active_dictionary_reuses_ngram_tables_after_shared_eviction() {
+    for bigram in [false, true] {
+        for trigram in [false, true] {
+            let fixture = crate::lattice::active_tables_tests::fixture(bigram, trigram);
+            let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+            let segments = ["ni", "hao", "ma"].map(str::to_owned);
+            crate::lattice::active_tables_tests::assert_query_stable(&fixture.paths, || {
+                let mut result = Vec::new();
+                dictionary.merge_sentences(&mut result, "nihaoma", "ni'hao'ma", &segments);
+                result
+            });
+        }
+    }
+}
 use crate::quanpin::fixture::Fixture;
 use crate::types::{fuzzy_rule, FirstPageRows, DEFAULT_FIRST_PAGE_ROWS};
 
@@ -74,6 +90,23 @@ fn explicit_segmentation_without_alternatives_does_not_allocate_a_result_buffer(
 }
 
 #[test]
+fn complete_segmentation_alternatives_do_not_clone_owned_graph_paths() {
+    let resolution = SeriesResolution {
+        segmentation: "xian".to_owned(),
+        ..SeriesResolution::default()
+    };
+    let segments = vec!["xian".to_owned()];
+    let (alternatives, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+        alternative_segmentations("xian", &segments, &resolution, NONE)
+    });
+    assert_eq!(alternatives, vec![vec!["xi".to_owned(), "an".to_owned()]]);
+    assert!(
+        allocations <= 15,
+        "完整音节图替代路径分配次数应不超过 15：{allocations}"
+    );
+}
+
+#[test]
 fn alternative_segmentation_key_state_uses_no_temporary_heap_allocation() {
     let keys = ["ni'hao", "ni'he", "ni'hao", "ni'men"]
         .into_iter()
@@ -111,6 +144,18 @@ fn series_slot_key_encodes_switches_and_context() {
         series_slot_key("T0:A:ni", options, true, "你好"),
         "T0:A:ni\u{1f}S101\u{1f}你好"
     );
+    for key in ["", "T0:A:ni", "C:T3:A:gua", "T0:M:ni'hao"] {
+        for context in ["", "合成上文😀", "合成较长上文甲乙丙丁"] {
+            for has_rerankers in [false, true] {
+                let slot = series_slot_key(key, options, has_rerankers, context);
+                assert_eq!(
+                    slot.capacity(),
+                    slot.clone().capacity(),
+                    "原键转移须保持缓存键容量"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -140,7 +185,10 @@ fn segment_row_cache_hit_borrows_the_segmentation_key() {
     let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
         let _ = dictionary.query_database(&segments, "ni'hao");
     });
-    assert_eq!(allocations, 5, "热缓存分段查询仍重建了表键: {allocations}");
+    assert_eq!(
+        allocations, 4,
+        "热缓存分段查询仍创建了临时行页: {allocations}"
+    );
 }
 
 #[test]
@@ -153,7 +201,10 @@ fn automatic_segmentation_reuses_the_joined_code_for_word_items() {
     let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
         let _ = dictionary.query_database(&segments, "");
     });
-    assert_eq!(allocations, 6, "自动分段查询重复拼接了读音: {allocations}");
+    assert_eq!(
+        allocations, 5,
+        "自动分段查询仍创建了临时行页: {allocations}"
+    );
 }
 
 #[test]
@@ -211,12 +262,20 @@ fn fuzzy_row_cache_hit_checks_the_full_key_without_allocating() {
         typed,
     ));
 
+    let typed = typed.to_owned();
+    let mut rows = Vec::new();
     let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
-        assert!(
-            cached_fuzzy_rows(&database, &mut cache, &paths, fuzzy_rule::Z_ZH, 32, typed,)
-                .is_empty()
+        append_cached_fuzzy_rows(
+            &database,
+            &mut cache,
+            &paths,
+            fuzzy_rule::Z_ZH,
+            32,
+            typed,
+            &mut rows,
         );
     });
+    assert!(rows.is_empty());
     assert_eq!(allocations, 0, "模糊行缓存热命中仍重建了查询键");
 }
 
@@ -242,11 +301,18 @@ fn fuzzy_row_cache_hash_collision_requeries_instead_of_returning_wrong_rows() {
         },
     );
 
-    let rows = cached_fuzzy_rows(&database, &mut cache, &paths, fuzzy_rule::Z_ZH, 32, typed);
+    let mut rows = Vec::new();
+    append_cached_fuzzy_rows(
+        &database,
+        &mut cache,
+        &paths,
+        fuzzy_rule::Z_ZH,
+        32,
+        typed.to_owned(),
+        &mut rows,
+    );
     assert_eq!(
-        rows.iter()
-            .map(|row| row.value.as_str())
-            .collect::<Vec<_>>(),
+        rows.iter().map(|row| row.word.as_str()).collect::<Vec<_>>(),
         ["战好"]
     );
 }
@@ -614,8 +680,8 @@ fn longer_phrase_cache_hit_does_not_rebuild_the_full_key() {
         let _ = dictionary.longer_phrase_candidates("ni'hao", &segments);
     });
     assert_eq!(
-        allocations, 8,
-        "热缓存长词补全仍重建了切分键: {allocations}"
+        allocations, 7,
+        "热缓存长词补全仍创建了临时行页: {allocations}"
     );
 }
 
@@ -1408,7 +1474,7 @@ fn fuzzy_candidate_rows_reuse_the_first_typed_reading_string() {
         let _ = dictionary.fuzzy_candidates("zong'guo", options);
     });
     assert_eq!(
-        allocations, 35,
+        allocations, 25,
         "模糊候选重复复制了首个读音或查询键: {allocations}"
     );
 }

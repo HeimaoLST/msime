@@ -50,6 +50,14 @@ public final class InputViewValuePolicy {
         return textOr(object == null ? null : object.opt(key), fallback);
     }
 
+    /** View 的 `punctuation_marks`：引号与方头括号样式。缺失或取值不认识时是缺省（弯引号、实心括号）。 */
+    public static app.msime.android.ChineseSymbolFaces.Marks punctuationMarks(JSONObject view) {
+        JSONObject marks = view == null ? null : view.optJSONObject("punctuation_marks");
+        if (marks == null) return app.msime.android.ChineseSymbolFaces.Marks.DEFAULT;
+        return app.msime.android.ChineseSymbolFaces.Marks.of(
+            textOr(marks, "quotes", "curly"), textOr(marks, "brackets", "solid"));
+    }
+
     /** Read the input view's editing text using the shared strict text policy. */
     public static String editingText(JSONObject view) {
         return text(view, "editing_text");

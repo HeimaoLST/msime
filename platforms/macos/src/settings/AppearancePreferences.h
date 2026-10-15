@@ -48,6 +48,7 @@ extern BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier);
 @property(nonatomic) BOOL showsCandidatePageNumber;
 /// 「展开候选」（共享偏好 `expand_candidates`）：横排候选窗按 ↓ 展开成多行候选网格。没有共享值也没有本机值时关闭。
 @property(nonatomic) BOOL expandCandidates;
+@property(nonatomic) BOOL showsCandidateExpandButton;
 @property(nonatomic, copy) NSString *inputScheme;
 /// The Chinese scheme to go back to when leaving japanese or korean: the current scheme while it is Chinese, otherwise the one left for japanese or korean here or the shared `last_chinese_scheme`, 全拼 when neither is known.
 @property(nonatomic, readonly) NSString *lastChineseScheme;

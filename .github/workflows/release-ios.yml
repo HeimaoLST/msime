@@ -7,6 +7,13 @@ on:
       publish: {description: Publish the build as an ios-v release (otherwise it is only uploaded as a workflow artifact), required: false, default: true, type: boolean}
       testflight: {description: 签名归档并上传 App Store Connect（内部测试组自动拿到）, required: false, default: true, type: boolean}
       testflight_external: {description: 上传后加入外部测试组并提交 TestFlight 审核, required: false, default: true, type: boolean}
+  workflow_call:
+    inputs:
+      version: {description: Semantic version, required: false, default: '', type: string}
+      prerelease: {description: Mark as prerelease, required: false, default: false, type: boolean}
+      publish: {description: Publish the build, required: false, default: false, type: boolean}
+      testflight: {description: Upload to TestFlight, required: false, default: false, type: boolean}
+      testflight_external: {description: Submit external TestFlight review, required: false, default: false, type: boolean}
 permissions: {contents: write}
 concurrency: {group: release-ios, cancel-in-progress: false}
 jobs:
@@ -108,11 +115,11 @@ jobs:
           check_profile "$dir/app.mobileprovision" app.msime.ios
           check_profile "$dir/keyboard.mobileprovision" app.msime.ios.keyboard
           printf 'dir=%s\nkeychain=%s\n' "$dir" "$keychain" >> "$GITHUB_OUTPUT"
-      # A build number App Store Connect has already taken is refused, and it can never be overwritten. A re-run keeps github.run_number, so the attempt is folded in: every run and every re-run of it gets a larger number than any before (the earlier builds were numbered by run_number alone, all far below this).
+      # nightly 和手动发布各有自己的 run_number，不能用它生成共享的 TestFlight 构建号。以 2020 年起的秒数编号，两条入口共用 release-ios 并发组，重跑也取新编号。
       - name: Choose the build number
         id: build-number
         if: ${{ inputs.testflight }}
-        run: echo "value=$((GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))" >> "$GITHUB_OUTPUT"
+        run: echo "value=$(($(date -u +%s) - 1577836800))" >> "$GITHUB_OUTPUT"
       - name: Upload the signed build to App Store Connect
         if: ${{ inputs.testflight }}
         env:

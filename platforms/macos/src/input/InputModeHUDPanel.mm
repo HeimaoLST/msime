@@ -6,14 +6,13 @@
 #import <cmath>
 
 namespace {
-// The badge is the floating toolbar's size, read from the same floating_toolbar.font_size and scale_percent (FloatingToolbarPanel.mm -applySizingPreferences:): the toolbar's (font + 20) x scale height, its 0.95 x font glyphs, its 22pt brand mark and its 10pt native corner radius, all scaled.
-constexpr CGFloat kDefaultFontSize = 24.0;
-constexpr CGFloat kGlyphScale = 0.95;
-constexpr CGFloat kHeightPadding = 20.0;
-constexpr CGFloat kLogoSide = 22.0;
-constexpr CGFloat kCornerRadius = 10.0;
-constexpr CGFloat kHorizontalInset = 12.0;
-constexpr CGFloat kContentSpacing = 6.0;
+// 短暂切换提示使用独立紧凑尺寸；工具栏为了点击放大时不放大这个鼠标穿透的提示。
+constexpr CGFloat kFontSize = 18.0;
+constexpr CGFloat kHeight = 32.0;
+constexpr CGFloat kLogoSide = 16.0;
+constexpr CGFloat kCornerRadius = 8.0;
+constexpr CGFloat kHorizontalInset = 8.0;
+constexpr CGFloat kContentSpacing = 4.0;
 constexpr CGFloat kBorderWidth = 1.0;
 constexpr CGFloat kScreenMargin = 8.0;
 constexpr CGFloat kCaretGap = 10.0;
@@ -59,8 +58,6 @@ NSRect MSIMEInputModeHUDFrame(NSRect caretRect, NSSize panelSize, NSRect visible
     NSStackView *_content;
     NSLayoutConstraint *_logoWidth;
     NSLayoutConstraint *_logoHeight;
-    CGFloat _fontSize;
-    CGFloat _scale;
 }
 
 + (instancetype)sharedPanel {
@@ -101,7 +98,7 @@ NSRect MSIMEInputModeHUDFrame(NSRect caretRect, NSSize panelSize, NSRect visible
     _label = [NSTextField labelWithString:@""];
     _label.alignment = NSTextAlignmentCenter;
     _label.translatesAutoresizingMaskIntoConstraints = NO;
-    _content = [NSStackView stackViewWithViews:logo ? @[_logoView, _label] : @[_label]];
+    _content = [NSStackView stackViewWithViews:@[_logoView, _label]];
     _content.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     _content.alignment = NSLayoutAttributeCenterY;
     _content.translatesAutoresizingMaskIntoConstraints = NO;
@@ -121,28 +118,24 @@ NSRect MSIMEInputModeHUDFrame(NSRect caretRect, NSSize panelSize, NSRect visible
 }
 
 - (void)applySizingPreferences:(NSDictionary *)preferences {
-    id toolbar = preferences[@"floating_toolbar"];
-    if (![toolbar isKindOfClass:NSDictionary.class]) toolbar = @{};
-    id scaleValue = toolbar[@"scale_percent"] ?: @100;
-    id fontValue = toolbar[@"font_size"] ?: @(kDefaultFontSize);
-    _scale = [@[@75, @100, @125, @150] containsObject:scaleValue] ? [scaleValue doubleValue] / 100.0 : 1.0;
-    _fontSize = [@[@16, @18, @20, @22, @24, @26, @28] containsObject:fontValue] ? [fontValue doubleValue] : kDefaultFontSize;
-    _label.font = [NSFont systemFontOfSize:_fontSize * _scale * kGlyphScale weight:NSFontWeightSemibold];
-    _logoWidth.constant = kLogoSide * _scale;
-    _logoHeight.constant = kLogoSide * _scale;
-    _content.spacing = kContentSpacing * _scale;
-    self.contentView.layer.cornerRadius = kCornerRadius * _scale;
+    id value = preferences[@"show_app_logo"];
+    const BOOL requested = [value isKindOfClass:NSNumber.class] && CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID() && [value boolValue];
+    _logoView.hidden = !requested || _logoView.image.size.width <= 0;
+    _label.font = [NSFont systemFontOfSize:kFontSize weight:NSFontWeightSemibold];
+    _logoWidth.constant = kLogoSide;
+    _logoHeight.constant = kLogoSide;
+    _content.spacing = kContentSpacing;
+    self.contentView.layer.cornerRadius = kCornerRadius;
     [self setContentSize:self.panelSize];
 }
 
 - (NSSize)panelSize {
-    // The wider of the two characters, so switching modes never changes the badge's width.
+    // 两个字取较宽者，切换模式时窗口宽度保持稳定。
     CGFloat glyph = 0.0;
     for (NSString *text in @[MSIMEInputModeHUDText(NO), MSIMEInputModeHUDText(YES)])
         glyph = std::max(glyph, [text sizeWithAttributes:@{NSFontAttributeName : _label.font}].width);
-    const CGFloat logo = _logoView.hidden ? 0.0 : (kLogoSide + kContentSpacing) * _scale;
-    // NSWindow rounds fractional point sizes; round outward so nothing is clipped, as the toolbar does.
-    return NSMakeSize(std::ceil(2.0 * kHorizontalInset * _scale + logo + glyph), std::ceil((_fontSize + kHeightPadding) * _scale));
+    const CGFloat logo = _logoView.hidden ? 0.0 : kLogoSide + kContentSpacing;
+    return NSMakeSize(std::ceil(2.0 * kHorizontalInset + logo + glyph), kHeight);
 }
 
 - (void)setSurfaceColor:(NSColor *)surface borderColor:(NSColor *)border textColor:(NSColor *)text {

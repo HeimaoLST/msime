@@ -1,4 +1,5 @@
 #import "ScreenKeyboardPanel.h"
+#import "ScreenKeyboardWindowAppearance.h"
 #import "WindowPresentationLog.h"
 #import <Carbon/Carbon.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -44,10 +45,10 @@ const std::vector<std::vector<Key>> &Rows() {
          {"m","M",1,kVK_ANSI_M},{",","<",1,kVK_ANSI_Comma},{".",">",1,kVK_ANSI_Period},
          {"/","?",1,kVK_ANSI_Slash},{"Shift","",2.15,kVK_Shift,NSEventModifierFlagShift}},
         {{"Ctrl","",1.25,kVK_Control,NSEventModifierFlagControl},
-         {"Command","",1.25,kVK_Command,NSEventModifierFlagCommand},
-         {"Option","",1.25,kVK_Option,NSEventModifierFlagOption},{"Space"," ",6.7,kVK_Space},
          {"Option","",1.25,kVK_Option,NSEventModifierFlagOption},
-         {"Command","",1.25,kVK_Command,NSEventModifierFlagCommand},{"Del","",1.25,kVK_ForwardDelete},
+         {"Command","",1.25,kVK_Command,NSEventModifierFlagCommand},{"Space"," ",6.7,kVK_Space},
+         {"Command","",1.25,kVK_Command,NSEventModifierFlagCommand},
+         {"Option","",1.25,kVK_Option,NSEventModifierFlagOption},{"Del","",1.25,kVK_ForwardDelete},
          {"Ctrl","",1.25,kVK_Control,NSEventModifierFlagControl}}
     };
     return rows;
@@ -203,13 +204,13 @@ BOOL PostKey(unsigned short code, NSEventModifierFlags flags, pid_t targetPID) {
     self.releasedWhenClosed = NO;
     self.opaque = NO;
     self.backgroundColor = NSColor.clearColor;
-    self.level = NSFloatingWindowLevel;
     self.hidesOnDeactivate = NO;
     self.movableByWindowBackground = YES;
     self.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary;
     MSIMEScreenKeyboardContent *content = [[MSIMEScreenKeyboardContent alloc] initWithFrame:NSMakeRect(0, 0, 1100, 400)];
     content.wantsLayer = YES;
     self.contentView = content;
+    MSIMEConfigureScreenKeyboardWindow(self);
     _status = [NSTextField labelWithString:@"水杉屏幕键盘"];
     _status.font = [NSFont systemFontOfSize:12];
     _status.frame = NSMakeRect(10, 4, 950, 20);

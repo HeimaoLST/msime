@@ -639,6 +639,21 @@ if rg -A 30 'void (clearClipboardHistory|renderClipboardHistory|renderClipboardI
   echo "Android clipboard panel must not raise dialogs or popup menus from the input method" >&2
   exit 1
 fi
+# 删除候选词的确认收在长按菜单的子菜单里（ImeCandidates），与 iOS 的嵌套 UIMenu 一致：点开「删除词条…」当场展开「确认删除此词条」，一次长按删完；不弹 AlertDialog（#5605、#5653：输入法服务没有 Activity 的窗口令牌，对话框要么加不上窗口、让输入法进程崩掉，要么抢走编辑器的窗口焦点，两种情况键盘都会被收起），也不要退出去再长按一次的两步确认。
+if rg -q 'new AlertDialog' \
+    "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java"; then
+  echo "Android input method service must not raise AlertDialog; confirm inside the keyboard (#5605, #5653)" >&2
+  exit 1
+fi
+if ! rg -q 'addSubMenu\(Menu\.NONE, Menu\.NONE, action\.ordinal\(\), action\.title\(\)\)' \
+    "$repo_root/platforms/android/java/app/msime/android/core/ImeCandidates.java" \
+  || ! rg -q 'action\.confirmationTitle\(\)' \
+    "$repo_root/platforms/android/java/app/msime/android/core/ImeCandidates.java" \
+  || ! rg -q 'String confirmationTitle\(\)' \
+    "$repo_root/platforms/android/java/app/msime/android/candidate/CandidateManagementAction.java"; then
+  echo "Android candidate removal must confirm through the long-press submenu (#7793)" >&2
+  exit 1
+fi
 # 「添加到常用语」经常用语存储写入（校验、去重、上限和同步标记都在那里），它要等文件锁，必须放在工作线程上，不能在主线程卡住键盘（#5909）。
 if ! rg -A 12 'void addClipboardTextToPhrases\(' \
     "$repo_root/platforms/android/java/app/msime/android/core/ImePanels.java" \
@@ -1070,7 +1085,7 @@ echo "Compiled ${#device_sources[@]} Android device-suite sources"
 # those needs the library's own resources, which is Gradle's job. Compiling still catches a malformed
 # drawable, layout or values file, which is what this step was for.
 "$android_sdk/build-tools/35.0.0/aapt2" compile --dir "$repo_root/platforms/android/res" -o "$output_dir/resources.zip"
-for alias in MainActivityForest MainActivitySky MainActivityDusk MainActivityVermilion; do
+for alias in MainActivityClassic MainActivityForest MainActivitySky MainActivityDusk MainActivityVermilion; do
   if ! rg -q "android:name=\"\\.${alias}\"" "$repo_root/platforms/android/AndroidManifest.xml"; then
     echo "Android app icon alias missing: $alias" >&2
     exit 1

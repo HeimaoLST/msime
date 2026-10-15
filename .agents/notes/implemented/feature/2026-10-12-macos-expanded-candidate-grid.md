@@ -10,6 +10,10 @@ Status: implemented
 
 ## Decision
 
+macOS 普通拼音候选的方向键分工及展开末页显示由[拼音与候选方向键分工](../bug-fix/2026-10-14-macos-arrow-candidate-navigation.md)部分取代，原有引擎契约和其它平台行为保留。
+
+普通候选的鼠标展开按钮由[独立展开按钮](2026-10-14-macos-independent-expand-button.md)取代绑定页码的显示规则；本篇的网格按键、候选身份与重载机制保留。
+
 **新的共享偏好 `expand_candidates`（设置页叫「展开候选」），默认关闭。** 字段在 `crates/client-core/src/preferences.rs`（`#[serde(default)]`，缺字段的旧文档读成关闭），能力位 `HostCapabilities::expand_candidates` 目前只在 macOS 为真；共享设置页只在这个能力下于「候选窗口 › 布局」组显示开关，原生设置窗口的候选窗口卡片里有同名开关，本机键 `MSIMEClientExpandCandidates` 在该分区的恢复列表里。Windows、Linux 以后接上同一个偏好时只需打开各自的能力位。
 
 **网格之外的方向键规则不变。** 偏好关闭、候选窗竖排、只有一页、候选列表（韩文汉字、注音）或释义页开着时，↓ 和以前一样移高亮；←/→ 无论偏好如何都照旧移光标或改字。只有偏好打开、横排、多页时，↓ 和候选窗首行 ‹ › 后面多出的展开按钮才打开网格。展开按钮跟着页码和翻页按钮按 `show_candidate_page_number` 显示：关掉它们的人要的是只剩候选行的卡片，↓ 照样能展开。注音组字时 ↓ 打开候选列表（`MSIMECandidateListDownKey`）排在前面，优先于展开。
@@ -37,6 +41,8 @@ Status: implemented
 - **用 NSScrollView 做真正的平滑滚动**：最强的理由是触控板滚动更自然，长列表不必按行跳。不选它：非激活面板里的滚动视图要自己处理焦点、滚轮和皮肤背景，高亮行保持可见还得算偏移；按行开窗口（一次画几行）让键盘、滚轮和高亮跟随共用一套下标计算，候选按钮和皮肤代码原样复用。
 - **复用 `src/candidate/CandidatePanel.mm`**：维护者提到它，它的名字看起来就是候选面板。不选它：那是 Apple 快照里直连引擎的控制器留下的面板，产品不编译它，只有 `candidate-panel-test` 用（见 `platforms/macos/CMakeLists.txt` 的注释）；产品的候选窗在 `InputController.mm`，画法在 `CandidateChrome.h` 和 `CandidateItemLayout.h`，网格复用的是这两份。
 - **网格里不认的键一律吞掉**：最强的理由是不会因为误按而丢掉网格。不选它：字母、退格是用户接着打字，吞掉它们等于让网格变成一个要先退出的模式；释义页已经是「不认的键先收起再照常处理」，两处保持一致。
+
+展开视图与普通候选窗共用 `show_candidate_page_number` 的首行显示规则：关闭时不绘制行号和收起按钮，logo、预编辑也关闭时不预留首行高度。键盘的 `Esc` 和第一行 `↑` 仍能收起网格。#7764 的空白首行和隐藏页码后仍出现控件来自展开渲染漏用此规则；控制器集成测试覆盖空首行、仅预编辑和恢复控件三种状态。展开动画属于独立视觉选择，不改变此处布局契约。
 
 ## Consequences
 

@@ -149,9 +149,11 @@
     NSAssert(NSThread.isMainThread, @"Translation batch must run on main thread");
     if (_started || !_completion) return;
     _started = YES;
-    _deadline = [self currentTime] + 6;
+    // AI 的批次预算与传输的 8 秒一致，普通翻译继续使用 6 秒。
+    NSTimeInterval budget = _ai ? 8 : 6;
+    _deadline = [self currentTime] + budget;
     __weak MSIMECustomTranslationBatch *weakSelf = self;
-    _timer = [NSTimer timerWithTimeInterval:6 repeats:NO block:^(NSTimer *timer) {
+    _timer = [NSTimer timerWithTimeInterval:budget repeats:NO block:^(NSTimer *timer) {
         (void)timer;
         [weakSelf finish];
     }];

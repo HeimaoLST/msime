@@ -34,12 +34,29 @@ int main() {
     tracker.push("）");
   assert(tracker.size() == PairedPunctuationTracker::kMaxDepth);
 
-  assert(paired_closing_for_key('"', false) == "”");
-  assert(paired_closing_for_key('\'', false) == "’");
-  assert(paired_closing_for_key(')', false) == "）");
-  assert(paired_closing_for_key('}', false) == "}");
-  assert(paired_closing_for_key('}', true) == "｝");
-  assert(!paired_closing_for_key(',', false));
+  tracker.clear();
+  assert(paired_closing_for_key('"', false, tracker) == "”");
+  assert(paired_closing_for_key('\'', false, tracker) == "’");
+  assert(paired_closing_for_key(')', false, tracker) == "）");
+  assert(paired_closing_for_key(']', false, tracker) == "】");
+  assert(paired_closing_for_key('}', false, tracker) == "}");
+  assert(paired_closing_for_key('}', true, tracker) == "｝");
+  assert(!paired_closing_for_key(',', false, tracker));
+  // 直角引号与空心括号：栈顶是这个键的另一组后半个时跨过它。
+  tracker.push("」");
+  assert(paired_closing_for_key('\'', false, tracker) == "」");
+  assert(paired_closing_for_key('"', false, tracker) == "”");
+  tracker.push("』");
+  assert(paired_closing_for_key('"', false, tracker) == "』");
+  tracker.push("〗");
+  assert(paired_closing_for_key(']', false, tracker) == "〗");
+  assert(tracker.consume("〗", "〗", true));
+  assert(tracker.consume(*paired_closing_for_key('"', false, tracker), "』", true));
+  assert(tracker.consume(*paired_closing_for_key('\'', false, tracker), "」", true));
+  assert(tracker.empty());
+  for (std::size_t index = 0; index < PairedPunctuationTracker::kMaxDepth + 3;
+       ++index)
+    tracker.push("）");
   assert(paired_punctuation_excluded_client("/usr/bin/scalc"));
   assert(paired_punctuation_excluded_client("scalc.bin"));
   assert(paired_punctuation_excluded_client("GNUMERIC"));
@@ -79,6 +96,18 @@ int main() {
     assert(normalize_punctuation_pair(text, Mode::DoubleQuote) && text == "“”");
     text = "‘";
     assert(normalize_punctuation_pair(text, Mode::SingleQuote) && text == "‘’");
+    // 直角引号：引擎写出哪一组的哪一半，就补成那一组完整的一对，并能从文本取回后半个。
+    text = "「";
+    assert(normalize_punctuation_pair(text, Mode::SingleQuote) && text == "「」");
+    assert(paired_closing_from_text(text) == std::optional<std::string>("」"));
+    text = "你好』";
+    assert(normalize_punctuation_pair(text, Mode::DoubleQuote) && text == "你好『』");
+    assert(paired_closing_from_text(text) == std::optional<std::string>("』"));
+    text = "」";
+    assert(!normalize_punctuation_pair(text, Mode::DoubleQuote) && text == "」");
+    text = "〖";
+    assert(normalize_punctuation_pair(text, Mode::Bracket) && text == "〖〗");
+    assert(paired_closing_from_text(text) == std::optional<std::string>("〗"));
     text = "(";
     assert(!normalize_punctuation_pair(text, Mode::Bracket) && text == "(");
     assert(!normalize_punctuation_pair(text, Mode::Unpaired));

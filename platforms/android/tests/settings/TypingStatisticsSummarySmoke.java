@@ -1,4 +1,5 @@
 import app.msime.android.NumberPolicy;
+import app.msime.android.TypingStatisticsModel;
 import app.msime.android.TypingStatisticsSummary;
 import app.msime.android.TypingStatisticsSummary.Achievement;
 import app.msime.android.TypingStatisticsSummary.PeakWindow;
@@ -99,6 +100,19 @@ public final class TypingStatisticsSummarySmoke {
         TypingStatisticsSummary summary = new TypingStatisticsSummary(null, null, null,
             List.of(first, million, streak));
         check(summary.unlockedCount() == 1, "unlocked count");
+        // 午夜后重画或刷新失败时，保留的摘要仍决定热力图窗口，不再读取系统日期。
+        TypingStatisticsModel keyModel = new TypingStatisticsModel(true, 0, "forever",
+            Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(
+                "2026-06-10", Map.of("KeyA", 100L),
+                "2026-06-11", Map.of("KeyA", 2L),
+                "2026-06-17", Map.of("KeyA", 3L, "Backspace", 1L),
+                "2026-06-18", Map.of("KeyA", 9L)));
+        check(keyModel.keysForDays(List.of("2026-06-11", "2026-06-12", "2026-06-13", "2026-06-14", "2026-06-15", "2026-06-16", "2026-06-17"))
+            .equals(Map.of("KeyA", 5L, "Backspace", 1L)),
+            "retained summary excludes the new day and includes the old window start");
+        check(keyModel.keysForDays(List.of("2026-06-12", "2026-06-13", "2026-06-14", "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18"))
+            .equals(Map.of("KeyA", 12L, "Backspace", 1L)),
+            "a refreshed summary advances the heatmap window");
         System.out.println("TypingStatisticsSummarySmoke passed");
     }
 

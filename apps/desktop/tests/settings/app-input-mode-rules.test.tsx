@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, expect, test, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { StrictMode } from "react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { SettingsPage, type SettingsClient, type Snapshot } from "@msime/ui";
 import {
   appInputModeRuleProblem,
@@ -9,6 +10,7 @@ import {
 } from "../../../../packages/ui/src/settings/app-input-mode-rules";
 import { selectSettingsTab, saveSettingsNow, settingsFormReady } from "../support/settings-form";
 import { testHost } from "../support/host";
+import { AppInputModeRulesSection } from "../../../../packages/ui/src/settings/app-input-mode-rules-section";
 
 afterEach(cleanup);
 
@@ -243,4 +245,106 @@ test("a Windows program picked from the dialog becomes its lower-cased file name
   );
   // Windows 的规则就是程序文件名，不向宿主查名称。
   expect(applicationNames).not.toHaveBeenCalled();
+});
+
+function nameRequest() {
+  let resolve!: (names: Record<string, string>) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<Record<string, string>>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+const firstApp = "org.example.first";
+const secondApp = "org.example.second";
+
+test.each(["成功", "失败"])("应用名称查询函数更换后，旧查询%s不覆盖新名称", async (outcome) => {
+  const old = nameRequest();
+  const current = nameRequest();
+  const oldNames = vi.fn(() => old.promise);
+  const currentNames = vi.fn(() => current.promise);
+  const props = { windows: false, value: { [firstApp]: "english" as const }, onChange: vi.fn() };
+  const view = render(<AppInputModeRulesSection {...props} applicationNames={oldNames} />);
+  expect(oldNames).toHaveBeenCalledWith([firstApp]);
+  view.rerender(<AppInputModeRulesSection {...props} applicationNames={currentNames} />);
+  expect(currentNames).toHaveBeenCalledWith([firstApp]);
+  await act(async () => {
+    if (outcome === "成功") old.resolve({ [firstApp]: "旧应用" });
+    else old.reject(new Error("synthetic old name query"));
+  });
+  expect(screen.queryByLabelText("旧应用 的输入模式")).toBeNull();
+  await act(async () => current.resolve({ [firstApp]: "当前应用" }));
+  expect(screen.getByLabelText("当前应用 的输入模式")).toHaveProperty("value", "english");
+  expect(currentNames).toHaveBeenCalledTimes(1);
+});
+
+test.each(["成功", "失败"])("规则标识变化后，旧名称查询%s不缓存已经离开的应用", async (outcome) => {
+  const old = nameRequest();
+  const current = nameRequest();
+  const applicationNames = vi
+    .fn()
+    .mockReturnValueOnce(old.promise)
+    .mockReturnValueOnce(current.promise)
+    .mockResolvedValueOnce({ [firstApp]: "重新查询的应用" });
+  const tree = (id: string) => (
+    <AppInputModeRulesSection
+      windows={false}
+      value={{ [id]: "chinese" }}
+      applicationNames={applicationNames}
+      onChange={vi.fn()}
+    />
+  );
+  const view = render(tree(firstApp));
+  view.rerender(tree(secondApp));
+  await act(async () => {
+    if (outcome === "成功") old.resolve({ [firstApp]: "旧应用" });
+    else old.reject(new Error("synthetic old batch"));
+  });
+  await act(async () => current.resolve({ [secondApp]: "第二个应用" }));
+  expect(screen.getByLabelText("第二个应用 的输入模式")).toBeTruthy();
+  view.rerender(tree(firstApp));
+  expect(await screen.findByLabelText("重新查询的应用 的输入模式")).toBeTruthy();
+  expect(applicationNames.mock.calls).toEqual([[[firstApp]], [[secondApp]], [[firstApp]]]);
+});
+
+test.each(["缺失", "失败"])("应用名称%s时缓存标识回退，改模式不重复查询", async (outcome) => {
+  const applicationNames =
+    outcome === "缺失"
+      ? vi.fn(async () => ({}))
+      : vi.fn(async () => {
+          throw new Error("synthetic name lookup failure");
+        });
+  const props = { windows: false, applicationNames, onChange: vi.fn() };
+  const view = render(<AppInputModeRulesSection {...props} value={{ [firstApp]: "chinese" }} />);
+  await waitFor(() => expect(applicationNames).toHaveBeenCalledTimes(1));
+  await act(async () => undefined);
+  view.rerender(<AppInputModeRulesSection {...props} value={{ [firstApp]: "english" }} />);
+  expect(screen.getByLabelText(`${firstApp} 的输入模式`)).toHaveProperty("value", "english");
+  expect(applicationNames).toHaveBeenCalledTimes(1);
+});
+
+test("StrictMode 重放后，只接受当前应用名称查询", async () => {
+  const old = nameRequest();
+  const current = nameRequest();
+  const applicationNames = vi
+    .fn()
+    .mockReturnValueOnce(old.promise)
+    .mockReturnValueOnce(current.promise);
+  render(
+    <StrictMode>
+      <AppInputModeRulesSection
+        windows={false}
+        value={{ [firstApp]: "chinese" }}
+        applicationNames={applicationNames}
+        onChange={vi.fn()}
+      />
+    </StrictMode>,
+  );
+  expect(applicationNames).toHaveBeenCalledTimes(2);
+  await act(async () => old.resolve({ [firstApp]: "重放前的应用" }));
+  expect(screen.queryByLabelText("重放前的应用 的输入模式")).toBeNull();
+  await act(async () => current.resolve({ [firstApp]: "重放后的应用" }));
+  expect(screen.getByLabelText("重放后的应用 的输入模式")).toBeTruthy();
 });

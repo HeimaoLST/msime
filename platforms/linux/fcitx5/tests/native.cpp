@@ -74,6 +74,17 @@ void autocorrectMarker() {
           "marker comes before the cloud badge");
   require(shown(row(Json{{"text", "汉语"}, {"corrected", true}}, true)) == "漢語*",
           "marker follows the traditional-converted word");
+  // 候选行按会话的繁体变体转换；繁体关着时变体不起作用。
+  const auto variantRow = [](bool traditional, uint32_t variant) {
+    return FcitxCandidate(nullptr,
+                          Json{{"text", "软件里面"}, {"id", Json{{"session", 1}, {"generation", 1}, {"index", 0}}}},
+                          traditional, false, std::string(), variant);
+  };
+  require(shown(variantRow(true, 0)) == "軟件裏面", "s2t row");
+  require(shown(variantRow(true, 1)) == "軟件裡面", "s2tw row uses Taiwan glyphs");
+  require(shown(variantRow(true, 2)) == "軟體裡面", "s2twp row uses Taiwan phrases");
+  require(shown(variantRow(false, 2)) == "软件里面", "variant is ignored while traditional output is off");
+  require(variantRow(true, 2).text() == "软件里面", "the selected text stays the Engine's");
 }
 // A Hanja row's 훈음 is drawn as the row's secondary gloss: its own italic, uncommittable segment where a translation goes, shown whatever the annotation and translation settings say, with a translation after it. Any other annotation stays plain text gated by the annotation setting. Runs before the resource fixture.
 void koreanHanjaGlossRow() {
@@ -3052,6 +3063,39 @@ int main(int argc, char **argv) {
     require(key(FcitxKey_apostrophe), "ASCII apostrophe enters punctuation routing");
     // Paired completion is on by default (#579), so the opening quote arrives with its closing mark, as on Windows.
     require(ic.committed == beforePunctuation + "，‘’", "apostrophe follows shared punctuation policy");
+    {
+      // 引号改成直角、方头括号改成空心：存进偏好、宿主读回后 View 报告新样式，' 补出「」，[ 补出〖〗。
+      const auto saveStyles = [&](const Json &quote, const Json &bracket) {
+        auto snapshot = response(msime_client_load_preferences(
+            reinterpret_cast<const uint8_t *>(preferenceDirectory.data()), preferenceDirectory.size()));
+        const auto revision = snapshot.at("revision").get<uint64_t>();
+        snapshot["preferences"]["quote_style"] = quote;
+        snapshot["preferences"]["bracket_style"] = bracket;
+        snapshot["revision"] = revision + 1;
+        const auto document = snapshot.dump();
+        const auto saved = response(msime_client_save_preferences(
+            reinterpret_cast<const uint8_t *>(preferenceDirectory.data()), preferenceDirectory.size(),
+            revision, reinterpret_cast<const uint8_t *>(document.data()), document.size()));
+        require(saved.value("revision", uint64_t{}) > revision, "punctuation styles saved");
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        const auto marks = [&] { return state->view_.value("punctuation_marks", Json::object()); };
+        while (marks().value("quotes", std::string()) != quote.get<std::string>() &&
+               std::chrono::steady_clock::now() < deadline) {
+          state->refreshPreferences();
+          std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return marks() == Json{{"quotes", quote}, {"brackets", bracket}};
+      };
+      require(saveStyles("corner", "hollow"), "the view reports corner quotes and hollow brackets");
+      const auto beforeCorner = ic.committed;
+      ic.surroundingText().setText("A", 1, 1);
+      require(key(FcitxKey_apostrophe) && ic.committed == beforeCorner + "「」",
+              "apostrophe pairs corner quotes");
+      ic.surroundingText().setText("A", 1, 1);
+      require(key(FcitxKey_bracketleft) && ic.committed == beforeCorner + "「」〖〗",
+              "left bracket pairs hollow brackets");
+      require(saveStyles("curly", "solid"), "punctuation styles restored");
+    }
     // Voice input replaces an open composition, as on Windows and in the IBus host, so this runs after the checks that need the refocus composition and brings a composition of its own.
     require(key(FcitxKey_n) && key(FcitxKey_i) &&
                 ic.inputPanel().clientPreedit().toString() == "ni",

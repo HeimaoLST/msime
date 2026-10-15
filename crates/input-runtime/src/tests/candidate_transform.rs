@@ -773,3 +773,6 @@ fn a_suspended_transform_neither_runs_nor_replays() {
     assert_eq!(harness.calls(), 2);
     assert_eq!(harness.shown(), ["丁", "乙", "甲", "戊"]);
 }
+
+#[path = "candidate_transform/allocation_tests.rs"]
+mod allocation_tests;

@@ -198,15 +198,23 @@ stagger_ms = 14
                 "Vertical candidate highlighting did not fill the final card width.");
         Require(NSMaxX(wideButton.frame) >= cardWidth - contentInset - 0.5,
                 "Vertical candidate row did not reach the card's content edge.");
+        panel.caretRect = NSMakeRect(300, 300, 1, 20);
+        [panel show:kIMKLocateCandidatesBelowHint];
         [panel selectCandidateWithIdentifier:1];
         NSButton *selectedWideButton = nil;
         for (NSView *view in panel.window.contentView.subviews)
             if ([view isKindOfClass:NSButton.class] && view.tag == 1)
                 selectedWideButton = (NSButton *)view;
         Require(selectedWideButton != nil, "The second wide-card candidate was not rendered.");
-        if (!NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion)
-            Require([selectedWideButton.layer animationForKey:@"msime-candidate-selection"] != nil,
-                    "The v2 selection animation did not reach the native candidate button.");
+        Require([selectedWideButton.layer animationForKey:@"msime-candidate-selection"] == nil,
+                "切换候选不应播放皮肤选中动画。");
+        NSPanel *window = [panel valueForKey:@"window"];
+        Require(window.alphaValue == 1.0 && window.animationBehavior == NSWindowAnimationBehaviorNone,
+                "候选窗应立即以不透明状态显示。");
+        [panel hide];
+        Require(!panel.isVisible, "隐藏候选窗不应等待退出动画。");
+        [panel show:kIMKLocateCandidatesBelowHint];
+        Require(panel.isVisible && window.alphaValue == 1.0, "快速重新显示不应留下淡出状态。");
         Require(MetasequoiaResolveStoredTheme(NO, YES).candidateSkin == "wide-card" &&
                     MetasequoiaResolveStoredTheme(NO, NO).candidateSkin.empty(),
                 "A vertical-only package was not drawn in exactly the vertical layout.");

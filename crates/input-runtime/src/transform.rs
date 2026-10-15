@@ -35,6 +35,7 @@ mod desktop {
     use crate::*;
     use msime_engine::ordering::apply_order;
     use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
 
     /// 交给插件的窗口最多几行。
     pub const MAX_TRANSFORM_ROWS: usize = 20;
@@ -109,28 +110,140 @@ mod desktop {
         occurrence: usize,
     }
 
+    #[derive(Default)]
+    struct ArrangementBuffers {
+        hidden: Vec<bool>,
+        free: Vec<(usize, usize)>,
+        order: Vec<usize>,
+        tail: Vec<usize>,
+    }
+
+    #[derive(Default)]
+    struct OccurrenceSlot {
+        hash: u64,
+        representative: usize,
+        count: usize,
+        generation: u64,
+    }
+
+    #[derive(Default)]
+    struct OccurrenceBuffers {
+        seats: Vec<usize>,
+        slots: Vec<OccurrenceSlot>,
+        generation: u64,
+    }
+
     impl Identity {
-        fn all(snapshot: &EngineSnapshot, engine_order: &[usize]) -> Vec<Self> {
+        fn fill_occurrences(
+            snapshot: &EngineSnapshot,
+            engine_order: &[usize],
+            buffers: &mut OccurrenceBuffers,
+            occurrences: &mut Vec<usize>,
+        ) {
             let count = snapshot.candidates.len();
-            let mut seats: Vec<usize> = (0..count).collect();
-            seats.sort_unstable_by_key(|seat| engine_order.get(*seat).copied().unwrap_or(*seat));
-            let mut occurrences: HashMap<(&str, u8, &str), usize> = HashMap::new();
-            let mut identities = vec![None; count];
-            for seat in seats {
+            buffers.seats.clear();
+            buffers.seats.extend(0..count);
+            buffers
+                .seats
+                .sort_unstable_by_key(|seat| engine_order.get(*seat).copied().unwrap_or(*seat));
+            occurrences.clear();
+            occurrences.resize(count, 0);
+
+            let required_slots = count.saturating_mul(2).max(1);
+            if buffers.slots.len() < required_slots {
+                buffers
+                    .slots
+                    .resize_with(required_slots.next_power_of_two(), Default::default);
+            }
+            let next_generation = buffers.generation.wrapping_add(1);
+            if next_generation == 0 {
+                for slot in &mut buffers.slots {
+                    slot.generation = 0;
+                }
+                buffers.generation = 1;
+            } else {
+                buffers.generation = next_generation;
+            }
+            let generation = buffers.generation;
+            for &seat in &buffers.seats {
                 let text = snapshot.candidates[seat].as_str();
                 let source = snapshot.candidate_sources[seat];
                 let code = snapshot.candidate_codes[seat].as_str();
-                let occurrence = occurrences.entry((text, source, code)).or_default();
-                identities[seat] = Some(Self {
-                    text: text.to_owned(),
-                    source,
-                    code: code.to_owned(),
-                    occurrence: *occurrence,
-                });
-                *occurrence += 1;
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                text.hash(&mut hasher);
+                source.hash(&mut hasher);
+                code.hash(&mut hasher);
+                let hash = hasher.finish();
+                let mut slot = (hash as usize) & (buffers.slots.len() - 1);
+                loop {
+                    let entry = &mut buffers.slots[slot];
+                    if entry.generation != generation {
+                        *entry = OccurrenceSlot {
+                            hash,
+                            representative: seat,
+                            count: 1,
+                            generation,
+                        };
+                        break;
+                    }
+                    if entry.hash == hash
+                        && snapshot.candidates[entry.representative] == snapshot.candidates[seat]
+                        && snapshot.candidate_sources[entry.representative]
+                            == snapshot.candidate_sources[seat]
+                        && snapshot.candidate_codes[entry.representative]
+                            == snapshot.candidate_codes[seat]
+                    {
+                        occurrences[seat] = entry.count;
+                        entry.count += 1;
+                        break;
+                    }
+                    slot = (slot + 1) & (buffers.slots.len() - 1);
+                }
             }
-            identities.into_iter().map(Option::unwrap).collect()
         }
+
+        fn at(snapshot: &EngineSnapshot, seat: usize, occurrence: usize) -> Self {
+            Self {
+                text: snapshot.candidates[seat].clone(),
+                source: snapshot.candidate_sources[seat],
+                code: snapshot.candidate_codes[seat].clone(),
+                occurrence,
+            }
+        }
+
+        fn matches(&self, snapshot: &EngineSnapshot, seat: usize, occurrence: usize) -> bool {
+            self.occurrence == occurrence
+                && self.source == snapshot.candidate_sources[seat]
+                && self.text == snapshot.candidates[seat]
+                && self.code == snapshot.candidate_codes[seat]
+        }
+    }
+
+    fn annotation_text(title: &str, note: &str) -> Option<String> {
+        if title.is_empty() && note.is_empty() {
+            return None;
+        }
+        let separator = !title.is_empty() && !note.is_empty();
+        // 一个 UTF-16 码元最多对应三个 UTF-8 字节，32 码元的结果不会超过此容量。
+        let capacity = title
+            .len()
+            .saturating_add(note.len())
+            .saturating_add(usize::from(separator))
+            .min(MAX_ANNOTATION_UTF16 * 3);
+        let mut text = String::with_capacity(capacity);
+        let mut units = 0;
+        for character in title
+            .chars()
+            .chain(separator.then_some(' '))
+            .chain(note.chars())
+        {
+            units += character.len_utf16();
+            if units > MAX_ANNOTATION_UTF16 {
+                break;
+            }
+            text.push(character);
+        }
+        Some(text)
     }
 
     /// 挂在 runtime 上的插件状态。
@@ -145,8 +258,10 @@ mod desktop {
         order: Vec<Identity>,
         hidden: Vec<Identity>,
         annotations: Vec<(Identity, String)>,
-        /// 与当前缓存座位平行；排列后仍能把注释对应回原始候选。
-        identities: Vec<Identity>,
+        /// 与当前缓存座位平行的同组出现序号；文本和编码借用快照，仅被点名的行保存完整身份。
+        occurrences: Vec<usize>,
+        /// 构造同组出现序号时复用的座位排序和开放寻址表。
+        occurrence_buffers: OccurrenceBuffers,
         /// 降到末尾、不显示的行数。
         hidden_rows: usize,
         /// 宿主暂停了候选变换：不运行、不重放。插件指令同样不调用。
@@ -155,6 +270,10 @@ mod desktop {
         commands: Option<Box<dyn CommandProvider>>,
         /// 最近一次写进引擎的插件行的注释，按行文本；同文的行引擎只留第一行，这里也只记第一条。
         command_notes: HashMap<String, String>,
+        /// 插件指令提供者的回包行，调用之间清空并复用容量。
+        command_rows: Vec<(String, String)>,
+        /// 候选排列的工作区，旁路重放之间清空并复用容量。
+        arrangement: ArrangementBuffers,
     }
 
     impl PluginState {
@@ -197,18 +316,27 @@ mod desktop {
             let Some(query) = self.engine.plugin_command_query() else {
                 return;
             };
-            let mut rows = Vec::new();
-            if provider.provide(&query.trigger, &query.argument, &mut rows)
-                == CommandOutcome::NotRun
-            {
+            self.plugins.command_rows.clear();
+            let outcome = provider.provide(
+                &query.trigger,
+                &query.argument,
+                &mut self.plugins.command_rows,
+            );
+            if outcome == CommandOutcome::NotRun {
+                self.plugins.command_rows.clear();
                 return;
             }
-            if self.engine.apply_plugin_command_rows(&query, &rows) {
+            if self
+                .engine
+                .apply_plugin_command_rows(&query, &self.plugins.command_rows)
+            {
                 let notes = &mut self.plugins.command_notes;
                 notes.clear();
-                for (text, note) in rows {
+                for (text, note) in self.plugins.command_rows.drain(..) {
                     notes.entry(text).or_insert(note);
                 }
+            } else {
+                self.plugins.command_rows.clear();
             }
         }
 
@@ -227,21 +355,7 @@ mod desktop {
                 .map(String::as_str)
                 .filter(|note| !note.chars().any(char::is_control))
                 .unwrap_or_default();
-            let joined = match (title.is_empty(), note.is_empty()) {
-                (true, true) => return None,
-                (false, true) => title.to_owned(),
-                (true, false) => note.to_owned(),
-                (false, false) => format!("{title} {note}"),
-            };
-            let mut units = 0;
-            let cut: String = joined
-                .chars()
-                .take_while(|character| {
-                    units += character.len_utf16();
-                    units <= MAX_ANNOTATION_UTF16
-                })
-                .collect();
-            Some(cut)
+            annotation_text(title, note)
         }
 
         /// 暂停或恢复候选变换。暂停期间派发里的 refresh 和展开不运行插件，旁路调用也不重放，记下的操作在下一次排列时清掉，列表保持内置排序；恢复之后从下一次派发起重新运行。宿主在上屏只能观察时暂停，见模块说明。
@@ -303,17 +417,14 @@ mod desktop {
         pub(crate) fn transform_candidates(&mut self) -> bool {
             let hidden_before = self.plugins.hidden_rows;
             let ready = self.transform_ready();
-            if ready && (self.plugins.transform.is_some() || self.plugins.has_recorded()) {
-                self.plugins.identities = Identity::all(&self.cached, &self.engine_order);
-            } else {
-                self.plugins.identities.clear();
-            }
             let mut annotations_changed = false;
             // 暂停时和没有候选时一样把记下的操作清掉：恢复之后的旁路调用不能把暂停之前的操作重放到新列表上。
             if self.cached.candidates.is_empty() || self.plugins.suspended {
+                self.plugins.occurrences.clear();
                 annotations_changed = !self.plugins.annotations.is_empty();
                 self.plugins.clear_recorded();
             } else if self.plugins.live {
+                self.plugins.occurrences.clear();
                 let previous = std::mem::take(&mut self.plugins.annotations);
                 self.plugins.order.clear();
                 self.plugins.hidden.clear();
@@ -321,6 +432,15 @@ mod desktop {
                     self.run_transform();
                 }
                 annotations_changed = previous != self.plugins.annotations;
+            } else if ready && self.plugins.has_recorded() {
+                Identity::fill_occurrences(
+                    &self.cached,
+                    &self.engine_order,
+                    &mut self.plugins.occurrence_buffers,
+                    &mut self.plugins.occurrences,
+                );
+            } else {
+                self.plugins.occurrences.clear();
             }
             self.arrange_candidates(ready);
             // 高亮只能落在可见前缀里：派发里的展开会重新运行插件，插件这次可以多藏几行，而翻页填满当前页时高亮原地不动；落进被隐藏的末尾时，空格、结束组字和标点按高亮交给引擎的就是一行被隐藏的候选。
@@ -351,39 +471,64 @@ mod desktop {
             self.plugins.ops.clear();
             transform.transform(window, &snapshot.local_mode, &mut self.plugins.ops);
             let plugins = &mut self.plugins;
+            // 没有操作时不建立全列表元数据；插件仍收到原来的窗口并照常运行。
+            if !plugins.ops.iter().any(|ops| {
+                !ops.order.is_empty() || !ops.hidden.is_empty() || !ops.annotations.is_empty()
+            }) {
+                return;
+            }
+            Identity::fill_occurrences(
+                snapshot,
+                &self.engine_order,
+                &mut plugins.occurrence_buffers,
+                &mut plugins.occurrences,
+            );
             // 重排：后面的插件优先，所以倒着收，同一行只收第一次。
             for ops in plugins.ops.iter().rev() {
-                for id in ops
-                    .order
-                    .iter()
-                    .filter_map(|index| plugins.identities.get(*index as usize))
-                {
-                    if !plugins.order.contains(id) {
-                        plugins.order.push(id.clone());
+                for &index in &ops.order {
+                    let seat = index as usize;
+                    let Some(&occurrence) = plugins.occurrences.get(seat) else {
+                        continue;
+                    };
+                    if !plugins
+                        .order
+                        .iter()
+                        .any(|id| id.matches(snapshot, seat, occurrence))
+                    {
+                        plugins.order.push(Identity::at(snapshot, seat, occurrence));
                     }
                 }
             }
             for ops in &plugins.ops {
-                for id in ops
-                    .hidden
-                    .iter()
-                    .filter_map(|index| plugins.identities.get(*index as usize))
-                {
-                    if !plugins.hidden.contains(id) {
-                        plugins.hidden.push(id.clone());
+                for &index in &ops.hidden {
+                    let seat = index as usize;
+                    let Some(&occurrence) = plugins.occurrences.get(seat) else {
+                        continue;
+                    };
+                    if !plugins
+                        .hidden
+                        .iter()
+                        .any(|id| id.matches(snapshot, seat, occurrence))
+                    {
+                        plugins
+                            .hidden
+                            .push(Identity::at(snapshot, seat, occurrence));
                     }
                 }
                 for (index, text) in &ops.annotations {
-                    let Some(id) = plugins.identities.get(*index as usize) else {
+                    let seat = *index as usize;
+                    let Some(&occurrence) = plugins.occurrences.get(seat) else {
                         continue;
                     };
                     match plugins
                         .annotations
                         .iter_mut()
-                        .find(|(existing, _)| existing == id)
+                        .find(|(id, _)| id.matches(snapshot, seat, occurrence))
                     {
                         Some((_, annotation)) => annotation.clone_from(text),
-                        None => plugins.annotations.push((id.clone(), text.clone())),
+                        None => plugins
+                            .annotations
+                            .push((Identity::at(snapshot, seat, occurrence), text.clone())),
                     }
                 }
             }
@@ -411,56 +556,72 @@ mod desktop {
             };
             let listed = |list: &[Identity], seat: usize| {
                 list.iter()
-                    .position(|id| id == &self.plugins.identities[seat])
+                    .position(|id| id.matches(snapshot, seat, self.plugins.occurrences[seat]))
             };
-            let hidden: Vec<bool> = (0..count)
-                .map(|seat| {
-                    !locked(seat)
-                        && engine_index(seat) != 0
-                        && listed(&self.plugins.hidden, seat).is_some()
-                })
-                .collect();
-            let hidden_rows = hidden.iter().filter(|hidden| **hidden).count();
+            let mut buffers = std::mem::take(&mut self.plugins.arrangement);
+            buffers.hidden.clear();
+            buffers.hidden.extend((0..count).map(|seat| {
+                !locked(seat)
+                    && engine_index(seat) != 0
+                    && listed(&self.plugins.hidden, seat).is_some()
+            }));
+            let hidden_rows = buffers.hidden.iter().filter(|hidden| **hidden).count();
             let visible = count - hidden_rows;
             let stays = |seat: usize| seat < visible && locked(seat);
             // 不留在原座位上的可见行：点名的（锁定的行不认点名）按优先次序在前，其余按原来的座位。
-            let mut free: Vec<(usize, usize)> = (0..count)
-                .filter(|seat| !hidden[*seat] && !stays(*seat))
-                .map(|seat| {
-                    let rank = if locked(seat) {
-                        None
-                    } else {
-                        listed(&self.plugins.order, seat)
-                    };
-                    (rank.unwrap_or(usize::MAX), seat)
-                })
-                .collect();
-            free.sort_unstable();
-            let mut free = free.into_iter().map(|(_, seat)| seat);
-            let mut order = Vec::with_capacity(count);
+            buffers.free.clear();
+            buffers.free.extend(
+                (0..count)
+                    .filter(|seat| !buffers.hidden[*seat] && !stays(*seat))
+                    .map(|seat| {
+                        let rank = if locked(seat) {
+                            None
+                        } else {
+                            listed(&self.plugins.order, seat)
+                        };
+                        (rank.unwrap_or(usize::MAX), seat)
+                    }),
+            );
+            buffers.free.sort_unstable();
+            let mut free = buffers.free.iter().map(|(_, seat)| *seat);
+            buffers.order.clear();
+            buffers.order.reserve(count);
             for seat in 0..visible {
                 if stays(seat) {
-                    order.push(seat);
+                    buffers.order.push(seat);
                 } else if let Some(row) = free.next() {
-                    order.push(row);
+                    buffers.order.push(row);
                 }
             }
             // 隐藏的行按引擎原来的次序排：末尾里的位置变动（落定重排提上来一行隐藏行之类）不改变座位顺序，不会被当成可见行挪动过。
-            let mut tail: Vec<usize> = (0..count).filter(|seat| hidden[*seat]).collect();
-            tail.sort_unstable_by_key(|seat| engine_index(*seat));
-            order.extend(tail);
+            buffers.tail.clear();
+            buffers
+                .tail
+                .extend((0..count).filter(|seat| buffers.hidden[*seat]));
+            buffers
+                .tail
+                .sort_unstable_by_key(|seat| engine_index(*seat));
+            buffers.order.extend(buffers.tail.iter().copied());
             // 一个排列，否则什么都不动：缺一个或重一个下标都会悄悄丢掉候选。
-            debug_assert_eq!(order.len(), count);
-            if order.len() != count {
+            debug_assert_eq!(buffers.order.len(), count);
+            if buffers.order.len() != count {
                 self.plugins.hidden_rows = 0;
+                self.plugins.arrangement = buffers;
                 return;
             }
             self.plugins.hidden_rows = hidden_rows;
-            if order.iter().enumerate().all(|(seat, row)| seat == *row) {
+            if buffers
+                .order
+                .iter()
+                .enumerate()
+                .all(|(seat, row)| seat == *row)
+            {
+                self.plugins.arrangement = buffers;
                 return;
             }
-            self.apply_candidate_order(&order);
-            apply_order(&mut self.plugins.identities, &order);
+            self.apply_candidate_order(&buffers.order);
+            apply_order(&mut self.plugins.occurrences, &buffers.order);
+            self.plugins.arrangement = buffers;
         }
 
         /// `seat` 上可见的行的插件注释；没有、为空或者列表现在不做变换时为 `None`。插件指令行（来源 14）的注释是「标题 注释」，不经过候选变换。
@@ -477,14 +638,68 @@ mod desktop {
             {
                 return None;
             }
-            let identity = self.plugins.identities.get(seat)?;
+            let occurrence = *self.plugins.occurrences.get(seat)?;
             self.plugins
                 .annotations
                 .iter()
-                .find(|(id, _)| id == identity)
+                .find(|(id, _)| id.matches(&self.cached, seat, occurrence))
                 .map(|(_, annotation)| annotation)
                 .filter(|annotation| !annotation.is_empty())
                 .cloned()
+        }
+    }
+    #[cfg(test)]
+    mod annotation_tests {
+        use super::*;
+        use crate::tests::allocations;
+
+        // 冻结原来的完整拼接和字符收集，独立对照空值、分隔空格及 UTF-16 边界。
+        fn frozen_annotation(title: &str, note: &str) -> Option<String> {
+            let joined = match (title.is_empty(), note.is_empty()) {
+                (true, true) => return None,
+                (false, true) => title.to_owned(),
+                (true, false) => note.to_owned(),
+                (false, false) => format!("{title} {note}"),
+            };
+            let mut units = 0;
+            Some(
+                joined
+                    .chars()
+                    .take_while(|character| {
+                        units += character.len_utf16();
+                        units <= MAX_ANNOTATION_UTF16
+                    })
+                    .collect(),
+            )
+        }
+
+        #[test]
+        fn direct_annotation_preserves_the_frozen_text_and_uses_one_buffer() {
+            let values = [
+                "".to_owned(),
+                "UUID".to_owned(),
+                "合成".to_owned(),
+                "😀".repeat(8),
+                "a".repeat(31),
+                "注".repeat(32),
+                "😀".repeat(17),
+                "混😀合".repeat(12),
+            ];
+            for title in &values {
+                for note in &values {
+                    let (expected, old_allocations, old_bytes) =
+                        allocations::count_bytes(|| frozen_annotation(title, note));
+                    let (actual, new_allocations, new_bytes) =
+                        allocations::count_bytes(|| annotation_text(title, note));
+                    assert_eq!(actual, expected, "title={title:?}, note={note:?}");
+                    assert_eq!(new_allocations, usize::from(actual.is_some()));
+                    assert!(new_bytes <= MAX_ANNOTATION_UTF16 * 3);
+                    if actual.is_some() {
+                        assert!(new_allocations < old_allocations);
+                        assert!(new_bytes < old_bytes);
+                    }
+                }
+            }
         }
     }
 }

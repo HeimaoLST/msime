@@ -77,13 +77,18 @@ class PairedPunctuationTracker {
   std::vector<std::string> closings_;
 };
 
-inline std::optional<std::string> paired_closing_for_key(char key,
-                                                          bool fullwidth) {
+// 这个键能跨过的后半个。引号和方头括号有两组字（quote_style、bracket_style），样式可能在一对还开着时换掉，所以按 tracker 栈顶挑：栈顶是其中之一就给它，否则给缺省那个，consume 会照旧清空栈。
+inline std::optional<std::string> paired_closing_for_key(
+    char key, bool fullwidth, const PairedPunctuationTracker &tracker) {
+  const auto either = [&tracker](const char *first,
+                                 const char *second) -> std::string {
+    return tracker.matches(second) ? second : first;
+  };
   switch (key) {
-    case '"': return std::string("”");
-    case '\'': return std::string("’");
+    case '"': return either("”", "』");
+    case '\'': return either("’", "」");
     case ')': return std::string("）");
-    case ']': return std::string("】");
+    case ']': return either("】", "〗");
     case '}': return fullwidth ? std::string("｝") : std::string("}");
     case '>': return std::string("〉");
     default: return std::nullopt;
@@ -94,6 +99,7 @@ inline const char *paired_punctuation_closing(std::string_view text) {
   for (const auto &[opening, closing] : {
            std::pair<std::string_view, const char *> {"（", "）"},
            {"【", "】"},
+           {"〖", "〗"},
            {"《", "》"},
            {"〈", "〉"}}) {
     if (text.size() >= opening.size() &&
@@ -132,18 +138,23 @@ inline bool normalize_punctuation_pair(std::string &text, PunctuationPairMode mo
     }
     return false;
   }
-  const std::string_view opening =
-      mode == PunctuationPairMode::DoubleQuote ? "“" : "‘";
-  const std::string_view closing =
-      mode == PunctuationPairMode::DoubleQuote ? "”" : "’";
-  for (const auto suffix : {opening, closing}) {
-    if (text.size() < suffix.size() ||
-        text.compare(text.size() - suffix.size(), suffix.size(), suffix) != 0)
-      continue;
-    text.erase(text.size() - suffix.size());
-    text += opening;
-    text += closing;
-    return true;
+  // 引擎按样式写出弯引号或直角引号的某一半；文本末尾是哪一组就补哪一组。
+  const bool double_quote = mode == PunctuationPairMode::DoubleQuote;
+  const std::pair<std::string_view, std::string_view> groups[] = {
+      double_quote ? std::pair<std::string_view, std::string_view>{"“", "”"}
+                   : std::pair<std::string_view, std::string_view>{"‘", "’"},
+      double_quote ? std::pair<std::string_view, std::string_view>{"『", "』"}
+                   : std::pair<std::string_view, std::string_view>{"「", "」"}};
+  for (const auto &[opening, closing] : groups) {
+    for (const auto suffix : {opening, closing}) {
+      if (text.size() < suffix.size() ||
+          text.compare(text.size() - suffix.size(), suffix.size(), suffix) != 0)
+        continue;
+      text.erase(text.size() - suffix.size());
+      text += opening;
+      text += closing;
+      return true;
+    }
   }
   return false;
 }
@@ -151,7 +162,9 @@ inline std::optional<std::string> paired_closing_from_text(std::string_view text
   for (const auto closing : {std::string_view("）"), std::string_view("】"),
                              std::string_view("》"), std::string_view("〉"),
                              std::string_view("｝"), std::string_view("}"),
-                             std::string_view("”"), std::string_view("’")}) {
+                             std::string_view("”"), std::string_view("’"),
+                             std::string_view("〗"), std::string_view("』"),
+                             std::string_view("」")}) {
     if (text.size() >= closing.size() &&
         text.compare(text.size() - closing.size(), closing.size(), closing) ==
             0)

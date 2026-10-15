@@ -58,6 +58,7 @@ import { HitOffset, KeyboardGeometry } from './KeyboardGeometry';
 import { NineKeyLayout, NineKey } from './input/NineKeyLayout';
 import { FourteenKey, FourteenKeyLayout } from './input/FourteenKeyLayout';
 import { LayerCharacterRoute, LayerKey, LayerKeyKind, NumberSymbolLayout } from './input/NumberSymbolLayout';
+import { ChineseSymbolFaces } from './input/ChineseSymbolFaces';
 import {
   NineKeyPanelBackspace, NineKeyPanelMode, NineKeyPanelPolicy, NineKeyStroke
 } from './input/NineKeyPanelPolicy';
@@ -446,12 +447,6 @@ const CLIPBOARD_NOT_PERMITTED: string =
 // 不说「已在设置中关闭」：API 12 起键盘读的是自己沙箱里那份偏好，设置页的开关传不过来（platforms/harmony/README.md「输入法扩展的独立沙箱」），设置页显示开着时这句话就是错的。开关因此放在面板里，见 enableClipboardHistory。
 const CLIPBOARD_HISTORY_OFF: string = '剪贴板历史未开启';
 
-const CHINESE_SYMBOL_FACES: Map<string, string> = new Map<string, string>([
-  [',', '，'], ['.', '。'], ['?', '？'], ['!', '！'], [';', '；'], [':', '：'],
-  ['\'', '‘'], ['"', '“'], ['\\', '、'], ['(', '（'], [')', '）'],
-  ['[', '【'], [']', '】'], ['<', '《'], ['>', '》']
-]);
-
 @Entry
 @Component
 struct KeyboardView {
@@ -481,6 +476,9 @@ struct KeyboardView {
   @State traditional: boolean = false;
   /** Chinese punctuation, mirrored from the session so the strip's pill and the panel's tile redraw when it flips. */
   @State chinesePunctuation: boolean = true;
+  /** View 的 `punctuation_marks`：引号与方头括号样式，符号键和 123 层的键面跟着它画。 */
+  @State cornerQuotes: boolean = false;
+  @State hollowBrackets: boolean = false;
   /** Fullwidth ASCII, mirrored from the session for the panel's 全 tile. */
   @State fullWidth: boolean = false;
   /** Candidate translations, mirrored from the session for the panel's 译 tile and the strip's 译 pill. */
@@ -851,6 +849,8 @@ struct KeyboardView {
       this.spellings = state.spellings;
       this.nineKeySingleCharacter = state.nineKeySingleCharacter;
       this.nineKeyStrokes = state.nineKeyStrokes;
+      this.cornerQuotes = state.cornerQuotes;
+      this.hollowBrackets = state.hollowBrackets;
       this.engineScheme = state.scheme;
       this.candidateListOpen = state.candidateListOpen;
       this.japanese = state.scheme === JAPANESE_SCHEME && !state.english
@@ -1135,7 +1135,7 @@ struct KeyboardView {
    * Zhuyin: a mark whose ASCII key is a Dachen phonetic or tone key would compose rather than be typed, so the conversion is finished and the mark typed after it, in Chinese while the punctuation switch says so.
    */
   private typeZhuyinMark(symbol: string): void {
-    const chinese: string | undefined = CHINESE_SYMBOL_FACES.get(symbol);
+    const chinese: string | undefined = ChineseSymbolFaces.face(symbol, this.cornerQuotes, this.hollowBrackets);
     KeyboardSession.shared.commitThenInsert(
       this.chinesePunctuation && chinese !== undefined ? chinese : symbol);
   }
@@ -2776,7 +2776,7 @@ struct KeyboardView {
 
   /** A symbol wears the face of what it will insert, which in Chinese is not the ASCII on the cap. */
   private symbolFace(symbol: string): string {
-    const chinese: string | undefined = CHINESE_SYMBOL_FACES.get(symbol);
+    const chinese: string | undefined = ChineseSymbolFaces.face(symbol, this.cornerQuotes, this.hollowBrackets);
     // 韩语、越南语和藏文的标点就是键帽上的 ASCII。
     return !this.english && !this.koreanFace() && !this.vietnameseFace() && !this.tibetanFace()
       && chinese !== undefined
@@ -9080,7 +9080,7 @@ struct KeyboardView {
   }
 
   private designLayerRows(): LayerKey[][] {
-    return NumberSymbolLayout.rows(this.moreSymbols, this.designLayerChinese());
+    return NumberSymbolLayout.rows(this.moreSymbols, this.designLayerChinese(), this.cornerQuotes);
   }
 
   /** 字符键输入它显示的内容；哪些键仍走符号行路径见 `NumberSymbolLayout.route`。 */

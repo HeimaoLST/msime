@@ -17,51 +17,12 @@ use msime_host_api::{
     msime_client_string_free,
 };
 use msime_input_runtime::{DispatchFacts, SelectionFact, SelectionHow, SelectionOutcome};
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::ffi::{c_char, CStr};
 use std::time::{Duration, Instant};
 
-struct Counting;
-
-thread_local! {
-    // const 初始化、没有析构：读写它本身不会分配，也不会在分配器里递归。
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-fn note() {
-    // 线程正在销毁时 thread_local 已不可用，那时的分配不属于任何一次测量。
-    let _ = ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
-}
-
-// SAFETY: 每次调用原样转给系统分配器；计数只碰一个线程局部的整数。
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        note();
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        note();
-        unsafe { System.alloc_zeroed(layout) }
-    }
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        note();
-        unsafe { System.realloc(pointer, layout, size) }
-    }
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) }
-    }
-}
-
-#[global_allocator]
-static GLOBAL: Counting = Counting;
-
-/// `operation` 在当前线程上分配了几次。
-fn allocations(operation: impl FnOnce()) -> usize {
-    let before = ALLOCATIONS.with(Cell::get);
-    operation();
-    ALLOCATIONS.with(Cell::get) - before
-}
+#[path = "support/allocations.rs"]
+mod allocation_counter;
+use allocation_counter::allocations;
 
 unsafe fn take_response(pointer: *mut c_char) -> serde_json::Value {
     assert!(!pointer.is_null());

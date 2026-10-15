@@ -9,9 +9,11 @@ struct PairedPunctuationCompletion: Equatable {
 
 /// Host-side completion for punctuation pairs that the Engine opens one mark at a time. The Harmony keyboard's `PairedPunctuationPolicy` does the same.
 enum PairedPunctuationPolicy {
+  /// 『』「」〖〗是引号样式、方头括号样式（`quote_style`、`bracket_style`）下同一个键的另一组字。
   private static let completions: [(opening: String, openingMark: String, closing: String)] = [
     ("\"", "“", "”"), ("'", "‘", "’"), ("(", "（", "）"),
     ("<", "《", "》"), ("<", "〈", "〉"), ("[", "【", "】"),
+    ("\"", "『", "』"), ("'", "「", "」"), ("[", "〖", "〗"),
   ]
 
   /// With pairing on, every quote press opens a fresh pair, as the reference's `KeyHandler.cpp` does. The Engine alternates the quote keys (“ then ”) because a host without pairing needs that, but a host that supplies the closing half itself never sends the press that would have produced it, so the next quote would otherwise arrive as a lone ”. A closing quote at the end of the commit is therefore rewritten to the opening one before the pair is completed; with pairing off the commit is left to the Engine's alternation.
@@ -19,6 +21,9 @@ enum PairedPunctuationPolicy {
     guard enabled, let commit else { return commit }
     if ascii == "\"", commit.hasSuffix("”") { return String(commit.dropLast()) + "“" }
     if ascii == "'", commit.hasSuffix("’") { return String(commit.dropLast()) + "‘" }
+    // 直角引号样式下同理。
+    if ascii == "\"", commit.hasSuffix("』") { return String(commit.dropLast()) + "『" }
+    if ascii == "'", commit.hasSuffix("」") { return String(commit.dropLast()) + "「" }
     return commit
   }
 
@@ -39,9 +44,9 @@ struct PairedPunctuationStack {
     let editor: UInt64
   }
 
-  /// Closing marks a key can step over. `<` opens either 《 or 〈 depending on nesting, so `>` matches both.
+  /// Closing marks a key can step over. `<` opens either 《 or 〈 depending on nesting, so `>` matches both. 引号和方头括号的两组字（`quote_style`、`bracket_style`）同理：样式可能在一对还开着时换掉。
   private static let closings: [String: Set<String>] = [
-    "\"": ["”"], "'": ["’"], ")": ["）"], "]": ["】"], ">": ["》", "〉"],
+    "\"": ["”", "』"], "'": ["’", "」"], ")": ["）"], "]": ["】", "〗"], ">": ["》", "〉"],
   ]
   /// The reference's cap on remembered pairs; deeper nesting forgets the outermost.
   static let limit = 16
@@ -87,6 +92,7 @@ extension MetasequoiaInputSnapshot {
       answeredByPinyinFallback: answeredByPinyinFallback, diagnosticText: diagnosticText, localMode: localMode,
       nineKeySpellings: nineKeySpellings, nineKeyReading: nineKeyReading,
       nineKeySingleCharacter: nineKeySingleCharacter, nineKeyStrokes: nineKeyStrokes,
-      editingText: editingText, caretPosition: caretPosition)
+      editingText: editingText, caretPosition: caretPosition,
+      cornerQuotes: cornerQuotes, hollowBrackets: hollowBrackets)
   }
 }

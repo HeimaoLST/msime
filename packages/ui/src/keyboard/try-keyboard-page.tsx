@@ -13,10 +13,9 @@ import { chatRequest } from "../chat/chat-prompt";
 import { resizeChatComposer } from "../chat/chat-composer-size";
 import { chatError } from "../chat/chat-errors";
 import { errorCode } from "../core/error-code";
-import { errorMessage } from "../core/error-message";
-import { useToast } from "../core/toast";
 import { touchHairline } from "../core/touch-style";
 import { makeDefaultAction, useImeSetupState, type SetupActions } from "./setup-status-card";
+import { useHostAction } from "../core/use-host-action";
 
 /** 草稿上限，与 Android 和 Apple 的试用页相同。2000 个字符最多 8000 字节，在 client-core 单条消息 16 KiB 的上限之内，所以发送前不必再按字节检查。 */
 const DRAFT_LIMIT = 2000;
@@ -63,7 +62,6 @@ export function TryKeyboardPage({
   switchAway?: boolean;
 }) {
   const state = useImeSetupState(actions?.setup);
-  const toast = useToast();
   const greeting = (): Bubble => ({
     id: 0,
     role: "notice",
@@ -190,7 +188,13 @@ export function TryKeyboardPage({
 
   const fieldKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     // 聊天页的回车是发送；组字中的回车属于输入法，Shift+回车照常换行。
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    if (
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.nativeEvent.isComposing ||
+      event.keyCode === 229
+    )
+      return;
     if (!chat) return;
     event.preventDefault();
     void send();
@@ -211,8 +215,7 @@ export function TryKeyboardPage({
     : switchAway
       ? actions?.showInputMethodPicker
       : undefined;
-  const runHostAction = (action: () => Promise<void>) =>
-    void action().catch((error: unknown) => toast(errorMessage(error)));
+  const runHostAction = useHostAction();
 
   return (
     <section className="flex min-h-0 flex-1 flex-col gap-2.5" aria-label="试用键盘">

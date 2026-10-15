@@ -105,13 +105,13 @@ extension EmojiCatalogTest {
     assert(StubEmojiSession.lastRequest.count == 0)
     assert(MacEmojiCatalog.installedPluginSymbolGroups(resources: resources, preferencesDirectory: "/synthetic/preferences") == groups)
 
-    // 符号页：没有搜索词时只给选中插件包的组，内置分类下没有插件项；有搜索词时跨包匹配关键词或文本。
+    // 符号页：全部分类包含插件，选中包只给该包的组，内置分类下没有插件项；搜索跨包匹配关键词或文本。
     let arrows = MacEmojiPluginSymbolGroup.parentID(pack: "fixture-arrows")
     assert(MacEmojiPluginSymbolGroup.isParentID(arrows) && !MacEmojiPluginSymbolGroup.isParentID("Arrows"))
     assert(MacEmojiPluginSymbolGroup.symbolItems(groups, search: "", parent: arrows)
       == [.init(text: "←", annotation: "", group: "Basic"), .init(text: "→", annotation: "", group: "Basic")])
     assert(MacEmojiPluginSymbolGroup.symbolItems(groups, search: "", parent: "P1").isEmpty)
-    assert(MacEmojiPluginSymbolGroup.symbolItems(groups, search: "", parent: "").isEmpty)
+    assert(MacEmojiPluginSymbolGroup.symbolItems(groups, search: "", parent: "").map(\.text) == ["←", "→", "±", "→"])
     assert(MacEmojiPluginSymbolGroup.symbolItems(groups, search: "DIRECTION", parent: "").map(\.text) == ["←", "→"])
     assert(MacEmojiPluginSymbolGroup.symbolItems(groups, search: "→", parent: "").map(\.group) == ["Basic", "Operators"])
     assert(MacEmojiPluginSymbolGroup.symbolItems(groups, search: "missing", parent: "").isEmpty)

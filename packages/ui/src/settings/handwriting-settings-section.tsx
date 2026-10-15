@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { useLatestRef } from "../core/use-latest-ref";
+import { useDebouncedCallback } from "../core/use-debounced-callback";
 import { SettingsGroupNote } from "./settings-group-note";
 import * as surface from "../keyboard/panel-surface-style";
 import { GroupList } from "../core/platform-controls";
@@ -37,17 +39,22 @@ const strokeColorOptions: readonly [HandwritingStrokeColor, string][] = [
  */
 function useSettledSlider(value: number, save: (value: number) => void) {
   const [moving, setMoving] = useState<number | null>(null);
-  const saveRef = useRef(save);
-  saveRef.current = save;
-  useEffect(() => {
-    if (moving === null) return;
-    const timer = setTimeout(() => {
-      // 在丢弃本地值的同一个 tick 里保存，这样已保存的值（在等待保存之前就已设置）会直接接替，中间不会闪现旧值。
-      if (moving !== value) saveRef.current(moving);
+  const saveRef = useLatestRef(save);
+  const { schedule: saveLater, cancel: cancelSave } = useDebouncedCallback(
+    (next: number, current: number) => {
+      if (next !== current) saveRef.current(next);
       setMoving(null);
-    }, SLIDER_SAVE_DELAY_MS);
-    return () => clearTimeout(timer);
-  }, [moving, value]);
+    },
+    SLIDER_SAVE_DELAY_MS,
+  );
+  useEffect(() => {
+    if (moving === null) {
+      cancelSave();
+      return;
+    }
+    // 在丢弃本地值的同一个 tick 里保存，这样已保存的值（在等待保存之前就已设置）会直接接替，中间不会闪现旧值。
+    saveLater(moving, value);
+  }, [cancelSave, moving, saveLater, value]);
   return [moving ?? value, setMoving] as const;
 }
 

@@ -48,8 +48,10 @@ export interface InputSharedSettingsSectionProps {
   outputExtra?: ReactNode;
   beforeFrequency?: ReactNode;
   afterFrequency?: ReactNode;
-  /** 鸿蒙手机的「输入」页只把主要分组留在视野内：这里的每个分组都放进末尾「更多」分组的同一个「更多选项」折叠中，「繁体输出」开关不放，因为该页以「中文字符集」提供它。 */
+  /** 鸿蒙手机的「输入」页只把主要分组留在视野内：这里的每个分组都放进末尾「更多」分组的同一个「更多选项」折叠中，「中文输出」单选不放，因为该页以「中文字符集」提供它。 */
   foldIntoMore?: boolean;
+  /** 宿主能按 OpenCC 变体做繁体转换（`HostCapabilities.traditional_chinese_variants`），「中文输出」单选列出台湾正体和台湾用词。 */
+  traditionalChineseVariants?: boolean;
   onPreferencesChange: (patch: Partial<Preferences>) => void;
 }
 
@@ -75,6 +77,7 @@ export function InputSharedSettingsSection({
   beforeFrequency,
   afterFrequency,
   foldIntoMore = false,
+  traditionalChineseVariants = false,
   onPreferencesChange,
 }: InputSharedSettingsSectionProps) {
   const wordCharacterRows = (
@@ -105,8 +108,10 @@ export function InputSharedSettingsSection({
   const traditionalOutputRow = (
     <TraditionalChineseOutputSection
       value={preferences.traditional_chinese_output}
+      variant={preferences.traditional_chinese_variant}
+      variants={traditionalChineseVariants}
       scheme={preferences.scheme}
-      onChange={(traditional_chinese_output) => onPreferencesChange({ traditional_chinese_output })}
+      onChange={onPreferencesChange}
     />
   );
 

@@ -59,6 +59,14 @@ struct DictionarySettingsView: View {
     .navigationTitle("词库")
     .navigationBarTitleDisplayMode(.inline)
     .reloadOnAppearAndActive(reload)
+    .task { await loadDiscover() }
+    .refreshable { await loadDiscover() }
+    .sheet(isPresented: $importing, onDismiss: reload) {
+      PersonalDictionaryImportView { words in
+        try store.enqueueImport(words)
+        ToastCenter.shared.show("已加入导入队列")
+      }
+    }
     .alert("导入这版词库到本机？", isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
            presenting: confirming) { item in
       Button("取消", role: .cancel) {}

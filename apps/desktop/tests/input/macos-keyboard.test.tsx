@@ -46,6 +46,16 @@ test("macOS uses Command and Option while retaining the shared modifier contract
     expect(screen.queryByRole("button", { name })).toBeNull();
   }
   expect(screen.getByRole("button", { name: "Clear" })).toBeTruthy();
+  const control = screen.getAllByRole("button", { name: "Ctrl" })[0];
+  const command = screen.getAllByRole("button", { name: "Command" })[0];
+  const option = screen.getAllByRole("button", { name: "Option" })[0];
+  expect(control.compareDocumentPosition(option) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(option.compareDocumentPosition(command) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const rightCommand = screen.getAllByRole("button", { name: "Command" })[1];
+  const rightOption = screen.getAllByRole("button", { name: "Option" })[1];
+  expect(
+    rightCommand.compareDocumentPosition(rightOption) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
   fireEvent.click(screen.getAllByRole("button", { name: "Command" })[0]);
   fireEvent.click(screen.getAllByRole("button", { name: "Option" })[0]);
   fireEvent.click(screen.getByRole("button", { name: "a" }));

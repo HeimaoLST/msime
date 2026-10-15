@@ -93,6 +93,40 @@ test("a benign request still focuses the confirming button", async () => {
   );
 });
 
+test.each([false, true])("tab stays inside the confirmation, danger=%s", (danger) => {
+  const answered = vi.fn();
+  render(<Harness danger={danger} onAnswer={answered} />);
+  const trigger = screen.getByRole("button", { name: "删除" });
+  trigger.focus();
+  fireEvent.click(trigger);
+  const cancel = screen.getByRole("button", { name: "取消" });
+  const confirm = screen.getByRole("button", { name: "确定" });
+
+  confirm.focus();
+  expect(fireEvent.keyDown(confirm, { key: "Tab" })).toBe(false);
+  expect(document.activeElement).toBe(cancel);
+  expect(fireEvent.keyDown(cancel, { key: "Tab", shiftKey: true })).toBe(false);
+  expect(document.activeElement).toBe(confirm);
+  expect(screen.getByTestId("answer").textContent).toBe("未问");
+  expect(answered).not.toHaveBeenCalled();
+
+  fireEvent.keyDown(confirm, { key: "Escape" });
+  expect(screen.queryByRole("alertdialog")).toBeNull();
+  expect(document.activeElement).toBe(trigger);
+});
+
+test("tab between the confirmation buttons keeps native navigation", () => {
+  render(<Harness />);
+  fireEvent.click(screen.getByRole("button", { name: "删除" }));
+  const cancel = screen.getByRole("button", { name: "取消" });
+  const confirm = screen.getByRole("button", { name: "确定" });
+
+  cancel.focus();
+  expect(fireEvent.keyDown(cancel, { key: "Tab" })).toBe(true);
+  confirm.focus();
+  expect(fireEvent.keyDown(confirm, { key: "Tab", shiftKey: true })).toBe(true);
+});
+
 test("unmounting while open answers no rather than leaving the caller waiting", async () => {
   const answered = vi.fn();
   const view = render(<Harness onAnswer={answered} />);

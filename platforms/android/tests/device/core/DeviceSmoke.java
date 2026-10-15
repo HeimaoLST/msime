@@ -17,6 +17,7 @@ import android.view.MotionEvent;
 import android.view.InputDevice;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
@@ -36,12 +37,38 @@ public class DeviceSmoke extends Instrumentation {
         }
     }
 
-    /** 重新注册并启用被测输入法，等待系统完成切换。 */
+    /** 重新注册并启用被测输入法，确认系统的异步回退没有覆盖选择。 */
     protected final void restartIme() throws Exception {
         shellDiscard("ime disable app.msime.android/.MSIMEInputService");
         shellDiscard("ime enable app.msime.android/.MSIMEInputService");
         shellDiscard("ime set app.msime.android/.MSIMEInputService");
-        SystemClock.sleep(1000);
+        // 禁用当前输入法会异步切回系统键盘；命令返回不代表回退已经结束。
+        // 连续确认选中水杉再启动编辑器，避免把系统键盘当作产品的空窗口。
+        long deadline = SystemClock.uptimeMillis() + 15000;
+        int settled = 0;
+        do {
+            if (msimeSelected()) {
+                if (++settled >= 4) return;
+            } else {
+                settled = 0;
+                shellDiscard("ime set app.msime.android/.MSIMEInputService");
+            }
+            SystemClock.sleep(250);
+        } while (SystemClock.uptimeMillis() < deadline);
+        throw new AssertionError("Test input method selection did not settle after restart");
+    }
+
+    /** 只读取默认输入法标识，不读取编辑器内容或用户设置日志。 */
+    private boolean msimeSelected() throws Exception {
+        try (var input = new ParcelFileDescriptor.AutoCloseInputStream(
+                automation.executeShellCommand("settings get secure default_input_method"))) {
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            byte[] buffer = new byte[256];
+            int length;
+            while ((length = input.read(buffer)) != -1) output.write(buffer, 0, length);
+            return "app.msime.android/.MSIMEInputService".equals(
+                new String(output.toByteArray(), StandardCharsets.UTF_8).trim());
+        }
     }
 
     /** 用原子写入发布测试偏好；失败时保留原文件。 */
@@ -98,6 +125,33 @@ public class DeviceSmoke extends Instrumentation {
             stage = "deletion";
             tap(key("⌫"));
             await(field("msime-test-plain").and(node -> equalsText("你", node.getText())));
+            stage = "limited composition focus";
+            final String limitedPrefix = "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥天地玄黄";
+            tap(field("msime-test-limited"));
+            AccessibilityNodeInfo limited = await(field("msime-test-limited").and(AccessibilityNodeInfo::isFocused));
+            Bundle selection = new Bundle();
+            selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, limitedPrefix.length());
+            selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, limitedPrefix.length());
+            if (!limited.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selection))
+                throw new AssertionError("Synthetic limited editor selection failed");
+            await(field("msime-test-limited").and(node -> node.getTextSelectionStart() == limitedPrefix.length()
+                && node.getTextSelectionEnd() == limitedPrefix.length()));
+            await(field("msime-test-limited").and(node -> equalsText(limitedPrefix, node.getText())));
+            stage = "limited composition typing";
+            for (String key : new String[] {"n", "i", "h", "a", "o"}) tap(key(key));
+            await(field("msime-test-limited").and(node -> equalsText(limitedPrefix, node.getText())));
+            await(imeText("nihao"));
+            // 截短后继续输入；新建的 Sink 不能重新把已隐藏的组字写入编辑器。
+            stage = "limited composition continues while hidden";
+            for (String key : new String[] {"n", "i", "h", "a", "o"}) tap(key(key));
+            await(field("msime-test-limited").and(node -> equalsText(limitedPrefix, node.getText())));
+            await(imeText("nihaonihao"));
+            stage = "limited composition commit";
+            tap(key("空格"));
+            await(field("msime-test-limited").and(node -> equalsText(limitedPrefix + "你好你好", node.getText())));
+            // 后续繁体输出仍验证原来的普通输入框，也验证隐藏状态不跨编辑器泄漏。
+            tap(field("msime-test-plain"));
+            await(field("msime-test-plain").and(AccessibilityNodeInfo::isFocused));
             // 安卓 11（API 30）以下到此为止：在 API 28 模拟器上，「更多」面板在屏幕上正常打开、点按也生效，但 UiAutomation 的无障碍树里拿不到面板和它的任何磁贴，后面的繁体输出流程没法在那里驱动。打开应用、准备词库、拼音上屏和删除这条主路径仍在 API 28 上检查。
             if (Build.VERSION.SDK_INT < 30) return;
             // 繁体输出 is a setting rather than a toolbar key, the way Apple has it: it moved out
@@ -229,6 +283,8 @@ public class DeviceSmoke extends Instrumentation {
     }
     private Predicate<AccessibilityNodeInfo> imeText(String text) {
         return node -> equalsText("app.msime.android", node.getPackageName())
+            // 旧系统会缓存第一拍的读音节点；刷新后再断言当前组字，避免把 n 当成 nihao 的实际状态。
+            && (Build.VERSION.SDK_INT >= 34 || node.refresh())
             && equalsText(text, node.getText());
     }
     private AccessibilityNodeInfo findAnyVisibleImeNode(Predicate<AccessibilityNodeInfo> match) {

@@ -115,6 +115,7 @@ fn settings_sync_export_is_exactly_the_shared_android_keys() {
     assert_eq!(
         keys,
         [
+            "input.bracket_style",
             "input.character_set",
             "input.chinese_punctuation",
             "input.frequency_linear_step",
@@ -122,9 +123,11 @@ fn settings_sync_export_is_exactly_the_shared_android_keys() {
             "input.frequency_trigger_count",
             "input.learning",
             "input.paired_punctuation",
+            "input.quote_style",
             "input.schema",
             "input.shuangpin_schema",
             "input.smart_punctuation",
+            "input.traditional_variant",
             "input.wubi_auto_commit_unique",
             "input.wubi_code_hint",
             "input.wubi_schema",
@@ -250,6 +253,8 @@ fn settings_sync_round_trips_every_exported_key() {
         chinese_punctuation: false,
         smart_punctuation: !Preferences::default().smart_punctuation,
         paired_punctuation: !Preferences::default().paired_punctuation,
+        quote_style: crate::preferences::QuoteStyle::CornerWhenTraditional,
+        bracket_style: crate::preferences::BracketStyle::Hollow,
         wubi_code_hint: !Preferences::default().wubi_code_hint,
         wubi_auto_commit_unique: !Preferences::default().wubi_auto_commit_unique,
         touch_keyboard_layout: TouchKeyboardLayout::NineKey,
@@ -405,6 +410,9 @@ fn settings_sync_unknown_enum_values_skip_only_their_key() {
         ("input.shuangpin_schema", "sogou"),
         ("input.wubi_schema", "wubi06"),
         ("input.frequency_mode", "random"),
+        ("input.quote_style", "semantic"),
+        ("input.traditional_variant", "s2hk"),
+        ("input.bracket_style", "round"),
         ("platform.android.keyboard_layout", "future_layout"),
         ("platform.android.theme", "sepia"),
         ("platform.android.global_theme", "aurora"),
@@ -954,4 +962,78 @@ fn settings_sync_desktop_apply_changes_only_the_shared_input_settings() {
     let applied = apply_desktop_settings(&local, &document(settings), &schema).unwrap();
     assert_eq!(applied.preferences.scheme, local.scheme);
     assert_eq!(applied.skipped, ["input.schema"]);
+}
+
+/// 引号和方头括号样式按偏好文档里的写法上传，三种引号样式都能读回来。
+#[test]
+fn settings_sync_punctuation_styles_round_trip() {
+    use crate::preferences::{BracketStyle, QuoteStyle};
+    for (quote_style, quote_value) in [
+        (QuoteStyle::Curly, "curly"),
+        (QuoteStyle::Corner, "corner"),
+        (QuoteStyle::CornerWhenTraditional, "corner_when_traditional"),
+    ] {
+        for (bracket_style, bracket_value) in [
+            (BracketStyle::Solid, "solid"),
+            (BracketStyle::Hollow, "hollow"),
+        ] {
+            let expected = Preferences {
+                quote_style,
+                bracket_style,
+                ..Preferences::default()
+            };
+            let exported = export_desktop_settings(&expected);
+            assert_eq!(
+                exported.get("input.quote_style"),
+                Some(&AccountPreferenceValue::String(quote_value.into()))
+            );
+            assert_eq!(
+                exported.get("input.bracket_style"),
+                Some(&AccountPreferenceValue::String(bracket_value.into()))
+            );
+            let applied = apply_desktop_settings(
+                &Preferences::default(),
+                &document(exported),
+                &full_schema(),
+            )
+            .unwrap();
+            assert_eq!(applied.preferences, expected);
+            assert!(applied.skipped.is_empty());
+        }
+    }
+    for (variant, value) in [
+        (TraditionalVariant::Standard, "s2t"),
+        (TraditionalVariant::Taiwan, "s2tw"),
+        (TraditionalVariant::TaiwanPhrases, "s2twp"),
+    ] {
+        let expected = Preferences {
+            traditional_chinese_output: true,
+            traditional_chinese_variant: variant,
+            ..Preferences::default()
+        };
+        let exported = export_desktop_settings(&expected);
+        assert_eq!(
+            exported.get("input.traditional_variant"),
+            Some(&AccountPreferenceValue::String(value.into()))
+        );
+        let applied =
+            apply_desktop_settings(&Preferences::default(), &document(exported), &full_schema())
+                .unwrap();
+        assert_eq!(applied.preferences, expected);
+        assert!(applied.skipped.is_empty());
+    }
+    // 字段表没有这两个键时不应用，也不算跳过。
+    let mut exported = export_desktop_settings(&Preferences {
+        quote_style: QuoteStyle::Corner,
+        ..Preferences::default()
+    });
+    exported.retain(|key, _| key == "input.quote_style");
+    let applied = apply_desktop_settings(
+        &Preferences::default(),
+        &document(exported),
+        &schema_for(&[]),
+    )
+    .unwrap();
+    assert_eq!(applied.preferences.quote_style, QuoteStyle::Curly);
+    assert!(applied.skipped.is_empty());
 }

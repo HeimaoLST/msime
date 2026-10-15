@@ -13,6 +13,7 @@ import {
   type MobilePrimaryPageId,
 } from "./settings-navigation-helpers";
 import type { SettingsPageId } from "./settings-page-registry";
+import { useMobilePopState } from "./use-mobile-pop-state";
 
 export interface SettingsNavigationOptions {
   mobilePlatform: boolean;
@@ -44,14 +45,12 @@ export function useSettingsNavigation({
 }: SettingsNavigationOptions) {
   const mobileActiveTab = mobileTabForPage(page);
   const handledRoute = useRef(route?.nonce);
-  // The history listener outlives a render, so it reads the pages through a ref rather than the list it was created with.
-  const availablePagesRef = useRef(availablePages);
-  availablePagesRef.current = availablePages;
 
   /** 打开 `next`。在移动端它是一条新的 WebView 历史记录，因此系统返回手势可以返回；`replace` 则用它替换当前记录，用于从背后没有设置记录的页面向上返回。 */
   const selectPage = (next: SettingsPageId, replace = false) => {
     if (mobilePlatform && mobileHiddenPageIds.includes(next)) return;
     if (next === page) return;
+    if (page === "account" && next !== "account") setAccountLoginReturnPage(null);
     if (mobilePlatform) mobileLastPageByTab.current[mobileTabForPage(next)] = next;
     setPage(next);
     if (mobilePlatform && typeof window !== "undefined") {
@@ -88,17 +87,16 @@ export function useSettingsNavigation({
         "",
       );
     }
-    const onPopState = (event: PopStateEvent) => {
-      const state = event.state;
-      if (state?.msimeSettings === true && typeof state.page === "string") {
-        const restored = requestedPage(state.page, availablePagesRef.current, "input");
-        mobileLastPageByTab.current[mobileTabForPage(restored)] = restored;
-        setPage(restored);
-      }
-    };
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
   }, [mobilePlatform]);
+
+  useMobilePopState(mobilePlatform, (event) => {
+    const state = event.state;
+    if (state?.msimeSettings !== true || typeof state.page !== "string") return;
+    const restored = requestedPage(state.page, availablePages, "input");
+    if (restored !== "account") setAccountLoginReturnPage(null);
+    mobileLastPageByTab.current[mobileTabForPage(restored)] = restored;
+    setPage(restored);
+  });
 
   const selectMobileTab = (tab: SettingsPageId) => {
     if (!mobilePrimaryPageIds.includes(tab as MobilePrimaryPageId)) return;

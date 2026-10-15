@@ -20,9 +20,6 @@ pub const CONTEXT_CHARACTERS: usize = 64;
 pub const MAX_MODEL_BYTES: u64 = 64 * 1024 * 1024;
 const MODEL_CACHE_CAPACITY: usize = 8;
 
-/// The lattice score is converted as log10 the way the C++ did (patch:869-871); the arithmetic is ported unchanged so the two models' blend keeps the weight it was tuned with.
-const LOG10_TO_NATS: f64 = std::f64::consts::LN_10;
-
 static MODELS: OnceLock<Mutex<LruCache<PathBuf, Option<Arc<SentenceModel>>>>> = OnceLock::new();
 
 /// A shipped model for tests: from `MSIME_EVAL_RESOURCES` (the dictionary resource set), else from `MSIME_NEURAL_MODEL_DIR` (where `scripts/fetch_neural_model.py` puts both models, `target/neural-model` by default); the error is the reason a test skips.
@@ -84,25 +81,41 @@ fn load_model(path: &Path) -> Option<Arc<SentenceModel>> {
     SentenceModel::load(&bytes).ok().map(Arc::new)
 }
 
-/// The first `min(n, 12)` indices stable-sorted by `static * ln 10 + lambda * (neural - static * ln 10)` descending, the rest in order. `None` for fewer than two paths or mismatched lengths (patch:914-944). `neural` holds per-sentence summed natural-log probabilities, `static_log10` the lattice scores.
+/// 对前 `min(n, 12)` 条路径按 `static + lambda * (neural - static)` 降序稳定排序，尾部保留原顺序。路径不足两条或评分长度不匹配时返回 `None`。两侧都使用自然对数：`neural` 是逐字评分的总和，`static_nats` 是词网格的 `SentencePath.log_prob`。
 ///
-/// `neural` scores the same paths as `static_log10`, in order; only its first `min(n, 12)` entries are read, so a caller may score only those and pass exactly that many.
-pub fn rerank_order(neural: &[f64], static_log10: &[f64]) -> Option<Vec<usize>> {
-    let n = static_log10.len();
+/// `neural` 按相同路径顺序评分，只读取前 `min(n, 12)` 项，调用方可以只计算并传入这些评分。
+#[cfg(test)]
+pub fn rerank_order(neural: &[f64], static_nats: &[f64]) -> Option<Vec<usize>> {
+    let n = static_nats.len();
     let scored = n.min(MAX_RERANK_PATHS);
     if n < 2 || (neural.len() != n && neural.len() != scored) {
         return None;
     }
-    let combined: Vec<f64> = (0..scored)
-        .map(|index| {
-            let statik = static_log10[index] * LOG10_TO_NATS;
-            statik + RERANK_LAMBDA * (neural[index] - statik)
-        })
-        .collect();
     let mut order: Vec<usize> = (0..n).collect();
-    // Stable so that sentences the two models score identically keep the lattice's order, and the unscored tail past the cap stays as it was.
-    order[..scored].sort_by(|&a, &b| combined[b].total_cmp(&combined[a]));
+    rerank_order_into(neural, static_nats, &mut order[..scored]);
     Some(order)
+}
+
+/// 把最多12条评分前缀写入调用方缓冲；尾部路径保持恒等映射，由调用方按 `scored` 接回。
+pub(super) fn rerank_order_into(
+    neural: &[f64],
+    static_nats: &[f64],
+    order: &mut [usize],
+) -> Option<usize> {
+    let n = static_nats.len();
+    let scored = n.min(MAX_RERANK_PATHS);
+    if n < 2 || (neural.len() != n && neural.len() != scored) || order.len() < scored {
+        return None;
+    }
+    let mut combined = [0.0; MAX_RERANK_PATHS];
+    for index in 0..scored {
+        let statik = static_nats[index];
+        combined[index] = statik + RERANK_LAMBDA * (neural[index] - statik);
+        order[index] = index;
+    }
+    // 同分保留词网格顺序；评分上限后的尾部不写入此缓冲，调用方接回恒等尾部。
+    order[..scored].sort_by(|&a, &b| combined[b].total_cmp(&combined[a]));
+    Some(scored)
 }
 
 pub struct NeuralReranker {
@@ -119,34 +132,62 @@ impl NeuralReranker {
         }
     }
 
-    /// Reorder `paths` by `rerank_order` conditioned on the last 64 characters of `context`; false leaves them untouched. The crate returns mean per-character log-probabilities; the sum is that times the character count.
+    /// 按 `context` 最后64字的模型评分重排路径；返回 false 时保持原序。模型返回逐字平均对数概率，乘文本字数得到总分。
     pub fn rerank(&mut self, paths: &mut [SentencePath], context: &str) -> bool {
-        if paths.len() < 2 {
-            return false;
-        }
-        let scored = paths.len().min(MAX_RERANK_PATHS);
-        let texts: Vec<&str> = paths[..scored]
-            .iter()
-            .map(|path| path.sentence.as_str())
-            .collect();
-        let means = self
-            .reranker
-            .log_probabilities(last_characters(context, CONTEXT_CHARACTERS), &texts);
-        // A model that answered for some sentences only is inconsistent; half a reranking is worse than none, so the lattice order stays.
-        if means.len() != scored {
-            return false;
-        }
-        let neural: Vec<f64> = means
-            .iter()
-            .zip(&texts)
-            .map(|(mean, text)| f64::from(*mean) * text.chars().count() as f64)
-            .collect();
-        let statik: Vec<f64> = paths.iter().map(|path| path.log_prob).collect();
-        let Some(order) = rerank_order(&neural, &statik) else {
+        let mut order = [0; MAX_RERANK_PATHS];
+        let Some(scored) = self.score_order_into(paths, context, &mut order) else {
             return false;
         };
-        apply_order(paths, &order);
+        apply_order(&mut paths[..scored], &order[..scored]);
         true
+    }
+
+    /// 只读路径并返回评分前缀的排列；未评分尾部保持恒等映射，失败时不产生排列。
+    #[cfg(test)]
+    pub(super) fn score_order(
+        &mut self,
+        paths: &[SentencePath],
+        context: &str,
+    ) -> Option<Vec<usize>> {
+        if paths.len() < 2 {
+            return None;
+        }
+        let mut order: Vec<usize> = (0..paths.len()).collect();
+        let scored = paths.len().min(MAX_RERANK_PATHS);
+        self.score_order_into(paths, context, &mut order[..scored])?;
+        Some(order)
+    }
+
+    /// 只读路径并把评分前缀排列写入调用方的固定缓冲；不为索引向量申请堆内存。
+    pub(super) fn score_order_into(
+        &mut self,
+        paths: &[SentencePath],
+        context: &str,
+        order: &mut [usize],
+    ) -> Option<usize> {
+        if paths.len() < 2 {
+            return None;
+        }
+        let scored = paths.len().min(MAX_RERANK_PATHS);
+        let mut texts = [""; MAX_RERANK_PATHS];
+        for (text, path) in texts[..scored].iter_mut().zip(&paths[..scored]) {
+            *text = path.sentence.as_str();
+        }
+        let means = self.reranker.log_probabilities(
+            last_characters(context, CONTEXT_CHARACTERS),
+            &texts[..scored],
+        );
+        // 模型评分数量不完整时保持原序，避免只重排部分结果。
+        if means.len() != scored {
+            return None;
+        }
+        let mut neural = [0.0; MAX_RERANK_PATHS];
+        let mut statik = [0.0; MAX_RERANK_PATHS];
+        for index in 0..scored {
+            neural[index] = f64::from(means[index]) * texts[index].chars().count() as f64;
+            statik[index] = paths[index].log_prob;
+        }
+        rerank_order_into(&neural[..scored], &statik[..scored], order)
     }
 }
 
@@ -154,6 +195,10 @@ impl NeuralReranker {
 fn reorder_paths(paths: &mut [SentencePath], order: &[usize]) {
     apply_order(paths, order);
 }
+
+#[cfg(test)]
+#[path = "neural_score_buffer_tests.rs"]
+mod score_buffer_tests;
 
 #[cfg(test)]
 mod tests {
@@ -176,15 +221,29 @@ mod tests {
 
     #[test]
     fn rerank_order_blends_the_two_scores() {
-        // Static in log10, neural in nats: path 1 is worse on the lattice but the model prefers it enough.
+        // 两侧都是自然对数：路径 1 的静态分较低，但神经分足以补上差距。
         let statik = [-1.0, -1.2];
         let neural = [-10.0, -2.0];
-        let combined0 = -LOG10_TO_NATS + 0.5 * (-10.0 + LOG10_TO_NATS);
-        let combined1 = -1.2 * LOG10_TO_NATS + 0.5 * (-2.0 + 1.2 * LOG10_TO_NATS);
+        let combined0 = -1.0 + 0.5 * (-10.0 + 1.0);
+        let combined1 = -1.2 + 0.5 * (-2.0 + 1.2);
         assert!(combined1 > combined0);
         assert_eq!(rerank_order(&neural, &statik), Some(vec![1, 0]));
-        // The model agreeing with the lattice leaves the order.
+        // 模型也偏向静态首选时维持顺序。
         assert_eq!(rerank_order(&[-2.0, -10.0], &statik), Some(vec![0, 1]));
+    }
+
+    #[test]
+    fn rerank_order_uses_the_lattice_producers_natural_log_scores() {
+        use super::super::decode::{edge_log_prob, LatticeOptions};
+
+        let options = LatticeOptions::default();
+        let statik = [
+            edge_log_prob(100, 2, &options),
+            edge_log_prob(50, 2, &options),
+        ];
+        // 词频相差两倍只贡献 ln(2)，模型多给第二条 1 nat 时应选它。
+        // 再乘 ln(10) 会把词频差放大到约 1.596，错误保留第一条。
+        assert_eq!(rerank_order(&[-3.0, -2.0], &statik), Some(vec![1, 0]));
     }
 
     #[test]

@@ -2081,14 +2081,8 @@ HRESULT CMetasequoiaIME::_HandleCompositionPunctuation(TfEditCookie ec, _In_ ITf
         // Quotes share one physical key for both sides. In paired mode every
         // press starts a fresh pair instead of following the legacy left/right
         // toggle maintained by GetPunctuation().
-        if (wch == L'"' && punctuationStr.back() == L'”')
-        {
-            punctuationStr.back() = L'“';
-        }
-        else if (wch == L'\'' && punctuationStr.back() == L'’')
-        {
-            punctuationStr.back() = L'‘';
-        }
+        // 直角引号样式下同理：』改回『，」改回「。
+        punctuationStr.back() = Global::ReopenedPairedQuote(wch, punctuationStr.back());
         punctuationStr.back() = Global::PairedPunctuationKeyOpening(wch, punctuationStr.back(), fullWidthPair);
     }
 

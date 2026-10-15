@@ -238,6 +238,7 @@ export function createWorkerHandler(post, close) {
         }
         post({
           type: "ready",
+          seq: msg.seq,
           build: build_info(),
           scheme: msg.scheme,
           timings: { fetch: 0, compile: 0, import: 0, session: performance.now() - t0 },

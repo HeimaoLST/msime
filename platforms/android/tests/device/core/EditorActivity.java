@@ -50,6 +50,14 @@ public final class EditorActivity extends Activity {
         plain.setHint("Plain editor");
         showImeOnFocus(plain);
         layout.addView(plain);
+        EditText limited = new EditText(this);
+        limited.setInputType(InputType.TYPE_CLASS_TEXT);
+        limited.setFilters(new android.text.InputFilter[] {new android.text.InputFilter.LengthFilter(30)});
+        limited.setText("甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥天地玄黄");
+        limited.setContentDescription("msime-test-limited");
+        limited.setHint("Thirty character editor");
+        showImeOnFocus(limited);
+        layout.addView(limited);
         EditText password = new EditText(this);
         password.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         password.setContentDescription("msime-test-password");

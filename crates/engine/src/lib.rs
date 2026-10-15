@@ -50,6 +50,7 @@ pub use nine_key::KeyGrid;
 pub use nine_key_shuangpin::NineKeyShuangpin;
 pub use paths::RuntimePaths;
 pub use pinyin::glide::{GlideKeyboard, GlidePoint};
+pub use punctuation::{BracketMarks, PunctuationMarks, QuoteMarks};
 pub use session::{Clock, Session, SessionOptions, SessionSnapshot};
 pub use types::{
     autocorrect_type, fuzzy_rule, request_autocorrect_mask, CandidateEdge, CandidateSource,
@@ -65,6 +66,7 @@ pub use user_dictionary::bundled::{
     DictionaryTablePage,
 };
 pub use user_dictionary::generation::prepare_runtime_paths;
+pub use user_dictionary::journal::quarantine_corrupt_journal;
 pub use user_dictionary::personal::{
     edit_personal_dictionary, personal_dictionary_entries, validate_personal_dictionary_entry,
     PersonalDictionaryPage,

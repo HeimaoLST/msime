@@ -384,6 +384,95 @@ int main(void)
         assert([[controller valueForKey:@"announcedCandidate"] isEqual:@"3  AI 候选等待中"]);
         renderAccessible(2, @"—");
         assert([[controller valueForKey:@"announcedCandidate"] isEqual:@"3  AI 候选没有结果"]);
+        // 原生控制器立即显示与隐藏；皮肤不能让候选窗淡入或缩放。
+        assert(panel.alphaValue == 1.0);
+        assert(panel.animationBehavior == NSWindowAnimationBehaviorNone);
+        assert(CATransform3DIsIdentity(panel.contentView.layer.transform));
+        for (NSView *row in panel.contentView.subviews)
+            assert([row.layer animationForKey:@"msime-candidate-selection"] == nil);
+        [controller hideCandidatePanel:"empty"];
+        assert(!panel.isVisible);
+        [controller renderCandidates];
+        assert(panel.alphaValue == 1.0);
+        // 使用有效的合成候选身份，验证按需创建、帧内复用和旧按钮拒绝菜单。
+        NSDictionary *menuView = @{@"session": @1, @"generation": @7, @"focused": @YES,
+                                  @"editing_text": @"d", @"page": @0, @"page_count": @1,
+                                  @"candidates": @[@{@"id": @{@"session": @1, @"generation": @7, @"index": @0},
+                                                     @"text": @"合成", @"highlighted": @YES}]};
+        [controller setValue:menuView forKey:@"view"];
+        [controller renderCandidates];
+        MSIMECandidateButton *menuRow = CandidateButton(panel.contentView, 0);
+        assert(menuRow.menu == nil);
+        NSEvent *rightClick = [NSEvent mouseEventWithType:NSEventTypeRightMouseDown location:NSZeroPoint modifierFlags:0
+                                               timestamp:0 windowNumber:0 context:nil eventNumber:1 clickCount:1 pressure:1];
+        NSMenu *menu = [menuRow menuForEvent:rightClick];
+        assert(menu && menu.numberOfItems == 3);
+        assert([menuRow menuForEvent:rightClick] == menu);
+        [controller renderCandidates];
+        assert([menuRow menuForEvent:rightClick] == nil);
+        assert(CandidateButton(panel.contentView, 0).menu == nil);
+
+        // 可选的合成显隐样本，仅输出耗时与菜单构建次数，不输出输入内容。
+        if (getenv("MSIME_CANDIDATE_BENCHMARK")) {
+            NSMutableArray *sample = [NSMutableArray array];
+            for (NSUInteger slot = 0; slot < 9; ++slot)
+                [sample addObject:@{@"id": @{@"session": @1, @"generation": @7, @"index": @(slot)},
+                                    @"text": @"合成", @"highlighted": @(slot == 0)}];
+            NSDictionary *shown = @{@"session": @1, @"generation": @7, @"focused": @YES,
+                                    @"editing_text": @"d", @"candidates": sample, @"page": @0, @"page_count": @1};
+            NSDictionary *hidden = @{@"candidates": @[]};
+            std::vector<double> timings;
+            for (NSUInteger iteration = 0; iteration < 60; ++iteration) {
+                @autoreleasepool {
+                    const uint64_t started = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+                    [controller setValue:shown forKey:@"view"];
+                    [controller renderCandidates];
+                    [controller setValue:hidden forKey:@"view"];
+                    [controller renderCandidates];
+                    timings.push_back((clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - started) / 1e6);
+                }
+            }
+            std::sort(timings.begin(), timings.end());
+            printf("candidate show/hide: median=%.3fms p95=%.3fms\n", timings[30], timings[57]);
+        }
+        // 首选与悬停行按相同内边距推导圆角，覆盖极端设置和缩放。
+        appearance.candidateCornerRadius = @32;
+        appearance.candidatePadding = @0;
+        for (NSNumber *scale in @[@50, @100, @150, @200]) {
+            appearance.candidateScalePercent = scale.integerValue;
+            renderAccessible(0, @"…");
+            MSIMECandidateButton *selected = CandidateButton(panel.contentView, 0);
+            MSIMECandidateButton *hovered = CandidateButton(panel.contentView, 1);
+            hovered.candidateHovered = YES;
+            assert(selected.cornerRadius == 30.0 * scale.doubleValue / 100.0);
+            assert(hovered.cornerRadius == selected.cornerRadius);
+            assert(NSMinX(selected.frame) >= 2.0 * scale.doubleValue / 100.0);
+        }
+        // 前一组覆盖到 200% 缩放，首行布局断言使用 100% 的坐标。
+        appearance.candidateScalePercent = 100;
+        // 直接驱动实际展开渲染路径，避免其它快捷键测试的失败遮住布局回归。
+        NSMutableArray *expanded = [NSMutableArray array];
+        for (NSUInteger slot = 0; slot < 9; ++slot)
+            [expanded addObject:@{@"text": @"合成", @"highlighted": @(slot == 0)}];
+        [controller setValue:expanded forKey:@"expandedCandidates"];
+        [controller setValue:@0 forKey:@"expandedCursor"];
+        appearance.vertical = NO;
+        appearance.showsCandidatePageNumber = NO;
+        appearance.showsAppLogo = NO;
+        appearance.showsCandidatePreedit = NO;
+        assert([controller renderExpandedCandidates]);
+        for (NSView *row in panel.contentView.subviews) {
+            assert(![row.identifier isEqual:@"candidate-page-indicator"]);
+            assert(![row.identifier isEqual:@"candidate-collapse"]);
+        }
+        const CGFloat inset = MAX(2.0, [appearance candidateWindowSkinForDark:NO].tokens.pad);
+        assert(std::abs(NSMaxY(CandidateButton(panel.contentView, 0).frame) - (NSHeight(panel.contentView.bounds) - inset)) < .01);
+        appearance.showsCandidatePreedit = YES;
+        assert([controller renderExpandedCandidates]);
+        assert(NSMaxY(CandidateButton(panel.contentView, 0).frame) < NSHeight(panel.contentView.bounds) - inset);
+        appearance.showsCandidatePageNumber = YES;
+        assert([controller renderExpandedCandidates]);
+        assert([CandidateButton(panel.contentView, -3).identifier isEqual:@"candidate-collapse"]);
         MSIMERemoveTestPreferenceSuite(defaults, suite);
     }
     return 0;

@@ -1,4 +1,5 @@
 import { useEffect, useRef, type HTMLAttributes } from "react";
+import { subscribeToWindowBlur } from "../core/window-focus";
 import { useMountedRef } from "../settings/use-mounted-ref";
 
 export function usePanelDrag(
@@ -11,10 +12,10 @@ export function usePanelDrag(
     pendingDrag.current = null;
   };
   useEffect(() => {
-    window.addEventListener("blur", reset);
+    const stopBlur = subscribeToWindowBlur(reset);
     return () => {
       reset();
-      window.removeEventListener("blur", reset);
+      stopBlur();
     };
   }, [client]);
   return {

@@ -15,12 +15,11 @@ use crate::helpcode::{
     match_single_helpcode, matches_double_helpcodes, HelpcodeKeymap, SingleHelpcodeMatch,
 };
 use crate::ime::online_batch::replace_online_candidate_batch;
-use crate::lattice::decode::make_sentence_lattice_options;
+use crate::lattice::decode::SentenceNgramTables;
 use crate::lattice::merge::{merge_lattice_candidates, whole_sentence_insert_position};
 use crate::lattice::neural::{
     shared_sentence_model, NeuralReranker, CONTEXT_CHARACTERS, MAX_RERANK_PATHS,
 };
-use crate::lattice::ngram::NgramTable;
 use crate::lattice::{SentencePath, TypoEdgeSource};
 use crate::ordering::apply_order;
 use crate::paths::RuntimePaths;
@@ -36,8 +35,10 @@ use crate::user_dictionary::ngram_store::PersonalNgramStore;
 
 // 双拼前缀候选的短合并直接扫描已有词，避免临时哈希表和重复索引分配。
 const SMALL_PREFIX_DEDUP: usize = 64;
-// 单字辅助码的常见候选批次很短，排列索引放在栈上即可。
-const SMALL_SINGLE_HELP_CODE_ORDER: usize = 64;
+// 单字辅助码的常见候选批次很短，匹配分类和排列索引放在栈上即可。
+const SMALL_SINGLE_HELP_CODE_BATCH: usize = 64;
+/// 常见双拼纠错输入的两键分段放在栈上；更长的输入仍回退到堆容器，不改变准入范围。
+const INLINE_TYPO_CODES: usize = 32;
 
 /// The reference passed `INT_MAX` as "no limit" to the row queries (SD:899, SD:543).
 const UNLIMITED_ROWS: usize = i32::MAX as usize;
@@ -56,6 +57,7 @@ pub struct ShuangpinDictionary {
     profile: &'static ShuangpinProfile,
     database: PinyinDatabase,
     paths: RuntimePaths,
+    sentence_tables: SentenceNgramTables,
     personal: Arc<PersonalNgramStore>,
     rerankers: Vec<NeuralReranker>,
     sentence_alternatives: bool,
@@ -84,11 +86,11 @@ impl ShuangpinDictionary {
     pub fn new(profile: &'static ShuangpinProfile, paths: &RuntimePaths) -> Self {
         // READWRITE without CREATE: a missing dictionary stays missing and every query answers empty (SD:54-70).
         let mut database = PinyinDatabase::open(&paths.dictionary(assets::MAIN_DICTIONARY));
+        let mut sentence_tables = SentenceNgramTables::default();
         if database.is_open() {
             database.warm_up();
-            // Off the typing path: the first lattice decode would otherwise map the tables.
-            NgramTable::shared(&paths.dictionary(assets::BIGRAM_TABLE));
-            NgramTable::shared(&paths.dictionary(assets::TRIGRAM_TABLE));
+            // 在构造时加载并保留表，避免共享淘汰后在按键路径重新读表。
+            sentence_tables = SentenceNgramTables::load(paths);
             // Records the data version so the first cache hit has something to compare with.
             database.database_changed();
         }
@@ -100,6 +102,7 @@ impl ShuangpinDictionary {
             profile,
             database,
             paths: paths.clone(),
+            sentence_tables,
             personal,
             rerankers: Vec::new(),
             sentence_alternatives: false,
@@ -287,7 +290,7 @@ impl ShuangpinDictionary {
         if !word_lattice && self.rerankers.is_empty() {
             return;
         }
-        let mut options = make_sentence_lattice_options(&self.paths, self.sentence_alternatives);
+        let mut options = self.sentence_tables.options(self.sentence_alternatives);
         if !self.rerankers.is_empty() {
             options.nbest = MAX_RERANK_PATHS;
         }
@@ -308,7 +311,7 @@ impl ShuangpinDictionary {
                 database,
                 span_cache,
                 profile,
-                &codes,
+                codes.as_slice(),
                 segments,
                 literal_best,
                 types,
@@ -366,12 +369,9 @@ impl ShuangpinDictionary {
         }
         let prefer_last = help_code.as_bytes()[0].is_ascii_uppercase();
         let normalized = help_code.to_ascii_lowercase();
-        let matches: Vec<_> = candidates
-            .iter()
-            .map(|candidate| match_single_helpcode(&candidate.word, &normalized, keymap))
-            .collect();
+        let matches = single_helpcode_matches(&candidates, &normalized, keymap);
         let (mut result, unmatched) =
-            reorder_single_helpcode_rows(candidates, &matches, prefer_last);
+            reorder_single_helpcode_rows(candidates, matches.as_slice(), prefer_last);
         // The whole raw input, the last letter read as pinyin instead of a helpcode. The reference segments the raw input as one chunk, `'` included; the conversion drops the empty pieces that leaves (SD:370-372).
         let original_segmentation = pinyin_segmentation(raw, self.profile);
         let whole = self.generate_series(raw, &original_segmentation, "");
@@ -465,18 +465,22 @@ impl ShuangpinDictionary {
         if expanded.len() <= limited {
             return false;
         }
-        let mut merged = Vec::with_capacity(candidates.len() - limited + expanded.len());
-        let mut expanded = Some(expanded);
-        for item in candidates.drain(..) {
-            if is_limited(&item) {
-                if let Some(rows) = expanded.take() {
-                    merged.extend(rows);
-                }
-                continue;
+        let first_limited = candidates
+            .iter()
+            .position(is_limited)
+            .expect("limited count checked above");
+        candidates.reserve_exact(expanded.len() - limited);
+        let mut removed = 0;
+        candidates.retain(|item| {
+            if is_limited(item) {
+                removed += 1;
+                false
+            } else {
+                true
             }
-            merged.push(item);
-        }
-        *candidates = merged;
+        });
+        debug_assert_eq!(removed, limited);
+        candidates.splice(first_limited..first_limited, expanded.iter().cloned());
         if !series_key.is_empty() {
             let key = self.sentence_cache_key(series_key);
             self.series_cache.insert(key, candidates.clone());
@@ -614,6 +618,47 @@ impl ShuangpinDictionary {
     }
 }
 
+struct SingleHelpcodeMatches {
+    values: [SingleHelpcodeMatch; SMALL_SINGLE_HELP_CODE_BATCH],
+    len: usize,
+    heap: Option<Vec<SingleHelpcodeMatch>>,
+}
+
+impl SingleHelpcodeMatches {
+    fn as_slice(&self) -> &[SingleHelpcodeMatch] {
+        self.heap.as_deref().unwrap_or(&self.values[..self.len])
+    }
+}
+
+fn single_helpcode_matches(
+    candidates: &[WordItem],
+    normalized: &str,
+    keymap: &HelpcodeKeymap,
+) -> SingleHelpcodeMatches {
+    let mut values = [SingleHelpcodeMatch::None; SMALL_SINGLE_HELP_CODE_BATCH];
+    if candidates.len() <= SMALL_SINGLE_HELP_CODE_BATCH {
+        for (slot, candidate) in values.iter_mut().zip(candidates) {
+            *slot = match_single_helpcode(&candidate.word, normalized, keymap);
+        }
+        return SingleHelpcodeMatches {
+            values,
+            len: candidates.len(),
+            heap: None,
+        };
+    }
+    let mut heap = Vec::with_capacity(candidates.len());
+    heap.extend(
+        candidates
+            .iter()
+            .map(|candidate| match_single_helpcode(&candidate.word, normalized, keymap)),
+    );
+    SingleHelpcodeMatches {
+        values,
+        len: 0,
+        heap: Some(heap),
+    }
+}
+
 /// 纠错整句的座位：全码词条和整句块之后，且永远不是第一位。整句块可能是空的（词网格关着、键盘重排器又没给出一条），这时全码词条之后就是第 0 位，纠错行会顶到首选，被空格直接上屏，所以至少让出第一位；表是空的就不给纠错行，免得它成为唯一也是首个候选。
 fn typo_sentence_seat(candidates: &[WordItem], segments: &[String]) -> Option<usize> {
     if candidates.is_empty() {
@@ -627,20 +672,72 @@ fn typo_sentence_seat(candidates: &[WordItem], segments: &[String]) -> Option<us
 }
 
 /// 纠错整句要求每个音节恰好是一对键，才知道该换哪个键；用户手打的 `'` 表示按字面切分，和全拼一样不纠。`rows_key` 是这次答案的缓存键（带 `'` 的原始输入或去掉分隔的按键），所以准入只由缓存键和切分决定，命中缓存的答案与重新计算的一致。不可纠时返回空。
+struct TypoCodes<'a> {
+    values: [&'a str; INLINE_TYPO_CODES],
+    len: usize,
+    heap: Option<Vec<&'a str>>,
+}
+
+impl<'a> TypoCodes<'a> {
+    fn empty() -> Self {
+        Self {
+            values: [""; INLINE_TYPO_CODES],
+            len: 0,
+            heap: None,
+        }
+    }
+
+    fn as_slice(&self) -> &[&'a str] {
+        self.heap.as_deref().unwrap_or(&self.values[..self.len])
+    }
+
+    fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+}
+
 fn typo_codes<'a>(
     types: u32,
     segments: &[String],
     segmentation: &'a str,
     rows_key: &str,
-) -> Vec<&'a str> {
+) -> TypoCodes<'a> {
     if types & SHUANGPIN_TYPO_TYPES == 0 || rows_key.contains('\'') {
-        return Vec::new();
+        return TypoCodes::empty();
     }
-    let codes: Vec<&str> = segmentation.split('\'').collect();
-    if codes.len() != segments.len() || codes.iter().any(|code| code.len() != 2) {
-        return Vec::new();
+    let mut inline = [""; INLINE_TYPO_CODES];
+    let mut len = 0;
+    let mut heap: Option<Vec<&'a str>> = None;
+    for code in segmentation.split('\'') {
+        if code.len() != 2 {
+            return TypoCodes::empty();
+        }
+        if let Some(values) = &mut heap {
+            values.push(code);
+        } else if len < INLINE_TYPO_CODES {
+            inline[len] = code;
+            len += 1;
+        } else {
+            let mut values = Vec::with_capacity(segments.len());
+            values.extend_from_slice(&inline[..len]);
+            values.push(code);
+            heap = Some(values);
+        }
     }
-    codes
+    match heap {
+        Some(values) if values.len() == segments.len() => TypoCodes {
+            values: inline,
+            len,
+            heap: Some(values),
+        },
+        Some(_) => TypoCodes::empty(),
+        None if len == segments.len() => TypoCodes {
+            values: inline,
+            len,
+            heap: None,
+        },
+        None => TypoCodes::empty(),
+    }
 }
 
 fn prefix_group_count(segmentation: &str) -> usize {
@@ -755,8 +852,8 @@ fn reorder_single_helpcode_rows(
         .iter()
         .filter(|matched| **matched == SingleHelpcodeMatch::None)
         .count();
-    if candidates.len() <= SMALL_SINGLE_HELP_CODE_ORDER {
-        let mut order = [0usize; SMALL_SINGLE_HELP_CODE_ORDER];
+    if candidates.len() <= SMALL_SINGLE_HELP_CODE_BATCH {
+        let mut order = [0usize; SMALL_SINGLE_HELP_CODE_BATCH];
         let order_len = fill_single_helpcode_order(&mut order, matches, prefer_last);
         debug_assert_eq!(order_len, candidates.len());
         debug_assert!(order_len <= order.len());
@@ -806,14 +903,42 @@ fn fill_single_helpcode_order(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn active_dictionary_reuses_ngram_tables_after_shared_eviction() {
+        for bigram in [false, true] {
+            for trigram in [false, true] {
+                let fixture = crate::lattice::active_tables_tests::fixture(bigram, trigram);
+                let selected = profile(crate::types::ShuangpinProfileKind::Xiaohe).unwrap();
+                let mut dictionary = ShuangpinDictionary::new(selected, &fixture.paths);
+                let segments = ["ni", "hao", "ma"].map(str::to_owned);
+                crate::lattice::active_tables_tests::assert_query_stable(&fixture.paths, || {
+                    let mut result = Vec::new();
+                    dictionary.merge_sentences(
+                        &mut result,
+                        &segments,
+                        "ni'hc'ma",
+                        "nihcma",
+                        "ni'hc'ma",
+                    );
+                    result
+                });
+            }
+        }
+    }
+
     use super::append_helpcode_rows;
     use super::append_prefix_rows;
     use super::double_helpcode_cache_key;
     use super::prefix_group_count;
     use super::reorder_single_helpcode_rows;
+    use super::single_helpcode_matches;
+    use super::typo_codes;
     use super::typo_sentence_seat;
     use super::ShuangpinDictionary;
     use super::SingleHelpcodeMatch;
+    use super::INLINE_TYPO_CODES;
+    use super::SHUANGPIN_TYPO_TYPES;
+    use super::SMALL_SINGLE_HELP_CODE_BATCH;
     use crate::helpcode::HelpcodeKeymap;
     use crate::paths::RuntimePaths;
     use crate::shuangpin::profile::profile;
@@ -910,6 +1035,42 @@ mod tests {
             allocations, 0,
             "短辅助码重排不应为排列索引分配临时存储：{allocations}"
         );
+    }
+
+    #[test]
+    fn short_single_helpcode_matching_does_not_allocate_a_heap_vector() {
+        let candidates = [row("甲"), row("乙"), row("丙")];
+        let keymap = HelpcodeKeymap::from_codes(std::collections::HashMap::from([
+            ("甲".to_owned(), "ab".to_owned()),
+            ("乙".to_owned(), "cd".to_owned()),
+            ("丙".to_owned(), "ef".to_owned()),
+        ]));
+
+        let (matches, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            single_helpcode_matches(&candidates, "a", &keymap)
+        });
+
+        assert_eq!(
+            matches.as_slice(),
+            [
+                SingleHelpcodeMatch::First,
+                SingleHelpcodeMatch::None,
+                SingleHelpcodeMatch::None,
+            ]
+        );
+        assert_eq!(allocations, 0, "短辅助码匹配不应申请临时堆向量");
+    }
+
+    #[test]
+    fn long_single_helpcode_matching_keeps_the_heap_fallback() {
+        let candidates = vec![row("甲"); SMALL_SINGLE_HELP_CODE_BATCH + 1];
+        let matches = single_helpcode_matches(&candidates, "a", &HelpcodeKeymap::default());
+
+        assert_eq!(matches.as_slice().len(), candidates.len());
+        assert!(matches
+            .as_slice()
+            .iter()
+            .all(|matched| *matched == SingleHelpcodeMatch::None));
     }
 
     #[test]
@@ -1106,5 +1267,34 @@ mod tests {
             allocations <= 2,
             "large prefix merge allocated {allocations} temporary buffers"
         );
+    }
+
+    #[test]
+    fn typical_typo_code_projection_does_not_allocate_a_heap_vector() {
+        let segments: Vec<String> = ["mei", "gen", "xi"].map(str::to_owned).into();
+        let (codes, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            typo_codes(SHUANGPIN_TYPO_TYPES, &segments, "mw'gf'xi", "mwgfxi")
+        });
+
+        assert_eq!(codes.as_slice(), ["mw", "gf", "xi"]);
+        assert_eq!(allocations, 0, "双拼纠错码投影不应申请临时堆向量");
+    }
+
+    #[test]
+    fn typo_code_projection_keeps_invalid_and_long_input_semantics() {
+        let segments: Vec<String> = ["mei", "gen"].map(str::to_owned).into();
+        assert!(typo_codes(SHUANGPIN_TYPO_TYPES, &segments, "mw'gf", "mw'gf").is_empty());
+        assert!(typo_codes(SHUANGPIN_TYPO_TYPES, &segments, "mwgf", "mwgf").is_empty());
+        assert!(typo_codes(0, &segments, "mw'gf", "mwgf").is_empty());
+
+        let long_segments = vec!["aa".to_owned(); INLINE_TYPO_CODES + 1];
+        let long_segmentation = long_segments.join("'");
+        let codes = typo_codes(
+            SHUANGPIN_TYPO_TYPES,
+            &long_segments,
+            &long_segmentation,
+            &long_segmentation.replace('\'', ""),
+        );
+        assert_eq!(codes.as_slice().len(), INLINE_TYPO_CODES + 1);
     }
 }

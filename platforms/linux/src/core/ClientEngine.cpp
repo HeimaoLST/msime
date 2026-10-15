@@ -396,6 +396,8 @@ struct State {
   bool fullwidth = false;
   bool english_mode = false;
   bool traditional_output = false;
+  // 偏好 `traditional_chinese_variant` 的编号（0 s2t、1 s2tw、2 s2twp）。
+  uint32_t traditional_variant = 0;
   std::string candidate_preedit_style = "pinyin";
   bool show_candidate_page_number = true;
   bool learning = true;
@@ -818,6 +820,8 @@ struct State {
     japanese_toggle_enabled = keybindings.value("toggle_japanese_ctrl_shift_j", false);
     traditional_output = traditional_output_override.value_or(
         preferences.value("traditional_chinese_output", false));
+    traditional_variant = msime_linux_traditional_variant(
+        preferences.value("traditional_chinese_variant", std::string("s2t")));
     cloud_candidates = cloud_candidates_override.value_or(
         preferences.value("cloud_candidates", true));
     candidate_translations = candidate_translations_override.value_or(
@@ -988,6 +992,8 @@ struct State {
     }
     traditional_output = traditional_output_override.value_or(
         preferences.value("traditional_chinese_output", false));
+    traditional_variant = msime_linux_traditional_variant(
+        preferences.value("traditional_chinese_variant", std::string("s2t")));
     const bool next_cloud_candidates = cloud_candidates_override.value_or(
         preferences.value("cloud_candidates", true));
     if (next_cloud_candidates != cloud_candidates)
@@ -1198,7 +1204,7 @@ bool script_conversion_applies(const Json &context) {
 std::string traditional_display(const State &s, const Json &context,
                                 std::string text) {
   if (s.traditional_output && script_conversion_applies(context))
-    text = msime_linux_simplified_to_traditional(text);
+    text = msime_linux_simplified_to_traditional(text, s.traditional_variant);
   return text;
 }
 constexpr size_t kClipboardStoreBytes = 1024 * 1024;
@@ -1734,6 +1740,14 @@ const char *smart_punctuation_pair(char value) {
   const auto mark = msime::linux_host::chinese_punctuation_mark(value);
   return mark.empty() ? nullptr : mark.data();
 }
+// 英文模式下的中文标点按最近一次 View 报告的样式出字（`punctuation_marks`，host-api 已解析好 corner_when_traditional）。
+msime::linux_host::PunctuationMarks view_punctuation_marks(const Json &view) {
+  if (!view.is_object()) return {};
+  const auto marks = view.value("punctuation_marks", Json::object());
+  if (!marks.is_object()) return {};
+  return msime::linux_host::punctuation_marks_from_view(
+      marks.value("quotes", std::string{}), marks.value("brackets", std::string{}));
+}
 using msime::linux_host::normalize_punctuation_pair;
 using msime::linux_host::paired_closing_from_text;
 using msime::linux_host::PunctuationPairMode;
@@ -1894,7 +1908,7 @@ bool try_skip_paired_closing(IBusEngine *engine, guint key, guint flags) {
     paired_modifiers |= static_cast<std::uint32_t>(
         msime::linux_host::PairedPunctuationModifier::Mod5);
   const auto closing = msime::linux_host::paired_closing_for_key(
-      static_cast<char>(key), s.fullwidth);
+      static_cast<char>(key), s.fullwidth, s.paired_tracker);
   if (!closing) return false;
   const auto following = surrounding_following_character(s);
   const bool modifiers_allowed =
@@ -2071,8 +2085,25 @@ void translation_dispatch(IBusEngine *engine) {
     // The shared query carries candidate objects; the socket protocol takes
     // the candidate texts, matching TranslationQuery in the host API.
     auto texts = Json::array();
-    for (const auto &candidate : query.at("candidates"))
+    const auto &viewCandidates = s.view.value("candidates", Json::array());
+    size_t candidateIndex = 0;
+    for (const auto &candidate : query.at("candidates")) {
+      // Preserve the source gate before the text-only provider protocol drops
+      // candidate metadata. Unknown or mismatched rows remain eligible so a
+      // malformed view cannot suppress an otherwise valid translation.
+      if (viewCandidates.is_array() && candidateIndex < viewCandidates.size()) {
+        const auto &viewCandidate = viewCandidates.at(candidateIndex);
+        if (viewCandidate.is_object() && viewCandidate.contains("source") &&
+            viewCandidate.at("source").is_number_unsigned() &&
+            !msime::linux_host::candidate_translation_source_allowed(
+                viewCandidate.at("source").get<std::uint64_t>())) {
+          ++candidateIndex;
+          continue;
+        }
+      }
       texts.push_back(candidate.at("text"));
+      ++candidateIndex;
+    }
     query["candidates"] = std::move(texts);
     const auto encoded = query.dump();
     // Applying a gloss redraws the same generation. Do not start another
@@ -6452,7 +6483,8 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
   if (s.focused && !s.blocked && !s.input_enabled && !release) {
     if (!voice_hotkey_match && (modifiers & ~(IBUS_SHIFT_MASK | IBUS_MOD5_MASK)) == 0) {
       if (const auto text = s.native_compose.feed(key)) {
-        if (!text->empty()) commit_text(engine, *text);
+        if (!text->empty())
+          commit_text(engine, *text, msime::linux_host::TypingSource::English);
         return TRUE;
       }
     } else {
@@ -6467,7 +6499,7 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
         ibus_keyval_to_unicode(key), keypad,
         s.punctuation_lock == "chinese" ||
             (s.punctuation_lock == "follow" && s.english_chinese_punctuation),
-        s.fullwidth, s.english_punctuation);
+        s.fullwidth, s.english_punctuation, view_punctuation_marks(s.view));
     if (!text.empty()) {
       commit_text(engine, text, msime::linux_host::TypingSource::English);
       return TRUE;
@@ -6528,7 +6560,7 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
   // 英文模式在上面已经交给应用；Engine 自己的英文模式（Ctrl+Shift+E）里同样交给应用，和 Windows 一致。
   if (s.japanese_toggle_enabled && (key == IBUS_j || key == IBUS_J) &&
       modifiers == (IBUS_CONTROL_MASK | IBUS_SHIFT_MASK) &&
-      !s.view.value("dedicated_english", false)) {
+      s.view.is_object() && !s.view.value("dedicated_english", false)) {
     if (!toggle_japanese_scheme(engine))
       return FALSE;
     s.japanese_chord_held = true;
@@ -6559,6 +6591,7 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
     const auto index = maintenance_candidate_slot;
     if (!index || s.rendered_session != s.session || !candidates.is_array() ||
         *index >= candidates.size() || !s.rendered_view.is_object() ||
+        !s.view.is_object() ||
         s.rendered_view.value("generation", uint64_t{0}) !=
             s.view.value("generation", uint64_t{0}))
       return FALSE;

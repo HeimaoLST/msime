@@ -180,6 +180,9 @@ inline std::atomic_bool PairedPunctuationEnabled{true};
 inline std::atomic_bool MicrosoftShuangpinEnabled{false};
 // 组字时 ';' 和 '\'' 选第二、第三个候选。Server 用 SecondThirdCandidateChanged 推送之前保持关闭，两个键照常是标点。
 inline std::atomic_bool SecondThirdCandidateEnabled{false};
+// 引号与方头括号样式，Server 用 PunctuationMarksChanged 推送之前是弯引号、实心括号。GetPunctuation 按它们换字（PairedPunctuationHostPolicy.h 的 StyledPunctuation）。
+inline std::atomic_bool CornerQuotes{false};
+inline std::atomic_bool HollowBrackets{false};
 // The scheme the TIP keys before its host session answers a key: scheme::mode_scheme of the mode the Server last announced in InputModeChanged, or of the scheme the preferences run before it has (common/InputSchemeTraits.h). The pinyin and shape schemes all read as quanpin, which they key alike.
 inline std::atomic_int InputModeScheme{0};
 // 任务栏模式图标显示的模式：Server 上次在 InputModeChanged 里给的码（scheme::input_mode_code），双拼和五笔也各有自己的码；Server 还没给时是偏好里正在运行的方案。只有语言栏读它，键入看上面的 InputModeScheme。

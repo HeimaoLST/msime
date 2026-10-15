@@ -71,6 +71,16 @@ pub fn detach_window_content(window_address: usize) -> Option<DetachedWindowCont
     })
 }
 
+/// 在转换并恢复内容后，为共享屏幕键盘设置透明圆角和遮罩上方的层级。
+#[cfg(target_os = "macos")]
+pub fn prepare_keyboard_window(window_address: usize) -> bool {
+    unsafe extern "C" {
+        fn msime_macos_prepare_keyboard_window(address: usize) -> bool;
+    }
+    // 原生边界核对主线程和 NSApp 活窗口；不会直接解引用任意地址。
+    unsafe { msime_macos_prepare_keyboard_window(window_address) }
+}
+
 #[cfg(target_os = "macos")]
 impl Drop for DetachedWindowContent {
     fn drop(&mut self) {

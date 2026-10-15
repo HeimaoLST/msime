@@ -1,12 +1,5 @@
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { createContext, useCallback, useContext, useRef, type ReactNode } from "react";
+import { useTimedValue } from "./use-timed-value";
 
 /** toast 停留的时长，即设计稿的 1.6 秒（Android `Ui.TOAST_MILLIS`）。 */
 export const toastMillis = 1600;
@@ -21,19 +14,17 @@ function ignore() {}
  * 设计稿的 toast：底部标签栏上方的一个深色胶囊（浅色模式 `#1C1C1E` 配白字，深色模式 `#F2F2F2` 配 `#111`），淡入后 1.6 秒消失。新 toast 会替换正在显示的那个并重新计时，和 Android 的 `MsToast` 一样。屏幕阅读器通过一个始终挂载的 polite live region 读出它，所以即使消息到达时区域是空的也会被播报。
  */
 export function ToastProvider({ children }: { children: ReactNode }) {
-  const [toast, setToast] = useState<{ text: string; key: number } | null>(null);
-  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const [toast, setToast] = useTimedValue<{ text: string; key: number } | null>(null);
   const counter = useRef(0);
 
-  const show = useCallback<ShowToast>((text) => {
-    clearTimeout(timer.current);
-    counter.current += 1;
-    // 换一个新 key 会重新挂载胶囊，所以替换上来的 toast 会重新淡入，而不是原地换掉文字。
-    setToast({ text, key: counter.current });
-    timer.current = setTimeout(() => setToast(null), toastMillis);
-  }, []);
-
-  useEffect(() => () => clearTimeout(timer.current), []);
+  const show = useCallback<ShowToast>(
+    (text) => {
+      counter.current += 1;
+      // 换一个新 key 会重新挂载胶囊，使替换后的 toast 重新淡入。
+      setToast({ text, key: counter.current }, toastMillis);
+    },
+    [setToast],
+  );
 
   return (
     <ToastContext.Provider value={show}>

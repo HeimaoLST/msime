@@ -1774,6 +1774,8 @@ public:
     preferences_ = std::move(session_preferences);
     applyContextOverrides(preferences_);
     traditional_ = preferences_.value("traditional_chinese_output", false);
+    traditional_variant_ = msime_linux_traditional_variant(
+        preferences_.value("traditional_chinese_variant", std::string("s2t")));
     chinese_punctuation_ = preferences_.value("chinese_punctuation", true);
     paired_punctuation_ = preferences_.value("paired_punctuation", true);
     smart_punctuation_ = preferences_.value("smart_punctuation", true);
@@ -1955,6 +1957,8 @@ public:
             // A width chosen here that the store does not hold - its save failed, or a private window, which never saves - is not undone by the store, as a failed scheme choice is kept; the next session re-reads the store.
             if (!private_ && !unsavedChoice("", "character_width")) syncSessionCharacterWidth();
             traditional_ = preferences_.value("traditional_chinese_output", traditional_);
+            traditional_variant_ = msime_linux_traditional_variant(
+                preferences_.value("traditional_chinese_variant", std::string("s2t")));
             chinese_punctuation_ = preferences_.value("chinese_punctuation", chinese_punctuation_);
             syncSessionChinesePunctuation();
             paired_punctuation_ = preferences_.value("paired_punctuation", paired_punctuation_);
@@ -2220,11 +2224,30 @@ public:
                              {"candidates", candidates}};
     if (dictionary) glossRequest["target_language"] = query.at("target_language");
     const auto gloss = glossRequest.dump();
+    std::vector<bool> providerAllowed;
+    providerAllowed.reserve(query.at("candidates").size());
+    const bool bypassSourceGate = manual_sentence || commandTranslation(query);
+    const auto &viewCandidates = view_.value("candidates", Json::array());
+    for (size_t candidateIndex = 0; candidateIndex < query.at("candidates").size();
+         ++candidateIndex) {
+      bool allowed = true;
+      if (!bypassSourceGate && viewCandidates.is_array() &&
+          candidateIndex < viewCandidates.size()) {
+        const auto &viewCandidate = viewCandidates.at(candidateIndex);
+        if (viewCandidate.is_object() && viewCandidate.contains("source") &&
+            viewCandidate.at("source").is_number_unsigned()) {
+          allowed = msime::linux_host::candidate_translation_source_allowed(
+              viewCandidate.at("source").get<std::uint64_t>());
+        }
+      }
+      providerAllowed.push_back(allowed);
+    }
     const auto socket = (manual_sentence || commandTranslation(query) ||
                          preferences_.value("candidate_translations", true))
                             ? translation_socket_ : std::string{};
     translation_job_ = detachedJob(
-        [query, encoded, gloss, offline, local, socket, dictionary, resources = resources_] () mutable {
+        [query, encoded, gloss, offline, local, socket, dictionary, providerAllowed,
+         resources = resources_] () mutable {
           if (offline) {
             try {
               local = preferOnline(response(msime_client_candidate_gloss_request(
@@ -2235,11 +2258,15 @@ public:
           } else if (!socket.empty()) {
             auto transport = query;
             auto missing = Json::array();
+            size_t candidateIndex = 0;
             for (const auto &candidate : query.at("candidates")) {
               const auto &text = candidate.at("text");
-              if (dictionary || std::none_of(local.begin(), local.end(), [&](const Json &item) {
+              const bool sourceAllowed = candidateIndex >= providerAllowed.size() ||
+                  providerAllowed[candidateIndex];
+              if (sourceAllowed && (dictionary || std::none_of(local.begin(), local.end(), [&](const Json &item) {
                     return item.at("text") == text;
-                  })) missing.push_back(text);
+                  }))) missing.push_back(text);
+              ++candidateIndex;
             }
             transport["candidates"] = std::move(missing);
             if (!transport.at("candidates").empty()) {
@@ -3082,7 +3109,7 @@ public:
     pair_inserted_ = false;
     if (result.contains("commit") && result["commit"].is_string()) {
       auto text = result["commit"].get<std::string>();
-      if (traditionalApplies()) text = msime_linux_simplified_to_traditional(text);
+      if (traditionalApplies()) text = msime_linux_simplified_to_traditional(text, traditional_variant_);
       const auto spaceConvertAscii =
           spaceConvertPreceding
               ? msime::linux_host::smart_punctuation_ascii_mark(text)
@@ -3149,6 +3176,13 @@ public:
   }
   bool fullwidthOutput() const {
     return view_.value("character_width", std::string{}) == "Fullwidth";
+  }
+  // 英文模式下的中文标点按 View 报告的样式出字（host-api 已解析好 corner_when_traditional）。
+  msime::linux_host::PunctuationMarks viewPunctuationMarks() const {
+    const auto marks = view_.value("punctuation_marks", Json::object());
+    if (!marks.is_object()) return {};
+    return msime::linux_host::punctuation_marks_from_view(
+        marks.value("quotes", std::string{}), marks.value("brackets", std::string{}));
   }
   // The session types Korean: jamo compose in the preedit, punctuation is always half-width ASCII and none of the Chinese punctuation helpers apply. The dedicated English mode keeps its own rules in every scheme.
   bool korean() const {
@@ -3328,7 +3362,8 @@ public:
     if (!pairedPunctuationEnabled()) return false;
     const auto typed = fcitx::Key::keySymToUTF8(sym);
     if (typed.size() != 1) return false;
-    const auto closing = msime::linux_host::paired_closing_for_key(typed[0], fullwidthOutput());
+    const auto closing =
+        msime::linux_host::paired_closing_for_key(typed[0], fullwidthOutput(), paired_tracker_);
     if (!closing) return false;
     using Modifier = msime::linux_host::PairedPunctuationModifier;
     std::uint32_t modifiers = 0;
@@ -3705,6 +3740,8 @@ public:
   FcitxEngine *engine_;
   bool private_ = false;
   bool traditional_ = false;
+  // 偏好 `traditional_chinese_variant` 的编号（0 s2t、1 s2tw、2 s2twp）。
+  uint32_t traditional_variant_ = 0;
   bool chinese_punctuation_ = true;
   // What the session was last told; see syncSessionChinesePunctuation().
   bool session_chinese_punctuation_ = true;
@@ -3884,14 +3921,15 @@ public:
 };
 
 // The row as the panel draws it.
+// `variant` 是繁体变体的编号，只在 `traditional` 为真时用到。
 fcitx::Text candidateRowText(const Json &candidate, bool traditional, bool annotations,
-                             const std::string &hanjaGloss) {
+                             const std::string &hanjaGloss, uint32_t variant) {
   // Engine 候选来源 12 是 AI 座位上的占位行（「…」或「—」）：Fcitx5 的文本格式没有颜色，用斜体表示它是次要的，并标明不上屏（#6888）。
   if (msime::linux_host::strict_json_value(candidate, "source", uint64_t{}) == 12)
     return fcitx::Text(candidate.at("text").get<std::string>(),
                        fcitx::TextFormatFlags{fcitx::TextFormatFlag::Italic,
                                               fcitx::TextFormatFlag::DontCommit});
-  fcitx::Text row((traditional ? msime_linux_simplified_to_traditional(candidate.at("text").get<std::string>())
+  fcitx::Text row((traditional ? msime_linux_simplified_to_traditional(candidate.at("text").get<std::string>(), variant)
                                : candidate.at("text").get<std::string>()) +
       // Engine-corrected spellings carry the same light marker Windows and the IBus host draw. Only the displayed row gets it: selection goes by session/generation/index, and text_ below, which the candidate actions (dictionary removal) read, stays the Engine's text.
       (candidate.value("corrected", false) ? "*" : "") +
@@ -3916,8 +3954,8 @@ fcitx::Text candidateRowText(const Json &candidate, bool traditional, bool annot
 class FcitxCandidate : public fcitx::CandidateWord {
 public:
   FcitxCandidate(fcitx::FactoryFor<FcitxState> *factory, const Json &candidate, bool traditional,
-                 bool annotations, const std::string &hanjaGloss)
-      : CandidateWord(candidateRowText(candidate, traditional, annotations, hanjaGloss)), factory_(factory),
+                 bool annotations, const std::string &hanjaGloss, uint32_t variant = 0)
+      : CandidateWord(candidateRowText(candidate, traditional, annotations, hanjaGloss, variant)), factory_(factory),
         session_(msime::linux_host::strict_json_required_integer<uint64_t>(candidate.at("id").at("session"))),
         generation_(msime::linux_host::strict_json_required_integer<uint64_t>(candidate.at("id").at("generation"))),
         index_(msime::linux_host::strict_json_required_integer<size_t>(candidate.at("id").at("index"))),
@@ -3973,7 +4011,7 @@ public:
       if (candidate.value("highlighted", false)) cursor_ = words_.size();
       words_.push_back(std::make_unique<FcitxCandidate>(
           factory, candidate, state.traditionalApplies(), annotations,
-          msime::linux_host::korean_hanja_gloss(state.view_, candidate)));
+          msime::linux_host::korean_hanja_gloss(state.view_, candidate), state.traditional_variant_));
       // 序号与选它的数字键一致：第十个由 0 键选，标 0。
       labels_.emplace_back((words_.size() == 10 ? std::string("0") : std::to_string(words_.size())) + ". ");
     }
@@ -7463,7 +7501,7 @@ bool FcitxState::key(fcitx::KeyEvent &event) {
     const auto text = msime::linux_host::english_mode_output(
         static_cast<char32_t>(fcitx::Key::keySymToUnicode(sym)), keypad,
         punctuation_lock_ == 1 || (punctuation_lock_ == 0 && english_chinese_punctuation_),
-        fullwidthOutput(), english_punctuation_);
+        fullwidthOutput(), english_punctuation_, viewPunctuationMarks());
     if (text.empty()) return false;
     commitText(text, msime::linux_host::TypingSource::English);
     return true;

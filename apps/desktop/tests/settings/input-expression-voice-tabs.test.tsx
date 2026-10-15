@@ -50,13 +50,13 @@ test("输入分区只显示当前面板，切换和离页保留草稿与标签�
       .map((tab) => tab.textContent),
   ).toEqual(["方案", "中英文", "选词与翻页", "候选与联想", "输出", "进阶"]);
   expect(screen.getAllByRole("tabpanel")).toHaveLength(1);
-  expect(screen.queryByRole("switch", { name: "繁体输出" })).toBeNull();
+  expect(screen.queryByRole("radiogroup", { name: "中文输出" })).toBeNull();
   fireEvent.click(within(tabs).getByRole("tab", { name: "输出" }));
-  const output = screen.getByRole("switch", { name: "繁体输出" });
+  const output = screen.getByRole("radio", { name: "繁体" });
   fireEvent.click(output);
   fireEvent.click(within(tabs).getByRole("tab", { name: "方案" }));
   fireEvent.click(within(tabs).getByRole("tab", { name: "输出" }));
-  expect(screen.getByRole("switch", { name: "繁体输出" })).toBe(output);
+  expect(screen.getByRole("radio", { name: "繁体" })).toBe(output);
   expect(output).toHaveProperty("checked", true);
   fireEvent.click(screen.getByRole("button", { name: "标点与翻译" }));
   fireEvent.click(screen.getByRole("button", { name: "输入" }));
@@ -114,7 +114,7 @@ test("语音能力过滤标签，润色切换保留未保存的输入框", async
 test.each(["input", "expression", "voice"] as const)("手机 %s 页保留原布局", async (page) => {
   await mount(page, "ios");
   expect(screen.queryByRole("tablist", { name: /设置分类/ })).toBeNull();
-  if (page === "input") expect(screen.getByRole("switch", { name: "繁体输出" })).toBeTruthy();
+  if (page === "input") expect(screen.getByRole("radiogroup", { name: "中文输出" })).toBeTruthy();
   if (page === "expression")
     expect(screen.getByRole("switch", { name: "显示英文释义" })).toBeTruthy();
   if (page === "voice") expect(screen.getByRole("region", { name: "录音行为" })).toBeTruthy();

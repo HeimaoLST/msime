@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { StrictMode, useEffect, useLayoutEffect } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ToastProvider, toastMillis, useToast } from "../../../../packages/ui/src/core/toast";
 
@@ -65,3 +66,48 @@ test("outside a provider showing a toast does nothing", () => {
   expect(screen.queryByRole("status")).toBeNull();
   expect(screen.queryByText("已复制下载链接", { selector: "span" })).toBeNull();
 });
+
+test("相同 toast 重新挂载动画，卸载后迟到提示不创建计时器", () => {
+  let show!: (text: string) => void;
+  function CaptureToast() {
+    show = useToast();
+    return <CopyButton text="合成提示" />;
+  }
+  const { unmount } = render(
+    <ToastProvider>
+      <CaptureToast />
+    </ToastProvider>,
+  );
+  fireEvent.click(screen.getByRole("button"));
+  const first = screen.getByRole("status").firstElementChild;
+  act(() => vi.advanceTimersByTime(1000));
+  fireEvent.click(screen.getByRole("button"));
+  expect(screen.getByRole("status").firstElementChild).not.toBe(first);
+  act(() => vi.advanceTimersByTime(600));
+  expect(screen.getByRole("status").textContent).toBe("合成提示");
+  unmount();
+  expect(vi.getTimerCount()).toBe(0);
+  act(() => show("迟到提示"));
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+test.each([useEffect, useLayoutEffect])(
+  "StrictMode 子组件挂载时显示的 toast 仍会到期消失：%s",
+  (effect) => {
+    function MountToast() {
+      const show = useToast();
+      effect(() => show("挂载提示"), [show]);
+      return null;
+    }
+    render(
+      <StrictMode>
+        <ToastProvider>
+          <MountToast />
+        </ToastProvider>
+      </StrictMode>,
+    );
+    expect(screen.getByRole("status").textContent).toBe("挂载提示");
+    act(() => vi.advanceTimersByTime(toastMillis));
+    expect(screen.getByRole("status").textContent).toBe("");
+  },
+);

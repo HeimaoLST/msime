@@ -17,7 +17,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * 表达页：标点（使用英文标点、自动补全成对标点、智能标点）、智能（整句联想三档、英文联想、中英混输、触发字母数、候选带符号、候选带 emoji、候选带颜文字）和发现短语（社区里的前几个短语包，末尾「浏览更多短语」进社区短语的完整列表）。
+ * 表达页：标点（使用英文标点、引号样式、方头括号样式、自动补全成对标点、智能标点）、智能（整句联想三档、英文联想、中英混输、触发字母数、候选带符号、候选带 emoji、候选带颜文字）和发现短语（社区里的前几个短语包，末尾「浏览更多短语」进社区短语的完整列表）。
  *
  * <p>「使用英文标点」是 `chinese_punctuation` 取反显示、写入时取反；整句联想三档写 `sentence_association`：关闭是 `word_lattice=false`，标准是 `word_lattice`，增强是 `word_lattice` 加 `neural_keyboard`。发现短语列社区里 `phrase` 类的资源，「添加」经 {@link CommonPhrasesStore#installPack} 装进本机无编码常用语（它会标记云同步的「常用语」），已经装过的包显示「已添加」。
  */
@@ -28,6 +28,14 @@ public final class ExpressionPage extends ReloadingDetailPage {
 
     private static final int DISCOVER_LIMIT = 8;
     private static final String[] SENTENCE_LABELS = {"关闭", "标准", "增强"};
+    /** 共享偏好 `quote_style` 的取值与显示文字，缺省（文档里没有这个键）是弯引号。 */
+    private static final String[] QUOTE_STYLES = {"curly", "corner", "corner_when_traditional"};
+    private static final String[] QUOTE_STYLE_LABELS = {"弯引号 “ ” ‘ ’", "直角引号 「 」『 』", "繁体输出时用直角引号"};
+    private static final String QUOTE_STYLE_DESCRIPTION = "中文标点下 ' 键和 Shift+' 键输出的引号。直角引号：' 出「」，Shift+' 出『』";
+    /** 共享偏好 `bracket_style` 的取值与显示文字，缺省是实心。 */
+    private static final String[] BRACKET_STYLES = {"solid", "hollow"};
+    private static final String[] BRACKET_STYLE_LABELS = {"实心 【 】", "空心 〖 〗"};
+    private static final String BRACKET_STYLE_DESCRIPTION = "中文标点下 [ ] 键输出的括号";
     /** 中英混输的触发长度：共享偏好 `mixed_input.minimum_prefix` 的默认值和保存时校验的范围（client-core `MixedInputPreferences`）。 */
     private static final int MIXED_PREFIX_MIN = 1;
     private static final int MIXED_PREFIX_MAX = 8;
@@ -98,6 +106,15 @@ public final class ExpressionPage extends ReloadingDetailPage {
         punctuation.toggle("使用英文标点", "中文模式下也上屏半角标点",
             !values.optBoolean(chinese.key(), chinese.enabledByDefault()),
             checked -> savePreferences(edit -> edit.put(chinese.key(), !checked)));
+        // 两项只在中文标点下起作用，紧跟在中文标点的开关之后。
+        int quote = styleIndex(QUOTE_STYLES, values.optString("quote_style", QUOTE_STYLES[0]));
+        punctuation.nav("引号样式", QUOTE_STYLE_DESCRIPTION, QUOTE_STYLE_LABELS[quote],
+            () -> pickStyle("引号样式", QUOTE_STYLE_DESCRIPTION, "quote_style", QUOTE_STYLES,
+                QUOTE_STYLE_LABELS, quote));
+        int bracket = styleIndex(BRACKET_STYLES, values.optString("bracket_style", BRACKET_STYLES[0]));
+        punctuation.nav("方头括号样式", BRACKET_STYLE_DESCRIPTION, BRACKET_STYLE_LABELS[bracket],
+            () -> pickStyle("方头括号样式", BRACKET_STYLE_DESCRIPTION, "bracket_style", BRACKET_STYLES,
+                BRACKET_STYLE_LABELS, bracket));
         InputFeatureToggle paired = InputFeatureToggle.PAIRED_PUNCTUATION;
         punctuation.toggle("自动补全成对标点", paired.description(),
             values.optBoolean(paired.key(), paired.enabledByDefault()),
@@ -161,6 +178,23 @@ public final class ExpressionPage extends ReloadingDetailPage {
             }
             render();
         });
+    }
+
+    /** 写入引号或方头括号样式。存的就是偏好文档里的取值；写下缺省值也没关系，保存时 client-core 会把等于缺省的键省掉。 */
+    private void pickStyle(String title, String description, String key, String[] values, String[] labels,
+            int selected) {
+        OptionSheet sheet = new OptionSheet(requireContext(), title, description);
+        for (int index = 0; index < values.length; index++) {
+            String value = values[index];
+            sheet.option(labels[index], index == selected, () -> savePreferences(edit -> edit.put(key, value)));
+        }
+        sheet.show();
+    }
+
+    /** 取值在列表里的位置；不认识的取值（更新的版本写的）按第一个即缺省显示。 */
+    private static int styleIndex(String[] values, String value) {
+        for (int index = 0; index < values.length; index++) if (values[index].equals(value)) return index;
+        return 0;
     }
 
     private void pickSentence(int selected) {

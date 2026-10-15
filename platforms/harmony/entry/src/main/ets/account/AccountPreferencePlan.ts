@@ -79,6 +79,9 @@ const WUBI_PROFILES = ["wubi86", "wubi98"];
 const FREQUENCY_MODES = ["disabled", "pin", "halve", "linear", "promote"];
 // 下载时认得的 `touch_keyboard_layout` 取值；不在这里的取值（更新的版本加的布局）只跳过这个键，不拒绝整份文档。
 const LAYOUTS = ["twenty_six_key", "nine_key", "handwriting", "fourteen_key"];
+/** 共享偏好 `quote_style`、`bracket_style` 的取值；文档里没有这两个键时是第一个。 */
+const QUOTE_STYLES = ["curly", "corner", "corner_when_traditional"];
+const BRACKET_STYLES = ["solid", "hollow"];
 // 本版上传的布局。全拼 14 键先不上传：旧版鸿蒙读到 `fourteen_key` 会拒收整份文档，而上传是把本机的键盖在云端快照上，省略这个键等于保留云端原值；写成 `twenty_six_key` 则会把同账号的其他设备切回 26 键。
 const UPLOADED_LAYOUTS = ["twenty_six_key", "nine_key", "handwriting"];
 // The seven global theme ids the shared layer accepts; any other id, a retired skin id included, is refused rather than mapped.
@@ -392,6 +395,12 @@ export function localAccountPreferences(
     "input.chinese_punctuation": flag(member(preferences, "chinese_punctuation"), true),
     "input.smart_punctuation": flag(member(preferences, "smart_punctuation"), true),
     "input.paired_punctuation": flag(member(preferences, "paired_punctuation"), true),
+    "input.quote_style": enumerated(member(preferences, "quote_style"), QUOTE_STYLES, "curly"),
+    "input.bracket_style": enumerated(
+      member(preferences, "bracket_style"),
+      BRACKET_STYLES,
+      "solid",
+    ),
     "input.wubi_code_hint": flag(member(preferences, "wubi_code_hint"), true),
     "input.wubi_auto_commit_unique": flag(member(preferences, "wubi_auto_commit_unique"), true),
     "platform.harmony.global_theme": enumerated(
@@ -619,6 +628,13 @@ export function applyAccountPreferences(
   if (smartPunctuation !== null) preferences.smart_punctuation = smartPunctuation;
   const pairedPunctuation = reader.boolean("input.paired_punctuation");
   if (pairedPunctuation !== null) preferences.paired_punctuation = pairedPunctuation;
+  // 不认得的样式（更新的版本加的）只跳过这个键，与 client-core 的设置同步一致。
+  const quoteStyle = reader.text("input.quote_style");
+  if (quoteStyle !== null && QUOTE_STYLES.includes(quoteStyle))
+    preferences.quote_style = quoteStyle;
+  const bracketStyle = reader.text("input.bracket_style");
+  if (bracketStyle !== null && BRACKET_STYLES.includes(bracketStyle))
+    preferences.bracket_style = bracketStyle;
   const wubiCodeHint = reader.boolean("input.wubi_code_hint");
   if (wubiCodeHint !== null) preferences.wubi_code_hint = wubiCodeHint;
   const wubiAutoCommitUnique = reader.boolean("input.wubi_auto_commit_unique");

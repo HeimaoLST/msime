@@ -1,4 +1,5 @@
 import { useEffect, useRef, type MouseEvent, type PointerEvent } from "react";
+import { subscribeToWindowBlur } from "../core/window-focus";
 import type { WindowControl, WindowResizeEdge } from "../keyboard/window-host";
 import { useWindowResizeCapture } from "./use-window-resize-capture";
 
@@ -26,10 +27,10 @@ export function useSettingsWindowInteractions({
     const clear = () => {
       pendingDrag.current = null;
     };
-    window.addEventListener("blur", clear);
+    const stopBlur = subscribeToWindowBlur(clear);
     return () => {
       clear();
-      window.removeEventListener("blur", clear);
+      stopBlur();
     };
   }, []);
 

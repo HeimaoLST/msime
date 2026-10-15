@@ -186,6 +186,8 @@ pub struct HostCapabilities {
     pub candidate_page_number: bool,
     /// 宿主按 `show_app_logo` 显示或隐藏候选窗和悬浮工具栏左端的水杉 logo。
     pub app_logo: bool,
+    /// 宿主按 `traditional_chinese_variant` 选 OpenCC 配置（`s2t`、`s2tw`、`s2twp`）做繁体转换；其它宿主一律用 `s2t`，设置页只给简体和繁体两项。
+    pub traditional_chinese_variants: bool,
     /// The host can apply candidate foreground/background RGB row colors.
     /// Linux exposes these through IBusText attributes even though it cannot
     /// draw the native card geometry or hover state.
@@ -194,7 +196,7 @@ pub struct HostCapabilities {
     pub candidate_selection_appearance: bool,
     /// The host outlines the candidate panel in the border colour. Separate from `candidate_selection_appearance` because Linux draws the border (the Fcitx5 classic UI theme carries it) while neither Linux panel has a hover state.
     pub candidate_border_color: bool,
-    /// The host draws its own floating candidate window and multiplies its font and geometry by `candidate_scale_percent`. A host whose list lives in a desktop panel, or in a strip on the keyboard that already follows the font size, has nothing else to scale.
+    /// 宿主应用 `candidate_scale_percent` 调整候选显示。自绘浮动窗口缩放字体和几何尺寸；桌面面板可以缩放自己拥有的字体描述。
     pub candidate_window_scale: bool,
     /// The host can lower the alpha of its candidate card fill, border and skin background by `candidate_opacity_percent` while keeping text opaque. A panel the desktop draws, or a strip that is part of an opaque keyboard, cannot.
     pub candidate_window_opacity: bool,
@@ -553,6 +555,8 @@ impl HostCapabilities {
             candidate_page_number: matches!(platform, HostPlatform::Linux | HostPlatform::Macos),
             // macOS 和 Windows 按这个开关画 logo；Linux 和鸿蒙的候选窗照常显示 logo，不提供这个开关。
             app_logo: matches!(platform, HostPlatform::Macos | HostPlatform::Windows),
+            // 目前只有 Linux 的 IBus 与 Fcitx5 宿主把变体交给 `msime_client_convert_to_traditional`。
+            traditional_chinese_variants: matches!(platform, HostPlatform::Linux),
             // The iOS strip scales its composition line by `candidate_preedit_font_size`.
             candidate_preedit_font: matches!(
                 platform,
@@ -591,8 +595,11 @@ impl HostCapabilities {
                     | HostPlatform::Ios
                     | HostPlatform::Linux
             ),
-            // The Windows and macOS candidate windows are drawn by the host, so every style control reaches them. The Fcitx5 classic UI theme carries a corner radius but no scale, and on X11 without a compositor a translucent fill shows as black, so Linux offers only the radius. The HarmonyOS 2in1 candidate card takes a radius and a fill alpha but its size follows the font size alone. The iOS and Android candidate strips sit on the keyboard rather than float, so none of the three applies there.
-            candidate_window_scale: matches!(platform, HostPlatform::Windows | HostPlatform::Macos),
+            // Windows 和 macOS 自绘候选浮窗并缩放全部几何尺寸。Linux 的桌面面板拥有卡片几何，但可以缩放唯一的 Pango 字体描述，这正是高 DPI 面板需要的部分。鸿蒙只随字号调整，iOS 和 Android 绘制键盘候选条，所以两者都不提供此控件。
+            candidate_window_scale: matches!(
+                platform,
+                HostPlatform::Windows | HostPlatform::Macos | HostPlatform::Linux
+            ),
             candidate_window_opacity: matches!(
                 platform,
                 HostPlatform::Windows | HostPlatform::Macos | HostPlatform::Harmony

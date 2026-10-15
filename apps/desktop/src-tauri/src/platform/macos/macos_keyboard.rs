@@ -78,6 +78,11 @@ pub(crate) fn prepare(
     panel.set_hides_on_deactivate(false);
     panel.set_becomes_key_only_if_needed(true);
     drop(content);
+    if !msime_host_macos::prepare_keyboard_window(window.ns_window()? as usize) {
+        return Err(tauri::Error::Io(std::io::Error::other(
+            "Cannot style keyboard window",
+        )));
+    }
     Ok(panel)
 }
 

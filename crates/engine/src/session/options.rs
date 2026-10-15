@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use crate::helpcode::SharedKeymap;
 use crate::paths::RuntimePaths;
+use crate::punctuation::PunctuationMarks;
 use crate::types::{
     CandidateSource, CommandTableEntry, EnglishInputOptions, FrequencyAdjustmentOptions,
     FuzzyPinyinOptions, LocalInputMode, LocalModeOptions, MentionEntry, MixedExpressiveOptions,
@@ -47,6 +48,8 @@ pub struct SessionOptions {
     pub paired_punctuation: bool,
     /// 0 follows the mode, 1 forces Chinese, 2 forces ASCII.
     pub punctuation_lock: i32,
+    /// 中文标点下引号键和方头括号键出哪一组字，缺省是弯引号、实心括号。
+    pub punctuation_marks: PunctuationMarks,
     pub learning: bool,
     /// Hand back every whole-sentence reading instead of only the best. A host that sets this must reorder and crop them itself.
     pub sentence_alternatives: bool,
@@ -102,6 +105,7 @@ impl SessionOptions {
             chinese_punctuation: true,
             paired_punctuation: true,
             punctuation_lock: 0,
+            punctuation_marks: PunctuationMarks::default(),
             learning: true,
             sentence_alternatives: false,
             first_page_rows: DEFAULT_FIRST_PAGE_ROWS,

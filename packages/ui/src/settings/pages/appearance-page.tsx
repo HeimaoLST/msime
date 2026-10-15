@@ -188,6 +188,10 @@ export function AppearanceSettingsPage() {
             {showExpandCandidates && (
               <CandidateExpandSection
                 value={draft.expand_candidates}
+                showButton={draft.show_candidate_expand_button}
+                onShowButtonChange={(show_candidate_expand_button) =>
+                  appearanceActions.onPreferencesChange({ show_candidate_expand_button })
+                }
                 onChange={(expand_candidates) =>
                   appearanceActions.onPreferencesChange({ expand_candidates })
                 }
@@ -251,6 +255,7 @@ export function AppearanceSettingsPage() {
           {showCandidateWindowScale && (
             <CandidateScaleRow
               preferences={draft}
+              platform={host?.platform}
               onChange={appearanceActions.onPreferencesChange}
             />
           )}
@@ -384,6 +389,7 @@ function HarmonyPhoneCandidateGroups() {
           {showCandidateWindowScale && (
             <CandidateScaleRow
               preferences={draft}
+              platform={host?.platform}
               onChange={appearanceActions.onPreferencesChange}
             />
           )}

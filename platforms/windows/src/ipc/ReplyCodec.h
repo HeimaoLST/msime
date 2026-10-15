@@ -97,7 +97,13 @@ struct TsfLocalConfig {
   bool dedicated_english = false;
   // 组字时 ';' 和 '\'' 选第二、第三个候选，TIP 据此把这两个键归为数字选词（SecondThirdCandidatePolicy.h）。
   bool second_third_candidate = false;
+  // 中文标点下 '\'' 出「」、'"' 出『』（直角引号），'[' ']' 出〖〗（空心括号）。由 apply_punctuation_marks 从偏好算出。
+  bool corner_quotes = false;
+  bool hollow_brackets = false;
 };
+// 按偏好 `quote_style`、`bracket_style` 和繁体输出开关设 corner_quotes、hollow_brackets。规则与 crates/client-core/src/punctuation.rs 的 `punctuation_marks` 相同：`corner_when_traditional` 在繁体输出打开时是直角引号，否则是弯引号；不认识的取值按缺省（弯引号、实心括号）。
+void apply_punctuation_marks(TsfLocalConfig &config, std::string_view quote_style, std::string_view bracket_style,
+                             bool traditional_output);
 // Set the V, "/" and "@" flags from the user's `local_modes` switches for `scheme`, the `SchemeType` number of the scheme the Engine runs (scheme::scheme_from_name; -1 for a name no build knows). A switch stays off where the Engine would not open its mode: V follows scheme::OpensLocalModes, "/" and "@" follow scheme::OpensTableModes.
 void apply_local_mode_switches(TsfLocalConfig &config, int scheme, bool expression, bool command, bool mention);
 // One frame per setting, in the order the reference pushes them.

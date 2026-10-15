@@ -178,6 +178,14 @@ public final class FourteenKeyDeviceSmoke extends DeviceSmoke {
             tap(key("123"));
             await(key("1").and(AccessibilityNodeInfo::isClickable));
             await(described("更多符号"));
+            stage = "number layer punctuation toggle";
+            await(key("中标"));
+            tap(key("中标"));
+            await(key("英标"));
+            await(key("."));
+            tap(key("英标"));
+            await(key("中标"));
+            await(key("。"));
             tap(described("切换到字母键盘"));
             await(described("按键 Q W"));
 
@@ -194,7 +202,15 @@ public final class FourteenKeyDeviceSmoke extends DeviceSmoke {
             stage = "pinyin column on a narrow display";
             shellDiscard("wm size 480x1600");
             try {
+                // 改显示尺寸会重建编辑器并收起输入法，先在新配置下重新获得焦点。
+                openEditor();
+                dropStaleNodes();
+                stage = "narrow display editor focus";
+                tap(field("msime-test-plain"));
+                await(field("msime-test-plain").and(AccessibilityNodeInfo::isFocused));
+                stage = "narrow display fourteen-key face";
                 awaitStableBounds(described("按键 A S"));
+                stage = "narrow display pinyin column";
                 tap(described("按键 A S"));
                 tap(described("按键 U I"));
                 Rect narrowLetter = new Rect();

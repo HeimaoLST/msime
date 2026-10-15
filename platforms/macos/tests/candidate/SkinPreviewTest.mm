@@ -299,6 +299,10 @@ static void TestCandidateWindowStyle(MSIMEAppearancePreferences *preferences, NS
         }
         [preferences applySharedCandidatePreferences:@{@"candidate_padding": @0}];
         assert([preferences.candidatePadding isEqual:@0]);
+        const CGFloat minimumPaddingHeight = preview.previewContentHeight;
+        preferences.candidatePadding = @16;
+        assert(std::abs(preview.previewContentHeight - minimumPaddingHeight - 28.0 * preferences.candidateScalePercent / 100.0) < .01);
+        preferences.candidatePadding = @0;
         [preferences applySharedCandidatePreferences:@{@"candidate_padding": NSNull.null}];
         assert(preferences.candidatePadding == nil);
 

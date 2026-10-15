@@ -13,6 +13,8 @@ Status: implemented
 - 地球键（Android 的 `offersGlobeKey`、iOS 的 `needsInputModeSwitchKey`）原来跟在中/英后面，现在跟在 123 后面，留在左手边。鸿蒙没有地球键。
 - 各平台的落点：Android 是 `KeyboardActionRow.designEntries` 与 `DesignSlot` 的顺序；iOS 是 `KeyboardViewController.arrangeActionRow` 的 `.phone` 和 `.nineKey`；鸿蒙是 `KeyboardView.ets` 的 `designActionRow` 和 `nineKeyActionRow`。应用内画底行的预览（Android 的首页预览、按键热力图、皮肤缩略图，iOS 的皮肤预览、社区卡片、键盘内皮肤选择器）同步改成新顺序。
 - 不在范围内、保持原样的面：iPad 的 `.tablet` 底行（这一行没有回车）、日文假名九键和注音九键（语言键在侧边竖列，与回车不在同一行）、123 / #+= 符号层（底行没有中/英键）。鸿蒙的经典底行（笔画、假名、手写和 2in1）原本就是中/英紧挨回车。
+
+2026-10-14：Android 日文假名九键的语言键后来因 #7751 移到右侧空格与回车之间；其余平台和注音九键仍按本篇决定保持原样。详见 [Android 外语轮换与日语九键布局修正](../bug-fix/2026-10-14-android-language-switch.md)。
 - Android 分离式键盘的空格拆分下限 `SplitKeyboardPolicy.MIN_SPACE_SHARE` 从 0.25 降到 0.15。中/英挪到右边后，空格右侧（`。 中 ↵`，3.95 份）比左侧（`123 ，`，2.25 份）宽得多；逗号被隐藏时（当前方案没有标点可给），要让中间空隙落在整行正中，右半空格只剩原宽的约 16%，原下限会把空隙推离中线。逗号显示时右半约 29%，不受影响。
 
 ## Alternatives considered
@@ -28,3 +30,5 @@ Status: implemented
 - **验证**：Android 跑了 `check-host.sh`（`KeyboardActionRowSmoke` 断言新顺序，并新增一条检查九键底行的中/英紧挨回车；`SplitKeyboardPolicySmoke` 断言逗号隐藏时空隙居中）。本机 API 35 专用 AVD 上装了 arm64 包跑 `smoke.sh`（跳过名单与 CI 相同），各套件全部通过：`KeyboardHeightDeviceSmoke` 第一次在「输入法重启后高度不变」一步没等到键盘出现，单独重跑两次都通过，与底行无关。截图确认 26 键底行实际画成 `123 | ， | 空格 | 。 | 中 | ↵`。iOS 在 Studio 上 `build-for-testing`，把产物拉回本机后在模拟器上跑完 `MSIMEKeyboardTests`，其中 `NineKeyKeyboardTests` 断言了手机底行和九键底行的可见键顺序，`HandwritingTests` 断言了手写底行的句号、中/英、回车三者相邻。鸿蒙跑了类型检查和键盘逻辑测试（底行写在 `.ets` 视图里，node 测试碰不到它），并在本机用 `hvigorw assembleHap` 做了 ArkTS 真编译；鸿蒙设备或模拟器上没有看过实际效果。
 
 数字 1 的提示与长按入口，以及九键底行 0 的字形规则见 [手机九键保留符号入口的数字 1](../bug-fix/2026-10-13-mobile-nine-key-one-hint.md)。这里的键位布局不变。
+
+iOS 默认仍沿用本篇排列，可选隐藏中/英并扩大空格，见 [iOS 可隐藏底行中英键并扩大空格](2026-10-15-ios-hide-language-key.md)。

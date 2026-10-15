@@ -120,6 +120,8 @@ final class ImeCandidates {
         if (!s.candidateGlossInsertionEnabled() && !s.candidateManagementEnabled()) return false;
         PopupMenu popup = new PopupMenu(s, button);
         String translation = candidate == null || candidate.isNull("translation")
+            || !CandidateTranslationPolicy.userTranslationSourceAllowed(
+                InputViewValuePolicy.integer(candidate, "source", -1))
             ? "" : JsonPolicy.strictStringOrEmpty(candidate.opt("translation"));
         java.util.List<String> glosses = s.candidateGlossInsertionEnabled()
             ? CandidateTranslationPolicy.insertionGlosses(translation) : java.util.List.of();
@@ -129,6 +131,13 @@ final class ImeCandidates {
         if (glosses.isEmpty() && !management) return false;
         if (management) {
             for (CandidateManagementAction action : CandidateManagementAction.values()) {
+                if (action.confirmationRequired()) {
+                    // 删除收进子菜单，和 iOS 的嵌套 UIMenu 一样：点开「删除词条…」当场展开「确认删除此词条」，
+                    // 一次长按就能删完，不用退出菜单再长按一次，也不弹对话框（#5605、#5653）。
+                    popup.getMenu().addSubMenu(Menu.NONE, Menu.NONE, action.ordinal(), action.title())
+                        .add(Menu.NONE, action.menuItemId(), Menu.NONE, action.confirmationTitle());
+                    continue;
+                }
                 popup.getMenu().add(Menu.NONE, action.menuItemId(), action.ordinal(), action.title());
             }
         }
@@ -145,10 +154,6 @@ final class ImeCandidates {
                 action = CandidateManagementAction.fromMenuItemId(item.getItemId());
             } catch (IllegalArgumentException error) {
                 return false;
-            }
-            if (action.confirmationRequired()) {
-                s.confirmCandidateRemoval(id, text);
-                return true;
             }
             s.editCandidate(id, action);
             return true;
@@ -212,16 +217,14 @@ final class ImeCandidates {
             ViewPolicy.bindClick(button, () -> {
                 s.imeKeyFeedback.playFeedback(button);
                 // 点占位行什么也不发生：Engine 本来就不上屏，这里连面板也不收起，用户还在看完整列表（#6888）。
-                if (placeholder || s.session == 0
-                        || CandidateGlossPolicy.strictOr(id.opt("session"), Long.MIN_VALUE)
-                            != s.session) return;
+                if (placeholder || !s.candidateVersionIsCurrent(id)) return;
                 s.candidatePanelOpen = false;
                 s.candidatePanelSnapshot = null;
                 try {
                     s.apply(NativeClient.selectAnyCandidate(
                         s.session, MSIMEInputService.strictCandidateLong(id, "generation"),
                         MSIMEInputService.strictCandidateLong(id, "index")));
-                } catch (JSONException | LinkageError error) { s.fail(); }
+                } catch (JSONException | LinkageError error) { s.fail(error); }
             });
             // 占位行不挂长按：没有可管理的词，读屏也不该提示长按（#6888）。
             if (AiPendingCandidatePolicy.offersMenu(source)) button.setOnLongClickListener(ignored -> {

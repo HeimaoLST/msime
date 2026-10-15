@@ -1,6 +1,6 @@
 //! 候选排序的唯一实现：句子模型重排、整句次选读法的后移，以及交给重排器的上文窗口。
 //!
-//! 这里只做决策，不碰候选数组：`rerank_pick` 返回应移到首位的下标，`runner_up_order` 返回一个排列（新座位 -> 旧座位）。`msime-input-runtime` 把结果同步应用到它的八个并行数组上，网页引擎（`msime-engine-wasm`）也调用同一组函数，两处的排序因此不会各自漂移。
+//! 这里只做决策，不碰候选数组：`rerank_pick` 返回应移到首位的下标，`runner_up_order` 返回一个排列（新座位 -> 旧座位）。`msime-input-runtime` 把结果同步应用到候选元数据和引擎座位映射上，网页引擎（`msime-engine-wasm`）也调用同一组函数，两处的排序因此不会各自漂移。
 
 use crate::SchemeType;
 
@@ -25,6 +25,9 @@ const MIXED_JAPANESE_SOURCE: u8 = 13;
 /// 候选列表通常不超过一页；短列表的文本引用放在栈上，较大列表继续走堆缓冲。
 const SMALL_RERANK_TEXTS: usize = 128;
 
+/// 静态证据分支只比较前九条真正回答按键的候选。
+const STATIC_RERANK_LIMIT: usize = 9;
+
 /// The traits of the scheme behind `scheme`, which the Engine reports as its `SchemeType` ordinal. Only the placeholder snapshot of a failed refresh carries an ordinal no scheme has; each caller decides what that placeholder means, the way the ordinal comparisons this replaces did.
 fn scheme_type(scheme: u8) -> Option<SchemeType> {
     SchemeType::from_u8(scheme)
@@ -46,18 +49,26 @@ fn corrections_may_lead(scheme: u8) -> bool {
 /// 短列表用栈缓冲，大列表才申请辅助缓冲，恒等排列直接返回。
 pub fn apply_order<T>(items: &mut [T], order: &[usize]) {
     debug_assert_eq!(items.len(), order.len());
+    apply_order_with(order, |left, right| items.swap(left, right));
+}
+
+/// 按排列的循环调用交换操作，让调用方同步移动多个并行数组。
+///
+/// `order` 必须是新座位到旧座位的合法排列；交换操作涉及的数组长度必须与它一致。
+/// 每条循环只遍历一次，共用访问标记缓冲，恒等排列不调用交换操作。
+pub fn apply_order_with(order: &[usize], mut swap: impl FnMut(usize, usize)) {
     if order.iter().enumerate().all(|(seat, row)| seat == *row) {
         return;
     }
     let mut stack_visited = [false; 128];
     let mut heap_visited;
-    let visited = if items.len() <= stack_visited.len() {
-        &mut stack_visited[..items.len()]
+    let visited = if order.len() <= stack_visited.len() {
+        &mut stack_visited[..order.len()]
     } else {
-        heap_visited = vec![false; items.len()];
+        heap_visited = vec![false; order.len()];
         &mut heap_visited[..]
     };
-    for start in 0..items.len() {
+    for start in 0..order.len() {
         if visited[start] {
             continue;
         }
@@ -65,7 +76,7 @@ pub fn apply_order<T>(items: &mut [T], order: &[usize]) {
         let mut current = start;
         while order[current] != start {
             let next = order[current];
-            items.swap(current, next);
+            swap(current, next);
             visited[next] = true;
             current = next;
         }
@@ -118,10 +129,29 @@ pub struct OrderRow<'a> {
     pub corrected: bool,
 }
 
+/// 词网格的自然对数总分，去掉共同的音节奖励；保留整数毫 nat 与字数避免快照丢失精度。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StaticEvidence {
+    pub log_prob_milli_nats: i64,
+    pub characters: usize,
+}
+
+impl StaticEvidence {
+    fn mean(self) -> Option<f64> {
+        (self.characters > 0)
+            .then(|| self.log_prob_milli_nats as f64 / 1000.0 / self.characters as f64)
+    }
+}
+
 /// 排序决策读取的候选行来源。连续的 `OrderRow` 数组和快照里的并行数组都可以实现它。
 pub trait OrderRowSource<'a> {
     fn len(&self) -> usize;
     fn get(&self, index: usize) -> OrderRow<'a>;
+
+    /// 没有静态证据的调用方继续使用原模型决策，不从来源或行位置猜一个分数。
+    fn static_evidence(&self, _index: usize) -> Option<StaticEvidence> {
+        None
+    }
 
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -158,12 +188,40 @@ impl<'a, const N: usize> OrderRowSource<'a> for [OrderRow<'a>; N] {
     }
 }
 
+/// 为已有候选行附上可选的静态证据；长度不一致时整份证据失效。
+pub struct ScoredOrderRows<'s, R: ?Sized> {
+    rows: &'s R,
+    evidence: &'s [Option<StaticEvidence>],
+}
+
+impl<'s, R: ?Sized> ScoredOrderRows<'s, R> {
+    pub fn new(rows: &'s R, evidence: &'s [Option<StaticEvidence>]) -> Self {
+        Self { rows, evidence }
+    }
+}
+
+impl<'a, R: OrderRowSource<'a> + ?Sized> OrderRowSource<'a> for ScoredOrderRows<'_, R> {
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+    fn get(&self, index: usize) -> OrderRow<'a> {
+        self.rows.get(index)
+    }
+    fn static_evidence(&self, index: usize) -> Option<StaticEvidence> {
+        if self.evidence.len() != self.rows.len() {
+            return None;
+        }
+        self.evidence.get(index).copied().flatten()
+    }
+}
+
 /// 借用快照里的并行候选数组，避免排序前复制一份行数组。
 pub struct ParallelOrderRows<'a> {
     texts: &'a [String],
     sources: &'a [u8],
     answers_key: &'a [bool],
     corrected: &'a [bool],
+    static_evidence: Option<&'a [Option<StaticEvidence>]>,
 }
 
 impl<'a> ParallelOrderRows<'a> {
@@ -178,13 +236,23 @@ impl<'a> ParallelOrderRows<'a> {
             sources,
             answers_key,
             corrected,
+            static_evidence: None,
         }
+    }
+
+    pub fn with_static_evidence(mut self, evidence: &'a [Option<StaticEvidence>]) -> Self {
+        self.static_evidence = (evidence.len() == self.texts.len()).then_some(evidence);
+        self
     }
 }
 
 impl<'a> OrderRowSource<'a> for ParallelOrderRows<'a> {
     fn len(&self) -> usize {
         self.texts.len()
+    }
+
+    fn static_evidence(&self, index: usize) -> Option<StaticEvidence> {
+        self.static_evidence?.get(index).copied().flatten()
     }
 
     fn get(&self, index: usize) -> OrderRow<'a> {
@@ -250,12 +318,69 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
         .unwrap_or(0);
     let context = rerank_context(context, reranker.model().context_length(), longest);
     with_row_texts(rows, |texts| {
+        let leader = rows.get(0);
+        let trusted_leader = DICTIONARY_SOURCES.contains(&leader.source) && !corrected_key;
+        if !trusted_leader && answers_key(leader) && rows.static_evidence(0).is_some() {
+            let mut considered = [0; STATIC_RERANK_LIMIT];
+            let mut statik = [0.0; STATIC_RERANK_LIMIT];
+            let mut subset = [""; STATIC_RERANK_LIMIT];
+            if let Some(count) = fill_static_rerank_inputs(
+                rows,
+                texts,
+                answers_key,
+                &mut considered,
+                &mut statik,
+                &mut subset,
+            ) {
+                let neural = reranker.log_probabilities(context, &subset[..count]);
+                if neural.len() == count {
+                    // 模型逐字分与词网格逐字分等权混合，两侧均为自然对数。
+                    let combined = |index: usize| (statik[index] + f64::from(neural[index])) * 0.5;
+                    let mut best = 0;
+                    for index in 1..count {
+                        if combined(index) > combined(best) {
+                            best = index;
+                        }
+                    }
+                    return (best != 0).then(|| considered[best]);
+                }
+            }
+        }
         reranker.best_where(context, texts, |index| CandidateFacts {
             answers_key: answers_key(rows.get(index)),
             trusted_dictionary_hit: DICTIONARY_SOURCES.contains(&rows.get(index).source)
                 && !corrected_key,
         })
     })
+}
+
+fn fill_static_rerank_inputs<'a, R, F>(
+    rows: &'a R,
+    texts: &[&'a str],
+    answers_key: F,
+    considered: &mut [usize; STATIC_RERANK_LIMIT],
+    statik: &mut [f64; STATIC_RERANK_LIMIT],
+    subset: &mut [&'a str; STATIC_RERANK_LIMIT],
+) -> Option<usize>
+where
+    R: OrderRowSource<'a> + ?Sized,
+    F: Fn(OrderRow<'a>) -> bool,
+{
+    debug_assert_eq!(rows.len(), texts.len());
+    let mut count = 0;
+    for (index, text) in texts.iter().enumerate().take(rows.len()) {
+        if !answers_key(rows.get(index)) {
+            continue;
+        }
+        if count == STATIC_RERANK_LIMIT {
+            break;
+        }
+        considered[count] = index;
+        statik[count] = rows.static_evidence(index)?.mean()?;
+        subset[count] = text;
+        count += 1;
+    }
+    (count >= 2).then_some(count)
 }
 
 fn with_row_texts<'a, R, T>(rows: &'a R, operation: impl FnOnce(&[&'a str]) -> T) -> T
@@ -574,6 +699,40 @@ mod tests {
             with_row_texts(&rows, |texts| (texts.len(), texts[0], texts[1]))
         });
         assert_eq!(summary, (2, "你好", "倪好"));
+        assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn static_rerank_inputs_need_no_temporary_heap_state() {
+        let rows = [row("甲", LATTICE_SOURCE), row("乙", LATTICE_SOURCE)];
+        let scores = [
+            Some(StaticEvidence {
+                log_prob_milli_nats: -1000,
+                characters: 1,
+            }),
+            Some(StaticEvidence {
+                log_prob_milli_nats: -2000,
+                characters: 1,
+            }),
+        ];
+        let scored = ScoredOrderRows::new(&rows, &scores);
+        let (summary, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            with_row_texts(&scored, |texts| {
+                let mut considered = [0; STATIC_RERANK_LIMIT];
+                let mut statik = [0.0; STATIC_RERANK_LIMIT];
+                let mut subset = [""; STATIC_RERANK_LIMIT];
+                let count = fill_static_rerank_inputs(
+                    &scored,
+                    texts,
+                    |row| row.answers_key,
+                    &mut considered,
+                    &mut statik,
+                    &mut subset,
+                );
+                (count, considered[0], considered[1], statik[0], subset[1])
+            })
+        });
+        assert_eq!(summary, (Some(2), 0, 1, -1.0, "乙"));
         assert_eq!(allocations, 0);
     }
 

@@ -59,10 +59,16 @@ public final class CandidateTranslationPolicySmoke {
         check(CandidateTranslationPolicy.insertionGlosses("1;2;3;4;5;6;7;8;9;10\n")
                 .equals(List.of("1", "2", "3", "4", "5", "6", "7", "8", "9")),
             "an empty secondary row does not waste a menu slot");
+        check(CandidateTranslationPolicy.sourceGetsNoGloss(6)
+                && CandidateTranslationPolicy.sourceGetsNoGloss(7)
+                && CandidateTranslationPolicy.sourceGetsNoGloss(13)
+                && CandidateTranslationPolicy.sourceGetsNoGloss(14),
+            "all gloss-blocked sources are recognized by the display gate");
         check(!CandidateTranslationPolicy.userTranslationSourceAllowed(6)
                 && !CandidateTranslationPolicy.userTranslationSourceAllowed(7)
-                && !CandidateTranslationPolicy.userTranslationSourceAllowed(13),
-            "emoji, kaomoji, and mixed Japanese candidates are not sent to user services");
+                && !CandidateTranslationPolicy.userTranslationSourceAllowed(13)
+                && !CandidateTranslationPolicy.userTranslationSourceAllowed(14),
+            "emoji, kaomoji, mixed Japanese, and plugin candidates are not sent to user services");
         check(CandidateTranslationPolicy.userTranslationSourceAllowed(0)
                 && CandidateTranslationPolicy.userTranslationSourceAllowed(12),
             "ordinary candidate sources remain eligible for user services");

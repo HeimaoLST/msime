@@ -51,6 +51,7 @@ static NSString *const InputModeStatusItemKey = @"MSIMEClientInputModeStatusItem
 static NSString *const AppLogoKey = @"MSIMEClientAppLogo";
 static NSString *const CandidatePageNumberKey = @"MSIMEClientCandidatePageNumber";
 static NSString *const ExpandCandidatesKey = @"MSIMEClientExpandCandidates";
+static NSString *const CandidateExpandButtonKey = @"MSIMEClientCandidateExpandButton";
 static NSString *const SchemeKey = @"MSIMEClientInputScheme";
 static NSString *const LastSyncedSchemeKey = @"MSIMEClientLastSyncedInputScheme";
 static NSString *const ShuangpinProfileKey = @"MSIMEClientShuangpinProfile";
@@ -393,6 +394,7 @@ static NSDictionary<NSString *, NSString *> *SharedOverrideProperties() {
         AppLogoKey : @"sharedShowsAppLogo",
         CandidatePageNumberKey : @"sharedShowsCandidatePageNumber",
         ExpandCandidatesKey : @"sharedExpandCandidates",
+        CandidateExpandButtonKey : @"sharedShowsCandidateExpandButton",
         SchemeKey : @"sharedInputScheme",
         ShuangpinProfileKey : @"sharedShuangpinProfile",
         ShuangpinPreeditKey : @"sharedShuangpinPreeditUsesRaw",
@@ -540,6 +542,7 @@ static NSDictionary<NSString *, MSIMESettingProbe> *SettingProbes() {
             AppLogoKey : ^id(MSIMEAppearancePreferences *p) { return @(p.showsAppLogo); },
             CandidatePageNumberKey : ^id(MSIMEAppearancePreferences *p) { return @(p.showsCandidatePageNumber); },
             ExpandCandidatesKey : ^id(MSIMEAppearancePreferences *p) { return @(p.expandCandidates); },
+            CandidateExpandButtonKey : ^id(MSIMEAppearancePreferences *p) { return @(p.showsCandidateExpandButton); },
             FontFamilyKey : ^id(MSIMEAppearancePreferences *p) { return p.fontFamily ?: NSNull.null; },
             CandidateEnglishFontKey : ^id(MSIMEAppearancePreferences *p) { return p.candidateEnglishFont ?: NSNull.null; },
             FallbackFontsKey : ^id(MSIMEAppearancePreferences *p) { return p.fallbackFonts ?: NSNull.null; },
@@ -1061,6 +1064,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSNumber *_sharedShowsAppLogo;
     NSNumber *_sharedShowsCandidatePageNumber;
     NSNumber *_sharedExpandCandidates;
+    NSNumber *_sharedShowsCandidateExpandButton;
     NSNumber *_sharedFontSize;
     NSString *_sharedFontFamily;
     id _sharedCandidateEnglishFont;
@@ -1070,6 +1074,8 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSSwitch *_appLogoToggle;
     NSSwitch *_candidatePageNumberToggle;
     NSSwitch *_expandCandidatesToggle;
+    NSSwitch *_candidateExpandButtonToggle;
+    NSView *_candidateExpandButtonRow;
     id _sharedTextColor;
     id _sharedNumberColor;
     id _sharedAccentColor;
@@ -1349,6 +1355,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     merged[@"show_app_logo"] = @(self.showsAppLogo);
     merged[@"show_candidate_page_number"] = @(self.showsCandidatePageNumber);
     merged[@"expand_candidates"] = @(self.expandCandidates);
+    merged[@"show_candidate_expand_button"] = @(self.showsCandidateExpandButton);
     merged[@"scheme"] = self.inputScheme;
     // 切到日文、韩文、越南文或藏文时要留一条回去的路。`last_chinese_scheme` 是其他宿主在方案变化时都会写的字段——Fcitx5、IBus、iOS 和 HarmonyOS 都写——共享设置页也靠它把用户送回五笔而不是全拼。这个窗口自己也会设置方案，包括这四个，所以不写的话这个字段会停在别的界面写下的值，回去的路就指错了方案。在这四个方案之一生效期间，只要知道是从哪个方案进来的，也照样写进去，因为输入菜单的 中 也是这样离开它们的。
     if (![@[@"japanese", @"korean", @"vietnamese", @"tibetan"] containsObject:self.inputScheme] || _lastChineseScheme) merged[@"last_chinese_scheme"] = self.lastChineseScheme;
@@ -1720,6 +1727,15 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
 - (void)setExpandCandidates:(BOOL)value {
     _sharedExpandCandidates = nil;
     [_defaults setBool:value forKey:ExpandCandidatesKey];
+    [self preferencesChanged];
+}
+- (BOOL)showsCandidateExpandButton {
+    if (_sharedShowsCandidateExpandButton) return _sharedShowsCandidateExpandButton.boolValue;
+    return [_defaults objectForKey:CandidateExpandButtonKey] == nil ? YES : [_defaults boolForKey:CandidateExpandButtonKey];
+}
+- (void)setShowsCandidateExpandButton:(BOOL)value {
+    _sharedShowsCandidateExpandButton = nil;
+    [_defaults setBool:value forKey:CandidateExpandButtonKey];
     [self preferencesChanged];
 }
 - (BOOL)candidateLearningEnabled {
@@ -2979,6 +2995,8 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     if (LocalModeBoolean(pageNumber)) _sharedShowsCandidatePageNumber = pageNumber;
     id expandCandidates = preferences[@"expand_candidates"];
     if (LocalModeBoolean(expandCandidates)) _sharedExpandCandidates = expandCandidates;
+    id expandButton = preferences[@"show_candidate_expand_button"];
+    if (LocalModeBoolean(expandButton)) _sharedShowsCandidateExpandButton = expandButton;
     id font = preferences[@"candidate_font_size"];
     // The global theme and the custom theme. Every part of custom_theme is omitted when unset, and omission also clears a previously loaded value, without persisting a local override.
     id globalTheme = preferences[@"global_theme"];
@@ -3230,6 +3248,8 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     _appLogoToggle.state = self.showsAppLogo ? NSControlStateValueOn : NSControlStateValueOff;
     _candidatePageNumberToggle.state = self.showsCandidatePageNumber ? NSControlStateValueOn : NSControlStateValueOff;
     _expandCandidatesToggle.state = self.expandCandidates ? NSControlStateValueOn : NSControlStateValueOff;
+    _candidateExpandButtonToggle.state = self.showsCandidateExpandButton ? NSControlStateValueOn : NSControlStateValueOff;
+    _candidateExpandButtonRow.hidden = !self.expandCandidates;
     [_themeModeButton selectItemAtIndex:(NSInteger)[ThemeModes() indexOfObject:self.themeMode]];
     [_candidateThemeButton selectItemAtIndex:(NSInteger)[SurfaceThemes() indexOfObject:self.candidateTheme]];
     // A well always shows a colour, so one that is not overridden shows the colour the candidate
@@ -3528,6 +3548,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     _appLogoToggle = MSIMESettingSwitch(self, @selector(appLogoChanged:), @"显示水杉 logo");
     _candidatePageNumberToggle = MSIMESettingSwitch(self, @selector(candidatePageNumberChanged:), @"显示页码和翻页按钮");
     _expandCandidatesToggle = MSIMESettingSwitch(self, @selector(expandCandidatesChanged:), @"展开候选");
+    _candidateExpandButtonToggle = MSIMESettingSwitch(self, @selector(candidateExpandButtonChanged:), @"显示展开键");
     _preeditFontButton = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     for (NSUInteger size = 12; size <= 32; ++size)
         [_preeditFontButton addItemWithTitle:[NSString stringWithFormat:@"%lu pt", (unsigned long)size]];
@@ -4050,6 +4071,10 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
                   detail:@"横排候选窗按 ↓ 或点展开按钮，把后面几页候选排成多行一起显示；竖排候选窗不受影响。"
                  control:_expandCandidatesToggle
                      aka:@[@"多行候选", @"候选网格", @"候选词卷轴"]],
+        (_candidateExpandButtonRow = [self settingRow:@"显示展开键"
+                  detail:@"独立于页码和翻页按钮显示；关闭后仍可按 ↓ 展开候选。"
+                 control:_candidateExpandButtonToggle
+                     aka:@[@"鼠标展开"]]),
     ], 0.0);
     candidateWindowCard.accessibilityLabel = @"候选窗口卡片";
     // 字体选择和字号、整体缩放归入同一个标签。
@@ -4108,7 +4133,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     _candidateSettingsTabs.selectedSegment = 0;
     _candidateSettingsTabContents = @[
         @[[self sectionHeader:@"布局" keys:@[LayoutKey, PageSizeKey, CandidateFollowCursorKey,
-            InputModeHUDKey, InputModeStatusItemKey, AppLogoKey, CandidatePageNumberKey, ExpandCandidatesKey]], candidateWindowCard],
+            InputModeHUDKey, InputModeStatusItemKey, AppLogoKey, CandidatePageNumberKey, ExpandCandidatesKey, CandidateExpandButtonKey]], candidateWindowCard],
         @[[self sectionHeader:@"字体大小" keys:@[FontFamilyKey, CandidateEnglishFontKey, FallbackFontsKey,
             FontKey, PreeditFontKey, CandidateScaleKey]], fontCard],
         @[[self sectionHeader:@"窗口样式" keys:@[CandidateOpacityKey, CandidateCornerRadiusKey, CandidatePaddingKey]], windowStyleCard,
@@ -5658,6 +5683,7 @@ static NSString *CandidateColorHex(NSColor *color) {
 - (void)appLogoChanged:(NSSwitch *)sender { self.showsAppLogo = sender.state == NSControlStateValueOn; }
 - (void)candidatePageNumberChanged:(NSSwitch *)sender { self.showsCandidatePageNumber = sender.state == NSControlStateValueOn; }
 - (void)expandCandidatesChanged:(NSSwitch *)sender { self.expandCandidates = sender.state == NSControlStateValueOn; }
+- (void)candidateExpandButtonChanged:(NSSwitch *)sender { self.showsCandidateExpandButton = sender.state == NSControlStateValueOn; }
 - (void)themeModeChanged:(NSPopUpButton *)sender { self.themeMode = ThemeModes()[sender.indexOfSelectedItem]; }
 - (void)candidateThemeChanged:(NSPopUpButton *)sender { self.candidateTheme = SurfaceThemes()[sender.indexOfSelectedItem]; }
 - (void)preeditFontChanged:(NSPopUpButton *)sender { self.preeditFontSize = sender.indexOfSelectedItem + 12; }

@@ -182,10 +182,17 @@ static inline NSString *MSIMECandidateGlossWithScriptAnnotation(NSString *gloss,
 @property(nonatomic) CGFloat selectionLeftInset;
 // candidate_scale_percent as a factor, for the lengths the row draws itself: the text insets and the selection bar. Zero draws at 100%.
 @property(nonatomic) CGFloat chromeScale;
+// 右键才构建操作菜单，普通输入不创建菜单树。
+@property(nonatomic, copy) NSMenu *(^candidateMenuProvider)(void);
 @end
 @implementation MSIMECandidateButton
 {
     NSTrackingArea *_candidateTrackingArea;
+}
+- (NSMenu *)menuForEvent:(NSEvent *)event
+{
+    if (self.candidateMenuProvider) return self.candidateMenuProvider();
+    return [super menuForEvent:event];
 }
 - (BOOL)acceptsFirstResponder
 {

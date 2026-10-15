@@ -37,6 +37,32 @@ pub unsafe extern "C" fn msime_client_simplified_to_traditional(
     CString::new(converted).map_or(std::ptr::null_mut(), CString::into_raw)
 }
 
+/// 与 `msime_client_simplified_to_traditional` 相同，但按 `variant` 选 OpenCC 配置：0 `s2t`、1 `s2tw`、2 `s2twp`，即偏好 `traditional_chinese_variant` 的三个取值。未知编号和其它非法输入一样返回 null，调用方保留原文。
+/// # Safety
+/// `text` points to `length` readable bytes. The returned string must be released with `msime_client_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_convert_to_traditional(
+    text: *const u8,
+    length: usize,
+    variant: u32,
+) -> *mut c_char {
+    let Some(variant) =
+        msime_client_core::chinese_conversion::TraditionalVariant::from_code(variant)
+    else {
+        return std::ptr::null_mut();
+    };
+    if text.is_null() || length > MAX_TRADITIONAL_CONVERSION_BYTES {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: guaranteed by the documented caller contract.
+    let bytes = unsafe { std::slice::from_raw_parts(text, length) };
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return std::ptr::null_mut();
+    };
+    let converted = msime_client_core::chinese_conversion::convert_to_traditional(text, variant);
+    CString::new(converted).map_or(std::ptr::null_mut(), CString::into_raw)
+}
+
 /// Resolve display font families using the same adapter as the shared preview.
 /// # Safety
 /// `value` points to `length` readable bytes containing a JSON string array.

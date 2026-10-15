@@ -7,7 +7,7 @@ import java.util.function.Predicate;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-/** Android host acceptance for Engine-owned fuzzy-pinyin candidates and disabled rules. */
+/** 验证引擎生成模糊拼音候选，以及关闭开关后保留规则的行为。 */
 public final class FuzzyPinyinDeviceSmoke extends DeviceSmoke {
     @Override protected String successDescription() {
         return "fuzzy-pinyin candidate generation, disabled-rule retention and deferred update";
@@ -60,9 +60,17 @@ public final class FuzzyPinyinDeviceSmoke extends DeviceSmoke {
     }
 
     private Predicate<android.view.accessibility.AccessibilityNodeInfo> candidate(String text) {
-        return node -> equalsText("app.msime.android", node.getPackageName())
-            && node.getContentDescription() != null
-            && node.getContentDescription().toString().startsWith("候选 1：" + text);
+        // 规则只保证候选出现；词库更新或学习可以改变其排名。
+        return node -> {
+            if (!equalsText("app.msime.android", node.getPackageName())
+                    || node.getContentDescription() == null) return false;
+            String description = node.getContentDescription().toString();
+            int delimiter = description.indexOf('：');
+            if (!description.startsWith("候选 ") || delimiter < 0) return false;
+            String value = description.substring(delimiter + 1);
+            String head = value.contains("；") ? value.substring(0, value.indexOf('；')) : value;
+            return head.equals(text);
+        };
     }
 
     private android.view.accessibility.AccessibilityNodeInfo findVisible(

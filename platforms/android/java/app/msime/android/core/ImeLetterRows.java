@@ -159,7 +159,7 @@ final class ImeLetterRows {
             if (triggered[0] || !key.isPressed()) return;
             triggered[0] = true;
             // 长按不看「按键弹出」：这是手势已触发的唯一提示。
-            showKeyPreview(key, LetterHintTable.face(input, s.sendsChinesePunctuation()));
+            showKeyPreview(key, LetterHintTable.face(input, s.sendsChinesePunctuation(), s.punctuationMarks()));
         };
         key.setOnTouchListener((view, event) -> {
             switch (event.getActionMasked()) {
@@ -182,7 +182,7 @@ final class ImeLetterRows {
                         triggered[0] = true;
                         key.removeCallbacks(hold);
                         if (keyPreview != null && keyPreviewOwner == key)
-                            keyPreview.setLabel(LetterHintTable.face(input, s.sendsChinesePunctuation()));
+                            keyPreview.setLabel(LetterHintTable.face(input, s.sendsChinesePunctuation(), s.punctuationMarks()));
                     }
                     return triggered[0];
                 }
@@ -471,8 +471,23 @@ final class ImeLetterRows {
         return true;
     }
 
+    private int drawnTouchLayout = -1;
+
+    /** 底行跟随已经构建的主键区，不提前采用尚未重建键区的会话快照。 */
+    int drawnTouchLayout() {
+        return drawnTouchLayout < 0 ? s.displayedTouchLayout(s.view) : drawnTouchLayout;
+    }
+
+    private boolean builtLanguageNumberSwap;
+
+    boolean languageNumberSwapStale() {
+        return builtLanguageNumberSwap != s.localSettings.bool(AndroidLocalSettings.SWAP_LANGUAGE_NUMBER_KEYS);
+    }
+
     void rebuildKeyRows() {
         if (s.keyRows == null) return;
+        drawnTouchLayout = s.displayedTouchLayout(s.view);
+        builtLanguageNumberSwap = s.localSettings.bool(AndroidLocalSettings.SWAP_LANGUAGE_NUMBER_KEYS);
         builtLayerPunctuation = null;
         builtLetterLayout = -1;
         koreanKeyButtons.clear();
@@ -587,7 +602,7 @@ final class ImeLetterRows {
             final String key = KeyboardLayout.symbolRowKey(rowKey, tibetanSymbols);
             final String input = key;
             String face = s.keyboardLayer == KeyboardLayout.Layer.SYMBOLS
-                ? ChineseSymbolFaces.face(key, s.sendsChinesePunctuation())
+                ? ChineseSymbolFaces.face(key, s.sendsChinesePunctuation(), s.punctuationMarks())
                 : koreanKeycaps ? KoreanKeyboardLayout.face(key, shifted)
                 : zhuyinKeycaps ? ZhuyinKeyboardLayout.face(key)
                 : LetterKeyFacePolicy.face(key, chineseMode, localMode, shifted);
@@ -603,7 +618,7 @@ final class ImeLetterRows {
             } else if (zhuyinLayout && ZhuyinKeyboardLayout.claimsSymbol(key)) {
                 // Dachen reads these digits and marks as bopomofo and tone keys, so the symbol page writes what its key shows instead of handing the key to the Engine.
                 keyButton = s.keyboardKey(face, face, () -> s.imeLayoutRows.commitNineKeyLiteral(
-                    ChineseSymbolFaces.face(input, s.sendsChinesePunctuation())));
+                    ChineseSymbolFaces.face(input, s.sendsChinesePunctuation(), s.punctuationMarks())));
             } else if (koreanKeycaps) {
                 // Jamo keycaps over the same QWERTY letters: type() sends the letter, and the Engine composes the syllable.
                 keyButton = s.keyboardKey(face, face, () -> s.type(input.charAt(0)));
@@ -621,7 +636,7 @@ final class ImeLetterRows {
                 s.shuangpinKeyInputs.add(input);
                 // 键面随中文标点切换，之后由 render() 里的 updateLetterCornerHints 就地更新。
                 hintButton.setCornerHint(standardLetters
-                    ? LetterHintTable.face(input, s.sendsChinesePunctuation()) : null);
+                    ? LetterHintTable.face(input, s.sendsChinesePunctuation(), s.punctuationMarks()) : null);
                 KeyboardTypographyPolicy.setKeyTextSize(hintButton, 22);
                 bindLetterGestures(hintButton, standardLetters ? input : null);
             } else {
@@ -827,7 +842,7 @@ final class ImeLetterRows {
         builtLayerPunctuation = chinesePunctuation;
         java.util.List<java.util.List<KeyboardLayout.LayerKey>> rows = moreSymbols
             ? KeyboardLayout.moreSymbolLayer(chinese, chinesePunctuation)
-            : KeyboardLayout.numberLayer(chinese, chinesePunctuation);
+            : KeyboardLayout.numberLayer(chinese, chinesePunctuation, s.punctuationMarks().cornerQuotes());
         for (int rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
             LinearLayout row = LayoutPolicy.row(s);
             // 最后一行是这一层自带的底行，和功能行一样挂底行角色：和一行键同高，分到四行均分后底行的那一份调整；前三行和字母键一样分摊其余部分，整层与字母层同高。底行原先挂的是 rowCount 为 1 的普通角色，整份调整量在三行之外又加了一遍：调高时这一层比字母层高出一截，调到 75% 时底行被压成 0 高。
@@ -885,6 +900,10 @@ final class ImeLetterRows {
                 icon.setText(text);
                 s.bindCountedAction(icon, s.imePanels::showEmojiPicker);
                 key = icon;
+            }
+            case PUNCTUATION_TOGGLE -> {
+                key = s.keyboardKey(text, layerKey.description(), s::toggleChinesePunctuation);
+                s.keyId(key, "SoftPunctuation");
             }
             case SYMBOL_PANEL -> {
                 key = s.keyboardKey(text, layerKey.description(), s.imePanels::showSymbolPanel);

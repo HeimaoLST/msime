@@ -1,6 +1,39 @@
 //! Host-context punctuation decisions shared by native clients.
 
-use crate::preferences::PunctuationLock;
+use crate::preferences::{BracketStyle, Preferences, PunctuationLock, QuoteStyle};
+
+/// 解析后的引号样式：`corner_when_traditional` 已按繁体开关定成两者之一。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuoteMarks {
+    #[default]
+    Curly,
+    Corner,
+}
+
+/// 中文标点下引号键和方头括号键实际出哪一组字。引擎、View 和 Windows Server 都只认这两种确定的值；View 里序列化成 `{"quotes": "curly"|"corner", "brackets": "solid"|"hollow"}`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+pub struct PunctuationMarks {
+    pub quotes: QuoteMarks,
+    pub brackets: BracketStyle,
+}
+
+/// 从偏好算出生效的标点样式，这是唯一的解析处：`corner_when_traditional` 在繁体输出打开时是直角引号，否则是弯引号。Windows Server 读偏好 JSON 时照抄这条规则（`server_main.cpp` 的 `tsf_local_config`）。
+pub fn punctuation_marks(preferences: &Preferences) -> PunctuationMarks {
+    let corner = match preferences.quote_style {
+        QuoteStyle::Curly => false,
+        QuoteStyle::Corner => true,
+        QuoteStyle::CornerWhenTraditional => preferences.traditional_chinese_output,
+    };
+    PunctuationMarks {
+        quotes: if corner {
+            QuoteMarks::Corner
+        } else {
+            QuoteMarks::Curly
+        },
+        brackets: preferences.bracket_style,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PunctuationRoute {
@@ -158,7 +191,7 @@ pub fn should_replace_repeat(
 
 /// The ASCII twin of a Chinese punctuation mark, or `None` where there is none.
 ///
-/// Both quote directions map to the same ASCII quote: a straight quote has no handedness.
+/// Both quote directions map to the same ASCII quote: a straight quote has no handedness. 直角引号和空心方头括号是同一个键的另一组字（`quote_style`、`bracket_style`），同样转回那个键。
 pub fn ascii_for_chinese_mark(chinese: char) -> Option<u8> {
     Some(match chinese {
         '。' => b'.',
@@ -170,8 +203,10 @@ pub fn ascii_for_chinese_mark(chinese: char) -> Option<u8> {
         '、' => b'/',
         '\u{201c}' | '\u{201d}' => b'"',
         '\u{2018}' | '\u{2019}' => b'\'',
-        '【' => b'[',
-        '】' => b']',
+        '『' | '』' => b'"',
+        '「' | '」' => b'\'',
+        '【' | '〖' => b'[',
+        '】' | '〗' => b']',
         '《' => b'<',
         '》' => b'>',
         '（' => b'(',
@@ -521,6 +556,17 @@ mod tests {
         assert_eq!(ascii_for_chinese_mark('\u{201d}'), Some(b'"'));
         assert_eq!(ascii_for_chinese_mark('\u{2018}'), Some(b'\''));
         assert_eq!(ascii_for_chinese_mark('\u{2019}'), Some(b'\''));
+        // 直角引号与空心括号转回同一个键。
+        for (chinese, ascii) in [
+            ('「', b'\''),
+            ('」', b'\''),
+            ('『', b'"'),
+            ('』', b'"'),
+            ('〖', b'['),
+            ('〗', b']'),
+        ] {
+            assert_eq!(ascii_for_chinese_mark(chinese), Some(ascii), "{chinese}");
+        }
         for other in ['中', 'a', '.', '…', '—'] {
             assert_eq!(ascii_for_chinese_mark(other), None, "{other}");
         }
@@ -583,6 +629,60 @@ mod tests {
         assert_eq!(
             decide_space_convert(None, b' ', Some('\u{ff0c}'), false, 4),
             None
+        );
+    }
+
+    #[test]
+    fn punctuation_marks_resolve_corner_when_traditional() {
+        let marks = |quote_style, bracket_style, traditional| {
+            punctuation_marks(&Preferences {
+                quote_style,
+                bracket_style,
+                traditional_chinese_output: traditional,
+                ..Preferences::default()
+            })
+        };
+        let defaults = punctuation_marks(&Preferences::default());
+        assert_eq!(
+            defaults,
+            PunctuationMarks {
+                quotes: QuoteMarks::Curly,
+                brackets: BracketStyle::Solid,
+            }
+        );
+        for traditional in [false, true] {
+            assert_eq!(
+                marks(QuoteStyle::Curly, BracketStyle::Solid, traditional).quotes,
+                QuoteMarks::Curly
+            );
+            assert_eq!(
+                marks(QuoteStyle::Corner, BracketStyle::Solid, traditional).quotes,
+                QuoteMarks::Corner
+            );
+            assert_eq!(
+                marks(QuoteStyle::Curly, BracketStyle::Hollow, traditional).brackets,
+                BracketStyle::Hollow
+            );
+        }
+        assert_eq!(
+            marks(
+                QuoteStyle::CornerWhenTraditional,
+                BracketStyle::Solid,
+                false
+            )
+            .quotes,
+            QuoteMarks::Curly
+        );
+        assert_eq!(
+            marks(
+                QuoteStyle::CornerWhenTraditional,
+                BracketStyle::Hollow,
+                true
+            ),
+            PunctuationMarks {
+                quotes: QuoteMarks::Corner,
+                brackets: BracketStyle::Hollow,
+            }
         );
     }
 }

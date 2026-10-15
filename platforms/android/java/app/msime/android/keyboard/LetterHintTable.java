@@ -36,9 +36,14 @@ public final class LetterHintTable {
      * @return 中文标点生效时，( ) " ? ! 换成 （ ） “ ？ ！（与 123 层同一份 {@link ChineseSymbolFaces}），其余提示照旧；没有提示时返回 null
      */
     public static String face(String letter, boolean chinesePunctuation) {
+        return face(letter, chinesePunctuation, ChineseSymbolFaces.Marks.DEFAULT);
+    }
+
+    /** 同 {@link #face(String, boolean)}，按引号样式画 " 的提示：直角引号下是『。 */
+    public static String face(String letter, boolean chinesePunctuation, ChineseSymbolFaces.Marks marks) {
         String hint = hint(letter);
         if (hint == null || !chinesePunctuation) return hint;
-        return ChineseSymbolFaces.face(hint, true);
+        return ChineseSymbolFaces.face(hint, true, marks);
     }
 
     /**

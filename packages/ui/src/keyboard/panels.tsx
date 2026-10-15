@@ -1,6 +1,12 @@
 import { ControlledCheckbox } from "../core/controlled-checkbox";
 import { downloadBlob } from "../core/download-blob";
 import { trackAsyncSubscription } from "../core/async-subscription";
+import { subscribeToInterval } from "../core/use-interval";
+import {
+  subscribeToDocumentVisibilityChange,
+  subscribeToWindowBlur,
+  subscribeToWindowEvent,
+} from "../core/window-focus";
 import {
   readOptionalJson,
   readOptionalStorage,
@@ -40,6 +46,7 @@ import { VoiceLanguageOptions } from "../voice/voice-language-options";
 import { useAsyncGeneration } from "../settings/use-async-generation";
 import { useMountedRef } from "../settings/use-mounted-ref";
 import { useLatestRef } from "../core/use-latest-ref";
+import { useTimedValue } from "../core/use-timed-value";
 import {
   isImeCommitKey,
   keyboardKeyWeight,
@@ -68,6 +75,7 @@ import {
   flattenGroups,
   matchesEmojiItem,
   matchingGroupItems,
+  symbolCategoryTitle,
 } from "./emoji-panel-helpers";
 
 export { emojiDisplayName } from "./emoji-panel-helpers";
@@ -443,26 +451,29 @@ export function KeyboardPanel({
   const sourceRows = activeLayout === "nine_key" ? nineKeyRows : keyboardRows;
   const rows =
     platform === "macos"
-      ? sourceRows.map((row) =>
-          row
-            // macOS has no PC application/Menu key. The native panel omits it and
-            // host-macos deliberately rejects the Windows VK_MENU (0x5d) contract
-            // value rather than guessing at a Command/Option equivalent. Keep the
-            // shared layout's other keypad/navigation keys because CoreGraphics has
-            // stable ANSI mappings for those values.
-            .filter((item) => ![0x2c, 0x91, 0x13, 0x2d, 0x5d].includes(item.virtualKey))
-            .map((item) => ({
-              ...item,
-              label:
-                item.label === "Win"
-                  ? "Command"
-                  : item.label === "Alt"
-                    ? "Option"
-                    : item.label === "Num Lock"
-                      ? "Clear"
-                      : item.label,
-            })),
-        )
+      ? sourceRows.map((row) => {
+          // PC 底行左侧 Ctrl/Win/Alt 改为 Control/Option/Command，右侧按相反方向镜像。
+          const ordered =
+            row[0]?.virtualKey === 0x11 && row[3]?.virtualKey === 0x20
+              ? [row[0], row[2], row[1], row[3], row[5], row[4], ...row.slice(6)]
+              : row;
+          return (
+            ordered
+              // macOS 没有这些 PC 专用键；保留有稳定 ANSI 映射的数字小键盘和导航键。
+              .filter((item) => ![0x2c, 0x91, 0x13, 0x2d, 0x5d].includes(item.virtualKey))
+              .map((item) => ({
+                ...item,
+                label:
+                  item.label === "Win"
+                    ? "Command"
+                    : item.label === "Alt"
+                      ? "Option"
+                      : item.label === "Num Lock"
+                        ? "Clear"
+                        : item.label,
+              }))
+          );
+        })
       : sourceRows;
   const [, setActiveModifiers] = useState<Set<Modifier>>(new Set());
   const modifiersRef = useRef<Set<Modifier>>(new Set());
@@ -502,10 +513,9 @@ export function KeyboardPanel({
       void client.rememberInputTarget().catch((error: unknown) => {
         if (queue.active) setNotice(keyboardDeliveryNotice(error, platformRef.current));
       });
-    const stopForBlur = () => stopKeyRepeat();
-    window.addEventListener("blur", stopForBlur);
+    const stopBlur = subscribeToWindowBlur(stopKeyRepeat);
     return () => {
-      window.removeEventListener("blur", stopForBlur);
+      stopBlur();
       stopKeyRepeat();
       queue.active = false;
       queue.pending = [];
@@ -837,8 +847,7 @@ function HandwritingCandidateButton({
       observer.observe(element);
       return () => observer.disconnect();
     }
-    window.addEventListener("resize", resize);
-    return () => window.removeEventListener("resize", resize);
+    return subscribeToWindowEvent("resize", resize);
   }, []);
   // Use Unicode code points so supplementary Han does not count as two glyphs.
   const length = Math.max(1, Array.from(candidate).length);
@@ -893,8 +902,7 @@ export function HandwritingPanel({
   const handwritingPack = resourcePackStatus(packs, "handwriting");
   // 只有确定缺少模型时才暂停识别；读不到列表时照常识别。已过期（文件字节与锁文件不一致）的资源包会由 ensure 重新下载，期间识别照常尝试，宿主可能还有别的模型可用。
   const modelMissing = handwritingPack?.state === "missing";
-  const modelMissingRef = useRef(modelMissing);
-  modelMissingRef.current = modelMissing;
+  const modelMissingRef = useLatestRef(modelMissing);
   const waitingForModel = useRef(false);
   const ensuredModel = useRef(false);
   useEffect(() => {
@@ -1773,8 +1781,7 @@ export function VoicePanel({
       event.stopPropagation();
       void cancel();
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return subscribeToWindowEvent("keydown", onKeyDown);
   }, [client]);
 
   async function close() {
@@ -3162,12 +3169,12 @@ export function CloudDictionaryApplyPanel({ client }: { client: CloudDictionaryP
     setPreview(null);
     setPreviewToken(null);
     void refreshStatus();
-    const timer = window.setInterval(() => {
+    const stopPoll = subscribeToInterval(() => {
       void refreshStatus();
     }, 2000);
     return () => {
       invalidate();
-      window.clearInterval(timer);
+      stopPoll();
     };
   }, [client, invalidate]);
 
@@ -4052,11 +4059,13 @@ const panelEmpty = `m-0 flex min-h-[220px] items-center justify-center text-cent
  * to their content and wrap their text instead. The `:nth-child(n)` the stylesheet used on the group
  * was only there to win a specificity fight with the grid rule -- a fight utilities do not have.
  */
-const panelTile = (flow: boolean) =>
+const panelTile = (flow: boolean, compact = false) =>
   `flex min-w-0 items-center justify-center overflow-hidden rounded-[9px] border border-transparent bg-transparent text-center font-emoji-text leading-[1.2] wrap-anywhere ${surface.panelText} hover:border-[#555560] hover:bg-[#303038] focus-visible:border-[#555560] focus-visible:bg-[#303038] group-data-[panel-theme=light]:hover:border-[#c8ccd5] group-data-[panel-theme=light]:hover:bg-[#eceef3] group-data-[panel-theme=light]:focus-visible:border-[#c8ccd5] group-data-[panel-theme=light]:focus-visible:bg-[#eceef3] disabled:cursor-wait disabled:opacity-55 ${
     flow
       ? "max-w-full flex-[0_1_auto] min-h-12 px-3 py-2.5 text-xl whitespace-pre-wrap"
-      : "min-h-[66px] p-1.5 text-[29px]"
+      : compact
+        ? "h-10 min-h-10 p-1 text-xl"
+        : "min-h-[66px] p-1.5 text-[29px]"
   }`;
 const clipboardRow = `w-full flex-1 min-w-0 overflow-hidden rounded-lg px-3.5 py-3 text-left font-[inherit] text-ellipsis whitespace-nowrap ${panelField} hover:border-[#5fbf84] hover:bg-[#303038] focus-visible:border-[#5fbf84] focus-visible:bg-[#303038] group-data-[panel-theme=light]:hover:border-[#2c7a4b] group-data-[panel-theme=light]:hover:bg-[#eceef3] group-data-[panel-theme=light]:focus-visible:border-[#2c7a4b] group-data-[panel-theme=light]:focus-visible:bg-[#eceef3]`;
 const clipboardSideButton = `shrink-0 grow-0 basis-auto rounded-lg p-2 font-[inherit] ${panelField} hover:border-[#5fbf84] focus-visible:border-[#5fbf84] group-data-[panel-theme=light]:hover:border-[#2c7a4b] group-data-[panel-theme=light]:focus-visible:border-[#2c7a4b]`;
@@ -4085,6 +4094,19 @@ export function EmojiPanel({
           .slice(0, 28) as EmojiCatalogItem[])
       : [];
   });
+  const [symbolRecent, setSymbolRecent] = useState<EmojiCatalogItem[]>(() => {
+    const value = readOptionalJson("msime.symbols.recent");
+    return Array.isArray(value)
+      ? value
+          .filter(
+            (item) => item && typeof item.text === "string" && typeof item.keywords === "string",
+          )
+          .slice(0, 28)
+      : [];
+  });
+  useEffect(() => {
+    writeOptionalJson("msime.symbols.recent", symbolRecent);
+  }, [symbolRecent]);
   const [clipboard, setClipboard] = useState<string[]>([]);
   const {
     busy: clipboardBusy,
@@ -4101,8 +4123,7 @@ export function EmojiPanel({
   const deletedRowFocus = useRef<{ element: HTMLElement; index: number; query: string } | null>(
     null,
   );
-  const [notice, setNoticeText] = useState("");
-  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [notice, setNoticeText] = useTimedValue("");
   const [catalog, setCatalog] = useState({
     emoji: fallbackEmojiGroups,
     kaomoji: fallbackKaomojiGroups,
@@ -4117,26 +4138,14 @@ export function EmojiPanel({
   const clipboardLifecycle = useAsyncGeneration(client, page, clipboardRefresh);
 
   function setNotice(message: string, temporary = false) {
-    if (noticeTimer.current !== null) clearTimeout(noticeTimer.current);
-    noticeTimer.current = null;
-    setNoticeText(message);
-    if (temporary) {
-      noticeTimer.current = setTimeout(() => {
-        noticeTimer.current = null;
-        setNoticeText("");
-      }, 1600);
-    }
+    setNoticeText(message, temporary ? 1600 : undefined);
   }
 
   useEffect(() => {
     clipboardMutation.current = false;
     deletedRowFocus.current = null;
     setNotice("");
-    return () => {
-      invalidate();
-      if (noticeTimer.current !== null) clearTimeout(noticeTimer.current);
-      noticeTimer.current = null;
-    };
+    return invalidate;
   }, [client, invalidate]);
 
   useEffect(() => {
@@ -4192,8 +4201,8 @@ export function EmojiPanel({
     }
     const generation = clipboardLifecycle.current;
     const isCurrent = () => generation === clipboardLifecycle.current;
-    let unsubscribe: (() => void) | undefined;
-    let poll: ReturnType<typeof setInterval> | undefined;
+    let stopPoll: (() => void) | undefined;
+    let stopVisibility: (() => void) | undefined;
     let inFlight = 0;
     let refreshPending = false;
     const refresh = () => {
@@ -4246,39 +4255,36 @@ export function EmojiPanel({
         refresh();
     };
     const start = async () => {
+      let stop: (() => void) | undefined;
       try {
-        const stop = await client.clipboard?.onChanged?.(refresh);
-        if (!isCurrent()) {
-          stop?.();
-          return;
-        }
-        unsubscribe = stop;
+        stop = await client.clipboard?.onChanged?.(refresh);
       } catch {
-        /* Keep polling if host notification registration fails. */
+        /* 宿主通知注册失败时继续轮询。 */
       }
-      if (!isCurrent()) return;
+      if (!isCurrent()) return stop;
       // Close the gap between the initial snapshot and subscription setup.
       refresh();
-      if (unsubscribe && poll !== undefined) {
-        clearInterval(poll);
-        poll = undefined;
-        document.removeEventListener("visibilitychange", pollVisible);
+      if (stop && stopPoll !== undefined) {
+        stopPoll();
+        stopPoll = undefined;
+        stopVisibility?.();
       }
+      return stop;
     };
     // Listing must not wait for a slow or stalled notification registration.
     // Use Windows' 400 ms interval until the host subscription is ready.
     refresh();
     if (page === "clipboard") {
-      poll = setInterval(pollVisible, 400);
-      document.addEventListener("visibilitychange", pollVisible);
+      stopPoll = subscribeToInterval(pollVisible, 400);
+      stopVisibility = subscribeToDocumentVisibilityChange(pollVisible);
     }
-    void start();
+    const disposeSubscription = trackAsyncSubscription(start(), isCurrent);
     return () => {
       refreshPending = false;
       ++clipboardGeneration.current;
-      if (poll !== undefined) clearInterval(poll);
-      document.removeEventListener("visibilitychange", pollVisible);
-      unsubscribe?.();
+      stopPoll?.();
+      stopVisibility?.();
+      disposeSubscription();
     };
   }, [client, page, clipboardLifecycle, clipboardRefresh]);
 
@@ -4309,7 +4315,7 @@ export function EmojiPanel({
     selectedCategory === "recent" || categoryTabs.some((tab) => tab.id === selectedCategory)
       ? selectedCategory
       : "all";
-  const recentGroup = { title: "最近使用", icon: "◷", items: recent };
+  const recentGroup: EmojiCatalogGroup = { title: "最近使用", icon: "◷", items: recent };
   const selectedGroups =
     categoryPage && (page === "emoji" || !query)
       ? activeCategory === "recent"
@@ -4322,7 +4328,19 @@ export function EmojiPanel({
     .map((group) => ({
       ...group,
       flow: page === "kaomoji",
-      items: matchingGroupItems(group, query),
+      items: matchingGroupItems(
+        page === "symbols" && !group.pack
+          ? {
+              ...group,
+              keywords: [
+                group.keywords,
+                symbolCategoryTitle(group.title),
+                symbolCategoryTitle(group.parent ?? ""),
+              ].join(" "),
+            }
+          : group,
+        query,
+      ),
     }))
     .filter((group) => group.items.length);
   const symbolPreview = query
@@ -4388,6 +4406,10 @@ export function EmojiPanel({
           input ? "已输入到原应用" : isClipboardItem ? "已复制到剪贴板" : `已复制：${text}`,
           true,
         );
+        if (page === "symbols")
+          setSymbolRecent((current) =>
+            [{ text, keywords }, ...current.filter((item) => item.text !== text)].slice(0, 28),
+          );
         if (!isClipboardItem)
           setRecent((current) =>
             [{ text, keywords }, ...current.filter((item) => item.text !== text)].slice(0, 28),
@@ -4487,6 +4509,7 @@ export function EmojiPanel({
   }
 
   function selectPage(next: EmojiPage) {
+    if (next === "symbols") setActivationMode("input");
     setPage(next);
     setItemPage(0);
     setQuery("");
@@ -4570,18 +4593,18 @@ export function EmojiPanel({
   return (
     <main
       {...navigation}
-      className={`native-panel group flex min-h-screen flex-col overflow-hidden ${surface.panelSurface} ${surface.panelText}`}
+      className={`native-panel group flex min-h-screen flex-col overflow-hidden ${page === "symbols" ? "h-screen" : ""} ${surface.panelSurface} ${surface.panelText}`}
       data-panel-theme={theme}
       aria-label="表情与符号"
     >
       <NativePanelHeader
-        title="Emoji and more"
+        title={page === "symbols" ? "符号大全" : "Emoji and more"}
         className={`native-panel-header flex-[0_0_38px] border-b ${panelDivider} ${surface.panelSurface} ${surface.panelText} [&>button]:text-[#aeb0b7] group-data-[panel-theme=light]:[&>button]:text-[#656a73]`}
         closeDisabled={clipboardBusy}
         onClose={() => void closeEmoji()}
       />
       <div
-        className={`mx-6 mt-3.5 flex flex-[0_0_52px] items-center gap-2 rounded-[10px] px-3.5 max-phone:mx-3.5 ${panelField} focus-within:border-[#5fbf84] focus-within:shadow-[0_0_0_1px_rgba(95,191,132,0.35)] group-data-[panel-theme=light]:focus-within:border-[#2c7a4b] group-data-[panel-theme=light]:focus-within:shadow-[0_0_0_1px_rgba(154,98,173,0.28)]`}
+        className={`emoji-panel-search mx-6 mt-3.5 flex ${page === "symbols" ? "flex-[0_0_40px]" : "flex-[0_0_52px]"} items-center gap-2 rounded-[10px] px-3.5 max-phone:mx-3.5 ${panelField} focus-within:border-[#5fbf84] focus-within:shadow-[0_0_0_1px_rgba(95,191,132,0.35)] group-data-[panel-theme=light]:focus-within:border-[#2c7a4b] group-data-[panel-theme=light]:focus-within:shadow-[0_0_0_1px_rgba(154,98,173,0.28)]`}
       >
         <span className="text-[23px] leading-none" aria-hidden="true">
           ⌕
@@ -4605,7 +4628,7 @@ export function EmojiPanel({
                 : page === "kaomoji"
                   ? "Search kaomoji"
                   : page === "symbols"
-                    ? "Search symbols"
+                    ? "搜索符号、名称或分类"
                     : page === "home"
                       ? "Search emoji, kaomoji, and symbols"
                       : "Search"
@@ -4613,7 +4636,7 @@ export function EmojiPanel({
         />
       </div>
       <nav
-        className="flex flex-[0_0_72px] items-stretch gap-1 px-[18px] pt-2 max-phone:px-2"
+        className={`flex ${page === "symbols" ? "flex-[0_0_38px]" : "flex-[0_0_72px]"} items-stretch gap-1 px-[18px] pt-2 max-phone:px-2`}
         aria-label="面板分类"
       >
         {emojiPages.map((item) => (
@@ -4629,16 +4652,18 @@ export function EmojiPanel({
             aria-pressed={page === item.id}
             onClick={() => selectPage(item.id)}
           >
-            <span className="min-h-7 font-emoji text-[23px] leading-[1.1]" aria-hidden="true">
-              {item.icon}
-            </span>
+            {page !== "symbols" && (
+              <span className="min-h-7 font-emoji text-[23px] leading-[1.1]" aria-hidden="true">
+                {item.icon}
+              </span>
+            )}
             <small className="m-0 text-[10px] leading-[1.2] text-inherit max-phone:text-[9px]">
               {item.label}
             </small>
           </button>
         ))}
       </nav>
-      {isDetail && (
+      {isDetail && page !== "symbols" && (
         <div className="flex-[0_0_32px] px-6">
           <button
             type="button"
@@ -4723,7 +4748,7 @@ export function EmojiPanel({
             </button>
           </div>
         )}
-      {categoryPage && (
+      {categoryPage && page !== "symbols" && (
         <nav
           className="flex shrink-0 gap-1.5 overflow-x-auto px-6 py-2 whitespace-pre-wrap"
           aria-label={page === "emoji" ? "Emoji 子分类" : "符号子分类"}
@@ -4759,7 +4784,96 @@ export function EmojiPanel({
           ))}
         </nav>
       )}
-      {page === "clipboard" ? (
+      {page === "symbols" ? (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <section
+            className={`mx-6 mt-2 border-b pb-2 ${panelDivider}`}
+            aria-label="最近使用的符号"
+          >
+            <div className="flex items-center gap-2 text-xs">
+              <span>最近使用</span>
+              {symbolRecent.length > 0 && (
+                <button
+                  type="button"
+                  className={`${panelAction} ml-auto`}
+                  onClick={() => setSymbolRecent([])}
+                >
+                  清除符号记录
+                </button>
+              )}
+            </div>
+            <div className="mt-1 flex gap-1 overflow-x-auto">
+              {symbolRecent.length ? (
+                symbolRecent.map((item) => (
+                  <button
+                    type="button"
+                    key={item.text}
+                    className={`${panelTile(false, true)} shrink-0 min-w-10`}
+                    title={emojiDisplayName(item.keywords, item.text)}
+                    onClick={() => copy(item.text, false, item.keywords)}
+                  >
+                    {item.text}
+                  </button>
+                ))
+              ) : (
+                <p className={`my-1 text-xs ${panelDim}`}>使用过的符号会显示在这里</p>
+              )}
+            </div>
+          </section>
+          <div className="flex min-h-0 flex-1 pt-2">
+            <nav
+              className={`w-36 shrink-0 overflow-y-auto border-r px-2 pb-3 ${panelDivider}`}
+              aria-label="符号子分类"
+            >
+              {[{ id: "all", title: "全部符号", icon: "" }, ...categoryTabs].map((tab) => (
+                <button
+                  type="button"
+                  key={tab.id}
+                  className={`${panelChip(activeCategory === tab.id)} mb-1 w-full text-left`}
+                  aria-pressed={activeCategory === tab.id}
+                  onClick={() => {
+                    setQuery("");
+                    selectCategory(tab.id);
+                  }}
+                >
+                  {tab.id.startsWith("pack") ? tab.title : symbolCategoryTitle(tab.title)}
+                </button>
+              ))}
+            </nav>
+            <section
+              className="emoji-panel-content min-h-0 flex-1 overflow-y-auto px-3 pt-2 pb-3 [scrollbar-color:#77747d_transparent]"
+              aria-label="符号目录"
+            >
+              {filteredGroups.map((group) => (
+                <div key={JSON.stringify([group.pack, group.parent, group.title])} className="mb-3">
+                  <h2 className={`${panelHeading} mb-2`}>
+                    {group.pack ? group.title : symbolCategoryTitle(group.title)}
+                  </h2>
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(36px,1fr))] gap-1">
+                    {group.items.map((item, index) => (
+                      <button
+                        type="button"
+                        key={`${index}-${item.text}`}
+                        className={panelTile(false, true)}
+                        data-emoji-navigation-item
+                        title={emojiDisplayName(item.keywords, item.text)}
+                        onClick={() => copy(item.text, false, item.keywords)}
+                      >
+                        {item.text}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              {!filteredGroups.length && (
+                <p className={panelEmpty}>
+                  {catalogLoading ? "正在加载符号…" : query ? "没有匹配的符号" : "暂无可显示符号"}
+                </p>
+              )}
+            </section>
+          </div>
+        </div>
+      ) : page === "clipboard" ? (
         <section className={`${panelContent} pt-3.5`} aria-label="剪贴板历史">
           <div className={panelToolbar}>
             <h2 className={panelHeading}>剪贴板</h2>

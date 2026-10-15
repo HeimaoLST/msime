@@ -89,3 +89,28 @@ private struct MacEmojiCategoryTabStyle: ButtonStyle {
     }
   }
 }
+
+/// 符号分类显示文字，长列表独立滚动，目录查询仍使用原始标识。
+struct MacSymbolSidebar: View {
+  let tabs: [MacEmojiCategoryTab<String>]
+  let selected: String
+  let palette: MacEmojiPalette
+  let select: (String) -> Void
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 4) {
+        ForEach(tabs, id: \.id) { tab in
+          Button { select(tab.id) } label: {
+            Text(MacEmojiPluginSymbolGroup.isParentID(tab.id) ? tab.title : MacEmojiSymbolGroup.displayTitle(tab.title))
+              .font(.system(size: 12)).lineLimit(1)
+              .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 8).padding(.vertical, 8)
+          }
+          .buttonStyle(.plain)
+          .background(tab.id == selected ? MacEmojiPalette.color(palette.selected) : .clear, in: RoundedRectangle(cornerRadius: 5))
+          .accessibilityAddTraits(tab.id == selected ? .isSelected : [])
+        }
+      }
+    }.frame(width: 128)
+    .accessibilityLabel("符号分类")
+  }
+}

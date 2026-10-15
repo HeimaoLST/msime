@@ -15,7 +15,7 @@ import SwiftUI
     assert(sections.map { $0.items.count } == [7, 2, 1])
     assert(sections.flatMap(\.items) == source)
     assert(MacEmojiSymbolSections.split([]).isEmpty)
-    assert(MacEmojiSymbolSections.height(sections[0]) == 156)
+    assert(MacEmojiSymbolSections.height(sections[0]) == 86)
     for section in sections {
       for index in section.items.indices { assert(source[section.start + index] == section.items[index]) }
     }
@@ -58,7 +58,7 @@ import SwiftUI
         palette: palette, selectedIndex: 7, copy: { _ in }).background(Color.white))
       renderer.scale = 3
       guard let image = renderer.cgImage else { fatalError("Symbol section rendering unavailable") }
-      assert(image.width == 1008 && image.height == 768, "Unexpected section size \(image.width)x\(image.height)")
+      assert(image.width == 1008 && image.height == 516, "Unexpected section size \(image.width)x\(image.height)")
       var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
       pixels.withUnsafeMutableBytes { buffer in
         let context = CGContext(data: buffer.baseAddress, width: image.width, height: image.height,
@@ -66,7 +66,7 @@ import SwiftUI
           bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
       }
-      let pixel = (594 * image.width + 30) * 4
+      let pixel = (384 * image.width + 30) * 4
       for channel in 0..<3 {
         let expected = Int((palette.selected >> ((2 - channel) * 8)) & 255)
         assert(abs(Int(pixels[pixel + channel]) - expected) <= 2)

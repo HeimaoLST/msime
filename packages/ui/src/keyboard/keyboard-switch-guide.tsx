@@ -1,6 +1,7 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import type { ImeSetupClient } from "../core/host-contracts";
 import { useImeSetupState } from "./setup-status-card";
+import { useInterval } from "../core/use-interval";
 import { useTimeout } from "../core/use-timeout";
 
 /**
@@ -64,11 +65,7 @@ function KeyboardSwitchGuide({ setup }: { setup?: ImeSetupClient }) {
     input.current?.focus();
   }, []);
 
-  useEffect(() => {
-    if (done || !setup?.refresh) return;
-    const timer = window.setInterval(() => setup.refresh?.(), REFRESH_MS);
-    return () => window.clearInterval(timer);
-  }, [done, setup]);
+  useInterval(() => void setup?.refresh?.(), done || !setup?.refresh ? null : REFRESH_MS);
 
   useEffect(() => {
     if (!done) return;

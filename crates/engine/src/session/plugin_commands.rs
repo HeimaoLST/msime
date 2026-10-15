@@ -38,22 +38,29 @@ impl InputSession {
         if self.plugin_command_query().as_ref() != Some(query) {
             return false;
         }
-        let mut texts: Vec<&str> = Vec::new();
+        let mut texts: [Option<&str>; RESULT_LIMIT] = [None; RESULT_LIMIT];
+        let mut text_count = 0;
         for (text, _) in rows {
-            if texts.len() == RESULT_LIMIT {
+            if text_count == RESULT_LIMIT {
                 break;
             }
             if !text.trim().is_empty()
                 && !text.chars().any(char::is_control)
                 && text.encode_utf16().count() <= TEXT_UTF16_LIMIT
-                && !texts.contains(&text.as_str())
+                && !texts[..text_count]
+                    .iter()
+                    .flatten()
+                    .any(|existing| *existing == text)
             {
-                texts.push(text);
+                texts[text_count] = Some(text);
+                text_count += 1;
             }
         }
-        let count = texts.len();
+        let count = text_count;
         let items = texts
             .into_iter()
+            .take(count)
+            .flatten()
             .enumerate()
             .map(|(index, text)| {
                 WordItem::new(

@@ -25,7 +25,10 @@
 #                                 when all three are set (and an identity is), the DMG is notarized and stapled
 #
 # 产物是 universal 的：Apple 芯片和 Intel Mac 用同一个包。Rust 产物按两个 target 各编一次再用 lipo 合并，CMake 的目标和 Swift 后端经 CMAKE_OSX_ARCHITECTURES 编出双架构，打包后 check_app 逐个核对包里的 Mach-O 都含两种架构。需要 rustup target add aarch64-apple-darwin x86_64-apple-darwin。
-set -euo pipefail
+set -Eeuo pipefail
+
+# ERR 传入函数和子 shell，只记录行号、版本 id 和退出码，不打印可能带公证凭据的命令。
+trap 'package_status=$?; printf "macOS 打包失败：行号=%s，版本=%s，退出码=%s\n" "$LINENO" "${edition:-shared}" "$package_status" >&2; exit "$package_status"' ERR
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo_root"
@@ -128,6 +131,24 @@ only() {
     exit 1
   fi
   printf '%s\n' "$1"
+}
+
+# 磁盘映像服务偶发失败时重新创建；每次都清掉半成品，持续失败仍阻止上传。
+create_dmg() {
+  local output="$1" attempt status
+  shift
+  for attempt in 1 2 3; do
+    rm -f "$output"
+    if hdiutil create "$@" "$output"; then
+      return 0
+    else
+      status=$?
+    fi
+    printf 'DMG creation failed: edition=%s attempt=%s status=%s\n' "$edition" "$attempt" "$status" >&2
+    if [ "$attempt" -lt 3 ]; then sleep "$((attempt * 5))"; fi
+  done
+  rm -f "$output"
+  return "$status"
 }
 
 # ---- Core dictionaries ----
@@ -423,7 +444,7 @@ printf '%s\n' \
 dmg="$out_dir/$dmg_prefix-$version-$arch.dmg"
 rm -f "$dmg"
 # 用 ULMO（lzma）而不是 UDZO（zlib）：同样内容的 DMG 小约三分之一。ULMO 在 macOS 10.15 及以后都能挂载，而应用本身要求 13.0。DMG 创建之后才签名、公证和装订，事后再转换格式会丢掉签名，所以在创建时就选定格式。
-hdiutil create -quiet -volname "$display_name $version" -srcfolder "$stage" -format ULMO -fs HFS+ "$dmg"
+create_dmg "$dmg" -volname "$display_name $version" -srcfolder "$stage" -format ULMO -fs HFS+
 if [ -n "$identity" ]; then
   codesign_timestamped --force --sign "$identity" "$dmg"
   codesign --verify --strict "$dmg"

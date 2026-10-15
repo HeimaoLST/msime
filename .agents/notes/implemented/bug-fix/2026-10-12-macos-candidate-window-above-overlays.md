@@ -15,7 +15,9 @@ Status: implemented
 - 输入模式提示 `InputModeHUDPanel.mm` 和双拼键位图 `ShuangpinKeymapPanel.mm`，它们同样在光标旁出现，否则在同一个遮罩下一样看不见
 - 打字特效 `TypingEffectPanel.mm` 取 `MSIMECandidateWindowLevel() - 1`，仍紧贴在候选窗之下，火花不盖住候选
 
-悬浮工具栏、语音波形、表情送达提示和屏幕键盘不跟光标走，仍在 `NSFloatingWindowLevel`，不在这次范围内。
+屏幕键盘也要在 PixPin 的置顶遮罩上操作（#7785），共享 WebView 面板与原生备用面板统一取 `MSIMECandidateWindowLevel() - 1`，在遮罩上方、候选窗下方。转换 WebView 为非激活面板后，先恢复内容，再设置窗口为非不透明、透明背景，并让内容层以 8pt 圆角裁切；只在 DOM 或 `drawRect` 里画圆角会留下窗口底色。两条屏幕键盘路径的左侧修饰键统一为 Control、Option、Command，右侧镜像，虚拟键码和发送语义不变。
+
+悬浮工具栏、语音波形和表情送达提示仍在 `NSFloatingWindowLevel`。
 
 ## 候选右键菜单
 
@@ -29,9 +31,15 @@ Status: implemented
 - 按客户端窗口自适应，取 `max(NSPopUpMenuWindowLevel, client.windowLevel + 1)`，用 `IMKTextInput` 的 `windowLevel`：只比当前输入的窗口高一层，对其他应用最克制。但 Qt 应用和自绘遮罩的客户端不一定如实报告它，PixPin 这类正是最可能报错的一类，修不住本问题。
 - 右键菜单开着时把候选窗降回弹出菜单层级：基于「菜单固定开在弹出菜单层级」的错误前提，实测反而让候选窗和菜单一起掉到遮罩下面，见上一节。
 
+- 只修改共享屏幕键盘的 CSS 圆角：范围更小，但黑角来自不透明原生窗口与未裁切的 WebView 容器，CSS 无法把窗口底色变透明；需要在转换完成后的原生边界处理。
+
 ## Consequences
 
 - **收益**：候选窗、输入模式提示、双拼键位图在截图遮罩、屏保层级的置顶窗口和全屏应用之上都看得见；Spaces 和全屏的 `collectionBehavior` 没变。层级集中在一个头文件里，打字特效的「紧贴候选窗之下」随之变化。
 - **代价**：这些窗口现在高过所有应用的置顶窗口，包括别的应用的弹出菜单；它们只在组字或切换模式时短暂出现，与鼠须管的表现一致。
 - **测试**：`shortcut` 断言控制器建的候选窗在 `MSIMECandidateWindowLevel()`、高于屏保层级、低于光标层级，并断言右键菜单若有代理，开、关时候选窗都留在 `MSIMECandidateWindowLevel()`；把候选窗层级改回去，或重新加上降层级的菜单代理，断言都会失败。`typing-effect-panel`、`input-mode-hud-panel`、`shuangpin-keymap-input` 各自断言层级。
 - **未验证**：本机没装 PixPin，没有在真实截图遮罩里看过候选窗；右键菜单开在面板层级加一是在独立的测试程序里用 `CGWindowListCopyWindowInfo` 核对的，没有在输入法进程里截图核对。修复发布后请报告者确认；若候选窗仍不出现，打开诊断日志看收起原因，`invalid_caret` 说明是另一个光标矩形问题。
+
+## 屏幕键盘验证
+
+`shared-keyboard-host` 与 `screen-keyboard-panel` 检查透明窗口、内容层圆角裁切和层级；原生键盘逐键检查新的修饰键顺序、虚拟键码以及全部组合。共享界面的 `macos-keyboard` 检查实际按钮顺序和 Command/Option 发出的原有字段。没有向用户的编辑器投递按键，PixPin 的实际遮罩尚未验收。

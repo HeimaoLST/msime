@@ -5,6 +5,11 @@ on:
       version: {description: Semantic version (defaults to platforms/harmony/version.txt), required: false, type: string}
       prerelease: {description: Mark as prerelease, required: false, default: false, type: boolean}
       publish: {description: Publish the build as a harmony-v release (otherwise it is only uploaded as a workflow artifact), required: false, default: true, type: boolean}
+  workflow_call:
+    inputs:
+      version: {description: Semantic version, required: false, default: '', type: string}
+      prerelease: {description: Mark as prerelease, required: false, default: false, type: boolean}
+      publish: {description: Publish the build, required: false, default: false, type: boolean}
 permissions: {contents: write}
 concurrency: {group: release-harmony, cancel-in-progress: false}
 jobs:

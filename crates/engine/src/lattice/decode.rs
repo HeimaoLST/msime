@@ -26,14 +26,14 @@ pub type LatticeLexeme = DictRow;
 #[derive(Clone)]
 pub struct LatticeOptions<'a> {
     pub beam: usize,
-    /// Paths traced back from the final column. The default is 5; the product searches 6 (`make_sentence_lattice_options`) and 12 with neural rerankers.
+    /// 从末列回溯的路径数。默认5条；产品的 `SentenceNgramTables::options` 搜索6条，神经重排启用时搜索12条。
     pub nbest: usize,
     /// Cap on rows per span. The DB lookup already applies the same cap.
     pub span_limit: usize,
     pub max_phrase_syllables: usize,
     /// Heuristic unigram normaliser against a phrase-length bonus: single-character msime-pinyin.db weights are corpus counts, phrase weights are on a smaller scale.
     pub unigram_z: f64,
-    /// The bonus was 3.0, which was never measured against the eval sets: a plausible number for a term whose only job was to stop the decoder spelling a sentence out character by character. Swept through the client's convert_eval with the n-gram tables present, whole-sentence top-1 rises monotonically up to 20 and stops moving after it: sentences-v1 0.850 -> 0.900, sentences-v2 0.125 -> 0.189, quanpin-words-v1 unchanged at 0.768. Raising it further trades sentences-v1 away for nothing.
+    /// 多字词每音节奖励，并扣一份作为每词插入代价。默认值 20 沿用原校准：旧评分从 3 提到 20 时，句子首选率上升至平台期，词级结果不变；继续增大会损失手写句子集。
     pub phrase_length_bonus: f64,
     /// How much each context term may move a path (tests/src/eval_sentences.cpp and the sweep above): at bonus 20 the bigram term is worth doubling, sentences-v2 top-1 0.173 -> 0.189 and MRR 0.393 -> 0.401 with sentences-v1 unchanged, while 3.0 starts trading page coverage for it.
     pub bigram_weight: f64,
@@ -64,7 +64,7 @@ pub struct LatticeOptions<'a> {
     pub show_next_on_duplicate: bool,
 }
 
-/// 产品解码用的 `phrase_length_bonus`。词组边每覆盖一个音节就加这么多，所以整句分只在同一串音节里可比；九宫格要比较不同音节串解出的整句，得先把它扣掉，见 `nine_key::comparable_weight`。
+/// 多字词每音节奖励，并扣一份作为每词插入代价。九宫格跨切分比较再扣音节奖励，保留已经计入的每词代价，见 `nine_key::comparable_weight`。
 pub const PHRASE_LENGTH_BONUS: f64 = 20.0;
 
 impl Default for LatticeOptions<'_> {
@@ -94,13 +94,39 @@ impl Default for LatticeOptions<'_> {
     }
 }
 
-/// The single configuration point quanpin and shuangpin share (WL:643-653): `nbest = 6`, `emit = 0` with alternatives else 1, and the generation's n-gram tables. The two paths used to build this block each themselves, which is how a ranking fix reached one and missed the other for weeks (engine PR #156).
+/// 活动词典持有构造时预热的 n 元表，按键查询不再构造路径或访问进程共享缓存。
+#[derive(Default)]
+pub(crate) struct SentenceNgramTables {
+    bigram: Option<Arc<NgramTable>>,
+    trigram: Option<Arc<NgramTable>>,
+}
+
+impl SentenceNgramTables {
+    pub(crate) fn load(paths: &RuntimePaths) -> Self {
+        Self {
+            bigram: NgramTable::shared(&paths.dictionary(assets::BIGRAM_TABLE)),
+            trigram: NgramTable::shared(&paths.dictionary(assets::TRIGRAM_TABLE)),
+        }
+    }
+
+    pub(crate) fn options<'a>(&self, sentence_alternatives: bool) -> LatticeOptions<'a> {
+        LatticeOptions {
+            nbest: 6,
+            emit: if sentence_alternatives { 0 } else { 1 },
+            bigram: self.bigram.clone(),
+            trigram: self.trigram.clone(),
+            ..LatticeOptions::default()
+        }
+    }
+}
+
+/// 固定 `87593cb4791e16297798f3542f817aa80da8be48` 的旧路径型配置入口，仅移除注释供测试对照。
+#[cfg(test)]
 pub fn make_sentence_lattice_options<'a>(
     paths: &RuntimePaths,
     sentence_alternatives: bool,
 ) -> LatticeOptions<'a> {
     LatticeOptions {
-        // Six are searched and rescored either way; `emit` only decides how many of them are handed back.
         nbest: 6,
         emit: if sentence_alternatives { 0 } else { 1 },
         bigram: NgramTable::shared(&paths.dictionary(assets::BIGRAM_TABLE)),
@@ -204,7 +230,7 @@ impl TypoSentence {
     }
 }
 
-/// WL:56-68. Single-character rows in msime-pinyin.db are raw corpus counts (often 1e6+) while multi-syllable rows are phrase weights on a much smaller scale; libpinyin stores comparable log probabilities, approximated here by down-projecting unigrams and giving dictionary phrases a length bonus.
+/// 单字权重按语料计数归一；多字词按音节奖励，并为每次插入扣一份奖励，避免拆成更多词组额外赚取正的词频分。
 pub fn edge_log_prob(weight: i64, syllables: usize, options: &LatticeOptions<'_>) -> f64 {
     let weight = if weight > 0 { weight as f64 } else { 1.0 };
     let z = if options.unigram_z > 1.0 {
@@ -215,7 +241,7 @@ pub fn edge_log_prob(weight: i64, syllables: usize, options: &LatticeOptions<'_>
     if syllables <= 1 {
         weight.ln() - z.ln()
     } else {
-        weight.ln() + options.phrase_length_bonus * syllables as f64
+        weight.ln() + options.phrase_length_bonus * (syllables - 1) as f64
     }
 }
 
@@ -272,33 +298,64 @@ pub(super) fn build_graph(
     let n = syllables.len();
     let max_len = options.max_phrase_syllables.max(1);
     let mut graph: Graph = (0..n).map(|_| Vec::new()).collect();
-    // A key repeated in the input (ma'ma'ma) is looked up once.
+    // 重复跨度只查一次字典，缓存首个图边区间；首次查询行直接移交字段。
+    struct CachedSpan {
+        column: usize,
+        edges: std::ops::Range<usize>,
+        reserve: usize,
+    }
     let span_capacity = (0..n)
         .map(|start| n.min(start.saturating_add(max_len)) - start)
         .sum();
-    let mut span_cache: HashMap<&[String], Vec<LatticeLexeme>> =
-        HashMap::with_capacity(span_capacity);
-    for (start, edges) in graph.iter_mut().enumerate() {
+    let mut span_cache: HashMap<&[String], CachedSpan> = HashMap::with_capacity(span_capacity);
+    for start in 0..n {
+        // 同一列的跨度长度各异，重复键必在更早的列；追加图边不改变区间索引。
+        let (earlier, remaining) = graph.split_at_mut(start);
+        let edges = &mut remaining[0];
         for end in start + 1..=n.min(start + max_len) {
             let span = &syllables[start..end];
-            let rows = span_cache.entry(span).or_insert_with(|| lookup(span));
-            edges.reserve(rows.len().min(options.span_limit));
-            let mut span_key = None;
-            for row in rows.iter().take(options.span_limit) {
-                if row.value.is_empty() {
-                    continue;
+            match span_cache.entry(span) {
+                std::collections::hash_map::Entry::Occupied(entry) => {
+                    let cached = entry.get();
+                    edges.reserve(cached.reserve);
+                    for edge in &earlier[cached.column][cached.edges.clone()] {
+                        edges.push(Edge {
+                            end,
+                            word: edge.word.clone(),
+                            key: edge.key.clone(),
+                            log_prob: edge.log_prob,
+                            typo: false,
+                        });
+                    }
                 }
-                edges.push(Edge {
-                    end,
-                    word: row.value.clone(),
-                    key: if row.key.is_empty() {
-                        span_key.get_or_insert_with(|| span.join("'")).clone()
-                    } else {
-                        row.key.clone()
-                    },
-                    log_prob: edge_log_prob(row.weight, end - start, options),
-                    typo: false,
-                });
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let rows = lookup(span);
+                    let reserve = rows.len().min(options.span_limit);
+                    edges.reserve(reserve);
+                    let begin = edges.len();
+                    let mut span_key = None;
+                    for row in rows.into_iter().take(options.span_limit) {
+                        if row.value.is_empty() {
+                            continue;
+                        }
+                        edges.push(Edge {
+                            end,
+                            word: row.value,
+                            key: if row.key.is_empty() {
+                                span_key.get_or_insert_with(|| span.join("'")).clone()
+                            } else {
+                                row.key
+                            },
+                            log_prob: edge_log_prob(row.weight, end - start, options),
+                            typo: false,
+                        });
+                    }
+                    entry.insert(CachedSpan {
+                        column: start,
+                        edges: begin..edges.len(),
+                        reserve,
+                    });
+                }
             }
         }
     }
@@ -788,6 +845,19 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_complete_phrase_does_not_lose_to_extra_frequency_terms() {
+        let rows = table(&[
+            ("xing'he", &[("星禾", 50_000)]),
+            ("mian'ban", &[("面板", 20_000)]),
+            ("xing'he'mian'ban", &[("星河面板", 100)]),
+        ]);
+        assert_eq!(
+            best("xing'he'mian'ban", &rows, &LatticeOptions::default()),
+            "星河面板"
+        );
+    }
+
+    #[test]
     fn edge_log_prob_projects_unigrams_and_rewards_phrases() {
         let options = LatticeOptions::default();
         assert!((edge_log_prob(1_000_000, 1, &options) - 0.0).abs() < 1e-12);
@@ -796,7 +866,7 @@ pub(super) mod tests {
             edge_log_prob(-5, 1, &options),
             edge_log_prob(1, 1, &options)
         );
-        assert!((edge_log_prob(100, 2, &options) - (100f64.ln() + 40.0)).abs() < 1e-12);
+        assert!((edge_log_prob(100, 2, &options) - (100f64.ln() + 20.0)).abs() < 1e-12);
         let odd = LatticeOptions {
             unigram_z: 0.5,
             ..LatticeOptions::default()
@@ -1341,3 +1411,7 @@ pub(super) mod tests {
         .is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "graph_ownership_tests.rs"]
+mod graph_ownership_tests;

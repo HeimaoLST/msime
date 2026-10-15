@@ -3,12 +3,22 @@
 #include "../../../../shared/input/GlossSenses.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 namespace msime::linux_host {
+
+// Candidate sources whose text is display-only and must never be sent to a
+// user-owned translation service. The shared query carries this identity as
+// `online_gloss: false`, but Linux's provider socket intentionally accepts a
+// text-only candidate list, so hosts must apply the source gate before
+// stripping the metadata.
+inline bool candidate_translation_source_allowed(std::uint64_t source) {
+  return source != 6 && source != 7 && source != 13 && source != 14;
+}
 
 // The dictionary joins multiple senses with either an ASCII or a full-width semicolon; IBus and Fcitx5 present them as the same secondary translation choices. The rule is shared with every other host - see shared/input/GlossSenses.h.
 inline std::vector<std::string>

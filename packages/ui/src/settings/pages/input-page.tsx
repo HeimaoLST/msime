@@ -83,6 +83,9 @@ export function InputSettingsPage() {
     visibleTranslationLanguages,
     visibleSecondaryLanguages,
   } = useSettingsForm();
+  const dictionary = client.dictionary;
+  const wubiCodes = dictionary?.wubiCodes;
+  const wubiCodeLookup = useMemo(() => wubiCodes?.bind(dictionary), [dictionary, wubiCodes]);
   // 自定义双拼的编辑页是输入页里的一个视图（像插件页的详情），打开时代替整页内容；宿主能校验表、能给出内置方案的表时才有它。去设置表单里的别的页时它不关，只随输入页一起藏起来，回来时还是那张没保存的表；和插件页详情离开就关不同，因为这里有还没保存的键位，而只有编辑页的返回会先问一声再丢掉它们。
   const validateShuangpinCustomProfile = client.validateShuangpinCustomProfile;
   const builtinShuangpinTable = client.builtinShuangpinTable;
@@ -193,7 +196,7 @@ export function InputSettingsPage() {
           resourcePacks={resourcePacks}
           languageCard={harmonyPhone}
           onEnableAndSelectTouchKeyboardScheme={selectHomeScheme}
-          wubiCodeLookup={client.dictionary?.wubiCodes?.bind(client.dictionary)}
+          wubiCodeLookup={wubiCodeLookup}
           onEditCustomShuangpin={
             shuangpinCustomClient ? () => setShuangpinEditorOpen(true) : undefined
           }
@@ -269,6 +272,7 @@ export function InputSettingsPage() {
       <InputSharedSettingsSection
         renderGroup={panel}
         foldIntoMore={harmonyPhone}
+        traditionalChineseVariants={host?.traditional_chinese_variants === true}
         preferences={draft}
         wordCharacter={wordCharacter}
         navigation={navigation}

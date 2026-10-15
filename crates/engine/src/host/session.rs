@@ -58,7 +58,7 @@ pub enum Command {
     ConversionRight = 14,
 }
 
-/// Every `candidate_*` vector has `candidates.len()` elements; the runtime's reorderings require it.
+/// 除可选的静态评分证据外，所有 `candidate_*` 向量必须与 `candidates` 等长，运行时才能同步重排。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EngineSnapshot {
     pub local_mode: String,
@@ -99,6 +99,8 @@ pub struct EngineSnapshot {
     pub candidate_positions: Vec<u8>,
     pub candidate_corrected: Vec<bool>,
     pub candidate_answers_key: Vec<bool>,
+    /// 与候选同步排列的词网格逐字评分证据；非词网格行为空，证据缺失或长度不符时沿用原模型决策。
+    pub candidate_static_evidence: Vec<Option<crate::ordering::StaticEvidence>>,
     /// The scheme's openable candidate list is showing (the Korean Hanja list, the Zhuyin conversion list); candidates are its rows while it is.
     pub candidate_list_open: bool,
     /// 整句改字时改好的整句，否则为空（`SessionSnapshot::conversion`）。
@@ -147,6 +149,15 @@ pub struct Session {
 }
 
 impl Session {
+    /// 显示候选仍与引擎原始候选同座时直接取反查码；身份不一致时保持旧的按词查找语义。
+    pub(crate) fn candidate_wubi_code_for_display(&self, index: usize, word: &str) -> Option<&str> {
+        self.inner
+            .candidate_wubi_code_at_if_word(index, word)
+            .or_else(|| self.inner.candidate_wubi_code(word))
+    }
+}
+
+impl Session {
     pub fn new(options: &EngineOptions) -> Result<Session> {
         // The C++ ran `options_for` a second time only to read the profile name back (bridge.cpp:430); that rerun recopied the same sidecar, so one mapping is enough.
         let inner = crate::session::Session::new(session_options(options)?)?;
@@ -183,7 +194,9 @@ impl Session {
 
     /// With the annotation rule of bridge.cpp:914-929.
     pub fn snapshot(&self) -> Result<EngineSnapshot> {
-        let value = self.inner.snapshot();
+        let value = self
+            .inner
+            .snapshot_with_helpcode_visibility(self.show_helpcode);
         let helpcode_scheme = value.scheme.helpcode();
         let uppercase_all = value.scheme == SchemeType::Quanpin;
         // Rows the engine generated in the expression, command and mention modes are not spelled by pinyin; their annotations are the engine's own. 拆字行的注释是字的读音，没有读音的字也不补辅助码。
@@ -241,25 +254,22 @@ impl Session {
             candidate_positions: Vec::with_capacity(count),
             candidate_corrected: Vec::with_capacity(count),
             candidate_answers_key: Vec::with_capacity(count),
+            candidate_static_evidence: Vec::with_capacity(count),
             candidate_list_open: value.candidate_list_open,
             conversion: value.conversion,
             conversion_focus_start: value.conversion_focus.0,
             conversion_focus_end: value.conversion_focus.1,
         };
+        let mut annotations = value.candidate_annotations.into_iter();
         for (index, candidate) in value.candidates.into_iter().enumerate() {
-            let mut annotation = value
-                .candidate_annotations
-                .get(index)
-                .cloned()
+            let mut annotation = annotations
+                .next()
                 .unwrap_or_else(|| candidate.corrected_from.clone());
             if let Some(keymap) = keymap {
-                if !self.show_helpcode {
-                    // Hidden helpcodes give their slot back to the correction hint the engine would otherwise have shown.
-                    let helpcode = compute_helpcodes(&candidate.word, uppercase_all, keymap);
-                    if !helpcode.is_empty() && annotation == helpcode {
-                        annotation = candidate.corrected_from.clone();
-                    }
-                } else if annotation.is_empty() && candidate.source == CandidateSource::Generated {
+                if self.show_helpcode
+                    && annotation.is_empty()
+                    && candidate.source == CandidateSource::Generated
+                {
                     // The engine annotates dictionary rows itself; a sentence it synthesised carries no helpcode until the host adds one.
                     annotation = compute_helpcodes(&candidate.word, uppercase_all, keymap);
                 }
@@ -273,7 +283,8 @@ impl Session {
                     SchemeType::Quanpin | SchemeType::Shuangpin | SchemeType::Wubi
                 )
             {
-                if let Some(code) = self.inner.candidate_wubi_code(&candidate.word) {
+                let code = self.candidate_wubi_code_for_display(index, &candidate.word);
+                if let Some(code) = code {
                     if !annotation.contains(code) {
                         if !annotation.is_empty() {
                             annotation.push(' ');
@@ -298,6 +309,9 @@ impl Session {
                     .copied()
                     .unwrap_or(false),
             );
+            output
+                .candidate_static_evidence
+                .push(candidate.static_evidence());
             output.candidate_codes.push(candidate.pinyin);
             output.candidates.push(candidate.word);
         }
@@ -800,3 +814,7 @@ mod tests {
         assert_eq!(word.capacity(), word.len());
     }
 }
+
+#[cfg(test)]
+#[path = "session/annotation_move_tests.rs"]
+mod annotation_move_tests;

@@ -11,6 +11,7 @@ import androidx.annotation.Nullable;
 import androidx.core.widget.NestedScrollView;
 import app.msime.android.KeyboardGeometry;
 import com.google.android.material.bottomsheet.BottomSheetDialog;
+import com.google.android.material.bottomsheet.BottomSheetBehavior;
 import java.util.function.Supplier;
 
 /**
@@ -70,7 +71,11 @@ public final class OptionSheet {
         return this;
     }
 
-    public void show() { dialog.show(); }
+    public void show() {
+        // 长列表直接展开，让列表滚动，避免初始折叠位置把固定取消行推到导航栏下方。
+        dialog.getBehavior().setState(BottomSheetBehavior.STATE_EXPANDED);
+        dialog.show();
+    }
 
     public void dismiss() { dialog.dismiss(); }
 

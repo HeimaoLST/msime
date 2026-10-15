@@ -22,18 +22,29 @@ fn collect_place_matches(
     code: &str,
     existing_names: &[&str],
     limit: usize,
-) -> Vec<(&'static str, &'static str)> {
+) -> ([(&'static str, &'static str); RESULT_LIMIT], usize) {
     let limit = limit.min(RESULT_LIMIT);
+    let mut exact = [("", ""); RESULT_LIMIT];
     if limit == 0 {
-        return Vec::new();
+        return (exact, 0);
     }
-    let mut exact = [None; RESULT_LIMIT];
+    // 仅剩一行时，源表首行的精确命中沿用立即返回，避免先构建前缀位图。
+    if limit == 1 {
+        if let Some((place, spellings)) = table.places.first().zip(table.spellings.first()) {
+            if spelling_match(spellings, code) == Some(true)
+                && !existing_names.contains(&place.name)
+            {
+                exact[0] = (place.key, place.name);
+                return (exact, 1);
+            }
+        }
+    }
     let mut exact_len = 0;
-    let mut prefix = [None; RESULT_LIMIT];
+    let mut prefix = [("", ""); RESULT_LIMIT];
     let mut prefix_len = 0;
     let mut matched_names = [None; PLACE_MATCH_CAPACITY];
     let mut matched_names_len = 0;
-    for (place, spellings) in table.places.iter().zip(&table.spellings) {
+    for (place, spellings) in table.matching_entries(code) {
         let Some(is_exact) = spelling_match(spellings, code) else {
             continue;
         };
@@ -49,10 +60,10 @@ fn collect_place_matches(
             if exact_len == limit {
                 continue;
             }
-            exact[exact_len] = Some((place.key, place.name));
+            exact[exact_len] = (place.key, place.name);
             exact_len += 1;
         } else if prefix_len < limit {
-            prefix[prefix_len] = Some((place.key, place.name));
+            prefix[prefix_len] = (place.key, place.name);
             prefix_len += 1;
         } else {
             continue;
@@ -64,11 +75,8 @@ fn collect_place_matches(
         }
     }
     let prefix_len = prefix_len.min(limit.saturating_sub(exact_len));
-    let mut matches = Vec::with_capacity(exact_len + prefix_len);
-    for place in exact[..exact_len].iter().chain(prefix[..prefix_len].iter()) {
-        matches.push(place.expect("place row slot is filled"));
-    }
-    matches
+    exact[exact_len..exact_len + prefix_len].copy_from_slice(&prefix[..prefix_len]);
+    (exact, exact_len + prefix_len)
 }
 
 /// The entries that are usable of a host list: non-empty text within the candidate text bound, a key of lowercase letters and single apostrophes between them, the first entry of a text, at most `LIST_LIMIT`.
@@ -211,36 +219,36 @@ fn collect_mention_rows<'a>(
     (exact, exact_len, prefix, prefix_len)
 }
 
-/// Generated rows for the letters after `@`, weight `count - index`, at most `RESULT_LIMIT`: entries the input spells out completely, then entries it begins, each group in list order. A key matches by its letters (`zhangsan`) or its initials (`zs`); an entry without a key matches by its own text in lowercase. `pinyin` holds the key. `entries` must have gone through `usable_mentions`.
+/// `@` 后的字母生成至多 `RESULT_LIMIT` 行，权重为 `count - index`：精确匹配在前，前缀匹配在后，每组保持列表顺序。键按完整字母（`zhangsan`）或首字母（`zs`）匹配；无键条目按 ASCII 小写文本匹配。`pinyin` 保存键，`entries` 必须已经过 `usable_mentions`。
 ///
-/// With `with_places` and a non-empty `code`, the embedded places fill the rows the list leaves, matched the same way and in table order, skipping a place whose name the list already offers.
+/// `with_places` 开启且 `code` 非空时，内置地点按同一规则和表中顺序填充列表剩余位置，跳过列表已提供的同名地点。
 pub fn query_mentions(code: &str, entries: &[MentionEntry], with_places: bool) -> Vec<WordItem> {
     let (exact, exact_len, prefix, prefix_len) = collect_mention_rows(code, entries);
     let prefix_len = prefix_len.min(RESULT_LIMIT - exact_len);
-    let mut matches = Vec::with_capacity(exact_len + prefix_len);
-    for entry in exact[..exact_len].iter().chain(prefix[..prefix_len].iter()) {
+    let mut matches = [("", ""); RESULT_LIMIT];
+    let mut count = exact_len + prefix_len;
+    for (slot, entry) in matches[..count]
+        .iter_mut()
+        .zip(exact[..exact_len].iter().chain(prefix[..prefix_len].iter()))
+    {
         let entry = entry.expect("mention row slot is filled");
-        matches.push((entry.key.as_str(), entry.text.as_str()));
+        *slot = (entry.key.as_str(), entry.text.as_str());
     }
     if with_places && !code.is_empty() {
         let table = places();
-        let existing_len = matches.len();
         let mut existing_names = [""; RESULT_LIMIT];
-        for (index, (_, text)) in matches.iter().enumerate() {
+        for (index, (_, text)) in matches[..count].iter().enumerate() {
             existing_names[index] = text;
         }
-        matches.extend(collect_place_matches(
-            table,
-            code,
-            &existing_names[..existing_len],
-            RESULT_LIMIT.saturating_sub(matches.len()),
-        ));
+        let (place_matches, place_count) =
+            collect_place_matches(table, code, &existing_names[..count], RESULT_LIMIT - count);
+        matches[count..count + place_count].copy_from_slice(&place_matches[..place_count]);
+        count += place_count;
     }
-    let count = matches.len();
-    matches
-        .into_iter()
+    matches[..count]
+        .iter()
         .enumerate()
-        .map(|(index, (key, text))| {
+        .map(|(index, &(key, text))| {
             WordItem::new(
                 key,
                 text,
@@ -259,28 +267,28 @@ mod place_match_tests {
     #[test]
     fn place_matches_keep_exact_rows_before_prefix_rows() {
         let table = places();
-        let matches = collect_place_matches(table, "bei", &[], RESULT_LIMIT);
-        assert!(!matches.is_empty());
-        assert!(matches.iter().all(|(_, name)| !name.is_empty()));
+        let (matches, count) = collect_place_matches(table, "bei", &[], RESULT_LIMIT);
+        assert!(count > 0);
+        assert!(matches[..count].iter().all(|(_, name)| !name.is_empty()));
     }
 
     #[test]
-    fn place_matches_need_only_the_output_allocation() {
+    fn place_matches_use_no_heap_storage() {
         let table = places();
-        let (matches, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+        let ((_, count), allocations) = crate::ime::personal_rerank::allocations::count(|| {
             collect_place_matches(table, "bei", &[], RESULT_LIMIT)
         });
-        assert!(!matches.is_empty());
-        assert_eq!(allocations, 1);
+        assert!(count > 0);
+        assert_eq!(allocations, 0);
     }
 
     #[test]
     fn place_matches_skip_a_name_already_offered_by_the_list() {
         let table = places();
-        let matches = collect_place_matches(table, "bei", &["北京市"], 2);
+        let (matches, count) = collect_place_matches(table, "bei", &["北京市"], 2);
 
-        assert_eq!(matches.len(), 2);
-        assert!(matches.iter().all(|(_, name)| *name != "北京市"));
+        assert_eq!(count, 2);
+        assert!(matches[..count].iter().all(|(_, name)| *name != "北京市"));
     }
 }
 
@@ -517,3 +525,11 @@ mod tests {
         assert_eq!(usable_mentions(&many).len(), LIST_LIMIT);
     }
 }
+
+#[cfg(test)]
+#[path = "mention/match_output_tests.rs"]
+mod match_output_tests;
+
+#[cfg(test)]
+#[path = "mention/place_index_tests.rs"]
+mod place_index_tests;

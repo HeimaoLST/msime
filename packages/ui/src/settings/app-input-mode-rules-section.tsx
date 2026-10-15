@@ -14,6 +14,7 @@ import {
 import { SettingsGroupNote } from "./settings-group-note";
 import { SettingsRowStack } from "./settings-row-stack";
 import { SettingsWarning } from "./settings-warning";
+import { useAsyncGeneration } from "./use-async-generation";
 
 /** 宿主选中的应用：`id` 是规则用的标识（macOS 的 Bundle ID，Windows 的程序文件名），`name` 是给人看的名称。 */
 export interface PickedApplication {
@@ -67,13 +68,14 @@ export function AppInputModeRulesSection({
   const entries = sortedAppInputModeRules(rules);
   const unnamed = entries.map(([id]) => id).filter((id) => !(id in names));
   const unnamedKey = unnamed.join("\n");
+  const namesGeneration = useAsyncGeneration(applicationNames, unnamedKey);
   useEffect(() => {
     if (!applicationNames || unnamedKey === "") return;
-    let current = true;
+    const current = namesGeneration.current;
     const ids = unnamedKey.split("\n");
     applicationNames(ids).then(
       (found) => {
-        if (!current) return;
+        if (namesGeneration.current !== current) return;
         // 查不到的也记下（名称就是标识），同一批标识不再反复去问。
         setNames((known) => ({
           ...known,
@@ -81,13 +83,10 @@ export function AppInputModeRulesSection({
         }));
       },
       () => {
-        if (current)
+        if (namesGeneration.current === current)
           setNames((known) => ({ ...known, ...Object.fromEntries(ids.map((id) => [id, id])) }));
       },
     );
-    return () => {
-      current = false;
-    };
   }, [applicationNames, unnamedKey]);
 
   const addRule = (raw: string): boolean => {

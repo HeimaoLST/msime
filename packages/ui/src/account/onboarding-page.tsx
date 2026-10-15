@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
+import { useCallback, useRef, useState, type PointerEvent } from "react";
 import { Switch } from "../core/platform-controls";
 import { ActionButton } from "../core/action-button";
 import { useAsyncActionRunner } from "../core/use-async-action";
@@ -11,6 +11,8 @@ import { makeDefaultAction, useImeSetupState } from "../keyboard/setup-status-ca
 import { KeyboardSwitchGuideHost } from "../keyboard/keyboard-switch-guide";
 import { useSettingsPlatform } from "../theme/settings-platform";
 import { useHarmonyWelcomeSystemBars } from "../settings/use-settings-theme";
+import { subscribeToWindowEvent } from "../core/window-focus";
+import { useMobilePopState } from "../settings/use-mobile-pop-state";
 import { logo } from "../settings/app-resources";
 import type { EditionInfo, InputScheme, Preferences } from "../index";
 import * as onboarding from "./onboarding-style";
@@ -358,17 +360,12 @@ export function WelcomeFlowPage({
   // HarmonyOS 手机每前进一步压入一条历史记录，让系统返回手势（它使 WebView 后退）在流程里逐步后退；流程交接之前再把这些记录撤掉。
   const pushedEntries = useRef(0);
   const rewinding = useRef(false);
-  useEffect(() => {
-    if (!harmonyPhone) return;
-    const onPopState = (event: PopStateEvent) => {
-      if (rewinding.current) return;
-      const entry = onboardingHistoryEntry(event.state);
-      pushedEntries.current = entry?.depth ?? 0;
-      setPage(entry?.page ?? 0);
-    };
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
-  }, [harmonyPhone]);
+  useMobilePopState(harmonyPhone, (event) => {
+    if (rewinding.current) return;
+    const entry = onboardingHistoryEntry(event.state);
+    pushedEntries.current = entry?.depth ?? 0;
+    setPage(entry?.page ?? 0);
+  });
   const swipeStart = useRef<{ x: number; y: number } | null>(null);
 
   const goTo = (next: number) => {
@@ -389,12 +386,11 @@ export function WelcomeFlowPage({
     return new Promise<void>((resolve) => {
       rewinding.current = true;
       const landed = () => {
-        window.removeEventListener("popstate", landed);
         pushedEntries.current = 0;
         rewinding.current = false;
         resolve();
       };
-      window.addEventListener("popstate", landed);
+      subscribeToWindowEvent("popstate", landed, { once: true });
       window.history.go(-depth);
     });
   };

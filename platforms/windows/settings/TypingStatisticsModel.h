@@ -180,6 +180,12 @@ inline std::string day_key(CivilDay date) {
   return buffer;
 }
 
+// 统计页的快照内容没有变化时，日期推进也必须触发重画。
+inline bool statistics_date_changed(std::optional<std::string> const &previous,
+                                    std::string_view current) {
+  return !previous || *previous != current;
+}
+
 // `formatZhMonthDay`：`9月21日`。
 inline std::wstring month_day(CivilDay date) {
   return std::to_wstring(date.month) + L"月" + std::to_wstring(date.day) + L"日";

@@ -3,6 +3,7 @@
 //! 这里的"插件"是一个记录调用、按预设交回行的 [`CommandProvider`]；真正运行脚本、找触发词主人的实现在 host-api 里测。
 
 use super::super::*;
+use super::allocations;
 use super::{character, generated_mode_runtime};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -298,6 +299,22 @@ fn plugin_commits_stay_out_of_the_ai_context() {
     assert!(!runtime.ai_context.contains("0f8fad5b"));
 }
 
+/// 插件注释只拥有最终结果，不先复制完整标题和注释。
+#[test]
+fn plugin_annotation_reads_only_allocate_the_final_text() {
+    let directory = tempfile::tempdir().unwrap();
+    let long = "注".repeat(40);
+    let (mut runtime, _script) = plugin_runtime(directory.path(), rows(&[("甲", &long)]));
+    type_text(&mut runtime, "/uuid");
+    let (annotation, allocations) = allocations::count(|| runtime.script_annotation(0));
+    let expected = format!("UUID {}", "注".repeat(27));
+    assert_eq!(annotation.as_deref(), Some(expected.as_str()));
+    assert_eq!(
+        allocations, 1,
+        "插件注释读取只应申请最终字符串：{allocations}"
+    );
+}
+
 /// 插件注释格最多 32 个 UTF-16 码元，在字符边界上截断；含控制字符的注释不显示，只剩标题。
 #[test]
 fn plugin_annotations_are_cut_to_the_annotation_limit() {
@@ -396,4 +413,26 @@ fn focus_loss_commits_the_typed_command_instead_of_a_plugin_row() {
     assert!(lost.commit.is_some());
     assert_eq!(lost.commit, done.commit);
     assert!(!lost.commit_context.expect("a commit context").plugin_row);
+}
+
+/// 连续两次重新查询同一插件指令时，行容器应复用第一次提供者调用的容量。
+#[test]
+fn repeated_command_queries_reuse_the_output_rows_buffer() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut runtime, script) = plugin_runtime(directory.path(), rows(&[("甲", "注释")]));
+    type_text(&mut runtime, "/uuid");
+    assert_eq!(script.borrow().calls.len(), 1);
+    for calls in 2..=3 {
+        runtime
+            .dispatch(Action::Command(Command::Backspace))
+            .unwrap();
+        let (transition, count) = allocations::count(|| character(&mut runtime, b'd'));
+        assert_eq!(script.borrow().calls.len(), calls);
+        assert_eq!(texts(&transition.view), ["甲"]);
+        assert_eq!(
+            transition.view.candidates[0].script_annotation.as_deref(),
+            Some("UUID 注释")
+        );
+        assert_eq!(count, 46, "预热后的插件指令查询超出分配预算：{count}");
+    }
 }

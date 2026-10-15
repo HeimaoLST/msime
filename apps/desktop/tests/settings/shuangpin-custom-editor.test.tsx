@@ -2,7 +2,8 @@
 import { testHost } from "../support/host";
 import { saveSettingsNow, settingsFormReady } from "../support/settings-form";
 import { afterEach, expect, test, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import {
   InputSchemeDetailsSection,
   SettingsPage,
@@ -16,6 +17,7 @@ import {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -131,6 +133,59 @@ function upload(text: string, name = "table.json") {
     target: { files: [new File([text], name, { type: "application/json" })] },
   });
 }
+
+test("StrictMode effect replay keeps validation and template actions usable", async () => {
+  vi.useFakeTimers();
+  const client = fakeClient();
+  render(
+    <StrictMode>
+      <ShuangpinCustomEditor
+        client={client}
+        saved={xiaohe}
+        active={false}
+        confirm={async () => true}
+        onSave={vi.fn()}
+        onBack={vi.fn()}
+      />
+    </StrictMode>,
+  );
+
+  await act(async () => vi.advanceTimersByTimeAsync(150));
+  expect(button("保存并选用").disabled).toBe(false);
+  expect(button("导出 JSON").disabled).toBe(false);
+  await act(async () => fireEvent.click(button("填入")));
+  expect(screen.getByText("已填入小鹤双拼的键位，改动想换的键后保存。")).toBeTruthy();
+  expect(button("填入").disabled).toBe(false);
+});
+
+test.each(["success", "failure"])(
+  "a late validation %s from an old draft cannot replace its current validation",
+  async (outcome) => {
+    vi.useFakeTimers();
+    let resolve!: (value: ShuangpinCustomProblem | null) => void;
+    let reject!: (reason: Error) => void;
+    const oldValidation = new Promise<ShuangpinCustomProblem | null>((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    const client = fakeClient();
+    client.validate.mockReturnValueOnce(oldValidation);
+    renderEditor({ client, saved: xiaohe, active: false });
+    await act(async () => vi.advanceTimersByTimeAsync(150));
+
+    fireEvent.change(cell("韵母 ing"), { target: { value: ";" } });
+    await act(async () => vi.advanceTimersByTimeAsync(150));
+    expect(button("保存并选用").disabled).toBe(false);
+
+    await act(async () => {
+      if (outcome === "success") resolve({ kind: "missing_unit", part: "finals", unit: "ing" });
+      else reject(new Error("synthetic old validation"));
+      await oldValidation.catch(() => undefined);
+    });
+    expect(button("保存并选用").disabled).toBe(false);
+    expect(screen.queryByRole("alert")).toBeNull();
+  },
+);
 
 test("fills an empty table from a built-in profile and saves it as the custom profile", async () => {
   const client = fakeClient();

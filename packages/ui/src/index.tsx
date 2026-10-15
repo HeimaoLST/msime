@@ -1,4 +1,5 @@
 import type { DictionaryCollectionsClient } from "./dictionary/dictionary-collections";
+import type { TraditionalChineseVariant } from "./settings/traditional-chinese-output-section";
 import type {
   BuiltinShuangpinProfile,
   ShuangpinCustomProblem,
@@ -95,7 +96,7 @@ import {
 export { useSettingsTheme } from "./settings/use-settings-theme";
 export { updateCandidateColor, updateCustomKeyboard } from "./settings/theme-selection-updates";
 import { useTouchKeyboardGeometryDrag } from "./settings/use-touch-keyboard-geometry-drag";
-import { defaultTouchKeyboardGeometry } from "./settings/touch-keyboard-geometry-defaults";
+import { touchKeyboardGeometryPreferences } from "./settings/touch-keyboard-geometry-preferences";
 export { defaultTouchKeyboardGeometry } from "./settings/touch-keyboard-geometry-defaults";
 export { useTouchKeyboardGeometryDrag } from "./settings/use-touch-keyboard-geometry-drag";
 import { useMobileKeyboardFeedback } from "./settings/use-mobile-keyboard-feedback";
@@ -145,7 +146,7 @@ import { useWindowState } from "./settings/use-window-state";
 import { useAppVersion } from "./settings/use-app-version";
 import { supportDiagnostics } from "./settings/support-diagnostics";
 import { useMountedRef } from "./settings/use-mounted-ref";
-import { useAsyncGeneration } from "./settings/use-async-generation";
+import { useCustomHelpcodeSchemas, useHelpcodePacks } from "./settings/use-helpcode-catalog";
 export {
   useProviderCredentials,
   type ProviderCredentialBusy,
@@ -351,6 +352,7 @@ export {
   type UseSettingsWindowInteractionsOptions,
 } from "./settings/use-settings-window-interactions";
 export { useAppVersion, type UseAppVersionOptions } from "./settings/use-app-version";
+export { useCustomHelpcodeSchemas, useHelpcodePacks } from "./settings/use-helpcode-catalog";
 export {
   supportDiagnostics,
   type SupportDiagnosticsHost,
@@ -470,11 +472,7 @@ import type { PluginPreferences } from "./settings/plugin-preferences";
 import { AboutSettingsPage } from "./settings/pages/about-page";
 import { UsageReportingSettingsPage } from "./settings/pages/usage-reporting-page";
 import { PrivacySettingsPage } from "./settings/pages/privacy-page";
-import type {
-  CustomHelpcodeSchema,
-  HelpcodePackOption,
-  HelpcodePreferences,
-} from "./settings/pages/helpcode-page";
+import type { CustomHelpcodeSchema, HelpcodePreferences } from "./settings/pages/helpcode-page";
 import type { ClipboardHistoryClient } from "./settings/clipboard-history-section";
 import type { CloudClipboardRequest } from "./settings/cloud-clipboard-send";
 import { type FuzzyPinyinPreferences } from "./settings/fuzzy-pinyin-section";
@@ -502,6 +500,7 @@ export { useConfirm, type ConfirmRequest } from "./core/confirm";
 export type * from "./core/host-contracts";
 export { resolveSettingsTheme } from "./settings/theme-helpers";
 export { ToastProvider, useToast } from "./core/toast";
+export { subscribeMediaQuery } from "./core/media-query";
 export {
   decodeDictionaryBytes,
   readDictionaryFile,
@@ -605,6 +604,15 @@ export {
   type AsyncActionOperation,
   type AsyncActionRunner,
 } from "./core/use-async-action";
+export { useInterval } from "./core/use-interval";
+export { useDebouncedCallback, type DebouncedCallback } from "./core/use-debounced-callback";
+export {
+  subscribeToWindowBlur,
+  subscribeToWindowEvent,
+  subscribeToWindowFocus,
+  subscribeToWindowResume,
+  type WindowFocusListener,
+} from "./core/window-focus";
 export {
   ChatPage,
   type ChatClient,
@@ -894,7 +902,10 @@ export {
 } from "./settings/ime-mode-scope-section";
 export {
   TraditionalChineseOutputSection,
+  type ChineseOutputForm,
   type TraditionalChineseOutputSectionProps,
+  type TraditionalChineseOutputValue,
+  type TraditionalChineseVariant,
 } from "./settings/traditional-chinese-output-section";
 export {
   ChineseEnglishSpacingSection,
@@ -1254,6 +1265,11 @@ export {
   type CommunitySkinTrial,
 } from "./community/community-skins";
 export {
+  createCommunitySkinClient,
+  type CommunitySkinOperation,
+  type CommunitySkinRequest,
+} from "./community/community-skin-client";
+export {
   useCommunityGallery,
   type CommunityGalleryActionOptions,
   type CommunityGalleryClient,
@@ -1420,7 +1436,7 @@ export {
 } from "./settings/settings-input-description";
 export { SettingsWarning, type SettingsWarningProps } from "./settings/settings-warning";
 export { ErrorAlert, type ErrorAlertProps } from "./core/error-alert";
-export { formatZhDate, formatZhMonthDay } from "./core/format-date";
+export { formatDateTime, formatZhDate, formatZhMonthDay } from "./core/format-date";
 export { formatZhNumber, formatZhPercent } from "./core/format-number";
 export { StatusMessage, type StatusMessageProps } from "./core/status-message";
 export { SettingsNotice, type SettingsNoticeProps } from "./settings/settings-notice";
@@ -1707,6 +1723,8 @@ export interface HostCapabilities {
   candidate_page_number: boolean;
   /** 宿主按 `show_app_logo` 显示或隐藏候选窗和悬浮工具栏左端的水杉 logo（macOS 和 Windows）。 */
   app_logo?: boolean;
+  /** 宿主按 `traditional_chinese_variant` 选 OpenCC 的 s2t、s2tw 或 s2twp 做繁体转换（目前只有 Linux）；没有时设置页只给简体和繁体。 */
+  traditional_chinese_variants?: boolean;
   /** 宿主按 `expand_candidates` 让横排候选窗按 ↓ 展开成多行候选网格（目前只有 macOS）。 */
   expand_candidates?: boolean;
   candidate_row_colors: boolean;
@@ -1943,6 +1961,8 @@ export type Preferences = {
   show_app_logo?: boolean;
   /** 「展开候选」：横排候选窗按 ↓ 展开成多行候选网格，默认关闭。 */
   expand_candidates?: boolean;
+  /** 展开按钮独立于页码显示，缺字段时默认开启。 */
+  show_candidate_expand_button?: boolean;
   /** The one theme for the candidate window, floating toolbar, menus and touch keyboard. `theme` stays the light/dark mode that `system` and the settings window follow. */
   global_theme?: GlobalTheme;
   /** What the `custom` global theme is made of: an external candidate skin package, the seven candidate colour pickers and the keyboard editor design. */
@@ -1970,7 +1990,13 @@ export type Preferences = {
   paired_punctuation?: boolean;
   punctuation_lock?: "follow" | "chinese" | "english";
   caps_lock_ascii_punctuation?: boolean;
+  /** 中文标点下引号键的样式；缺省为弯引号，等于缺省时文档里没有这个键。 */
+  quote_style?: "curly" | "corner" | "corner_when_traditional";
+  /** 中文标点下方头括号键的样式；缺省为实心，等于缺省时文档里没有这个键。 */
+  bracket_style?: "solid" | "hollow";
   traditional_chinese_output?: boolean;
+  /** 繁体输出用的 OpenCC 配置：标准繁体、台湾正体、台湾正体加惯用词。缺省为 `s2t`，等于缺省时文档里没有这个键。 */
+  traditional_chinese_variant?: TraditionalChineseVariant;
   /** 中英文之间加空格：上屏文本里汉字与 ASCII 字母、数字相邻处加一个半角空格。缺省为关，关着时文档里没有这个键。 */
   chinese_english_spacing?: boolean;
   /** Sound packs, music and command tables; the document leaves it out while every value is the default. */
@@ -2466,58 +2492,6 @@ type SettingsPageProps = {
   onReplayOnboarding?: () => void;
 };
 
-/** 宿主资源目录里找到的自定义辅助码表；宿主不支持扫描或读取失败时为空。 */
-function useCustomHelpcodeSchemas(
-  reader: SettingsClient["listHelpcodeSchemas"],
-): CustomHelpcodeSchema[] {
-  const [schemas, setSchemas] = useState<CustomHelpcodeSchema[]>([]);
-  const generation = useAsyncGeneration(reader);
-  useEffect(() => {
-    const current = generation.current;
-    if (!reader) {
-      setSchemas([]);
-      return;
-    }
-    void reader()
-      .then((next) => {
-        if (generation.current === current) setSchemas(next);
-      })
-      .catch(() => {
-        if (generation.current === current) setSchemas([]);
-      });
-  }, [reader, generation]);
-  return schemas;
-}
-
-/** 已安装的辅助码表插件，每次进入「输入」页时重读，在别处导入或删除的包下次进来就能看到。 */
-function useHelpcodePacks(
-  catalog: PluginClient["catalog"] | undefined,
-  inputPageOpen: boolean,
-): HelpcodePackOption[] {
-  const [packs, setPacks] = useState<HelpcodePackOption[]>([]);
-  const generation = useAsyncGeneration(catalog, inputPageOpen);
-  useEffect(() => {
-    if (!catalog || !inputPageOpen) {
-      setPacks([]);
-      return;
-    }
-    const current = generation.current;
-    void catalog()
-      .then((next) => {
-        if (generation.current !== current) return;
-        setPacks(
-          next.packages
-            .filter((pack) => pack.kind === "helpcode")
-            .map((pack) => ({ id: pack.id, name: pack.name })),
-        );
-      })
-      .catch(() => {
-        if (generation.current === current) setPacks([]);
-      });
-  }, [catalog, inputPageOpen, generation]);
-  return packs;
-}
-
 // The state, effects and handlers behind the settings window. The shell below and every page component read the same values - the pages through `SettingsFormContext` - so splitting the page into files changed where the markup lives, not what it closes over.
 function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps) {
   const { confirm, confirmation } = useConfirm();
@@ -2570,7 +2544,6 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     showInputModeHUD,
     showInputModeStatusItem,
     showVoiceCaptureDevices,
-    showDesktopMaintenanceShortcuts,
     showFullwidthChord,
     clientHostedPlatform,
     desktopPanels,
@@ -2963,12 +2936,11 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
   // A custom theme without a keyboard design draws its base's keyboard, so the custom keyboard card is selected only when the theme carries one.
   const customKeyboardSelected = globalTheme === "custom" && Boolean(draft?.custom_theme?.keyboard);
   useEffect(() => setSkinPreviewThemes({}), [candidatePreviewTheme]);
-  const touchKeySpacingTenths =
-    draft?.touch_key_spacing_tenths ?? defaultTouchKeyboardGeometry.keySpacingTenths;
-  const touchRowSpacingTenths =
-    draft?.touch_row_spacing_tenths ?? defaultTouchKeyboardGeometry.rowSpacingTenths;
-  const touchKeyboardHeightAdjustment =
-    draft?.touch_keyboard_height_adjustment ?? defaultTouchKeyboardGeometry.heightAdjustment;
+  const {
+    keySpacingTenths: touchKeySpacingTenths,
+    rowSpacingTenths: touchRowSpacingTenths,
+    heightAdjustment: touchKeyboardHeightAdjustment,
+  } = touchKeyboardGeometryPreferences(draft);
   const installerTrust = availableUpdate
     ? describeInstallerTrust(
         availableUpdate,
@@ -3376,7 +3348,6 @@ function SettingsShell(props: SettingsPageProps) {
     client,
     confirmation,
     confirm,
-    host,
     androidPlatform,
     iosPlatform,
     harmonyPlatform,
@@ -3574,6 +3545,7 @@ function SettingsShell(props: SettingsPageProps) {
         value={navQuery}
         onChange={(event) => setNavQuery(event.target.value)}
         onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing || event.keyCode === 229) return;
           if (event.key === "Escape") setNavQuery("");
           if (event.key !== "Enter") return;
           const first = shownSidebarGroups[0]?.pages[0];

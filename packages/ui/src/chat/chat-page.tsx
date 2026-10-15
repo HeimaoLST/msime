@@ -3,8 +3,6 @@ import MarkdownIt from "markdown-it";
 import { useEffect, useRef, useState } from "react";
 import { useConfirm } from "../core/confirm";
 import { errorCode } from "../core/error-code";
-import { errorMessage } from "../core/error-message";
-import { useToast } from "../core/toast";
 import { ActionButton } from "../core/action-button";
 import * as chat from "./chat-style";
 import { chatMessageByteLength, MAX_MESSAGE_BYTES } from "./chat-history";
@@ -12,7 +10,9 @@ import { resizeChatComposer } from "./chat-composer-size";
 import { chatRequest } from "./chat-prompt";
 import { chatError } from "./chat-errors";
 import { useAsyncGeneration } from "../settings/use-async-generation";
+import { useDebouncedCallback } from "../core/use-debounced-callback";
 import { useTimeout } from "../core/use-timeout";
+import { useHostAction } from "../core/use-host-action";
 import { useMountedRef } from "../settings/use-mounted-ref";
 import {
   makeDefaultAction,
@@ -88,7 +88,6 @@ export function ChatPage({
   const composer = useRef<HTMLTextAreaElement>(null);
   const [composerFocused, setComposerFocused] = useState(false);
   const setupState = useImeSetupState(setup?.setup);
-  const toast = useToast();
 
   const loadModels = async () => {
     if (!mounted.current || modelsRunning.current) return;
@@ -197,6 +196,7 @@ export function ChatPage({
   const resizeField = () => {
     resizeChatComposer(composer.current);
   };
+  const { schedule: resizeAfterSend } = useDebouncedCallback(resizeField, 0);
   const newConversation = () => {
     if (!messages.length) {
       clear();
@@ -214,8 +214,7 @@ export function ChatPage({
     setupState?.enabled === false || setupState?.current === false
       ? makeDefaultAction(setup, setupState)
       : undefined;
-  const runSetup = (action: () => Promise<void>) =>
-    void action().catch((cause: unknown) => toast(errorMessage(cause)));
+  const runSetup = useHostAction();
 
   // 触屏：这一页是用来试键盘的（打字发给 AI，看候选、皮肤和手感），所以不给代写的开头，让用户自己打。顶部一行胶囊（设置没补完时的引导、打字时的「收起键盘」、「新对话」），中间是气泡对话，底部圆角输入框加圆形发送键，和「试用键盘」同一套样子。没有登录、出错都写在对话里，不用红框。
   if (touch)
@@ -347,7 +346,7 @@ export function ChatPage({
             onStop={cancel}
             onSend={() => {
               send();
-              window.setTimeout(resizeField, 0);
+              resizeAfterSend();
             }}
           />
         </div>
@@ -410,6 +409,7 @@ export function ChatPage({
           placeholder="输入消息，试试键盘"
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
             if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
               event.preventDefault();
               send();

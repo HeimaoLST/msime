@@ -1875,6 +1875,12 @@ void CMetasequoiaIME::IpcWorkerThread(CMetasequoiaIME *pIME)
         {
             validFrame = msime::windows::scheme::is_input_mode_payload(buf.data, std::size(buf.data));
         }
+        if (validFrame && buf.msg_type == Global::DataToTsfWorkerThreadMsgType::PunctuationMarksChanged)
+        {
+            // "q<0|1>b<0|1>"，后面紧跟结束符。
+            validFrame = buf.data[0] == L'q' && (buf.data[1] == L'0' || buf.data[1] == L'1') && buf.data[2] == L'b' &&
+                         (buf.data[3] == L'0' || buf.data[3] == L'1') && buf.data[4] == L'\0';
+        }
         if (validFrame && buf.msg_type == Global::DataToTsfWorkerThreadMsgType::PunctuationLockChanged)
         {
             bool hasTerminator = false;
@@ -1948,6 +1954,7 @@ void CMetasequoiaIME::IpcWorkerThread(CMetasequoiaIME *pIME)
                 buf.msg_type == Global::DataToTsfWorkerThreadMsgType::TsfDiagnosticLogChanged ||
                 buf.msg_type == Global::DataToTsfWorkerThreadMsgType::DedicatedEnglishChanged ||
                 buf.msg_type == Global::DataToTsfWorkerThreadMsgType::PunctuationLockChanged ||
+                buf.msg_type == Global::DataToTsfWorkerThreadMsgType::PunctuationMarksChanged ||
                 buf.msg_type == Global::DataToTsfWorkerThreadMsgType::PipeReady ||
                 buf.msg_type == Global::DataToTsfWorkerThreadMsgType::FocusSessionReady ||
                 buf.msg_type == Global::DataToTsfWorkerThreadMsgType::UpdateVoiceComposition ||
@@ -2047,6 +2054,12 @@ void CMetasequoiaIME::IpcWorkerThread(CMetasequoiaIME *pIME)
         else if (buf.msg_type == Global::DataToTsfWorkerThreadMsgType::SecondThirdCandidateChanged)
         {
             Global::SecondThirdCandidateEnabled.store(buf.data[0] == L'1', std::memory_order_relaxed);
+        }
+        else if (buf.msg_type == Global::DataToTsfWorkerThreadMsgType::PunctuationMarksChanged)
+        {
+            // 上面已校验为 "q<0|1>b<0|1>"。
+            Global::CornerQuotes.store(buf.data[1] == L'1', std::memory_order_relaxed);
+            Global::HollowBrackets.store(buf.data[3] == L'1', std::memory_order_relaxed);
         }
         else if (buf.msg_type == Global::DataToTsfWorkerThreadMsgType::LocalModeTriggersChanged)
         {

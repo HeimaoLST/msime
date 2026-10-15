@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace msime::input {
 
@@ -12,8 +13,20 @@ struct EnglishPunctuationState {
   int book_title_nesting = 0;
 };
 
+// 引号与方头括号样式（契约的 styles 段）：宿主从当前 View 的 punctuation_marks 取值，corner_when_traditional 在 host-api 里已经解析好，这里不读偏好。
+struct PunctuationMarks {
+  bool corner_quotes = false;
+  bool hollow_brackets = false;
+};
+
+// View.punctuation_marks 的两个字段（"quotes": "curly"|"corner"，"brackets": "solid"|"hollow"）换成上面的结构；不认识的取值按缺省处理。
+inline PunctuationMarks punctuation_marks_from_view(std::string_view quotes,
+                                                     std::string_view brackets) {
+  return {quotes == "corner", brackets == "hollow"};
+}
+
 inline std::string english_mode_chinese_punctuation(
-    char value, EnglishPunctuationState &state) {
+    char value, EnglishPunctuationState &state, const PunctuationMarks &marks) {
   switch (value) {
   case ',': return "，";
   case '.': return "。";
@@ -23,8 +36,8 @@ inline std::string english_mode_chinese_punctuation(
   case ':': return "：";
   case '(': return "（";
   case ')': return "）";
-  case '[': return "【";
-  case ']': return "】";
+  case '[': return marks.hollow_brackets ? "〖" : "【";
+  case ']': return marks.hollow_brackets ? "〗" : "】";
   case '\\': return "、";
   case '`': return "·";
   case '$': return "￥";
@@ -32,9 +45,13 @@ inline std::string english_mode_chinese_punctuation(
   case '_': return "——";
   case '"':
     state.double_quote_open = !state.double_quote_open;
+    if (marks.corner_quotes)
+      return state.double_quote_open ? "『" : "』";
     return state.double_quote_open ? "“" : "”";
   case '\'':
     state.single_quote_open = !state.single_quote_open;
+    if (marks.corner_quotes)
+      return state.single_quote_open ? "「" : "」";
     return state.single_quote_open ? "‘" : "’";
   case '<':
     return state.book_title_nesting++ == 0 ? "《" : "〈";
@@ -66,12 +83,13 @@ inline std::string english_mode_fullwidth(char value) {
 // What an English-mode key press commits instead of passing through, empty when the key should go to the application unchanged. Windows order: Chinese punctuation first (only while the lock pins it on or a Ctrl+. in English mode turned it on), then fullwidth, which covers printable ASCII including Space (U+3000). Keypad keys never become Chinese punctuation, matching Chinese mode.
 inline std::string english_mode_output(char32_t character, bool keypad,
                                        bool chinese_punctuation, bool fullwidth,
-                                       EnglishPunctuationState &state) {
+                                       EnglishPunctuationState &state,
+                                       const PunctuationMarks &marks) {
   if (character < 0x20 || character > 0x7e)
     return {};
   const auto value = static_cast<char>(character);
   if (chinese_punctuation && !keypad) {
-    auto mark = english_mode_chinese_punctuation(value, state);
+    auto mark = english_mode_chinese_punctuation(value, state, marks);
     if (!mark.empty())
       return mark;
   }

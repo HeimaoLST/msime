@@ -50,17 +50,14 @@ int main() {
         CheckColor(t.selectedNumber, 0xFFFFFF, .82f);
         assert(t.radius == 10 && t.candidateRadius == 6 && t.selectedRadius == 6 && t.borderWidth == 1 && t.pad == 6 &&
                !t.showSelectedBar);
-        // Selected and hover rows share one 6pt shape; only an end row of a highlighted run takes the card radius.
+        // 选中与悬停共享 6pt 行圆角，首尾位置不改变形状。
         assert(msime::mac::CandidateRowRadius(t, true) == 6);
-        assert(msime::mac::CandidateRowRadius(t, true, true, false) == t.radius);
-        assert(msime::mac::CandidateRowRadius(t, true, false, true) == t.radius);
         assert(msime::mac::CandidateRowRadius(t, false) == 6);
     }
     msime::mac::SkinTokens split;
     split.candidateRadius = 3.0f;
     split.selectedRadius = 7.0f;
     assert(msime::mac::CandidateRowRadius(split, true) == 7.0f);
-    assert(msime::mac::CandidateRowRadius(split, true, true, false) == split.radius);
     assert(msime::mac::CandidateRowRadius(split, false) == 3.0f);
 
     // The user's 候选窗 style over a resolved skin. The defaults change nothing at all.
@@ -75,18 +72,28 @@ int main() {
         assert(SameTokens(untouched.tokens, skin.tokens) && untouched.tokens.candidateRadius == 6 && untouched.tokens.pad == 6);
         assert(untouched.backgroundOpacity == 0.8 && untouched.decorationTopDip == 40.0 && untouched.minWidthDip == 200.0);
 
-        // A user radius beats the package's (already in tokens.radius) and pulls the rows in with it; a larger one leaves the rows at their own 6pt.
+        // 用户圆角减去有效内边距，选中与悬停得到相同的内圆角。
         auto packaged = skin;
         packaged.tokens.radius = 20.0f;
         msime::mac::CandidateWindowStyle style;
         style.cornerRadius = 3.0;
         const auto tight = msime::mac::StyledCandidateSkin(packaged, style);
-        assert(tight.tokens.radius == 3.0f && tight.tokens.candidateRadius == 3.0f && tight.tokens.selectedRadius == 3.0f);
+        assert(tight.tokens.radius == 3.0f && tight.tokens.candidateRadius == 0.0f && tight.tokens.selectedRadius == 0.0f);
         style.cornerRadius = 0.0;
         assert(msime::mac::StyledCandidateSkin(packaged, style).tokens.radius == 0.0f);
         style.cornerRadius = 14.0;
         const auto loose = msime::mac::StyledCandidateSkin(packaged, style);
-        assert(loose.tokens.radius == 14.0f && loose.tokens.candidateRadius == 6.0f && loose.tokens.selectedRadius == 6.0f);
+        assert(loose.tokens.radius == 14.0f && loose.tokens.candidateRadius == 8.0f && loose.tokens.selectedRadius == 8.0f);
+        // 最大圆角和零内边距保留 2pt 安全边距，各项同时缩放。
+        style.cornerRadius = 32.0;
+        style.padding = 0.0;
+        for (double scale : {0.5, 1.0, 1.5, 2.0}) {
+            style.scale = scale;
+            const auto extreme = msime::mac::StyledCandidateSkin(packaged, style);
+            assert(extreme.tokens.radius == 32.0 * scale);
+            assert(extreme.tokens.candidateRadius == 30.0 * scale);
+            assert(extreme.tokens.selectedRadius == extreme.tokens.candidateRadius);
+        }
         // Without a user radius the package's stays, and the rows keep the host's 6pt shape they drew before the setting existed.
         auto square = skin;
         square.tokens.radius = 2.0f;
@@ -104,12 +111,12 @@ int main() {
         assert(SameColor(half.tokens.selected, skin.tokens.selected) && SameColor(half.tokens.selectedText, skin.tokens.selectedText));
         assert(SameColor(half.tokens.accent, skin.tokens.accent) && SameColor(half.tokens.hover, skin.tokens.hover));
 
-        // The scale multiplies every length the skin carries, after the radius is chosen, and leaves the hairline alone.
+        // 整体大小在推导内圆角后缩放各项长度，细边框保持不变。
         msime::mac::CandidateWindowStyle large;
         large.scale = 1.5;
         large.cornerRadius = 8.0;
         const auto scaled = msime::mac::StyledCandidateSkin(skin, large);
-        assert(scaled.tokens.radius == 12.0f && scaled.tokens.candidateRadius == 9.0f && scaled.tokens.selectedRadius == 9.0f);
+        assert(scaled.tokens.radius == 12.0f && scaled.tokens.candidateRadius == 3.0f && scaled.tokens.selectedRadius == 3.0f);
         assert(scaled.tokens.pad == 9.0f && scaled.tokens.borderWidth == skin.tokens.borderWidth);
         assert(scaled.decorationTopDip == 60.0 && scaled.decorationWidthDip == 90.0 && scaled.minWidthDip == 300.0);
         assert(SameColor(scaled.tokens.surface, skin.tokens.surface) && scaled.backgroundOpacity == 0.8);

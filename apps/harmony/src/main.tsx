@@ -38,10 +38,7 @@ import {
   type CommunityResourceApplication,
   type CommunityResourceClient,
   type CommunityResourcePage,
-  type CommunitySkin,
   type CommunitySkinClient,
-  type CommunitySkinDownload,
-  type CommunitySkinPage,
   type AccountPreferenceSchema,
   type SettingsSyncClient,
   type ChatClient,
@@ -69,6 +66,8 @@ import {
   type PluginClient,
   type PluginPackage,
   UNBATCHED_DICTIONARY_FILE_BYTES,
+  createCommunitySkinClient,
+  subscribeMediaQuery,
 } from "@msime/ui";
 import type {
   AiAssistantClient,
@@ -535,8 +534,7 @@ function followSystemTheme(): () => void {
   apply();
   if (typeof window.matchMedia !== "function") return () => undefined;
   const media = window.matchMedia("(prefers-color-scheme: light)");
-  media.addEventListener("change", apply);
-  return () => media.removeEventListener("change", apply);
+  return subscribeMediaQuery(media, apply);
 }
 
 /**
@@ -766,43 +764,25 @@ function chatClient(native: NativeBridge): ChatClient {
  * with afterwards.
  */
 function communitySkinClient(native: NativeBridge): CommunitySkinClient {
-  const request = <T,>(action: Record<string, unknown>): Promise<T> =>
-    bridgeRequest(
+  const request = <T,>(operation: string, args: Record<string, unknown>): Promise<T> => {
+    const action =
+      operation === "list"
+        ? (() => {
+            const { mine, ...rest } = args;
+            return {
+              community_operation: operation,
+              ...rest,
+              ...(mine ? { scope: "mine" } : {}),
+            };
+          })()
+        : { community_operation: operation, ...args };
+    return bridgeRequest(
       native,
       "community_skin",
       JSON.stringify({ operation: "community_skin", ...action }),
     ).then(unwrap<T>);
-  return {
-    // 我的作品 asks the host for scope "mine", which it sends with the session and fields=moderation so a removed skin carries its 已下架 badge.
-    list: (offset, search, mine, category) =>
-      request<CommunitySkinPage>({
-        community_operation: "list",
-        offset,
-        search,
-        ...(mine ? { scope: "mine" } : {}),
-        category,
-      }),
-    detail: (id) => request<CommunitySkin>({ community_operation: "detail", id }),
-    download: (id, name) =>
-      request<CommunitySkinDownload>({ community_operation: "download", id, name }),
-    rate: async (id, stars) => {
-      await request({ community_operation: "rate", id, stars });
-    },
-    publish: async (id, name, description, design, category) => {
-      await request({ community_operation: "publish", id, name, description, design, category });
-    },
-    setCategory: (id, category) =>
-      request<CommunitySkin>({ community_operation: "set_category", id, category }),
-    unpublish: async (id) => {
-      await request({ community_operation: "unpublish", id });
-    },
-    finishTrial: async (id, keep) => {
-      await request({ community_operation: "finish_trial", id, keep });
-    },
-    report: async (id, reason, detail) => {
-      await request({ community_operation: "report", id, reason, detail });
-    },
   };
+  return createCommunitySkinClient(request);
 }
 
 /**

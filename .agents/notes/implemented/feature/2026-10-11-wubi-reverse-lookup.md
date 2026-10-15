@@ -35,6 +35,8 @@ Status: implemented
 
 共享设置页的输入文字一变化，就作废尚未完成的查码请求，清掉旧结果和错误，并允许对新文字立即查码；过期请求即使晚于新请求返回也不再回写。否则用户把「你好」改成「世界」后，会继续看到「你好」的编码，旧请求未结束时还无法查询新文字。
 
+查码的忙碌状态、同步防重复点击和卸载保护复用 `useAsyncActionRunner(setError, undefined, lookup)`；编辑文字通过 runner 的 `invalidate` 立即作废请求，更换宿主查码入口同样解除旧请求的占用。旧成功、失败和收尾都不能覆盖当前请求。输入页按词库客户端及其 `wubiCodes` 方法缓存绑定回调，保留方法的接收者；修改其他设置不会产生新的查码 owner。码表列的高亮只影响展示，不作废请求。此处与[双拼编辑器的共享守卫](../simplification/2026-10-14-shuangpin-custom-editor-generation.md)使用同一公共操作生命周期，不另建一套查码专用异步接口。
+
 页面只经 `DictionaryClient.wubiCodes` 拿结果；宿主没有提供它时整组不画。各宿主的接法：
 
 - macOS、Linux：Tauri 设置应用的 `dictionary` 客户端（`apps/desktop/src/main.tsx`）发 `dictionary_request`，到 `dictionary_request_json`。
@@ -54,6 +56,8 @@ iOS 原生页同样用 `WubiLookupRequestState` 管理输入、请求身份和�
 三个场景原本记录的是参考实现「五笔里 `z` 被拒绝」的行为，现在按新行为更新：`wubi_mixed_plain_mode` 和 `wubi_mixed_matched_code` 在混输关闭时键入的 `zi` 记录为反查组字 `zi`；`wubi_select_and_gates` 把 `z` 的拒绝挪到五笔码中间（`wqb` 之后）检验，四码、第五码和撇号的检验不变。`tools/engine-golden/gen_scenarios.py` 同步改了这两个场景的步骤与说明。
 
 ## Alternatives considered
+
+- **继续维护查码自己的 `busy` 和数字代次**：编辑文字时作废请求的逻辑很直接；但它没有覆盖宿主更换和卸载，状态更新也无法阻止同一轮重复点击。共享 runner 已提供这些规则，并允许通过 `invalidate` 保留编辑即作废的边界，因此删除本地副本。
 
 - **新增一个 `LocalInputMode`（像 `R` 临时日文那样切换方案）**：最强的理由是隔离得干净，预编辑可以显示成独立的模式，选词和学习各走本地模式那一套，不碰五笔组字的代码。没有采用：`LocalInputMode` 的名字是跨进程契约，六个宿主都有各自的模式标签、打字统计和中文输出策略按名字分支（Linux `CandidateLocalModeLabels.h`、Android `LocalInputMode.java`、Harmony `LocalInputMode.ts` 等），新增一个值要在每个宿主补一遍；本地模式的选择总是整段上屏，也就没法选走一部分拼音再接着反查。留在五笔组字里，宿主侧一行都不用改，现有的编码提示规则直接生效。
 - **只告诉用户去打开「五笔拼音混输」**：不改代码。没有采用：混输会让每个五笔码后面都跟着拼音候选，打不出的码还会延长到拼音；只想偶尔查一个字的五笔用户不该为此改变整个输入手感。
@@ -75,6 +79,7 @@ iOS 原生页同样用 `WubiLookupRequestState` 管理输入、请求身份和�
 - `cargo test -p msime-engine --lib -- wubi::lookup`：每个字全部编码短码在前、重复编码并成一个；非汉字跳过、重复的字只列一次、带标点的一段不当词查；码表没有的字列出但没有编码；缺 `wubi98` 表或整个文件时只有那一列为空；超过 64 个不同汉字截断。
 - `pnpm --filter @msime/desktop exec vitest run`（全量 524 个文件通过），其中 `tests/settings/wubi-code-lookup-section.test.tsx`：整段词在前、两列编码与当前码表标记；没有汉字和截断的提示；失败时报错并清掉旧结果；「输入」页在五笔方案且宿主有 `wubiCodes` 时画出这一组并用它查，全拼方案或宿主没给 `wubiCodes` 时不画。
 - 查码输入变化和过期响应由 `tests/settings/wubi-code-lookup-section.test.tsx` 覆盖：编辑立即隐藏旧表格、允许新请求，旧请求晚返回也不覆盖新结果。
+- 共享 runner 的查码接入测试覆盖宿主更换后立即查询、旧成功和失败不覆盖新请求、StrictMode 下同步重复点击及忙碌恢复，以及输入页无关设置变化时保留请求和客户端接收者。新增宿主更换与重复点击测试在局部守卫实现上失败；验证范围是共享前端交互和构建，不代替原生设备验收。
 - Android 原生页的请求状态由 `WubiLookupRequestStateSmoke` 覆盖：编辑后新旧请求逆序完成、视图销毁后旧回调失效且新视图可重试、已完成结果跨视图重建保留。`check-host.sh` 的 216 个 JVM 冒烟与设备套件源码编译、原生 Gradle 工程的 `compileFullDebugJavaWithJavac` 通过；此改动尚未在模拟器上运行。
 - iOS 原生页的 `WubiLookupRequestStateTests` 覆盖编辑后旧成功、旧失败回调失效，以及新请求能立即启动；这两项先在空实现上失败，再在修复后通过。iOS 17 模拟器 SDK 的 SwiftUI 类型检查和 XcodeGen 工程生成通过；此批改动尚未在原生 App 模拟器运行，本机剩余空间不足以完成 Rust 与 Xcode 全量构建。
 - Windows 那一行（`platforms/windows/settings/main.cpp`）没有在本机构建：WinUI 设置窗口只能用 MSVC 编译，交给 CI 的 Windows 构建；它照搬同一文件里辅助码插件那一行的 `shell_row(..., nav::shell_links::input)`。

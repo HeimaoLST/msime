@@ -1,5 +1,5 @@
 {
-  "contractVersion": 1,
+  "contractVersion": 2,
   "simple": [
     { "input": ",", "output": "，" },
     { "input": ".", "output": "。" },
@@ -28,5 +28,15 @@
     "nestedOpening": "〈",
     "closing": "》",
     "nestedClosing": "〉"
+  },
+  "styles": {
+    "cornerQuotes": [
+      { "input": "\"", "opening": "『", "closing": "』" },
+      { "input": "'", "opening": "「", "closing": "」" }
+    ],
+    "hollowBrackets": [
+      { "input": "[", "output": "〖" },
+      { "input": "]", "output": "〗" }
+    ]
   }
 }

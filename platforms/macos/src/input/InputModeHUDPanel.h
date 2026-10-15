@@ -16,7 +16,7 @@ FOUNDATION_EXPORT NSRect MSIMEInputModeHUDFrame(NSRect caretRect, NSSize panelSi
 - (void)setSurfaceColor:(NSColor *)surface borderColor:(NSColor *)border textColor:(NSColor *)text;
 /// The light or dark mode the badge is drawn in. It wears the floating toolbar's palette, so it takes the toolbar's rule: `toolbar_theme` when it names a mode, otherwise `theme`, and the system appearance for `system` or neither. The controller passes the dictionary it gives the toolbar, whose `toolbar_theme` is pinned when the theme has a mode of its own.
 - (void)applyThemePreferences:(NSDictionary *)preferences;
-/// The badge's size, the floating toolbar's: `floating_toolbar.font_size` and `scale_percent` set the height, the character, the brand mark and the corner radius exactly as they set the toolbar's. Missing or unknown values fall back to the toolbar's 24pt at 100%.
+/// 紧凑提示独立使用 18pt 字号和 32pt 高度，图标遵循 `show_app_logo`；悬浮工具栏字号与缩放不影响它。
 - (void)applySizingPreferences:(NSDictionary *)preferences;
 @property(nonatomic, readonly) NSSize panelSize;
 @property(nonatomic, readonly) NSColor *surfaceColor;

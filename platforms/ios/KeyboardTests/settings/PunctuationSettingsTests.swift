@@ -54,6 +54,30 @@ final class PunctuationSettingsTests: XCTestCase {
     XCTAssertEqual(bridge.handlePunctuationWithContext(",", preceding: 0x61).commitText, "，")
   }
 
+  /// 设置页写下的引号与方头括号样式在键盘下次出现时生效：快照报告新样式，标点键按它出字。缺键时是弯引号、实心括号。
+  func testPunctuationStylesReachTheLiveSession() async throws {
+    let bridge = MetasequoiaInputSessionBridge(stateRoot: state)
+    let before = try XCTUnwrap(MetasequoiaInputSessionBridge.loadSharedPreferences(stateRoot: state))
+    XCTAssertNil(before["quote_style"], "the default is left out of the document")
+    XCTAssertNil(before["bracket_style"])
+    let curly = bridge.handlePunctuationWithContext("'", preceding: 0)
+    XCTAssertEqual(curly.commitText, "‘")
+    XCTAssertFalse(curly.cornerQuotes)
+    _ = bridge.handlePunctuationWithContext("'", preceding: 0)
+
+    XCTAssertTrue(MetasequoiaInputSessionBridge.updateSharedPreferences(stateRoot: state) {
+      $0["quote_style"] = "corner"
+      $0["bracket_style"] = "hollow"
+    })
+    await reload(bridge)
+
+    let corner = bridge.handlePunctuationWithContext("'", preceding: 0)
+    XCTAssertEqual(corner.commitText, "「")
+    XCTAssertTrue(corner.cornerQuotes)
+    XCTAssertTrue(corner.hollowBrackets)
+    XCTAssertEqual(bridge.handlePunctuationWithContext("[", preceding: 0).commitText, "〖")
+  }
+
   private func reload(_ bridge: MetasequoiaInputSessionBridge) async {
     let reloaded = expectation(description: "reload")
     var accepted = false

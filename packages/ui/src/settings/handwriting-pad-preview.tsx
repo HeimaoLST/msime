@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { TouchKeyboardSkinDesign } from "../keyboard/touch-keyboard-skin-design";
 import { resolveKeyboardSkinLook } from "../keyboard/keyboard-skin-look";
 import type { GlobalTheme } from "../theme/global-theme";
 import type { HandwritingStrokeColor } from "./mobile-keyboard-feedback-section";
+import { useTimeout } from "../core/use-timeout";
 
 /** 「水」的四笔，画在 100 × 100 的格子里：竖钩、左边的横撇、右上的撇、右下的捺。 */
 const strokes = [
@@ -59,23 +60,19 @@ export function HandwritingPadPreview({
   // 每写一遍加一，作为字形的 key，让描笔画的动画从头再播。
   const [round, setRound] = useState(0);
 
-  useEffect(() => {
-    if (reducedMotion) return;
-    const next =
-      phase === "writing"
-        ? () => setPhase("waiting")
-        : phase === "waiting"
-          ? () => setPhase("recognized")
-          : () => {
-              setRound((value) => value + 1);
-              setPhase("writing");
-            };
-    const timer = window.setTimeout(
-      next,
-      phase === "writing" ? WRITE_MS : phase === "waiting" ? delayMs : SHOW_MS,
-    );
-    return () => window.clearTimeout(timer);
-  }, [phase, delayMs, reducedMotion]);
+  useTimeout(
+    () => {
+      if (phase === "writing") {
+        setPhase("waiting");
+      } else if (phase === "waiting") {
+        setPhase("recognized");
+      } else {
+        setRound((value) => value + 1);
+        setPhase("writing");
+      }
+    },
+    reducedMotion ? null : phase === "writing" ? WRITE_MS : phase === "waiting" ? delayMs : SHOW_MS,
+  );
 
   const recognized = phase === "recognized" || reducedMotion;
   return (

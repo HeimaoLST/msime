@@ -206,3 +206,14 @@ test("the card geometry reads the host values, keeping the old ones where no hos
     "background:color-mix(insrgb,var(--cand-bg)var(--msime-candidate-opacity,100%),transparent);",
   );
 });
+
+test("macOS 自定义行圆角扣除实际内边距，选中与悬停保持同形", () => {
+  const geometry = declarations(`${mac}[data-preview-theme] :is(.wnd-h,.wnd-v)`);
+  expect(geometry["--msime-candidate-pad-x"]).toBe(
+    "max(2px,var(--msime-candidate-user-pad,var(--msime-host-pad)))",
+  );
+  expect(geometry["--msime-candidate-pad-y"]).toBe("var(--msime-candidate-pad-x)");
+  expect(geometry["--msime-candidate-row-radius"]).toBe(
+    "max(0px,calc(var(--msime-candidate-user-radius,calc(var(--msime-host-row-radius)+var(--msime-candidate-pad-x)))-var(--msime-candidate-pad-x)))",
+  );
+});

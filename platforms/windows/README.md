@@ -440,6 +440,10 @@ msime_client_set_chinese_punctuation 是 ABI 1 的附加符号，适配器和宿
 
 候选打开时 `<` 由 Server 的 Engine 转换，Engine 的书名号嵌套计数随之加一；开启配对补全后右半边由 TSF 自己插入，之后的 `>` 只跨过它，Server 收不到能回退计数的按键，于是后面每个书名号都变成〈〉。所以 TSF 自动补全 `<` 后发 Main 事件 PairedPunctuationAutoClosed（16），keycode 为开口键，只能是 `<`，其他值在 `valid_main_frame` 被拒。它是没有回复的通知，和 PuncSwitch 一样经 FocusRouter 限定当前焦点，在输入队列里调用 `msime_client_balance_paired_punctuation_after_auto_close`；管道按序投递，所以回退先于下一个按键生效。开口由 TSF 本地解析时也照发：两边计数都在零处截止，多回退一次无害。事件编号由 `scripts/apply_engine_paired_punctuation_ipc.py` 叠加进 Engine 契约头。
 
+### 引号与方头括号样式
+
+共享偏好 `quote_style`（`curly`、`corner`、`corner_when_traditional`）和 `bracket_style`（`solid`、`hollow`）决定中文标点下 `'` `"` `[` `]` 出什么字。TIP 自己的标点表（`PunctuationTable`、`SetupPunctuationPair`）不变，`GetPunctuation` 查表后经 `Global::StyledPunctuation` 换字，所以空闲标点、候选带标点、英文模式和智能标点重复都一起跟着样式走；交替和嵌套状态照旧。Server 按偏好算出生效样式（`apply_punctuation_marks`，规则与 client-core 的 `punctuation_marks` 相同，`corner_when_traditional` 看 `traditional_chinese_output`），用 Worker 帧 PunctuationMarksChanged（31，载荷 `q<0|1>b<0|1>`）推给 TIP；推送到达前 TIP 是弯引号、实心括号。新 Server 配旧 TIP 时旧 TIP 丢掉这个帧，组字经 Server 结束时带出的标点已是直角而 TIP 空闲时出的还是弯引号，安装包同时替换两者，只有开发时手动换单个 DLL 才会碰到。成对补全、跨过、改回前引号和空格转换的表（`PairedPunctuationHostPolicy.h`、`Composition.cpp` 的 `SmartPunctuationAsciiFor`）都认「」『』〖〗。
+
 ### 发往 TSF 的模式请求
 
 WindowsServer/SessionController::request_mode(lease, mode) 提供中英文、中文/ASCII 标点、全/半角六种命令，线格式使用固定 Engine worker opcode 与清零的 404 字节帧，不支持任意 opcode 或文本。调用方从已确认焦点事件获取 lease，并在外部线程调用；输入/事件/控制回调内调用会拒绝，避免递归焦点锁。有限时写入可能阻塞，不宜直接占用 UI 线程。

@@ -123,33 +123,60 @@ int main() {
 
   // English mode: plain keys pass through, fullwidth widens printable ASCII, and the Chinese punctuation lock converts marks ahead of width.
   EnglishPunctuationState english;
-  assert(english_mode_output(U'a', false, false, false, english).empty());
-  assert(english_mode_output(U',', false, false, false, english).empty());
-  assert(english_mode_output(U'a', false, false, true, english) == "ａ");
-  assert(english_mode_output(U' ', false, false, true, english) == "\u3000");
-  assert(english_mode_output(U'1', true, false, true, english) == "１");
-  assert(english_mode_output(U'\t', false, true, true, english).empty());
-  assert(english_mode_output(U'\u00e9', false, true, true, english).empty());
-  assert(english_mode_output(U',', false, true, false, english) == "，");
-  assert(english_mode_output(U',', false, true, true, english) == "，");
-  assert(english_mode_output(U'a', false, true, false, english).empty());
-  assert(english_mode_output(U'a', false, true, true, english) == "ａ");
-  assert(english_mode_output(U'\\', false, true, false, english) == "、");
-  assert(english_mode_output(U'/', false, true, false, english).empty());
-  assert(english_mode_output(U'^', false, true, false, english) == "……");
+  assert(english_mode_output(U'a', false, false, false, english, {}).empty());
+  assert(english_mode_output(U',', false, false, false, english, {}).empty());
+  assert(english_mode_output(U'a', false, false, true, english, {}) == "ａ");
+  assert(english_mode_output(U' ', false, false, true, english, {}) == "\u3000");
+  assert(english_mode_output(U'1', true, false, true, english, {}) == "１");
+  assert(english_mode_output(U'\t', false, true, true, english, {}).empty());
+  assert(english_mode_output(U'\u00e9', false, true, true, english, {}).empty());
+  assert(english_mode_output(U',', false, true, false, english, {}) == "，");
+  assert(english_mode_output(U',', false, true, true, english, {}) == "，");
+  assert(english_mode_output(U'a', false, true, false, english, {}).empty());
+  assert(english_mode_output(U'a', false, true, true, english, {}) == "ａ");
+  assert(english_mode_output(U'\\', false, true, false, english, {}) == "、");
+  assert(english_mode_output(U'/', false, true, false, english, {}).empty());
+  assert(english_mode_output(U'^', false, true, false, english, {}) == "……");
   // The keypad keeps its ASCII mark, then width applies.
-  assert(english_mode_output(U'.', true, true, false, english).empty());
-  assert(english_mode_output(U'.', true, true, true, english) == "．");
+  assert(english_mode_output(U'.', true, true, false, english, {}).empty());
+  assert(english_mode_output(U'.', true, true, true, english, {}) == "．");
   // Quotes alternate and book titles nest, as in Engine's policy.
-  assert(english_mode_output(U'"', false, true, false, english) == "“");
-  assert(english_mode_output(U'"', false, true, false, english) == "”");
-  assert(english_mode_output(U'\'', false, true, false, english) == "‘");
-  assert(english_mode_output(U'\'', false, true, false, english) == "’");
-  assert(english_mode_output(U'<', false, true, false, english) == "《");
-  assert(english_mode_output(U'<', false, true, false, english) == "〈");
-  assert(english_mode_output(U'>', false, true, false, english) == "〉");
-  assert(english_mode_output(U'>', false, true, false, english) == "》");
-  assert(english_mode_output(U'>', false, true, false, english) == "》");
-  assert(english_mode_output(U'<', false, true, false, english) == "《");
+  assert(english_mode_output(U'"', false, true, false, english, {}) == "“");
+  assert(english_mode_output(U'"', false, true, false, english, {}) == "”");
+  assert(english_mode_output(U'\'', false, true, false, english, {}) == "‘");
+  assert(english_mode_output(U'\'', false, true, false, english, {}) == "’");
+  assert(english_mode_output(U'<', false, true, false, english, {}) == "《");
+  assert(english_mode_output(U'<', false, true, false, english, {}) == "〈");
+  assert(english_mode_output(U'>', false, true, false, english, {}) == "〉");
+  assert(english_mode_output(U'>', false, true, false, english, {}) == "》");
+  assert(english_mode_output(U'>', false, true, false, english, {}) == "》");
+  assert(english_mode_output(U'<', false, true, false, english, {}) == "《");
+  // 直角引号与空心括号按 View 报告的样式出字，交替和缺省样式一样；样式不影响全角和其他键。
+  const auto corner = msime::input::punctuation_marks_from_view("corner", "hollow");
+  assert(corner.corner_quotes && corner.hollow_brackets);
+  const auto defaults = msime::input::punctuation_marks_from_view("curly", "unknown");
+  assert(!defaults.corner_quotes && !defaults.hollow_brackets);
+  EnglishPunctuationState styled;
+  assert(english_mode_output(U'\'', false, true, false, styled, corner) == "「");
+  assert(english_mode_output(U'"', false, true, false, styled, corner) == "『");
+  assert(english_mode_output(U'\'', false, true, false, styled, corner) == "」");
+  assert(english_mode_output(U'"', false, true, false, styled, corner) == "』");
+  assert(english_mode_output(U'[', false, true, false, styled, corner) == "〖");
+  assert(english_mode_output(U']', false, true, false, styled, corner) == "〗");
+  assert(english_mode_output(U',', false, true, false, styled, corner) == "，");
+  assert(english_mode_output(U'\'', false, false, true, styled, corner) == "＇");
+  assert(english_mode_output(U'[', false, false, false, styled, corner).empty());
+
+  // 空格转换的反查认直角引号和空心括号，转回按下的那个键。
+  assert(smart_punctuation_ascii_mark("「") == '\'');
+  assert(smart_punctuation_ascii_mark("」") == '\'');
+  assert(smart_punctuation_ascii_mark("『") == '"');
+  assert(smart_punctuation_ascii_mark("』") == '"');
+  assert(smart_punctuation_ascii_mark("〖") == '[');
+  assert(smart_punctuation_ascii_mark("〗") == ']');
+  assert(space_conversion_ascii_text("「") == "'");
+  // 正向表仍给缺省样式的字。
+  assert(chinese_punctuation_mark('\'') == "‘");
+  assert(chinese_punctuation_mark('[') == "【");
   return 0;
 }

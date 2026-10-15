@@ -22,7 +22,11 @@ public final class PairedPunctuationPolicy {
         new EngineCompletion('(', "（", "）"),
         new EngineCompletion('<', "《", "》"),
         new EngineCompletion('<', "〈", "〉"),
-        new EngineCompletion('[', "【", "】"));
+        new EngineCompletion('[', "【", "】"),
+        // 引号样式、方头括号样式（`quote_style`、`bracket_style`）下同一个键的另一组字。
+        new EngineCompletion('"', "『", "』"),
+        new EngineCompletion('\'', "「", "」"),
+        new EngineCompletion('[', "〖", "〗"));
 
     /**
      * 符号面板里点前半个就成对上屏的符号。ASCII 的 `"` 和 `'` 不在里面：它们前后半个是同一个字符，`'` 更常作撇号用，点一下变成两个反而要删。ASCII 的 `<` 也不在里面：它绝大多数时候是小于号，打 `a < b` 时补出的 `>` 只能再删掉；全角 ＜ 照常成对。竖排用的 ︵︶﹁﹂ 也不在里面。
@@ -43,6 +47,9 @@ public final class PairedPunctuationPolicy {
         if (!enabled || commit == null) return commit;
         if (ascii == '"' && commit.endsWith("”")) return commit.substring(0, commit.length() - 1) + "“";
         if (ascii == '\'' && commit.endsWith("’")) return commit.substring(0, commit.length() - 1) + "‘";
+        // 直角引号样式下同理：』改回『，」改回「。
+        if (ascii == '"' && commit.endsWith("』")) return commit.substring(0, commit.length() - 1) + "『";
+        if (ascii == '\'' && commit.endsWith("」")) return commit.substring(0, commit.length() - 1) + "「";
         return commit;
     }
 
@@ -77,10 +84,10 @@ public final class PairedPunctuationPolicy {
     public static final class Stack {
         /** 记得的对数上限，更深的嵌套忘掉最外层。 */
         public static final int LIMIT = 16;
-        /** 每个键能跨过的后半个。`<` 视嵌套打开《或〈，所以 `>` 两个都认。 */
+        /** 每个键能跨过的后半个。`<` 视嵌套打开《或〈，所以 `>` 两个都认；引号和方头括号的两组字同理，样式可能在一对还开着时换掉。 */
         private static final Map<Integer, Set<String>> CLOSINGS = Map.of(
-            (int) '"', Set.of("”"), (int) '\'', Set.of("’"), (int) ')', Set.of("）"),
-            (int) ']', Set.of("】"), (int) '>', Set.of("》", "〉"));
+            (int) '"', Set.of("”", "』"), (int) '\'', Set.of("’", "」"), (int) ')', Set.of("）"),
+            (int) ']', Set.of("】", "〗"), (int) '>', Set.of("》", "〉"));
 
         private record Entry(String closing, long editor) {}
 

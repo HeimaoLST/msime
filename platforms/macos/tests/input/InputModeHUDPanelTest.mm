@@ -31,13 +31,19 @@ int main() {
             // 和候选窗同层级，截图工具的遮罩盖不住它（#7326）。
             Require(hud.level == MSIMECandidateWindowLevel() && hud.level > NSScreenSaverWindowLevel, "HUD is not at the candidate window level");
             Require(hud.displayedText == nil, "HUD was visible before use");
-            // The badge is the floating toolbar's height, (font + 20) x scale: 44pt at the toolbar's default 24pt and 100%.
-            Require(hud.panelSize.height == 44.0 && hud.panelSize.width < 100.0, "HUD default size is not the toolbar's");
+            // 工具栏放大或缩小都不改变提示尺寸，默认隐藏图标。
+            Require(hud.panelSize.height == 32.0 && hud.panelSize.width < 50.0 && !hud.showsLogo, "HUD default is not compact");
             const CGFloat defaultWidth = hud.panelSize.width;
-            [hud applySizingPreferences:@{@"floating_toolbar" : @{@"font_size" : @16, @"scale_percent" : @150}}];
-            Require(hud.panelSize.height == 54.0 && hud.panelSize.width > defaultWidth, "HUD did not follow the toolbar's font size and scale");
-            [hud applySizingPreferences:@{@"floating_toolbar" : @{@"font_size" : @99, @"scale_percent" : @7}}];
-            Require(hud.panelSize.height == 44.0 && hud.panelSize.width == defaultWidth, "HUD did not fall back to the toolbar's defaults");
+            for (NSNumber *scale : @[@75, @100, @125, @150]) {
+                [hud applySizingPreferences:@{@"floating_toolbar": @{@"font_size": @28, @"scale_percent": scale}}];
+                Require(hud.panelSize.height == 32.0 && hud.panelSize.width == defaultWidth, "HUD still follows toolbar sizing");
+            }
+            NSImageView *logo = [hud valueForKey:@"logoView"];
+            logo.image = [[NSImage alloc] initWithSize:NSMakeSize(16, 16)];
+            [hud applySizingPreferences:@{@"show_app_logo": @YES}];
+            Require(hud.showsLogo && hud.panelSize.width == defaultWidth + 20.0 && hud.panelSize.height == 32.0, "HUD logo did not follow preference");
+            [hud applySizingPreferences:@{@"show_app_logo": @NO}];
+            Require(!hud.showsLogo && hud.panelSize.width == defaultWidth, "HUD logo was not hidden");
             // Until the controller hands it the theme's palette the badge is the system window surface, not a fixed brand colour.
             Require([hud.surfaceColor isEqual:NSColor.windowBackgroundColor] && [hud.textColor isEqual:NSColor.labelColor], "HUD default colours are not the system ones");
             NSColor *surface = [NSColor colorWithSRGBRed:0xF4 / 255.0 green:0xF8 / 255.0 blue:1.0 alpha:1.0];

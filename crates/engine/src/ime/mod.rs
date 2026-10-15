@@ -197,6 +197,16 @@ impl ImeSession {
             .and_then(|(_, code)| (!code.is_empty()).then_some(code.as_str()))
     }
 
+    /// 仅在候选身份仍占据同一座位且已有编码时按位置读取反查码；词面不一致或该座位没有编码时交给调用方回退旧入口。
+    pub(crate) fn candidate_wubi_code_at_if_word(&self, index: usize, word: &str) -> Option<&str> {
+        let candidate = self.state.candidates.get(index)?;
+        if candidate.word != word {
+            return None;
+        }
+        let code = self.state.wubi_codes.get(index)?.as_str();
+        (!code.is_empty()).then_some(code)
+    }
+
     pub fn request(&self) -> &QueryRequest {
         &self.state.request
     }

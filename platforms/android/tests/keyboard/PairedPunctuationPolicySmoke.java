@@ -8,6 +8,7 @@ public final class PairedPunctuationPolicySmoke {
         stepOver();
         symbolStepOver();
         caretAfterClosingCommit();
+        punctuationStyles();
         System.out.println("PairedPunctuationPolicySmoke: PASS");
     }
 
@@ -24,6 +25,26 @@ public final class PairedPunctuationPolicySmoke {
         check(PairedPunctuationPolicy.completion("，", true) == null, "plain punctuation");
         check(PairedPunctuationPolicy.completion("", true) == null && PairedPunctuationPolicy.completion(null, true) == null,
             "empty commit");
+    }
+
+    /** 直角引号与空心方头括号（`quote_style`、`bracket_style`）补全、改回前引号和跨过都和缺省样式一样。 */
+    private static void punctuationStyles() {
+        PairedPunctuationPolicy.Completion corner = PairedPunctuationPolicy.completion("「", true);
+        check(corner.closing().equals("」") && corner.opening() == '\'', "「 closes on the ' key");
+        check(PairedPunctuationPolicy.completion("你好『", true).closing().equals("』"), "『 closes");
+        check(PairedPunctuationPolicy.completion("〖", true).closing().equals("〗"), "〖 closes");
+        check(PairedPunctuationPolicy.completion("」", true) == null, "a corner closing half is not completed");
+        check(PairedPunctuationPolicy.reopenQuote("」", '\'', true).equals("「"), "」 reopens as 「");
+        check(PairedPunctuationPolicy.reopenQuote("好』", '"', true).equals("好『"), "』 reopens as 『");
+        check(PairedPunctuationPolicy.reopenQuote("』", '\'', true).equals("』"), "another key's half is left alone");
+        PairedPunctuationPolicy.Stack stack = new PairedPunctuationPolicy.Stack();
+        stack.push("〗", 9);
+        stack.push("』", 9);
+        stack.push("」", 9);
+        check("」".equals(stack.stepOver('\'', 9, "」』〗")), "' steps over 」");
+        check("』".equals(stack.stepOver('"', 9, "』〗")), "\" steps over 』");
+        check("〗".equals(stack.stepOver(']', 9, "〗")), "] steps over 〗");
+        check(stack.isEmpty(), "every corner pair was closed");
     }
 
     private static void quoteReopening() {

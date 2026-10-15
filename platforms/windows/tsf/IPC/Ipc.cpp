@@ -1,4 +1,5 @@
 #include "Ipc.h"
+#include "AuxNamedpipeSender.h"
 #include "../../../../shared/contracts/ipc_negotiation.h"
 #include "../../common/PipeMetadata.h"
 #include <algorithm>
@@ -1465,80 +1466,7 @@ struct FanyImeNamedpipeDataToTsf *ReadDataFromServerViaNamedPipe(uint64_t expect
  */
 bool SendToAuxNamedpipe(const std::wstring &pipeData, bool waitForAcknowledgement)
 {
-    HANDLE hAuxPipe = INVALID_HANDLE_VALUE;
-
-    // 重试几次，等待 Server 准备好
-    for (int retry = 0; retry < 5; ++retry)
-    {
-        hAuxPipe = CreateFileW(                              //
-            FANY_IME_AUX_NAMED_PIPE,                         //
-            GENERIC_READ | GENERIC_WRITE,                    //
-            0,                                               //
-            nullptr,                                         //
-            OPEN_EXISTING,                                   //
-            SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, //
-            nullptr                                          //
-        );
-        if (hAuxPipe && hAuxPipe != INVALID_HANDLE_VALUE)
-        {
-            break;
-        }
-        /* 为了解决 Windows Media Player 会在启动时调用两次 kill 并且第二次失败的问题
-         * TODO: 在 msg wnd proc 中去处理打开程序会调用两次 kill 的问题，将其优化成一次
-         */
-        Sleep(20); // 等待 20ms 再重试
-    }
-    if (!hAuxPipe || hAuxPipe == INVALID_HANDLE_VALUE)
-    {
-        return false;
-    }
-    if (!IsPipeServerInOwnSession(hAuxPipe))
-    {
-        CloseHandle(hAuxPipe);
-        return false;
-    }
-    DWORD bytesWritten = 0;
-    BOOL ret = WriteFile(                    //
-        hAuxPipe,                            //
-        pipeData.c_str(),                    //
-        pipeData.length() * sizeof(wchar_t), //
-        &bytesWritten,                       //
-        NULL                                 //
-    );
-    const bool sent = ret && bytesWritten == pipeData.length() * sizeof(wchar_t);
-    if (!sent || !waitForAcknowledgement)
-    {
-        CloseHandle(hAuxPipe);
-        return sent;
-    }
-
-    DWORD pipeMode = PIPE_READMODE_MESSAGE | PIPE_NOWAIT;
-    if (!SetNamedPipeHandleState(hAuxPipe, &pipeMode, nullptr, nullptr))
-    {
-        CloseHandle(hAuxPipe);
-        return false;
-    }
-
-    bool acknowledged = false;
-    const ULONGLONG deadline = GetTickCount64() + 150;
-    while (GetTickCount64() < deadline)
-    {
-        wchar_t acknowledgement[2] = {};
-        DWORD bytesRead = 0;
-        if (ReadFile(hAuxPipe, acknowledgement, sizeof(acknowledgement), &bytesRead, nullptr))
-        {
-            acknowledged =
-                bytesRead == sizeof(acknowledgement) && acknowledgement[0] == L'O' && acknowledgement[1] == L'K';
-            break;
-        }
-        if (GetLastError() != ERROR_NO_DATA)
-        {
-            break;
-        }
-        Sleep(1);
-    }
-    CloseHandle(hAuxPipe);
-    return acknowledged;
+    return msime::windows::detail::SendToAuxNamedpipe(FANY_IME_AUX_NAMED_PIPE, pipeData, waitForAcknowledgement);
 }
 
 /**

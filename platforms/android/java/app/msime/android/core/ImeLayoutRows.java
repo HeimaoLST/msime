@@ -629,7 +629,7 @@ final class ImeLayoutRows {
         }
         // 最后一行：123（数字与符号层，？！ 和其他符号都在那里）、0（仍在 8 的正下方）、逗号和句号各占半格。
         LinearLayout lastRow = LayoutPolicy.row(s);
-        adoptBarKey(lastRow, s.layerButton, KeyboardKeyRole.ACCENT);
+        adoptBarKey(lastRow, s.localSettings.bool(AndroidLocalSettings.SWAP_LANGUAGE_NUMBER_KEYS) ? s.languageButton : s.layerButton, KeyboardKeyRole.ACCENT);
         addNineKey(lastRow, zhuyinNineKeySoundKey(ZhuyinNineKeyLayout.zero()));
         LinearLayout marks = LayoutPolicy.row(s);
         boolean chinese = s.sendsChinesePunctuation();
@@ -659,7 +659,7 @@ final class ImeLayoutRows {
         s.imeLetterRows.bindBackspaceRepeat(delete, deleteAction);
         if (delete instanceof KeyboardPressButton press) press.setKeyboardRole(KeyboardKeyRole.ACCENT);
         addNineKey(actions, delete);
-        adoptBarKey(actions, s.languageButton, KeyboardKeyRole.ACCENT);
+        adoptBarKey(actions, s.localSettings.bool(AndroidLocalSettings.SWAP_LANGUAGE_NUMBER_KEYS) ? s.layerButton : s.languageButton, KeyboardKeyRole.ACCENT);
         adoptBarKey(actions, s.spaceButton, KeyboardKeyRole.KEY);
         adoptBarKey(actions, s.enterButton, s.imeBottomRow.returnKeyRole());
         container.addView(actions, LayoutPolicy.weightedMatchParentParams(0.8f));
@@ -1214,22 +1214,22 @@ final class ImeLayoutRows {
             s.imeLetterRows.rebuildKeyRows();
             s.render();
         }), "SoftLayer");
-        // 左列：◀ 光标左移、→ 结束连点切换（或光标右移），再是 123、☺（工具栏没有表情时）、英、切换，各占一格。
+        // 左列：◀ 光标左移、→ 结束连点切换（或光标右移），再是 123、☺（工具栏没有表情时）、切换，各占一格。
         addJapaneseSideKey(modeColumn, s.iconKey(KeyboardIconKey.Kind.CURSOR_LEFT, "◀",
             "光标左移", this::moveJapaneseCaretLeft), 1);
         addJapaneseSideKey(modeColumn, s.iconKey(KeyboardIconKey.Kind.TOGGLE_NEXT, "→",
             "结束连点切换，开始下一个假名；没有组字时光标右移", this::advanceJapaneseToggle), 1);
-        addJapaneseSideKey(modeColumn, s.japaneseSymbolsKey, 1);
+        boolean swapLanguageNumber = s.localSettings.bool(AndroidLocalSettings.SWAP_LANGUAGE_NUMBER_KEYS);
+        // 打开「中英键轮换其他语言」时这个键也按轮换走（日语之后是下一种其他语言或回到中文），键面写它要切到的语言；否则从日语只能到英文、英文再轮回日语，回不到中文。它和新设计底行一样放在空格与回车之间。
+        Button language = s.keyId(s.keyboardKey(s.japaneseLanguageKeyLabel(), s.japaneseLanguageKeyDescription(),
+            s::languageKeyTapped), "SoftLanguage");
+        s.bindInputMethodPicker(language);
+        addJapaneseSideKey(modeColumn, swapLanguageNumber ? language : s.japaneseSymbolsKey, 1);
         boolean emojiKey = s.japaneseSideEmojiKey();
         if (emojiKey) {
             addJapaneseSideKey(modeColumn, s.keyId(s.keyboardKey("☺", "打开表情浏览", s.imePanels::showEmojiPicker),
                 "SoftEmoji"), 1);
         }
-        // 打开「中英键轮换其他语言」时这个键也按轮换走（日语之后是下一种其他语言或回到中文），键面写它要切到的语言；否则从日语只能到英文、英文再轮回日语，回不到中文。
-        Button language = s.keyId(s.keyboardKey(s.japaneseLanguageKeyLabel(), s.japaneseLanguageKeyDescription(),
-            s::languageKeyTapped), "SoftLanguage");
-        s.bindInputMethodPicker(language);
-        addJapaneseSideKey(modeColumn, language, 1);
         if (s.offersGlobeKey()) {
             Button globe = s.keyId(s.keyboardKey("切换", "切换到下一个输入法",
                 s::switchToNextInputMethodAfterCommit), "SoftGlobe");
@@ -1266,6 +1266,7 @@ final class ImeLayoutRows {
         s.japaneseSpaceKey = s.keyId(s.keyboardKey("空白", "空白；左右滑动移动光标", s::space), "Space");
         s.imeBottomRow.bindSpaceCursor(s.japaneseSpaceKey);
         addJapaneseSideKey(side, s.japaneseSpaceKey, 1);
+        addJapaneseSideKey(side, swapLanguageNumber ? s.japaneseSymbolsKey : language, 1);
         s.japaneseReturnKey = s.keyId(s.keyboardKey("改行", "改行", s::enter), "Enter");
         addJapaneseSideKey(side, s.japaneseReturnKey, 2);
         container.addView(side, LayoutPolicy.weightedMatchParentParams(0.19f));
@@ -1282,10 +1283,13 @@ final class ImeLayoutRows {
         if (s.dedicatedEnglish || !s.punctuation('.')) commitNineKeyLiteral(".");
     }
 
-    void chooseNineKeySpelling(long generation, int index) {
-        if (s.session == 0) return;
+    void chooseNineKeySpelling(long session, long generation, int index) {
+        if (session == 0 || session != s.session || s.view == null
+                || CandidateGlossPolicy.strictOr(s.view.opt("session"), Long.MIN_VALUE) != session
+                || CandidateGlossPolicy.strictOr(s.view.opt("generation"), Long.MIN_VALUE) != generation)
+            return;
         try { s.apply(NativeClient.chooseNineKeySpelling(s.session, generation, index)); }
-        catch (JSONException | LinkageError error) { s.fail(); }
+        catch (JSONException | LinkageError error) { s.fail(error); }
     }
 
     /** 拼音栏里一项的高度：侧栏三行键高里放得下五六项，多的纵向滚动。 */
@@ -1360,7 +1364,7 @@ final class ImeLayoutRows {
             int slot = s.nineKeySpellingButtons.size();
             Runnable choose = () -> {
                 if (slot < s.nineKeySpellingIndices.size()) {
-                    chooseNineKeySpelling(s.nineKeySpellingGeneration,
+                    chooseNineKeySpelling(s.session, s.nineKeySpellingGeneration,
                         s.nineKeySpellingIndices.get(slot));
                 }
             };

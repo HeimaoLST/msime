@@ -9,14 +9,18 @@ settings=false
 handwriting=false
 statistics=false
 core=false
+feedback=false
+diagnostics=false
 for option in "${@:2}"; do
   case "$option" in
-    # --core 只做安装、首次启动准备词库和 DeviceSmoke 的打字主路径，给 API 28 这类其余套件驱动不了的旧系统用（见 DeviceSmoke 里的说明）。
+    # --core 跑安装、词库准备、打字主路径及剪贴板保存生命周期；其余键盘套件在 API 28 上仍不支持。
     --core) core=true ;;
     --settings) settings=true ;;
     --handwriting) handwriting=true ;;
     --statistics) statistics=true ;;
-    *) echo "usage: smoke.sh [emulator-5580] [--core] [--settings] [--handwriting] [--statistics]" >&2; exit 1 ;;
+    --feedback) feedback=true ;;
+    --diagnostics) diagnostics=true ;;
+    *) echo "usage: smoke.sh [emulator-5580] [--core] [--settings] [--handwriting] [--statistics] [--feedback] [--diagnostics]" >&2; exit 1 ;;
   esac
 done
 [[ "$serial" == emulator-* ]] || { echo "Only the dedicated emulator is supported" >&2; exit 1; }
@@ -26,6 +30,7 @@ avd_name=$("$adb" -s "$serial" emu avd name | tr -d '\r' | head -1)
 bash platforms/android/tests/device/build-editor.sh
 "$adb" -s "$serial" install --no-incremental -r target/android/msime-android.apk
 "$adb" -s "$serial" install --no-incremental -r target/android/editor-test.apk
+"$adb" -s "$serial" install --no-incremental -r target/android/first-frame-editor.apk
 mkdir -p target/android/device-test
 xml="$repo_root/target/android/device-test/window.xml"
 dump() {
@@ -90,7 +95,31 @@ run_instrumentation() {
 result=$(run_instrumentation app.msime.android.test/app.msime.android.test.DeviceSmoke)
 printf '%s\n' "$result"
 [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "System input acceptance failed" >&2; exit 1; }
-if [[ "$core" == true ]]; then echo "Dedicated Android AVD: install, resource setup and core typing acceptance passed"; exit 0; fi
+# 在安装产品中区分失败来源；只用合成响应和拒写连接，不读取实际输入。
+result=$(run_instrumentation app.msime.android.test/app.msime.android.test.InputFailureCategoryDeviceSmoke)
+printf '%s\n' "$result"
+[[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Input failure category acceptance failed" >&2; exit 1; }
+# 旧菜单、展开按钮和拼写回调只检查身份，不写编辑器、不停止当前会话。
+result=$(run_instrumentation app.msime.android.test/app.msime.android.test.StaleCandidateDeviceSmoke)
+printf '%s\n' "$result"
+[[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Stale candidate callback acceptance failed" >&2; exit 1; }
+if [[ "$feedback" == true ]]; then
+  # 使用真实反馈页连续输入合成文字，不点击提交；API 28 的 --core 也能单独带上此回归。
+  result=$(run_instrumentation app.msime.android.test/app.msime.android.test.FeedbackInputStabilityDeviceSmoke)
+  printf '%s\n' "$result"
+  [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Feedback input stability acceptance failed" >&2; exit 1; }
+fi
+if [[ "$diagnostics" == true ]]; then
+  # 只生成合成日志包，覆盖原生导出到上传请求的契约，不发网络请求。
+  result=$(run_instrumentation app.msime.android.test/app.msime.android.test.DiagnosticsBundleDeviceSmoke)
+  printf '%s\n' "$result"
+  [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Diagnostics bundle acceptance failed" >&2; exit 1; }
+fi
+if [[ "$core" == true ]]; then
+  bash platforms/android/tests/device/clipboard-edit-lifecycle.sh "$serial" app.msime.android
+  echo "Dedicated Android AVD: install, resource setup, core typing and clipboard save lifecycle acceptance passed"
+  exit 0
+fi
 # MSIME_DEVICE_SMOKE_SKIP：空格分隔的套件名。这些套件已知失败、正在修（原因写在调用方，见 .github/workflows/android-device.yml），跳过时明确打印出来，不算通过。
 skipped_suites=()
 for entry in \
@@ -101,9 +130,12 @@ for entry in \
     "LetterHintPunctuationDeviceSmoke|Letter hint punctuation acceptance failed" \
     "PreferencesDeviceSmoke|Preferences acceptance failed" \
     "ThemeModeDeviceSmoke|Theme mode acceptance failed" \
+    "LanguageNumberKeySwapDeviceSmoke|Language/number key swap acceptance failed" \
+    "ChineseLanguageReturnDeviceSmoke|Chinese language return acceptance failed" \
     "KeyboardHeightDeviceSmoke|Keyboard height acceptance failed" \
     "FuzzyPinyinDeviceSmoke|Fuzzy pinyin acceptance failed" \
     "CandidateGlossDeviceSmoke|Candidate gloss acceptance failed" \
+    "InitialKeyboardRowDeviceSmoke|Initial keyboard row acceptance failed" \
     "NineKeyEnglishDeviceSmoke|Nine-key English acceptance failed" \
     "NineKeyPanelDeviceSmoke|Nine-key panel acceptance failed" \
     "FourteenKeyDeviceSmoke|Fourteen-key acceptance failed" \
@@ -111,8 +143,10 @@ for entry in \
     "ChineseHelpcodeDeviceSmoke|Chinese helpcode acceptance failed" \
     "ChineseHelpcodeOffDeviceSmoke|Chinese helpcode-off Shift letter acceptance failed" \
     "MicrosoftShuangpinDeviceSmoke|Microsoft double-pinyin acceptance failed" \
+    "LongSymbolCellDeviceSmoke|Long symbol cell acceptance failed" \
     "EmailSuffixDeviceSmoke|Email suffix acceptance failed" \
     "NumberRowDeviceSmoke|Number row acceptance failed" \
+    "EmptyEditorBackspaceDeviceSmoke|Empty editor backspace acceptance failed" \
     "ClipboardImageDeviceSmoke|Clipboard image acceptance failed" \
     "CaretCandidatesDeviceSmoke|Caret candidates acceptance failed" \
     "HardwareTranslationDeviceSmoke|Hardware Ctrl+Enter translation acceptance failed" \
@@ -135,7 +169,7 @@ do
   [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "${entry#*|}" >&2; exit 1; }
 done
 if [[ "$settings" == true ]]; then
-  for suite in SettingsDeviceSmoke SettingsLifecycleSmoke AccountStorageDeviceSmoke CloudClipboardKeystoreDeviceSmoke CloudClipboardDriverDeviceSmoke CloudClipboardRelayDeviceSmoke; do
+  for suite in OptionSheetDeviceSmoke SettingsDeviceSmoke SettingsLifecycleSmoke AccountStorageDeviceSmoke CloudClipboardKeystoreDeviceSmoke CloudClipboardDriverDeviceSmoke CloudClipboardRelayDeviceSmoke; do
     result=$("$adb" -s "$serial" shell am instrument -w "app.msime.android.test/app.msime.android.test.$suite")
     printf '%s\n' "$result"
     [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Shared settings acceptance failed" >&2; exit 1; }
@@ -230,5 +264,7 @@ if [[ "$handwriting" == true ]]; then
   trap - EXIT INT TERM
   [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Handwriting acceptance failed" >&2; exit 1; }
 fi
+# 生命周期回归会重启宿主进程，放在键盘套件之后，避免打断系统已经绑定的输入法服务。
+bash platforms/android/tests/device/clipboard-edit-lifecycle.sh "$serial" app.msime.android
 [[ ${#skipped_suites[@]} -eq 0 ]] || echo "Skipped known failures: ${skipped_suites[*]}" >&2
 echo "Dedicated Android AVD: install, resource setup, system input and live preferences acceptance passed"

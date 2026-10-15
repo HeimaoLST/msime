@@ -13,10 +13,29 @@ struct PunctuationSettingsView: View {
   @State private var lock = "follow"
   @State private var width = CharacterWidthPreference.halfwidth
   @State private var spacing = false
+  @State private var quoteStyle = "curly"
+  @State private var bracketStyle = "solid"
   @State private var saveFailed = false
 
   var body: some View {
     Form {
+      // 两项只在中文标点下起作用，排在本页最前，紧接「表达」页上的「中文标点」。
+      Section {
+        Picker("引号样式", selection: stored("quote_style", $quoteStyle)) {
+          Text("弯引号 “ ” ‘ ’").tag("curly")
+          Text("直角引号 「 」『 』").tag("corner")
+          Text("繁体输出时用直角引号").tag("corner_when_traditional")
+        }
+        .accessibilityIdentifier("quoteStyle")
+        Picker("方头括号样式", selection: stored("bracket_style", $bracketStyle)) {
+          Text("实心 【 】").tag("solid")
+          Text("空心 〖 〗").tag("hollow")
+        }
+        .accessibilityIdentifier("bracketStyle")
+      } footer: {
+        Text("中文标点下 ' 键和 Shift+' 键输出的引号、[ ] 键输出的括号。直角引号：' 出「」，Shift+' 出『』。")
+      }
+      .designRow()
       Section {
         Toggle("智能标点", isOn: stored("smart_punctuation", $smart))
           .accessibilityIdentifier("smartPunctuation")
@@ -103,5 +122,8 @@ struct PunctuationSettingsView: View {
     width = CharacterWidthPreference.value(in: preferences) ?? width
     // 关着时文档里没有这个键，缺键就是关。
     spacing = preferences["chinese_english_spacing"] as? Bool ?? false
+    // 等于缺省值时文档里没有这两个键，缺键就是弯引号、实心括号。
+    quoteStyle = preferences["quote_style"] as? String ?? "curly"
+    bracketStyle = preferences["bracket_style"] as? String ?? "solid"
   }
 }

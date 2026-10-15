@@ -1,4 +1,5 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
+import { useAsyncActionRunner } from "../core/use-async-action";
 import { GroupList } from "../core/platform-controls";
 import { StatusMessage } from "../core/status-message";
 import { ActionButton } from "./action-button";
@@ -40,33 +41,26 @@ export interface WubiCodeLookupSectionProps {
 /** 五笔查码：输入或粘贴汉字，列出每个字（以及整段词）的 86 和 98 五笔编码。没有字根拆分：仓库里没有授权清楚的拆分数据。 */
 export function WubiCodeLookupSection({ lookup, profile = "wubi86" }: WubiCodeLookupSectionProps) {
   const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<WubiCodeLookup | null>(null);
   const [error, setError] = useState("");
-  const generation = useRef(0);
+  const { busy, invalidate, run } = useAsyncActionRunner(setError, undefined, lookup);
   const edit = (value: string) => {
-    generation.current++;
+    invalidate();
     setText(value);
-    setBusy(false);
     setResult(null);
     setError("");
   };
-  const search = async () => {
-    const requestGeneration = ++generation.current;
-    setBusy(true);
-    setError("");
-    try {
-      const answer = await lookup(text);
-      if (generation.current === requestGeneration) setResult(answer);
-    } catch {
-      if (generation.current === requestGeneration) {
-        setResult(null);
-        setError("查码失败，请稍后重试。");
-      }
-    } finally {
-      if (generation.current === requestGeneration) setBusy(false);
-    }
-  };
+  const search = () =>
+    run(
+      async (isCurrent) => {
+        const answer = await lookup(text);
+        if (isCurrent()) setResult(answer);
+      },
+      {
+        formatError: () => "查码失败，请稍后重试。",
+        onError: () => setResult(null),
+      },
+    );
 
   const columns: [WubiProfile, string][] = [
     ["wubi86", "86 五笔"],

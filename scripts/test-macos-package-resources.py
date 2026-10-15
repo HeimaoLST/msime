@@ -7,7 +7,10 @@
 """
 import json
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +58,42 @@ def check(condition: bool, message: str) -> None:
 
 def live_lines(path: Path) -> list:
     return [line for line in path.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#")]
+
+
+def check_dmg_creation() -> None:
+    bash = shutil.which("bash")
+    if not bash:
+        print("skipped: DMG creation retry needs bash")
+        return
+    source = PACKAGE.read_text(encoding="utf-8")
+    helper = re.search(r"^create_dmg\(\) \{\n.*?^\}\n", source, re.MULTILINE | re.DOTALL)
+    check(helper is not None, "package-release.sh has no bounded DMG creation helper")
+    if helper is None:
+        return
+    # 仅替换系统磁盘映像服务：使用真实半成品文件，检查重试前与持续失败后的清理。
+    probe = """set -euo pipefail
+edition=tibetan
+calls=0
+failures=$2
+sleep() { :; }
+hdiutil() {
+  calls=$((calls + 1))
+  local output="${!#}"
+  [ "$1" = create ] && [ ! -e "$output" ] || return 42
+  printf synthetic-image > "$output"
+  if [ "$calls" -le "$failures" ]; then return 1; fi
+}
+""" + helper.group() + """
+if create_dmg "$1" -srcfolder 'synthetic source' -format ULMO -fs HFS+; then status=0; else status=$?; fi
+printf '%s %s %s\\n' "$calls" "$status" "$([ -e "$1" ] && echo present || echo absent)"
+"""
+    with tempfile.TemporaryDirectory(prefix="msime-dmg-retry-") as directory:
+        for count, expected in ((0, "1 0 present"), (1, "2 0 present"), (3, "3 1 absent")):
+            output = Path(directory) / f"合成 安装包-{count}.dmg"
+            result = subprocess.run([bash, "-c", probe, "probe", str(output), str(count)],
+                                    capture_output=True, text=True, timeout=10)
+            check(result.returncode == 0 and result.stdout.strip() == expected,
+                  f"DMG creation with {count} failures: expected {expected}, got {result.stdout.strip()}")
 
 
 def main() -> int:
@@ -109,6 +148,9 @@ def main() -> int:
         check(path in workflow, f"ci-macos-package.yml does not treat {path} as a packaging input")
 
     check(any("platforms/macos/package-release.sh" in line for line in live_lines(RELEASE_WORKFLOW)), "release-macos.yml no longer runs platforms/macos/package-release.sh")
+
+    check('create_dmg "$dmg" -volname' in package_text, "package-release.sh bypasses the DMG creation retry")
+    check_dmg_creation()
 
     if failures:
         for failure in failures:

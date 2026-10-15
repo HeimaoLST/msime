@@ -1,4 +1,5 @@
 import { createVoiceRecognitionClient } from "./voice/voice-recognition-client";
+import { createTauriProgressClient } from "./core/tauri-progress-client";
 import {
   StrictMode,
   useCallback,
@@ -9,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { createRoot } from "react-dom/client";
+import { trackAsyncSubscription } from "../../../packages/ui/src/core/async-subscription";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -24,6 +26,8 @@ import {
   VoicePanel,
   completeOnboardingPreferences,
   usePreferencesSnapshot,
+  useMobilePopState,
+  subscribeToWindowEvent,
   SettingsPage,
   SettingsStartupPage,
   WelcomeFlowPage,
@@ -232,25 +236,26 @@ const macosInputModes: NonNullable<SettingsClient["macosInputModes"]> = {
   openSettings: () => invoke("open_input_source_settings"),
 };
 // 桌面按需下载的资源包（macOS 的日文词库和「粤语、注音与笔画词库」，三个桌面平台的手写模型和桌面神经联想模型）；这些命令只在桌面宿主上注册，所以只在宿主报告桌面平台时提供给页面。本机提供哪些由宿主的列表决定。
-const resourcePacks: ResourcePackClient = {
-  list: () => invoke<ResourcePackStatus[]>("resource_packs"),
-  install: (id) => invoke<string>("resource_pack_install", { id }),
-  cancel: (id) => invoke<boolean>("resource_pack_cancel", { id }),
-  onProgress: (listener) =>
-    listen<LocalVoiceModelProgress>("resource-pack-progress", (event) => listener(event.payload)),
-};
+const resourcePacks: ResourcePackClient = createTauriProgressClient<
+  ResourcePackStatus[],
+  LocalVoiceModelProgress
+>(invoke, listen, {
+  list: "resource_packs",
+  install: "resource_pack_install",
+  cancel: "resource_pack_cancel",
+  progress: "resource-pack-progress",
+});
 const macosInstallClient: MacosInstallClient = {
   install: () => invoke("run_first_input_source_install"),
 };
 const localVoiceModels: LocalVoiceModelClient = {
-  list: () => invoke<LocalVoiceModelList>("voice_local_models"),
-  install: (id) => invoke<string>("voice_local_model_install", { id }),
-  cancel: (id) => invoke<boolean>("voice_local_model_cancel", { id }),
+  ...createTauriProgressClient<LocalVoiceModelList, LocalVoiceModelProgress>(invoke, listen, {
+    list: "voice_local_models",
+    install: "voice_local_model_install",
+    cancel: "voice_local_model_cancel",
+    progress: "voice-local-model-progress",
+  }),
   remove: (id) => invoke<void>("voice_local_model_remove", { id }),
-  onProgress: (listener) =>
-    listen<LocalVoiceModelProgress>("voice-local-model-progress", (event) =>
-      listener(event.payload),
-    ),
 };
 
 const client: SettingsClient = {
@@ -586,15 +591,15 @@ function DesktopSettings() {
     }),
     [closeMobilePanelAsync, iosHost],
   );
+  useMobilePopState(true, (event) => {
+    const state = event.state;
+    if (state?.msimeSettings === true && typeof state.panel === "string") {
+      setMobilePanel(state.panel as NonNullable<typeof mobilePanel>);
+    } else if (mobilePanelRef.current !== null) {
+      setMobilePanel(null);
+    }
+  });
   useEffect(() => {
-    const onPopState = (event: PopStateEvent) => {
-      const state = event.state;
-      if (state?.msimeSettings === true && typeof state.panel === "string") {
-        setMobilePanel(state.panel as NonNullable<typeof mobilePanel>);
-      } else if (mobilePanelRef.current !== null) {
-        setMobilePanel(null);
-      }
-    };
     const onNativePanel = (event: Event) => {
       const panel = (event as CustomEvent<unknown>).detail;
       if (
@@ -624,31 +629,29 @@ function DesktopSettings() {
         setMobilePanel(null);
       }
     };
-    window.addEventListener("popstate", onPopState);
-    window.addEventListener("msime-mobile-panel", onNativePanel);
-    window.addEventListener("msime-settings-page", onNativeSettingsPage);
+    const stopNativePanel = subscribeToWindowEvent("msime-mobile-panel", onNativePanel);
+    const stopNativeSettingsPage = subscribeToWindowEvent(
+      "msime-settings-page",
+      onNativeSettingsPage,
+    );
     return () => {
-      window.removeEventListener("popstate", onPopState);
-      window.removeEventListener("msime-mobile-panel", onNativePanel);
-      window.removeEventListener("msime-settings-page", onNativeSettingsPage);
+      stopNativePanel();
+      stopNativeSettingsPage();
     };
   }, []);
   // The host menu entry that started this window names a section; resolve it
   // before mounting so the page never opens on one and then jumps.
   useEffect(() => {
     let active = true;
-    let unsubscribe: (() => void) | undefined;
-    if (isTauri()) {
-      void listen<string>("settings-route", (event) => {
-        // An entry with no section only brings the window forward; it keeps the page in view.
-        if (active && event.payload) requestSettingsPage(event.payload);
-      })
-        .then((stop) => {
-          if (active) unsubscribe = stop;
-          else stop();
-        })
-        .catch(() => {});
-    }
+    const disposeSubscription = isTauri()
+      ? trackAsyncSubscription(
+          listen<string>("settings-route", (event) => {
+            // 未指定分区的入口只将窗口带到前台，保留当前页面。
+            if (active && event.payload) requestSettingsPage(event.payload);
+          }),
+          () => active,
+        )
+      : undefined;
     const requested = isTauri()
       ? invoke<string | null>("initial_settings_page").catch(() => null)
       : Promise.resolve(null);
@@ -934,7 +937,7 @@ function DesktopSettings() {
     });
     return () => {
       active = false;
-      unsubscribe?.();
+      disposeSubscription?.();
     };
   }, []);
   const onboardingPlatform = settingsClient?.host?.platform;

@@ -99,14 +99,33 @@ public final class LanguageKeyCyclePolicy {
      */
     public static KeyboardScheme chineseReturn(KeyboardScheme lastChinese, String lastChineseEngineScheme,
             List<KeyboardScheme> available, AppEdition edition, KeyboardScheme fallback) {
+        return chineseReturn(lastChinese, lastChineseEngineScheme, null, available, edition, fallback);
+    }
+
+    /**
+     * 从外语键盘回到中文时选择入口；进程重启后没有内存里的最近入口时，优先保留当前外语键盘的布局。
+     */
+    public static KeyboardScheme chineseReturn(KeyboardScheme lastChinese, String lastChineseEngineScheme,
+            String preferredLayout, List<KeyboardScheme> available, AppEdition edition,
+            KeyboardScheme fallback) {
         if (lastChinese != null && !lastChinese.otherLanguage() && available.contains(lastChinese)) return lastChinese;
         KeyboardScheme first = null;
+        KeyboardScheme layoutMatch = null;
+        KeyboardScheme engineMatch = null;
         for (KeyboardScheme candidate : available) {
             if (candidate.otherLanguage()) continue;
             if (first == null) first = candidate;
+            boolean sameLayout = preferredLayout != null
+                && preferredLayout.equals(candidate.touchKeyboardLayout());
+            if (sameLayout && layoutMatch == null) layoutMatch = candidate;
             if (candidate != KeyboardScheme.HANDWRITING
-                    && candidate.engineScheme(edition).equals(lastChineseEngineScheme)) return candidate;
+                    && candidate.engineScheme(edition).equals(lastChineseEngineScheme)) {
+                if (sameLayout) return candidate;
+                if (engineMatch == null) engineMatch = candidate;
+            }
         }
+        if (layoutMatch != null) return layoutMatch;
+        if (engineMatch != null) return engineMatch;
         return first != null ? first : fallback;
     }
 

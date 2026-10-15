@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Harmony dictionary reloads must not publish stale results after a mutation."""
+"""Harmony 词库刷新不能在修改完成后发布过期结果。"""
 
 from pathlib import Path
 
@@ -8,7 +8,8 @@ SOURCE = Path(__file__).resolve().parents[1] / "packages/ui/src/settings/harmony
 TEXT = SOURCE.read_text(encoding="utf-8")
 
 required = {
-    "reload owns a generation": "const reloadGeneration = useRef(0);" in TEXT,
+    "reload owns a generation":
+        "const reloadGeneration = useAsyncGeneration(collections, dictionary, galleryOpen);" in TEXT,
     "reload captures its generation": "const current = ++reloadGeneration.current;" in TEXT,
     "builtin count is generation guarded":
         ".then(" in TEXT and "current === reloadGeneration.current && setBuiltinCount(count)" in TEXT,

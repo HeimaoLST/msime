@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useConfirm } from "../core/confirm";
 import { readDictionaryFile } from "../dictionary/dictionary-file";
 import { useMountedRef } from "./use-mounted-ref";
+import { useAsyncGeneration } from "./use-async-generation";
 import { ActionButton } from "./action-button";
 import { SettingsEmptyMessage } from "./settings-empty-message";
 import { compactPage } from "../core/page-style";
@@ -124,6 +125,7 @@ export function VocabularyReviewPage({
   const requestRef = useRef<Promise<VocabularyReviewStatus> | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const mounted = useMountedRef();
+  const generation = useAsyncGeneration(client);
 
   useEffect(() => {
     requestRef.current = null;
@@ -133,32 +135,33 @@ export function VocabularyReviewPage({
     };
   }, [client]);
 
-  // One funnel, one in-flight request. Two taps on 认识 in quick succession would otherwise both
-  // read the same card and the second would schedule from a state the first had already replaced.
-  async function update(operation: () => Promise<VocabularyReviewStatus>) {
-    if (!mounted.current || requestRef.current) return;
+  // 同一代次只允许一个请求；文件读取和确认返回后，也必须在调用宿主前检查归属。
+  async function update(
+    operation: () => Promise<VocabularyReviewStatus>,
+    current = generation.current,
+  ) {
+    if (!mounted.current || generation.current !== current || requestRef.current) return;
     setBusy(true);
     setError("");
     const request = operation();
     requestRef.current = request;
     try {
       const next = await request;
-      if (!mounted.current || requestRef.current !== request) return;
+      if (!mounted.current || generation.current !== current || requestRef.current !== request)
+        return;
       setStatus(next);
     } catch {
-      if (mounted.current && requestRef.current === request)
+      if (mounted.current && generation.current === current && requestRef.current === request)
         setError("无法读取或保存背单词进度，请稍后重试。已有的进度不会被自动清空。");
     } finally {
-      if (requestRef.current === request) {
+      if (generation.current === current && requestRef.current === request) {
         requestRef.current = null;
         if (mounted.current) setBusy(false);
       }
     }
   }
 
-  // The client is the host binding and does not change while the page is mounted, so this reads
-  // once on open. Everything after that arrives from a mutator's return value rather than a
-  // refetch, which is what keeps the one in-flight request enough.
+  // 页面打开或客户端替换时读取一次；后续操作直接采纳修改返回值，避免额外刷新争用请求槽位。
   useEffect(() => {
     void update(() => client.load());
   }, [client]);
@@ -180,6 +183,8 @@ export function VocabularyReviewPage({
 
   async function chooseFile(file: File) {
     if (!client.importWordbook || requestRef.current) return;
+    const current = generation.current;
+    const isCurrent = () => mounted.current && generation.current === current;
     setImportNote("");
     setError("");
     // Real word lists arrive as UTF-16-with-BOM and GB18030 from Windows tools, which is why the
@@ -190,7 +195,7 @@ export function VocabularyReviewPage({
     } catch (cause) {
       // The read happens outside `update`, so nothing else would report it. Only the size refusal
       // carries a message worth showing; a failed read's own is technical and often English.
-      if (mounted.current)
+      if (isCurrent())
         setImportNote(
           file.size > WORDBOOK_FILE_BYTES && cause instanceof Error
             ? cause.message
@@ -198,13 +203,13 @@ export function VocabularyReviewPage({
         );
       return;
     }
-    if (!mounted.current) return;
+    if (!isCurrent()) return;
     const name = file.name.replace(/\.[^.]+$/, "").slice(0, 64) || "导入的词表";
     await update(async () => {
       const next = await client.importWordbook!(name, text);
-      if (mounted.current) setImportNote(`已导入「${name}」。`);
+      if (isCurrent()) setImportNote(`已导入「${name}」。`);
       return next;
-    });
+    }, current);
   }
 
   if (!status && busy) {
@@ -336,6 +341,7 @@ export function VocabularyReviewPage({
           {client.removeWordbook && selectedBook && !selectedBook.builtin && !selectedBook.pack && (
             <ActionButton
               action={async () => {
+                const current = generation.current;
                 if (
                   !(await confirm({
                     title: "删除词表",
@@ -345,7 +351,7 @@ export function VocabularyReviewPage({
                   }))
                 )
                   return;
-                await update(() => client.removeWordbook!(selectedBook.id));
+                await update(() => client.removeWordbook!(selectedBook.id), current);
               }}
               ariaBusy={busy}
               className="secondary"
@@ -409,6 +415,7 @@ export function VocabularyReviewPage({
         <div className="section">
           <ActionButton
             action={async () => {
+              const current = generation.current;
               if (
                 !(await confirm({
                   title: "清空进度",
@@ -418,7 +425,7 @@ export function VocabularyReviewPage({
                 }))
               )
                 return;
-              await update(() => client.reset());
+              await update(() => client.reset(), current);
             }}
             ariaBusy={busy}
             className="secondary"

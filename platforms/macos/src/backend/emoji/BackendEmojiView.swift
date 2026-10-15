@@ -38,7 +38,7 @@ struct MacEmojiView: View {
     category = page.destination(hasRecents: !recent.items.isEmpty)
   }
   private var mediaPage: MacEmojiMediaPage? { MacEmojiMediaPage(rawValue: category) }
-  private var columns: Int { category == "clipboard" ? 1 : MacEmojiGridMetrics.columns }
+  private var columns: Int { category == "clipboard" ? 1 : category == "symbols" ? MacEmojiGridMetrics.symbolColumns : MacEmojiGridMetrics.columns }
   @State private var group = ""
   @State private var parent = ""
   @State private var symbolGroups: [MacEmojiSymbolGroup] = []
@@ -51,6 +51,7 @@ struct MacEmojiView: View {
   @State private var groupsFailed = false
   @State private var selectedIndex = 0
   @State private var recent = MacEmojiRecents()
+  @State private var symbolRecent = MacEmojiRecents(storageKey: "MSIMESymbolRecentItems")
   @State private var toast = MacEmojiToastState()
   @State private var historyRevision = 0
   @State private var historyEnabled: Bool?
@@ -70,8 +71,14 @@ struct MacEmojiView: View {
   var copyText: (String) -> Bool = { MacEmojiClipboard.copy($0) }
 
   private func copyItem(_ item: MacEmojiCatalogItem) {
-    if category != "clipboard" { recent.recordSelection(item) }
-    toast.copied(item.text, success: copyText(item.text))
+    if category == "symbols" {
+      selection.submit(item.text, send: onSelect)
+      if !selection.rejected { symbolRecent.recordSelection(item); recent.recordSelection(item) }
+    } else {
+      let copied = copyText(item.text)
+      if copied && category != "clipboard" { recent.recordSelection(item) }
+      toast.copied(item.text, success: copied)
+    }
   }
 
   private func enableHistory() {
@@ -124,9 +131,9 @@ struct MacEmojiView: View {
     }
   }
   var body: some View {
-    VStack(alignment: .leading, spacing: 12) {
+    VStack(alignment: .leading, spacing: category == "symbols" ? 8 : 12) {
       HStack(spacing: 0) {
-        Text("Emoji and more").font(.system(size: 12, weight: .semibold))
+        Text(category == "symbols" ? "符号大全" : "Emoji and more").font(.system(size: 12, weight: .semibold))
         Spacer()
         MacEmojiCloseButton().frame(width: 28, height: 40 * 2 / 3)
       }.frame(height: 27)
@@ -138,8 +145,6 @@ struct MacEmojiView: View {
           if emojiPage {
             MacEmojiCategoryTabs(tabs: MacEmojiCategoryIcons.emojiTabs(groupsCategory == category ? groups : []),
               selected: emojiSection.wrappedValue, palette: palette, select: { emojiSection.wrappedValue = $0 })
-          } else if category == "symbols" && !symbolTabs.isEmpty {
-            MacEmojiCategoryTabs(tabs: symbolTabs, selected: parent, palette: palette, select: { resetNavigation(); parent = $0 })
           } else { Text(MacEmojiMainPage.title(category: category)).font(.system(size: 16, weight: .semibold)) }
         }
       }
@@ -147,6 +152,24 @@ struct MacEmojiView: View {
       MacEmojiSearchField(text: $search,
         presentation: MacEmojiSearchPresentation(category: category),
         palette: palette)
+      if category == "symbols" {
+        VStack(alignment: .leading, spacing: 4) {
+          HStack {
+            Text("最近使用").font(.caption)
+            Spacer()
+            if !symbolRecent.items.isEmpty { Button("清除") { symbolRecent.clear() }.buttonStyle(.plain).font(.caption) }
+          }
+          ScrollView(.horizontal) {
+            HStack(spacing: 4) {
+              if symbolRecent.items.isEmpty { Text("使用过的符号会显示在这里").font(.caption).foregroundStyle(MacEmojiPalette.color(palette.muted)) }
+              ForEach(Array(symbolRecent.items.enumerated()), id: \.offset) { _, item in
+                Button { copyItem(item) } label: { Text(item.text).font(.system(size: 20)).frame(width: 32, height: 32) }
+                  .buttonStyle(.plain).help(item.annotation)
+              }
+            }
+          }
+        }
+      }
       if category == "clipboard" {
         if historyEnabled == false && loadedQuery == queryID {
           MacEmojiClipboardDisabledView(palette: palette, enabling: enablingHistory, enable: enableHistory)
@@ -168,6 +191,11 @@ struct MacEmojiView: View {
       } else if let page = mediaPage {
         MacEmojiMediaPlaceholder(page: page, palette: palette)
       } else {
+      HStack(alignment: .top, spacing: 12) {
+      if category == "symbols" {
+        MacSymbolSidebar(tabs: [.init(id: "", title: "全部符号", icon: "")] + symbolTabs,
+          selected: parent, palette: palette, select: { resetNavigation(); search = ""; parent = $0 })
+      }
       GeometryReader { geometry in
       let flowWidth = max(0, geometry.size.width - 16)
       let flowSections = loadedQuery == queryID && category == "kaomoji" ? kaomojiSections : []
@@ -226,12 +254,25 @@ struct MacEmojiView: View {
       .overlayPreferenceValue(MacClipboardTooltipPreference.self) { anchors in
         MacClipboardTooltipOverlay(anchors: anchors, light: palette.background == 0xF7F7FA)
       }
+      }
+      HStack {
       Button("插入所选项") {
         guard loadedQuery == queryID, items.indices.contains(selectedIndex) else { return }
-        selection.submit(items[selectedIndex].text, send: onSelect)
+        if category == "symbols" { copyItem(items[selectedIndex]) }
+        else { selection.submit(items[selectedIndex].text, send: onSelect) }
       }.disabled(loadedQuery != queryID || !items.indices.contains(selectedIndex))
+      if category == "symbols" {
+        Button("复制所选符号") {
+          guard loadedQuery == queryID, items.indices.contains(selectedIndex) else { return }
+          let item = items[selectedIndex]
+          let copied = copyText(item.text)
+          if copied { symbolRecent.recordSelection(item) }
+          toast.copied(item.text, success: copied)
+        }.disabled(loadedQuery != queryID || !items.indices.contains(selectedIndex))
       }
-    }.padding(20).frame(minWidth: MacEmojiGridMetrics.minimumPanelWidth, minHeight: 500)
+      }
+      }
+    }.padding(20).frame(minWidth: category == "symbols" ? 560 : MacEmojiGridMetrics.minimumPanelWidth, minHeight: 500)
       .background(MacEmojiPalette.color(palette.background))
       .foregroundStyle(MacEmojiPalette.color(palette.text))
       .tint(MacEmojiPalette.color(palette.accent))
@@ -278,7 +319,7 @@ struct MacEmojiView: View {
             pluginGroupsCategory = selectedCategory
             symbolGroups = result?.0 ?? []
             symbolTabs = (result?.1 ?? []) + MacEmojiCategoryIcons.pluginSymbolTabs(loadedPlugins)
-            parent = symbolTabs.first?.id ?? ""
+            parent = ""
             groupsFailed = result == nil
             if result != nil { groupsCategory = selectedCategory }
             return

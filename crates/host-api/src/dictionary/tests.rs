@@ -29,6 +29,8 @@ fn import_engine_options() -> msime_engine::host::EngineOptions {
         chinese_punctuation: true,
         paired_punctuation: true,
         punctuation_lock: 0,
+        corner_quotes: false,
+        hollow_brackets: false,
         frequency_mode: "promote".into(),
         frequency_trigger_count: 1,
         frequency_linear_step: 1,

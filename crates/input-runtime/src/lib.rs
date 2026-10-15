@@ -38,6 +38,8 @@ pub use chinese_ime_lm::{CandidateFacts, Reranker, SentenceModel, DICTIONARY_SOU
 use msime_client_core::preferences::TouchKeyboardLayout;
 /// 每页候选数的上限，与共享偏好的校验一致；宿主和网页引擎从这里取，不各写一份。
 pub use msime_client_core::preferences::MAX_CANDIDATE_PAGE_SIZE;
+/// View 里报告的已解析标点样式，类型与 client-core 的解析函数同源。
+pub use msime_client_core::punctuation::{PunctuationMarks, QuoteMarks};
 use msime_engine::host::{
     local_mode_counts_as_typing, CandidateEdge, Command, CommandTableEntry,
     CommandTranslationQuery, EngineResult, EngineSnapshot, MentionEntry, OnlineQuerySnapshot,

@@ -1,5 +1,6 @@
 import app.msime.android.EditorBridge;
 import app.msime.android.EditorPolicy;
+import app.msime.android.CompositionTextPolicy;
 import app.msime.android.EnglishCapitalizationPolicy;
 import android.text.InputType;
 import java.util.ArrayList;
@@ -78,6 +79,11 @@ public final class EditorSmoke {
         sink.calls.clear();
         check(bridge.apply(sink, null, ""));
         check(sink.calls.equals(List.of("begin", "end")));
+        // 长度过滤器可能把组字区截短；宿主读回光标前文字后应识别出这种情况，改为只在键盘上显示组字。
+        check(CompositionTextPolicy.matchesEditorSuffix("合成文字nihao", "nihao"));
+        check(!CompositionTextPolicy.matchesEditorSuffix("合成文字ni", "nihao"));
+        check(CompositionTextPolicy.matchesEditorSuffix(null, "nihao"));
+        check(CompositionTextPolicy.composingLength("合成文字ni", "nihao") == 2);
         sink.calls.clear();
         // 空的组字区同样算没有。
         check(bridge.apply(sink, null, "かn"));
@@ -99,7 +105,8 @@ public final class EditorSmoke {
         // No-suggestion text, and Chrome's address bar (URI + no suggestions), still compose.
         check(EditorPolicy.useEngine(0x80001));
         check(EditorPolicy.useEngine(0x80011));
-        for (int type : new int[] {0, 2, 3, 0x81, 0x91, 0xe1}) check(!EditorPolicy.useEngine(type));
+        for (int type : new int[] {2, 3, 0x81, 0x91, 0xe1}) check(!EditorPolicy.useEngine(type));
+        check(EditorPolicy.useEngine(0));
         check(EditorPolicy.allowLearning(0));
         check(!EditorPolicy.allowLearning(0x1000000));
         // Key heatmap exclusion: text and numeric passwords, and fields that ask for no learning.

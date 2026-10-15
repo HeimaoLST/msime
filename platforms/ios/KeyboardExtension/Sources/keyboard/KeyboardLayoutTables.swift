@@ -15,6 +15,8 @@ enum SymbolLayerLayout {
 
   private static let numberDigits = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
   private static let chineseNumberSymbols = ["-", "/", "：", "；", "（", "）", "¥", "@", "“", "”"]
+  /// 直角引号样式（View 的 `punctuation_marks`）下中文 123 层的两个引号键。这两个键代表首选引号，原样插入，所以换成「」，不按 ASCII 键位对应成『』。
+  private static let chineseCornerNumberSymbols = ["-", "/", "：", "；", "（", "）", "¥", "@", "「", "」"]
   private static let englishNumberSymbols = ["-", "/", ":", ";", "(", ")", "$", "@", "\"", "'"]
   private static let chinesePunctuation = ["。", "，", "、", "？", "！"]
   private static let englishPunctuation = [".", ",", "?", "!", "…"]
@@ -22,13 +24,14 @@ enum SymbolLayerLayout {
   private static let chineseMoreSymbolsSecond = ["_", "\\", "|", "~", "《", "》", "€", "&", "·", "…"]
   private static let englishMoreSymbolsSecond = ["_", "\\", "|", "~", "<", ">", "€", "&", "·", "£"]
 
-  /// 一层的字符键，从上到下：两行各十个，然后是层切换键与 ⌫ 之间的五个标点键。`more` 选 #+= 层，`chinese` 选中文版。
-  static func characterRows(more: Bool, chinese: Bool) -> [[String]] {
+  /// 一层的字符键，从上到下：两行各十个，然后是层切换键与 ⌫ 之间的五个标点键。`more` 选 #+= 层，`chinese` 选中文版，`cornerQuotes` 让中文 123 层的引号键用直角引号。
+  static func characterRows(more: Bool, chinese: Bool, cornerQuotes: Bool = false) -> [[String]] {
     let punctuation = chinese ? chinesePunctuation : englishPunctuation
     if more {
       return [moreSymbolsFirst, chinese ? chineseMoreSymbolsSecond : englishMoreSymbolsSecond, punctuation]
     }
-    return [numberDigits, chinese ? chineseNumberSymbols : englishNumberSymbols, punctuation]
+    let numberSymbols = chinese ? (cornerQuotes ? chineseCornerNumberSymbols : chineseNumberSymbols) : englishNumberSymbols
+    return [numberDigits, numberSymbols, punctuation]
   }
 
   /// 第三行的第一个键：123 层上是 `#+=`，#+= 层上是 `123`。

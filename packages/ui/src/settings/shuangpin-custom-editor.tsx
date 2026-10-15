@@ -5,10 +5,13 @@ import { ErrorAlert } from "../core/error-alert";
 import { GroupList, PageIntro, Row } from "../core/platform-controls";
 import { select as selectStyle, textInput } from "../core/platform-controls-style";
 import { StatusMessage } from "../core/status-message";
+import { useAsyncActionRunner } from "../core/use-async-action";
+import { useDebouncedCallback } from "../core/use-debounced-callback";
 import { readDictionaryFile } from "../dictionary/dictionary-file";
 import { ActionButton } from "./action-button";
 import { SettingsManagerActions } from "./settings-manager-actions";
 import * as settings from "./settings-style";
+import { useAsyncGeneration } from "./use-async-generation";
 import {
   builtinShuangpinProfiles,
   emptyShuangpinCustomProfile,
@@ -92,19 +95,24 @@ export function ShuangpinCustomEditor({
   const [template, setTemplate] = useState<BuiltinShuangpinProfile>("xiaohe");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
   // 宿主没能回答这张表能不能用；改下一个键时重新问。
   const [checkFailed, setCheckFailed] = useState(false);
-  const generation = useRef(0);
-  const mounted = useRef(true);
   const fileInput = useRef<HTMLInputElement>(null);
   const back = useRef<HTMLButtonElement>(null);
-
-  useEffect(
-    () => () => {
-      mounted.current = false;
+  const { busy, mounted, run: runAsyncAction } = useAsyncActionRunner(setError, setNotice);
+  const generation = useAsyncGeneration(client, draft);
+  const { schedule: validateLater } = useDebouncedCallback(
+    (validationClient: ShuangpinCustomProfileClient, profile: Draft, current: number) => {
+      validationClient
+        .validate(profile)
+        .then((result) => {
+          if (mounted.current && current === generation.current) setProblem(result ?? null);
+        })
+        .catch(() => {
+          if (mounted.current && current === generation.current) setCheckFailed(true);
+        });
     },
-    [],
+    VALIDATE_DELAY_MS,
   );
   // 打开时焦点落在返回上，键盘用户不会停在一个已经消失的「编辑」行上。
   useLayoutEffect(() => {
@@ -116,18 +124,8 @@ export function ShuangpinCustomEditor({
     const current = ++generation.current;
     setProblem(undefined);
     setCheckFailed(false);
-    const timer = window.setTimeout(() => {
-      client
-        .validate(draft)
-        .then((result) => {
-          if (mounted.current && current === generation.current) setProblem(result ?? null);
-        })
-        .catch(() => {
-          if (mounted.current && current === generation.current) setCheckFailed(true);
-        });
-    }, VALIDATE_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [client, draft]);
+    validateLater(client, draft, current);
+  }, [client, draft, validateLater]);
 
   const dirty = !sameShuangpinCustomProfile(draft, saved);
   const valid = problem === null;
@@ -144,16 +142,10 @@ export function ShuangpinCustomEditor({
     });
   };
 
-  const run = async (action: () => Promise<void>) => {
-    setBusy(true);
-    setError("");
-    setNotice("");
-    try {
-      await action();
-    } finally {
-      if (mounted.current) setBusy(false);
-    }
-  };
+  const run = (action: () => Promise<void>) =>
+    runAsyncAction(async () => action(), {
+      formatError: () => "操作失败，请稍后重试。",
+    });
 
   const applyTemplate = () =>
     run(async () => {

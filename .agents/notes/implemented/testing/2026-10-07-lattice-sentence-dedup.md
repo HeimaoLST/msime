@@ -21,3 +21,5 @@ Status: implemented
 ## Consequences
 
 64 条以内的去重时间复杂度为平方级，但默认 beam 有明确小上限；更大的自定义 beam 继续走哈希表路径。
+
+[默认整句行所有权转移](2026-10-14-generated-lattice-row-ownership.md)直接把默认分支路径字段交给候选，沿用解码唯一性、去重和块容量规则；神经分支继续借用并复制实际输出字段。

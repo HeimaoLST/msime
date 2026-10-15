@@ -68,7 +68,7 @@ constexpr ExpandedGridStep StepExpandedGrid(std::size_t cursor, std::size_t coun
     return {cursor, false};
 }
 
-// 可见的第一行：光标所在行在可见范围之外时滚到刚好看见它，其余时候不动；最后几行不留空。
+// 可见的第一行：光标所在行在可见范围之外时滚到刚好看见它，其余时候不动；末页允许少画几行，保持打开时的高亮行在顶部。
 constexpr std::size_t ExpandedGridFirstRow(std::size_t firstRow, std::size_t cursorRow, std::size_t rows,
                                            std::size_t visibleRows)
 {
@@ -82,6 +82,6 @@ constexpr std::size_t ExpandedGridFirstRow(std::size_t firstRow, std::size_t cur
         firstRow = cursorRow;
     if (cursorRow >= firstRow + visibleRows)
         firstRow = cursorRow + 1 - visibleRows;
-    return firstRow > rows - visibleRows ? rows - visibleRows : firstRow;
+    return firstRow < rows ? firstRow : rows - 1;
 }
 } // namespace msime::mac

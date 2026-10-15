@@ -398,8 +398,29 @@ static void TestAIItems() {
         assert(([results isEqual:@[@{@"text":@"候选甲", @"translation":@"释义甲"}]])); done = YES;
     }];
     [batch start]; assert(batch.requests.count == 1 && batch.requests[0].started);
+    // AI 传输允许 8 秒，超过普通翻译的 6 秒后返回的有效回答仍须进入结果。
+    batch.now = 7;
     NSData *body = [NSJSONSerialization dataWithJSONObject:@{@"choices":@[@{@"message":@{@"content":@"{\"candidates\":[{\"text\":\"释义甲\"},{\"text\":\"超出限额\"}]}"}}]} options:0 error:nil];
     batch.requests[0].reply(body); assert(done);
+    AssertReleased(batch);
+}
+
+// 无响应的 AI 批次必须在 8 秒截止时完成一次，取消传输并忽略已排队的迟到回包。
+static void TestAIDeadline() {
+    NSArray *items = @[@{@"text":@"合成候选", @"request":@{@"url":@"https://ai.invalid/chat"}}];
+    __block NSUInteger calls = 0;
+    SyntheticTranslationBatch *batch = [[SyntheticTranslationBatch alloc] initWithAIItems:items
+        configuration:NSURLSessionConfiguration.ephemeralSessionConfiguration completion:^(NSArray *results) {
+        assert(results.count == 0 && ++calls == 1);
+    }];
+    [batch start];
+    NSTimer *timer = [batch valueForKey:@"timer"];
+    assert(timer.valid && timer.fireDate.timeIntervalSinceNow > 7 && timer.fireDate.timeIntervalSinceNow <= 8);
+    batch.now = 8;
+    [timer fire];
+    assert(calls == 1 && batch.requests[0].cancelled && !timer.valid);
+    batch.requests[0].reply(Response(@"迟到合成回答"));
+    assert(calls == 1);
     AssertReleased(batch);
 }
 int main() {
@@ -415,6 +436,7 @@ int main() {
         TestTencentFailedRepliesAreNotAnswers();
         TestDetachLetsInFlightLand();
         TestAIItems();
+        TestAIDeadline();
     }
     return 0;
 }

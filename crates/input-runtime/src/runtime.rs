@@ -2,9 +2,9 @@
 //! providers return asynchronously.
 
 use super::*;
-pub(crate) use msime_engine::ordering::apply_order;
 use msime_engine::ordering::{
-    ensure_engine_order, rerank_pick, rotate_to_front, runner_up_order, ParallelOrderRows,
+    apply_order_with, ensure_engine_order, rerank_pick, rotate_to_front, runner_up_order,
+    ParallelOrderRows,
 };
 // 排序决策搬进了 `msime_engine::ordering`；`tests.rs` 仍按原来的 crate 内名字引用这几项，这里为它们重新导出。
 #[cfg(test)]
@@ -91,6 +91,7 @@ pub struct Runtime<E: InputEngine = Session> {
     pub(crate) engine_order: Vec<usize>,
     pub(crate) snapshot_valid: bool,
     pub(crate) character_width: CharacterWidth,
+    pub(crate) punctuation_marks: PunctuationMarks,
     pub(crate) touch_keyboard_layout: TouchKeyboardLayout,
     /// 整个候选列表只给出一个词的完整五笔码，是否在第四键提交。
     ///
@@ -192,6 +193,24 @@ pub(crate) fn move_to_back<T>(items: &mut [T], moved: &[bool]) {
     }
 }
 
+/// 稀疏释义不为全候选列表建集合；任一侧最多 8 条时，比较次数仍受小侧上限约束。
+fn retain_candidate_translations(
+    translations: &mut HashMap<String, String>,
+    candidates: &[String],
+) {
+    if translations.is_empty() {
+        return;
+    }
+    if candidates.is_empty() {
+        translations.clear();
+    } else if translations.len() <= 8 || candidates.len() <= 8 {
+        translations.retain(|text, _| candidates.contains(text));
+    } else {
+        let candidates: HashSet<&str> = candidates.iter().map(String::as_str).collect();
+        translations.retain(|text, _| candidates.contains(text.as_str()));
+    }
+}
+
 /// 排序决策读取的候选行，借用快照里的并行数组。调用方先确认各数组等长。
 fn order_rows(snapshot: &EngineSnapshot) -> ParallelOrderRows<'_> {
     ParallelOrderRows::new(
@@ -200,6 +219,7 @@ fn order_rows(snapshot: &EngineSnapshot) -> ParallelOrderRows<'_> {
         &snapshot.candidate_answers_key,
         &snapshot.candidate_corrected,
     )
+    .with_static_evidence(&snapshot.candidate_static_evidence)
 }
 
 impl Runtime<Session> {
@@ -551,19 +571,31 @@ impl<E: InputEngine> Runtime<E> {
         Ok(())
     }
 
-    /// Applies a candidate permutation to every parallel view and the Engine seat map.
-    /// Candidate text, code, annotations and source metadata must move together.
+    /// 一次遍历排列，同步交换候选字段和引擎座位映射，共用循环访问缓冲。
     pub(crate) fn apply_candidate_order(&mut self, order: &[usize]) {
         ensure_engine_order(&mut self.engine_order, order.len());
         let snapshot = &mut self.cached;
-        apply_order(&mut snapshot.candidates, order);
-        apply_order(&mut snapshot.candidate_codes, order);
-        apply_order(&mut snapshot.candidate_annotations, order);
-        apply_order(&mut snapshot.candidate_sources, order);
-        apply_order(&mut snapshot.candidate_positions, order);
-        apply_order(&mut snapshot.candidate_corrected, order);
-        apply_order(&mut snapshot.candidate_answers_key, order);
-        apply_order(&mut self.engine_order, order);
+        debug_assert_eq!(snapshot.candidates.len(), order.len());
+        debug_assert_eq!(snapshot.candidate_codes.len(), order.len());
+        debug_assert_eq!(snapshot.candidate_annotations.len(), order.len());
+        debug_assert_eq!(snapshot.candidate_sources.len(), order.len());
+        debug_assert_eq!(snapshot.candidate_positions.len(), order.len());
+        debug_assert_eq!(snapshot.candidate_corrected.len(), order.len());
+        debug_assert_eq!(snapshot.candidate_answers_key.len(), order.len());
+        let engine_order = &mut self.engine_order;
+        apply_order_with(order, |left, right| {
+            snapshot.candidates.swap(left, right);
+            snapshot.candidate_codes.swap(left, right);
+            snapshot.candidate_annotations.swap(left, right);
+            snapshot.candidate_sources.swap(left, right);
+            snapshot.candidate_positions.swap(left, right);
+            snapshot.candidate_corrected.swap(left, right);
+            snapshot.candidate_answers_key.swap(left, right);
+            if snapshot.candidate_static_evidence.len() == order.len() {
+                snapshot.candidate_static_evidence.swap(left, right);
+            }
+            engine_order.swap(left, right);
+        });
     }
 
     pub fn set_dedicated_english(&mut self, enabled: bool) -> Result<(), RuntimeError> {
@@ -663,6 +695,7 @@ impl<E: InputEngine> Runtime<E> {
             cached,
             snapshot_valid: true,
             character_width: CharacterWidth::Halfwidth,
+            punctuation_marks: PunctuationMarks::default(),
             touch_keyboard_layout,
             wubi_auto_commit_unique: true,
             phrase_preedit: false,
@@ -758,6 +791,11 @@ impl<E: InputEngine> Runtime<E> {
 
     pub fn set_character_width(&mut self, width: CharacterWidth) {
         self.character_width = width;
+    }
+
+    /// 记下引擎当前用的标点样式，只用于在 View 里报告；出字由引擎按自己的选项决定。宿主在建会话和每次重建引擎后设它。
+    pub fn set_punctuation_marks(&mut self, marks: PunctuationMarks) {
+        self.punctuation_marks = marks;
     }
 
     /// Put text into the committed context without typing it.
@@ -866,6 +904,7 @@ impl<E: InputEngine> Runtime<E> {
             nine_key_strokes: self.cached.nine_key_strokes.clone(),
             touch_keyboard_layout: self.touch_keyboard_layout,
             character_width: self.character_width,
+            punctuation_marks: self.punctuation_marks,
             microsoft_shuangpin: self.cached.microsoft_shuangpin,
             shuangpin_profile: self.cached.shuangpin_profile.clone(),
             answered_by_pinyin_fallback: self.cached.answered_by_pinyin_fallback,
@@ -1041,9 +1080,19 @@ impl<E: InputEngine> Runtime<E> {
                 .copied()
                 .unwrap_or_default(),
             highlighted: index == self.highlighted,
-            translation: (!self.translations.is_empty())
-                .then(|| self.translations.get(text).cloned())
-                .flatten(),
+            // Translation answers are keyed by text for the host ABI. Keep
+            // rows whose source is explicitly ineligible from inheriting an
+            // answer for an ordinary row with the same text.
+            translation: (!self.translations.is_empty()
+                && !msime_client_core::translation::source_gets_no_gloss(
+                    self.cached
+                        .candidate_sources
+                        .get(index)
+                        .copied()
+                        .unwrap_or_default(),
+                ))
+            .then(|| self.translations.get(text).cloned())
+            .flatten(),
             #[cfg(any(
                 target_os = "macos",
                 target_os = "windows",
@@ -1157,7 +1206,7 @@ impl<E: InputEngine> Runtime<E> {
         if generation != self.generation {
             return false;
         }
-        let translations: HashMap<String, String> = translations.into_iter().collect();
+        let mut translations: HashMap<String, String> = translations.into_iter().collect();
         // The answer to a `/fy` request arrives through the same host path as candidate glosses, so a host forwarding `translation_query` needs nothing else: it becomes the row that commits the translation, not a gloss under the English.
         if let Some(query) = self.command_translation() {
             if let Some(translation) = translations.get(&query.text) {
@@ -1172,12 +1221,8 @@ impl<E: InputEngine> Runtime<E> {
             changed = !self.translations.is_empty();
             self.translations.clear();
         } else {
-            let candidates: HashSet<&str> =
-                self.cached.candidates.iter().map(String::as_str).collect();
-            for (text, translation) in translations
-                .into_iter()
-                .filter(|(text, _)| candidates.contains(text.as_str()))
-            {
+            retain_candidate_translations(&mut translations, &self.cached.candidates);
+            for (text, translation) in translations {
                 if self.translations.get(&text) != Some(&translation) {
                     self.translations.insert(text, translation);
                     changed = true;
@@ -1679,147 +1724,153 @@ impl<E: InputEngine> Runtime<E> {
             return false;
         }
 
-        // A provider may answer with several candidates - the AI limit reaches ten - and they take
-        // their seat as a group. The reference has only one of each to place and silently drops the
-        // rest; dropping a candidate the user was offered is not an option here.
-        //
-        // 有中文候选时，引擎只在两种情况下把英文放在首位，从不看权重或置顶：输入拆不成完整音节、英文正好完全匹配整段输入（`CandidateQueries::mixed`），或者用户把这个词固定在第一位（`apply_candidate_positions`）。所以本地候选还在、首位却是英文时，就是这样一个词：它保留首位，领先的英文座位不再填第二个英文词。
-        //
-        // 日文混输行（`CandidateSource::MixedJapanese`，只有一行）按英文的规矩坐：引擎让它领先时它在首位，英文已经领先时在第二位，云候选、AI 候选到达后保持不动；不领先时它坐英文的优先座位，排在英文那一行前面。
-        let is_local = |source: u8| {
-            !matches!(
-                source,
-                CLOUD | AI | AI_PENDING | ENGLISH | EMOJI | KAOMOJI | JAPANESE
-            )
-        };
-        let first_source = |source: u8| {
-            snapshot
-                .candidate_sources
-                .iter()
-                .position(|candidate_source| *candidate_source == source)
-        };
-        let local_count = snapshot
+        const LOCAL_GROUP: usize = 0;
+        const CLOUD_GROUP: usize = 1;
+        const AI_GROUP: usize = 2;
+        const JAPANESE_GROUP: usize = 3;
+        const ENGLISH_GROUP: usize = 4;
+        const EMOJI_GROUP: usize = 5;
+        const KAOMOJI_GROUP: usize = 6;
+        let mut counts = [0; 7];
+        let mut fixed_english_count = 0;
+        for (source, position) in snapshot
             .candidate_sources
             .iter()
-            .filter(|source| is_local(**source))
-            .count();
-        let first_english = first_source(ENGLISH);
-        let promoted_english = first_english == Some(0) && local_count != 0;
-        let first_japanese = first_source(JAPANESE);
-        let promoted_japanese =
-            local_count != 0 && first_japanese == Some(usize::from(promoted_english));
-        let has_cloud = snapshot.candidate_sources.contains(&CLOUD);
-        let first_emoji = first_source(EMOJI);
-        let first_kaomoji = first_source(KAOMOJI);
-        let mut order = Vec::with_capacity(count);
-        let append_group =
-            |order: &mut Vec<usize>, source: u8, skip: usize, limit: Option<usize>| {
-                let end = limit.map_or(usize::MAX, |count| skip.saturating_add(count));
-                let mut matched = 0;
-                for (index, candidate_source) in snapshot.candidate_sources.iter().enumerate() {
-                    if *candidate_source != source {
-                        continue;
-                    }
-                    if matched < skip {
-                        matched += 1;
-                        continue;
-                    }
-                    if matched >= end {
-                        break;
-                    }
-                    order.push(index);
-                    matched += 1;
+            .zip(&snapshot.candidate_positions)
+        {
+            match *source {
+                CLOUD => counts[CLOUD_GROUP] += 1,
+                AI | AI_PENDING => counts[AI_GROUP] += 1,
+                JAPANESE => counts[JAPANESE_GROUP] += 1,
+                ENGLISH => {
+                    counts[ENGLISH_GROUP] += 1;
+                    fixed_english_count += usize::from(*position > 0);
                 }
-            };
-        let append_local = |order: &mut Vec<usize>, skip: usize, limit: Option<usize>| {
-            let end = limit.map_or(usize::MAX, |count| skip.saturating_add(count));
-            let mut matched = 0;
-            for (index, candidate_source) in snapshot.candidate_sources.iter().enumerate() {
-                if !is_local(*candidate_source) {
-                    continue;
-                }
-                if matched < skip {
-                    matched += 1;
-                    continue;
-                }
-                if matched >= end {
-                    break;
-                }
-                order.push(index);
-                matched += 1;
+                EMOJI => counts[EMOJI_GROUP] += 1,
+                KAOMOJI => counts[KAOMOJI_GROUP] += 1,
+                _ => counts[LOCAL_GROUP] += 1,
             }
-        };
-        if promoted_english {
-            order.push(0);
         }
-        if promoted_japanese {
-            order.extend(first_japanese);
-        }
-        // The hiragana/katakana pair of a single complete kana keeps seats 1 and 2 ahead of every online candidate, as the reference's `preserve_single_kana_pair` does (server/src/ipc/event_listener.cpp); the reading is the converted kana, so one character in U+3041..U+3096 is its `IsSingleKanaConversion`.
+        // 引擎把完全匹配或固定在首位的英文保留在首位；领先的日文混输行也不被在线行挤走。
+        let promoted_english = counts[LOCAL_GROUP] > 0 && snapshot.candidate_sources[0] == ENGLISH;
+        let promoted_japanese = counts[LOCAL_GROUP] > 0
+            && snapshot.candidate_sources[usize::from(promoted_english)] == JAPANESE;
+        let has_cloud = counts[CLOUD_GROUP] > 0;
         let mut reading = snapshot.reading.chars();
         let single_kana = scheme_type(snapshot.scheme) == Some(SchemeType::JapaneseRomaji)
             && matches!((reading.next(), reading.next()), (Some(kana), None) if ('\u{3041}'..='\u{3096}').contains(&kana));
         let local_prefix = if single_kana { 2 } else { 1 };
-        // 坐 AI 座位的那一行，以及排到最后的其余 AI 候选。
-        let mut ai_rows = snapshot
-            .candidate_sources
-            .iter()
-            .enumerate()
-            .filter(|(_, source)| is_ai(**source))
-            .map(|(index, _)| index);
-        let ai_seat = ai_rows.next();
-        append_local(&mut order, 0, Some(local_prefix));
+
+        // 每组有优先段和剩余段，组内按引擎原顺序排列；AI 的剩余段放在整个列表末尾。
+        let mut head_starts = [0; 7];
+        let mut head_counts = [0; 7];
+        let mut next_seat = 0;
+        let mut head = |group: usize, limit: usize| {
+            head_starts[group] = next_seat;
+            head_counts[group] = counts[group].min(limit);
+            next_seat += head_counts[group];
+        };
+        if promoted_english {
+            head(ENGLISH_GROUP, 1);
+        }
+        if promoted_japanese {
+            head(JAPANESE_GROUP, 1);
+        }
+        head(LOCAL_GROUP, local_prefix);
+        head(CLOUD_GROUP, counts[CLOUD_GROUP]);
         if has_cloud {
-            append_group(&mut order, CLOUD, 0, None);
-            order.extend(ai_seat);
+            head(AI_GROUP, 1);
         }
         if !promoted_japanese {
-            order.extend(first_japanese);
+            head(JAPANESE_GROUP, 1);
         }
         if !promoted_english {
-            if let Some(index) = first_english {
-                order.push(index);
-            }
+            head(ENGLISH_GROUP, 1);
         }
         if !has_cloud {
-            order.extend(ai_seat);
+            head(AI_GROUP, 1);
         }
-        if let Some(index) = first_emoji {
-            order.push(index);
+        head(EMOJI_GROUP, 1);
+        head(KAOMOJI_GROUP, 1);
+        let mut tail_starts = [0; 7];
+        for group in [
+            LOCAL_GROUP,
+            ENGLISH_GROUP,
+            JAPANESE_GROUP,
+            EMOJI_GROUP,
+            KAOMOJI_GROUP,
+            AI_GROUP,
+        ] {
+            tail_starts[group] = next_seat;
+            next_seat += counts[group] - head_counts[group];
         }
-        if let Some(index) = first_kaomoji {
-            order.push(index);
-        }
-        append_local(&mut order, local_prefix, None);
-        append_group(&mut order, ENGLISH, 1, None);
-        append_group(&mut order, JAPANESE, 1, None);
-        append_group(&mut order, EMOJI, 1, None);
-        append_group(&mut order, KAOMOJI, 1, None);
-        // An English candidate the user fixed to a seat goes back to that seat after the seating, so a cloud or AI reply does not push it behind the online candidates (reference: server/src/ipc/candidate_selection_policy.h, the fixed-English pass at the end of NormalizeMixedCandidateOrder). Seats are 1-based and 0 means unfixed; a seat past the end clamps to the end, as the reference's `insert_at` does.
-        let mut fixed_english = Vec::with_capacity(count);
-        order.retain(|index| {
-            let fixed = snapshot.candidate_sources[*index] == ENGLISH
-                && snapshot.candidate_positions[*index] > 0;
-            if fixed {
-                fixed_english.push(*index);
-            }
-            !fixed
-        });
-        fixed_english.sort_by_key(|index| snapshot.candidate_positions[*index]);
-        for index in fixed_english {
-            let seat = usize::from(snapshot.candidate_positions[index] - 1).min(order.len());
-            order.insert(seat, index);
-        }
-        order.extend(ai_rows);
-        // A permutation or nothing: a missing or repeated index would silently drop a candidate.
-        debug_assert_eq!(order.len(), count);
-        if order.len() != count {
-            return false;
-        }
-        if order.iter().enumerate().all(|(seat, index)| seat == *index) {
-            return false;
-        }
+        debug_assert_eq!(next_seat, count);
 
+        // 第二次扫描直接计算每行的新座位；全部未变位时不建立索引表。
+        let mut order = None;
+        let mut seen = [0; 7];
+        let mut take_ordinal = |group: usize| {
+            let ordinal = seen[group];
+            seen[group] += 1;
+            (group, ordinal)
+        };
+        for (index, source) in snapshot.candidate_sources.iter().enumerate() {
+            let (group, ordinal) = match *source {
+                CLOUD => take_ordinal(CLOUD_GROUP),
+                AI | AI_PENDING => take_ordinal(AI_GROUP),
+                JAPANESE => take_ordinal(JAPANESE_GROUP),
+                ENGLISH => take_ordinal(ENGLISH_GROUP),
+                EMOJI => take_ordinal(EMOJI_GROUP),
+                KAOMOJI => take_ordinal(KAOMOJI_GROUP),
+                _ => take_ordinal(LOCAL_GROUP),
+            };
+            let seat = if ordinal < head_counts[group] {
+                head_starts[group] + ordinal
+            } else {
+                tail_starts[group] + ordinal - head_counts[group]
+            };
+            if seat != index && order.is_none() {
+                order = Some((0..count).collect::<Vec<usize>>());
+            }
+            if let Some(order) = &mut order {
+                order[seat] = index;
+            }
+        }
+        // 固定英文行在在线座位排好后归位，云或 AI 不能把它挤离指定座位（参考 server/src/ipc/candidate_selection_policy.h 的 NormalizeMixedCandidateOrder）。位置从 1 开始，超出末尾时夹到末尾；来源统计给出实际行数，空缓冲不申请存储。
+        if fixed_english_count > 0 {
+            let order = order.get_or_insert_with(|| (0..count).collect::<Vec<usize>>());
+            // 只压缩非 AI 尾部；空出的槽供固定英文插回，AI 尾部始终留在原处。
+            let prefix_len = count - counts[AI_GROUP].saturating_sub(1);
+            let mut fixed_english = Vec::with_capacity(fixed_english_count);
+            let mut write = 0;
+            for read in 0..prefix_len {
+                let index = order[read];
+                if snapshot.candidate_sources[index] == ENGLISH
+                    && snapshot.candidate_positions[index] > 0
+                {
+                    fixed_english.push(index);
+                } else {
+                    order[write] = index;
+                    write += 1;
+                }
+            }
+            fixed_english.sort_by_key(|index| snapshot.candidate_positions[*index]);
+            for index in fixed_english {
+                let seat = usize::from(snapshot.candidate_positions[index] - 1).min(write);
+                order.copy_within(seat..write, seat + 1);
+                order[seat] = index;
+                write += 1;
+            }
+            debug_assert_eq!(write, prefix_len);
+        }
+        let Some(order) = order else {
+            return false;
+        };
+        // 排列必须包含全部候选，恒等排列不应用到候选数组。
+        debug_assert_eq!(order.len(), count);
+        if order.len() != count || order.iter().enumerate().all(|(seat, index)| seat == *index) {
+            return false;
+        }
         self.apply_candidate_order(&order);
         true
     }
@@ -1852,7 +1903,7 @@ impl<E: InputEngine> Runtime<E> {
         {
             return false;
         }
-        // 方案、五笔表码和上文窗口的判断都在 `rerank_pick` 里，这里只负责把八个并行数组同步旋转。
+        // 方案、五笔表码和上文窗口的判断都在 `rerank_pick` 里，这里同步旋转候选元数据和引擎座位映射。
         let rows = order_rows(snapshot);
         let Some(promote) = rerank_pick(
             reranker,
@@ -1872,13 +1923,16 @@ impl<E: InputEngine> Runtime<E> {
         rotate_to_front(&mut snapshot.candidate_positions, promote);
         rotate_to_front(&mut snapshot.candidate_corrected, promote);
         rotate_to_front(&mut snapshot.candidate_answers_key, promote);
+        if snapshot.candidate_static_evidence.len() == count {
+            rotate_to_front(&mut snapshot.candidate_static_evidence, promote);
+        }
         rotate_to_front(&mut self.engine_order, promote);
         true
     }
 
-    /// Keep the leading sentence readings together near the top and move the rest of them behind the list.
+    /// 将领先的整句读法保持在顶部附近，其余读法移到列表末尾。
     ///
-    /// 规则本身（保留几条整句读法、哪些算整句、为什么挪而不删）见 `msime_engine::ordering::runner_up_order`；这里只把它给出的排列同步应用到八个并行数组上。
+    /// 规则本身（保留几条整句读法、哪些算整句、为什么挪而不删）见 `msime_engine::ordering::runner_up_order`；这里只把排列同步应用到候选元数据和引擎座位映射上。
     pub(crate) fn demote_runner_up_readings(&mut self) -> bool {
         if !self.cached.conversion.is_empty() {
             return false;
@@ -1905,11 +1959,9 @@ impl<E: InputEngine> Runtime<E> {
     pub(crate) fn refresh_online_candidates(&mut self) -> Result<(), RuntimeError> {
         // 在线结果不改变组字，只保留前后都存在的词条释义；代次校验照旧。
         let mut translations = std::mem::take(&mut self.translations);
-        let before: HashSet<&str> = self.cached.candidates.iter().map(String::as_str).collect();
-        translations.retain(|text, _| before.contains(text.as_str()));
+        retain_candidate_translations(&mut translations, &self.cached.candidates);
         self.refresh()?;
-        let after: HashSet<&str> = self.cached.candidates.iter().map(String::as_str).collect();
-        translations.retain(|text, _| after.contains(text.as_str()));
+        retain_candidate_translations(&mut translations, &self.cached.candidates);
         self.translations = translations;
         Ok(())
     }
@@ -1942,6 +1994,7 @@ impl<E: InputEngine> Runtime<E> {
                     candidate_positions: Vec::new(),
                     candidate_corrected: Vec::new(),
                     candidate_answers_key: Vec::new(),
+                    candidate_static_evidence: Vec::new(),
                     candidate_list_open: false,
                     microsoft_shuangpin: false,
                     shuangpin_profile: String::new(),
@@ -1986,6 +2039,7 @@ impl<E: InputEngine> Runtime<E> {
             && self.cached.candidate_positions == previous.candidate_positions
             && self.cached.candidate_corrected == previous.candidate_corrected
             && self.cached.candidate_answers_key == previous.candidate_answers_key
+            && self.cached.candidate_static_evidence == previous.candidate_static_evidence
             && self.cached.conversion == previous.conversion
             && self.cached.conversion_focus_start == previous.conversion_focus_start
         {

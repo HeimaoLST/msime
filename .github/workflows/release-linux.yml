@@ -6,6 +6,12 @@ on:
       prerelease: {description: Mark as prerelease, required: false, default: false, type: boolean}
       publish: {description: Publish the build as a linux-v release (otherwise it is only uploaded as a workflow artifact), required: false, default: true, type: boolean}
       legacy: {description: "Also build the IBus-only legacy .deb for glibc 2.28 systems (Debian 10, UOS 20) and attach it as msime-linux-legacy_VERSION_ARCH.deb", required: false, default: true, type: boolean}
+  workflow_call:
+    inputs:
+      version: {description: Semantic version, required: false, default: '', type: string}
+      prerelease: {description: Mark as prerelease, required: false, default: false, type: boolean}
+      publish: {description: Publish the build, required: false, default: false, type: boolean}
+      legacy: {description: Build the glibc 2.28 legacy package, required: false, default: false, type: boolean}
 permissions: {contents: write}
 concurrency: {group: release-linux, cancel-in-progress: false}
 jobs:
@@ -41,7 +47,7 @@ jobs:
           bash scripts/build-official-plugins.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: official-plugin-packs
+          name: official-plugin-packs-linux
           path: target/plugin-packs/
           if-no-files-found: error
   # Each architecture builds natively on its own runner (package-container.sh builds its images for the host, and the voice runtime is picked by uname -m); there is no cross-compilation.
@@ -83,7 +89,7 @@ jobs:
       # 官方插件包（official-plugins 作业构建、核对过哈希的那一份），package-container.sh 把它装进 share/<client>/plugin-packs；MSIME_REQUIRE_OFFICIAL_PLUGINS=1 让缺了它的包打不出来。
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: official-plugin-packs
+          name: official-plugin-packs-linux
           path: target/plugin-packs
       - name: Build Linux packages
         env: {VERSION: "${{ steps.version.outputs.value }}", MSIME_REQUIRE_OFFICIAL_PLUGINS: '1'}
@@ -169,7 +175,7 @@ jobs:
       # 官方插件包（official-plugins 作业构建、核对过哈希的那一份），package-container.sh 把它装进 share/<client>/plugin-packs；MSIME_REQUIRE_OFFICIAL_PLUGINS=1 让缺了它的包打不出来。
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: official-plugin-packs
+          name: official-plugin-packs-linux
           path: target/plugin-packs
       - name: Build Linux RPM
         env: {VERSION: "${{ steps.version.outputs.value }}", MSIME_PACKAGE_FORMAT: rpm, MSIME_REQUIRE_OFFICIAL_PLUGINS: '1'}

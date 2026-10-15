@@ -9,6 +9,7 @@ use crate::diagnostics;
 use crate::error::{EngineError, Result};
 use crate::helpcode::SharedKeymap;
 use crate::paths::RuntimePaths;
+use crate::punctuation::{BracketMarks, PunctuationMarks, QuoteMarks};
 use crate::session::SessionOptions;
 use crate::types::{
     autocorrect_type, fuzzy_rule, CommandTableEntry, EnglishInputOptions, FrequencyAdjustmentMode,
@@ -82,6 +83,10 @@ pub struct EngineOptions {
     pub chinese_punctuation: bool,
     pub paired_punctuation: bool,
     pub punctuation_lock: u8,
+    /// 中文标点下 `'` 出「」、`"` 出『』（`QuoteMarks::Corner`），否则是弯引号。宿主已经按繁体开关解析过 `corner_when_traditional`。
+    pub corner_quotes: bool,
+    /// 中文标点下 `[` `]` 出空心〖〗（`BracketMarks::Hollow`），否则是实心【】。
+    pub hollow_brackets: bool,
     pub frequency_mode: String,
     pub frequency_trigger_count: u8,
     pub frequency_linear_step: u8,
@@ -194,6 +199,8 @@ pub fn prepare_options_for(
         chinese_punctuation: true,
         paired_punctuation: true,
         punctuation_lock: 0,
+        corner_quotes: false,
+        hollow_brackets: false,
         frequency_mode: FrequencyAdjustmentMode::Promote.name().to_owned(),
         frequency_trigger_count: 1,
         frequency_linear_step: 1,
@@ -284,6 +291,18 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
     session.chinese_punctuation = options.chinese_punctuation;
     session.paired_punctuation = options.paired_punctuation;
     session.punctuation_lock = i32::from(options.punctuation_lock);
+    session.punctuation_marks = PunctuationMarks {
+        quotes: if options.corner_quotes {
+            QuoteMarks::Corner
+        } else {
+            QuoteMarks::Curly
+        },
+        brackets: if options.hollow_brackets {
+            BracketMarks::Hollow
+        } else {
+            BracketMarks::Solid
+        },
+    };
     session.helpcode = options.helpcode;
     session.helpcode_schema = options.helpcode_schema.clone();
     session.helpcode_table = options.helpcode_table.clone();

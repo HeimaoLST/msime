@@ -296,7 +296,7 @@ test("the HarmonyOS phone 输入 page shows the design's groups and folds the re
   expect(within(more).getByRole("switch", { name: "以词定字" })).toBeTruthy();
   expect(within(more).getByText("拼音方案调频")).toBeTruthy();
   expect(within(page).queryByRole("switch", { name: "本地整句联想" })).toBeNull();
-  expect(within(page).queryByRole("switch", { name: "繁体输出" })).toBeNull();
+  expect(within(page).queryByRole("radiogroup", { name: "中文输出" })).toBeNull();
 });
 
 test("拼音纠错 sets both quanpin corrections and 中文字符集 sets traditional output", async () => {
@@ -333,5 +333,5 @@ test("the desktop 输入 page keeps its own groups", async () => {
   expect(groupTitles(page)).not.toContain("语言与方案");
   expect(groupTitles(page)).not.toContain("更多");
   selectSettingsTab("输出");
-  expect(within(page).getByRole("switch", { name: "繁体输出" })).toBeTruthy();
+  expect(within(page).getByRole("radiogroup", { name: "中文输出" })).toBeTruthy();
 });

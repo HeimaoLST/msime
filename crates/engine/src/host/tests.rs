@@ -38,6 +38,8 @@ fn options(root: &Path) -> EngineOptions {
         chinese_punctuation: true,
         paired_punctuation: true,
         punctuation_lock: 0,
+        corner_quotes: false,
+        hollow_brackets: false,
         frequency_mode: "promote".into(),
         frequency_trigger_count: 1,
         frequency_linear_step: 1,
@@ -2318,7 +2320,7 @@ fn hanzi_to_pinyin_reads_the_generation_dictionary() {
 }
 
 /// ni'hao 你好 100 / 拟好 80 plus the english schema v3 (`dictionary_stage/tests.rs:6-30`), written into the resources and the generation alike instead of staged.
-fn helpcode_fixture(root: &Path, extra_sql: &str, helpcodes: &str) -> EngineOptions {
+pub(super) fn helpcode_fixture(root: &Path, extra_sql: &str, helpcodes: &str) -> EngineOptions {
     let mut options = options(root);
     for directory in [&options.resources, &options.dictionaries] {
         let directory = Path::new(directory);
@@ -2424,7 +2426,7 @@ fn wubi_reverse_codes_are_shown_only_in_the_wubi_scheme() {
     let mut native = helpcode_fixture(native_root.path(), extra, "");
     native.scheme = SchemeType::Wubi as u8;
     let mut session = Session::new(&native).unwrap();
-    type_text(&mut session, b"wqvb");
+    type_text(&mut session, b"wq");
     let view = session.snapshot().unwrap();
     let index = view
         .candidates
@@ -2488,6 +2490,46 @@ fn wubi_reverse_codes_are_looked_up_only_in_the_wubi_scheme() {
             .iter()
             .any(|item| item.word == "你好"));
         assert_eq!(session.candidate_wubi_code("你好"), expected, "{scheme:?}");
+    }
+}
+
+#[test]
+fn wubi_reverse_code_fast_path_requires_the_display_word_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let mut options = helpcode_fixture(
+        root.path(),
+        "INSERT INTO wubi86 VALUES('wqvb','你好',300),('wqbb','父子',200);",
+        "",
+    );
+    options.scheme = SchemeType::Wubi as u8;
+    options.show_helpcode = false;
+    let mut session = Session::new(&options).unwrap();
+    type_text(&mut session, b"wq");
+    let snapshot = session.snapshot().unwrap();
+    assert!(!snapshot.candidates.is_empty());
+    for (index, candidate) in snapshot.candidates.iter().enumerate() {
+        assert_eq!(
+            session.candidate_wubi_code_for_display(index, candidate),
+            snapshot
+                .candidate_annotations
+                .get(index)
+                .and_then(|annotation| annotation.split_whitespace().next()),
+            "同座候选应复用已有反查码"
+        );
+        assert!(
+            session
+                .candidate_wubi_code_for_display(index, "另一个词")
+                .is_none(),
+            "词面不一致时不得读取该座位的反查码"
+        );
+    }
+    if snapshot.candidates.len() > 1 {
+        let other = &snapshot.candidates[1];
+        assert_eq!(
+            session.candidate_wubi_code_for_display(0, other),
+            snapshot.candidate_annotations[1].split_whitespace().next(),
+            "座位错位时应回退到按词查找"
+        );
     }
 }
 
@@ -2820,7 +2862,7 @@ fn a_session_dropped_while_its_thread_exits_does_not_abort() {
     assert_eq!(written, 1);
 }
 
-fn generated_mode_options(root: &Path) -> EngineOptions {
+pub(super) fn generated_mode_options(root: &Path) -> EngineOptions {
     let mut value = options(root);
     value.local_expression = true;
     value.local_command = true;
@@ -3434,4 +3476,21 @@ fn a_multi_pick_in_the_pinyin_lookup_creates_no_phrase() {
     let control = phrase_options(control_root.path(), true);
     pick_in_two(&control, b"nihao");
     assert_eq!(created_rows(&control), 1);
+}
+
+#[test]
+fn hidden_helpcode_snapshot_does_not_recompute_annotations() {
+    let root = tempfile::tempdir().unwrap();
+    let mut options = helpcode_fixture(root.path(), "", "你=ab\n好=cd\n拟=ef\n");
+    options.show_helpcode = false;
+    let mut session = Session::new(&options).unwrap();
+    type_text(&mut session, b"nihao");
+    let (snapshot, allocations) =
+        crate::ime::personal_rerank::allocations::count(|| session.snapshot().unwrap());
+    eprintln!("隐藏辅助码快照分配: {allocations}");
+    assert!(
+        allocations <= 32,
+        "隐藏辅助码重复构造分配了 {allocations} 次"
+    );
+    assert!(!snapshot.candidates.is_empty());
 }

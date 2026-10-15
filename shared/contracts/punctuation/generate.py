@@ -9,10 +9,21 @@ SPEC = json.loads((ROOT / "policy.json").read_text(encoding="utf-8"))
 simple = SPEC["simple"]
 alternating = SPEC["alternating"]
 nested = SPEC["nested"]
+styles = SPEC["styles"]
+corner_quotes = styles["cornerQuotes"]
+hollow_brackets = styles["hollowBrackets"]
 inputs = [entry["input"] for entry in simple + alternating] + [nested["openingInput"], nested["closingInput"]]
-if (SPEC["contractVersion"] != 1 or any(len(value) != 1 or not 32 <= ord(value) < 127 for value in inputs) or
+if (SPEC["contractVersion"] != 2 or any(len(value) != 1 or not 32 <= ord(value) < 127 for value in inputs) or
         len(set(inputs)) != len(inputs)):
     raise SystemExit("Invalid punctuation contract")
+# 样式是同一个键的另一组字，不是新键：直角引号只能替换交替引号的键，空心括号只能替换 simple 里的键，各键至多出现一次。
+alternating_inputs = [entry["input"] for entry in alternating]
+simple_inputs = [entry["input"] for entry in simple]
+corner_inputs = [entry["input"] for entry in corner_quotes]
+hollow_inputs = [entry["input"] for entry in hollow_brackets]
+if (sorted(corner_inputs) != sorted(alternating_inputs) or any(value not in simple_inputs for value in hollow_inputs) or
+        len(set(hollow_inputs)) != len(hollow_inputs)):
+    raise SystemExit("Invalid punctuation contract styles")
 
 
 def char_literal(value):
@@ -51,6 +62,19 @@ lines += [
 ]
 lines += [
     "}};",
+    f"inline constexpr std::array<AlternatingMapping, {len(corner_quotes)}> corner_quotes = {{{{",
+]
+lines += [
+    f"    {{{char_literal(entry['input'])}, {json.dumps(entry['opening'], ensure_ascii=False)}, {json.dumps(entry['closing'], ensure_ascii=False)}}},"
+    for entry in corner_quotes
+]
+lines += [
+    "}};",
+    f"inline constexpr std::array<Mapping, {len(hollow_brackets)}> hollow_brackets = {{{{",
+]
+lines += [f"    {{{char_literal(entry['input'])}, {json.dumps(entry['output'], ensure_ascii=False)}}}," for entry in hollow_brackets]
+lines += [
+    "}};",
     f"inline constexpr char nested_opening_input = {char_literal(nested['openingInput'])};",
     f"inline constexpr char nested_closing_input = {char_literal(nested['closingInput'])};",
     f"inline constexpr char nested_opening[] = {json.dumps(nested['opening'], ensure_ascii=False)};",
@@ -75,6 +99,18 @@ lines += [
     "{",
     "    for (const auto &mapping : alternating)",
     "        if (mapping.input == input) return &mapping;",
+    "    return nullptr;",
+    "}",
+    "constexpr const AlternatingMapping *corner_quote_mapping(char input)",
+    "{",
+    "    for (const auto &mapping : corner_quotes)",
+    "        if (mapping.input == input) return &mapping;",
+    "    return nullptr;",
+    "}",
+    "constexpr const char *hollow_bracket_output(char input)",
+    "{",
+    "    for (const auto &mapping : hollow_brackets)",
+    "        if (mapping.input == input) return mapping.output;",
     "    return nullptr;",
     "}",
     "} // namespace metasequoia::punctuation_contract",

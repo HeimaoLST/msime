@@ -1,15 +1,17 @@
+import { subscribeMediaQuery } from "../core/media-query";
+
 export type ConditionalFont = { face: FontFace; media: readonly MediaQueryList[] };
 
 // Keep source order when a condition changes: font matching must not depend on
 // which media query happened to activate first. No font reads occur here.
 export function installConditionalFonts(fonts: readonly ConditionalFont[]): () => void {
   const queries = [...new Set(fonts.flatMap((font) => font.media))];
-  const listening: MediaQueryList[] = [];
+  const listening: Array<() => void> = [];
   let active = true,
     added: FontFace[] = [];
   const remove = () => {
     active = false;
-    for (const query of listening) query.removeEventListener("change", refresh);
+    for (const dispose of listening) dispose();
     listening.length = 0;
     for (const face of added) document.fonts.delete(face);
     added = [];
@@ -35,8 +37,7 @@ export function installConditionalFonts(fonts: readonly ConditionalFont[]): () =
   };
   try {
     for (const query of queries) {
-      query.addEventListener("change", refresh);
-      listening.push(query);
+      listening.push(subscribeMediaQuery(query, refresh));
     }
     refresh();
   } catch {

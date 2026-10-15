@@ -130,15 +130,12 @@ void DeriveSelectedForegrounds(SkinTokens &tokens, bool text, bool number)
 ResolvedSkin StyledCandidateSkin(ResolvedSkin skin, const CandidateWindowStyle &style)
 {
     SkinTokens &tokens = skin.tokens;
-    // Only a radius the user chose rounds the rows down with the card; a skin package's own radius keeps the host row radius it has always drawn.
+    // 用户圆角扣除有效内边距，选中与悬停共享同一内轮廓。
     if (style.cornerRadius)
-    {
         tokens.radius = static_cast<float>(std::clamp(*style.cornerRadius, 0.0, 32.0));
-        tokens.candidateRadius = std::min(tokens.candidateRadius, tokens.radius);
-        tokens.selectedRadius = std::min(tokens.selectedRadius, tokens.radius);
-    }
-    // 用户设的内边距先于皮肤包和原生的 6pt，和圆角一样在缩放之前替换，所以「整体大小」照样把它放大（#7316）。窗口绘制时仍至少留 2pt，见 InputController 的 inset。
     if (style.padding) tokens.pad = static_cast<float>(std::clamp(*style.padding, 0.0, 16.0));
+    if (style.cornerRadius)
+        tokens.candidateRadius = tokens.selectedRadius = std::max(0.0f, tokens.radius - std::max(2.0f, tokens.pad));
     const float opacity = static_cast<float>(std::clamp(style.opacity, 0.0, 1.0));
     tokens.surface.a *= opacity;
     tokens.border.a *= opacity;

@@ -262,6 +262,9 @@ public final class KeyboardSchemeSmoke {
             Set.of(), FULL).equals(List.of(KeyboardScheme.QUANPIN)));
         check(KeyboardScheme.installedOf(List.of(KeyboardScheme.JAPANESE, KeyboardScheme.QUANPIN), "",
             Set.of("japanese"), FULL).equals(List.of(KeyboardScheme.JAPANESE, KeyboardScheme.QUANPIN)));
+        // 词典装好不等于用户启用：中英键轮换只应在调用方传入的启用列表里找方案。
+        check(KeyboardScheme.installedOf(List.of(KeyboardScheme.QUANPIN), "",
+            Set.of("japanese"), FULL).equals(List.of(KeyboardScheme.QUANPIN)));
 
         check(KeyboardScheme.availablePacks(pack -> false, "").isEmpty());
         check(KeyboardScheme.availablePacks(pack -> true, null)

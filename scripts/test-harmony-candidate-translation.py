@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Guard the candidate-translation presentation wiring found by the Apple assertion audit."""
+"""检查候选翻译的展示接线，包含所有候选快照中的来源过滤与显示开关。"""
 
 from pathlib import Path
+import re
 
 
 def main() -> int:
@@ -14,10 +15,21 @@ def main() -> int:
     ).read_text()
     metrics = (root / "platforms/harmony/entry/src/main/ets/keyboard/KeyboardMetrics.ts").read_text()
 
+    # 注释不能代替接线；三个候选快照都必须同时传来源过滤结果和显示开关。
+    presentation = re.sub(r"/\*.*?\*/|//[^\n]*", "", session, flags=re.DOTALL)
+    gloss_calls = re.findall(
+        r"CandidateGlossPolicy\.(annotation|annotationIsTranslation)\(\s*"
+        r"CandidateGlossPolicy\.slotAnnotation\(hanja,\s*candidate\.annotation\),\s*"
+        r"TranslationPolicy\.sourceGetsNoGloss\(candidate\.source\)\s*"
+        r"\?\s*null\s*:\s*candidate\.translation\s*\?\?\s*null,\s*"
+        r"this\.candidateGlossEnabled\s*\)",
+        presentation,
+    )
     required = {
         "independent online display switch": "this.candidateGlossEnabled" in session
         and "preferences.candidate_translations" in session
-        and "candidate.translation ?? null, this.candidateGlossEnabled" in session,
+        and gloss_calls.count("annotation") == 3
+        and gloss_calls.count("annotationIsTranslation") == 3,
         "pre-arrival row decision": "CandidateGlossLayoutPolicy.rows" in session
         and "glossRows(): number" in session,
         "word-sized unglossed chips": "CandidateChipWidth.chip(word, false, 0, padding)" in view,

@@ -5,7 +5,7 @@ import SwiftUI
   @MainActor static func main() {
     _ = NSApplication.shared
     let placeholders = ["home": "Search emoji, kaomoji, and symbols", "": "Search emojis",
-      "recent": "Search emojis", "kaomoji": "Search kaomoji", "symbols": "Search symbols",
+      "recent": "Search emojis", "kaomoji": "Search kaomoji", "symbols": "搜索符号、名称或分类",
       "clipboard": "搜索剪贴板", "sticker": "Search", "gif": "Search", "unknown": "Search"]
     for (category, placeholder) in placeholders {
       let presentation = MacEmojiSearchPresentation(category: category)

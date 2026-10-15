@@ -216,7 +216,14 @@ pub fn merge_alternative_segmentations(
         .weight
         .saturating_mul(ALTERNATIVE_SEGMENTATION_PROMOTION_RATIO)
         >= primary_full.first().map_or(0, |item| item.weight);
-    let best_word = best_alternative.word.clone();
+    // 先记录词面缓冲地址；移动 `WordItem` 不会改变其 `String` 缓冲，唯一词无需复制。存在同文行时保留文字副本，以便去重后回退到幸存行。
+    let best_word_pointer = best_alternative.word.as_ptr();
+    let duplicate_best_word = (promote
+        && primary_full
+            .iter()
+            .chain(alternatives.iter().skip(1))
+            .any(|item| item.word == best_alternative.word))
+    .then(|| best_alternative.word.clone());
 
     let capacity = result
         .len()
@@ -229,7 +236,15 @@ pub fn merge_alternative_segmentations(
     retain_unique_sorted_rows(&mut merged);
 
     if promote {
-        if let Some(at) = merged.iter().position(|item| item.word == best_word) {
+        let at = merged
+            .iter()
+            .position(|item| item.word.as_ptr() == best_word_pointer)
+            .or_else(|| {
+                duplicate_best_word
+                    .as_deref()
+                    .and_then(|word| merged.iter().position(|item| item.word == word))
+            });
+        if let Some(at) = at {
             if at >= ALTERNATIVE_SEGMENTATION_FIRST_PAGE_SIZE {
                 let promoted = merged.remove(at);
                 merged.insert(BEST_ALTERNATIVE_SEGMENTATION_INDEX, promoted);
@@ -485,6 +500,37 @@ mod tests {
         let alternatives = vec![row("ti'an", "提案", 2_000)];
         let merged = merge_alternative_segmentations(Vec::new(), primary, alternatives);
         assert_eq!(words(&merged), ["天", "田", "提案"]);
+    }
+
+    #[test]
+    fn alternative_promotion_does_not_clone_a_unique_word() {
+        let primary: Vec<WordItem> = (0..16)
+            .map(|index| row("xian", &format!("先{index}"), 10_000 - index))
+            .collect();
+        let alternatives = vec![row("xi'an", "西安", 1_000)];
+        let (merged, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            merge_alternative_segmentations(Vec::new(), primary, alternatives)
+        });
+
+        assert_eq!(merged[1].word, "西安");
+        assert!(
+            allocations <= 1,
+            "唯一替代词归位不应复制词面：{allocations}"
+        );
+    }
+
+    #[test]
+    fn alternative_promotion_keeps_duplicate_word_semantics() {
+        let mut primary: Vec<WordItem> = (0..15)
+            .map(|index| row("xian", &format!("先{index}"), 10_000 - index))
+            .collect();
+        primary.push(row("xian", "西安", 2_000));
+        let alternatives = vec![row("xi'an", "西安", 1_000)];
+
+        let merged = merge_alternative_segmentations(Vec::new(), primary, alternatives);
+
+        assert_eq!(merged.len(), 16);
+        assert_eq!(merged[1].word, "西安");
     }
 
     #[test]

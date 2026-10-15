@@ -2750,6 +2750,21 @@ fn translations_are_generation_scoped_and_exposed_on_candidates() {
 }
 
 #[test]
+fn special_source_rows_do_not_inherit_a_translation_for_the_same_text() {
+    for source in [6, 7, 13, 14] {
+        let mut runtime = runtime();
+        runtime.engine.words = vec!["相同".into(), "相同".into()];
+        runtime.engine.sources = vec![0, source];
+        runtime.focus(true).unwrap();
+        let view = type_key(&mut runtime).view;
+        assert!(runtime.apply_translations(view.generation, [("相同".into(), "meaning".into())]));
+        let rows = runtime.view().candidates;
+        assert_eq!(rows[0].translation.as_deref(), Some("meaning"));
+        assert_eq!(rows[1].translation, None, "source {source}");
+    }
+}
+
+#[test]
 fn translation_merges_do_not_accumulate_non_candidates() {
     let mut runtime = runtime();
     runtime.focus(true).unwrap();
@@ -3915,6 +3930,8 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         chinese_punctuation: true,
         paired_punctuation: true,
         punctuation_lock: 0,
+        corner_quotes: false,
+        hollow_brackets: false,
         frequency_mode: "promote".into(),
         frequency_trigger_count: 1,
         frequency_linear_step: 1,
@@ -7976,3 +7993,39 @@ fn the_reranker_leaves_mixed_japanese_rows_alone() {
 }
 
 mod facts;
+
+/// View 报告宿主设下的标点样式，缺省是弯引号、实心括号；换样式不动组字和候选。
+#[test]
+fn view_reports_the_applied_punctuation_marks() {
+    let mut runtime = runtime();
+    let json = serde_json::to_value(runtime.view()).unwrap();
+    assert_eq!(
+        json["punctuation_marks"],
+        serde_json::json!({ "quotes": "curly", "brackets": "solid" })
+    );
+    let before = runtime.view().generation;
+    runtime.set_punctuation_marks(PunctuationMarks {
+        quotes: QuoteMarks::Corner,
+        brackets: msime_client_core::preferences::BracketStyle::Hollow,
+    });
+    let view = runtime.view();
+    assert_eq!(view.generation, before);
+    assert_eq!(
+        serde_json::to_value(&view).unwrap()["punctuation_marks"],
+        serde_json::json!({ "quotes": "corner", "brackets": "hollow" })
+    );
+}
+
+#[allow(unsafe_code)]
+pub(crate) mod allocations;
+mod online_gloss_retention;
+
+mod online_slot_allocations;
+
+mod parallel_order_allocations;
+
+mod static_evidence;
+
+mod online_slot_order_equivalence;
+
+mod translation_reply_allocations;

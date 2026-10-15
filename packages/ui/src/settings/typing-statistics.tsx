@@ -18,6 +18,7 @@ import { ActionButton } from "./action-button";
 import { ErrorAlert } from "../core/error-alert";
 import { StatusMessage } from "../core/status-message";
 import { formatZhNumber, formatZhPercent } from "../core/format-number";
+import { formatDateTime } from "../core/format-date";
 import { SettingsEmptyMessage } from "./settings-empty-message";
 import {
   charactersPerMinute,
@@ -27,6 +28,8 @@ import {
 } from "./typing-speed";
 import { useMountedRef } from "./use-mounted-ref";
 import { useAsyncGeneration } from "./use-async-generation";
+import { subscribeToWindowResume } from "../core/window-focus";
+import { subscribeToInterval } from "../core/use-interval";
 import { MobileStatistics, statisticsCardClass, type StatisticsLook } from "./mobile-statistics";
 import { StatisticsNote } from "./statistics-note";
 import type { TypingSummary } from "./typing-summary";
@@ -1320,7 +1323,7 @@ export function availabilityNotice(
     ? "请先确认已在系统设置 → 通用 → 键盘 → 键盘 → 水杉输入法中为水杉键盘开启“允许完全访问”，未开启时键盘不记录统计。"
     : "";
   if (status.lastWrittenMs) {
-    const written = new Date(status.lastWrittenMs).toLocaleString("zh-CN");
+    const written = formatDateTime(status.lastWrittenMs, "zh-CN");
     return iosPlatform
       ? `统计最后写入于 ${written}，当前计数为零。${fullAccess}已开启的话，如果刚刚清空过统计，这是正常的。`
       : `统计最后写入于 ${written}，当前计数为零；如果刚刚清空过统计，这是正常的。`;
@@ -1345,6 +1348,7 @@ export function TypingStatisticsPage({
 }) {
   const { confirm, confirmation } = useConfirm();
   const [status, setStatus] = useState<TypingStatisticsStatus>();
+  const [today, setToday] = useState(() => recentDays(1)[0]);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   // 打开页面时先看按键热力图，它排在标签行的第一位；标签只存在组件状态里，不跨次打开记忆。
   const [contentTab, setContentTab] = useState<
@@ -1369,10 +1373,16 @@ export function TypingStatisticsPage({
   const clientGeneration = useAsyncGeneration(client);
   const mobileTrendDays = useMemo(
     () => recentDays(mobileTrendLength(status?.statistics.days ?? {})),
-    [status?.statistics.days],
+    [status?.statistics.days, today.key],
   );
-  const desktopTrendDays = useMemo(() => recentDays(DESKTOP_TREND_DAYS), []);
+  const desktopTrendDays = useMemo(() => recentDays(DESKTOP_TREND_DAYS), [today.key]);
   const trendDays = mobile ? mobileTrendDays : desktopTrendDays;
+
+  function refreshDay() {
+    const next = recentDays(1)[0];
+    // 数据没有变化时也要推进日历；同一天保留原对象，避免轮询重画整页。
+    setToday((current) => (current.key === next.key ? current : next));
+  }
 
   useEffect(
     () => () => {
@@ -1437,6 +1447,7 @@ export function TypingStatisticsPage({
 
   async function update(operation: () => Promise<TypingStatisticsStatus>, overview = false) {
     if (!mounted.current || requestRef.current) return;
+    refreshDay();
     const generation = clientGeneration.current;
     setBusy(true);
     setError("");
@@ -1474,9 +1485,10 @@ export function TypingStatisticsPage({
     const generation = clientGeneration.current;
     const refreshWhenVisible = () => {
       if (!mounted.current || clientGeneration.current !== generation) return;
+      if (document.visibilityState === "hidden") return;
+      refreshDay();
       const now = Date.now();
       if (
-        document.visibilityState === "hidden" ||
         (requestRef.current && now - requestStartedAtRef.current <= overviewStaleMs) ||
         now - lastRequestAtRef.current < overviewMinIntervalMs
       )
@@ -1509,13 +1521,11 @@ export function TypingStatisticsPage({
         });
     };
     refreshWhenVisible();
-    window.addEventListener("focus", refreshWhenVisible);
-    document.addEventListener("visibilitychange", refreshWhenVisible);
-    const poll = window.setInterval(refreshWhenVisible, overviewPollMs);
+    const stopResume = subscribeToWindowResume(refreshWhenVisible);
+    const stopPoll = subscribeToInterval(refreshWhenVisible, overviewPollMs);
     return () => {
-      window.clearInterval(poll);
-      window.removeEventListener("focus", refreshWhenVisible);
-      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      stopPoll();
+      stopResume();
     };
   }, [client, clientGeneration, look]);
 
@@ -1536,7 +1546,6 @@ export function TypingStatisticsPage({
     scopeKeys === null
       ? statistics.total
       : scopeKeys.reduce((total, key) => total + (statistics.days[key] ?? 0), 0);
-  const today = recentDays(1)[0];
   const selectedLabel = selectedDay
     ? (trendDays.find((day) => day.key === selectedDay)?.label ?? dayLabel(selectedDay))
     : null;

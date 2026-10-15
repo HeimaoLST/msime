@@ -667,6 +667,14 @@ pub unsafe extern "C" fn msime_client_candidate_gloss_request(
             })
         };
         let mut glosses = lookup(&candidates)?;
+        // Sources that never receive glosses keep an empty slot so the reply
+        // remains position-safe; hosts can still apply ordinary rows with the
+        // same text without displaying a gloss on these special rows.
+        for (candidate, gloss) in candidates.iter().zip(&mut glosses) {
+            if msime_client_core::translation::source_gets_no_gloss(candidate.1) {
+                gloss.clear();
+            }
+        }
         // The gloss tables are keyed by Simplified text, so a Traditional candidate - a Korean Hanja such as 韓, or any candidate under Traditional output - finds nothing under its own spelling. Ask again under the Simplified characters for the ones that missed; the reply still names the candidate as shown.
         if glosses.len() == candidates.len() {
             let (retry, retry_index) = traditional_retry_inputs(&candidates, &glosses);
@@ -693,13 +701,16 @@ pub unsafe extern "C" fn msime_client_candidate_gloss_request(
             })
             .filter(|total| *total <= 900_000)
             .ok_or("candidate gloss response exceeds limits")?;
-        let mut translations = Vec::with_capacity(candidates.len());
+        let translated_count = glosses.iter().filter(|gloss| !gloss.is_empty()).count();
+        let mut translations = Vec::with_capacity(translated_count);
         translations.extend(candidates.into_iter().zip(glosses).filter_map(
             |((text, _), translation)| {
-                (!translation.is_empty()).then_some(json!({
-                    "text": text,
-                    "translation": translation,
-                }))
+                (!translation.is_empty()).then(|| {
+                    json!({
+                        "text": text,
+                        "translation": translation,
+                    })
+                })
             },
         ));
         Ok(json!({

@@ -64,10 +64,18 @@ export class SmartPunctuationSpacePolicy {
         return 0x27; // ‘ '
       case 0x2019:
         return 0x27; // ’ '
+      case 0x300e:
+      case 0x300f:
+        return 0x22; // 『 』 "，直角引号样式
+      case 0x300c:
+      case 0x300d:
+        return 0x27; // 「 」 '，直角引号样式
       case 0x3010:
-        return 0x5b; // 【 [
+      case 0x3016:
+        return 0x5b; // 【 〖 [
       case 0x3011:
-        return 0x5d; // 】 ]
+      case 0x3017:
+        return 0x5d; // 】 〗 ]
       case 0x300a:
         return 0x3c; // 《 <
       case 0x300b:

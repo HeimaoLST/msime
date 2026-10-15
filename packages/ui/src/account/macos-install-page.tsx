@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { InputSourceStartupStatus } from "../settings/input-source-startup-notice";
 import { ActionButton } from "../core/action-button";
+import { useInterval } from "../core/use-interval";
+import { useTimeout } from "../core/use-timeout";
 import { logo } from "../settings/app-resources";
 
 export interface MacosInstallClient {
@@ -57,25 +59,24 @@ export function MacosInstallPage({
   const outcome = useRef<InputSourceStartupStatus | null>(null);
   const startedAt = useRef(0);
 
-  useEffect(() => {
-    if (phase !== "installing") return;
-    const timer = window.setInterval(() => {
+  useInterval(
+    () => {
       const finished = outcome.current !== null && Date.now() - startedAt.current >= MINIMUM_MS;
       setProgress((current) => nextSimulatedProgress(current, finished, Math.random()));
-    }, TICK_MS);
-    return () => window.clearInterval(timer);
-  }, [phase]);
+    },
+    phase === "installing" ? TICK_MS : null,
+  );
 
   // The bar only reaches 100 once the install has finished; let the full bar show for a moment before it turns into the result.
-  useEffect(() => {
-    const status = outcome.current;
-    if (phase !== "installing" || progress < 100 || !status) return;
-    const timer = window.setTimeout(() => {
+  useTimeout(
+    () => {
+      const status = outcome.current;
+      if (!status) return;
       setResult(status);
       setPhase("done");
-    }, 260);
-    return () => window.clearTimeout(timer);
-  }, [phase, progress]);
+    },
+    phase === "installing" && progress >= 100 && outcome.current ? 260 : null,
+  );
 
   const install = useCallback(() => {
     if (phase === "installing") return;

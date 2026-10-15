@@ -18,11 +18,19 @@ Status: implemented
 
 用户关掉提示的开关 `touch_shuangpin_key_hints` 在键盘进程启动时就从皮肤片段（`readSkinHint` → `applyTouchGeometry`）恢复，所以关掉提示的人在空窗里也不会看到提示闪一下。
 
+### 九键首帧与底行的一致性
+
+#7780 的截图里主键区是九键，底行却多出仅属于 26 键的句号。布局缓存用于会话尚未创建时；一旦 `view` 到达，底行原先独立读取可变快照，而主键区要等 `rebuildKeyRows` 才更换。`ImeLetterRows` 现在在构建开始时记住绘制布局，`ImeBottomRow` 的键位和数字层底行归属都读取这一布局；新快照不能让底行提前换成另一个键盘。真正切换方案仍经原有的重建路径，两部分同时采用新布局。
+
+首次显示的回归使用独立包名的合成编辑器，允许强停编辑器而不终止测试执行进程。测试在打开和点击输入框之前开始观察，无障碍树里九键出现时不得同时出现 26 键底行句号，并重复五次强停与打开。不保存输入内容或截图。
+
 ## Alternatives considered
 
 - 用 `!runtimeOptionsBase.isEmpty()` 判断会话在起：`runtimeOptionsBase` 在 `stop()` 和建会话失败时都不清空，失败后的直接输入键盘会一直画着双拼提示。
 - 只在内存里记方案、不写 SharedPreferences：换应用、换页面时键盘进程通常还活着，内存就够；但进程被回收后的第一次弹出仍会跳。布局提示已经在同一个文件里，多存一个键不多读一次盘。
 - 把 `NativeClient.create` 挪到工作线程、缩短空窗本身：每种方案都受益，但要重排会话建立的线程模型，改动远大于这一跳。
+
+- 只在会话准备时隐藏底行句号：直接对症，但不能约束其它自带底行的布局，且会掩盖主键区与底行读取不同状态的问题。让底行跟随实际构建的键区覆盖这一状态边界，不改变标点配置。
 
 ## Consequences
 
@@ -33,3 +41,5 @@ Status: implemented
 ## Verification
 
 `ShuangpinKeyHintPolicySmoke` 新增 `rememberedProfile` 和 `profileWithoutView` 的用例，改动前编译失败（方法不存在），改动后通过；`check-host.sh` 加了一道检查，`updateShuangpinKeyHints` 必须经 `profileWithoutView` 处理没有 view 的情况。没有在设备上测换应用时的第一帧，也没有用 systrace 量主线程耗时；HarmonyOS 是否有同样的空窗没有检查。
+
+API 28 与 API 35 的修复 APK 均通过安装、词库准备、核心打字删除和首帧专项（五次强停合成编辑器后重开）。API 28 专项暂时停用 AVD 自带的崩溃键盘，结束后恢复。首帧回归在 API 35 的修复前代码上没有重现截图中的短暂句号，因此它是持续的一致性检查，不作为已复现设备问题的证据。修复约束主键区与底行采用同一绘制布局，vivo API 30 的实际表现仍需报告者确认。

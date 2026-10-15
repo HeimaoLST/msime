@@ -1,11 +1,13 @@
 import { downloadBlob } from "../core/download-blob";
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ActionSheet } from "../core/action-sheet";
 import { useConfirm } from "../core/confirm";
 import { formatZhNumber } from "../core/format-number";
 import { GroupList, NavRow } from "../core/platform-controls";
 import * as controls from "../core/platform-controls-style";
 import { useToast } from "../core/toast";
+import { useAsyncActionRunner } from "../core/use-async-action";
+import { useDebouncedCallback } from "../core/use-debounced-callback";
 import * as dialog from "../community/community-style";
 import type { CommunityResource, CommunityResourceClient } from "../community/community-resources";
 import { communityResourceSubtitle } from "../community/community-resources";
@@ -73,15 +75,22 @@ export function HarmonyPhoneDictionary() {
   const [detail, setDetail] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [addingDictionary, setAddingDictionary] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const mounted = useRef(true);
-  const reloadGeneration = useRef(0);
-  useEffect(
-    () => () => {
-      mounted.current = false;
+  const reportFailure = useCallback(
+    (message: string) => {
+      if (message) toast(message);
     },
-    [],
+    [toast],
   );
+  const runner = useAsyncActionRunner(
+    reportFailure,
+    undefined,
+    collections,
+    dictionary,
+    client.communityResources,
+  );
+  const { busy, mounted } = runner;
+  const galleryOpen = communityGallery?.category === "dictionary";
+  const reloadGeneration = useAsyncGeneration(collections, dictionary, galleryOpen);
 
   const reload = async (flush: boolean) => {
     const current = ++reloadGeneration.current;
@@ -107,30 +116,35 @@ export function HarmonyPhoneDictionary() {
     }
   };
   // 社区词库图库盖在这页上面，在里面添加的词库关掉图库时才读进来，「已安装」和「发现词库」的「已添加」随之更新。
-  const galleryOpen = communityGallery?.category === "dictionary";
   useEffect(() => {
     if (galleryOpen) return;
     void reload(true);
   }, [collections, dictionary, galleryOpen]);
 
-  const run = async (action: () => Promise<DictionaryCollectionsView>, done?: string) => {
-    if (busy) return undefined;
-    // A mutation owns the next view; an older flush/load must not overwrite it when it settles.
-    reloadGeneration.current++;
-    setBusy(true);
-    try {
-      const next = await action();
-      if (!mounted.current) return undefined;
-      setView(next);
-      if (done) toast(done);
-      return next;
-    } catch (error) {
-      if (mounted.current) toast(collectionFailureMessage(error));
-      if (mounted.current && collections) void reload(false);
-      return undefined;
-    } finally {
-      if (mounted.current) setBusy(false);
-    }
+  const run = async (
+    action: (isCurrent: () => boolean) => Promise<DictionaryCollectionsView | undefined>,
+    done?: string | (() => string),
+  ) => {
+    const current = runner.generation.current;
+    let next: DictionaryCollectionsView | undefined;
+    await runner.run(
+      async (isCurrent) => {
+        // 修改取得下一份列表的所有权，较早的刷新不能在回包时覆盖它。
+        reloadGeneration.current++;
+        const result = await action(isCurrent);
+        if (!result || !isCurrent()) return;
+        next = result;
+        setView(result);
+        if (done) toast(typeof done === "function" ? done() : done);
+      },
+      {
+        formatError: collectionFailureMessage,
+        onError: () => {
+          if (collections) void reload(false);
+        },
+      },
+    );
+    return mounted.current && current === runner.generation.current ? next : undefined;
   };
 
   const openDetail = (id: string) => {
@@ -242,12 +256,18 @@ export function HarmonyPhoneDictionary() {
           community={client.communityResources}
           view={view}
           busy={busy}
-          onInstall={(resource) =>
-            run(
-              () => collections.installCommunity(resource),
-              `已添加「${resource.name}」，可以在已安装里停用或删除`,
-            )
-          }
+          onInstall={(item) => {
+            let resource = item;
+            return run(
+              async (isCurrent) => {
+                // 列表里的副本可能比服务器上的旧，词条取自重新读的详情，与社区页的「添加」相同。
+                resource = await client.communityResources!.detail(item.id);
+                if (!isCurrent()) return undefined;
+                return collections.installCommunity(resource);
+              },
+              () => `已添加「${resource.name}」，可以在已安装里停用或删除`,
+            );
+          }}
           onBrowseMore={() =>
             openCommunityGallery({ category: "dictionary", scope: "", initialMine: false })
           }
@@ -308,6 +328,8 @@ export function HarmonyPhoneDictionary() {
             setCreating(true);
           }}
           onFile={async (source, file) => {
+            const current = runner.generation.current;
+            const isCurrent = () => mounted.current && current === runner.generation.current;
             setAddingDictionary(false);
             const name = collectionNameFromFile(file.name);
             const format = collectionFormatForFile(file.name, source.format);
@@ -321,9 +343,11 @@ export function HarmonyPhoneDictionary() {
               try {
                 encoded = await readScelFile(file, MAX_SCEL_FILE_BYTES);
               } catch (error) {
-                toast(error instanceof Error ? error.message : "读取文件失败，请重新选择。");
+                if (isCurrent())
+                  toast(error instanceof Error ? error.message : "读取文件失败，请重新选择。");
                 return;
               }
+              if (!isCurrent()) return;
               const next = await run(() => importBytes(name, format, encoded));
               if (next) toast(collectionImportMessage(name, next.import));
               return;
@@ -332,9 +356,11 @@ export function HarmonyPhoneDictionary() {
             try {
               text = await readDictionaryFile(file, MAX_COLLECTION_IMPORT_BYTES);
             } catch (error) {
-              toast(error instanceof Error ? error.message : "读取文件失败，请重新选择。");
+              if (isCurrent())
+                toast(error instanceof Error ? error.message : "读取文件失败，请重新选择。");
               return;
             }
+            if (!isCurrent()) return;
             const next = await run(() => collections.importFile(name, format, text));
             if (next) toast(collectionImportMessage(name, next.import));
           }}
@@ -548,8 +574,7 @@ function DiscoverDictionaries({
                   onClick={async () => {
                     setAdding(item.id);
                     try {
-                      // 列表里的副本可能比服务器上的旧，词条取自重新读的详情，与社区页的「添加」相同。
-                      await onInstall(await community.detail(item.id));
+                      await onInstall(item);
                     } finally {
                       setAdding(null);
                     }
@@ -663,7 +688,7 @@ function BuiltinDictionaryDetail({
   const [more, setMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
-  const generation = useRef(0);
+  const generation = useAsyncGeneration(dictionary, query);
   const searchId = useId();
 
   const load = async (search: string, offset: number) => {
@@ -692,10 +717,13 @@ function BuiltinDictionaryDetail({
       if (current === generation.current) setLoading(false);
     }
   };
+  const { schedule: loadLater } = useDebouncedCallback(
+    (search: string) => void load(search, 0),
+    query ? 250 : 0,
+  );
   useEffect(() => {
-    const timer = setTimeout(() => void load(query, 0), query ? 250 : 0);
-    return () => clearTimeout(timer);
-  }, [query, dictionary]);
+    loadLater(query);
+  }, [loadLater, query, dictionary]);
 
   return (
     <>
@@ -841,6 +869,7 @@ function FormDialog({
         aria-modal="true"
         aria-labelledby={titleId}
         onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing || event.keyCode === 229) return;
           if (event.key === "Escape" && !submitting) onClose();
           if (event.key === "Enter" && event.target instanceof HTMLInputElement) {
             event.preventDefault();

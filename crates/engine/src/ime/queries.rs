@@ -288,19 +288,25 @@ impl CandidateQueries {
         } else {
             Vec::new()
         };
-        let others_db = self.paths.resource(assets::OTHER_DICTIONARY);
         let shuangpin = self.profile;
         let long_enough = prefix.len() >= MIXED_EXPRESSIVE_MINIMUM_INPUT;
-        let emoji_rows = if expressive.emoji_candidates && long_enough {
-            query_mixed_emoji(prefix, scheme, &others_db, shuangpin)
-        } else {
-            Vec::new()
-        };
-        let kaomoji_rows = if expressive.kaomoji_candidates && long_enough {
-            query_mixed_kaomoji(prefix, scheme, &others_db, shuangpin)
-        } else {
-            Vec::new()
-        };
+        let (emoji_rows, kaomoji_rows) =
+            if long_enough && (expressive.emoji_candidates || expressive.kaomoji_candidates) {
+                let others_db = self.paths.resource(assets::OTHER_DICTIONARY);
+                let emoji_rows = if expressive.emoji_candidates {
+                    query_mixed_emoji(prefix, scheme, &others_db, shuangpin)
+                } else {
+                    Vec::new()
+                };
+                let kaomoji_rows = if expressive.kaomoji_candidates {
+                    query_mixed_kaomoji(prefix, scheme, &others_db, shuangpin)
+                } else {
+                    Vec::new()
+                };
+                (emoji_rows, kaomoji_rows)
+            } else {
+                (Vec::new(), Vec::new())
+            };
         let symbol_rows = if expressive.symbol_candidates && symbols_allowed && long_enough {
             query_mixed_symbols(prefix, scheme, shuangpin)
         } else {
@@ -692,6 +698,68 @@ mod tests {
             crate::ime::personal_rerank::allocations::count(|| lowercase_prefix("hello"));
         assert_eq!(prefix, "hello");
         assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn mixed_skips_unused_expressive_database_path_allocations() {
+        let paths = RuntimePaths {
+            resources: "/synthetic/msime-unused-mixed-resources".into(),
+            ..RuntimePaths::default()
+        };
+        let english = EnglishInputOptions {
+            mixed_candidates: true,
+            minimum_prefix: usize::MAX,
+        };
+        for (prefix, english, expressive, with_japanese) in [
+            ("ni", english, MixedExpressiveOptions::default(), false),
+            (
+                "n",
+                EnglishInputOptions::default(),
+                MixedExpressiveOptions {
+                    emoji_candidates: true,
+                    kaomoji_candidates: true,
+                    symbol_candidates: true,
+                },
+                false,
+            ),
+            (
+                "ni",
+                EnglishInputOptions::default(),
+                MixedExpressiveOptions::default(),
+                true,
+            ),
+        ] {
+            let mut queries = CandidateQueries::new(&paths, default_profile());
+            let mut candidates = Vec::with_capacity(3);
+            candidates.extend(chinese());
+            let expected = candidates.clone();
+            let japanese = with_japanese.then(|| japanese("合成日文", false).unwrap());
+            let (mixed, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+                queries.mixed(
+                    candidates,
+                    prefix,
+                    SchemeType::Quanpin,
+                    english,
+                    expressive,
+                    false,
+                    LocalInputMode::None,
+                    true,
+                    true,
+                    japanese,
+                )
+            });
+
+            assert_eq!(mixed.capacity(), 3);
+            if with_japanese {
+                assert_eq!(mixed[0], expected[0]);
+                assert_eq!(mixed[1].word, "合成日文");
+                assert_eq!(mixed[1].source, CandidateSource::MixedJapanese);
+                assert_eq!(mixed[2], expected[1]);
+            } else {
+                assert_eq!(mixed, expected);
+            }
+            assert_eq!(allocations, 0, "无需表情词库时仍分配了路径：{allocations}");
+        }
     }
 
     fn row(word: &str, source: CandidateSource) -> WordItem {

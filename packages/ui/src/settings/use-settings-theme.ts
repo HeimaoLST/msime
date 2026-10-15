@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { subscribeMediaQuery } from "../core/media-query";
 import type { AppThemeClient, HostChromeClient, ResolvedAppTheme } from "../core/host-contracts";
 import { resolveSettingsTheme } from "./theme-helpers";
 import type { SurfaceTheme, ThemeMode } from "./theme-settings-section";
@@ -23,12 +24,7 @@ export function useSettingsTheme(themeMode: ThemeMode, settingsTheme: SurfaceThe
       return;
     const media = window.matchMedia("(prefers-color-scheme: light)");
     const listener = () => apply();
-    if (typeof media.addEventListener === "function") {
-      media.addEventListener("change", listener);
-      return () => media.removeEventListener("change", listener);
-    }
-    media.addListener(listener);
-    return () => media.removeListener(listener);
+    return subscribeMediaQuery(media, listener);
   }, [settingsTheme, themeMode]);
   return resolved === "dark";
 }

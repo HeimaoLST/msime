@@ -1,6 +1,7 @@
 //! Versioned local preferences. Hosts supply a private application data directory.
 //! All writers coordinate through the stable lock file, not the replaced data file.
 
+pub use crate::chinese_conversion::TraditionalVariant;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -739,6 +740,37 @@ pub enum PunctuationLock {
     English,
 }
 
+/// 中文标点下 `'` 和 `"` 键出哪种引号。`Corner` 按键对应：`'` 出「」，`"`（Shift+'）出『』。`CornerWhenTraditional` 在 `traditional_chinese_output` 打开时等于 `Corner`，否则等于 `Curly`；解析见 `crate::punctuation::punctuation_marks`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QuoteStyle {
+    #[default]
+    Curly,
+    Corner,
+    CornerWhenTraditional,
+}
+
+impl QuoteStyle {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// 中文标点下 `[` `]` 键出实心【】还是空心〖〗。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BracketStyle {
+    #[default]
+    Solid,
+    Hollow,
+}
+
+impl BracketStyle {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TranslationTargetLanguage {
@@ -867,6 +899,9 @@ pub struct Preferences {
     /// 「展开候选」：横排候选窗组字时按 ↓ 展开成多行候选网格（一行一页，上下滚动），候选窗上也多一个展开按钮；竖排候选窗不受影响。默认关闭，缺字段的旧文档读成关闭。只有声明 `HostCapabilities::expand_candidates` 的宿主（目前只有 macOS）读它，其他宿主保留这个偏好但不用。
     #[serde(default)]
     pub expand_candidates: bool,
+    /// macOS 展开候选的鼠标按钮，独立于页码开关；默认显示，关闭后仍可用下键展开。
+    #[serde(default = "enabled_by_default")]
+    pub show_candidate_expand_button: bool,
     pub scheme: InputScheme,
     /// Show the Wubi code suffix that remains after the typed prefix.
     #[serde(default = "enabled_by_default")]
@@ -982,6 +1017,9 @@ pub struct Preferences {
     /// Render and commit Chinese Engine output in Traditional Chinese at the host boundary.
     #[serde(default)]
     pub traditional_chinese_output: bool,
+    /// 繁体输出用哪套 OpenCC 配置（`s2t`、`s2tw`、`s2twp`），只在 `traditional_chinese_output` 打开时起作用；宿主转换时把它交给 `msime_client_convert_to_traditional`。默认 `s2t`，默认时不写进文档，没有这个键的旧版本照样能读。
+    #[serde(default, skip_serializing_if = "is_default_traditional_variant")]
+    pub traditional_chinese_variant: TraditionalVariant,
     /// 中英文之间加空格：一次上屏的文本里，汉字与 ASCII 字母、数字相邻处插入一个半角空格（host-api 在全角转换之后做，见 `crates/host-api/src/chinese_english_spacing.rs`）。两次上屏之间不加，候选窗显示不变。默认关；关着时不写进文档，没有这个键的旧版本照样能读。
     #[serde(default, skip_serializing_if = "is_false")]
     pub chinese_english_spacing: bool,
@@ -1015,6 +1053,12 @@ pub struct Preferences {
     /// 大写锁定打开时，中文模式下没有组字时的标点按英文标点输出，和切到英文模式时一样（`punctuation_lock` 为 `chinese` 时仍是中文标点）。只有向会话报告大写锁定状态的宿主（`HostCapabilities::caps_lock_punctuation`）会用到它。默认关，打开前的行为不变。
     #[serde(default)]
     pub caps_lock_ascii_punctuation: bool,
+    /// 中文标点下引号键的样式（W#474、W#54）。等于默认值（弯引号）时不写进文档，没有这个键的旧版本照样能读。
+    #[serde(default, skip_serializing_if = "QuoteStyle::is_default")]
+    pub quote_style: QuoteStyle,
+    /// 中文标点下方头括号键的样式（W#24）。等于默认值（实心）时不写进文档。
+    #[serde(default, skip_serializing_if = "BracketStyle::is_default")]
+    pub bracket_style: BracketStyle,
     #[serde(default)]
     pub navigation: NavigationPreferences,
     #[serde(default)]
@@ -2110,6 +2154,7 @@ impl Default for Preferences {
             input_mode_status_item: false,
             show_app_logo: false,
             expand_candidates: false,
+            show_candidate_expand_button: true,
             scheme: InputScheme::default(),
             wubi_code_hint: true,
             wubi_auto_commit_unique: true,
@@ -2151,6 +2196,7 @@ impl Default for Preferences {
             quanpin_helpcode: default_quanpin_helpcode(),
             shuangpin_helpcode: default_shuangpin_helpcode(),
             traditional_chinese_output: false,
+            traditional_chinese_variant: TraditionalVariant::default(),
             chinese_english_spacing: false,
             chinese_punctuation: true,
             smart_punctuation: smart_punctuation_default(),
@@ -2161,6 +2207,8 @@ impl Default for Preferences {
             paired_punctuation: true,
             punctuation_lock: PunctuationLock::Follow,
             caps_lock_ascii_punctuation: false,
+            quote_style: QuoteStyle::Curly,
+            bracket_style: BracketStyle::Solid,
             navigation: NavigationPreferences::default(),
             keybindings: KeybindingPreferences::default(),
             word_character: WordCharacterPreferences::default(),
@@ -2233,6 +2281,10 @@ impl FuzzyPinyinRule {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_default_traditional_variant(value: &TraditionalVariant) -> bool {
+    *value == TraditionalVariant::default()
 }
 
 fn is_true(value: &bool) -> bool {

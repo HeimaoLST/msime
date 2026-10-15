@@ -115,6 +115,16 @@ export function useConfirm(): {
           if (event.key === "Escape") {
             event.stopPropagation();
             settle(false);
+            return;
+          }
+          if (event.key !== "Tab") return;
+          // 在两个按钮的边界循环焦点，避免操作尚未确认时 Tab 进入背景页面。
+          if (event.shiftKey && document.activeElement === cancelButton.current) {
+            event.preventDefault();
+            confirmButton.current?.focus();
+          } else if (!event.shiftKey && document.activeElement === confirmButton.current) {
+            event.preventDefault();
+            cancelButton.current?.focus();
           }
         }}
       >

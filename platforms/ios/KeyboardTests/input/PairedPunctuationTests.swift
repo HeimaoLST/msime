@@ -24,6 +24,37 @@ final class PairedPunctuationTests: XCTestCase {
     XCTAssertNil(PairedPunctuationPolicy.reopenQuote(nil, ascii: "\"", enabled: true))
   }
 
+  /// 直角引号与空心方头括号（`quote_style`、`bracket_style`）补全、改回前引号和跨过都与弯引号一样。
+  func testCornerQuotesAndHollowBracketsPairLikeTheDefaults() {
+    XCTAssertEqual(PairedPunctuationPolicy.completion("「", enabled: true),
+                   PairedPunctuationCompletion(opening: "'", closing: "」"))
+    XCTAssertEqual(PairedPunctuationPolicy.completion("你好『", enabled: true),
+                   PairedPunctuationCompletion(opening: "\"", closing: "』"))
+    XCTAssertEqual(PairedPunctuationPolicy.completion("〖", enabled: true),
+                   PairedPunctuationCompletion(opening: "[", closing: "〗"))
+    XCTAssertNil(PairedPunctuationPolicy.completion("」", enabled: true))
+    XCTAssertEqual(PairedPunctuationPolicy.reopenQuote("」", ascii: "'", enabled: true), "「")
+    XCTAssertEqual(PairedPunctuationPolicy.reopenQuote("好』", ascii: "\"", enabled: true), "好『")
+    XCTAssertEqual(PairedPunctuationPolicy.reopenQuote("』", ascii: "'", enabled: true), "』")
+    XCTAssertEqual(PairedPunctuationPolicy.reopenQuote("」", ascii: "'", enabled: false), "」")
+
+    var stack = PairedPunctuationStack()
+    stack.push(closing: "〗", editor: 3)
+    stack.push(closing: "』", editor: 3)
+    stack.push(closing: "」", editor: 3)
+    XCTAssertTrue(stack.stepOver(ascii: "'", editor: 3, following: "」』〗"))
+    XCTAssertTrue(stack.stepOver(ascii: "\"", editor: 3, following: "』〗"))
+    XCTAssertTrue(stack.stepOver(ascii: "]", editor: 3, following: "〗"))
+    XCTAssertTrue(stack.isEmpty)
+  }
+
+  func testReplacingTheCommitKeepsThePunctuationMarks() {
+    let snapshot = MetasequoiaInputSnapshot(isHandled: true, commitText: "」", cornerQuotes: true, hollowBrackets: true)
+    let reopened = snapshot.replacingCommit("「")
+    XCTAssertTrue(reopened.cornerQuotes)
+    XCTAssertTrue(reopened.hollowBrackets)
+  }
+
   func testBalancedBookTitlesKeepOpeningTheOuterMark() {
     let state = FileManager.default.temporaryDirectory
       .appendingPathComponent("msime-paired-\(UUID().uuidString)", isDirectory: true)

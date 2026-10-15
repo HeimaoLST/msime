@@ -39,6 +39,20 @@ public final class ChineseSymbolFacesSmoke {
         check("，".equals(ChineseSymbolFaces.face(",", true))
                 && ",".equals(ChineseSymbolFaces.face(",", false)),
             "the face follows the mode it is given");
+        // 引号与方头括号样式（View 的 punctuation_marks）只换 ' " [ ] 的键面。
+        ChineseSymbolFaces.Marks styled = ChineseSymbolFaces.Marks.of("corner", "hollow");
+        check(styled.cornerQuotes() && styled.hollowBrackets(), "View values parse");
+        check(ChineseSymbolFaces.Marks.of("curly", "unknown").equals(ChineseSymbolFaces.Marks.DEFAULT),
+            "unknown values fall back to the defaults");
+        check(ChineseSymbolFaces.face("'", true, styled).equals("「"), "corner ' face");
+        check(ChineseSymbolFaces.face("\"", true, styled).equals("『"), "corner \" face");
+        check(ChineseSymbolFaces.face("[", true, styled).equals("〖"), "hollow [ face");
+        check(ChineseSymbolFaces.face("]", true, styled).equals("〗"), "hollow ] face");
+        check(ChineseSymbolFaces.face(",", true, styled).equals("，"), "other faces are untouched");
+        check(ChineseSymbolFaces.face("'", false, styled).equals("'"), "English mode keeps ASCII face");
+        check(ChineseSymbolFaces.face("'", true, ChineseSymbolFaces.Marks.DEFAULT).equals("‘")
+                && ChineseSymbolFaces.face("[", true, null).equals("【"),
+            "the default style keeps the contract faces");
         System.out.println("Android Chinese symbol faces: punctuation and language switching passed");
     }
 }

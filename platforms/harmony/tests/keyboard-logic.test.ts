@@ -122,6 +122,7 @@ import {
   SmartPunctuationRepeatSnapshot,
 } from "../entry/src/main/ets/keyboard/input/SmartPunctuationRepeatPolicy";
 import { PairedPunctuationPolicy } from "../entry/src/main/ets/keyboard/input/PairedPunctuationPolicy";
+import { ChineseSymbolFaces } from "../entry/src/main/ets/keyboard/input/ChineseSymbolFaces";
 import {
   ReturnDispatch,
   ReturnKeyAction,
@@ -1099,7 +1100,7 @@ group("keeps translation provider policy bounded and credential-free in signatur
     generation: 12,
     target_language: "en",
     target_languages: ["en", "ja"],
-    candidates: [{ text: "你好" }, { text: "你好" }],
+    candidates: [{ text: "你好", source: 0 }, { text: "你好", source: 14 }],
     custom_translation: null,
     tencent_tmt: null,
     niutrans: { enabled: true, app_id: "account", apikey: "secret" },
@@ -1108,6 +1109,12 @@ group("keeps translation provider policy bounded and credential-free in signatur
     user_data: "/data/state",
   };
   check(TranslationPolicy.provider(query) === "niutrans", "NiuTrans has provider precedence");
+  check(
+    TranslationPolicy.sourceGetsNoGloss(6) && TranslationPolicy.sourceGetsNoGloss(7)
+      && TranslationPolicy.sourceGetsNoGloss(13) && TranslationPolicy.sourceGetsNoGloss(14)
+      && !TranslationPolicy.sourceGetsNoGloss(0),
+    "special candidate sources never receive glosses",
+  );
   check(TranslationPolicy.targets(query).join(",") === "en,ja", "targets are deduplicated");
   check(
     !TranslationPolicy.signature(query).includes("secret"),
@@ -1189,7 +1196,7 @@ group("asks a /fy sentence query as its own item into its own target", () => {
     generation: 5,
     target_language: "zh",
     target_languages: ["zh"],
-    candidates: [{ text: "hello world" }],
+    candidates: [{ text: "hello world", source: 0 }],
     custom_translation: { enabled: true, endpoint: "https://translate.example", api_key: "key" },
     english_gloss: false,
     sentence: true,
@@ -1209,12 +1216,12 @@ group("asks a /fy sentence query as its own item into its own target", () => {
     "a candidate gloss query is not a command request",
   );
   check(
-    TranslationPolicy.commandItem({ ...query, candidates: [{ text: "a" }, { text: "b" }] }) ===
+    TranslationPolicy.commandItem({ ...query, candidates: [{ text: "a", source: 0 }, { text: "b", source: 0 }] }) ===
       null,
     "a sentence query holds exactly one text",
   );
   check(
-    TranslationPolicy.commandItem({ ...query, candidates: [{ text: "" }] }) === null,
+    TranslationPolicy.commandItem({ ...query, candidates: [{ text: "", source: 0 }] }) === null,
     "an empty sentence is not asked",
   );
 });
@@ -1238,7 +1245,7 @@ group("offline dictionaries fill only what the user's own translator left", () =
     generation: 3,
     target_language: "en",
     target_languages: ["ja", "fr"],
-    candidates: [{ text: "你好" }, { text: "世界" }],
+    candidates: [{ text: "你好", source: 0 }, { text: "世界", source: 0 }],
     english_gloss: true,
     offline_gloss_languages: ["en", "fr", "de"],
   };
@@ -5736,27 +5743,27 @@ group("replaces a repeated smart ASCII mark only in the same short-lived editor 
 
 group("completes Engine opening punctuation only when paired mode is enabled", () => {
   check(
-    PairedPunctuationPolicy.completion("“", true)?.closing === "”",
+    PairedPunctuationPolicy.completion("“", 0x22, true)?.closing === "”",
     "double quote opens a Chinese pair",
   );
   check(
-    PairedPunctuationPolicy.completion("拟（", true)?.closing === "）",
+    PairedPunctuationPolicy.completion("拟（", 0x28, true)?.closing === "）",
     "a composition commit can end in an opening parenthesis",
   );
   check(
-    PairedPunctuationPolicy.completion("《", true)?.opening === 0x3c,
+    PairedPunctuationPolicy.completion("《", 0x3c, true)?.opening === 0x3c,
     "book title marks retain the balance input",
   );
   check(
-    PairedPunctuationPolicy.completion("”", true) === null,
+    PairedPunctuationPolicy.completion("”", 0x22, true) === null,
     "a closing quote is not completed again",
   );
   check(
-    PairedPunctuationPolicy.completion("“", false) === null,
+    PairedPunctuationPolicy.completion("“", 0x22, false) === null,
     "disabled paired punctuation leaves the editor to the Engine",
   );
   check(
-    PairedPunctuationPolicy.completion("", true) === null,
+    PairedPunctuationPolicy.completion("", 0x22, true) === null,
     "an empty commit cannot open a pair",
   );
 });
@@ -5766,7 +5773,7 @@ group("with pairing on every quote press opens a fresh pair, as the reference do
   const reopened = PairedPunctuationPolicy.reopenQuote("”", 0x22, true);
   check(reopened === "“", "a closing double quote from the Engine is rewritten to the opening one");
   check(
-    PairedPunctuationPolicy.completion(reopened, true)?.closing === "”",
+    PairedPunctuationPolicy.completion(reopened, 0x22, true)?.closing === "”",
     "and the rewritten quote is then completed to a pair",
   );
   check(
@@ -12188,6 +12195,8 @@ function fullPreferenceSchema(): AccountPreferenceSchema {
       "platform.harmony.haptic_strength",
       "platform.harmony.number_keypad_order",
       "platform.harmony.twenty_six_key_number_layout",
+      "input.quote_style",
+      "input.bracket_style",
     ],
     "string",
   );
@@ -19465,4 +19474,115 @@ group("applying cloud settings saves a whole preferences snapshot", () => {
     JSON.stringify(local.preferences) === JSON.stringify({ scheme: "quanpin", learning: true }),
     "the local snapshot is not changed in place",
   );
+});
+
+group("quote and bracket styles change only the faces and pairs of their own keys", () => {
+  check(ChineseSymbolFaces.face("'", false, false) === "‘", "the default ' face");
+  check(ChineseSymbolFaces.face("'", true, false) === "「", "corner quotes draw 「 on '");
+  check(ChineseSymbolFaces.face('"', true, false) === "『", 'and 『 on "');
+  check(ChineseSymbolFaces.face("[", false, true) === "〖", "hollow brackets draw 〖 on [");
+  check(ChineseSymbolFaces.face("]", false, true) === "〗", "and 〗 on ]");
+  check(
+    ChineseSymbolFaces.face("[", true, false) === "【",
+    "corner quotes leave the brackets alone",
+  );
+  check(ChineseSymbolFaces.face(",", true, true) === "，", "and every other mark");
+  check(
+    ChineseSymbolFaces.face("@", true, true) === undefined,
+    "a key without a Chinese face has none",
+  );
+  check(
+    ChineseSymbolFaces.cornerQuotes({ quotes: "corner", brackets: "solid" }) &&
+      !ChineseSymbolFaces.cornerQuotes({ quotes: "curly" }) &&
+      !ChineseSymbolFaces.cornerQuotes(undefined),
+    "the view's punctuation_marks decide the quotes; an older library reports nothing",
+  );
+  check(
+    ChineseSymbolFaces.hollowBrackets({ brackets: "hollow" }) &&
+      !ChineseSymbolFaces.hollowBrackets({ brackets: "solid" }),
+    "and the brackets",
+  );
+
+  check(PairedPunctuationPolicy.completion("「", 0x27, true)?.closing === "」", "「 is completed");
+  check(
+    PairedPunctuationPolicy.completion("你好『", 0x22, true)?.opening === 0x22,
+    '『 is completed on the " key',
+  );
+  check(PairedPunctuationPolicy.completion("〖", 0x5b, true)?.closing === "〗", "〖 is completed");
+  check(
+    PairedPunctuationPolicy.completion("」", 0x27, true) === null,
+    "a corner closing half is not",
+  );
+  // 注音的大千键位 `[` `{` 自己出「『，`]` `}` 也照样出」』，这个宿主没有跨过：不是引号键出的「『不补。
+  check(
+    PairedPunctuationPolicy.completion("「", 0x5b, true) === null &&
+      PairedPunctuationPolicy.completion("你好『", 0x7b, true) === null,
+    "Zhuyin's [ and { corner marks are not completed",
+  );
+  check(
+    PairedPunctuationPolicy.reopenQuote("」", 0x5d, true) === "」",
+    "and Zhuyin's ] keeps its closing half",
+  );
+  check(PairedPunctuationPolicy.reopenQuote("」", 0x27, true) === "「", "」 reopens as 「");
+  check(PairedPunctuationPolicy.reopenQuote("好』", 0x22, true) === "好『", "』 reopens as 『");
+  check(
+    PairedPunctuationPolicy.reopenQuote("』", 0x27, true) === "』",
+    "another key's half is left alone",
+  );
+
+  check(SmartPunctuationSpacePolicy.asciiFor(0x300c) === 0x27, "Space turns 「 back into '");
+  check(SmartPunctuationSpacePolicy.asciiFor(0x300f) === 0x22, '』 back into "');
+  check(SmartPunctuationSpacePolicy.asciiFor(0x3016) === 0x5b, "〖 back into [");
+  check(SmartPunctuationSpacePolicy.asciiFor(0x3017) === 0x5d, "〗 back into ]");
+
+  const corner: LayerKey[][] = NumberSymbolLayout.rows(false, true, true);
+  check(
+    texts(corner[1]) === "- / ： ； （ ） ¥ @ 「 」",
+    "the Chinese 123 layer's quote keys become 「」",
+  );
+  check(
+    texts(NumberSymbolLayout.rows(false, false, true)[1]) ===
+      texts(NumberSymbolLayout.numberLayer(false)[1]),
+    "the English layer ignores the style",
+  );
+  check(
+    texts(NumberSymbolLayout.rows(true, true, true)[1]) ===
+      texts(NumberSymbolLayout.moreSymbolLayer(true)[1]),
+    "and so does #+=",
+  );
+  check(
+    NumberSymbolLayout.route("「", true) === LayerCharacterRoute.LITERAL,
+    "a corner quote key is inserted as drawn",
+  );
+});
+
+group("the punctuation styles travel with the account settings", () => {
+  const values = localAccountPreferences(
+    { quote_style: "corner_when_traditional", bracket_style: "hollow" },
+    syncFeedback,
+  );
+  check(values["input.quote_style"] === "corner_when_traditional", "the quote style is exported");
+  check(values["input.bracket_style"] === "hollow", "and the bracket style");
+  const defaults = localAccountPreferences({}, syncFeedback);
+  check(
+    defaults["input.quote_style"] === "curly" && defaults["input.bracket_style"] === "solid",
+    "a document without the keys exports the defaults",
+  );
+  const schema = fullPreferenceSchema();
+  const applied = applyAccountPreferences(
+    { scheme: "quanpin" },
+    { revision: 2, settings: { "input.quote_style": "corner", "input.bracket_style": "hollow" } },
+    schema,
+    syncFeedback,
+  );
+  check(applied.preferences.quote_style === "corner", "a known quote style is applied");
+  check(applied.preferences.bracket_style === "hollow", "and a known bracket style");
+  const unknown = applyAccountPreferences(
+    { scheme: "quanpin", quote_style: "corner" },
+    { revision: 2, settings: { "input.quote_style": "semantic", "input.learning": false } },
+    schema,
+    syncFeedback,
+  );
+  check(unknown.preferences.quote_style === "corner", "an unknown style skips only its key");
+  check(unknown.preferences.learning === false, "and the rest still applies");
 });

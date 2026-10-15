@@ -13,7 +13,14 @@ export interface PunctuationPreferences {
   paired_punctuation?: boolean;
   punctuation_lock?: "follow" | "chinese" | "english";
   caps_lock_ascii_punctuation?: boolean;
+  /** 中文标点下引号键的样式；缺省（文档里没有这个键）是弯引号。 */
+  quote_style?: QuoteStyle;
+  /** 中文标点下方头括号键的样式；缺省是实心。 */
+  bracket_style?: BracketStyle;
 }
+
+export type QuoteStyle = "curly" | "corner" | "corner_when_traditional";
+export type BracketStyle = "solid" | "hollow";
 
 type PunctuationSwitch =
   | "smart_punctuation"
@@ -106,6 +113,8 @@ export function PunctuationSection({
         checked={preferences.chinese_punctuation}
         onChange={(chinese_punctuation) => onChange({ chinese_punctuation })}
       />
+      <QuoteStyleRow preferences={preferences} onChange={onChange} />
+      <BracketStyleRow preferences={preferences} onChange={onChange} />
       {showCharacterWidth && <CharacterWidthRow preferences={preferences} onChange={onChange} />}
       {switches.map(([key, label, description]) => (
         <PunctuationSwitchRow
@@ -181,7 +190,44 @@ function PunctuationLockRow({
   );
 }
 
-/** HarmonyOS 手机「表达」页的「标点」分组，遵循设计稿和 Android 的 `ExpressionPage`：「使用英文标点」（显示为 `chinese_punctuation` 的反值）、「自动补全成对标点」和「智能标点」，智能标点的细分选项和「固定标点」收在「更多选项」下，不丢失任何生效中的设置。 */
+/** 引号样式：只在中文标点下起作用，所以紧跟在「中文标点」之后。直角引号按键对应，说明里写出键位。 */
+export function QuoteStyleRow({
+  preferences,
+  onChange,
+}: Pick<PunctuationSectionProps, "preferences" | "onChange">) {
+  return (
+    <SelectRow
+      title="引号样式"
+      description="中文标点下 ' 键和 Shift+' 键输出的引号。直角引号：' 出「」，Shift+' 出『』"
+      value={preferences.quote_style ?? "curly"}
+      onChange={(event) => onChange({ quote_style: event.target.value as QuoteStyle })}
+    >
+      <option value="curly">弯引号 “ ” ‘ ’</option>
+      <option value="corner">直角引号 「 」『 』</option>
+      <option value="corner_when_traditional">繁体输出时用直角引号</option>
+    </SelectRow>
+  );
+}
+
+/** 方头括号样式：`[` `]` 出实心【】还是空心〖〗。 */
+export function BracketStyleRow({
+  preferences,
+  onChange,
+}: Pick<PunctuationSectionProps, "preferences" | "onChange">) {
+  return (
+    <SelectRow
+      title="方头括号样式"
+      description="中文标点下 [ ] 键输出的括号"
+      value={preferences.bracket_style ?? "solid"}
+      onChange={(event) => onChange({ bracket_style: event.target.value as BracketStyle })}
+    >
+      <option value="solid">实心 【 】</option>
+      <option value="hollow">空心 〖 〗</option>
+    </SelectRow>
+  );
+}
+
+/** HarmonyOS 手机「表达」页的「标点」分组，遵循设计稿和 Android 的 `ExpressionPage`：「使用英文标点」（显示为 `chinese_punctuation` 的反值）、「自动补全成对标点」和「智能标点」，引号与方头括号样式、智能标点的细分选项和「固定标点」收在「更多选项」下，不丢失任何生效中的设置。 */
 export function PhonePunctuationSection({
   preferences,
   onChange,
@@ -208,6 +254,8 @@ export function PhonePunctuationSection({
         onChange={onChange}
       />
       <MoreOptions>
+        <QuoteStyleRow preferences={preferences} onChange={onChange} />
+        <BracketStyleRow preferences={preferences} onChange={onChange} />
         {smartPunctuationRefinements.map(([key, label, description]) => (
           <PunctuationSwitchRow
             key={key}

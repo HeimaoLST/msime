@@ -64,6 +64,10 @@ int main() {
   check(weekday({1970, 1, 1}) == 4, "1970-01-01 is a Thursday");
   check(add_days("2026-03-01", -1) == "2026-02-28" && add_days("2024-03-01", -1) == "2024-02-29",
         "adding days crosses months and leap days");
+  check(statistics_date_changed(std::nullopt, "2026-10-11") &&
+            !statistics_date_changed(std::optional<std::string>("2026-10-11"), "2026-10-11") &&
+            statistics_date_changed(std::optional<std::string>("2026-10-11"), "2026-10-12"),
+        "a new local day redraws an unchanged statistics snapshot");
   check(add_days("2026-02-30", 1) == "2026-02-30" && add_days("x", 1) == "x", "not a date stays as it is");
   const auto days = recent_days(30, today);
   check(days.size() == 30 && days.front().key == "2026-09-12" && days.back().key == "2026-10-11" &&

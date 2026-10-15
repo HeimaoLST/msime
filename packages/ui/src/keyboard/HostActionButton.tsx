@@ -1,8 +1,8 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { errorCode } from "../core/error-code";
-import { useMountedRef } from "../settings/use-mounted-ref";
+import { useAsyncActionRunner } from "../core/use-async-action";
 
-/** Host failures may contain private paths or data; display only fixed UI messages. */
+/** 宿主失败可能包含私人路径或数据，界面只显示约定提示。 */
 export function HostActionButton({
   action,
   label,
@@ -14,35 +14,30 @@ export function HostActionButton({
   success?: string;
   error?: string;
 }) {
-  const running = useRef(false);
-  const [pending, setPending] = useState(false);
   const [result, setResult] = useState<"success" | "error" | null>(null);
   const [errorMessage, setErrorMessage] = useState("操作失败，请重试。");
-  const mounted = useMountedRef();
-  async function run() {
-    if (!action || running.current || !mounted.current) return;
-    running.current = true;
-    setPending(true);
-    setResult(null);
-    try {
-      await action();
-      if (!mounted.current) return;
-      setResult("success");
-    } catch (reason) {
-      if (!mounted.current) return;
-      const code = errorCode(reason);
-      setErrorMessage(
-        code === "unknown_skin"
-          ? "找不到该外部皮肤，请先刷新皮肤目录。"
-          : code === "invalid_skin"
-            ? "皮肤标识无效，未执行应用。"
-            : (error ?? "操作失败，请重试。"),
-      );
-      setResult("error");
-    } finally {
-      running.current = false;
-      if (mounted.current) setPending(false);
-    }
+  const runner = useAsyncActionRunner(setErrorMessage, undefined);
+  const pending = runner.busy;
+  function run() {
+    if (!action) return;
+    return runner.run(
+      async (isCurrent) => {
+        setResult(null);
+        await action();
+        if (isCurrent()) setResult("success");
+      },
+      {
+        formatError: (reason) => {
+          const code = errorCode(reason);
+          return code === "unknown_skin"
+            ? "找不到该外部皮肤，请先刷新皮肤目录。"
+            : code === "invalid_skin"
+              ? "皮肤标识无效，未执行应用。"
+              : (error ?? "操作失败，请重试。");
+        },
+        onError: () => setResult("error"),
+      },
+    );
   }
   return (
     <div>

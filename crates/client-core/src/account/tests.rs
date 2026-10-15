@@ -2900,6 +2900,9 @@ fn desktop_settings_sync_uploads_input_keys_and_applies_only_for_the_reading_use
     assert!(uploads.load(Ordering::SeqCst));
     assert_eq!(uploaded.revision, 43);
     assert!(uploaded.settings.contains_key("input.schema"));
+    // 字段表没有收录的键（比如服务端还没加的 `input.quote_style`、`input.bracket_style`）上传前被过滤掉，不报错。
+    assert!(!uploaded.settings.contains_key("input.quote_style"));
+    assert!(!uploaded.settings.contains_key("input.bracket_style"));
     assert_eq!(
         uploaded.settings.get("platform.ios.nine_key"),
         Some(&AccountPreferenceValue::Boolean(true))

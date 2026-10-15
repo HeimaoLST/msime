@@ -143,9 +143,18 @@ WCHAR SmartPunctuationAsciiFor(WCHAR chinese)
     case L'‘':
     case L'’':
         return L'\'';
+    // 直角引号与空心方头括号是同一个键的另一组字，转回那个键。
+    case L'『':
+    case L'』':
+        return L'"';
+    case L'「':
+    case L'」':
+        return L'\'';
     case L'【':
+    case L'〖':
         return L'[';
     case L'】':
+    case L'〗':
         return L']';
     case L'《':
         return L'<';

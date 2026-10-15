@@ -335,7 +335,7 @@ mod tests {
         });
 
         assert_eq!(length, 2);
-        assert_eq!(allocations, 10);
+        assert_eq!(allocations, 2);
     }
 
     #[test]

@@ -221,7 +221,8 @@ int main() {
         // Enabled: every standalone Chinese mark from the source mapping becomes its ASCII form. The space is the gesture and is consumed; it is not document content after a successful rewrite. 、 is covered with the real backslash key in TestRealKeyArming, since its ASCII target is not the key that types it.
         for (NSString *pair in @[ @",，", @".。", @":：", @"!！", @"?？", @";；",
                                   @"\"“", @"\"”", @"'‘", @"'’", @"[【", @"]】", @"<《",
-                                  @">》", @"(（", @")）" ]) {
+                                  @">》", @"(（", @")）", @"'「", @"'」", @"\"『", @"\"』",
+                                  @"[〖", @"]〗" ]) {
             const unichar ascii = [pair characterAtIndex:0];
             SpaceConvertClient *editor = ClientWith([@"abc" stringByAppendingString:[pair substringFromIndex:1]]);
             Arm(controller, ascii, editor);
@@ -375,7 +376,8 @@ int main() {
         auto Ascii = [](NSString *pair) { return [pair substringToIndex:1]; };
         for (NSString *pair in @[ @",，", @".。", @":：", @"!！", @"?？", @";；", @"/、",
                                   @"\"“", @"\"”", @"'‘", @"'’", @"[【", @"]】", @"<《",
-                                  @">》", @"(（", @")）" ]) {
+                                  @">》", @"(（", @")）", @"'「", @"'」", @"\"『", @"\"』",
+                                  @"[〖", @"]〗" ]) {
             SpaceConvertClient *editor = Converted(pair);
             assert([editor.document isEqual:[@"abc" stringByAppendingString:Ascii(pair)]]);
             assert([controller revertSmartPunctuationSpace:Key(Ascii(pair)) client:editor]);

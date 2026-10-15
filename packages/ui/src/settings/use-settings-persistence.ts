@@ -6,9 +6,12 @@ import {
   type RefObject,
   type SetStateAction,
 } from "react";
+import { useLatestRef } from "../core/use-latest-ref";
 import { deepEqual } from "../core/deep-equal";
 import { errorCode } from "../core/error-code";
 import { errorMessage } from "../core/error-message";
+import { trackAsyncSubscription } from "../core/async-subscription";
+import { subscribeToDocumentVisibilityChange } from "../core/window-focus";
 import { validCandidateFonts } from "../candidate/candidate-font-family";
 import type { Preferences, SettingsClient, Snapshot } from "../index";
 import {
@@ -62,13 +65,13 @@ export function useSettingsPersistence({
 }: UseSettingsPersistenceOptions) {
   const snapshotRef = useRef(snapshot);
   const draftRef = useRef(draft);
-  const clientRef = useRef(client);
+  const clientRef = useLatestRef(client);
   const loadingClientRef = useRef<SettingsClient | undefined>(undefined);
-  clientRef.current = client;
   const [saveState, setSaveState] = useState<SettingsSaveState>("idle");
   const [saveError, setSaveError] = useState("");
   const [loadFailed, setLoadFailed] = useState(false);
   const reloadInFlightRef = useRef<Promise<void> | undefined>(undefined);
+  const loadTokenRef = useRef(0);
   const generation = useAsyncGeneration(client);
 
   useEffect(() => {
@@ -148,31 +151,21 @@ export function useSettingsPersistence({
   };
   // The subscription outlives renders; it reaches the handler through this so it never runs a stale
   // one (the handler itself only touches refs and state setters).
-  const applyPreferencesChangeRef = useRef(applyPreferencesChange);
-  applyPreferencesChangeRef.current = applyPreferencesChange;
+  const applyPreferencesChangeRef = useLatestRef(applyPreferencesChange);
 
   useEffect(() => {
     if (!client.onPreferencesChanged) return;
     const current = generation.current;
-    let unsubscribe: (() => void) | undefined;
-    void client
-      .onPreferencesChanged((value) => {
-        if (generation.current !== current) return;
-        if (savingRef.current) {
-          if (!heldChange.current || value.revision > heldChange.current.revision)
-            heldChange.current = value;
-          return;
-        }
-        applyPreferencesChangeRef.current(value);
-      })
-      .then((value) => {
-        if (generation.current === current) unsubscribe = value;
-        else value();
-      })
-      .catch(() => undefined);
-    return () => {
-      unsubscribe?.();
-    };
+    const pending = client.onPreferencesChanged((value) => {
+      if (generation.current !== current) return;
+      if (savingRef.current) {
+        if (!heldChange.current || value.revision > heldChange.current.revision)
+          heldChange.current = value;
+        return;
+      }
+      applyPreferencesChangeRef.current(value);
+    });
+    return trackAsyncSubscription(pending, () => generation.current === current);
   }, [client, generation]);
 
   useEffect(() => {
@@ -181,6 +174,8 @@ export function useSettingsPersistence({
     saveTokenRef.current += 1;
     savingRef.current = false;
     heldChange.current = undefined;
+    reloadInFlightRef.current = undefined;
+    loadTokenRef.current += 1;
     loadingClientRef.current = client;
     snapshotRef.current = undefined;
     draftRef.current = undefined;
@@ -192,21 +187,24 @@ export function useSettingsPersistence({
 
   useEffect(() => {
     const current = generation.current;
+    const loadToken = ++loadTokenRef.current;
     client
       .load()
       .then((value) => {
-        if (generation.current !== current) return;
+        if (generation.current !== current || loadTokenRef.current !== loadToken) return;
         loadingClientRef.current = undefined;
-        adoptSnapshot(value);
+        // 加载期间可能已收到更新的宿主通知，迟到的读取不能把版本退回去。
+        if (!snapshotRef.current || value.revision >= snapshotRef.current.revision)
+          adoptSnapshot(value);
         setLoadFailed(false);
       })
       .catch((reason) => {
-        if (generation.current !== current) return;
+        if (generation.current !== current || loadTokenRef.current !== loadToken) return;
         setError(errorMessage(reason));
         setLoadFailed(true);
       })
       .finally(() => {
-        if (generation.current === current) setBusy(false);
+        if (generation.current === current && loadTokenRef.current === loadToken) setBusy(false);
       });
   }, [client, generation]);
 
@@ -214,6 +212,8 @@ export function useSettingsPersistence({
     if (!mounted.current) return;
     const inFlight = reloadInFlightRef.current;
     if (inFlight) return inFlight;
+    const current = generation.current;
+    const loadToken = ++loadTokenRef.current;
     const operation = (async () => {
       clearAutosave();
       setBusy(true);
@@ -222,18 +222,31 @@ export function useSettingsPersistence({
       setRecoveredBackup("");
       try {
         const value = await client.load();
-        if (!mounted.current) return;
+        if (
+          !mounted.current ||
+          generation.current !== current ||
+          loadTokenRef.current !== loadToken
+        )
+          return;
         loadingClientRef.current = undefined;
-        adoptSnapshot(value);
+        // 重载也遵守通知的版本顺序，保留请求期间已经采纳的新快照。
+        if (!snapshotRef.current || value.revision >= snapshotRef.current.revision)
+          adoptSnapshot(value);
         setLoadFailed(false);
         setSaveState("idle");
         setSaveError("");
       } catch (reason) {
-        if (!mounted.current) return;
+        if (
+          !mounted.current ||
+          generation.current !== current ||
+          loadTokenRef.current !== loadToken
+        )
+          return;
         setError(errorMessage(reason));
         setLoadFailed(true);
       } finally {
-        if (mounted.current) setBusy(false);
+        if (mounted.current && generation.current === current && loadTokenRef.current === loadToken)
+          setBusy(false);
       }
     })();
     reloadInFlightRef.current = operation;
@@ -347,8 +360,7 @@ export function useSettingsPersistence({
     heldChange.current = undefined;
     if (held) applyPreferencesChange(held);
   }
-  const flushRef = useRef(flush);
-  flushRef.current = flush;
+  const flushRef = useLatestRef(flush);
   useFlushOnWindowLeave(() => void flushRef.current());
 
   // 组件可能在自动保存收到首次响应前卸载。这里沿用挂载路径的有界冲突重试，但只修改本地副本；
@@ -421,8 +433,7 @@ export function useSettingsPersistence({
       }
       void reload();
     };
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+    return subscribeToDocumentVisibilityChange(onVisibilityChange);
   }, [client, mobile]);
 
   return {

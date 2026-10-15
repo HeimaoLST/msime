@@ -3,9 +3,8 @@ import type { Preferences } from "../index";
 import type { ImeSetupClient, ImeSetupState } from "../core/host-contracts";
 import { MsimeMark } from "../core/brand-logo";
 import { FluentIcon } from "../core/fluent-icons";
-import { errorMessage } from "../core/error-message";
-import { useToast } from "../core/toast";
 import { touchKeyboardSchemeTitle } from "../settings/touch-keyboard-scheme-helpers";
+import { useHostAction } from "../core/use-host-action";
 
 /** 设置引导界面调用的宿主操作：两个设置步骤，以及宿主自己的设置状态。 */
 export interface SetupActions {
@@ -29,15 +28,6 @@ export function useImeSetupState(setup: ImeSetupClient | undefined): ImeSetupSta
   }, [setup]);
   // 从界面已不再持有的客户端读到的状态，不是这个宿主的答案。
   return state && state.client === setup ? state.value : null;
-}
-
-/** 执行一个宿主操作，失败时用 toast 报告，这是设计里表示点按没生效的方式。 */
-function useHostAction() {
-  const toast = useToast();
-  return (action: (() => Promise<void>) | undefined) => {
-    if (!action) return;
-    void action().catch((error: unknown) => toast(errorMessage(error)));
-  };
 }
 
 /** 把本输入法设为默认的操作。系统选择器只列出已启用的输入法，所以第一步完成前改为打开系统的输入法列表，与 Android 的 `ImeSetup.makeDefault` 一致。 */

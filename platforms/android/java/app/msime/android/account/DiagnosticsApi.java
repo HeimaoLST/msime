@@ -21,7 +21,7 @@ import org.json.JSONObject;
 /**
  * 「MCP 开发者访问」的云端接口：上传一份日志快照、读回快照与最近访问、重新生成访问令牌、删除快照（`/v1/users/me/diagnostics`）。
  *
- * <p>上传的内容只来自 Rust 写出的诊断包（`NativeClient.diagnosticBundle`）：配置快照是诊断包里已经脱敏的 `config_snapshot`，这里不自己脱敏；输入事件和性能数据从诊断包里按 P19 白名单校验过的 jsonl 读出，再在这里按 {@link DiagnosticEventKind} 枚举逐条重建，只留 `t_ms`、`kind`、`duration_ms`，不认识的种类整行丢弃。请求体里不会出现任何文本、拼音、候选或按键字面值。
+ * <p>上传的内容只来自 Rust 写出的诊断包（`NativeClient.diagnosticBundle`）：配置快照是诊断包里已经脱敏的 `config_snapshot`，这里不自己脱敏；输入事件和性能数据从诊断包里按本地白名单校验过的 jsonl 读出，再在这里按 {@link DiagnosticEventKind} 枚举逐条重建，只留 `t_ms`、`kind`、`duration_ms`，不认识的种类和仅供本地导出的失败类别整行丢弃。请求体里不会出现任何文本、拼音、候选或按键字面值。
  *
  * <p>匿名账号也可以上传（`ACCOUNT_OR_ANONYMOUS`）。每个请求都阻塞在网络上，不要在主线程调用。
  */
@@ -67,10 +67,10 @@ public final class DiagnosticsApi {
 
     /** 一条输入事件或性能记录；`durationMs` 小于 0 表示没有耗时。 */
     public record Event(long tMs, DiagnosticEventKind kind, long durationMs) {
-        /** 按枚举重建一条记录；种类不认识、时间为负时返回 null。 */
+        /** 按云端枚举重建一条记录；本地类别、不认识的种类、负时间都返回 null。 */
         public static Event of(long tMs, String kind, long durationMs) {
             DiagnosticEventKind known = DiagnosticEventKind.fromWire(kind);
-            if (known == null || tMs < 0) return null;
+            if (known == null || !known.uploadable() || tMs < 0) return null;
             return new Event(tMs, known, durationMs < 0 ? -1 : durationMs);
         }
     }
@@ -217,9 +217,12 @@ public final class DiagnosticsApi {
 
     private static void events(StringBuilder out, List<Event> events, boolean durationRequired) {
         out.append('[');
-        for (int i = 0; i < events.size(); i++) {
-            Event event = events.get(i);
-            if (i > 0) out.append(',');
+        boolean first = true;
+        for (Event event : events) {
+            // 即使调用方直接构造 Event，也不向旧云端上传本地失败类别。
+            if (event.kind() == null || !event.kind().uploadable()) continue;
+            if (!first) out.append(',');
+            first = false;
             out.append("{\"t_ms\":").append(event.tMs()).append(",\"kind\":\"").append(event.kind().wire()).append('"');
             if (event.durationMs() >= 0 || durationRequired) {
                 out.append(",\"duration_ms\":").append(BoundsPolicy.nonNegative(event.durationMs()));
@@ -230,7 +233,7 @@ public final class DiagnosticsApi {
     }
 
     /**
-     * 从诊断包 zip 里取出要上传的各节。按条目文件名认：`config_snapshot.json`、`input_events.jsonl`（或 `input-events.jsonl`）、`perf.jsonl`（或 `perf_trace.jsonl`、`performance_logs.jsonl`）和 `*.crash`；没选的类别不读。
+     * 从共享层诊断包 ZIP 读取 `config_snapshot.json` 和三类 `.ndjson`；兼容旧 `.jsonl`、`*.crash`，没选的类别不读。
      */
     public static Sections readBundle(File zip, Include include) throws IOException {
         Path path = zip == null ? null : zip.toPath();
@@ -252,11 +255,15 @@ public final class DiagnosticsApi {
                 String name = baseName(entry.getName());
                 if (include.configSnapshot() && name.equals("config_snapshot.json")) {
                     config = configSnapshot(entryText(stream));
-                } else if (input != null && (name.equals("input_events.jsonl") || name.equals("input-events.jsonl"))) {
+                } else if (input != null && (name.equals("input_events.ndjson")
+                        || name.equals("input_events.jsonl") || name.equals("input-events.jsonl"))) {
                     appendEvents(input, eventLines(entryText(stream), false));
-                } else if (perf != null && (name.equals("perf.jsonl") || name.equals("perf_trace.jsonl")
+                } else if (perf != null && (name.equals("performance_logs.ndjson")
+                        || name.equals("perf.jsonl") || name.equals("perf_trace.jsonl")
                         || name.equals("performance_logs.jsonl"))) {
-                        appendEvents(perf, eventLines(entryText(stream), true));
+                    appendEvents(perf, eventLines(entryText(stream), true));
+                } else if (crashes != null && name.equals("crash_logs.ndjson") && crashes.size() < MAX_CRASH_LOGS) {
+                    appendCrashRecords(crashes, entryText(stream));
                 } else if (crashes != null && name.endsWith(".crash") && crashes.size() < MAX_CRASH_LOGS) {
                     crashes.add(crashRecord(entryText(stream), entry.getTime()));
                 }
@@ -264,6 +271,26 @@ public final class DiagnosticsApi {
         }
         return new Sections(crashes, latest(perf), include.configSnapshot() ? (config == null ? "{}" : config) : null,
             latest(input));
+    }
+
+    /** 共享层已脱敏的崩溃 NDJSON；拒绝不符合三字符串字段契约的记录。 */
+    private static void appendCrashRecords(List<CrashLog> target, String text) {
+        for (String line : text.split("\n")) {
+            if (target.size() == MAX_CRASH_LOGS) break;
+            try {
+                JSONObject row = new JSONObject(line);
+                if (row.length() != 3) continue;
+                String at = JsonPolicy.strictString(row.opt("at"));
+                String message = JsonPolicy.strictString(row.opt("message"));
+                String stack = JsonPolicy.strictString(row.opt("stack"));
+                if (at == null || at.isEmpty() || TextPolicy.utf8Length(at) > 64
+                        || message == null || TextPolicy.utf8Length(message) > MAX_MESSAGE_BYTES
+                        || stack == null || TextPolicy.utf8Length(stack) > MAX_STACK_BYTES) continue;
+                target.add(CrashLog.of(at, message, stack));
+            } catch (JSONException malformed) {
+                // 空行和不合规记录不进入上传请求，也不输出异常原文。
+            }
+        }
     }
 
     /** 每条 jsonl 都按枚举重建，只取三个数值/枚举字段；坏行和不认识的种类丢弃。 */

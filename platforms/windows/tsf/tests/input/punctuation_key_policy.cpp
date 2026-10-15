@@ -36,6 +36,34 @@ int main() {
     check(PairedPunctuationStepOverCandidate(L'}', L"}", false) == L'}', "half-width brace pair keeps its ASCII half");
     check(PairedPunctuationStepOverCandidate(L')', L"）", true) == L'）', "full width changes only the brace");
     check(PairedPunctuationStepOverCandidate(L'x', L"」") == L'」', "corner bracket closing half steps over");
+    // 直角引号与空心括号（quote_style、bracket_style）：引号键看出的是哪一组，后半个就是那一组的。
+    check(PairedPunctuationStepOverCandidate(L'"', L"『") == L'』', "corner double quote is keyed to its own group");
+    check(PairedPunctuationStepOverCandidate(L'"', L"』") == L'』', "corner double quote right half");
+    check(PairedPunctuationStepOverCandidate(L'\'', L"「") == L'」', "corner single quote is keyed to its own group");
+    check(PairedPunctuationStepOverCandidate(L']', L"〗") == L'〗', "hollow bracket closes");
+    check(PairedPunctuationStepOverCandidate(L'[', L"〖") == 0, "hollow opening never steps over");
+
+    // GetPunctuation 查表后的换字：只换引号和方头括号，其余原样。
+    check(std::wstring_view(StyledPunctuation(L"“", true, false)) == L"『", "corner left double quote");
+    check(std::wstring_view(StyledPunctuation(L"”", true, false)) == L"』", "corner right double quote");
+    check(std::wstring_view(StyledPunctuation(L"‘", true, false)) == L"「", "corner left single quote");
+    check(std::wstring_view(StyledPunctuation(L"’", true, false)) == L"」", "corner right single quote");
+    check(std::wstring_view(StyledPunctuation(L"【", false, true)) == L"〖", "hollow left bracket");
+    check(std::wstring_view(StyledPunctuation(L"】", false, true)) == L"〗", "hollow right bracket");
+    check(std::wstring_view(StyledPunctuation(L"【", true, false)) == L"【", "corner quotes leave brackets alone");
+    check(std::wstring_view(StyledPunctuation(L"“", false, true)) == L"“", "hollow brackets leave quotes alone");
+    check(std::wstring_view(StyledPunctuation(L"……", true, true)) == L"……", "multi-character marks are untouched");
+    check(std::wstring_view(StyledPunctuation(L"，", true, true)) == L"，", "other marks are untouched");
+    check(StyledPunctuation(nullptr, true, true) == nullptr, "a missing mark stays missing");
+
+    // 成对模式下引号键的后半个改回同一组的前半个。
+    check(ReopenedPairedQuote(L'"', L'”') == L'“', "curly double quote reopens");
+    check(ReopenedPairedQuote(L'\'', L'’') == L'‘', "curly single quote reopens");
+    check(ReopenedPairedQuote(L'"', L'』') == L'『', "corner double quote reopens");
+    check(ReopenedPairedQuote(L'\'', L'」') == L'「', "corner single quote reopens");
+    check(ReopenedPairedQuote(L'"', L'』') != L'「', "the group follows the key");
+    check(ReopenedPairedQuote(L'\'', L'』') == L'』', "another key's half is left alone");
+    check(ReopenedPairedQuote(L'(', L'）') == L'）', "non-quote keys are left alone");
 
     // 成对表：与 macOS 的 MSIMEPunctuationPairs 一致，另含按键才补的 {} 与全角 ｛｝。
     check(PairedPunctuationClosingFor(L'（') == L'）', "paren pair");
@@ -43,6 +71,9 @@ int main() {
     check(PairedPunctuationClosingFor(L'｛') == L'｝', "full-width brace pair");
     check(PairedPunctuationClosingFor(L'{') == L'}', "ascii brace pair");
     check(PairedPunctuationClosingFor(L'“') == L'”', "double quote pair");
+    check(PairedPunctuationClosingFor(L'『') == L'』', "corner double quote pair");
+    check(PairedPunctuationClosingFor(L'〖') == L'〗', "hollow bracket pair");
+    check(PairedPunctuationClosingForCandidate(L"『") == L'』', "corner double quote candidate opens a pair");
     check(PairedPunctuationClosingFor(L'。') == 0, "full stop is not an opening");
     check(PairedPunctuationClosingFor(L'）') == 0, "closing half is not an opening");
 

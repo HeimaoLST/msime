@@ -1227,6 +1227,11 @@ test("closing the file dialog changes nothing, and a file the host refuses says 
   const dialog = screen.getByRole("dialog", { name: "编辑个人资料" });
   fireEvent.click(within(dialog).getByRole("button", { name: "更换头像" }));
   await waitFor(() => expect(chooseAvatar).toHaveBeenCalledOnce());
+  await waitFor(() =>
+    expect(
+      (within(dialog).getByRole("button", { name: "更换头像" }) as HTMLButtonElement).disabled,
+    ).toBe(false),
+  );
   expect(screen.queryByText("头像已更新。")).toBeNull();
   expect(screen.queryByRole("alert")).toBeNull();
   fireEvent.click(within(dialog).getByRole("button", { name: "更换头像" }));
@@ -1332,6 +1337,42 @@ test("Harmony 我的 shows a signed-out card that opens the code sign-in sheet",
   expect(signedIn.textContent).toContain("水杉测试用户");
   expect(signedIn.textContent).toContain("水杉账号已登录");
   await waitFor(() => expect(client.profile).toHaveBeenCalled());
+});
+
+test.each(
+  ["登录水杉", "昵称"].flatMap((title) =>
+    [
+      { name: "组词期间", event: { isComposing: true } },
+      { name: "组词结束兼容事件", event: { isComposing: false, keyCode: 229 } },
+    ].map((event) => ({ title, ...event })),
+  ),
+)("账号 $title 面板保留$name 的 Escape", async ({ title, event }) => {
+  const client = account({
+    status: vi.fn().mockResolvedValue({ user: title === "昵称" ? user : null }),
+  });
+  harmonyMe({ client });
+  if (title === "昵称") {
+    fireEvent.click(await screen.findByRole("button", { name: "编辑个人资料" }));
+    fireEvent.click(await screen.findByRole("button", { name: "昵称，水杉测试用户" }));
+  } else {
+    fireEvent.click(await screen.findByRole("button", { name: "未登录，点按登录" }));
+    fireEvent.click(await screen.findByRole("button", { name: "使用邮箱登录" }));
+  }
+  const dialog = screen.getByRole("dialog", { name: title });
+  const field = within(dialog).getByRole("textbox", {
+    name: title === "昵称" ? "编辑社区昵称" : "邮箱地址",
+  }) as HTMLInputElement;
+  const draft = title === "昵称" ? "合成昵称" : "fixture@example.test";
+  fireEvent.change(field, { target: { value: draft } });
+
+  expect(fireEvent.keyDown(field, { key: "Escape", ...event })).toBe(true);
+  expect(screen.getByRole("dialog", { name: title })).toBe(dialog);
+  expect(field.value).toBe(draft);
+  expect(client.rename).not.toHaveBeenCalled();
+  expect(client.login).not.toHaveBeenCalled();
+
+  fireEvent.keyDown(field, { key: "Escape", keyCode: 27 });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: title })).toBeNull());
 });
 
 test("the Harmony sheet offers Google only when the host can run it", async () => {

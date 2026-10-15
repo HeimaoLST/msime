@@ -649,6 +649,14 @@ msime::windows::TsfLocalConfig tsf_local_config(
       local_modes.value("mention", false));
   // 与按键路由读同一个字段（InputState 经 preference_navigation），TIP 和 Server 对这两个键的归类才一致。
   config.second_third_candidate = msime::windows::preference_second_third_candidate(preferences);
+  // 引号与方头括号样式：TIP 自己的标点表按它换字。缺键就是缺省（偏好文档不写等于缺省的值）。
+  const auto string_preference = [&preferences](const char *key) {
+    const auto found = preferences.find(key);
+    return found != preferences.end() && found->is_string() ? found->get<std::string>() : std::string();
+  };
+  msime::windows::apply_punctuation_marks(config, string_preference("quote_style"),
+                                          string_preference("bracket_style"),
+                                          preferences.value("traditional_chinese_output", false));
   return config;
 }
 

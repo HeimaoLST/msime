@@ -1455,6 +1455,40 @@ static void TestPairedPunctuationClosesThePair() {
     [controller apply:@{@"commit": @"’", @"view": @{@"editing_text": @"", @"caret_position": @0}}];
     assert([client.committed isEqual:@"‘"] && [client.marked isEqual:@"’"]);
     [controller flushPendingPairedClosing];
+    // 直角引号与空心方头括号（quote_style、bracket_style）照样补全，引号键出的后半个同样改回前半个。
+    [controller setValue:@('\'') forKey:@"punctuationKeyInFlight"];
+    [controller apply:@{@"commit": @"」", @"view": @{@"editing_text": @"", @"caret_position": @0}}];
+    assert([client.committed isEqual:@"「"] && [client.marked isEqual:@"」"]);
+    [controller flushPendingPairedClosing];
+    [controller setValue:@('"') forKey:@"punctuationKeyInFlight"];
+    [controller apply:@{@"commit": @"』", @"view": @{@"editing_text": @"", @"caret_position": @0}}];
+    assert([client.committed isEqual:@"『"] && [client.marked isEqual:@"』"]);
+    [controller flushPendingPairedClosing];
+    [controller setValue:@('[') forKey:@"punctuationKeyInFlight"];
+    [controller apply:@{@"commit": @"〖", @"view": @{@"editing_text": @"", @"caret_position": @0}}];
+    assert([client.committed isEqual:@"〖"] && [client.marked isEqual:@"〗"]);
+    [controller flushPendingPairedClosing];
+    // 注音的大千键位 `[` `]` `{` `}` 自己出「」『』：`]` 出的」是用户要打的后半个，原样上屏；`[` `{` 出的「『不补后半个，因为这个宿主只在 `'` `"` 上跨过」』。
+    client.marked = nil;
+    [controller setValue:@(']') forKey:@"punctuationKeyInFlight"];
+    [controller apply:@{@"commit": @"」", @"view": @{@"editing_text": @"", @"caret_position": @0}}];
+    assert([client.committed isEqual:@"」"] && !client.marked.length);
+    [controller setValue:@('}') forKey:@"punctuationKeyInFlight"];
+    [controller apply:@{@"commit": @"』", @"view": @{@"editing_text": @"", @"caret_position": @0}}];
+    assert([client.committed isEqual:@"』"] && !client.marked.length);
+    [controller setValue:@('[') forKey:@"punctuationKeyInFlight"];
+    [controller apply:@{@"commit": @"「", @"view": @{@"editing_text": @"", @"caret_position": @0}}];
+    assert([client.committed isEqual:@"「"] && !client.marked.length);
+    [controller setValue:@('{') forKey:@"punctuationKeyInFlight"];
+    [controller apply:@{@"commit": @"你好『", @"view": @{@"editing_text": @"", @"caret_position": @0}}];
+    assert([client.committed isEqual:@"你好『"] && !client.marked.length);
+    // 没有按键的整段上屏（例如候选）照旧按字补，后半个不改回前半个。
+    [controller apply:@{@"commit": @"「", @"view": @{@"editing_text": @"", @"caret_position": @0}}];
+    assert([client.committed isEqual:@"「"] && [client.marked isEqual:@"」"]);
+    [controller flushPendingPairedClosing];
+    client.marked = nil;
+    [controller apply:@{@"commit": @"」", @"view": @{@"editing_text": @"", @"caret_position": @0}}];
+    assert([client.committed isEqual:@"」"] && !client.marked.length);
 
     // A punctuation key typed during a composition finishes it, and the Engine commits the candidate and the mark as one string. The pair is read from the last character of that commit, the way the reference reads `punctuationStr.back()`.
     [controller setValue:@('(') forKey:@"punctuationKeyInFlight"];
@@ -2860,6 +2894,54 @@ static NSUInteger ExpandedGridHighlightedTag(NSPanel *panel) {
     return NSNotFound;
 }
 
+// 普通候选把拼音编辑与选择分开，网格、列表和修饰键各走已有的入口。
+static void TestPinyinArrowCandidateNavigation() {
+    NSString *suite = [@"msime.pinyin-arrows." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *prefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    prefs.englishMode = NO;
+    ModeController *controller = [ModeController alloc];
+    ShortcutSession *session = [ShortcutSession new];
+    ShortcutClient *client = [ShortcutClient new];
+    TestCandidatePanel *panel = [TestCandidatePanel new];
+    [controller setValue:prefs forKey:@"appearance"];
+    [controller setValue:session forKey:@"session"];
+    [controller setValue:client forKey:@"activeClient"];
+    [controller setValue:panel forKey:@"panel"];
+    auto check = [&](int scheme, NSUInteger caret, NSUInteger selected, unsigned short key, uint32_t expected, BOOL list = NO) {
+        [controller setValue:@{@"focused": @YES, @"scheme": @(scheme), @"editing_text": @"ceshi", @"caret_position": @(caret),
+                              @"candidate_list_open": @(list), @"candidates": @[
+                                  @{@"text": @"甲", @"highlighted": @(selected == 0)},
+                                  @{@"text": @"乙", @"highlighted": @(selected == 1)}]} forKey:@"view"];
+        panel.visible = YES;
+        session.lastCommand = UINT32_MAX;
+        session.nextTransition = @{@"handled": @YES};
+        client.committed = nil;
+        assert([controller handleEvent:ModeKey(key, 0, NO) client:client]);
+        assert(session.lastCommand == expected && !client.committed);
+    };
+    for (int scheme : {0, 1}) {
+        for (BOOL vertical : {NO, YES}) {
+            prefs.vertical = vertical;
+            for (BOOL expand : {NO, YES}) {
+                prefs.expandCandidates = expand;
+                check(scheme, 5, 0, 123, MSIME_MOVE_LEFT);
+                check(scheme, 5, 1, 123, MSIME_PREVIOUS_CANDIDATE);
+                check(scheme, 2, 0, 124, MSIME_MOVE_RIGHT);
+                check(scheme, 2, 1, 124, MSIME_MOVE_RIGHT);
+                check(scheme, 5, 0, 124, MSIME_NEXT_CANDIDATE);
+                check(scheme, 5, 1, 124, MSIME_NEXT_CANDIDATE);
+            }
+        }
+    }
+    // 五笔的左右键仍编辑光标；韩文汉字列表四方向都选择，不误用锁定的光标。
+    check(2, 5, 1, 123, MSIME_MOVE_LEFT);
+    check(2, 5, 0, 124, MSIME_MOVE_RIGHT);
+    check(4, 5, 0, 123, MSIME_PREVIOUS_CANDIDATE, YES);
+    check(4, 2, 0, 124, MSIME_NEXT_CANDIDATE, YES);
+    [defaults removePersistentDomainForName:suite];
+}
+
 // 「展开候选」（#7307）：横排候选窗按 ↓ 展开多行网格，网格里 ←/→ 行内、↑/↓ 行间、数字选高亮行、空格和回车选高亮、Esc 或第一行 ↑ 收起而组字保留，网格不认的键先收起再照常处理；偏好关闭、竖排、只有一页时 ↓ 和 ←/→ 和以前一样；选择带着复制时的一代，过期的一代什么也不选。
 static void TestExpandedCandidateGrid() {
     NSString *suite = [@"msime.expanded-grid." stringByAppendingString:NSUUID.UUID.UUIDString];
@@ -2903,7 +2985,7 @@ static void TestExpandedCandidateGrid() {
     NSUInteger (^cursor)(void) = ^NSUInteger { return [[controller valueForKey:@"expandedCursor"] unsignedIntegerValue]; };
     auto press = [&](unsigned short code) { return [controller handleEvent:ModeKey(code, 0, NO) client:client]; };
 
-    // 偏好关闭：↓ 照旧移高亮，←/→ 照旧整句改字，不读完整候选，候选窗上也没有展开按钮。
+    // 偏好关闭：↓ 照旧移高亮，←/→ 按拼音光标和候选位置分工，不读完整候选，候选窗上也没有展开按钮。
     compose();
     assert(!ExpandedGridSubview(panel, -3));
     session.lastCommand = UINT32_MAX;
@@ -2911,7 +2993,7 @@ static void TestExpandedCandidateGrid() {
     assert(session.lastCommand == MSIME_NEXT_CANDIDATE && session.allCandidateCalls == 0 && !expanded());
     compose();
     assert(press(123));
-    assert(session.lastCommand == MSIME_CONVERSION_LEFT && !expanded());
+    assert(session.lastCommand == MSIME_MOVE_LEFT && !expanded());
 
     // 打开偏好但候选窗是竖排：↓ 照旧，没有展开按钮。
     prefs.expandCandidates = YES;
@@ -2932,13 +3014,49 @@ static void TestExpandedCandidateGrid() {
     assert(session.lastCommand == MSIME_NEXT_CANDIDATE && !expanded());
     session.total = 23;
 
-    // 横排、多页：网格外 ←/→ 不变，首行有展开按钮。
+    // 横排、多页：光标在末尾时 → 选择下一个候选，首行有展开按钮。
     compose();
     MSIMECandidateButton *expandButton = ExpandedGridSubview(panel, -3);
     assert(expandButton && [expandButton.identifier isEqual:@"candidate-expand"] && [expandButton.accessibilityLabel isEqual:@"展开候选"]);
     session.lastCommand = UINT32_MAX;
     assert(press(124));
-    assert(session.lastCommand == MSIME_CONVERSION_RIGHT && !expanded());
+    assert(session.lastCommand == MSIME_NEXT_CANDIDATE && !expanded());
+
+    compose();
+    NSMutableDictionary *lastPage = [[session gridView] mutableCopy];
+    lastPage[@"page"] = @4;
+    lastPage[@"candidates"] = @[[session gridCandidate:20 highlighted:NO], [session gridCandidate:21 highlighted:YES], [session gridCandidate:22 highlighted:NO]];
+    [controller setValue:lastPage forKey:@"view"];
+    [controller renderCandidates];
+    assert(press(125) && expanded());
+    assert(cursor() == 21 && [[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 4);
+    assert(ExpandedGridSubview(panel, 21) && !ExpandedGridSubview(panel, 19));
+    assert(press(126) && cursor() == 16);
+    assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 3);
+    [controller closeExpandedCandidates];
+
+    // 页码隐藏仍能用鼠标展开；全隐藏首行时按钮留在候选行，不增加高度。
+    prefs.showsCandidatePageNumber = NO;
+    prefs.showsAppLogo = NO;
+    prefs.showsCandidatePreedit = NO;
+    assert(prefs.showsCandidateExpandButton);
+    compose();
+    MSIMECandidateButton *compactButton = ExpandedGridSubview(panel, -3);
+    assert(compactButton && !ExpandedGridSubview(panel, -1) && !ExpandedGridSubview(panel, -2));
+    MSIMECandidateButton *first = ExpandedGridSubview(panel, 0);
+    assert(first && NSMinY(compactButton.frame) >= NSMinY(first.frame) && NSMaxY(compactButton.frame) <= NSMaxY(first.frame));
+    const CGFloat compactHeight = panel.frame.size.height;
+    [controller toggleExpandedCandidates:compactButton];
+    assert(expanded());
+    [controller closeExpandedCandidates];
+    prefs.showsCandidateExpandButton = NO;
+    compose();
+    assert(!ExpandedGridSubview(panel, -3) && panel.frame.size.height == compactHeight);
+    assert(press(125) && expanded());
+    [controller closeExpandedCandidates];
+    prefs.showsCandidateExpandButton = YES;
+    prefs.showsCandidatePageNumber = YES;
+    prefs.showsCandidatePreedit = YES;
 
     // ↓ 展开：读一次完整候选，不发任何 Engine 命令；23 个候选排成 5 行，高亮停在原来高亮的第一个。
     compose();
@@ -4209,10 +4327,11 @@ static void TestMusicIsClaimedOnceTheSessionOpens() {
 @interface AsyncPreferenceSession : ShortcutSession
 @property(nonatomic) NSUInteger updates;
 @property(nonatomic) NSUInteger failedUpdatesRemaining;
+@property(nonatomic, copy) NSDictionary *lastPreferences;
 @end
 @implementation AsyncPreferenceSession
 - (NSDictionary *)updatePreferencesSnapshot:(NSDictionary *)snapshot error:(NSError **)error {
-    (void)snapshot; ++self.updates;
+    self.lastPreferences = snapshot; ++self.updates;
     if (self.failedUpdatesRemaining) {
         --self.failedUpdatesRemaining;
         if (error) *error = [NSError errorWithDomain:@"synthetic-preferences" code:1 userInfo:nil];
@@ -4229,6 +4348,8 @@ static void TestMusicIsClaimedOnceTheSessionOpens() {
 @property(nonatomic, strong) NSMutableArray<NSDictionary *> *appliedPreferences;
 @end
 @implementation AsyncPreferencesController
+// 这些读取代次测试手动放行每次后台读取，监视生命周期由独立的按键恢复回归覆盖。
+- (void)startPreferencesMonitoring {}
 - (NSDictionary *)readPreferencesSnapshotInDirectory:(NSString *)directory error:(NSError **)error {
     (void)directory; (void)error;
     assert(!NSThread.isMainThread);
@@ -4722,6 +4843,52 @@ static void WaitForRecoveringCompletions(RecoveringPreferencesController *contro
     while (controller.completions < count && deadline.timeIntervalSinceNow > 0)
         [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.005]];
     assert(controller.completions == count);
+}
+
+// 失焦保留会话后，应用可以只发按键而不再发 activateServer:。
+static void TestKeyFocusRestoresPreferenceMonitoring() {
+    Method base = class_getInstanceMethod(IMKInputController.class, @selector(deactivateServer:));
+    IMP original = method_setImplementation(base, (IMP)RecordBaseDeactivation);
+    for (NSNumber *english in @[@NO, @YES]) {
+        NSString *suite = [@"msime.preference-key-focus." stringByAppendingString:NSUUID.UUID.UUIDString];
+        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+        MSIMEAppearancePreferences *prefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+        [prefs applySharedInputPreferences:@{@"chinese_punctuation":@NO}];
+        prefs.englishMode = english.boolValue;
+        RecoveringPreferencesController *controller = [RecoveringPreferencesController alloc];
+        AsyncPreferenceSession *session = [AsyncPreferenceSession new];
+        ShortcutClient *client = [ShortcutClient new];
+        controller.appliedPreferences = [NSMutableArray array];
+        controller.readSnapshot = @{@"revision":@1, @"preferences":@{@"chinese_punctuation":@NO}};
+        [controller setValue:prefs forKey:@"appearance"];
+        [controller setValue:session forKey:@"session"];
+        [controller setValue:client forKey:@"activeClient"];
+        [controller setValue:@"/synthetic-key-focus-preferences" forKey:@"preferencesDirectory"];
+        [controller startPreferencesMonitoring];
+        WaitForRecoveringCompletions(controller, 1);
+        NSTimer *oldTimer = [controller valueForKey:@"preferencesTimer"];
+        [controller deactivateServer:client];
+        assert(!oldTimer.valid && ![controller valueForKey:@"preferencesTimer"]);
+        assert([controller valueForKey:@"session"] == session && ![controller valueForKey:@"activeClient"]);
+
+        controller.readSnapshot = @{@"revision":@2, @"preferences":@{@"chinese_punctuation":@YES}};
+        // 修饰键释放不会准备会话；监视必须由接管客户端的路径恢复。
+        assert(![controller handleEvent:TapEvent(NSEventTypeFlagsChanged, 56, 0, 1) client:client]);
+        assert([[controller valueForKey:@"preferencesTimer"] isValid]);
+        WaitForRecoveringCompletions(controller, 2);
+        assert(session.updates == 2 && prefs.chinesePunctuation);
+        assert([session.lastPreferences isEqual:controller.readSnapshot]);
+        assert(controller.preparationCalls == 0 && [controller valueForKey:@"session"] == session);
+
+        // 不显式 reload 或触发 timer，验证下一次保存能由真实轮询应用。
+        controller.readSnapshot = @{@"revision":@3, @"preferences":@{@"chinese_punctuation":@NO}};
+        WaitForRecoveringCompletions(controller, 3);
+        assert(session.updates == 3 && !prefs.chinesePunctuation);
+        assert([session.lastPreferences isEqual:controller.readSnapshot]);
+        [controller deactivateServer:client];
+        MSIMERemoveTestPreferenceSuite(defaults, suite);
+    }
+    method_setImplementation(base, original);
 }
 
 static void TestUnreadablePreferencesAreRecoveredOnce() {
@@ -5391,6 +5558,18 @@ static void TestRealSessionComposition() {
     assert([session setChinesePunctuationEnabled:NO error:&error] && !error);
     assert(![controller handleEvent:comma client:client]);
     assert(client.insertions.count == 0);
+
+    // Shift+首字母也属于拼音组字：真实宿主不能先把 `O` 交给应用，再把剩下的字母送进引擎。
+    [client.insertions removeAllObjects];
+    client.marked = nil;
+    assert([controller handleEvent:KeypadKey(31, @"O", NSEventModifierFlagShift, NO) client:client]);
+    assert([client.marked isEqual:@"O"] && client.insertions.count == 0);
+    for (NSArray *stroke in @[@[@11, @"b"], @[@1, @"s"], @[@14, @"e"], @[@15, @"r"], @[@9, @"v"], @[@0, @"a"], @[@11, @"b"], @[@37, @"l"], @[@14, @"e"]]) {
+        assert([controller handleEvent:KeypadKey([stroke[0] unsignedShortValue], stroke[1], 0, NO) client:client]);
+    }
+    assert([client.marked isEqual:@"Observable"] && client.insertions.count == 0);
+    assert([controller handleEvent:enter client:client]);
+    assert(client.insertions.count == 1 && [client.insertions[0] isEqual:@"Observable"] && client.marked.length == 0);
 
     assert([session closeWithError:&error] && !error);
 
@@ -6063,6 +6242,15 @@ static void TestEnglishModePunctuationAndWidthOutput() {
     [controller setEnglishInputMode:NO];
     [controller setEnglishInputMode:YES];
     assert([type(quote) isEqual:@"“"]);
+    [controller setEnglishInputMode:NO];
+    // 引号与方头括号按 View 报告的样式出字（host-api 已解析好 corner_when_traditional）。
+    [controller setEnglishInputMode:YES];
+    [controller setValue:@{@"editing_text":@"", @"candidates":@[],
+                           @"punctuation_marks":@{@"quotes":@"corner", @"brackets":@"hollow"}} forKey:@"view"];
+    assert([type(quote) isEqual:@"『"] && [type(quote) isEqual:@"』"]);
+    assert([type(EnglishKey(@"[", 33, 0)) isEqual:@"〖"] && [type(EnglishKey(@"]", 30, 0)) isEqual:@"〗"]);
+    assert([type(comma) isEqual:@"，"]);
+    [controller setValue:@{@"editing_text":@"", @"candidates":@[]} forKey:@"view"];
     [controller setEnglishInputMode:NO];
 
     // Follow: English mode starts with English punctuation, and Ctrl+. turns Chinese on for this app without saving it.
@@ -7732,6 +7920,36 @@ static void TestAiCandidateScheduling() {
     assert([[controller valueForKey:@"aiQuery"] isEqual:expectedAIQuery]);
     [controller synchronizeAITranslations];
     assert(controller.aiBatches.count == 1);
+    [controller cancelAITranslations];
+}
+
+// 输入法在事件跟踪模式中停留时也要启动 AI 请求，不能让已显示的占位行一直等待。
+static void TestAiCandidateTimerFiresWhileTracking() {
+    AIShortcutController *controller = [AIShortcutController alloc];
+    controller.aiBatches = [NSMutableArray array];
+    AIShortcutSession *session = [AIShortcutSession new];
+    session.query = @{ @"scheme": @0, @"generation": @1, @"identity": @"synthetic-ai-tracking",
+        @"query_text": @"nihao", @"cache_key": @"nihao-tracking", @"pinyin_segments": @[@"ni", @"hao"],
+        @"ai_context": @"", @"cloud_eligible": @NO, @"ai_eligible": @YES, @"cloud_candidates": @YES,
+        @"ai_assistant": @{ @"enabled": @YES, @"candidate_limit": @3 }, @"session_id": @1 };
+    session.resolveApplies = YES;
+    [controller setValue:session forKey:@"session"];
+    [controller setValue:[ShortcutClient new] forKey:@"activeClient"];
+    [controller synchronizeAITranslations];
+    NSTimer *timer = [controller valueForKey:@"aiTimer"];
+    assert(timer);
+    timer.fireDate = [NSDate dateWithTimeIntervalSinceNow:0.01];
+    CFRunLoopAddCommonMode(CFRunLoopGetMain(), (__bridge CFStringRef)NSEventTrackingRunLoopMode);
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1];
+    while (!controller.aiBatches.count && deadline.timeIntervalSinceNow > 0)
+        [NSRunLoop.mainRunLoop runMode:NSEventTrackingRunLoopMode beforeDate:deadline];
+    assert(controller.aiBatches.count == 1 && controller.aiBatches[0].started);
+    assert([controller valueForKey:@"aiTimer"] == nil);
+    controller.aiBatches[0].reply(@[]);
+    NSDictionary *view = [controller valueForKey:@"view"];
+    assert(session.resolutions == 1 && [view[@"candidates"][1][@"text"] isEqual:@"—"]);
+    [controller synchronizeAITranslations];
+    assert([controller valueForKey:@"aiTimer"] == nil && controller.aiBatches.count == 1);
     [controller cancelAITranslations];
 }
 
@@ -9714,6 +9932,10 @@ int main(int argc, char **argv) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         // Each case drains its own pool. No run loop turns between cases, so under one outer pool every autoreleased preferences window lived to the end of main: about a hundred piled up, every later window paid for all of their notification observers and weak references, and the run grew quadratically until the sanitizer leg crossed its 240 s ceiling.
+        if (argc == 2 && std::string(argv[1]) == "--key-focus-preferences") {
+            TestKeyFocusRestoresPreferenceMonitoring();
+            return 0;
+        }
         if (argc == 2 && std::string(argv[1]) == "--translations") {
             @autoreleasepool { TestPreferenceLoadReusesCandidateServiceSnapshots(); }
             @autoreleasepool { TestCandidateServiceSnapshotsAreReused(); }
@@ -9754,6 +9976,7 @@ int main(int argc, char **argv) {
         @autoreleasepool { TestCloudCandidateRetryAfterRejectedResponse(); }
         @autoreleasepool { TestCloudCandidateEngineDelivery(); }
         @autoreleasepool { TestAiCandidateScheduling(); }
+        @autoreleasepool { TestAiCandidateTimerFiresWhileTracking(); }
         @autoreleasepool { TestAiCandidatesIgnoreGlossSwitch(); }
         @autoreleasepool { TestAiCandidateRetryAfterRejectedResponse(); }
         @autoreleasepool { TestAiPlaceholderResolvesAfterAnEmptyAnswer(); }
@@ -9948,7 +10171,9 @@ int main(int argc, char **argv) {
         }
         TestCandidatePanel *panel = [TestCandidatePanel new];
         [controller setValue:panel forKey:@"panel"];
-        // Windows maps Left/Right to the composition caret while candidates are shown, so a visible vertical panel sends the same caret move as a hidden one does and still consumes the key.
+        // 清掉前一组快捷键的上屏答复，光标命令的替身不返回上屏。
+        session.nextTransition = @{@"handled": @YES, @"view": @{@"focused": @YES, @"editing_text": @"ceshi", @"caret_position": @3, @"candidates": @[]}};
+        // macOS 普通左右键编辑拼音，候选窗可见或隐藏时都不进入整句改字，也不上屏。
         const BOOL arrowVertical = appearance.vertical;
         appearance.vertical = YES;
         assert([appearance navigationEnabled:@"arrows"]);
@@ -9959,12 +10184,15 @@ int main(int argc, char **argv) {
             client.committed = nil;
             client.marked = @"ceshi";
             assert([controller handleEvent:event client:client]);
-            assert(session.lastCommand == (key.unsignedShortValue == 123 ? MSIME_CONVERSION_LEFT : MSIME_CONVERSION_RIGHT));
+            assert(session.lastCommand == (key.unsignedShortValue == 123 ? MSIME_MOVE_LEFT : MSIME_MOVE_RIGHT));
+            assert(client.committed == nil);
             panel.visible = NO;
             session.lastCommand = UINT32_MAX;
             assert([controller handleEvent:event client:client]);
-            assert(session.lastCommand == (key.unsignedShortValue == 123 ? MSIME_CONVERSION_LEFT : MSIME_CONVERSION_RIGHT));
+            assert(session.lastCommand == (key.unsignedShortValue == 123 ? MSIME_MOVE_LEFT : MSIME_MOVE_RIGHT));
+            assert(client.committed == nil);
         }
+        session.nextTransition = nil;
         appearance.vertical = arrowVertical;
         HiddenCandidatePanel *layoutPanel = [[HiddenCandidatePanel alloc] initWithContentRect:NSZeroRect styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
         for (NSNumber *key in @[@115, @119]) {
@@ -10434,8 +10662,9 @@ int main(int argc, char **argv) {
         assert(session.maintenanceCalls == deletionCalls && session.lastCommand == UINT32_MAX);
         clickCandidate = (id)PageButton(layoutPanel.contentView, 1);
         assert(clickCandidate);
-        NSMenu *candidateMenu = clickCandidate.menu;
+        assert(clickCandidate.menu == nil);
         NSEvent *rightClick = [NSEvent mouseEventWithType:NSEventTypeRightMouseDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil eventNumber:1 clickCount:1 pressure:1];
+        NSMenu *candidateMenu = [clickCandidate menuForEvent:rightClick];
         assert([clickCandidate menuForEvent:rightClick] == candidateMenu);
         // AppKit 把右键菜单开在来源窗口层级加一，候选窗开着菜单时必须留在原层级。降回弹出菜单层级会让候选窗和菜单一起掉到截图遮罩下面（#7326）。
         layoutPanel.level = MSIMECandidateWindowLevel();
@@ -10464,7 +10693,7 @@ int main(int argc, char **argv) {
         [NSUserDefaults.standardUserDefaults removeObjectForKey:@"MSIMEClientPinnedCandidates"];
         [controller renderCandidates];
         clickCandidate = (id)PageButton(layoutPanel.contentView, 1);
-        candidateMenu = clickCandidate.menu;
+        candidateMenu = [clickCandidate menuForEvent:rightClick];
         positionMenu = [candidateMenu itemAtIndex:1].submenu;
         NSMutableArray *operations = [NSMutableArray arrayWithObjects:[candidateMenu itemAtIndex:0], [candidateMenu itemAtIndex:2], nil];
         [operations addObjectsFromArray:[positionMenu.itemArray subarrayWithRange:NSMakeRange(0, 5)]];
@@ -10485,7 +10714,7 @@ int main(int argc, char **argv) {
         [controller renderCandidates];
         // renderCandidates rebuilds the buttons, so everything captured from the previous panel is stale.
         clickCandidate = (id)PageButton(layoutPanel.contentView, 1);
-        candidateMenu = clickCandidate.menu;
+        candidateMenu = [clickCandidate menuForEvent:rightClick];
         assert(clickCandidate && candidateMenu.numberOfItems == 3);
         NSMenuItem *retainedOperation = [candidateMenu itemAtIndex:0];
         NSDictionary *validContext = retainedOperation.representedObject;
@@ -10764,17 +10993,24 @@ int main(int argc, char **argv) {
         appearance.vertical = NO;
         appearance.globalTheme = @"system";
         [controller appearanceChanged:nil];
+        NSDictionary *beforeArrowTransition = session.nextTransition;
         for (NSNumber *key in @[@123, @124, @125, @126]) {
+            [controller setValue:@{@"focused": @YES, @"scheme": @0, @"editing_text": @"ceshi", @"caret_position": @5,
+                                  @"candidates": @[@{@"text": @"甲", @"highlighted": @YES}]} forKey:@"view"];
+            session.nextTransition = @{@"handled": @YES};
             layoutPanel.requestedVisible = YES;
             session.lastCommand = UINT32_MAX;
             NSEvent *event = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil characters:@"" charactersIgnoringModifiers:@"" isARepeat:NO keyCode:key.unsignedShortValue];
             assert([controller handleEvent:event client:client]);
-            // 全拼的横排候选：左右键是整句改字，上下键移动高亮。
+            // 首选左键编辑拼音，末尾右键选择下一候选；此处关闭展开，上下仍移动高亮。
             const unsigned short code = key.unsignedShortValue;
-            uint32_t expected = code == 123 ? MSIME_CONVERSION_LEFT : code == 124 ? MSIME_CONVERSION_RIGHT
+            uint32_t expected = code == 123 ? MSIME_MOVE_LEFT : code == 124 ? MSIME_NEXT_CANDIDATE
                                 : code == 126 ? MSIME_PREVIOUS_CANDIDATE : MSIME_NEXT_CANDIDATE;
             assert(session.lastCommand == expected);
         }
+        session.nextTransition = beforeArrowTransition;
+        // 后面的字符翻页测试从普通空组字开始，不继承皮肤测试的本地模式。
+        [controller setValue:@{@"editing_text": @"", @"caret_position": @0, @"candidates": @[]} forKey:@"view"];
         {
             // 方向键与 Windows、Linux 同一套规则，不看方案和候选窗朝向：五笔的横排候选也是 ↑/↓ 移高亮、←/→ 移光标。
             NSDictionary *saved = [controller valueForKey:@"view"];
@@ -11394,6 +11630,7 @@ int main(int argc, char **argv) {
         @autoreleasepool { TestFreshProcessActsOnTheSharedSchemeNotTheStaleLocalOne(); }
         @autoreleasepool { TestPreferenceRevisionSkipsUnchangedDocuments(); }
         @autoreleasepool { TestPreferenceRevisionRetriesFailedUpdate(); }
+        @autoreleasepool { TestKeyFocusRestoresPreferenceMonitoring(); }
         @autoreleasepool { TestUnreadablePreferencesAreRecoveredOnce(); }
         @autoreleasepool { TestProviderSettingsPersistTheSharedSnapshot(); }
         @autoreleasepool { TestInputModeSwitchDoesNotSaveSharedPreferences(); }
@@ -11408,6 +11645,7 @@ int main(int argc, char **argv) {
         @autoreleasepool { TestJapaneseConversionKeys(appearance); }
         @autoreleasepool { TestGlossSensePage(appearance); }
         @autoreleasepool { TestGlossSenseTraditionalOutput(appearance); }
+        @autoreleasepool { TestPinyinArrowCandidateNavigation(); }
         @autoreleasepool { TestExpandedCandidateGrid(); }
         @autoreleasepool { TestExpandedCandidateGridGeneration(); }
         @autoreleasepool { TestSegmentEditingChords(appearance); }

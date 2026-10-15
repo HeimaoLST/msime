@@ -49,7 +49,43 @@ pub fn cvt_single_sp_to_pinyin(code: &str, profile: &ShuangpinProfile) -> String
 }
 
 pub fn is_accepted_syllable_code(code: &str, profile: &ShuangpinProfile) -> bool {
-    accepted_syllables().contains(cvt_single_sp_to_pinyin(code, profile).as_str())
+    let accepted = accepted_syllables();
+    if let Some((syllable, _)) = profile
+        .zero_initials
+        .iter()
+        .find(|(_, mapped)| *mapped == code)
+    {
+        return accepted.contains(syllable);
+    }
+    if code.len() != 2 || !code.is_char_boundary(1) {
+        return false;
+    }
+    let initial = initial_for_key(&code[..1], profile).as_bytes();
+    let final_key = &code[1..];
+    profile
+        .finals
+        .iter()
+        .filter(|(_, mapped)| *mapped == final_key)
+        .any(|(final_unit, _)| {
+            let final_unit = *final_unit;
+            let normalized =
+                if final_unit == "v" && matches!(initial, [b'j'] | [b'q'] | [b'x'] | [b'y']) {
+                    "u"
+                } else {
+                    final_unit
+                };
+            let normalized = normalized.as_bytes();
+            let length = initial.len() + normalized.len();
+            if length > 6 {
+                return false;
+            }
+            let mut syllable = [0; 6];
+            syllable[..initial.len()].copy_from_slice(initial);
+            syllable[initial.len()..length].copy_from_slice(normalized);
+            // 两张表都只含 ASCII 拼写，限定长度复制后转换不会失败。
+            std::str::from_utf8(&syllable[..length])
+                .is_ok_and(|syllable| accepted.contains(syllable))
+        })
 }
 
 /// Whether the two keys at `position` form an accepted syllable, case-insensitively.
@@ -231,6 +267,37 @@ mod tests {
     #[test]
     fn key_pair_lowering_stays_on_the_stack() {
         assert_eq!(lowercase_pair(b"NI", 0), [b'n', b'i']);
+    }
+
+    #[test]
+    fn accepted_syllable_code_check_does_not_allocate_decoded_text() {
+        let profile = xiaohe();
+        assert!(is_accepted_syllable_code("hc", profile));
+        let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            assert!(is_accepted_syllable_code("hc", profile));
+            assert!(!is_accepted_syllable_code("ak", profile));
+        });
+        assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn accepted_syllable_code_check_matches_owned_decoding() {
+        for kind in ALL {
+            let profile = profile(kind).unwrap();
+            for first in b'a'..=b'z' {
+                for second in b'a'..=b'z' {
+                    let code = [first, second];
+                    let code = std::str::from_utf8(&code).unwrap();
+                    let expected = accepted_syllables()
+                        .contains(cvt_single_sp_to_pinyin(code, profile).as_str());
+                    assert_eq!(
+                        is_accepted_syllable_code(code, profile),
+                        expected,
+                        "{kind:?} {code}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

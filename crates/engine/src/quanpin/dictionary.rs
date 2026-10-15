@@ -9,22 +9,17 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, RwLockReadGuard};
 use std::time::Duration;
 
-use crate::assets::{
-    BIGRAM_TABLE, MAIN_DICTIONARY, NEURAL_MODEL_KEYBOARD, TRIGRAM_TABLE, USER_JOURNAL,
-};
+use crate::assets::{MAIN_DICTIONARY, NEURAL_MODEL_KEYBOARD, USER_JOURNAL};
 use crate::cache::FifoCache;
 use crate::dictionary::pinyin::{PinyinDatabase, INSERTED_WEIGHT};
 use crate::dictionary::DictRow;
 use crate::error::{EngineError, Result};
 use crate::ime::online_batch::replace_online_candidate_batch;
-use crate::lattice::decode::{
-    decode_pinned, make_sentence_lattice_options, BigramMemo, PinnedSpan,
-};
+use crate::lattice::decode::{decode_pinned, BigramMemo, PinnedSpan, SentenceNgramTables};
 use crate::lattice::merge::{merge_lattice_candidates, whole_sentence_insert_position};
 use crate::lattice::neural::{
     shared_sentence_model, NeuralReranker, CONTEXT_CHARACTERS, MAX_RERANK_PATHS,
 };
-use crate::lattice::ngram::NgramTable;
 use crate::lattice::personal::{PersonalNgram, PersonalTransition};
 use crate::lattice::{SentencePath, TypoEdgeSource};
 use crate::paths::RuntimePaths;
@@ -144,6 +139,7 @@ impl Drop for RowCacheBatch<'_> {
 pub struct QuanpinDictionary {
     database: PinyinDatabase,
     paths: RuntimePaths,
+    sentence_tables: SentenceNgramTables,
     typo_profile: Arc<PersonalTypoProfile>,
     /// The profile generation the cached lists were built under.
     typo_generation: u64,
@@ -195,9 +191,8 @@ impl QuanpinDictionary {
     pub fn new(paths: &RuntimePaths) -> Self {
         let database = PinyinDatabase::open(&paths.dictionary(MAIN_DICTIONARY));
         database.warm_up();
-        // Mapping the n-gram tables and checking they are sorted is a sequential pass over about fifteen megabytes. Left to the first query that wants them it lands on a keystroke; here it joins the work of opening the dictionary, which the host does off the typing path. The same goes for the personal counts.
-        NgramTable::shared(&paths.dictionary(BIGRAM_TABLE));
-        NgramTable::shared(&paths.dictionary(TRIGRAM_TABLE));
+        // 构造时预热并保留表；共享缓存淘汰不能让按键查询重新映射和检查整张表。
+        let sentence_tables = SentenceNgramTables::load(paths);
         let journal = paths.user(USER_JOURNAL);
         let personal = PersonalNgramStore::for_journal(&journal);
         drop(personal.model());
@@ -207,6 +202,7 @@ impl QuanpinDictionary {
         let mut dictionary = Self {
             database,
             paths: paths.clone(),
+            sentence_tables,
             typo_profile,
             typo_generation,
             personal,
@@ -270,14 +266,6 @@ impl QuanpinDictionary {
         result
     }
 
-    /// `tbl_1_<c>` rows for a one-letter code, as `WordItem(key, value, weight, Database, key)` with `pinyin = code`.
-    pub fn query_initial(&self, code: &str, limit: usize) -> Vec<WordItem> {
-        if code.len() != 1 {
-            return Vec::new();
-        }
-        initial_items(self.database.query_initial(code, limit))
-    }
-
     /// 个人上下文模型的只读视图（与同一份用户日志上的输入会话共用）。九键查一次简拼时取一次，按 `PersonalNgram::word_count` 把用户用过的简拼词排到前面（#6185）；拿着它时不要记录新的使用，记录要写锁。
     pub fn personal_model(&self) -> RwLockReadGuard<'_, PersonalNgram> {
         self.personal.model()
@@ -305,7 +293,7 @@ impl QuanpinDictionary {
         )
     }
 
-    /// Replace the capped 24-row run with every row of the initial (QD:506-558); updates the row cache and the series slot of the query `(raw, segmentation, autocorrect_types)` that produced `candidates`.
+    /// 首字母的 24 行候选展开为全部行（QD:506-558），同时更新行缓存与产生该列表的查询槽。
     pub fn expand_initial_candidates(
         &mut self,
         raw: &str,
@@ -327,41 +315,38 @@ impl QuanpinDictionary {
         if limited_count != INITIAL_CANDIDATE_LIMIT {
             return false;
         }
-        let mut expanded = self.query_initial(code, UNLIMITED_ROWS);
+        let expanded = matched_items(self.database.query_initial(code, UNLIMITED_ROWS), code);
         if expanded.len() <= limited_count {
             return false;
         }
-        for item in &mut expanded {
-            item.canonical_pinyin = std::mem::replace(&mut item.pinyin, code.to_string());
-        }
-
-        let mut merged = Vec::with_capacity(candidates.len() - limited_count + expanded.len());
-        let mut inserted = false;
-        for item in candidates.drain(..) {
-            if is_limited_initial(&item) {
-                if !inserted {
-                    merged.extend(expanded.iter().cloned());
-                    inserted = true;
-                }
-                continue;
+        let first_limited = candidates
+            .iter()
+            .position(is_limited_initial)
+            .expect("limited_count checked above");
+        candidates.reserve_exact(expanded.len() - limited_count);
+        let mut removed = 0;
+        candidates.retain(|item| {
+            if is_limited_initial(item) {
+                removed += 1;
+                false
+            } else {
+                true
             }
-            merged.push(item);
-        }
-        *candidates = merged;
+        });
+        debug_assert_eq!(removed, limited_count);
+        candidates.splice(first_limited..first_limited, expanded.iter().cloned());
         self.cache.insert(code.to_string(), expanded);
-        // Keyed without the `C:` prefix, as the reference writes it (QD:554): a one-letter input is never corrected, so the key is the one its query used. The reference read the last query's fields here; the key is recomputed from the caller's query instead, because a caret-prefix decode is a second query on this dictionary and would otherwise receive the whole input's expanded list in its own slot.
-        let segments = self.resolve_segments(raw, segmentation);
-        let resolution = self.resolution(raw, segmentation, &segments, autocorrect_types);
-        let key = self.series_slot(&series_cache_key(
-            raw,
-            &resolution.segmentation,
-            autocorrect_types,
-        ));
+        // 按参考规则写入不带 `C:` 的槽（QD:554）：单字母不纠错。根据调用方查询重算键，避免第二次光标前缀查询把整段输入的展开列表写入自己的槽。
+        let cache_key =
+            self.project_resolution(raw, segmentation, autocorrect_types, |resolution| {
+                series_cache_key(raw, &resolution.segmentation, autocorrect_types)
+            });
+        let key = self.series_slot(&cache_key);
         self.series_cache.insert(key, candidates.clone());
         true
     }
 
-    /// Fuzzy rows for a segmentation, cached under `fuzzy:<rules>:<segmentation>` (QD:1680-1709). Shuangpin reuses this.
+    /// 切分的模糊候选按规则与读法缓存（QD:1680-1709），双拼也复用该路径。
     pub fn fuzzy_candidates(
         &mut self,
         segmentation: &str,
@@ -378,58 +363,41 @@ impl QuanpinDictionary {
             }
         }
         self.validate_row_caches();
-        let segments = split_segments(segmentation);
+        let segments: Vec<&str> = if segmentation.is_empty() {
+            Vec::new()
+        } else {
+            let count = segmentation.bytes().filter(|&byte| byte == b'\'').count() + 1;
+            let mut segments = Vec::with_capacity(count);
+            segments.extend(segmentation.split('\''));
+            segments
+        };
         let mut result = Vec::new();
         let mut budget = FUZZY_PATH_BUDGET;
+        let mut typed = segmentation;
         for count in (1..=segments.len()).rev() {
             if budget <= 1 {
                 break;
             }
+            if count < segments.len() {
+                typed = typed.rsplit_once('\'').map_or("", |(prefix, _)| prefix);
+            }
             let prefix = &segments[..count];
             let limit = FUZZY_SEGMENTATION_LIMIT.min(budget);
-            let typed = join_segments(prefix);
             // 路径照样算出来（纯计算，不查库），预算照旧按路径数扣；只有查库这一步走缓存。
             let paths = fuzzy_segmentations(prefix, options, limit);
             if paths.is_empty() {
                 continue;
             }
             budget -= paths.len();
-            let rows = cached_fuzzy_rows(
+            append_cached_fuzzy_rows(
                 &self.database,
                 &mut self.fuzzy_row_cache,
                 &paths,
                 options.rules,
                 limit,
-                &typed,
+                typed,
+                &mut result,
             );
-            result.reserve(rows.len());
-            let mut rows = rows.into_iter();
-            if let Some(row) = rows.next() {
-                let mut item = WordItem::new(
-                    typed,
-                    row.value,
-                    row.weight,
-                    CandidateSource::Database,
-                    row.key,
-                );
-                item.fuzzy = true;
-                result.push(item);
-            }
-            for row in rows {
-                let mut item = WordItem::new(
-                    result
-                        .last()
-                        .expect("the first fuzzy row was inserted")
-                        .pinyin
-                        .clone(),
-                    row.value,
-                    row.weight,
-                    CandidateSource::Database,
-                    row.key,
-                );
-                item.fuzzy = true;
-                result.push(item);
-            }
         }
         self.fuzzy_cache.insert(
             hash,
@@ -454,10 +422,15 @@ impl QuanpinDictionary {
         if raw.is_empty() || words.is_empty() {
             return false;
         }
-        // The key is recomputed exactly as the query computed it, so the rows land in the slot the next refresh reads.
-        let segments = self.resolve_segments(raw, segmentation);
-        let resolution = self.resolution(raw, segmentation, &segments, autocorrect_types);
-        let key = self.series_slot(&resolution.cache_key);
+        // 按查询原规则重算键，使候选写入下次刷新读取的槽。
+        let cache_key =
+            self.project_resolution(raw, segmentation, autocorrect_types, |resolution| {
+                match resolution {
+                    Cow::Borrowed(resolution) => resolution.cache_key.clone(),
+                    Cow::Owned(resolution) => resolution.cache_key,
+                }
+            });
+        let key = self.series_slot(&cache_key);
         let mut list = self.series_cache.get(&key).unwrap_or_default();
         if !replace_online_candidate_batch(&mut list, raw, words, source) {
             return false;
@@ -504,7 +477,7 @@ impl QuanpinDictionary {
         self.validate_row_caches();
         let personal = Arc::clone(&self.personal);
         let model = personal.model();
-        let mut options = make_sentence_lattice_options(&self.paths, false);
+        let mut options = self.sentence_tables.options(false);
         options.personal = Some(&*model);
         options.bigram_memo = Some(&self.bigram_memo);
         let span_limit = options.span_limit;
@@ -649,34 +622,74 @@ impl QuanpinDictionary {
                 self.personal_scored_keys.clear();
             }
         }
-        let segments = self.resolve_segments(raw, segmentation);
-        let resolution = self.resolution(raw, segmentation, &segments, types);
-        self.pinyin_segmentation = resolution.segmentation.clone();
-        // Published even on a cache hit: marking runs after every query. Costlier readings are corrections too, so they are marked although they rank below the primary tier.
-        self.alternative_segmentations = resolution
-            .alternative_corrected_cuts
-            .iter()
-            .chain(&resolution.costlier_corrected_cuts)
-            .map(|cut| join_segments(cut))
-            .collect();
-
+        let mut segments = None;
+        let segmentation_cache = &mut self.segmentation_cache;
+        let association = self.sentence_association;
+        let has_rerankers = !self.rerankers.is_empty();
+        let context = &self.rescoring_context;
+        let (resolution_hash, (resolution, pinyin_segmentation, marking_alternatives, slot)) =
+            project_cached_resolution_with(
+                &mut self.resolution_cache,
+                raw,
+                segmentation,
+                types,
+                || {
+                    let segments = segments.get_or_insert_with(|| {
+                        resolve_cached_segments(segmentation_cache, raw, segmentation)
+                    });
+                    resolve_series_query(raw, segments, types)
+                },
+                |resolution| {
+                    // 热命中也发布本次标记；高成本读法仍算纠错。
+                    let pinyin_segmentation = resolution.segmentation.clone();
+                    let alternatives = resolution
+                        .alternative_corrected_cuts
+                        .iter()
+                        .chain(&resolution.costlier_corrected_cuts)
+                        .map(|cut| join_segments(cut))
+                        .collect();
+                    let slot =
+                        series_slot_key(&resolution.cache_key, association, has_rerankers, context);
+                    let owned = match resolution {
+                        Cow::Borrowed(_) => None,
+                        Cow::Owned(resolution) => Some(resolution),
+                    };
+                    (owned, pinyin_segmentation, alternatives, slot)
+                },
+            );
+        self.pinyin_segmentation = pinyin_segmentation;
+        self.alternative_segmentations = marking_alternatives;
         self.drop_personal_scored_results();
-        let slot = self.series_slot(&resolution.cache_key);
         if self.series_cache.contains(&slot) {
-            self.reset_cache_if_database_changed();
+            if self.database.database_changed() {
+                // 清空切分备忘前取得重建需要的音节，保留原先的缓存复用与分配成本。
+                segments.get_or_insert_with(|| self.resolve_segments(raw, segmentation));
+                self.reset_cache();
+            }
             if let Some(cached) = self.series_cache.get(&slot) {
                 return cached;
             }
         }
 
+        let segments = segments.unwrap_or_else(|| self.resolve_segments(raw, segmentation));
+
+        // 候选槽失效不会改解析备忘；复用已核对的索引，避免重复哈希和完整键校验。
+        let resolution = resolution.unwrap_or_else(|| {
+            self.resolution_cache
+                .get_ref(&resolution_hash)
+                .expect("候选失效检查必须保留解析备忘")
+                .resolution
+                .clone()
+        });
+
         // 下面每一次读词典都可能走行缓存，先确认它们还和库里一致。
         self.validate_row_caches();
         let alternatives = alternative_segmentations(raw, &segments, &resolution, types);
-        let primary_segmentation = resolution.segmentation.clone();
+        let primary_segmentation = resolution.segmentation.as_str();
         let mut result;
         if resolution.corrected_input {
             // The corrected reading is the primary key, so selection and weight updates land on the right rows; the literal reading stays behind it as a fallback tail.
-            result = self.query_series(raw, &primary_segmentation, &resolution.corrected);
+            result = self.query_series(raw, primary_segmentation, &resolution.corrected);
             let literal = if segmentation.is_empty() {
                 let literal_segmentation = join_segments(&segments);
                 self.query_series(raw, &literal_segmentation, &segments)
@@ -688,7 +701,7 @@ impl QuanpinDictionary {
             if !alternatives.is_empty() {
                 result = self.merge_alternatives(
                     raw,
-                    &primary_segmentation,
+                    primary_segmentation,
                     &resolution.corrected,
                     &alternatives,
                     result,
@@ -700,21 +713,23 @@ impl QuanpinDictionary {
                 append_unique_words(&mut result, rows);
             }
         } else {
-            result = self.query_series(raw, &primary_segmentation, &segments);
+            result = self.query_series(raw, primary_segmentation, &segments);
             if !alternatives.is_empty() {
                 result = self.merge_alternatives(
                     raw,
-                    &primary_segmentation,
+                    primary_segmentation,
                     &segments,
                     &alternatives,
                     result,
                 );
             }
         }
-        self.series_cache.insert(slot.clone(), result.clone());
-        // Only keys long enough for the sentence lattice carry personal scores.
+        // 至少两音节的结果登记个人计分键；其余槽键只供缓存消费，直接转移。
         if segments.len() >= 2 || resolution.corrected.len() >= 2 {
+            self.series_cache.insert(slot.clone(), result.clone());
             self.remember_personal_scored_key(slot);
+        } else {
+            self.series_cache.insert(slot, result.clone());
         }
         result
     }
@@ -760,7 +775,7 @@ impl QuanpinDictionary {
         result.extend(rows);
     }
 
-    /// QD:560-730 without the Google sentence: prefix groups longest first, the lattice block, the typo sentence, sparse fallbacks.
+    /// 对应 QD:560-730：从长到短查前缀组，再合并词网格、纠错整句与稀疏回退。
     fn query_series(
         &mut self,
         raw: &str,
@@ -771,13 +786,16 @@ impl QuanpinDictionary {
             return self.query_single_path(raw, segmentation, segments);
         }
         let mut result = Vec::new();
-        let mut partial_segmentation = join_segments(segments);
+        let prefix_key = series_prefix_key(segmentation, segments);
+        let mut partial_segmentation = prefix_key.as_ref();
         for count in (1..=segments.len()).rev() {
             if count < segments.len() {
-                truncate_last_segment(&mut partial_segmentation);
+                partial_segmentation = partial_segmentation
+                    .rsplit_once('\'')
+                    .map_or("", |(prefix, _)| prefix);
             }
             let partial = &segments[..count];
-            let mut rows = self.query_single_path(raw, &partial_segmentation, partial);
+            let mut rows = self.query_single_path(raw, partial_segmentation, partial);
             if count == segments.len() {
                 // 同长度表里常常只剩冷僻同音词：ping'guo 只有 苹果 1143881、评过 1180、平果 169、平锅 1，而 苹果电脑 21495、苹果公司 19725 在 tbl_4_p，同长度查询看不到，第二位就落到冷僻同音词上。所以更长的补全词按权重并入这一组，权重出自同一语料，跨表可比。`pinyin` 仍是键入的切分（上屏只消耗已键入的音节），`canonical_pinyin` 保留完整读音供持久化。
                 // 但首位只留给读音和键入完全一致的同长度行里最重的那一行：补全词上屏会多出用户没打的字，权重再高也不能抢首选（#7345：dacuozi 的首选曾是 打错字了，doumeiren 的首选曾是 都没人管理）。补全词只和其余同长度行竞争第二位起的位置，苹果电脑 仍排在 平锅 前面。同长度查询没有精确键时会退到前缀区间（zhi'liang'jian 只查到 zhi'liang'jiang 的 质量奖），那一行的读音并不是键入的读音，不钉首位，和补全词一起按权重排；同长度查询一行都没有时同样按权重排，整句块随后由 `whole_sentence_insert_position` 插到首位。
@@ -786,7 +804,7 @@ impl QuanpinDictionary {
                     .iter()
                     .filter(|item| item.canonical_pinyin == partial_segmentation)
                     .count();
-                let longer = self.longer_phrase_candidates(&partial_segmentation, partial);
+                let longer = self.longer_phrase_candidates(partial_segmentation, partial);
                 if !longer.is_empty() {
                     if exact_rows < self.first_page_rows.get() {
                         rows.sort_by_key(|item| std::cmp::Reverse(item.weight));
@@ -836,7 +854,7 @@ impl QuanpinDictionary {
         // Held for the whole merge: the options borrow the model.
         let personal = Arc::clone(&self.personal);
         let model = personal.model();
-        let mut options = make_sentence_lattice_options(&self.paths, self.sentence_alternatives);
+        let mut options = self.sentence_tables.options(self.sentence_alternatives);
         if !self.rerankers.is_empty() {
             options.nbest = MAX_RERANK_PATHS;
         }
@@ -904,35 +922,23 @@ impl QuanpinDictionary {
         result.insert(at, sentence);
     }
 
-    /// Whole-syllable continuations of complete segments (QD:732-749): typed segmentation as `pinyin`, the longer key as canonical.
+    /// 完整音节的长词续接（QD:732-749）：输入切分作为 `pinyin`，完整长键作为规范键。
     fn longer_phrase_candidates(
         &mut self,
         segmentation: &str,
         segments: &[String],
     ) -> Vec<WordItem> {
-        let rows = if let Some(rows) = self.longer_row_cache.get_ref_by(segmentation) {
-            rows.clone()
-        } else {
-            let rows = self.database.query_longer_phrases(
-                segments,
-                LONGER_PHRASE_EXTRA_SYLLABLES,
-                LONGER_PHRASE_LIMIT,
-            );
-            self.longer_row_cache
-                .insert(segmentation.to_owned(), rows.clone());
-            rows
-        };
-        rows.into_iter()
-            .map(|row| {
-                WordItem::new(
-                    segmentation,
-                    row.value,
-                    row.weight,
-                    CandidateSource::Database,
-                    row.key,
-                )
-            })
-            .collect()
+        if let Some(rows) = self.longer_row_cache.get_ref_by(segmentation) {
+            return matched_items(rows.iter().cloned(), segmentation);
+        }
+        let rows = self.database.query_longer_phrases(
+            segments,
+            LONGER_PHRASE_EXTRA_SYLLABLES,
+            LONGER_PHRASE_LIMIT,
+        );
+        self.longer_row_cache
+            .insert(segmentation.to_owned(), rows.clone());
+        matched_items(rows, segmentation)
     }
 
     /// Dictionary rows for one segmentation, cached by segmentation (QD:751-765). With the Google decoder gone an empty lookup stays empty.
@@ -951,7 +957,7 @@ impl QuanpinDictionary {
         result
     }
 
-    /// QD:830-869: a lone letter reads its initial table capped at 24 rows; anything else runs the cascade.
+    /// QD:830-869：单字母查首字母表，最多 24 行；其它输入走原级联查询。
     fn query_database(&mut self, segments: &[String], segmentation: &str) -> Vec<WordItem> {
         if segments.len() == 1 && segments[0].len() == 1 {
             let matched_code = if segmentation.is_empty() {
@@ -959,88 +965,39 @@ impl QuanpinDictionary {
             } else {
                 segmentation
             };
-            // 单字母的首字母表查询也走行缓存；键前加 `\u{1}`，和切分键分开。
-            let key = format!("\u{1}{}", segments[0]);
-            let rows = if let Some(rows) = self.segment_row_cache.get_ref(&key) {
-                rows.clone()
-            } else {
-                let rows = self
-                    .database
-                    .query_initial(&segments[0], INITIAL_CANDIDATE_LIMIT);
-                self.segment_row_cache.insert(key, rows.clone());
-                rows
-            };
-            let mut rows = initial_items(rows);
-            for item in &mut rows {
-                item.canonical_pinyin =
-                    std::mem::replace(&mut item.pinyin, matched_code.to_string());
+            // 单字节 UTF-8 音节必为 ASCII；局部键只供查找，前缀与普通切分键分开。
+            let key_bytes = [1, segments[0].as_bytes()[0]];
+            let key = std::str::from_utf8(&key_bytes).expect("单字节音节与缓存前缀必须是 ASCII");
+            if let Some(rows) = self.segment_row_cache.get_ref_by(key) {
+                return matched_items(rows.iter().cloned(), matched_code);
             }
-            return rows;
+            let rows = self
+                .database
+                .query_initial(&segments[0], INITIAL_CANDIDATE_LIMIT);
+            self.segment_row_cache
+                .insert(format!("\u{1}{}", segments[0]), rows.clone());
+            return matched_items(rows, matched_code);
         }
-        // The segments were normalised once in `resolve_segments`, so the lookup uses the standard keys directly.
+        // 音节已在 `resolve_segments` 规范化一次，直接使用标准键查找。
         let code = segmentation.is_empty().then(|| join_segments(segments));
         let key = code.as_deref().unwrap_or(segmentation);
-        let rows = if let Some(rows) = self.segment_row_cache.get_ref_by(key) {
-            rows.clone()
-        } else {
-            let rows = self.database.query_segments_keyed_flat(
-                segments,
-                UNLIMITED_ROWS,
-                QuerySource::Quanpin,
-            );
-            self.segment_row_cache.insert(key.to_owned(), rows.clone());
-            rows
-        };
-        if let Some(code) = code.as_deref() {
-            rows.into_iter()
-                .map(|row| {
-                    WordItem::new(
-                        code,
-                        row.value,
-                        row.weight,
-                        CandidateSource::Database,
-                        row.key,
-                    )
-                })
-                .collect()
-        } else {
-            rows.into_iter()
-                .map(|row| {
-                    WordItem::new(
-                        segmentation,
-                        row.value,
-                        row.weight,
-                        CandidateSource::Database,
-                        row.key,
-                    )
-                })
-                .collect()
+        if let Some(rows) = self.segment_row_cache.get_ref_by(key) {
+            return matched_items(rows.iter().cloned(), key);
         }
+        let rows =
+            self.database
+                .query_segments_keyed_flat(segments, UNLIMITED_ROWS, QuerySource::Quanpin);
+        self.segment_row_cache.insert(key.to_owned(), rows.clone());
+        matched_items(rows, key)
     }
 
-    /// The single normalisation choke point (QD:767-775): an explicit segmentation and the automatic cut both pass here, so the segments entering the pipeline are alias-normalised exactly once.
+    /// 显式和自动切分共用一次别名规范化，进入查询管线的音节保持标准拼写（QD:767-775）。
     fn resolve_segments(&mut self, raw: &str, segmentation: &str) -> Vec<String> {
-        let mut segments = if segmentation.is_empty() {
-            self.computed_segments(raw)
-        } else {
-            split_segments(segmentation)
-        };
-        normalize_umlaut_aliases(&mut segments);
-        segments
+        resolve_cached_segments(&mut self.segmentation_cache, raw, segmentation)
     }
 
-    /// The first correction-mode cut of the raw input, cached (QD:777-788).
-    fn computed_segments(&mut self, raw: &str) -> Vec<String> {
-        if let Some(cached) = lookup_cached_segments(&self.segmentation_cache, raw) {
-            return cached;
-        }
-        let segments = first_correction_cut(raw).unwrap_or_default();
-        let key = raw.to_owned();
-        self.segmentation_cache.insert(key, segments.clone());
-        segments
-    }
-
-    /// `resolve_series_query` memoised on its whole input tuple (QD:354-364): the k-best search is the expensive part of a keystroke, and a re-typed or backspaced prefix reuses it.
+    /// 拥有型解析入口只保留作旧查询的测试对照；产品按已核对的索引延迟取得副本。
+    #[cfg(test)]
     fn resolution(
         &mut self,
         raw: &str,
@@ -1048,22 +1005,38 @@ impl QuanpinDictionary {
         segments: &[String],
         types: u32,
     ) -> SeriesResolution {
-        let hash = resolution_cache_hash(types, raw, segmentation);
-        if let Some(cached) = self.resolution_cache.get_ref(&hash) {
-            if resolution_cache_key_matches(&cached.key, types, raw, segmentation) {
-                return cached.resolution.clone();
-            }
-        }
-        let resolution = resolve_series_query(raw, segments, types);
-        let key = format!("{types}\u{1f}{raw}\u{1f}{segmentation}");
-        self.resolution_cache.insert(
-            hash,
-            CachedResolution {
-                key,
-                resolution: resolution.clone(),
+        project_cached_resolution(
+            &mut self.resolution_cache,
+            raw,
+            segmentation,
+            segments,
+            types,
+            |resolution| resolution.into_owned(),
+        )
+        .1
+    }
+
+    /// 热投影不构造音节；冷未命中保留原音节备忘和解析副本，并交出计算结果。
+    fn project_resolution<T>(
+        &mut self,
+        raw: &str,
+        segmentation: &str,
+        types: u32,
+        project: impl FnOnce(Cow<'_, SeriesResolution>) -> T,
+    ) -> T {
+        let segmentation_cache = &mut self.segmentation_cache;
+        project_cached_resolution_with(
+            &mut self.resolution_cache,
+            raw,
+            segmentation,
+            types,
+            || {
+                let segments = resolve_cached_segments(segmentation_cache, raw, segmentation);
+                resolve_series_query(raw, &segments, types)
             },
-        );
-        resolution
+            project,
+        )
+        .1
     }
 
     /// Insert a row that is not there yet and journal it as the user's own (QD:1200-1212, QD:1234-1266). A row already present is success without a journal write.
@@ -1119,6 +1092,68 @@ impl QuanpinDictionary {
                 .retain(|key| series_cache.contains(key));
         }
     }
+}
+
+/// 按缓存字段拆分借用，使调用方能同时读取系列槽配置；完整键核对和冷副本规则集中保留。
+#[cfg(test)]
+fn project_cached_resolution<T>(
+    cache: &mut FifoCache<u64, CachedResolution>,
+    raw: &str,
+    segmentation: &str,
+    segments: &[String],
+    types: u32,
+    project: impl FnOnce(Cow<'_, SeriesResolution>) -> T,
+) -> (u64, T) {
+    project_cached_resolution_with(
+        cache,
+        raw,
+        segmentation,
+        types,
+        || resolve_series_query(raw, segments, types),
+        project,
+    )
+}
+
+/// 解析热命中不调用构造闭包；常规查询因此可把音节拥有值延迟到真正未命中时。
+fn project_cached_resolution_with<T>(
+    cache: &mut FifoCache<u64, CachedResolution>,
+    raw: &str,
+    segmentation: &str,
+    types: u32,
+    resolve: impl FnOnce() -> SeriesResolution,
+    project: impl FnOnce(Cow<'_, SeriesResolution>) -> T,
+) -> (u64, T) {
+    let hash = resolution_cache_hash(types, raw, segmentation);
+    if let Some(cached) = cache.get_ref(&hash) {
+        if resolution_cache_key_matches(&cached.key, types, raw, segmentation) {
+            return (hash, project(Cow::Borrowed(&cached.resolution)));
+        }
+    }
+    let resolution = resolve();
+    let key = format!("{types}\u{1f}{raw}\u{1f}{segmentation}");
+    cache.insert(
+        hash,
+        CachedResolution {
+            key,
+            resolution: resolution.clone(),
+        },
+    );
+    (hash, project(Cow::Owned(resolution)))
+}
+
+/// 直接构造拥有型候选；缓存行可用惰性克隆迭代，避免完整的中间行页。
+fn matched_items(rows: impl IntoIterator<Item = DictRow>, matched_code: &str) -> Vec<WordItem> {
+    rows.into_iter()
+        .map(|row| {
+            WordItem::new(
+                matched_code,
+                row.value,
+                row.weight,
+                CandidateSource::Database,
+                row.key,
+            )
+        })
+        .collect()
 }
 
 /// `tbl_1_<c>` 的行转成 `WordItem(key, value, weight, Database, key)`。
@@ -1195,6 +1230,29 @@ fn lattice_span_cache_key_matches(
     remaining.is_empty()
 }
 
+// 只有参数字节恰好等于音节拼接结果才借用，保留空段、别名及嵌入撇号的旧键。
+fn series_prefix_key<'a>(segmentation: &'a str, segments: &[String]) -> Cow<'a, str> {
+    let mut remaining = segmentation;
+    for (index, segment) in segments.iter().enumerate() {
+        if index != 0 {
+            let Some(rest) = remaining.strip_prefix('\'') else {
+                return Cow::Owned(join_segments(segments));
+            };
+            remaining = rest;
+        }
+        let Some(rest) = remaining.strip_prefix(segment.as_str()) else {
+            return Cow::Owned(join_segments(segments));
+        };
+        remaining = rest;
+    }
+    if remaining.is_empty() {
+        Cow::Borrowed(segmentation)
+    } else {
+        Cow::Owned(join_segments(segments))
+    }
+}
+
+#[cfg(test)]
 fn truncate_last_segment(segmentation: &mut String) {
     if let Some(boundary) = segmentation.rfind('\'') {
         segmentation.truncate(boundary);
@@ -1251,18 +1309,22 @@ fn fuzzy_cache_key_matches(cached: &CachedFuzzyCandidates, rules: u32, segmentat
     cached.rules == rules && cached.segmentation == segmentation
 }
 
-fn cached_fuzzy_rows(
+/// 热页直接投影，冷页保留原缓存副本与 SQLite 页容量策略。
+fn append_cached_fuzzy_rows<'a>(
     database: &PinyinDatabase,
     cache: &mut FifoCache<u64, CachedFuzzyRows>,
     paths: &[Vec<String>],
     rules: u32,
     limit: usize,
-    typed: &str,
-) -> Vec<DictRow> {
-    let hash = fuzzy_row_cache_hash(rules, limit, typed);
+    typed: impl Into<Cow<'a, str>>,
+    result: &mut Vec<WordItem>,
+) {
+    let typed = typed.into();
+    let hash = fuzzy_row_cache_hash(rules, limit, &typed);
     if let Some(cached) = cache.get_ref(&hash) {
-        if fuzzy_row_cache_key_matches(cached, rules, limit, typed) {
-            return cached.rows.clone();
+        if fuzzy_row_cache_key_matches(cached, rules, limit, &typed) {
+            append_fuzzy_items(cached.rows.iter().cloned(), typed, result);
+            return;
         }
     }
     let rows = database.query_exact_segmentations_keyed_flat(paths, FUZZY_ROW_LIMIT);
@@ -1271,11 +1333,42 @@ fn cached_fuzzy_rows(
         CachedFuzzyRows {
             rules,
             limit,
-            typed: typed.to_owned(),
+            typed: typed.as_ref().to_owned(),
             rows: rows.clone(),
         },
     );
-    rows
+    append_fuzzy_items(rows.into_iter(), typed, result);
+}
+
+/// 取得首行才拥有匹配码，已有拥有值直接接管；其余行复制同一读法。
+fn append_fuzzy_items(
+    mut rows: impl ExactSizeIterator<Item = DictRow>,
+    typed: Cow<'_, str>,
+    result: &mut Vec<WordItem>,
+) {
+    result.reserve(rows.len());
+    if let Some(row) = rows.next() {
+        let mut item = WordItem::new(
+            typed.into_owned(),
+            row.value,
+            row.weight,
+            CandidateSource::Database,
+            row.key,
+        );
+        item.fuzzy = true;
+        result.push(item);
+    }
+    for row in rows {
+        let mut item = WordItem::new(
+            result.last().expect("首个模糊候选已插入").pinyin.clone(),
+            row.value,
+            row.weight,
+            CandidateSource::Database,
+            row.key,
+        );
+        item.fuzzy = true;
+        result.push(item);
+    }
 }
 
 fn fuzzy_row_cache_hash(rules: u32, limit: usize, typed: &str) -> u64 {
@@ -1301,6 +1394,27 @@ fn path_cache_key<'a>(raw: &'a str, segmentation: &'a str) -> &'a str {
     } else {
         segmentation
     }
+}
+
+/// 自动切分的冷副本先写入备忘，别名规范化只修改返回值，保留原有缓存容量与内容。
+fn resolve_cached_segments(
+    cache: &mut FifoCache<String, Vec<String>>,
+    raw: &str,
+    segmentation: &str,
+) -> Vec<String> {
+    let mut segments = if segmentation.is_empty() {
+        if let Some(cached) = lookup_cached_segments(cache, raw) {
+            cached
+        } else {
+            let segments = first_correction_cut(raw).unwrap_or_default();
+            cache.insert(raw.to_owned(), segments.clone());
+            segments
+        }
+    } else {
+        split_segments(segmentation)
+    };
+    normalize_umlaut_aliases(&mut segments);
+    segments
 }
 
 fn lookup_cached_segments(
@@ -1347,8 +1461,8 @@ fn alternative_segmentations(
             join_segments(cut),
         );
     }
-    let mut append = |candidate: &[String]| {
-        let key = join_segments(candidate);
+    let mut append = |candidate: Vec<String>| {
+        let key = join_segments(&candidate);
         if !key.is_empty()
             && alternatives.len() < SYLLABLE_GRAPH_PATH_LIMIT
             && remember_segmentation_key(&mut seen, &mut seen_length, primary_segmentation, key)
@@ -1356,16 +1470,16 @@ fn alternative_segmentations(
             if alternatives.is_empty() {
                 alternatives.reserve(SYLLABLE_GRAPH_PATH_LIMIT);
             }
-            alternatives.push(candidate.to_vec());
+            alternatives.push(candidate);
         }
     };
     // Correction-mode alternatives follow the autocorrect switch; offering them unconditionally made a misspelled "sahng" produce the corrected word with autocorrection turned off. Correction alternatives go first: they explain the letters actually typed, which the alias readings after them do not.
     if types != 0 {
         for cut in &resolution.alternative_corrected_cuts {
-            append(cut);
+            append(cut.to_vec());
         }
         for cut in cut_pinyin_by_mode(raw, CutMode::Correction) {
-            append(&cut);
+            append(cut);
         }
     }
     if !raw.contains('\'')
@@ -1374,7 +1488,7 @@ fn alternative_segmentations(
     {
         let graph = build_syllable_graph(raw);
         for path in enumerate_complete_segmentations(&graph, SYLLABLE_GRAPH_PATH_LIMIT) {
-            append(&path);
+            append(path);
         }
     }
     alternatives
@@ -1442,3 +1556,51 @@ mod tests;
 #[cfg(test)]
 #[path = "dictionary/lattice_span_cache_tests.rs"]
 mod lattice_span_cache_tests;
+
+#[cfg(test)]
+#[path = "dictionary/row_projection_tests.rs"]
+mod row_projection_tests;
+
+#[cfg(test)]
+#[path = "dictionary/initial_expansion_projection_tests.rs"]
+mod initial_expansion_projection_tests;
+
+#[cfg(test)]
+#[path = "dictionary/fuzzy_row_projection_tests.rs"]
+mod fuzzy_row_projection_tests;
+
+#[cfg(test)]
+#[path = "dictionary/resolution_projection_tests.rs"]
+mod resolution_projection_tests;
+
+#[cfg(test)]
+#[path = "dictionary/primary_segmentation_tests.rs"]
+mod primary_segmentation_tests;
+
+#[cfg(test)]
+#[path = "dictionary/series_hit_resolution_tests.rs"]
+mod series_hit_resolution_tests;
+
+#[cfg(test)]
+#[path = "dictionary/lazy_segments_tests.rs"]
+mod lazy_segments_tests;
+
+#[cfg(test)]
+#[path = "dictionary/slot_key_ownership_tests.rs"]
+mod slot_key_ownership_tests;
+
+#[cfg(test)]
+#[path = "dictionary/series_prefix_borrow_tests.rs"]
+mod series_prefix_borrow_tests;
+
+#[cfg(test)]
+#[path = "dictionary/initial_row_key_tests.rs"]
+mod initial_row_key_tests;
+
+#[cfg(test)]
+#[path = "dictionary/fuzzy_typed_borrow_tests.rs"]
+mod fuzzy_typed_borrow_tests;
+
+#[cfg(test)]
+#[path = "dictionary/fuzzy_input_borrow_tests.rs"]
+mod fuzzy_input_borrow_tests;

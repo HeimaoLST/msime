@@ -30,6 +30,75 @@ const panel = { close: async () => {} };
 const theme = () =>
   screen.getByRole("main", { name: "屏幕键盘" }).getAttribute("data-keyboard-theme");
 
+test("keyboard spacing follows snapshots with shared defaults and rendering limits", async () => {
+  let emit!: (value: Snapshot) => void;
+  let resolve!: (value: Snapshot) => void;
+  const pending = new Promise<Snapshot>((accept) => {
+    resolve = accept;
+  });
+  const load = vi.fn(() => pending);
+  render(
+    <DesktopKeyboard
+      client={panel}
+      preferences={{
+        host: testHost({ platform: "windows" }),
+        load,
+        onPreferencesChanged: async (listener) => {
+          emit = listener;
+          return () => {};
+        },
+      }}
+    />,
+  );
+  const grid = screen
+    .getByRole("main", { name: "屏幕键盘" })
+    .querySelector<HTMLDivElement>("[data-keyboard-layout-grid]");
+  const gaps = () => [
+    grid?.style.getPropertyValue("--keyboard-key-gap"),
+    grid?.style.getPropertyValue("--keyboard-row-gap"),
+  ];
+  expect(gaps()).toEqual(["6px", "7px"]);
+  await waitFor(() => expect(load).toHaveBeenCalledOnce());
+  const first = snapshot(1, "dark");
+  await act(async () =>
+    resolve({
+      ...first,
+      preferences: {
+        ...first.preferences,
+        touch_key_spacing_tenths: 35,
+        touch_row_spacing_tenths: 95,
+      },
+    }),
+  );
+  expect(gaps()).toEqual(["3.5px", "9.5px"]);
+  act(() =>
+    emit({
+      ...first,
+      revision: 2,
+      preferences: {
+        ...first.preferences,
+        touch_key_spacing_tenths: 0,
+        touch_row_spacing_tenths: 0,
+      },
+    }),
+  );
+  expect(gaps()).toEqual(["3px", "4px"]);
+  act(() => emit({ ...first, revision: 3 }));
+  expect(gaps()).toEqual(["6px", "7px"]);
+  act(() =>
+    emit({
+      ...first,
+      revision: 4,
+      preferences: {
+        ...first.preferences,
+        touch_key_spacing_tenths: 65,
+        touch_row_spacing_tenths: 110,
+      },
+    }),
+  );
+  expect(gaps()).toEqual(["6px", "10px"]);
+});
+
 test("keyboard subscribes before load and rejects stale snapshots without remounting", async () => {
   let emit!: (value: Snapshot) => void;
   let resolve!: (value: Snapshot) => void;

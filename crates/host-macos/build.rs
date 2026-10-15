@@ -4,6 +4,10 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=native/keyboard.mm");
     println!("cargo:rerun-if-changed=native/keyboard.h");
+    println!(
+        "cargo:rerun-if-changed=../../platforms/macos/src/core/ScreenKeyboardWindowAppearance.h"
+    );
+    println!("cargo:rerun-if-changed=../../platforms/macos/src/candidate/CandidateWindowLevel.h");
     println!("cargo:rerun-if-changed=native/voice_capture_devices.mm");
     println!("cargo:rerun-if-changed=native/clipboard.mm");
     println!("cargo:rerun-if-changed=native/uninstaller.mm");

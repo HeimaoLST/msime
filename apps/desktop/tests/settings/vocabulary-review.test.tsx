@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, test, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { answerConfirm } from "../support/confirm";
 import {
   VocabularyReviewPage,
@@ -362,4 +362,125 @@ test("a wordbook from a plugin is marked and cannot be deleted here", async () =
   expect(await screen.findByRole("option", { name: "计算机词汇（300 词） · 插件" })).toBeTruthy();
   expect(screen.getByText(/这本书来自插件，在「插件」页卸载/)).toBeTruthy();
   expect(screen.queryByRole("button", { name: "删除这个词表" })).toBeNull();
+});
+
+test.each(["reset", "removeWordbook"] as const)(
+  "a confirmation from a previous vocabulary generation cannot call %s",
+  async (operation) => {
+    const result = status({
+      settings: { wordbook: "user-list", newPerDay: 20, sessionLimit: 200 },
+    });
+    const action = vi.fn(async () => result);
+    const previous = client({ load: vi.fn(async () => result), [operation]: action });
+    const next = client();
+    const view = render(<VocabularyReviewPage client={previous} />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: operation === "reset" ? "清空复习进度" : "删除这个词表",
+      }),
+    );
+    await screen.findByRole("alertdialog");
+    view.rerender(<VocabularyReviewPage client={next} />);
+    await waitFor(() => expect(next.load).toHaveBeenCalledOnce());
+    view.rerender(<VocabularyReviewPage client={previous} />);
+    await waitFor(() => expect(previous.load).toHaveBeenCalledTimes(2));
+    await answerConfirm("confirm");
+    expect(action).not.toHaveBeenCalled();
+  },
+);
+
+test.each(["resolve", "reject"] as const)(
+  "a file read from a previous vocabulary generation cannot %s into the current page",
+  async (outcome) => {
+    let finish!: (value: ArrayBuffer) => void;
+    let fail!: (reason: Error) => void;
+    const arrayBuffer = vi.fn(
+      () =>
+        new Promise<ArrayBuffer>((resolve, reject) => {
+          finish = resolve;
+          fail = reject;
+        }),
+    );
+    const file = new File(["synthetic,合成释义"], "previous.txt");
+    Object.defineProperty(file, "arrayBuffer", { value: arrayBuffer });
+    const importWordbook = vi.fn(async () => status());
+    const previous = client({ importWordbook });
+    const next = client({ importWordbook: vi.fn(async () => status()) });
+    const view = render(<VocabularyReviewPage client={previous} />);
+    await screen.findByRole("button", { name: "导入词表文件" });
+    fireEvent.change(view.container.querySelector('input[type="file"]')!, {
+      target: { files: [file] },
+    });
+    expect(arrayBuffer).toHaveBeenCalledOnce();
+    view.rerender(<VocabularyReviewPage client={next} />);
+    await waitFor(() => expect(next.load).toHaveBeenCalledOnce());
+    view.rerender(<VocabularyReviewPage client={previous} />);
+    await waitFor(() => expect(previous.load).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      if (outcome === "resolve") finish(new TextEncoder().encode("synthetic,合成释义").buffer);
+      else fail(new Error("synthetic read failure"));
+    });
+    expect(importWordbook).not.toHaveBeenCalled();
+    expect(next.importWordbook).not.toHaveBeenCalled();
+    expect(screen.queryByText("无法读取所选文件，请重新选择。")).toBeNull();
+    expect(screen.queryByText("已导入「previous」。")).toBeNull();
+  },
+);
+
+test("a completed import from a replaced vocabulary client cannot show its success note", async () => {
+  let finish!: (value: VocabularyReviewStatus) => void;
+  const importWordbook = vi.fn(
+    () =>
+      new Promise<VocabularyReviewStatus>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const file = new File(["synthetic,合成释义"], "previous.txt");
+  Object.defineProperty(file, "arrayBuffer", {
+    value: async () => new TextEncoder().encode("synthetic,合成释义").buffer,
+  });
+  const previous = client({ importWordbook });
+  const next = client();
+  const view = render(<VocabularyReviewPage client={previous} />);
+  await screen.findByRole("button", { name: "导入词表文件" });
+  fireEvent.change(view.container.querySelector('input[type="file"]')!, {
+    target: { files: [file] },
+  });
+  await waitFor(() => expect(importWordbook).toHaveBeenCalledOnce());
+  view.rerender(<VocabularyReviewPage client={next} />);
+  await waitFor(() => expect(next.load).toHaveBeenCalledOnce());
+  await act(async () => finish(status()));
+  expect(screen.queryByText("已导入「previous」。")).toBeNull();
+});
+
+test("the current vocabulary client imports decoded text and reports success", async () => {
+  const importWordbook = vi.fn(async () => status({ answeredToday: 17 }));
+  const file = new File(["synthetic,合成释义"], "current.csv");
+  Object.defineProperty(file, "arrayBuffer", {
+    value: async () => new TextEncoder().encode("synthetic,合成释义").buffer,
+  });
+  const view = render(<VocabularyReviewPage client={client({ importWordbook })} />);
+  await screen.findByRole("button", { name: "导入词表文件" });
+  fireEvent.change(view.container.querySelector('input[type="file"]')!, {
+    target: { files: [file] },
+  });
+  expect(await screen.findByText("已导入「current」。")).toBeTruthy();
+  expect(importWordbook).toHaveBeenCalledExactlyOnceWith("current", "synthetic,合成释义");
+  expect(screen.getByText("17")).toBeTruthy();
+});
+
+test("a promise reused by a new vocabulary generation keeps its new request owner", async () => {
+  let finish!: (value: VocabularyReviewStatus) => void;
+  const shared = new Promise<VocabularyReviewStatus>((resolve) => {
+    finish = resolve;
+  });
+  const previous = client({ load: vi.fn(() => shared) });
+  const next = client({ load: vi.fn(() => shared) });
+  const view = render(<VocabularyReviewPage client={previous} />);
+  await waitFor(() => expect(previous.load).toHaveBeenCalledOnce());
+  view.rerender(<VocabularyReviewPage client={next} />);
+  await waitFor(() => expect(next.load).toHaveBeenCalledOnce());
+  await act(async () => finish(status()));
+  expect(await screen.findByText("背单词")).toBeTruthy();
+  expect((screen.getByRole("button", { name: "认识" }) as HTMLButtonElement).disabled).toBe(false);
 });

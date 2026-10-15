@@ -40,6 +40,19 @@ export interface LayerKey {
 
 const NUMBER_DIGITS: string[] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
 const CHINESE_NUMBER_SYMBOLS: string[] = ["-", "/", "：", "；", "（", "）", "¥", "@", "“", "”"];
+/** 直角引号样式（View 的 `punctuation_marks`）下的中文 123 层：两个引号键代表首选引号、原样上屏，所以换成「」，不按 ASCII 键位对应成『』。 */
+const CHINESE_CORNER_NUMBER_SYMBOLS: string[] = [
+  "-",
+  "/",
+  "：",
+  "；",
+  "（",
+  "）",
+  "¥",
+  "@",
+  "「",
+  "」",
+];
 const ENGLISH_NUMBER_SYMBOLS: string[] = ["-", "/", ":", ";", "(", ")", "$", "@", '"', "'"];
 const CHINESE_PUNCTUATION: string[] = ["。", "，", "、", "？", "！"];
 const ENGLISH_PUNCTUATION: string[] = [".", ",", "?", "!", "…"];
@@ -69,10 +82,14 @@ export class NumberSymbolLayout {
   static readonly RETURN_WEIGHT: number = 1.9;
 
   /** 1–0 / 十个符号 / `#+=`、五个标点和删除键 / 拼音（或 ABC）、表情、空格、回车。 */
-  static numberLayer(chinese: boolean): LayerKey[][] {
+  static numberLayer(chinese: boolean, cornerQuotes: boolean = false): LayerKey[][] {
     return NumberSymbolLayout.layer(
       NUMBER_DIGITS,
-      chinese ? CHINESE_NUMBER_SYMBOLS : ENGLISH_NUMBER_SYMBOLS,
+      chinese
+        ? cornerQuotes
+          ? CHINESE_CORNER_NUMBER_SYMBOLS
+          : CHINESE_NUMBER_SYMBOLS
+        : ENGLISH_NUMBER_SYMBOLS,
       layerKey("#+=", "更多符号", LayerKeyKind.LAYER_TOGGLE, NumberSymbolLayout.EDGE_WEIGHT),
       chinese,
       layerKey("😀", "表情", LayerKeyKind.EMOJI, NumberSymbolLayout.EMOJI_WEIGHT),
@@ -96,10 +113,10 @@ export class NumberSymbolLayout {
   }
 
   /** 当前显示的层：`moreSymbols` 为真时是 #+=，否则是 123。 */
-  static rows(moreSymbols: boolean, chinese: boolean): LayerKey[][] {
+  static rows(moreSymbols: boolean, chinese: boolean, cornerQuotes: boolean = false): LayerKey[][] {
     return moreSymbols
       ? NumberSymbolLayout.moreSymbolLayer(chinese)
-      : NumberSymbolLayout.numberLayer(chinese);
+      : NumberSymbolLayout.numberLayer(chinese, cornerQuotes);
   }
 
   /** 底行返回字母键的键面：中文为「拼音」，英文为「ABC」。 */

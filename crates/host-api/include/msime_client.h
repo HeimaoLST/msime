@@ -703,6 +703,7 @@ char *msime_client_english_completions(uint64_t session, const uint8_t *prefix,
                                        size_t prefix_length, size_t limit);
 /* View.local_mode 是 Engine 自己的模式，不是从预编辑前缀猜出来的；View.microsoft_shuangpin 报告 Engine 已应用的配置，不是尚未生效的新偏好；它为真表示当前是双拼且韵母或零声母编码用 `;` 作第二键，宿主要把 `;` 当字母键交给 msime_client_character。宿主结合模式、编辑文本和光标使用它。取值为 none、unicode、date_time、quick_phrase、emoji、kaomoji、super_jianpin、temporary_english、temporary_japanese、expression、command、mention、url、chaizi（拆字反查，Shift+C 进入；候选注释是字的带调读音，由 Engine 给出），未知取值视为不可用状态。
  * View.spelling_symbols 列出 Engine 在当前状态下当作输入的非字母键：当前模式的拼写（expression 的数字和运算符、unicode 的数字、url 的数字和网址符号）；没有组字时打开模式的键（`/` 和 `@`）；全拼、双拼、五笔组字中原文恰好是 www、http、https、ftp 时打开网址模式的键（`.` 或 `:`）。宿主要把它们当字符发送；列在里面的数字是输入，不是选候选的快捷键。转换结果的 commit_context.typing_statistics 对 expression、command、mention 模式生成的文本为 false，这些文本不计入打字统计。
+ * 中文标点下 '\'' 与 '"' 出哪种引号、'[' ']' 出哪种方头括号由偏好 quote_style、bracket_style 决定（契约 shared/contracts/punctuation 的 styles 段）。View.punctuation_marks 报告引擎已应用的样式：{"quotes": "curly"|"corner", "brackets": "solid"|"hollow"}，corner_when_traditional 已按繁体输出开关解析成 curly 或 corner。宿主做成对补全、跨过后半个、空格转换、英文模式下的中文标点和画触屏键面时读它，不自己解析偏好；改了偏好要等空闲重建后它才变，和引擎出字同步。
  */
 char *msime_client_view(uint64_t session);
 /* Return a copied OnlineQuery JSON object, or null when the current composition
@@ -935,6 +936,12 @@ char *msime_client_parse_surface_route(const uint8_t *value, size_t length);
  * string_free. The first call parses the tables (a few milliseconds in
  * release builds). */
 char *msime_client_simplified_to_traditional(const uint8_t *text, size_t length);
+/* 同上，但按 variant 选 OpenCC 配置：0 s2t、1 s2tw（臺灣字形）、2 s2twp
+ * （臺灣字形加惯用词），与偏好 traditional_chinese_variant 的 "s2t"、"s2tw"、
+ * "s2twp" 一一对应。未知的 variant 与其它非法输入一样返回 NULL。臺灣配置的
+ * 附加词表在第一次用到时解析。Free with string_free. */
+char *msime_client_convert_to_traditional(const uint8_t *text, size_t length,
+                                          uint32_t variant);
 /* Display-only font aliases. Input: JSON array, at most 33 names / 32 KiB.
  * Returns the standard response with an array value. Free with string_free.
  * Resolution failure retains the corresponding original family name. */
@@ -1027,7 +1034,7 @@ char *msime_client_plugins(const uint8_t *request, size_t length);
 char *msime_client_common_phrases(const uint8_t *request, size_t length);
 /* 具名词库集合（<=17 MiB）：{options: 带 preferences_directory 的 HostOptions, action:{operation:"load"|"create"|"rename"|"delete"|"set_enabled"|"add_words"|"remove_words"|"import"|"install_community"|"queue_words"{entries}|"flush", ...}}，格式见 client-core 的 dictionary::collections；import 的 format 为 "scel"（搜狗细胞词库）时文件按 base64 放在 bytes_base64（不超过 8 MiB），不带 text，结构损坏时是 import_malformed；queue_words 把不属于任何集合的词（本地备份恢复的个人词库，每次最多 20000 个）排进待发送队列，value 带 queued。词条经个人词库队列传过去，键盘在下一次会话时应用。Value 是集合视图；错误是固定的代码（collections_*、builtin_locked、unsupported_format、import_*、personal_dictionary_*）。在工作线程上调用。 */
 char *msime_client_dictionary_collections(const uint8_t *request, size_t length);
-/* 诊断包（<=65536 字节）：{state_root: 偏好目录, include:{crash_logs,performance_logs,input_events,config_snapshot}, sources:{crash_logs,performance_logs,input_events: 绝对路径|null}, destination: .zip 的绝对路径|null}。输入事件和性能记录只有恰好是 {t_ms, kind (key_down|key_up|candidate_shown|candidate_selected|commit|backspace|panel_open|panel_close|ime_start|ime_finish), duration_ms} 时才保留，带其他任何键（text、key、candidate……）的整行都丢掉并计数。崩溃记录只保留异常类型和栈帧：异常说明可能带着正在输入的文字，message 只留冒号前的异常类型，stack 的说明行同样处理，路径只留文件名。配置快照把所有凭据换成 "<redacted>"。给了 destination 时写出 zip，value 是 {path,bytes,counts}；没给时 value 是 {counts,sections}，sections 是上传请求体的对象（crash_logs、perf_trace、input_events、config_snapshot）。错误：diagnostics_invalid、diagnostics_source、diagnostics_preferences、diagnostics_write。在工作线程上调用。 */
+/* 诊断包（<=65536 字节）：{state_root: 偏好目录, include:{crash_logs,performance_logs,input_events,config_snapshot}, sources:{crash_logs,performance_logs,input_events: 绝对路径|null}, destination: .zip 的绝对路径|null}。输入事件和性能记录只有恰好是 {t_ms, kind (key_down|key_up|candidate_shown|candidate_selected|commit|backspace|panel_open|panel_close|ime_start|ime_finish|input_failure_runtime_rejected|input_failure_invalid_response|input_failure_editor_rejected|input_failure_jni_link), duration_ms} 时才保留，带其他任何键（text、key、candidate……）的整行都丢掉并计数。崩溃记录只保留异常类型和栈帧：异常说明可能带着正在输入的文字，message 只留冒号前的异常类型，stack 的说明行同样处理，路径只留文件名。input_failure_* 仅供本地诊断，云端上传器须按服务端白名单过滤。配置快照把所有凭据换成 "<redacted>"。给了 destination 时写出 zip，value 是 {path,bytes,counts}；没给时 value 是 {counts,sections}，sections 是上传请求体的对象（crash_logs、perf_trace、input_events、config_snapshot）。错误：diagnostics_invalid、diagnostics_source、diagnostics_preferences、diagnostics_write。在工作线程上调用。 */
 char *msime_client_diagnostic_bundle(const uint8_t *request, size_t length);
 /* 账号设置文档导出（<=4 MiB）：{preferences_directory, feedback?:{soundEnabled,hapticsEnabled,hapticStrength}|null, custom_keyboard_skins?: JSON 数组字符串|null, android_local?: {同步键: 值}|null, schema?: 偏好字段表|null, cloud?: {revision,settings}|null}。Value {settings, merged?}：settings 按本版本过滤（给了 schema 时再按它的字段过滤）；同时给了 schema 和 cloud 时，merged 是带着云端 revision 去 PUT 的整份文档。android_local 是 Android 本机设置文件里参与同步的值（应用主题、单手模式、按键细节、工具栏的常用语/方案/隐藏项、手写、离线语音），不认识的键和非法值不导出。凭据和诊断日志从不导出；隐私模式、开发者选项和语音贡献只在 Android 本机文件里，从不同步。 */
 char *msime_client_account_settings_export(const uint8_t *request, size_t length);

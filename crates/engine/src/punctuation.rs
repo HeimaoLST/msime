@@ -1,4 +1,4 @@
-//! Chinese punctuation translation (core-session.md §5.6, overlays.md §7.1, `contracts/punctuation/policy.json`): a fixed map, alternating quotes, and nested book-title marks. Quotes always alternate and book titles always nest, whether pairing is on or not; pairing only decides whether a host-side auto-close pays back the nesting count.
+//! Chinese punctuation translation (core-session.md §5.6, overlays.md §7.1, `contracts/punctuation/policy.json`): a fixed map, alternating quotes, and nested book-title marks, with a second set of characters for the quote and square-bracket keys (`styles`) that the host picks from preferences. Quotes always alternate and book titles always nest, whether pairing is on or not; pairing only decides whether a host-side auto-close pays back the nesting count.
 
 /// `policy.json` contract version 1, `simple` in file order.
 const SIMPLE: [(u8, &str); 15] = [
@@ -22,6 +22,36 @@ const SIMPLE: [(u8, &str); 15] = [
 const DOUBLE_QUOTE: (&str, &str) = ("“", "”");
 const SINGLE_QUOTE: (&str, &str) = ("‘", "’");
 
+/// `policy.json` 的 `styles.cornerQuotes`：直角引号下 `"` 和 `'` 的两组字。
+const CORNER_DOUBLE_QUOTE: (&str, &str) = ("『", "』");
+const CORNER_SINGLE_QUOTE: (&str, &str) = ("「", "」");
+
+/// `policy.json` 的 `styles.hollowBrackets`：空心方头括号替换 `[` `]` 在 `SIMPLE` 里的字。
+const HOLLOW_BRACKETS: [(u8, &str); 2] = [(b'[', "〖"), (b']', "〗")];
+
+/// 引号键出哪一组字。`Corner` 下 `'` 出「」、`"` 出『』，按键对应，不按语义对应。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuoteMarks {
+    #[default]
+    Curly,
+    Corner,
+}
+
+/// `[` `]` 出实心【】还是空心〖〗。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BracketMarks {
+    #[default]
+    Solid,
+    Hollow,
+}
+
+/// 已经解析好的标点样式：宿主从偏好算出它（`corner_when_traditional` 在那之前就按繁体开关定成两者之一），引擎只认这两种值。缺省就是契约第 1 版的表。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PunctuationMarks {
+    pub quotes: QuoteMarks,
+    pub brackets: BracketMarks,
+}
+
 const NESTED_OPENING_INPUT: u8 = b'<';
 const NESTED_CLOSING_INPUT: u8 = b'>';
 const NESTED_OPENING: &str = "《";
@@ -32,6 +62,7 @@ const NESTED_CLOSING_INNER: &str = "〉";
 #[derive(Debug, Clone)]
 pub struct PunctuationPolicy {
     paired_enabled: bool,
+    marks: PunctuationMarks,
     next_double_quote_is_opening: bool,
     next_single_quote_is_opening: bool,
     book_title_nesting: u32,
@@ -41,6 +72,7 @@ impl Default for PunctuationPolicy {
     fn default() -> Self {
         Self {
             paired_enabled: true,
+            marks: PunctuationMarks::default(),
             next_double_quote_is_opening: true,
             next_single_quote_is_opening: true,
             book_title_nesting: 0,
@@ -51,18 +83,33 @@ impl Default for PunctuationPolicy {
 impl PunctuationPolicy {
     /// The Chinese mark for an ASCII key, advancing quote and nesting state; `None` for keys without one (`{`, `@`, `-`, ...).
     pub fn translate(&mut self, key: u8) -> Option<&'static str> {
+        if self.marks.brackets == BracketMarks::Hollow {
+            if let Some(&(_, output)) = HOLLOW_BRACKETS.iter().find(|(input, _)| *input == key) {
+                return Some(output);
+            }
+        }
         if let Some(&(_, output)) = SIMPLE.iter().find(|(input, _)| *input == key) {
             return Some(output);
         }
+        let corner = self.marks.quotes == QuoteMarks::Corner;
         // Without host pairing this alternation is the only way to type a closing quote, and a host that does pair rewrites the closing quote itself, so it runs either way (punctuation_policy.cpp:12).
+        // 交替状态按键保存，和出哪一组字无关：换样式不重置它。
         match key {
             b'"' => Some(alternate(
                 &mut self.next_double_quote_is_opening,
-                DOUBLE_QUOTE,
+                if corner {
+                    CORNER_DOUBLE_QUOTE
+                } else {
+                    DOUBLE_QUOTE
+                },
             )),
             b'\'' => Some(alternate(
                 &mut self.next_single_quote_is_opening,
-                SINGLE_QUOTE,
+                if corner {
+                    CORNER_SINGLE_QUOTE
+                } else {
+                    SINGLE_QUOTE
+                },
             )),
             NESTED_OPENING_INPUT => {
                 self.book_title_nesting += 1;
@@ -90,6 +137,10 @@ impl PunctuationPolicy {
 
     pub fn set_paired_enabled(&mut self, enabled: bool) {
         self.paired_enabled = enabled;
+    }
+
+    pub fn set_marks(&mut self, marks: PunctuationMarks) {
+        self.marks = marks;
     }
 
     /// The host emitted the closing half of `opening` itself; only `<` with pairing on and a positive nesting count changes anything.
@@ -124,7 +175,7 @@ mod tests {
             "../../../shared/contracts/punctuation/policy.json"
         ))
         .expect("policy.json");
-        assert_eq!(spec["contractVersion"], 1);
+        assert_eq!(spec["contractVersion"], 2);
         let simple = spec["simple"].as_array().expect("simple");
         assert_eq!(simple.len(), SIMPLE.len());
         for ((input, output), row) in SIMPLE.iter().zip(simple) {
@@ -158,6 +209,27 @@ mod tests {
         assert_eq!(nested["closing"], NESTED_CLOSING);
         assert_eq!(nested["nestedClosing"], NESTED_CLOSING_INNER);
 
+        let styles = &spec["styles"];
+        let corner = styles["cornerQuotes"].as_array().expect("cornerQuotes");
+        assert_eq!(corner.len(), 2);
+        for (row, (input, (opening, closing))) in corner
+            .iter()
+            .zip([("\"", CORNER_DOUBLE_QUOTE), ("'", CORNER_SINGLE_QUOTE)])
+        {
+            assert_eq!(row["input"], input);
+            assert_eq!(row["opening"], opening);
+            assert_eq!(row["closing"], closing);
+        }
+        let hollow = styles["hollowBrackets"].as_array().expect("hollowBrackets");
+        assert_eq!(hollow.len(), HOLLOW_BRACKETS.len());
+        for ((input, output), row) in HOLLOW_BRACKETS.iter().zip(hollow) {
+            assert_eq!(
+                row["input"].as_str().map(str::as_bytes),
+                Some(&[*input][..])
+            );
+            assert_eq!(row["output"], *output);
+        }
+
         let header = include_str!("../../../shared/contracts/punctuation/policy.h");
         let literal = |input: u8| match input {
             b'\\' => "'\\\\'".to_owned(),
@@ -169,8 +241,22 @@ mod tests {
             let row = format!("{{{}, \"{output}\"}}", literal(input));
             assert!(header.contains(&row), "policy.h lacks {row}");
         }
-        for (input, (opening, closing)) in [(b'"', DOUBLE_QUOTE), (b'\'', SINGLE_QUOTE)] {
+        for (input, (opening, closing)) in [
+            (b'"', DOUBLE_QUOTE),
+            (b'\'', SINGLE_QUOTE),
+            (b'"', CORNER_DOUBLE_QUOTE),
+            (b'\'', CORNER_SINGLE_QUOTE),
+        ] {
             let row = format!("{{{}, \"{opening}\", \"{closing}\"}}", literal(input));
+            assert!(header.contains(&row), "policy.h lacks {row}");
+        }
+        assert!(header.contains("std::array<AlternatingMapping, 2> corner_quotes"));
+        assert!(header.contains(&format!(
+            "std::array<Mapping, {}> hollow_brackets",
+            HOLLOW_BRACKETS.len()
+        )));
+        for (input, output) in HOLLOW_BRACKETS {
+            let row = format!("{{{}, \"{output}\"}}", literal(input));
             assert!(header.contains(&row), "policy.h lacks {row}");
         }
         for (name, value) in [
@@ -275,5 +361,88 @@ mod tests {
         let mut empty = PunctuationPolicy::default();
         empty.balance_after_auto_close(b'<');
         assert_eq!(empty.book_title_nesting, 0);
+    }
+
+    fn styled(quotes: QuoteMarks, brackets: BracketMarks) -> PunctuationPolicy {
+        let mut policy = PunctuationPolicy::default();
+        policy.set_marks(PunctuationMarks { quotes, brackets });
+        policy
+    }
+
+    #[test]
+    fn corner_quotes_alternate_per_key() {
+        let mut policy = styled(QuoteMarks::Corner, BracketMarks::Solid);
+        assert_eq!(
+            translate_all(&mut policy, "'\"'\""),
+            ["「", "『", "」", "』"].map(Some)
+        );
+        assert_eq!(translate_all(&mut policy, "[]"), ["【", "】"].map(Some));
+    }
+
+    #[test]
+    fn hollow_brackets_replace_only_square_keys() {
+        let mut hollow = styled(QuoteMarks::Curly, BracketMarks::Hollow);
+        let mut solid = PunctuationPolicy::default();
+        assert_eq!(translate_all(&mut hollow, "[]"), ["〖", "〗"].map(Some));
+        for (key, _) in SIMPLE.iter().filter(|(key, _)| !matches!(key, b'[' | b']')) {
+            assert_eq!(hollow.translate(*key), solid.translate(*key));
+        }
+        assert_eq!(
+            translate_all(&mut hollow, "\"'<>"),
+            ["“", "‘", "《", "》"].map(Some)
+        );
+    }
+
+    /// 缺省样式就是契约第 1 版那张表，逐键相同。
+    #[test]
+    fn default_marks_match_the_contract() {
+        assert_eq!(
+            PunctuationMarks::default(),
+            PunctuationMarks {
+                quotes: QuoteMarks::Curly,
+                brackets: BracketMarks::Solid,
+            }
+        );
+        let mut styled = styled(QuoteMarks::Curly, BracketMarks::Solid);
+        let mut default = PunctuationPolicy::default();
+        let keys = ",.?!;:()[]\\`$^_\"\"''<<>>";
+        assert_eq!(
+            translate_all(&mut styled, keys),
+            translate_all(&mut default, keys)
+        );
+    }
+
+    #[test]
+    fn marks_do_not_reset_alternation() {
+        let mut policy = PunctuationPolicy::default();
+        assert_eq!(policy.translate(b'\''), Some("‘"));
+        policy.set_marks(PunctuationMarks {
+            quotes: QuoteMarks::Corner,
+            brackets: BracketMarks::Solid,
+        });
+        assert_eq!(policy.translate(b'\''), Some("」"));
+        assert_eq!(policy.translate(b'\''), Some("「"));
+    }
+
+    #[test]
+    fn pairing_off_still_alternates_corner_quotes() {
+        let mut policy = styled(QuoteMarks::Corner, BracketMarks::Hollow);
+        policy.set_paired_enabled(false);
+        assert_eq!(
+            translate_all(&mut policy, "''\"\"[]"),
+            ["「", "」", "『", "』", "〖", "〗"].map(Some)
+        );
+    }
+
+    #[test]
+    fn balance_after_auto_close_ignores_styles() {
+        let mut policy = styled(QuoteMarks::Corner, BracketMarks::Hollow);
+        assert_eq!(policy.translate(b'<'), Some("《"));
+        policy.balance_after_auto_close(b'[');
+        policy.balance_after_auto_close(b'\'');
+        assert_eq!(policy.book_title_nesting, 1);
+        policy.balance_after_auto_close(b'<');
+        assert_eq!(policy.book_title_nesting, 0);
+        assert_eq!(policy.translate(b'\''), Some("「"));
     }
 }

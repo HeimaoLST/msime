@@ -154,6 +154,71 @@ pub(crate) fn open_existing_read_only(path: &Path) -> Result<Option<Connection>>
     open_database(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map(Some)
 }
 
+/// 把 SQLite 无法读取为数据库的日志挪到旁边，让宿主从空日志启动，不再因为日志损坏而完全起不来。
+///
+/// 每个宿主都在第一个会话前准备词库代次，并在其中回放日志：不是数据库的日志会让回放、准备以及整个宿主在每次启动时都失败，用户没有可见的处理入口。2026 年 10 月在一台 Windows 机器上发现过被覆盖成零的日志；手动挪走文件后输入法才恢复。
+///
+/// 只采信 SQLite 自己的判断：读取 schema 失败且错误为 `SQLITE_NOTADB` 或 `SQLITE_CORRUPT` 时才改名。仅仅忙、被锁定或权限不足的日志保持不动，避免误挪正常日志。改名后的文件保留在原目录，名称为 `msime_user.db.corrupt-<unix seconds>`；`-wal`、`-shm` 和 `-journal` 旁路文件也使用同一名称前缀，因此不会删除数据，也不会让旧旁路文件套到新日志上。日志被挪动时返回新路径，否则返回 `None`。
+pub fn quarantine_corrupt_journal(path: &Path) -> std::io::Result<Option<PathBuf>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        // 文件不存在或不是普通文件：打开路径已经会拒绝后者。
+        _ => return Ok(None),
+    }
+    let verdict = open_database(path, OpenFlags::SQLITE_OPEN_READ_ONLY).and_then(|connection| {
+        connection
+            .query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(Into::into)
+    });
+    let corrupt = matches!(
+        verdict,
+        Err(crate::error::EngineError::Sqlite(rusqlite::Error::SqliteFailure(ref error, _)))
+            if matches!(error.code, rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt)
+    );
+    if !corrupt {
+        return Ok(None);
+    }
+    // 当前线程可能仍持有该文件的连接；Windows 不能改名移动已打开的文件。
+    close_cached_journals();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let suffixes = ["-wal", "-shm", "-journal"];
+    let mut target = path.with_file_name(format!("{name}.corrupt-{stamp}"));
+    let mut attempt = 1;
+    while std::fs::symlink_metadata(&target).is_ok()
+        || suffixes.iter().any(|suffix| {
+            std::fs::symlink_metadata(target.with_file_name(format!(
+                "{}{suffix}",
+                target.file_name().unwrap_or_default().to_string_lossy()
+            )))
+            .is_ok()
+        })
+    {
+        target = path.with_file_name(format!("{name}.corrupt-{stamp}-{attempt}"));
+        attempt += 1;
+    }
+    // 先挪旁路文件，再挪主文件；这样中途退出时，原路径不会留下会被新数据库套用的旁路文件。
+    for suffix in suffixes {
+        let sidecar = path.with_file_name(format!("{name}{suffix}"));
+        if std::fs::symlink_metadata(&sidecar).is_ok() {
+            let moved = target.with_file_name(format!(
+                "{}{suffix}",
+                target.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            std::fs::rename(&sidecar, moved)?;
+        }
+    }
+    std::fs::rename(path, &target)?;
+    Ok(Some(target))
+}
+
 /// Open (creating) the journal, reusing this thread's connection for the path.
 pub fn open_journal(path: &Path) -> Result<JournalConnection> {
     let generation = CACHE_GENERATION.load(Ordering::Acquire);
@@ -770,6 +835,73 @@ mod tests {
         close_cached_journals();
         assert!(CACHED_JOURNAL.with(|cache| cache.borrow().is_none()));
         assert_eq!(count(&journal, "SELECT count(*) FROM personal_bigram"), 1);
+    }
+
+    /// 模拟用户机器上发现的形状：除最后两页仍是有效索引页外，其余页面全部为零。
+    fn write_zeroed_journal(path: &Path) {
+        let mut bytes = vec![0u8; 23 * 4096];
+        bytes[21 * 4096] = 0x0a;
+        bytes[21 * 4096 + 4] = 0x0a;
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn a_journal_that_is_not_a_database_is_moved_aside_with_its_sidecars() {
+        let dir = Dir::new();
+        let journal = dir.journal();
+        write_zeroed_journal(&journal);
+        let wal = dir.root.path().join("msime_user.db-wal");
+        std::fs::write(&wal, b"stale wal").unwrap();
+
+        let moved = quarantine_corrupt_journal(&journal).unwrap().unwrap();
+        assert!(!journal.exists());
+        assert!(!wal.exists());
+        let name = moved.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("msime_user.db.corrupt-"), "{name}");
+        assert_eq!(std::fs::metadata(&moved).unwrap().len(), 23 * 4096);
+        assert_eq!(
+            std::fs::read(moved.with_file_name(format!("{name}-wal"))).unwrap(),
+            b"stale wal"
+        );
+        // 下一次启动找不到旧日志时会创建可用的新日志。
+        assert!(upsert(&journal, PersonalDictionaryKind::Pinyin, "ni", "你", 1, "").is_ok());
+        close_cached_journals();
+        // 同一秒再次出现损坏日志时也不会覆盖第一次挪开的文件。
+        write_zeroed_journal(&journal);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let occupied_sidecar = dir
+            .root
+            .path()
+            .join(format!("msime_user.db.corrupt-{stamp}-wal"));
+        std::fs::write(&occupied_sidecar, b"occupied target").unwrap();
+        let again = quarantine_corrupt_journal(&journal).unwrap().unwrap();
+        assert_ne!(again, moved);
+        assert_eq!(
+            std::fs::read(&occupied_sidecar).unwrap(),
+            b"occupied target"
+        );
+        assert!(moved.exists() && again.exists());
+    }
+
+    #[test]
+    fn a_readable_missing_or_empty_journal_is_left_alone() {
+        let dir = Dir::new();
+        let journal = dir.journal();
+        assert_eq!(quarantine_corrupt_journal(&journal).unwrap(), None);
+        std::fs::write(&journal, b"").unwrap();
+        assert_eq!(quarantine_corrupt_journal(&journal).unwrap(), None);
+        assert!(journal.exists());
+        std::fs::remove_file(&journal).unwrap();
+        upsert(&journal, PersonalDictionaryKind::Pinyin, "ni", "你", 1, "").unwrap();
+        close_cached_journals();
+        assert_eq!(quarantine_corrupt_journal(&journal).unwrap(), None);
+        assert_eq!(
+            count(&journal, "SELECT count(*) FROM user_dictionary_operations"),
+            1
+        );
     }
 
     #[test]

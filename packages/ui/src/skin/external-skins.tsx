@@ -1,4 +1,6 @@
 import { useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useLatestRef } from "../core/use-latest-ref";
+import { subscribeToWindowResume } from "../core/window-focus";
 import { SkinCandidatePreview } from "./skin-candidate-preview";
 import { SkinToolbarPreview } from "./skin-toolbar-preview";
 import { useSkinImage, type SkinImageReader } from "./skin-image";
@@ -508,8 +510,7 @@ export function useSkinCatalog(
     return run(true);
   }
   // 自动重扫走最新一次渲染的 `run`，订阅本身不必随每次渲染重建。
-  const rescan = useRef(run);
-  rescan.current = run;
+  const rescan = useLatestRef(run);
   useEffect(
     () =>
       subscribeSkinCatalogChanges(() => {
@@ -528,16 +529,7 @@ export function useSkinCatalog(
   // 页面显示期间，窗口重新获得焦点或从后台回到前台时重扫。两个事件常常一起到达，第二个碰上进行中的扫描就直接放弃。
   useEffect(() => {
     if (!active) return;
-    const onFocus = () => void rescan.current(false);
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") void rescan.current(false);
-    };
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => {
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
+    return subscribeToWindowResume(() => void rescan.current(false));
   }, [active]);
   return { catalog, revision, busy, failed, refresh, opening, openFailed, openFolder };
 }

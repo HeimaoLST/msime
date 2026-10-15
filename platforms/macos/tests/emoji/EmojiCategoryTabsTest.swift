@@ -37,6 +37,10 @@ import SwiftUI
     let merged = symbols + pluginTabs
     assert(Set(merged.map(\.id)).count == merged.count && !merged.prefix(symbols.count).contains { MacEmojiPluginSymbolGroup.isParentID($0.id) })
     assert(MacEmojiCategoryIcons.pluginSymbolTabs([]).isEmpty)
+    assert(MacEmojiPluginSymbolGroup.symbolItems(plugins, search: "", parent: "").map(\.text) == ["★", "☆", "♠", "♣"])
+    assert(MacEmojiSymbolGroup.displayTitle("Letters") == "字母与文字")
+    assert(MacEmojiSymbolGroup.displayTitle("Greek letters") == "希腊字母")
+    assert(MacEmojiSymbolGroup.displayTitle("Fixture") == "Fixture")
     let idle = MacEmojiSymbolGroup.queryFilters(search: "", parent: "fixture-a", group: "one")
     assert(idle.parent == "fixture-a" && idle.group == "one")
     let searching = MacEmojiSymbolGroup.queryFilters(search: "synthetic", parent: "fixture-a", group: "one")

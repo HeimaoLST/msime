@@ -21,3 +21,7 @@ Status: implemented
 ## Consequences
 
 启用地点补全的 `@` 查询少两组临时行缓冲分配，地点结果内容、顺序和去重语义保持不变。
+
+## Related output decision
+
+[@ 查询与地点补全直接投影固定匹配行](2026-10-15-mention-match-output-buffer.md)接替后续的堆上输出合并；本篇的 exact/prefix 收集、排序和去重约束继续保留。

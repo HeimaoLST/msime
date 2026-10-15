@@ -46,12 +46,13 @@ int main()
     assert(StepExpandedGrid(0, 0, columns, pageRows, ExpandedGridMove::Up).close);
     assert(!StepExpandedGrid(0, 0, columns, pageRows, ExpandedGridMove::Down).close);
 
-    // 可见窗口：光标在里面时不滚，出了上沿或下沿滚到刚好看见，末尾不留空行。
+    // 可见窗口：光标在里面时不滚，出了上沿或下沿滚到刚好看见，末页不向前补行。
     static_assert(ExpandedGridFirstRow(0, 2, 8, 5) == 0);
     static_assert(ExpandedGridFirstRow(0, 5, 8, 5) == 1);
     static_assert(ExpandedGridFirstRow(3, 1, 8, 5) == 1);
-    static_assert(ExpandedGridFirstRow(6, 7, 8, 5) == 3);
+    static_assert(ExpandedGridFirstRow(6, 7, 8, 5) == 6);
     static_assert(ExpandedGridFirstRow(4, 0, 3, 5) == 0);
     static_assert(ExpandedGridFirstRow(0, 0, 0, 5) == 0);
+    static_assert(ExpandedGridFirstRow(4, 4, 5, 5) == 4);
     return 0;
 }

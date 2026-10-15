@@ -598,7 +598,10 @@ test("directory opener is disabled when unavailable and retries sanitized failur
       throw new Error("private diagnostic");
     })
     .mockResolvedValue(undefined);
-  openSkinPage({ openSkinDirectory });
+  // 异步读取触发表单挂载；等首次 effect 完成，避免它在点击后重置错误状态。
+  await act(async () => {
+    openSkinPage({ openSkinDirectory });
+  });
   const row = await skinRow();
   fireEvent.click(within(row).getByRole("button", { name: "打开目录" }));
   const group = await skinGroup();

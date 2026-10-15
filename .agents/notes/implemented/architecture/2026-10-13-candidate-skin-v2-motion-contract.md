@@ -23,3 +23,5 @@ Status: implemented
 动画字段是可同步、可审计的纯数据，旧版静态包仍可读；不支持动画的宿主不会拒绝皮肤或影响输入。Web 候选栏具有淡入、上移、弹簧高亮和淡出效果，macOS 原生候选按钮和 Windows Direct2D 候选卡片也会播放对应动效，且系统减弱动态效果时不播放。新增预设需要同时修改 Rust 校验、MCP/CLI 文案、Web 映射、原生映射和测试；预设数量刻意保持小，不能满足任意复杂的逐元素编排。
 
 验证覆盖 `msime-client-core` 全量单测、MCP server 单测、Host API 皮肤测试、Web skin 单测、macOS 候选面板 Objective-C++ 严格语法检查和 Rust 格式检查；Web 测试还核对动画 CSS 变量只包含有限的 `ms` 数值，不能跳出样式声明。
+
+macOS 动画映射由[即时显隐决定](../bug-fix/2026-10-14-macos-candidate-instant-display.md)取代：原生候选窗不再执行动画字段，以保证快速输入即时展示。共享格式与其他平台映射仍成立。

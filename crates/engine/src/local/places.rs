@@ -6,6 +6,23 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 const TABLE: &str = include_str!("places.tsv");
+// 位图容量由内置表在编译期决定，表增长时不需要手工同步行数上限。
+const TABLE_LINE_COUNT: usize = {
+    let bytes = TABLE.as_bytes();
+    let mut count = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\n' {
+            count += 1;
+        }
+        index += 1;
+    }
+    if !bytes.is_empty() && bytes[bytes.len() - 1] != b'\n' {
+        count += 1;
+    }
+    count
+};
+const MATCH_MASK_WORDS: usize = TABLE_LINE_COUNT.div_ceil(u64::BITS as usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Place {
@@ -16,8 +33,10 @@ pub struct Place {
 
 pub struct Places {
     pub places: Vec<Place>,
-    /// The key without its apostrophes and the first letter of each syllable, per place, precomputed because every key in `@` mode scans the whole table.
+    /// 每个地点去掉分隔符的完整拼写和各音节首字母，前缀索引借用这两种既有拼写。
     pub spellings: Vec<[String; 2]>,
+    /// 拼写编号为地点行号乘 2 加拼写下标，按对应字符串排序，不复制字符串。
+    spelling_index: Vec<usize>,
     parents: HashMap<&'static str, &'static str>,
 }
 
@@ -32,7 +51,11 @@ impl Places {
                 places.push(Place { name, key, parent });
             }
         }
-        let spellings = places
+        assert!(
+            places.len() <= TABLE_LINE_COUNT,
+            "地点索引只用于内置表容量范围"
+        );
+        let spellings: Vec<[String; 2]> = places
             .iter()
             .map(|place| {
                 [
@@ -45,6 +68,12 @@ impl Places {
                 ]
             })
             .collect();
+        let mut spelling_index: Vec<usize> = (0..spellings.len() * 2).collect();
+        spelling_index.sort_unstable_by(|&left, &right| {
+            spellings[left / 2][left % 2]
+                .cmp(&spellings[right / 2][right % 2])
+                .then_with(|| left.cmp(&right))
+        });
         let parents = places
             .iter()
             .map(|place| (place.name, place.parent))
@@ -52,8 +81,49 @@ impl Places {
         Self {
             places,
             spellings,
+            spelling_index,
             parents,
         }
+    }
+
+    /// 只提供完整拼写或首字母以 `code` 开头的内置地点，按原表顺序输出，每行一次。
+    pub(super) fn matching_entries(
+        &self,
+        code: &str,
+    ) -> impl Iterator<Item = (&Place, &[String; 2])> {
+        let start = self
+            .spelling_index
+            .partition_point(|&index| self.spellings[index / 2][index % 2].as_str() < code);
+        let mut masks = [0_u64; MATCH_MASK_WORDS];
+        let mut used_words = 0;
+        for &index in self.spelling_index[start..]
+            .iter()
+            .take_while(|&&index| self.spellings[index / 2][index % 2].starts_with(code))
+        {
+            if self.spellings[index / 2][index % 2].is_empty() {
+                continue;
+            }
+            let row = index / 2;
+            let word = row / u64::BITS as usize;
+            masks[word] |= 1_u64 << (row % u64::BITS as usize);
+            used_words = used_words.max(word + 1);
+        }
+        // 拼写顺序只用于查找；按行号遍历位图，保留源表优先级和同名过滤的先后关系。
+        masks
+            .into_iter()
+            .take(used_words)
+            .enumerate()
+            .flat_map(|(word, mut bits)| {
+                std::iter::from_fn(move || {
+                    if bits == 0 {
+                        return None;
+                    }
+                    let row = word * u64::BITS as usize + bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    Some(row)
+                })
+            })
+            .map(|row| (&self.places[row], &self.spellings[row]))
     }
 
     /// The division a place belongs to, empty for a province, `None` when the text is not a place.
@@ -119,3 +189,7 @@ mod tests {
         assert_eq!(table.places[0].name, "北京市");
     }
 }
+
+#[cfg(test)]
+#[path = "places/prefix_index_tests.rs"]
+mod prefix_index_tests;

@@ -25,7 +25,8 @@ fn generated_empty_block_keeps_no_heap_storage() {
     let paths = [path("甲乙", -1.1), path("甲丙", -2.2)];
     let candidates = existing(&["甲乙", "甲丙"]);
     let (old, before) = measure(|| frozen_generated_block_linear(&candidates, &paths, "aba"));
-    let (new, after) = measure(|| generated_block_linear(&candidates, &paths, "aba"));
+    let owned_paths = paths.to_vec();
+    let (new, after) = measure(|| generated_block_linear(&candidates, owned_paths, "aba"));
     assert_eq!(new, old);
     assert!(new.is_empty());
     assert_eq!(before.allocations, 1);
@@ -35,16 +36,19 @@ fn generated_empty_block_keeps_no_heap_storage() {
     );
     assert_eq!(after.allocations, 0);
     assert_eq!(after.peak_bytes, 0);
-    assert_eq!(after.remaining_bytes, 0);
+    // 输入存储在计量前创建并在计量中消耗，不把它的释放计为输出块收益。
     assert_eq!(new.capacity(), 0);
     eprintln!(
         "合成两路径空输出块 分配 {}→{} 返回存储 {}→{}",
-        before.allocations, after.allocations, before.remaining_bytes, after.remaining_bytes
+        before.allocations,
+        after.allocations,
+        before.remaining_bytes,
+        (new.capacity() * size_of::<WordItem>()) as i128
     );
 }
 
 #[test]
-fn generated_nonempty_blocks_preserve_fields_capacity_and_allocations() {
+fn generated_nonempty_blocks_preserve_fields_and_capacity_with_exact_copy_savings() {
     for count in [0, 1, 2, 5, 64, 65, 128] {
         let paths: Vec<_> = (0..count)
             .map(|index| path(&format!("合成{}", index % 5), -1.2345 - index as f64))
@@ -57,15 +61,15 @@ fn generated_nonempty_blocks_preserve_fields_capacity_and_allocations() {
             let candidates = existing(words);
             let (old, before) =
                 measure(|| frozen_generated_block_linear(&candidates, &paths, "aba"));
-            let (new, after) = measure(|| generated_block_linear(&candidates, &paths, "aba"));
+            let owned_paths = paths.to_vec();
+            let (new, after) = measure(|| generated_block_linear(&candidates, owned_paths, "aba"));
             assert_eq!(new, old);
             if new.is_empty() {
                 assert_eq!(new.capacity(), 0);
                 assert_eq!(after.allocations, 0);
             } else {
                 assert_eq!(new.capacity(), old.capacity());
-                assert_eq!(after.allocations, before.allocations);
-                assert_eq!(after.remaining_bytes, before.remaining_bytes);
+                assert_eq!(after.allocations + 4 * new.len(), before.allocations);
             }
         }
     }
@@ -93,22 +97,47 @@ fn reranked_blocks_preserve_options_and_allocate_only_for_rows() {
                         let (old, before) = measure(|| {
                             frozen_reranked_block_linear(&candidates, ranked, pick, &options, "aba")
                         });
+                        let mut owned_paths = ranked.to_vec();
+                        let keyboard_start = owned_paths.len();
+                        if let Some(pick) = pick {
+                            owned_paths.extend_from_slice(pick);
+                        }
+                        let keyboard_end = owned_paths.len();
                         let (new, after) = measure(|| {
-                            reranked_block_linear(&candidates, ranked, pick, &options, "aba")
+                            reranked_block(
+                                owned_paths,
+                                0..ranked.len(),
+                                pick.map(|_| keyboard_start..keyboard_end),
+                                &options,
+                                "aba",
+                                |sentence| candidates.iter().any(|item| item.word == sentence),
+                            )
                         });
                         assert_block_equivalent(&old, &new, before, after);
                         let mut old_seen: HashSet<_> = words.iter().copied().collect();
                         let mut new_seen = old_seen.clone();
-                        // 两个集合都在区间前创建；新增借用键不释放已有输入存储。
+                        // 两个集合都在区间前创建；旧助手登记路径，新助手只查询候选并比较待选行。
                         old_seen.reserve(2);
                         new_seen.reserve(2);
                         let (old, before) = measure(|| {
                             frozen_reranked_block(ranked, pick, &options, "aba", &mut old_seen)
                         });
+                        let mut owned_paths = ranked.to_vec();
+                        let keyboard_start = owned_paths.len();
+                        if let Some(pick) = pick {
+                            owned_paths.extend_from_slice(pick);
+                        }
+                        let keyboard_end = owned_paths.len();
                         let (new, after) = measure(|| {
-                            reranked_block(ranked, pick, &options, "aba", &mut new_seen)
+                            reranked_block(
+                                owned_paths,
+                                0..ranked.len(),
+                                pick.map(|_| keyboard_start..keyboard_end),
+                                &options,
+                                "aba",
+                                |sentence| new_seen.contains(sentence),
+                            )
                         });
-                        assert_eq!(old_seen, new_seen);
                         assert_block_equivalent(&old, &new, before, after);
                     }
                 }
@@ -129,11 +158,10 @@ fn assert_block_equivalent(
         assert_eq!(before.allocations, 1);
         assert_eq!(after.allocations, 0);
         assert_eq!(after.peak_bytes, 0);
-        assert_eq!(after.remaining_bytes, 0);
+        // 拥有输入在区间前创建并在区间内消耗，返回块存储只按容量核对。
     } else {
         assert_eq!(new.capacity(), old.capacity());
-        assert_eq!(after.allocations, before.allocations);
-        assert_eq!(after.remaining_bytes, before.remaining_bytes);
+        assert_eq!(after.allocations + 4 * new.len(), before.allocations);
     }
 }
 
@@ -211,6 +239,10 @@ fn real_merge_preserves_nonempty_and_neural_rows_with_typo_return() {
         ("ca", &[("嚓", 1000)]),
     ]);
     let keys = syllables("a'ba'ca");
+    let graph = build_graph(&keys, &mut lookup(&rows), &LatticeOptions::default());
+    let decoded = decode_graph(&graph, &LatticeOptions::default(), None);
+    // 本轮借用排列移除完整路径克隆，按输入路径的独立实测成本收紧既有预算。
+    let clone_allocations = measure(|| decoded.clone()).1.allocations;
     let model = Arc::new(favouring_model(&['阿', '啊', '吧', '嚓'], &['啊']));
     // 先独立证实模型确实重排，而不是仅靠非空 rerankers 进入分支。
     let mut probe = NeuralReranker::new(CandidateSource::NeuralKeyboard, model.clone());
@@ -285,7 +317,30 @@ fn real_merge_preserves_nonempty_and_neural_rows_with_typo_return() {
                         assert_eq!(typo.edges, 1);
                         assert!(typo.sentence.ends_with("叭嚓"));
                         let empty = new.0 == input;
-                        assert_eq!(after.allocations + usize::from(empty), before.allocations);
+                        let transferred_allocations: usize = new
+                            .0
+                            .iter()
+                            .filter(|item| {
+                                matches!(
+                                    item.source,
+                                    CandidateSource::Generated | CandidateSource::NeuralKeyboard
+                                )
+                            })
+                            .map(|item| {
+                                let path = decoded
+                                    .iter()
+                                    .find(|path| path.sentence == item.word)
+                                    .unwrap();
+                                measure(|| path.clone()).1.allocations
+                            })
+                            .sum();
+                        assert_eq!(
+                            after.allocations
+                                + usize::from(empty)
+                                + transferred_allocations
+                                + if neural { clone_allocations } else { 0 },
+                            before.allocations
+                        );
                         assert_eq!(after.remaining_bytes, before.remaining_bytes);
                         assert_eq!(after.minimum_bytes, 0);
                         if neural
@@ -303,7 +358,10 @@ fn real_merge_preserves_nonempty_and_neural_rows_with_typo_return() {
 }
 
 // 沿用 input-runtime 的合成零层模型，固定字符偏好，不依赖真实模型资源。
-fn favouring_model(characters: &[char], favoured: &[char]) -> chinese_ime_lm::SentenceModel {
+pub(super) fn favouring_model(
+    characters: &[char],
+    favoured: &[char],
+) -> chinese_ime_lm::SentenceModel {
     const CONTEXT: usize = 16;
     let vocabulary: Vec<String> = ["<pad>", "<unk>", "<bos>"]
         .into_iter()

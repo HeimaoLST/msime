@@ -327,7 +327,9 @@ constexpr std::uint32_t LocalModeTriggersChanged = 28;
 constexpr std::uint32_t DedicatedEnglishChanged = 29;
 // 载荷为 "1" 时组字中的 ';' 和 '\'' 选第二、第三个候选（偏好 `second_third_candidate`），否则为 "0"。只有打开时 TIP 才把这两个键归类为数字选词；两边共用的规则在 platforms/windows/common/SecondThirdCandidatePolicy.h。旧版 TIP 丢弃这个帧，两个键照常是标点。
 constexpr std::uint32_t SecondThirdCandidateChanged = 30;
-constexpr std::uint32_t MaxKnown = SecondThirdCandidateChanged;
+// 引号与方头括号样式（偏好 `quote_style`、`bracket_style`，Server 已按繁体输出开关解析 `corner_when_traditional`）。载荷 "q<0|1>b<0|1>"：q1 时 TIP 的 '\'' 出「」、'"' 出『』，b1 时 '[' ']' 出〖〗。旧版 TIP 丢弃这个帧，照旧出弯引号和实心括号。
+constexpr std::uint32_t PunctuationMarksChanged = 31;
+constexpr std::uint32_t MaxKnown = PunctuationMarksChanged;
 // Source compatibility for the Server's historical spellings.
 constexpr std::uint32_t SwitchToEn = SwitchToEnglish;
 constexpr std::uint32_t SwitchToCn = SwitchToChinese;

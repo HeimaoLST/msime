@@ -19,6 +19,17 @@ import AppKit
     assert(recent.matching("fixture-10").count == 1)
     assert(recent.matching("missing").isEmpty)
     assert(recent.revision == 36)
+    let suite = "msime-symbol-recents-test-" + UUID().uuidString
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    var symbols = MacEmojiRecents(storageKey: "symbols", defaults: defaults)
+    symbols.recordSelection(.init(text: "±", annotation: "加减", group: "Math"))
+    symbols.recordSelection(.init(text: "±", annotation: "加减", group: "Math"))
+    assert(MacEmojiRecents(storageKey: "symbols", defaults: defaults).items.count == 1)
+    defaults.set([["text": ""], ["text": "±"], ["text": "±"], ["text": "\u{0}"]], forKey: "symbols")
+    assert(MacEmojiRecents(storageKey: "symbols", defaults: defaults).items.map(\.text) == ["±"])
+    symbols.clear()
+    assert(MacEmojiRecents(storageKey: "symbols", defaults: defaults).items.isEmpty)
     let clipboard = NSPasteboard.withUniqueName()
     defer { clipboard.releaseGlobally() }
     assert(MacEmojiClipboard.copy("😀👨‍👩‍👧", to: clipboard))

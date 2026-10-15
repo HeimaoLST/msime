@@ -1,4 +1,5 @@
 #include "keyboard.h"
+#include "../../../platforms/macos/src/core/ScreenKeyboardWindowAppearance.h"
 #include <cassert>
 #include <vector>
 
@@ -26,6 +27,15 @@ struct TestHost {
 
 int main() {
     @autoreleasepool {
+        [NSApplication sharedApplication];
+        NSPanel *panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 160, 100)
+            styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
+        panel.contentView.wantsLayer = YES;
+        panel.contentView.layer.backgroundColor = NSColor.whiteColor.CGColor;
+        MSIMEConfigureScreenKeyboardWindow(panel);
+        assert(!panel.opaque && panel.backgroundColor.alphaComponent == 0);
+        assert(panel.contentView.layer.cornerRadius == 8 && panel.contentView.layer.masksToBounds);
+        assert(panel.level > NSScreenSaverWindowLevel && panel.level < MSIMECandidateWindowLevel());
         const uint64_t flags = kCGEventFlagMaskCommand | kCGEventFlagMaskAlternate;
         TestHost host;
         assert(msime::SendKeyboardKey(host, 0, flags) == msime::KeyboardSendResult::Sent);

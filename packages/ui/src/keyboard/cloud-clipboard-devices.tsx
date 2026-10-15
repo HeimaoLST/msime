@@ -1,10 +1,11 @@
 import * as cloud from "./cloud-panel-style";
 import type { CloudClipboardDeviceShape } from "./cloud-response";
+import { formatDateTime } from "../core/format-date";
 
 /** 设备登记时间，读不出来时原样显示。 */
 function registeredAt(value: string): string {
   const time = Date.parse(value);
-  return Number.isNaN(time) ? value : new Date(time).toLocaleString();
+  return Number.isNaN(time) ? value : formatDateTime(time);
 }
 
 function deviceName(device: CloudClipboardDeviceShape): string {

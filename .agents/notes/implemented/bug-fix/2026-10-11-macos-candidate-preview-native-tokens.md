@@ -37,7 +37,7 @@ macOS 原生候选窗画的是 `NativeCandidateTokens`（`platforms/macos/src/ca
 
 - **收益**：macOS 上「跟随系统」和主题、皮肤包没定的槽位，预览画的是原生候选窗的选中色、白字、无竖条、10/6 圆角和 6 的内边距；内置主题的选中行文字色在所有平台的预览里都按主题画；「主题」页卡片随用户的圆角和不透明度变化。
 - **用户可见的跨平台变化**：内置主题（shuishan、light、paper、night、ink）的预览选中行文字从普通文字色变成主题的 `selected_text`（强调色），Windows、Linux 也一样。这是对的：两边原生都画 `selected_text`（`platforms/windows/src/candidate/CandidatePalette.h`、`platforms/linux/src/candidates/CandidateColors.h`）。
-- **已知差异**：行高、26pt 的首行、翻页指示器「1 / N ‹ ›」、横排为释义预留的高度（cc8105f5d8）、嵌入式预编辑时首行不显示拼音，这些预览都不画；原生横排首、末行高亮的圆角取卡片圆角（`CandidateRowRadius`），预览没有照做。竖条颜色仍读 `--accent-strong`，macOS 块不改它，免得连带改掉悬浮工具栏预览和光标的颜色。
+- **已知差异**：行高、26pt 的首行、翻页指示器「1 / N ‹ ›」、横排为释义预留的高度（cc8105f5d8）、嵌入式预编辑时首行不显示拼音，这些预览都不画；首尾高亮与悬停的圆角差异由[内圆角决定](2026-10-14-macos-candidate-inset-radius.md)消除，用户圆角和最小内边距按同一公式绘制。竖条颜色仍读 `--accent-strong`，macOS 块不改它，免得连带改掉悬浮工具栏预览和光标的颜色。
 - **代价与重访信号**：macOS token 有三份，靠对照测试维持一致；`CandidateSkin.cpp` 的写法（`Rgb(0x…, a)`、`Rgba{…}`、`if (dark) { … } else { … }`）变了，测试的解析要跟着改。Windows、Linux 补宿主块时沿用同一组 `--msime-host-*` 变量和对照测试的做法；补完后 `followedCornerRadius` 也要按平台改。
 
 ## Verification

@@ -43,12 +43,10 @@ struct SkinTokens
     std::optional<Rgba> divider;
 };
 
-// Corner radius of a candidate row background: selectedRadius for the highlighted row, candidateRadius for hover and every other row. The native tokens keep the two equal, so selected, pressed and hover fills share one shape.
-inline float CandidateRowRadius(const SkinTokens &tokens, bool highlighted, bool first = false, bool last = false)
+// 选中与悬停使用各自的行 token，首尾位置不借用整个卡片的圆角。
+inline float CandidateRowRadius(const SkinTokens &tokens, bool highlighted)
 {
-    const float radius = highlighted ? tokens.selectedRadius : tokens.candidateRadius;
-    if (highlighted && (first || last)) return tokens.radius;
-    return radius;
+    return highlighted ? tokens.selectedRadius : tokens.candidateRadius;
 }
 
 // The user's own 候选窗 style from the shared preferences: candidate_scale_percent and candidate_opacity_percent as factors, candidate_corner_radius in points, none to keep the theme's or the package's card radius, and candidate_padding in points, none to keep the theme's or the package's `pad`. The defaults leave a skin exactly as it was resolved.

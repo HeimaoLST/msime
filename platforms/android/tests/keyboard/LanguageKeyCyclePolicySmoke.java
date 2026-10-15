@@ -92,6 +92,16 @@ public final class LanguageKeyCyclePolicySmoke {
             KeyboardScheme.QUANPIN) == KeyboardScheme.QUANPIN, "last used Chinese entry");
         check(LanguageKeyCyclePolicy.chineseReturn(null, "quanpin", withOthers, FULL, KeyboardScheme.QUANPIN)
             == KeyboardScheme.QUANPIN_NINE_KEY, "first entry of the stored Chinese scheme");
+        check(LanguageKeyCyclePolicy.chineseReturn(null, "quanpin", "nine_key",
+            List.of(KeyboardScheme.QUANPIN, KeyboardScheme.QUANPIN_NINE_KEY,
+                KeyboardScheme.JAPANESE_NINE_KEY), FULL, KeyboardScheme.QUANPIN)
+            == KeyboardScheme.QUANPIN_NINE_KEY,
+            "returning from Japanese nine-key preserves the touch layout after restart");
+        check(LanguageKeyCyclePolicy.chineseReturn(null, "quanpin", "twenty_six_key",
+            List.of(KeyboardScheme.QUANPIN, KeyboardScheme.QUANPIN_NINE_KEY,
+                KeyboardScheme.JAPANESE), FULL, KeyboardScheme.QUANPIN)
+            == KeyboardScheme.QUANPIN,
+            "returning from Japanese 26-key preserves the touch layout after restart");
         check(LanguageKeyCyclePolicy.chineseReturn(KeyboardScheme.WUBI, "wubi", withOthers, FULL, KeyboardScheme.QUANPIN)
             == KeyboardScheme.QUANPIN_NINE_KEY, "a disabled entry falls back to the first Chinese entry");
         check(LanguageKeyCyclePolicy.chineseReturn(null, "quanpin", List.of(KeyboardScheme.JAPANESE), FULL,

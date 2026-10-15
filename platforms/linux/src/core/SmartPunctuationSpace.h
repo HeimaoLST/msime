@@ -22,6 +22,9 @@ inline constexpr SmartPunctuationMapping kSmartPunctuationSpaceMap[] = {
     {"：", ':'}, {"、", '/'}, {"“", '"'},  {"”", '"'},  {"‘", '\''},
     {"’", '\''}, {"【", '['}, {"】", ']'}, {"《", '<'}, {"》", '>'},
     {"（", '('}, {"）", ')'},
+    // 直角引号和空心方头括号是同一个键的另一组字（quote_style、bracket_style），排在缺省那组后面，所以 chinese_punctuation_mark 仍给缺省的字。
+    {"「", '\''}, {"」", '\''}, {"『", '"'},  {"』", '"'},  {"〖", '['},
+    {"〗", ']'},
 };
 
 // The three keys smart punctuation routes: a mark after an ASCII letter or digit
@@ -141,5 +144,7 @@ inline bool space_conversion_matches_document(
 using msime::input::english_mode_chinese_punctuation;
 using msime::input::english_mode_output;
 using msime::input::EnglishPunctuationState;
+using msime::input::PunctuationMarks;
+using msime::input::punctuation_marks_from_view;
 
 } // namespace msime::linux_host

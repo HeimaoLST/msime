@@ -261,6 +261,11 @@ impl Session {
         self.input.punctuation.set_paired_enabled(enabled);
     }
 
+    /// 换引号和方头括号的样式；组字、光标和交替状态都不动。
+    pub fn set_punctuation_marks(&mut self, marks: crate::punctuation::PunctuationMarks) {
+        self.input.punctuation.set_marks(marks);
+    }
+
     /// The host emitted the closing half of a paired mark itself.
     pub fn balance_paired_punctuation_after_auto_close(&mut self, opening: u8) {
         self.input.punctuation.balance_after_auto_close(opening);
@@ -458,9 +463,16 @@ impl Session {
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
+        self.snapshot_with_helpcode_visibility(true)
+    }
+
+    pub(crate) fn snapshot_with_helpcode_visibility(&self, show_helpcode: bool) -> SessionSnapshot {
         if self.nine_key.active() {
             return self.nine_key.snapshot();
         }
+        let hide_helpcode = !show_helpcode
+            && self.input.helpcode_enabled()
+            && !self.input.local_mode.annotates_rows();
         let input = &self.input;
         let candidates = input.candidates().to_vec();
         let preedit = if !self.shuangpin_preedit_uses_raw
@@ -490,7 +502,7 @@ impl Session {
             wubi_unique_four_code: input.wubi_unique_four_code(),
             shuangpin_profile: input.profile.kind.name().to_owned(),
             candidate_sources: candidates.iter().map(|item| item.source).collect(),
-            candidate_annotations: input.candidate_annotations(),
+            candidate_annotations: input.candidate_annotations(hide_helpcode),
             // 纠错候选按原始按键长度消费；普通候选仍按 `pinyin`，两者都由组字推进判断。
             candidate_answers_key: candidates
                 .iter()
@@ -520,6 +532,16 @@ impl Session {
             return None;
         }
         self.input.engine.candidate_wubi_code(word)
+    }
+
+    /// 显示候选与原始候选同座且词面一致时复用已缓存的反查码；候选身份错位时返回 `None`，由宿主回退到按词入口。
+    pub(crate) fn candidate_wubi_code_at_if_word(&self, index: usize, word: &str) -> Option<&str> {
+        if self.nine_key.active() {
+            return None;
+        }
+        self.input
+            .engine
+            .candidate_wubi_code_at_if_word(index, word)
     }
 
     /// Byte offsets into `editing_text` for pinyin-unit editing; empty when idle, in local modes, for non-pinyin schemes and during nine-key input. Read-only.

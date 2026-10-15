@@ -53,7 +53,7 @@ enum MacEmojiSymbolSections {
   }
 
   static func height(_ section: MacEmojiSymbolSection) -> CGFloat {
-    titleHeight + MacEmojiGridMetrics.height(count: section.items.count) + bottomPadding
+    titleHeight + CGFloat((section.items.count + MacEmojiGridMetrics.symbolColumns - 1) / MacEmojiGridMetrics.symbolColumns) * MacEmojiGridMetrics.symbolStride + bottomPadding
   }
 }
 
@@ -66,10 +66,10 @@ struct MacEmojiSymbolSectionsView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
       ForEach(MacEmojiSymbolSections.split(items), id: \.id) { section in
-        MacEmojiDetailSection(title: section.title, palette: palette) {
+        MacEmojiDetailSection(title: MacEmojiSymbolGroup.displayTitle(section.title), palette: palette) {
           MacEmojiGrid(items: section.items, palette: palette,
             selected: { selectedIndex == section.start + $0 },
-            identity: { section.start + $0 }, copy: { copy(section.start + $0) })
+            identity: { section.start + $0 }, copy: { copy(section.start + $0) }, compact: true)
         }
       }
     }.frame(width: MacEmojiGridMetrics.width, alignment: .leading)

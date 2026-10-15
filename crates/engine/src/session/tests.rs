@@ -561,10 +561,7 @@ fn caret_prefix_expands_its_own_initial_list() {
     let (grew, allocations) =
         crate::ime::personal_rerank::allocations::count(|| session.expand_initial_candidates());
     assert!(grew);
-    assert_eq!(
-        allocations, 353,
-        "caret-prefix expansion allocations: {allocations}"
-    );
+    assert_eq!(allocations, 319, "光标前缀展开申请次数：{allocations}");
     let widened = words(&session);
     assert_eq!(widened.len(), 30);
     assert!(widened.contains(&"丝".to_owned()), "{widened:?}");
@@ -1561,7 +1558,7 @@ fn ignored_scheme_key_does_not_clone_preedit_for_change_detection() {
     });
 
     assert!(!result.handled);
-    assert_eq!(allocations, 32);
+    assert_eq!(allocations, 28);
 }
 
 #[test]
@@ -1575,7 +1572,7 @@ fn typing_at_the_end_does_not_build_the_preedit_twice_for_caret_detection() {
     });
 
     assert!(result.handled);
-    assert_eq!(allocations, 132);
+    assert_eq!(allocations, 130);
 }
 
 #[test]
@@ -1588,7 +1585,7 @@ fn backspacing_at_the_end_does_not_build_the_preedit_twice_for_caret_detection()
         crate::ime::personal_rerank::allocations::count(|| session.command(Command::Backspace));
 
     assert!(result.handled);
-    assert_eq!(allocations, 23);
+    assert_eq!(allocations, 19);
 }
 
 #[test]
@@ -1648,7 +1645,7 @@ fn setting_the_caret_does_not_build_editing_text_to_clamp_it() {
     });
 
     assert_eq!(session.snapshot().caret_position, 2);
-    assert_eq!(allocations, 29);
+    assert_eq!(allocations, 25);
 }
 
 #[test]
@@ -1662,8 +1659,8 @@ fn moving_the_caret_does_not_build_the_preedit_twice() {
 
     assert!(result.handled);
     assert_eq!(
-        allocations, 29,
-        "caret movement should reuse the editing text length: {allocations} allocations"
+        allocations, 25,
+        "光标移动复用编辑文本长度后的分配次数：{allocations}"
     );
 }
 
@@ -1678,10 +1675,7 @@ fn typing_at_a_caret_reuses_the_editing_text_length() {
         crate::ime::personal_rerank::allocations::count(|| session.character(b'x', false));
 
     assert!(result.handled);
-    assert_eq!(
-        allocations, 206,
-        "caret insertion allocations: {allocations}"
-    );
+    assert_eq!(allocations, 202, "光标处输入的分配次数：{allocations}");
 }
 
 #[test]
@@ -1757,7 +1751,7 @@ fn selecting_a_shuangpin_candidate_does_not_clone_the_full_request() {
         crate::ime::personal_rerank::allocations::count(|| session.select(index));
 
     assert_eq!(result.commit.as_deref(), Some("你好"));
-    assert_eq!(allocations, 23, "双拼候选选择分配次数：{allocations}");
+    assert_eq!(allocations, 19, "双拼候选选择分配次数：{allocations}");
 }
 
 #[test]
@@ -3418,7 +3412,7 @@ fn shuangpin_snapshot_does_not_build_unused_raw_preedit() {
 
     assert_eq!(snapshot.preedit, "ni'hao");
     assert_eq!(
-        allocations, 54,
+        allocations, 42,
         "shuangpin snapshot allocations: {allocations}"
     );
 }
@@ -5341,6 +5335,55 @@ fn plugin_rows_replace_the_fallback_row() {
         (query.trigger.as_str(), query.argument.as_str()),
         ("cz", "huohuo")
     );
+}
+
+#[test]
+fn plugin_row_filter_does_not_allocate_a_second_text_index() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = plugin_session(&fixture, |_| {});
+    let query = open_uuid(&mut session);
+    let rows = plugin_rows(&[("甲", ""), ("乙", ""), ("甲", "重复")]);
+    let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+        assert!(session.apply_plugin_command_rows(&query, &rows));
+    });
+    assert_eq!(
+        allocations, 12,
+        "插件行过滤不应为临时文本索引多分配存储：{allocations}"
+    );
+    assert_eq!(words(&session), ["甲", "乙"]);
+}
+
+#[test]
+fn cached_plugin_rows_do_not_allocate_a_temporary_row_vector() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    for count in [1, 2, crate::local::command::RESULT_LIMIT] {
+        let mut session = plugin_session(&fixture, |_| {});
+        let query = open_uuid(&mut session);
+        let rows: Vec<_> = (0..count)
+            .map(|index| (format!("合成行{index}"), String::new()))
+            .collect();
+        assert!(session.apply_plugin_command_rows(&query, &rows));
+        let cached = session.input.plugin_rows.as_ref().unwrap().1.clone();
+
+        for _ in 0..2 {
+            let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+                assert!(session.input.update_local_candidates().is_none());
+            });
+            assert_eq!(
+                allocations,
+                count * 2 + 1,
+                "{count} 行缓存插件候选重建产生了 {allocations} 次分配"
+            );
+            assert_eq!(session.input.local_candidates, cached);
+            assert_eq!(session.input.plugin_rows.as_ref().unwrap().1, cached);
+            assert!(session.plugin_command_query().is_none());
+        }
+
+        session.input.local_candidates[0].word.push('改');
+        assert_eq!(session.input.plugin_rows.as_ref().unwrap().1, cached);
+        session.input.update_local_candidates();
+        assert_eq!(session.input.local_candidates, cached);
+    }
 }
 
 #[test]
@@ -8400,4 +8443,84 @@ fn a_zero_first_page_rows_reads_as_one_row() {
         "精确同音词一行都没有时补全词应按权重排在最前: {:?}",
         words(&one)
     );
+}
+
+// ---- 引号与方头括号样式 ----
+
+const CORNER_HOLLOW: crate::punctuation::PunctuationMarks = crate::punctuation::PunctuationMarks {
+    quotes: crate::punctuation::QuoteMarks::Corner,
+    brackets: crate::punctuation::BracketMarks::Hollow,
+};
+
+#[test]
+fn punctuation_marks_reach_the_bare_prefix_route() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = fixture.session_with(|options| {
+        options.punctuation_marks = CORNER_HOLLOW;
+        options.local_modes.command = true;
+    });
+    session.character(b'/', false);
+    assert_eq!(session.punctuation(b'\'').commit.as_deref(), Some("/「"));
+    assert_eq!(session.snapshot().local_mode, LocalInputMode::None);
+    assert_eq!(session.punctuation(b'\'').commit.as_deref(), Some("」"));
+    assert_eq!(session.punctuation(b'[').commit.as_deref(), Some("〖"));
+    // 组字后带标点也按样式出字。
+    type_text(&mut session, "nihao");
+    assert_eq!(session.punctuation(b'"').commit.as_deref(), Some("你好『"));
+}
+
+#[test]
+fn punctuation_marks_follow_every_scheme_with_chinese_punctuation() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut japanese = fixture.session_with(|options| options.punctuation_marks = CORNER_HOLLOW);
+    japanese.switch_scheme(SchemeType::JapaneseRomaji).unwrap();
+    assert_eq!(japanese.punctuation(b'\'').commit.as_deref(), Some("「"));
+    assert_eq!(japanese.punctuation(b']').commit.as_deref(), Some("〗"));
+
+    let mut cantonese = fixture.session_with(|options| {
+        options.punctuation_marks = CORNER_HOLLOW;
+        options.scheme = SchemeType::Cantonese;
+        options.cantonese_dictionary = cantonese_dictionary(fixture.path());
+    });
+    // 粤拼空闲时 `'` 是标点，不是音节分隔。
+    assert_eq!(cantonese.punctuation(b'\'').commit.as_deref(), Some("「"));
+    assert_eq!(cantonese.punctuation(b'"').commit.as_deref(), Some("『"));
+
+    // 韩文写半角 ASCII，样式不起作用。
+    let mut korean = fixture.session_with(|options| {
+        options.punctuation_marks = CORNER_HOLLOW;
+        options.scheme = SchemeType::Korean;
+    });
+    for mark in *b"'\"[]" {
+        let idle = korean.punctuation(mark);
+        assert!(!idle.handled && idle.commit.is_none());
+    }
+}
+
+#[test]
+fn zhuyin_square_keys_keep_their_own_corner_quotes() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = fixture.session_with(|options| {
+        options.scheme = SchemeType::Zhuyin;
+        options.zhuyin_dictionary = zhuyin_dictionary(fixture.path());
+        options.punctuation_marks = CORNER_HOLLOW;
+    });
+    // 大千键位自己占着 `[` `]`，出「」，不经过标点样式。
+    assert_eq!(session.character(b'[', false).commit.as_deref(), Some("「"));
+    assert_eq!(session.character(b']', false).commit.as_deref(), Some("」"));
+    // `'` 不是注音键，照样按样式出字。
+    assert_eq!(session.punctuation(b'"').commit.as_deref(), Some("『"));
+}
+
+#[test]
+fn set_punctuation_marks_applies_live_without_resetting_alternation() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = fixture.session();
+    assert_eq!(session.punctuation(b'"').commit.as_deref(), Some("“"));
+    session.set_punctuation_marks(CORNER_HOLLOW);
+    assert_eq!(session.punctuation(b'"').commit.as_deref(), Some("』"));
+    assert_eq!(session.punctuation(b'[').commit.as_deref(), Some("〖"));
+    session.set_punctuation_marks(crate::punctuation::PunctuationMarks::default());
+    assert_eq!(session.punctuation(b'"').commit.as_deref(), Some("“"));
+    assert_eq!(session.punctuation(b'[').commit.as_deref(), Some("【"));
 }

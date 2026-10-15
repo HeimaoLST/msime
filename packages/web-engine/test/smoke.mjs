@@ -148,6 +148,9 @@ try {
   await engine.keys([...letters("nihao"), null]);
   const picked = await engine.pick(0);
   assert.equal(picked.out.filter((o) => o.t === "commit").length, 1, `pick did not commit: ${JSON.stringify(picked.out)}`);
+  // 连续切换及返回当前方案都必须逐条结束，真实 Worker 回复也要带回请求编号。
+  await Promise.all([engine.setScheme("xiaohe"), engine.setScheme("ziranma"), engine.setScheme("quanpin")]);
+  assert.equal(engine.scheme, "quanpin");
   await engine.setScheme("xiaohe");
   assert.equal(engine.scheme, "xiaohe");
   await assert.rejects(engine.setScheme("wubi86"), (e) => e.code === "unsupported");

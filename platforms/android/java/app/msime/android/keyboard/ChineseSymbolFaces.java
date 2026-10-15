@@ -15,6 +15,19 @@ public final class ChineseSymbolFaces {
     private ChineseSymbolFaces() {}
 
     /**
+     * 引号与方头括号样式，取自 View 的 `punctuation_marks`（host-api 已按繁体输出开关解析好 `corner_when_traditional`）。直角引号下 `'` 出「」、`"` 出『』，空心括号下 `[` `]` 出〖〗。
+     */
+    public record Marks(boolean cornerQuotes, boolean hollowBrackets) {
+        /** 缺省：弯引号、实心括号，即没有这两个偏好时的行为。 */
+        public static final Marks DEFAULT = new Marks(false, false);
+
+        /** `quotes` 和 `brackets` 是 View 里的取值（"curly"|"corner"、"solid"|"hollow"），不认识的取值按缺省。 */
+        public static Marks of(String quotes, String brackets) {
+            return new Marks("corner".equals(quotes), "hollow".equals(brackets));
+        }
+    }
+
+    /**
      * 英文、日语、韩语、越南语、藏文和本地工具模式都不用中文标点。韩语、越南语和藏文无论中文标点开关怎样都写半角 ASCII 标点。
      *
      * <p>`chinesePunctuation` is the user's own switch, which the runtime holds and the toolbar
@@ -31,7 +44,21 @@ public final class ChineseSymbolFaces {
 
     /** Returns the key face for the active language; unmapped symbols retain their own face. */
     public static String face(String ascii, boolean chineseMode) {
+        return face(ascii, chineseMode, Marks.DEFAULT);
+    }
+
+    /** 按引号与方头括号样式取键面：这些键经 Engine 上屏，键面和写出的字一致。 */
+    public static String face(String ascii, boolean chineseMode, Marks marks) {
         if (ascii == null || !chineseMode) return ascii == null ? "" : ascii;
+        Marks styled = marks == null ? Marks.DEFAULT : marks;
+        if (styled.cornerQuotes()) {
+            if ("'".equals(ascii)) return "「";
+            if ("\"".equals(ascii)) return "『";
+        }
+        if (styled.hollowBrackets()) {
+            if ("[".equals(ascii)) return "〖";
+            if ("]".equals(ascii)) return "〗";
+        }
         return CHINESE_FACES.getOrDefault(ascii, ascii);
     }
 }

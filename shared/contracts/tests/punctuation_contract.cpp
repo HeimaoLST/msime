@@ -4,7 +4,8 @@
 int main()
 {
     using namespace metasequoia::punctuation_contract;
-    if (version != 1 || simple.size() != 15 || alternating.size() != 2)
+    if (version != 2 || simple.size() != 15 || alternating.size() != 2 || corner_quotes.size() != 2 ||
+        hollow_brackets.size() != 2)
         return 1;
     if (!is_supported(',') || !is_supported('"') || !is_supported('<') || !is_supported('_') || is_supported('a'))
         return 1;
@@ -14,6 +15,23 @@ int main()
     const auto *quotes = alternating_mapping('"');
     if (!quotes || std::string_view(quotes->opening) != "“" || std::string_view(quotes->closing) != "”")
         return 1;
+    // 直角引号和空心括号是同一个键的另一组字：键都在原表里，原表的字不变。
+    const auto *corner = corner_quote_mapping('\'');
+    if (!corner || std::string_view(corner->opening) != "「" || std::string_view(corner->closing) != "」")
+        return 1;
+    const auto *corner_double = corner_quote_mapping('"');
+    if (!corner_double || std::string_view(corner_double->opening) != "『" || corner_quote_mapping(',') != nullptr)
+        return 1;
+    const auto *hollow = hollow_bracket_output('[');
+    if (!hollow || std::string_view(hollow) != "〖" || hollow_bracket_output('(') != nullptr ||
+        std::string_view(simple_output('[')) != "【")
+        return 1;
+    for (const auto &mapping : corner_quotes)
+        if (!alternating_mapping(mapping.input))
+            return 1;
+    for (const auto &mapping : hollow_brackets)
+        if (!simple_output(mapping.input))
+            return 1;
     if (nested_opening_input != '<' || nested_closing_input != '>' || std::string_view(nested_opening_inner) != "〈")
         return 1;
     std::cout << "Punctuation contract passed\n";

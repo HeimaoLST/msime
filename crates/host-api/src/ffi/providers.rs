@@ -347,6 +347,7 @@ pub extern "C" fn msime_client_translation_query(handle: u64) -> *mut c_char {
             candidates.extend(candidates_view.candidates.iter().map(|candidate| {
                 json!({
                     "text": candidate.text,
+                    "source": candidate.source,
                     "online_gloss":
                         !msime_client_core::translation::source_gets_no_gloss(
                             candidate.source,

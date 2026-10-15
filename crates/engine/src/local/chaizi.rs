@@ -301,7 +301,7 @@ pub fn query_chaizi(
         }
     }
     hits.sort_by_key(|hit| (hit.missing, hit.rank));
-    let mut rows: Vec<Hit> = Vec::with_capacity(RESULT_LIMIT);
+    let mut rows: Vec<Hit> = Vec::new();
     for hit in hits {
         if rows.len() == RESULT_LIMIT {
             break;
@@ -317,6 +317,9 @@ pub fn query_chaizi(
             row.character == hit.character || (traditional_output && shown(row) == shown(&hit))
         });
         if !duplicate {
+            if rows.is_empty() {
+                rows.reserve_exact(RESULT_LIMIT);
+            }
             rows.push(hit);
         }
     }
@@ -349,6 +352,22 @@ mod tests {
 
     fn xiaohe() -> &'static ShuangpinProfile {
         default_profile()
+    }
+
+    #[test]
+    fn empty_chaizi_result_does_not_reserve_result_buffer() {
+        let profile = xiaohe();
+        assert!(!query_chaizi("huohuohuo", SchemeType::Quanpin, profile, false).is_empty());
+
+        let (rows, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            query_chaizi("zzzzzzzz", SchemeType::Quanpin, profile, false)
+        });
+
+        assert!(rows.is_empty());
+        assert_eq!(
+            allocations, 1,
+            "无命中拆字查询只应为去分隔符后的输入分配一次：{allocations}"
+        );
     }
 
     #[test]

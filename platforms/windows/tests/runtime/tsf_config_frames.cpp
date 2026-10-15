@@ -42,7 +42,7 @@ int main() {
     auto frames = tsf_config_frames(config);
     // Every setting the TIP consumes gets a frame; it kept compiled defaults
     // because the Server encoded none of them.
-    require(frames.size() == 11);
+    require(frames.size() == 12);
     for (const auto &frame : frames)
       require(frame.size() == sizeof(FanyImeNamedpipeDataToTsfWorkerThread));
 
@@ -58,7 +58,8 @@ int main() {
         FanyImeWorkerReplyType::PunctuationLockChanged,
         FanyImeWorkerReplyType::LocalModeTriggersChanged,
         FanyImeWorkerReplyType::DedicatedEnglishChanged,
-        FanyImeWorkerReplyType::SecondThirdCandidateChanged};
+        FanyImeWorkerReplyType::SecondThirdCandidateChanged,
+        FanyImeWorkerReplyType::PunctuationMarksChanged};
     for (size_t i = 0; i < frames.size(); ++i)
       require(frame_type(frames[i]) == expected[i]);
 
@@ -188,7 +189,25 @@ int main() {
     config.second_third_candidate = true;
     require(frame_text(tsf_config_frames(config)[10]) == L"1");
     config.second_third_candidate = false;
-    require(FanyImeWorkerReplyType::SecondThirdCandidateChanged == FanyImeWorkerReplyType::MaxKnown);
+    require(FanyImeWorkerReplyType::SecondThirdCandidateChanged < FanyImeWorkerReplyType::MaxKnown);
+    // 引号与方头括号样式也单独一帧，排在最后，缺省是弯引号、实心括号。
+    require(frame_text(tsf_config_frames(TsfLocalConfig{})[11]) == L"q0b0");
+    {
+      TsfLocalConfig styled;
+      const auto marks = [&styled](std::string_view quote, std::string_view bracket, bool traditional) {
+        apply_punctuation_marks(styled, quote, bracket, traditional);
+        return frame_text(tsf_config_frames(styled)[11]);
+      };
+      // 与 client-core 的 punctuation_marks 同一条规则：corner_when_traditional 跟着繁体输出开关。
+      require(marks("curly", "solid", true) == L"q0b0");
+      require(marks("corner", "solid", false) == L"q1b0");
+      require(marks("corner", "hollow", true) == L"q1b1");
+      require(marks("corner_when_traditional", "solid", false) == L"q0b0");
+      require(marks("corner_when_traditional", "hollow", true) == L"q1b1");
+      require(marks("", "", true) == L"q0b0");
+      require(marks("semantic", "round", true) == L"q0b0");
+    }
+    require(FanyImeWorkerReplyType::PunctuationMarksChanged == FanyImeWorkerReplyType::MaxKnown);
 
     // Caps Lock travels on its own frame rather than in the configuration set:
     // the Server owns the indicator because the TIP only sampled GetKeyState at

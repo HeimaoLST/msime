@@ -3,7 +3,7 @@
 pub mod dictionary;
 pub mod engine;
 #[cfg(test)]
-mod fixture;
+pub(crate) mod fixture;
 pub mod scheme;
 pub mod series;
 pub mod typo_edges;

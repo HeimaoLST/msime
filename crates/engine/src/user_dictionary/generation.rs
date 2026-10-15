@@ -13,7 +13,7 @@ use crate::diagnostics;
 use crate::error::{EngineError, Result};
 use crate::paths::RuntimePaths;
 use crate::types::SchemeSet;
-use crate::user_dictionary::journal::open_database;
+use crate::user_dictionary::journal::{open_database, quarantine_corrupt_journal};
 use crate::user_dictionary::replay::{replay, replay_english};
 use crate::wubi::provider::ensure_reverse_indexes;
 
@@ -72,6 +72,13 @@ pub fn prepare_runtime_paths_for(
     fs::create_dir_all(cache)?;
     reject_redirected_directory(user_data)?;
     reject_redirected_directory(cache)?;
+    // 不是数据库的日志会在下面的回放中每次启动都失败，让宿主永远无法启动；先把它挪开，从空日志开始。宿主 API 会在进入这里之前上报挪动结果；这里覆盖其余调用方。
+    if let Some(moved) = quarantine_corrupt_journal(&result.user(assets::USER_JOURNAL))? {
+        eprintln!(
+            "msime: user dictionary journal is not a database, moved aside to {}",
+            moved.display()
+        );
+    }
 
     let marker = result.dictionaries.join(assets::GENERATION_READY);
     let generation_ready = match fs::symlink_metadata(&marker) {
@@ -479,6 +486,34 @@ mod tests {
             journal,
             &format!("INSERT INTO user_dictionary_operations(dictionary,key,value,operation,weight,user_inserted,updated_at) VALUES('pinyin','ni','{word}','upsert',50,1,{updated_at})"),
         );
+    }
+
+    #[test]
+    fn a_journal_that_is_not_a_database_does_not_stop_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        let resources = resources(root.path());
+        let user = root.path().join("user");
+        fs::create_dir_all(&user).unwrap();
+        let journal = user.join(assets::USER_JOURNAL);
+        fs::write(&journal, vec![0u8; 8 * 4096]).unwrap();
+
+        let prepared =
+            prepare_runtime_paths(&resources, &user, &root.path().join("cache"), "v1").unwrap();
+        assert!(prepared
+            .dictionaries
+            .join(assets::GENERATION_READY)
+            .exists());
+        assert!(!journal.exists());
+        let moved: Vec<_> = fs::read_dir(&user)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("msime_user.db.corrupt-"))
+            .collect();
+        assert_eq!(moved.len(), 1, "{moved:?}");
+        // 之后写入的日志仍会按原流程回放到代次中。
+        learn(&journal, "你", 1);
+        prepare_runtime_paths(&resources, &user, &root.path().join("cache"), "v1").unwrap();
     }
 
     #[test]

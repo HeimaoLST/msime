@@ -38,6 +38,19 @@ int main() {
   assert(!command_translation_query("none", true));
   assert(!command_translation_query("mention", true));
 
+  // The shared translation query marks emoji, kaomoji, mixed-Japanese and
+  // plugin rows as display-only. Linux must retain that source identity while
+  // converting candidates to the text-only provider socket protocol.
+  using msime::linux_host::candidate_translation_source_allowed;
+  assert(candidate_translation_source_allowed(0));
+  assert(candidate_translation_source_allowed(4));
+  assert(!candidate_translation_source_allowed(6));
+  assert(!candidate_translation_source_allowed(7));
+  assert(!candidate_translation_source_allowed(13));
+  assert(!candidate_translation_source_allowed(14));
+  assert(candidate_translation_source_allowed(255));
+  assert(candidate_translation_source_allowed(256));
+
   using msime::linux_host::should_retry_translation_after_provider;
   assert(should_retry_translation_after_provider(true, false, false));
   assert(should_retry_translation_after_provider(true, true, false));

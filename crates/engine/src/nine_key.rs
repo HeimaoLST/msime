@@ -1457,14 +1457,12 @@ impl NineKeySession {
         });
         let mut ranked = Vec::new();
         if let Some(keyboard) = keyboard.as_mut() {
-            let scored: Vec<&WordItem> = candidates
-                .iter()
-                .filter(|item| is_lattice_sentence(item))
-                .take(MAX_RERANK_PATHS)
-                .collect();
+            let (scored, scored_len) = collect_lattice_sentences(candidates);
+            let scored = &scored[..scored_len];
             // 模型的顺序只取决于上屏上下文、整句和它们的词网格分，三者都相同时直接用上次的结果。
             let signature: Vec<(String, i64)> = scored
                 .iter()
+                .flatten()
                 .map(|item| (item.word.clone(), comparable_weight(item)))
                 .collect();
             let context = &self.rescoring_context;
@@ -1477,6 +1475,7 @@ impl NineKeySession {
             } else {
                 let mut sentences: Vec<SentencePath> = scored
                     .iter()
+                    .flatten()
                     .map(|item| SentencePath {
                         sentence: item.word.clone(),
                         key: item.canonical_pinyin.clone(),
@@ -1965,6 +1964,25 @@ fn is_lattice_sentence(item: &WordItem) -> bool {
     item.source == CandidateSource::Generated && item.sentence_association
 }
 
+/// 取候选列表中最多 `MAX_RERANK_PATHS` 条词网格整句，借用行本身而不建立临时索引向量。
+fn collect_lattice_sentences(
+    candidates: &[WordItem],
+) -> ([Option<&WordItem>; MAX_RERANK_PATHS], usize) {
+    let mut slots = [None; MAX_RERANK_PATHS];
+    let mut len = 0;
+    for item in candidates {
+        if !is_lattice_sentence(item) {
+            continue;
+        }
+        slots[len] = Some(item);
+        len += 1;
+        if len == MAX_RERANK_PATHS {
+            break;
+        }
+    }
+    (slots, len)
+}
+
 /// 把键盘模型重排后的整句顺序 `ranked` 落到候选上，规则同 `lattice::merge::reranked_block`。词网格开关开着时（`include_lattice_best`），模型排第一的整句若不是词网格最好的那一行，就把它改成 `NeuralKeyboard` 行，挪到词网格最好的整句后面；它就是那一行时，`show_next_on_duplicate` 打开才接着看模型的下一句，否则不出模型行。词网格开关关着时词网格最好的整句不显示，模型排第一的整句总是改成 `NeuralKeyboard` 行、占它的位置（与它相同也一样），随后去掉其余的词网格整句行。`ranked` 为空（模型没有重排）时只做去掉整句这一步。
 fn place_keyboard_pick(
     candidates: &mut Vec<WordItem>,
@@ -2241,13 +2259,8 @@ fn comparable_weight(item: &WordItem) -> i64 {
         return item.weight;
     }
     let syllables = item.canonical_pinyin.split('\'').count();
-    // 每个多字词再扣一份奖励（#6059）：只按音节扣时，一个词组的分只剩它的词频，比单字的分高得多，把读法切成更多词组反而得分，`ni'ming'tian'you'long'ma`（匿名天佑龙马）就压过了 `ni'ming'tian'you'kong'ma`（你明天有空吗）。每个词扣一份，等于给每个词一份插入代价，切得越碎越吃亏；单字本来就按 `unigram_z` 扣过，不再加扣。
-    let phrases = item
-        .sentence_words
-        .iter()
-        .filter(|word| word.chars().nth(1).is_some())
-        .count();
-    item.weight - (PHRASE_LENGTH_BONUS * 1000.0 * (syllables + phrases) as f64) as i64
+    // 每词插入代价已在共享词网格解码中扣除；这里只消去跨切分比较的音节奖励。
+    item.weight - (PHRASE_LENGTH_BONUS * 1000.0 * syllables as f64) as i64
 }
 
 /// 九键记进个人上下文模型的词：两个字以上的纯汉字词，单字和夹着英文、符号的不记（#6185）。
@@ -3125,9 +3138,9 @@ mod tests {
         assert_eq!(comparable_weight(&word), 500);
     }
 
-    /// #6059：每个多字词再扣一份奖励，切成更多词组的读法不再因此得分。
+    /// 每词插入代价由词网格计入，跨切分比较不能再扣一次。
     #[test]
-    fn each_phrase_costs_one_more_bonus_across_paths() {
+    fn phrase_insertion_cost_is_not_deducted_again_across_paths() {
         let bonus = (PHRASE_LENGTH_BONUS * 1000.0) as i64;
         let sentence = |word: &str, pinyin: &str, words: &[&str], weight: i64| {
             let mut row = item(
@@ -3140,18 +3153,18 @@ mod tests {
             row.sentence_words = words.iter().map(|word| (*word).to_owned()).collect();
             row
         };
-        // 两句都是六个音节；三个词组的那句原始分高出半份奖励，两个词组加两个单字的那句扣掉多出来的一份词组奖励后反超。
+        // 两句都是六个音节；输入分已含三份和两份词组插入代价，九键只扣相同的六份音节奖励。
         let phrases = sentence(
             "匿名天佑龙马",
             "ni'ming'tian'you'long'ma",
             &["匿名", "天佑", "龙马"],
-            40_000,
+            40_000 - 3 * bonus,
         );
         let plain = sentence(
             "你明天有空吗",
             "ni'ming'tian'you'kong'ma",
             &["你", "明天", "有空", "吗"],
-            30_000,
+            30_000 - 2 * bonus,
         );
         assert_eq!(comparable_weight(&phrases), 40_000 - 9 * bonus);
         assert_eq!(comparable_weight(&plain), 30_000 - 8 * bonus);
@@ -5008,6 +5021,33 @@ mod tests {
         let mut item = item(word, "64426", weight, CandidateSource::Generated);
         item.sentence_association = true;
         item
+    }
+
+    #[test]
+    fn lattice_sentence_slots_filter_in_order_without_allocations() {
+        let mut candidates = Vec::new();
+        candidates.push(item("跳过来源", "64426", 0, CandidateSource::Database));
+        candidates.push(sentence("整句 0", 0));
+        candidates.push(sentence("整句 1", 0));
+        let mut non_sentence = sentence("跳过标记", 0);
+        non_sentence.sentence_association = false;
+        candidates.push(non_sentence);
+        for index in 2..14 {
+            candidates.push(sentence(&format!("整句 {index}"), 0));
+        }
+
+        let ((slots, len), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            collect_lattice_sentences(&candidates)
+        });
+
+        assert_eq!(len, MAX_RERANK_PATHS);
+        assert_eq!(slots[0].map(|item| item.word.as_str()), Some("整句 0"));
+        assert_eq!(slots[1].map(|item| item.word.as_str()), Some("整句 1"));
+        assert_eq!(
+            slots[MAX_RERANK_PATHS - 1].map(|item| item.word.as_str()),
+            Some("整句 11")
+        );
+        assert_eq!(allocations, 0);
     }
 
     fn row_sources(candidates: &[WordItem]) -> Vec<(&str, CandidateSource)> {

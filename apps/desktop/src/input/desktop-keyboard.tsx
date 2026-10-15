@@ -5,10 +5,10 @@ import {
   type PanelClient,
   type SettingsClient,
   type TouchKeyboardSkinDesign,
-  defaultTouchKeyboardGeometry,
   keyboardThemeId,
 } from "@msime/ui";
 import { useCandidatePreviewTheme } from "../../../../packages/ui/src/candidate/candidate-preview-theme";
+import { touchKeyboardGeometryPreferences } from "../../../../packages/ui/src/settings/touch-keyboard-geometry-preferences";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
 type ThemeClient = Pick<SettingsClient, "load" | "onPreferencesChanged" | "host">;
@@ -47,10 +47,9 @@ export function DesktopKeyboard({
   );
   const layout =
     snapshot?.preferences.touch_keyboard_layout === "nine_key" ? "nine_key" : "twenty_six_key";
-  const keySpacingTenths =
-    snapshot?.preferences.touch_key_spacing_tenths ?? defaultTouchKeyboardGeometry.keySpacingTenths;
-  const rowSpacingTenths =
-    snapshot?.preferences.touch_row_spacing_tenths ?? defaultTouchKeyboardGeometry.rowSpacingTenths;
+  const { keySpacingTenths, rowSpacingTenths } = touchKeyboardGeometryPreferences(
+    snapshot?.preferences,
+  );
   const skin = keyboardThemeId(
     snapshot?.preferences.global_theme,
     snapshot?.preferences.custom_theme,

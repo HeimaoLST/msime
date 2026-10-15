@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useLatestRef } from "../core/use-latest-ref";
+import { subscribeToWindowEvent } from "../core/window-focus";
 
 export type MobilePopStateHandler = (event: PopStateEvent) => void;
 
@@ -10,7 +11,6 @@ export function useMobilePopState(mobile: boolean, onPopState: MobilePopStateHan
   useEffect(() => {
     if (!mobile || typeof window === "undefined") return;
     const handlePopState = (event: PopStateEvent) => handler.current(event);
-    window.addEventListener("popstate", handlePopState);
-    return () => window.removeEventListener("popstate", handlePopState);
+    return subscribeToWindowEvent("popstate", handlePopState);
   }, [handler, mobile]);
 }

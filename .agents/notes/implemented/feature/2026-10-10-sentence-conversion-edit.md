@@ -8,6 +8,10 @@ Status: implemented
 
 ## Decision
 
+macOS 普通拼音候选的方向键分工及展开末页显示由[拼音与候选方向键分工](../bug-fix/2026-10-14-macos-arrow-candidate-navigation.md)部分取代，原有引擎契约和其它平台行为保留。
+
+macOS 普通左右键的入口由[普通左右键编辑拼音光标](../bug-fix/2026-10-14-macos-plain-arrow-pinyin-caret.md)部分取代；下面记录的引擎改字语义、Windows 和 Linux 入口仍成立。
+
 - 引擎（`crates/engine/src/session/conversion.rs`）加整句改字。首选是一个字对一个完整音节、覆盖整个组字、至少两个字的句子（整句候选或词库整词）时，新命令 `ConversionLeft` 进入改字：整句按首选的词切段，光标停在最后一个字前；之后 `ConversionLeft` / `ConversionRight` 每次移一个字，最远到句末。改字期间组字原文不变，字母光标停在末尾。
 - 光标处的候选是从光标所在音节开始的字和词：先是光标所在那一段（光标在词中间时从光标到词尾），当前转换的文字排第一，再是更短的段、更长的段，同一长度按权重。词条来自规范全拼的词网格跨度查询（`QuanpinDictionary::conversion_rows`），双拼共用，因为整句的读音本来就是规范全拼。
 - 选中候选把这一段钉住，句子其余部分用同一套词网格、n 元表和个人模型重新转换，不能跨过钉住的段（`lattice::decode::decode_pinned`），光标移到这段后面。语义与注音编辑器的 pin 相同：没钉住的部分可能因为新的上下文改变。重新转换解不出路径时，碰到钉住段的段拆成单字，其余原样保留。

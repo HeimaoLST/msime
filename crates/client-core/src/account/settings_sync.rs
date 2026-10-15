@@ -11,8 +11,9 @@
 use super::{AccountError, AccountPreferenceSchema, AccountPreferenceValue, AccountPreferences};
 use crate::host_surface::HostPlatform;
 use crate::preferences::{
-    FrequencyMode, InputScheme, NumberKeypadOrder, Preferences, ShuangpinProfile, ThemeMode,
-    TouchKeyboardLayout, TwentySixKeyNumberLayout, WubiProfile,
+    BracketStyle, FrequencyMode, InputScheme, NumberKeypadOrder, Preferences, QuoteStyle,
+    ShuangpinProfile, ThemeMode, TouchKeyboardLayout, TraditionalVariant, TwentySixKeyNumberLayout,
+    WubiProfile,
 };
 use crate::skin::theme::GlobalTheme;
 use serde::{Deserialize, Serialize};
@@ -464,6 +465,16 @@ fn insert_input_settings(
             "simplified"
         },
     );
+    // 繁体变体单独成键，`input.character_set` 的取值不变，旧客户端照常读。服务端字段表没有这个键时，上传前的过滤会去掉它。
+    insert_string(
+        settings,
+        "input.traditional_variant",
+        match preferences.traditional_chinese_variant {
+            TraditionalVariant::Standard => "s2t",
+            TraditionalVariant::Taiwan => "s2tw",
+            TraditionalVariant::TaiwanPhrases => "s2twp",
+        },
+    );
     if let Some(schema) = shuangpin_schema(preferences.shuangpin_profile) {
         insert_string(settings, "input.shuangpin_schema", schema);
     }
@@ -505,6 +516,24 @@ fn insert_input_settings(
         settings,
         "input.paired_punctuation",
         preferences.paired_punctuation,
+    );
+    // 取值与偏好文档里的写法相同。服务端字段表没有这两个键时，上传前的过滤会去掉它们。
+    insert_string(
+        settings,
+        "input.quote_style",
+        match preferences.quote_style {
+            QuoteStyle::Curly => "curly",
+            QuoteStyle::Corner => "corner",
+            QuoteStyle::CornerWhenTraditional => "corner_when_traditional",
+        },
+    );
+    insert_string(
+        settings,
+        "input.bracket_style",
+        match preferences.bracket_style {
+            BracketStyle::Solid => "solid",
+            BracketStyle::Hollow => "hollow",
+        },
     );
     insert_bool(settings, "input.wubi_code_hint", preferences.wubi_code_hint);
     insert_bool(
@@ -745,6 +774,15 @@ fn apply_input_settings(applier: &mut Applier<'_>) -> Result<(), AccountError> {
         };
         Some(())
     })?;
+    applier.set_string("input.traditional_variant", |preferences, value| {
+        preferences.traditional_chinese_variant = match value {
+            "s2t" => TraditionalVariant::Standard,
+            "s2tw" => TraditionalVariant::Taiwan,
+            "s2twp" => TraditionalVariant::TaiwanPhrases,
+            _ => return None,
+        };
+        Some(())
+    })?;
     // 本机选着自定义方案时不导出这个键（账号装不下这张表），账号里留着的是上次的内置方案；合并上传后再应用回来时不能拿它盖掉本机的自定义方案。
     applier.set_string("input.shuangpin_schema", |preferences, value| {
         if preferences.shuangpin_profile == ShuangpinProfile::Custom {
@@ -797,6 +835,23 @@ fn apply_input_settings(applier: &mut Applier<'_>) -> Result<(), AccountError> {
     })?;
     applier.set_bool("input.paired_punctuation", |preferences, value| {
         preferences.paired_punctuation = value
+    })?;
+    applier.set_string("input.quote_style", |preferences, value| {
+        preferences.quote_style = match value {
+            "curly" => QuoteStyle::Curly,
+            "corner" => QuoteStyle::Corner,
+            "corner_when_traditional" => QuoteStyle::CornerWhenTraditional,
+            _ => return None,
+        };
+        Some(())
+    })?;
+    applier.set_string("input.bracket_style", |preferences, value| {
+        preferences.bracket_style = match value {
+            "solid" => BracketStyle::Solid,
+            "hollow" => BracketStyle::Hollow,
+            _ => return None,
+        };
+        Some(())
     })?;
     applier.set_bool("input.wubi_code_hint", |preferences, value| {
         preferences.wubi_code_hint = value

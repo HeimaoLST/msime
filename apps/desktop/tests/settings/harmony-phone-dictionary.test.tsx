@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, expect, test, vi } from "vitest";
+import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import type { CommunityResource } from "@msime/ui";
+import type { CommunityResource, DictionaryClient } from "@msime/ui";
 import { ToastProvider } from "../../../../packages/ui/src/core/toast";
 import { DictionarySettingsPage } from "../../../../packages/ui/src/settings/pages/dictionary-page";
 import {
@@ -58,7 +59,7 @@ function resource(id: string, name: string): CommunityResource {
   } as unknown as CommunityResource;
 }
 
-function setup({ harmonyPhone = true, scel = false, importBytes = false } = {}) {
+function setup({ harmonyPhone = true, scel = false, importBytes = false, strict = false } = {}) {
   const accepted = scel ? [...formats, "scel"] : formats;
   let current = viewOf([work, slang], accepted);
   const respond = (next: DictionaryCollection[]) => {
@@ -162,10 +163,16 @@ function setup({ harmonyPhone = true, scel = false, importBytes = false } = {}) 
       </ToastProvider>
     </SettingsFormContext.Provider>
   );
-  const view = render(tree(model));
+  const wrapped = (value: SettingsFormModel) =>
+    strict ? <StrictMode>{tree(value)}</StrictMode> : tree(value);
+  const view = render(wrapped(model));
   /** 以外壳打开或关上本页上的社区图库后的模型重画。 */
   const showGallery = (communityGallery: SettingsFormModel["communityGallery"]) =>
-    view.rerender(tree({ ...model, communityGallery }));
+    view.rerender(wrapped({ ...model, communityGallery }));
+  const changeDictionary = (dictionary: DictionaryClient) =>
+    view.rerender(wrapped({ ...model, client: { ...model.client, dictionary } }));
+  const changeCollections = (dictionaryCollections: DictionaryCollectionsClient) =>
+    view.rerender(wrapped({ ...model, client: { ...model.client, dictionaryCollections } }));
   return {
     collections,
     dictionary,
@@ -174,6 +181,8 @@ function setup({ harmonyPhone = true, scel = false, importBytes = false } = {}) 
     selectPage,
     openCommunityGallery,
     showGallery,
+    changeDictionary,
+    changeCollections,
   };
 }
 
@@ -231,6 +240,122 @@ test("the list flushes queued words when it opens", async () => {
   const { collections } = setup();
   await screen.findByText("工作");
   expect(collections.flush).toHaveBeenCalledTimes(1);
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((accept, fail) => {
+    resolve = accept;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+test("StrictMode 重放后词库列表和计数能加载，修改完成后恢复可用", async () => {
+  const { collections } = setup({ strict: true });
+  expect(await screen.findByText("工作")).toBeTruthy();
+  expect(await screen.findByText("内置词库 · 123,456 条自己的词")).toBeTruthy();
+  fireEvent.click(screen.getByText("工作"));
+  const toggle = screen.getByRole("switch", { name: "启用此词库" });
+  fireEvent.click(toggle);
+  await waitFor(() => expect(collections.setEnabled).toHaveBeenCalledWith("work", true));
+  await waitFor(() => expect(toggle).toHaveProperty("checked", true));
+  expect(toggle).toHaveProperty("disabled", false);
+});
+
+test.each(["成功", "失败"])("图库打开期间忽略旧刷新和计数的%s结果", async (outcome) => {
+  const { collections, dictionary, showGallery } = setup();
+  await screen.findByText("工作");
+  await screen.findByText("内置词库 · 123,456 条自己的词");
+  const refresh = deferred<DictionaryCollectionsView>();
+  const count = deferred<number>();
+  vi.mocked(collections.flush).mockReturnValueOnce(refresh.promise);
+  dictionary.count.mockReturnValueOnce(count.promise);
+  showGallery({ category: "dictionary", scope: "", initialMine: false });
+  showGallery(null);
+  showGallery({ category: "dictionary", scope: "", initialMine: false });
+  await act(async () => {
+    count.resolve(999);
+    if (outcome === "成功") refresh.resolve(viewOf([{ ...work, name: "旧列表" }]));
+    else refresh.reject(new Error("synthetic stale refresh"));
+  });
+  expect(screen.getByText("工作")).toBeTruthy();
+  expect(screen.queryByText("旧列表")).toBeNull();
+  expect(screen.getByText("内置词库 · 123,456 条自己的词")).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+test.each(["成功", "失败"])(
+  "词库客户端更换后旧修改的%s不覆盖新列表，也不解除新操作忙碌",
+  async (outcome) => {
+    const { collections, changeCollections } = setup();
+    await screen.findByText("工作");
+    const old = deferred<DictionaryCollectionsView>();
+    vi.mocked(collections.setEnabled).mockReturnValueOnce(old.promise);
+    fireEvent.click(screen.getByText("工作"));
+    fireEvent.click(screen.getByRole("switch", { name: "启用此词库" }));
+    const current = deferred<DictionaryCollectionsView>();
+    const replacement: DictionaryCollectionsClient = {
+      ...collections,
+      flush: vi.fn().mockResolvedValue(viewOf([{ ...work, name: "新列表" }])),
+      load: vi.fn().mockResolvedValue(viewOf([{ ...work, name: "新列表" }])),
+      setEnabled: vi.fn().mockReturnValue(current.promise),
+    };
+    changeCollections(replacement);
+    expect(await screen.findByRole("heading", { name: "新列表" })).toBeTruthy();
+    const toggle = screen.getByRole("switch", { name: "启用此词库" });
+    expect(toggle).toHaveProperty("disabled", false);
+    fireEvent.click(toggle);
+    expect(toggle).toHaveProperty("disabled", true);
+    await act(async () => {
+      if (outcome === "成功") old.resolve(viewOf([{ ...work, name: "旧列表", enabled: true }]));
+      else old.reject(new Error("synthetic stale mutation"));
+    });
+    expect(screen.getByRole("heading", { name: "新列表" })).toBeTruthy();
+    expect(toggle).toHaveProperty("disabled", true);
+    expect(replacement.load).not.toHaveBeenCalled();
+    expect(screen.queryByText("已启用")).toBeNull();
+    await act(async () => current.resolve(viewOf([{ ...work, name: "新列表", enabled: true }])));
+    expect(toggle).toHaveProperty("disabled", false);
+    expect(toggle).toHaveProperty("checked", true);
+  },
+);
+
+test("同一轮重复切换只发起一次修改，旧刷新不覆盖修改结果", async () => {
+  const { collections, showGallery } = setup();
+  await screen.findByText("工作");
+  const refresh = deferred<DictionaryCollectionsView>();
+  const mutation = deferred<DictionaryCollectionsView>();
+  vi.mocked(collections.flush).mockReturnValueOnce(refresh.promise);
+  vi.mocked(collections.setEnabled).mockReturnValueOnce(mutation.promise);
+  showGallery({ category: "dictionary", scope: "", initialMine: false });
+  showGallery(null);
+  fireEvent.click(screen.getByText("工作"));
+  const toggle = screen.getByRole("switch", { name: "启用此词库" });
+  await act(async () => {
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
+  });
+  expect(collections.setEnabled).toHaveBeenCalledTimes(1);
+  await act(async () => mutation.resolve(viewOf([{ ...work, enabled: true }])));
+  await act(async () => refresh.resolve(viewOf([work])));
+  expect(toggle).toHaveProperty("checked", true);
+  expect(toggle).toHaveProperty("disabled", false);
+});
+
+test("图库打开不作废已提交的词库修改", async () => {
+  const { collections, showGallery } = setup();
+  const mutation = deferred<DictionaryCollectionsView>();
+  vi.mocked(collections.setEnabled).mockReturnValueOnce(mutation.promise);
+  fireEvent.click(await screen.findByText("工作"));
+  fireEvent.click(screen.getByRole("switch", { name: "启用此词库" }));
+  showGallery({ category: "dictionary", scope: "", initialMine: false });
+  await act(async () => mutation.resolve(viewOf([{ ...work, enabled: true }])));
+  const toggle = screen.getByRole("switch", { name: "启用此词库" });
+  expect(toggle).toHaveProperty("checked", true);
+  expect(toggle).toHaveProperty("disabled", false);
+  expect(screen.getByText("已启用")).toBeTruthy();
 });
 
 test("添加词库 offers a new empty dictionary first, then the import sources client-core accepts", async () => {
@@ -327,6 +452,47 @@ test("新建词库 checks the name, creates the dictionary and opens it", async 
   expect(await screen.findByRole("heading", { name: "游戏" })).toBeTruthy();
 });
 
+test.each(
+  ["新建词库", "添加词条"].flatMap((title) =>
+    ["Enter", "Escape"].flatMap((key) =>
+      [
+        { name: "组词期间", event: { isComposing: true } },
+        { name: "组词结束兼容事件", event: { isComposing: false, keyCode: 229 } },
+      ].map((event) => ({ title, key, ...event })),
+    ),
+  ),
+)("$title 保留$name 的 $key", async ({ title, key, event }) => {
+  const { collections } = setup();
+  if (title === "新建词库") {
+    await openCreateDialog();
+  } else {
+    fireEvent.click(await screen.findByText("工作"));
+    fireEvent.click(await screen.findByText("添加词条"));
+  }
+  const dialog = screen.getByRole("dialog", { name: title });
+  const field = within(dialog).getByRole("textbox", {
+    name: title === "新建词库" ? "词库名称" : "词语",
+  }) as HTMLInputElement;
+  fireEvent.change(field, { target: { value: "游戏" } });
+  if (title === "添加词条") {
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "拼音" }), {
+      target: { value: "you xi" },
+    });
+  }
+  const save = title === "新建词库" ? collections.create : collections.addWords;
+
+  const defaultAllowed = fireEvent.keyDown(field, { key, ...event });
+  expect(save).not.toHaveBeenCalled();
+  expect(screen.getByRole("dialog", { name: title })).toBe(dialog);
+  expect(field.value).toBe("游戏");
+  expect(defaultAllowed).toBe(true);
+
+  fireEvent.keyDown(field, { key, keyCode: key === "Enter" ? 13 : 27 });
+  if (key === "Enter") await waitFor(() => expect(save).toHaveBeenCalledOnce());
+  else expect(save).not.toHaveBeenCalled();
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: title })).toBeNull());
+});
+
 // 整个设置页在一个 <form aria-label="设置"> 里；对话框若自己再是一个表单，WebView 会把提交当成外层表单的，整页重新加载回首页（jsdom 不会这样，只能直接看结构）。回车由输入框确认。
 test("the dialogs are not nested forms, and Enter in a field confirms", async () => {
   const { collections } = setup();
@@ -355,6 +521,30 @@ test("a community dictionary is added as its own dictionary, from its latest det
   expect(vi.mocked(collections.installCommunity).mock.calls[0][0].id).toBe("r-game");
   await waitFor(() => expect(add.textContent).toBe("已添加"));
 });
+
+test.each(["成功", "失败"])(
+  "社区词库详情等待期间更换客户端，旧详情%s不继续安装",
+  async (outcome) => {
+    const { collections, communityResources, changeCollections } = setup();
+    const detail = deferred<CommunityResource>();
+    communityResources.detail.mockReturnValueOnce(detail.promise);
+    fireEvent.click(
+      await within(group("发现词库")).findByRole("button", { name: "添加词库 游戏术语" }),
+    );
+    changeCollections({
+      ...collections,
+      flush: vi.fn(async () => viewOf([{ ...work, name: "新列表" }])),
+    });
+    await screen.findByText("新列表");
+    await act(async () => {
+      if (outcome === "成功") detail.resolve(resource("r-game", "旧游戏术语"));
+      else detail.reject(new Error("合成旧详情失败"));
+    });
+    expect(collections.installCommunity).not.toHaveBeenCalled();
+    expect(screen.getByText("新列表")).toBeTruthy();
+    expect(screen.queryByText("合成旧详情失败")).toBeNull();
+  },
+);
 
 // 「发现词库」只列前几个，最后一行打开本页上的完整社区词库图库；在图库里添加的词库，关掉图库时读进「已安装」。
 test("发现词库 ends with 浏览更多词库, and closing the gallery reads the dictionaries again", async () => {
@@ -392,6 +582,120 @@ test("the built-in dictionary searches by pinyin and is always on", async () => 
       await vi.advanceTimersByTimeAsync(300);
     });
     expect(dictionary.list).toHaveBeenLastCalledWith(0, 100, "pinyin", "shui'shan");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test.each(["成功", "失败"])(
+  "更换词库客户端后，旧内置词库查询的%s不影响当前列表",
+  async (outcome) => {
+    const { dictionary, changeDictionary } = setup();
+    await screen.findByText("工作");
+    vi.useFakeTimers();
+    try {
+      let finishOld!: (value: Awaited<ReturnType<DictionaryClient["list"]>>) => void;
+      let failOld!: (reason: unknown) => void;
+      const oldRequest = new Promise<Awaited<ReturnType<DictionaryClient["list"]>>>(
+        (resolve, reject) => {
+          finishOld = resolve;
+          failOld = reject;
+        },
+      );
+      dictionary.list.mockReturnValueOnce(oldRequest);
+      const newDictionary = {
+        list: vi.fn(async () => ({
+          entries: [{ kind: "pinyin", key: "xin", value: "新词", weight: 10 }],
+          has_more: false,
+        })),
+        edit: vi.fn(),
+      } as unknown as DictionaryClient;
+      fireEvent.click(screen.getByText("拼音词库"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(dictionary.list).toHaveBeenCalledTimes(1);
+
+      changeDictionary(newDictionary);
+      await act(async () => {
+        if (outcome === "失败") failOld(new Error("synthetic stale query"));
+        else
+          finishOld({
+            entries: [{ kind: "pinyin", key: "jiu", value: "旧词", weight: 10 }],
+            has_more: false,
+          });
+      });
+      expect(screen.queryByText("旧词")).toBeNull();
+      expect(screen.queryByText("读取词条失败，请稍后重试。")).toBeNull();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(newDictionary.list).toHaveBeenCalledTimes(1);
+      expect(screen.getByText("新词")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
+test("搜索防抖期间，旧查询不能显示过期词条", async () => {
+  const { dictionary } = setup();
+  await screen.findByText("工作");
+  vi.useFakeTimers();
+  try {
+    let finishOld!: (value: Awaited<ReturnType<DictionaryClient["list"]>>) => void;
+    dictionary.list.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishOld = resolve;
+      }),
+    );
+    fireEvent.click(screen.getByText("拼音词库"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索词条" }), {
+      target: { value: "xin" },
+    });
+    await act(async () =>
+      finishOld({
+        entries: [{ kind: "pinyin", key: "jiu", value: "旧词", weight: 10 }],
+        has_more: true,
+      }),
+    );
+    expect(screen.queryByText("旧词")).toBeNull();
+    expect(dictionary.list).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
+    expect(dictionary.list).toHaveBeenLastCalledWith(0, 100, "pinyin", "xin");
+    expect(screen.getByText("水杉")).toBeTruthy();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("离开内置词库详情后，旧查询失败不在列表上弹出提示", async () => {
+  const { dictionary } = setup();
+  await screen.findByText("工作");
+  vi.useFakeTimers();
+  try {
+    let fail!: (reason: unknown) => void;
+    dictionary.list.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        fail = reject;
+      }),
+    );
+    fireEvent.click(screen.getByText("拼音词库"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    act(() => {
+      window.history.replaceState(null, "");
+      window.dispatchEvent(new PopStateEvent("popstate", { state: null }));
+    });
+    expect(screen.getByText("工作")).toBeTruthy();
+    await act(async () => fail(new Error("synthetic closed query")));
+    expect(screen.queryByText("读取词条失败，请稍后重试。")).toBeNull();
   } finally {
     vi.useRealTimers();
   }
@@ -443,4 +747,38 @@ test("a host that cannot send bytes does not offer the Sogou cell dictionary", a
   fireEvent.click(await screen.findByText("添加词库"));
   const sheet = await screen.findByRole("dialog", { name: "添加词库" });
   expect(within(sheet).queryByRole("button", { name: "导入搜狗细胞词库" })).toBeNull();
+});
+
+test.each(["txt", "scel"])("读取 %s 文件期间更换客户端，不向旧客户端导入", async (format) => {
+  const { collections, changeCollections } = setup({ scel: true, importBytes: true });
+  const reading = deferred<ArrayBuffer>();
+  const file = new File(["synthetic"], `合成词库.${format}`);
+  Object.defineProperty(file, "arrayBuffer", { value: () => reading.promise });
+  fireEvent.click(await screen.findByText("添加词库"));
+  fireEvent.click(
+    screen.getByRole("button", { name: format === "txt" ? "导入文本文件" : "导入搜狗细胞词库" }),
+  );
+  Object.defineProperty(screen.getByLabelText("选择词库文件"), "files", { value: [file] });
+  fireEvent.change(screen.getByLabelText("选择词库文件"));
+  const nextCollections = { ...collections, flush: vi.fn(async () => viewOf([slang])) };
+  changeCollections(nextCollections);
+  await waitFor(() => expect(within(group("已安装")).queryByText("工作")).toBeNull());
+  await act(async () => reading.resolve(new Uint8Array([0x40, 0x15, 0, 0]).buffer));
+  expect(collections.importFile).not.toHaveBeenCalled();
+  expect(collections.importBytes).not.toHaveBeenCalled();
+  expect(screen.queryByText(/已导入「合成词库」/)).toBeNull();
+});
+
+test("读取文件期间更换客户端，旧读取失败不弹出提示", async () => {
+  const { collections, changeCollections } = setup();
+  const reading = deferred<ArrayBuffer>();
+  const file = new File(["synthetic"], "合成词库.txt");
+  Object.defineProperty(file, "arrayBuffer", { value: () => reading.promise });
+  fireEvent.click(await screen.findByText("添加词库"));
+  fireEvent.click(screen.getByRole("button", { name: "导入文本文件" }));
+  Object.defineProperty(screen.getByLabelText("选择词库文件"), "files", { value: [file] });
+  fireEvent.change(screen.getByLabelText("选择词库文件"));
+  changeCollections({ ...collections, flush: vi.fn(async () => viewOf([slang])) });
+  await act(async () => reading.reject(new Error("合成读取失败")));
+  expect(screen.queryByText("合成读取失败")).toBeNull();
 });

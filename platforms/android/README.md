@@ -123,6 +123,8 @@ Java/Kotlin 宿主按 `java/app/msime/android/<feature>/` 分为 `account`、`ca
 
 共享偏好 `paired_punctuation`（设置「表达 › 标点」里的「自动补全成对标点」，默认开）打开时，Engine 上屏以（、【、《、〈、“、‘ 结尾，宿主就补上后半个并把光标留在中间（后半个用 `commitText(closing, 0)` 写；个别应用不认这个 0、把光标放到后半个后面时，宿主写完立刻同步读光标两侧的文字，确认跑偏了才发左方向键退回去，见 #6458）；每按一次引号键都开一对新的（Engine 交替出的后引号改回前引号），没有组字时再按 `)`、`]`、`>`、`"`、`'` 会跨过光标右边自己补上的那个后半个而不是再写一个，删除、用户移动光标或换输入框后不再跨过。补的是书名号时经 `msime_client_balance_paired_punctuation_after_auto_close` 告诉 Engine 这一层已闭合。符号面板不经过 Engine：轻点中文和英文括号、书名号、中文引号的前半个时成对上屏，长按只上屏这半个；之后在面板里轻点同一个后半个会跨过已补好的那个，而不是再写一个；ASCII 的 `"`、`'` 和 `<` 不成对（`<` 绝大多数时候是小于号）。标点键的补全和跨过规则与 iOS 宿主相同（HarmonyOS 只有补全、没有跨过），集中在无 Android 依赖的 `PairedPunctuationPolicy`，由 `PairedPunctuationPolicySmoke` 验证。
 
+引号样式和方头括号样式（共享偏好 `quote_style`、`bracket_style`，设置「表达 › 标点」里「使用英文标点」之后的两行，点开是 `OptionSheet`）让中文标点下的 `'` 出「」、`"` 出『』，`[` `]` 出〖〗；「繁体输出时用直角引号」随繁体输出开关变化。出字由 Engine 决定，键盘只从 View 的 `punctuation_marks` 读生效样式：符号键、字母右上角的提示和 123 层的两个引号键跟着它画（123 层那两个键原样上屏，直角样式下是「」），样式变了就重建键行；成对补全、改回前引号和跨过都认这两组字。
+
 重复标点和标点后空格也由共享 Host API 决定：Android 只在当前编辑器会话内保存带 `editor_generation` 的有界 snapshot，按下下一个标点或空格时重新读取光标前标量并消费 `replace_with` / `space_ascii`；焦点、会话或编辑器变化会清空 snapshot，过期或上下文不一致时不改写文本。重复时间窗口、候选数量、组字状态和开关均不在 Android 重实现。
 
 微软双拼在字母第二行额外提供“微软双拼 ing”分词键，只有中文微软双拼普通输入时显示；它把 `;` 原样交给 Engine，由 Engine 根据当前组合决定 ing 韵母或标点语义。英文、日语、五笔和本地输入模式不显示该键。
@@ -219,7 +221,7 @@ Android Tauri 设置仅在 Android WebView 注入统计能力，桌面设置不�
 
 Android 14 起可以拿手写笔直接在应用的输入框上写字（#7080，系统的输入法手写笔接口）：full、拼音和五笔版的 `method.xml` 与 Tauri 合包的 `tauri_method.xml` 声明 `android:supportsStylusHandwriting="true"`，日文、越南文和藏文版没有中文手写，不声明（`scripts/test-editions.py` 按版本表的 `features.handwriting` 核对两边）。系统问要不要接时（`onStartStylusHandwriting`），API 34 以下、不走引擎的输入框（密码、数字）、专用英文、日韩越藏方案和本地模式一律不接，笔照常交给应用；规则在无 Android 依赖的 `StylusHandwritingPolicy`，由 `StylusHandwritingPolicySmoke` 覆盖。接下后键盘不弹出，笔迹画在系统的书写窗口里铺满屏幕的透明 `StylusInkView` 上：笔的事件由 `onStylusHandwritingMotionEvent` 直接交给它、按屏幕坐标记录（系统默认的「视图可见后补发」在同一窗口第二次书写时不再补发），书写窗口沿用输入法的浮动主题会被系统改成 wrap_content，接下时再交给 WindowManager 铺满；颜色和粗细跟手写设置，「跟随皮肤」时用皮肤的强调色（键帽文字色在深色皮肤下是白的，画在浅色应用上看不见）；停笔后按手写面板的识别等待时间（服务防抖 550 ms，设置更长时取设置值，满 64 笔立即识别）整行识别，书写区域是笔迹外接框四周留 8 dp、宽高至少 64 dp，光标前最多 20 个字作上文，结果直接上屏第一候选：有组字时先按首选结束，经简繁转换，以手写来源计入统计。笔停 3 秒系统结束这次会话，笔回到应用；还没识别的笔迹照常识别上屏，下一次书写接着写的笔迹会和它们一起重新识别。识别器与手写面板各用一个（`ImeStylusHandwriting` 持有自己的，进程退出时关），这里不下载模型：没下载时接下这次书写，只在落笔处显示「首次下载后可离线手写：请在键盘的手写面板里下载中文手写模型」，2.5 秒后结束会话，同一个输入框只提示一次，之后不再接；这样做是因为键盘没弹出时 Toast 在 Android 13 起常被系统吞掉。到了该识别时模型还在检查的，最多再等 1 秒，之后丢掉笔迹并提示「正在检查中文手写模型，请稍后再写」，这条不算提示过。iPadOS 的 Apple Pencil 随手写由系统处理，不经过键盘扩展；鸿蒙尚未评估。模拟器上可以用 `adb shell input stylus swipe` 注入手写笔轨迹，真机验收需要 Android 14 以上、带主动式手写笔的设备。
 
-中文候选在支持个人词典管理的方案中提供与固定 Apple 来源一致的长按菜单顺序：优先显示、固定到首位、取消固定和删除词条；删除操作要求 Android 确认对话框。固定位置通过共享 host API 限制为 1–5，本界面固定到首位时只传入位置 1。候选身份仍由 Engine 返回的 session/generation/index 传入 JNI，generation 或候选身份过期后不会修改当前会话；五笔、日语和本地输入模式不展示管理菜单。
+中文候选在支持个人词典管理的方案中提供与固定 Apple 来源一致的长按菜单顺序：优先显示、固定到首位、取消固定和删除词条；删除收进「删除词条…」的子菜单，点开当场展开「确认删除此词条」（与 iOS 的嵌套子菜单同款），不弹系统对话框，删除后只刷新候选列表、键盘保持打开。固定位置通过共享 host API 限制为 1–5，本界面固定到首位时只传入位置 1。候选身份仍由 Engine 返回的 session/generation/index 传入 JNI，generation 或候选身份过期后不会修改当前会话；五笔、日语和本地输入模式不展示管理菜单。
 
 候选 UI 现在消费共享的 `candidate_font_size`、`candidate_preedit_font_size`、`candidate_font_family`、`candidate_english_font`、`candidate_fallback_fonts` 和 `candidate_theme`；候选栏是键盘顶部的一条，按全局主题解析出的键盘调色板（以 `candidate_theme` 的明暗解析）渲染普通候选栏和展开面板，选中候选用强调色加粗，候选按钮、预编辑、页码和英文建议使用设置中的首选字体，缺字回落交给 Android 系统字体链。非法主题、颜色和字体安全回退。自定义主题的候选颜色选择器 `custom_theme.candidate_colors` 只作用于桌面候选窗，Android 候选栏跟随键盘调色板。共享的 `candidate_layout` 只描述桌面候选窗：触屏候选条只有一行高，和 iOS 一样始终横排，释义在候选下面另起一行，更多候选在展开面板里看。偏好热更新成功后立即调整候选字号、字体和调色板，不重建 Engine 会话。字号只接受核心偏好允许的 12–32 范围，字体名称遵循共享的 128 UTF-8 字节和控制字符边界。
 
@@ -260,6 +262,21 @@ Android 账号设置中的云词库现通过同一认证会话访问 HTTPS API�
 本地检查：`ANDROID_SDK_ROOT=<SDK绝对路径> bash platforms/android/check-host.sh`。需要 JDK 17+、Android API 35 和 build-tools 35.0.0，以及 `rg`（缺它会让脚本里所有 `if rg` 守卫静默通过，因此脚本直接拒绝运行）。脚本先逐条比对 Android 侧与 `crates/host-api/src/ffi/input.rs` 的共享命令契约，再用 `javac --release 17 -Xlint:all -Werror` 编译不依赖 Android 框架的那部分宿主 Java（排除 `java/app/msime/android/home/` 与任何 import AndroidX/Material 的文件——那些是 AAR，只有 Gradle 能解析），执行 99 个不依赖 Android 运行时的策略冒烟，并用 `aapt2 compile` 校验 manifest/resource；中间资源包随临时目录清理，不作为 APK 交付。
 
 JVM 冒烟只覆盖无 Android 依赖的策略层；焦点、选区、编辑器动作和进程生命周期由下面「专用模拟器验收」一节的 instrumentation 覆盖。React 设置页的 Android 合包与验证见下文。
+
+图标与键盘页面入口另用 `ANDROID_SDK_ROOT=<SDK绝对路径> bash platforms/android/tests/device/host-launch.sh emulator-5566`（API 35 换 `emulator-5580`）验收已安装的原生宿主；拼音版在末尾加 `app.msime.android.pinyin`。它逐一切换五种图标，检查真实宿主保持启用且只有一个 launcher，从独立编辑器 UID 实际点击设置、词库、反馈、关于，并保持设置页可见十五秒以覆盖组件变更的延迟广播。准备阶段和外部页面验收分开运行，结束后恢复原图标、首次引导标志、默认输入法及临时禁用的系统键盘。该回归可在 API 28 上单独执行，不受 `smoke.sh --core` 跳过其他面板套件的影响。
+
+`EmptyEditorBackspaceDeviceSmoke` 使用独立合成引用编辑器检查删除键：空框交给应用移除艾特/引用，有文字按码位删除，组字与选区先处理，读取失败不当作空框。API 35 的 `smoke.sh` 默认注册它；API 28 可在安装原生宿主与 `editor-test.apk`、启用被测输入法后单独执行 `adb -s emulator-5566 shell am instrument -w app.msime.android.test/app.msime.android.test.EmptyEditorBackspaceDeviceSmoke`。它验证系统 InputConnection 契约，QQ 等第三方应用仍需各自验收。
+
+剪贴板编辑从外部应用进入宿主的回归用 `ANDROID_SDK_ROOT=<SDK绝对路径> bash platforms/android/tests/device/clipboard-edit.sh emulator-5566`（API 35 换 `emulator-5580`），默认验收已安装的拼音版，完整版在末尾加 `app.msime.android`。它在经典、林绿图标下长按真实历史卡片，检查长记录完整预填、页面保持十五秒、保存后返回外部编辑器、重新插入和取消；最后核对条目时间戳与固定状态，并恢复测试前的历史、偏好、图标、引导状态、系统剪贴板和默认输入法。准备阶段与页面操作分属宿主及独立编辑器 UID，避免宿主 instrumentation 绕过启动条件。
+
+`FeedbackInputStabilityDeviceSmoke` 在真实原生反馈页连续输入 50 次合成拼音短语，每组核对上屏文字、退格和字数计数，再收起并重开键盘；不点击提交，结束后恢复偏好、输入模式与默认输入法。通过 `smoke.sh emulator-5566 --core --feedback`（API 28）或 `smoke.sh emulator-5580 --feedback`（API 35）运行，也可安装原生宿主和 `editor-test.apk` 后单独执行 `adb -s <serial> shell am instrument -w app.msime.android.test/app.msime.android.test.FeedbackInputStabilityDeviceSmoke`。测试失败只输出固定阶段；本地成功不代表已经解释 #7837 的原设备崩溃或连接失败。
+
+`DiagnosticsBundleDeviceSmoke` 调用安装后的原生宿主生成合成诊断包，核对上传器读取与请求编码、旧格式、类别选择、隐私过滤和记录上限，不连接云端。通过 `smoke.sh emulator-5566 --core --diagnostics` 或单独执行 `adb -s <serial> shell am instrument -w app.msime.android.test/app.msime.android.test.DiagnosticsBundleDeviceSmoke` 运行；本轮诊断上传回归只验证 API 28。
+
+剪贴板保存期间的重建回归用 `ANDROID_SDK_ROOT=<SDK绝对路径> bash platforms/android/tests/device/clipboard-edit-lifecycle.sh emulator-5580 app.msime.android`（API 28 换 `emulator-5566`，拼音版换 `app.msime.android.pinyin`）。它阻塞真实共享存储队列，分别重建 Fragment 视图和 Activity，检查草稿、忙碌状态、成功返回及保存失败后的重试；最后核对条目数、时间戳和固定状态并恢复历史、偏好、图标和引导状态。`smoke.sh` 的普通及 `--core` 路径都会运行这条回归。
+
+`InputFailureCategoryDeviceSmoke` 从已安装产品调用真实响应解析与编辑器写入，用合成响应和拒绝组字的连接区分原生拒绝、响应损坏、编辑器拒写和 JNI 链接错误，检查异常原文不会进入诊断类别。`smoke.sh` 的普通与 `--core` 路径都运行。输入失败的 logcat 记录只包含 `input_failure reason=<固定类别>`，不包含异常说明、堆栈或输入内容；诊断 ZIP 的 P19 输入事件格式不变。
+`ChineseLanguageReturnDeviceSmoke` 验收中文九键与 14 键进入英文、日语九键，输入日文并切换输入框三次后仍返回原中文入口，检查真实键面和保存的选择。API 35 的 `smoke.sh` 默认注册；API 28 可单独执行 `adb -s emulator-5566 shell am instrument -w app.msime.android.test/app.msime.android.test.ChineseLanguageReturnDeviceSmoke`。使用带日语词库的完整 APK；旧 AVD 的资源目录缺少日文文件时只临时补齐 APK 自带文件，结束后恢复偏好、本机设置、输入模式和默认输入法，并移除测试补入的文件。
 
 ## 两个 APK 入口，不要选错
 

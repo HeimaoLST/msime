@@ -8,7 +8,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-test("pointer hold repeats ordinary keys after the native delay and stops on release", async () => {
+test.each(["pointerup", "blur"])("长按按键在原生延迟后重复，并在 %s 时停止", async (reason) => {
   vi.useFakeTimers();
   const sendKey = vi.fn().mockResolvedValue(undefined);
   render(<KeyboardPanel client={{ close: async () => {}, sendKey }} platform="macos" />);
@@ -32,7 +32,8 @@ test("pointer hold repeats ordinary keys after the native delay and stops on rel
   });
   expect(sendKey).toHaveBeenCalledTimes(4);
 
-  fireEvent.pointerUp(key, { button: 0, isPrimary: true, pointerId: 1 });
+  if (reason === "blur") fireEvent(window, new Event("blur"));
+  else fireEvent.pointerUp(key, { button: 0, isPrimary: true, pointerId: 1 });
   await act(async () => {
     vi.advanceTimersByTime(300);
     await Promise.resolve();

@@ -194,6 +194,18 @@ public final class TypingStatisticsModel {
         return java.util.Collections.unmodifiableMap(result);
     }
 
+    /** 按 summary 提供的顺序，把明确快照窗口内的按键次数相加。 */
+    public Map<String, Long> keysForDays(Iterable<String> days) {
+        Map<String, Long> result = new LinkedHashMap<>();
+        if (days == null) return Map.of();
+        for (String day : days) {
+            for (Map.Entry<String, Long> entry : dailyKeys.getOrDefault(day, Map.of()).entrySet()) {
+                result.merge(entry.getKey(), entry.getValue(), TypingStatisticsModel::saturatingAdd);
+            }
+        }
+        return java.util.Collections.unmodifiableMap(result);
+    }
+
     /** The pressed keys of a scope, most pressed first, titled the way the page prints them. */
     private List<Slice> rankedKeys(String day) {
         Map<String, Long> counts = keys(day);
