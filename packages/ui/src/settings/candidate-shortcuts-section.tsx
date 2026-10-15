@@ -2,7 +2,10 @@ import type { ReactNode } from "react";
 import { SettingsGroupNote } from "./settings-group-note";
 import * as settings from "./settings-style";
 import { GroupList, MoreOptions, Row } from "../core/platform-controls";
-import type { NavigationPreferences, WordCharacterPreferences } from "./word-character-section";
+import type {
+  NavigationPreferences,
+  WordCharacterPreferences,
+} from "./candidate-paging-preferences";
 import { ShortcutRow } from "./shortcut-row";
 import { SettingsShortcutKey } from "./settings-shortcut-key";
 import { SwitchRow } from "./switch-row";

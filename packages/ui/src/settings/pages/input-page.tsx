@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useSettingsTabs } from "../use-settings-tabs";
-import { NavigationSection, defaultNavigation } from "../navigation-section";
+import { NavigationSection } from "../navigation-section";
+import { defaultNavigation, pagingPreferencesPatch } from "../candidate-paging-preferences";
 import { useSettingsForm } from "../settings-form-context";
 import { GroupList } from "../../core/platform-controls";
 import { InputSchemeSettingsContent } from "../input-scheme-settings-content";
@@ -303,15 +304,7 @@ export function InputSettingsPage() {
               navigation={navigation}
               wordCharacter={wordCharacter}
               linux={linuxPlatform}
-              onChange={(next) =>
-                onPreferencesChange({
-                  // 只有占用了「以词定字」按键的翻页键才会改动它；否则未设置的值保持未设置。
-                  ...(next.wordCharacter !== wordCharacter
-                    ? { word_character: next.wordCharacter }
-                    : {}),
-                  navigation: next.navigation,
-                })
-              }
+              onChange={(next) => onPreferencesChange(pagingPreferencesPatch(wordCharacter, next))}
             />
           )
         }

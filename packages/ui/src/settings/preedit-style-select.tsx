@@ -1,6 +1,7 @@
+import type { PreeditStyle } from "./preedit-preferences";
 import { Select } from "../core/platform-controls";
 
-export type PreeditStyle = "raw" | "pinyin" | "empty";
+export type { PreeditStyle } from "./preedit-preferences";
 export type PreeditStyleSelectMode = "shuangpin" | "inline" | "candidate";
 
 const preeditStyleOptions: Record<

@@ -44,19 +44,22 @@ def check_model_request_user_agent() -> None:
     # GPT-5 系列只接受默认 temperature，带了就是 HTTP 400（windows-v0.2.1）。
     payload = MODULE.json.loads(sent[0].data)
     check("temperature" not in payload, "模型请求带了 temperature，GPT-5 系列会以 HTTP 400 拒绝")
+    check(int(payload.get("max_tokens", 0)) >= 16000, "模型请求没有给足输出上限，长说明会被截断")
     prompt = payload["messages"][-1]["content"]
     check("## v0.10.0 更新内容" in prompt and "## v1.2.3 更新内容" in prompt, "模型请求没有带上格式样例和目标标题")
 
 
 def check_model_reply_heading() -> None:
     # 标题不对的回复说明模型没照样例写，宁可退回确定性版本，也不把它发出去。
+    # 截断的回复同样不能发：android-v0.3.0 曾停在半句话上，标题却是对的。
     replies = {
-        "## v1.2.3 更新内容\n\n### 🐛 问题修复\n\n- 修好了。(#1)": True,
-        "## Android 1.2.3\n\n### 修复\n\n- 修好了。": False,
+        ("## v1.2.3 更新内容\n\n### 🐛 问题修复\n\n- 修好了。(#1)", "stop"): True,
+        ("## Android 1.2.3\n\n### 修复\n\n- 修好了。", "stop"): False,
+        ("## v1.2.3 更新内容\n\n### 🐛 问题修复\n\n- 修好", "length"): False,
     }
-    for reply, accepted in replies.items():
-        def respond(request: object, timeout: float, reply: str = reply) -> object:
-            return io.BytesIO(MODULE.json.dumps({"choices": [{"message": {"content": reply}}]}).encode("utf-8"))
+    for (reply, finish), accepted in replies.items():
+        def respond(request: object, timeout: float, reply: str = reply, finish: str = finish) -> object:
+            return io.BytesIO(MODULE.json.dumps({"choices": [{"message": {"content": reply}, "finish_reason": finish}]}).encode("utf-8"))
 
         original = MODULE.urllib.request.urlopen
         MODULE.urllib.request.urlopen = respond
@@ -95,11 +98,17 @@ def check_pull_request_assignment() -> None:
         run("merge", "-q", "--no-ff", "feature", "-m", "Merge pull request #12 from org/feature")
         commit("c", "feat(engine): 新功能 (#13)")
         commit("d", "chore: 直接推送")
+        # release PR 把 develop 带进 main，它的合并提交不能认领前面那些提交。
+        run("checkout", "-q", "-b", "release/1.0.0")
+        commit("e", "chore(release): set version to 1.0.0")
+        run("checkout", "-q", "develop")
+        run("checkout", "-q", "-b", "main", "start")
+        run("merge", "-q", "--no-ff", "release/1.0.0", "-m", "Merge pull request #14 from org/release/1.0.0")
         records = MODULE.collect_commits(root, "start", "HEAD", "android")
     numbers = {str(record["subject"]): record["pr"] for record in records}
-    check(numbers == {"fix(engine): 第一处": 12, "test(engine): 覆盖第一处": 12, "feat(engine): 新功能 (#13)": 13, "chore: 直接推送": None}, f"提交没有对上 PR：{numbers}")
+    check(numbers == {"fix(engine): 第一处": 12, "test(engine): 覆盖第一处": 12, "feat(engine): 新功能 (#13)": 13, "chore: 直接推送": None, "chore(release): set version to 1.0.0": None}, f"提交没有对上 PR：{numbers}")
     groups = MODULE.group_by_pull_request(records)
-    check([group["pr"] for group in groups] == [12, 13, None], f"按 PR 分组不对：{[group['pr'] for group in groups]}")
+    check([group["pr"] for group in groups] == [12, 13, None, None], f"按 PR 分组不对：{[group['pr'] for group in groups]}")
 
 
 def main() -> int:

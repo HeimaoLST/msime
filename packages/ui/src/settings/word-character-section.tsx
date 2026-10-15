@@ -1,31 +1,22 @@
 import { SegmentedRow } from "./segmented-row";
 import { SwitchRow } from "./switch-row";
-
-export type WordCharacterPreferences = {
-  enabled: boolean;
-  keys: "brackets" | "minus_equal";
-};
-
-export const defaultWordCharacter: WordCharacterPreferences = { enabled: true, keys: "brackets" };
-
-export type NavigationPreferences = {
-  minus_equal: boolean;
-  comma_period: boolean;
-  brackets: boolean;
-  tab: boolean;
-  page_up_down: boolean;
-  mouse_wheel?: boolean;
-  arrows: boolean;
-};
+import {
+  wordCharacterEnabledChange,
+  type NavigationPreferences,
+  type WordCharacterPreferences,
+  type CandidatePagingChange,
+} from "./candidate-paging-preferences";
+export { defaultWordCharacter } from "./candidate-paging-preferences";
+export type {
+  NavigationPreferences,
+  WordCharacterPreferences,
+} from "./candidate-paging-preferences";
 
 export interface WordCharacterSectionProps {
   preferences: WordCharacterPreferences;
   navigation: NavigationPreferences;
   ios: boolean;
-  onChange: (next: {
-    wordCharacter: WordCharacterPreferences;
-    navigation: NavigationPreferences;
-  }) => void;
+  onChange: (next: CandidatePagingChange) => void;
 }
 
 const wordCharacterKeyOptions = [
@@ -51,10 +42,7 @@ export function WordCharacterSection({
         }
         checked={preferences.enabled}
         onChange={(enabled) =>
-          onChange({
-            wordCharacter: { ...preferences, enabled },
-            navigation: enabled ? { ...navigation, [preferences.keys]: false } : navigation,
-          })
+          onChange(wordCharacterEnabledChange(preferences, navigation, enabled))
         }
       />
       {/* An iOS keyboard extension never receives hardware keys; its candidates offer the first and last character on a long press instead. */}

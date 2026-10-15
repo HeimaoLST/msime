@@ -1,14 +1,14 @@
+import type {
+  PreeditPreferences,
+  TsfPreeditStyle,
+  CandidatePreeditStyle,
+} from "./preedit-preferences";
 import { PreeditStyleRow } from "./preedit-style-row";
 import { SwitchRow } from "./switch-row";
 
-export type TsfPreeditStyle = "raw" | "pinyin" | "empty";
-export type CandidatePreeditStyle = "pinyin" | "empty";
+export type { TsfPreeditStyle, CandidatePreeditStyle } from "./preedit-preferences";
 
-export interface PreeditSettingsPreferences {
-  shuangpin_preedit_uses_raw?: boolean;
-  tsf_preedit_style?: TsfPreeditStyle;
-  candidate_preedit_style?: CandidatePreeditStyle;
-}
+export interface PreeditSettingsPreferences extends PreeditPreferences {}
 
 export interface PreeditSettingsSectionProps {
   preferences: PreeditSettingsPreferences;

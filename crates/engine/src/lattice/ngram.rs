@@ -159,20 +159,18 @@ impl NgramTable {
         f32::from_le_bytes(self.bytes[at..at + 4].try_into().expect("four value bytes"))
     }
 
-    /// `std::lower_bound` over the key array, then an equality check (NG:149-155). 二分只在键所在的桶里做，见 `index`。
+    /// 在本桶的定长键切片中求下界，重复键取首项；桶尾未命中不读取下一桶。
     fn lookup(&self, key: u64) -> f32 {
         let bucket = (key >> INDEX_SHIFT) as usize;
-        let (mut low, mut high) = (self.index[bucket] as usize, self.index[bucket + 1] as usize);
-        while low < high {
-            let middle = low + (high - low) / 2;
-            if self.key_at(middle) < key {
-                low = middle + 1;
-            } else {
-                high = middle;
-            }
-        }
-        if low < self.count && self.key_at(low) == key {
-            self.value_at(low)
+        let (start, end) = (self.index[bucket] as usize, self.index[bucket + 1] as usize);
+        let (keys, _) =
+            self.bytes[HEADER_BYTES + start * 8..HEADER_BYTES + end * 8].as_chunks::<8>();
+        let position = keys.partition_point(|bytes| u64::from_le_bytes(*bytes) < key);
+        if keys
+            .get(position)
+            .is_some_and(|bytes| u64::from_le_bytes(*bytes) == key)
+        {
+            self.value_at(start + position)
         } else {
             0.0
         }
@@ -585,3 +583,7 @@ pub(super) mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "ngram_lookup_tests.rs"]
+mod lookup_tests;

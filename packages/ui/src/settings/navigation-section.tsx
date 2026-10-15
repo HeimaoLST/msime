@@ -1,16 +1,13 @@
 import { SettingsGroupNote } from "./settings-group-note";
 import { Checks } from "../core/platform-controls";
-import type { NavigationPreferences, WordCharacterPreferences } from "./word-character-section";
+import {
+  pagingShortcutChange,
+  type NavigationPreferences,
+  type WordCharacterPreferences,
+  type CandidatePagingChange,
+} from "./candidate-paging-preferences";
 import { SettingsGroupBlock } from "./settings-group-block";
-
-export const defaultNavigation: NavigationPreferences = {
-  minus_equal: true,
-  comma_period: true,
-  brackets: false,
-  tab: true,
-  page_up_down: true,
-  arrows: true,
-};
+export { defaultNavigation } from "./candidate-paging-preferences";
 
 const navigationOptions: [keyof NavigationPreferences, string][] = [
   ["minus_equal", "- / ="],
@@ -45,10 +42,7 @@ export interface NavigationSectionProps {
   linux: boolean;
   /** HarmonyOS 手机的「外接键盘快捷键」页以「外接键盘翻页键」承载翻页键：用设计的标签，没有鼠标滚轮，直接在「翻页」组里排成两列网格，legend 只给读屏。 */
   harmonyPhone?: boolean;
-  onChange: (next: {
-    navigation: NavigationPreferences;
-    wordCharacter: WordCharacterPreferences;
-  }) => void;
+  onChange: (next: CandidatePagingChange) => void;
 }
 
 /** 共用的候选翻页设置及其与以词定字的互斥：输入页「选词与翻页」组里以词定字之后的部分；HarmonyOS 手机上放在「外接键盘快捷键」页的「翻页」组。 */
@@ -72,13 +66,7 @@ export function NavigationSection({
         }),
       )}
       onChange={(key, enabled) =>
-        onChange({
-          navigation: { ...navigation, [key]: enabled },
-          wordCharacter:
-            enabled && wordCharacter.enabled && wordCharacter.keys === key
-              ? { ...wordCharacter, enabled: false }
-              : wordCharacter,
-        })
+        onChange(pagingShortcutChange(navigation, wordCharacter, key, enabled))
       }
     />
   );

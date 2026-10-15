@@ -1,53 +1,16 @@
 import { GroupList } from "../core/platform-controls";
 import { iosLocalModeEntry } from "./local-mode-text";
 import { SwitchRow } from "./switch-row";
-
-export type LocalModeKey =
-  | "unicode"
-  | "date_time"
-  | "quick_phrase"
-  | "emoji"
-  | "kaomoji"
-  | "super_jianpin"
-  | "temporary_english"
-  | "temporary_japanese"
-  | "chaizi"
-  | "expression"
-  | "command"
-  | "mention"
-  | "mention_places";
-
-export type LocalModePreferences = {
-  unicode: boolean;
-  date_time: boolean;
-  quick_phrase: boolean;
-  emoji: boolean;
-  kaomoji: boolean;
-  super_jianpin: boolean;
-  temporary_english: boolean;
-  temporary_japanese: boolean;
-  /** The V, / and @ modes. Off in a fresh profile and absent from the document while off, so an absent key reads as off. */
-  expression?: boolean;
-  command?: boolean;
-  mention?: boolean;
-  /** The @ mode also offers China's provinces, cities and counties from the built-in table, after the user's own names. Absent while off, like the three above. */
-  mention_places?: boolean;
-  /** 「Shift+字母进入快捷模式」总开关。和上面几项相反，缺省读作开：早于它的文档里没有这个键。 */
-  shift_letter_entry?: boolean;
-  /** 拆字反查（C 模式）。缺键表示用户没动过开关，由宿主形态决定：触屏宿主读作开，桌面宿主读作关。只有用户动过开关时才写进文档。 */
-  chaizi?: boolean;
-};
-
-export const defaultLocalModes: LocalModePreferences = {
-  unicode: true,
-  date_time: true,
-  quick_phrase: true,
-  emoji: true,
-  kaomoji: true,
-  super_jianpin: true,
-  temporary_english: true,
-  temporary_japanese: true,
-};
+import {
+  localModeControlState,
+  type LocalModeKey,
+  type LocalModePreferences,
+} from "./local-mode-preferences";
+export {
+  defaultLocalModes,
+  type LocalModeKey,
+  type LocalModePreferences,
+} from "./local-mode-preferences";
 
 const localModeRows: readonly [LocalModeKey, string, string][] = [
   ["quick_phrase", "快捷短语(K 模式)", "中文模式下按 Shift+K，再输入编码即可调用快捷短语"],
@@ -92,20 +55,6 @@ const localModeRows: readonly [LocalModeKey, string, string][] = [
     "中文模式下按 Shift+C，再输入字的各个部件的拼音，例如 huohuohuo 得 焱、nvzi 得 好。部件之间可以用 ' 分隔，ü 用 v。空格上屏；数字选词",
   ],
 ];
-
-/** 从 Shift+字母进入的模式：总开关关掉时它们的开关保留原值，只是暂时不起作用。`/` 和 `@` 不在其中。 */
-const shiftLetterModes: ReadonlySet<LocalModeKey> = new Set<LocalModeKey>([
-  "unicode",
-  "date_time",
-  "quick_phrase",
-  "emoji",
-  "kaomoji",
-  "super_jianpin",
-  "temporary_english",
-  "temporary_japanese",
-  "chaizi",
-  "expression",
-]);
 
 /** The modes a host has to route itself: digits that stay input in V, and the / and @ keys. Shown only where the host does (`HostCapabilities.plugin_triggers`). */
 const triggerModeRows: readonly [LocalModeKey, string, string][] = [
@@ -176,8 +125,6 @@ export function LocalModesSection({
   shiftLetterEntrySwitch = false,
   onChange,
 }: LocalModesSectionProps) {
-  // 只有显示总开关的宿主才按它禁用各行：别的宿主上它永远是缺省的开。
-  const shiftLetterEntry = !shiftLetterEntrySwitch || (preferences.shift_letter_entry ?? true);
   const modeRows = temporaryJapanese
     ? localModeRows
     : localModeRows.filter(([key]) => key !== "temporary_japanese");
@@ -209,11 +156,7 @@ export function LocalModesSection({
                 ? (iosLocalModeDescriptions[key] ?? description)
                 : description
           }
-          checked={preferences[key] ?? (key === "chaizi" && !shiftLetterEntrySwitch)}
-          disabled={
-            (key === "mention_places" && !preferences.mention) ||
-            (!shiftLetterEntry && shiftLetterModes.has(key))
-          }
+          {...localModeControlState(preferences, key, shiftLetterEntrySwitch)}
           onChange={(checked) => onChange({ ...preferences, [key]: checked })}
         />
       ))}
