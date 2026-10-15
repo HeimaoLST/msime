@@ -328,6 +328,8 @@ static void CheckMenu(NSMenu *menu, id controller) {
 @property(nonatomic) NSRange selection;
 @property(nonatomic) NSRect caret;
 @property(nonatomic, strong) NSMutableArray<NSString *> *insertions;
+// 对文档的同步读取次数：`selectedRange` 和 `attributedSubstringFromRange:`，每一次都要到应用里来回一趟。
+@property(nonatomic) NSUInteger documentReads;
 @end
 
 @interface ModeController : MSIMEInputController
@@ -519,8 +521,9 @@ static void TestKeyLatencyIsLoggedWithoutTheKey() {
 }
 
 @implementation ShortcutClient
-- (NSRange)selectedRange { return self.selection; }
+- (NSRange)selectedRange { ++self.documentReads; return self.selection; }
 - (NSAttributedString *)attributedSubstringFromRange:(NSRange)range {
+    ++self.documentReads;
     if (range.location == NSNotFound || range.location > self.document.length || range.length > self.document.length - range.location) return nil;
     return [[NSAttributedString alloc] initWithString:[self.document substringWithRange:range]];
 }
@@ -1556,6 +1559,16 @@ static void TestPairedPunctuationClosesBrace() {
     NSEvent *closeBrace = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:NSEventModifierFlagShift
                                            timestamp:0 windowNumber:0 context:nil characters:@"}" charactersIgnoringModifiers:@"]"
                                            isARepeat:NO keyCode:30];
+
+    // 没有自己补过的后半个可跨时，普通键不读文档：每次读取都要到应用里同步来回一趟，而这时读回来什么也改变不了。
+    NSEvent *letter = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0
+                                        context:nil characters:@"q" charactersIgnoringModifiers:@"q" isARepeat:NO keyCode:12];
+    [controller setValue:idle forKey:@"view"];
+    session.nextTransition = @{ @"handled": @NO, @"commit": NSNull.null, @"view": idle };
+    [controller handleEvent:letter client:client];
+    assert(client.documentReads == 0);
+    session.nextTransition = nil;
+    session.asciiCalls = 0;
 
     // Idle: the Engine leaves `{` alone, so the host commits it and owes `}`.
     [controller setValue:idle forKey:@"view"];
