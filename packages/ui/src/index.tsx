@@ -13,23 +13,13 @@ import { useSettingsWindowInteractions } from "./settings/use-settings-window-in
 import { useSettingsNavigation } from "./settings/use-settings-navigation";
 import { useSettingsPageRouting } from "./settings/use-settings-page-routing";
 import { useSettingsShellState } from "./settings/use-settings-shell-state";
+import { useSettingsShellNavigation } from "./settings/use-settings-shell-navigation";
+import { useSettingsCommunityViews } from "./settings/use-settings-community-views";
 import { MobileSettingsTabs } from "./settings/mobile-settings-tabs";
 import { SettingsPageHeader } from "./settings/settings-page-header";
-import { SettingsNavigationSearch } from "./settings/settings-navigation-search";
 import { settingsShellPlatformPresentation } from "./settings/settings-shell-platform-presentation";
 import { SettingsShellToasts } from "./settings/settings-shell-toasts";
-import {
-  mobilePrimaryPageIds,
-  mobileTabForPage,
-  type MobilePrimaryPageId,
-} from "./settings/settings-navigation-helpers";
-import {
-  desktopPage,
-  desktopPageTitle,
-  pages,
-  subPageParents,
-  type SettingsPageId,
-} from "./settings/settings-page-registry";
+import { desktopPageTitle, pages, type SettingsPageId } from "./settings/settings-page-registry";
 import { settingsPageProjections } from "./settings/settings-page-projections";
 import {
   mobileHiddenPageIds,
@@ -246,6 +236,14 @@ export {
 } from "./settings/notice-banner";
 export { settingsPageEnvironment } from "./settings/settings-page-environment";
 export { useSettingsShellState, type SettingsShellView } from "./settings/use-settings-shell-state";
+export {
+  useSettingsShellNavigation,
+  type UseSettingsShellNavigationOptions,
+} from "./settings/use-settings-shell-navigation";
+export {
+  useSettingsCommunityViews,
+  type UseSettingsCommunityViewsOptions,
+} from "./settings/use-settings-community-views";
 export {
   settingsPlatformPresentation,
   type SettingsPlatformPresentationOptions,
@@ -473,8 +471,6 @@ import { DeveloperSettingsPage, McpSettingsPage } from "./settings/pages/develop
 import { DictionarySettingsPage } from "./settings/pages/dictionary-page";
 import { AppearanceSettingsPage } from "./settings/pages/appearance-page";
 import { SkinSettingsPage } from "./settings/pages/skin-page";
-import { skinGridTabs } from "./settings/skin-grid";
-import { useSettingsTabs } from "./settings/use-settings-tabs";
 import { useCommunityGalleryNavigation } from "./settings/use-community-gallery-navigation";
 import { FloatingToolbarSettingsPage } from "./settings/pages/floating-toolbar-page";
 import { ScreenKeyboardSettingsPage } from "./settings/pages/screen-keyboard-page";
@@ -2535,29 +2531,27 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     mobilePageTitle,
     desktopPageTitle: (id, title) => desktopPageTitle(id, title, client.host?.platform),
   });
-  // 子页面在导航里点亮它的上级页面，并提供回到上级的入口。触屏宿主上「AI 对话」和桌面一样是「AI 辅助」的子页面；底部标签页（设置、社区、统计、我的）的根页面没有上级。
-  // 桌面上子页的上级如果并进了别的页（「帮助」的上级「帮助与反馈」在「关于」里），点亮的是承载它的那一页。
-  const navigationPage: SettingsPageId =
-    mobilePlatform && mobilePrimaryPageIds.includes(page as MobilePrimaryPageId)
-      ? page
-      : mobilePlatform
-        ? (subPageParents[page] ?? page)
-        : desktopPage(subPageParents[page] ?? page);
-  const { mobileActiveTab, selectPage, selectMobileTab, openAccountLogin, finishAccountLogin } =
-    useSettingsNavigation({
-      mobilePlatform,
-      mobileHiddenPageIds,
-      availablePages,
-      pageAliases,
-      page,
-      setPage,
-      mobileLastPageByTab,
-      route,
-      hasHomePage,
-      setCommunityDestination,
-      setAccountLoginReturnPage,
-      accountLoginReturnPage,
-    });
+  const {
+    mobileActiveTab,
+    navigationPage,
+    selectPage,
+    selectMobileTab,
+    openAccountLogin,
+    finishAccountLogin,
+  } = useSettingsNavigation({
+    mobilePlatform,
+    mobileHiddenPageIds,
+    availablePages,
+    pageAliases,
+    page,
+    setPage,
+    mobileLastPageByTab,
+    route,
+    hasHomePage,
+    setCommunityDestination,
+    setAccountLoginReturnPage,
+    accountLoginReturnPage,
+  });
   // 设计稿里从一个页面内部打开另一个页面的行，例如「词库」上的「背单词」。
   const pageEntry = (id: SettingsPageId) => availablePages.find((item) => item.id === id);
   const {
@@ -3021,14 +3015,17 @@ function SettingsShell(props: SettingsPageProps) {
   const recordCommunitySkin = (id: string) => {
     void client.typingStatistics?.recordSkin?.(id);
   };
-  // HarmonyOS 手机的皮肤页与 Android 皮肤页一样在顶部分「内置 / 我的 / 社区」。「社区」是完整的社区皮肤图库，自带搜索和发布表单，所以和桌面的「社区皮肤」一样画在设置表单之外，标签的选择也就放在这里；前两个分类的网格由皮肤页自己画。没有社区服务的宿主不给「社区」。
-  const skinTabs = useSettingsTabs(
-    skinGridTabs.filter((tab) => tab.id !== "community" || Boolean(client.communitySkins)),
-    "皮肤分类",
-    harmonyPlatform && mobilePlatform,
-  );
-  const phoneSkinCommunityShown =
-    page === "skin" && Boolean(client.communitySkins) && skinTabs.selected === "community";
+  const { skinTabs, phoneSkinCommunityShown, skinCommunityShown, pluginCommunityShown } =
+    useSettingsCommunityViews({
+      page,
+      mobile: mobilePlatform,
+      harmony: harmonyPlatform,
+      skinView,
+      pluginView,
+      hasCommunitySkins: Boolean(client.communitySkins),
+      hasCommunityCandidateSkins: Boolean(client.communityCandidateSkins),
+      hasCommunityPlugins: Boolean(client.communityPlugins),
+    });
   const { onOpenPage } = createSettingsPageSelection({ selectPage });
   const statusActions = createSettingsStatusActions({
     recoverPreferences,
@@ -3058,43 +3055,16 @@ function SettingsShell(props: SettingsPageProps) {
       macShell,
       onError: setError,
     });
-  // A community gallery stands in for the page's own settings, so the form's page-level actions do not apply while it is shown.
-  const skinCommunityShown =
-    (page === "skin" && Boolean(client.communityCandidateSkins) && skinView === "community") ||
-    phoneSkinCommunityShown;
-  const pluginCommunityShown =
-    page === "plugins" && Boolean(client.communityPlugins) && pluginView === "community";
-  // 子页面（「词库」下的「背单词」、「帮助与反馈」下的「帮助」、「AI 辅助」下的「AI 对话」）在返回时写出父页面的名字。
-  const parentPage =
-    navigationPage !== page ? availablePages.find((item) => item.id === navigationPage) : undefined;
-  // HarmonyOS 手机和边缘滑动一样，沿导航推入的 WebView 历史返回。设置打开时所在的页面身后没有设置的历史条目（最多只有宿主自己的，比如引导页的），所以从那里按钮改为向上，以替换当前条目的方式去到上级页面或所在标签页的根页面：如果推入新条目，刚离开的页面会留在上级页面后面，系统返回手势会回到它。此后上级页面占据最底部的条目，所以它自己的返回按钮也同样向上。
-  const goBack = () => {
-    if (page !== launchPage.current) {
-      window.history.back();
-      return;
-    }
-    const up = parentPage?.id ?? mobileTabForPage(page);
-    launchPage.current = up;
-    selectPage(up, true);
-  };
-  const navNeedle = navQuery.trim().toLocaleLowerCase();
-  // iPad 的标签栏已有社区、统计和我的；`settingsPageProjections` 在手机和 iPad 上都不把这几个标签页列进侧栏，这里不必再过滤一次。
-  const shownSidebarGroups = navNeedle
-    ? sidebarGroups
-        .map((group) => ({
-          ...group,
-          pages: group.pages.filter((item) => item.title.toLocaleLowerCase().includes(navNeedle)),
-        }))
-        .filter((group) => group.pages.length > 0)
-    : sidebarGroups;
-  const navSearchField = (
-    <SettingsNavigationSearch
-      groups={shownSidebarGroups}
-      value={navQuery}
-      onChange={setNavQuery}
-      onSelectPage={selectPage}
-    />
-  );
+  const { parentPage, goBack, shownSidebarGroups, navSearchField } = useSettingsShellNavigation({
+    page,
+    navigationPage,
+    launchPage,
+    availablePages,
+    sidebarGroups,
+    navQuery,
+    setNavQuery,
+    selectPage,
+  });
   return (
     <div
       className={settings.shell}

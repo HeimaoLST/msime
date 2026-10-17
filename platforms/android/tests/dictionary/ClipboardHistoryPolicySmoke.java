@@ -1,4 +1,5 @@
 import app.msime.android.ClipboardHistoryPolicy;
+import app.msime.android.ClipboardEditKey;
 import app.msime.android.JsonPolicy;
 
 public final class ClipboardHistoryPolicySmoke {
@@ -33,11 +34,13 @@ public final class ClipboardHistoryPolicySmoke {
             == ClipboardHistoryPolicy.Rejection.TOO_LONG,
             "a reason this host does not know must not be guessed as FULL");
 
-        check(ClipboardHistoryPolicy.LIMIT == 200, "the two-hundred-entry limit is the shared store's");
+        check(ClipboardHistoryPolicy.DEFAULT_LIMIT == 50, "the default limit is fifty entries");
+        check(ClipboardHistoryPolicy.LIMITS.length == 5
+            && ClipboardHistoryPolicy.LIMITS[4] == 1000, "all supported limits are exposed");
         for (ClipboardHistoryPolicy.Rejection rejection : ClipboardHistoryPolicy.Rejection.values())
             check(!ClipboardHistoryPolicy.message(rejection).isEmpty(), "each refusal is worded");
         check(ClipboardHistoryPolicy.message(ClipboardHistoryPolicy.Rejection.FULL)
-            .contains(String.valueOf(ClipboardHistoryPolicy.LIMIT)), "FULL names the limit");
+            .contains(String.valueOf(ClipboardHistoryPolicy.DEFAULT_LIMIT)), "FULL names the default limit");
         check(!ClipboardHistoryPolicy.message(ClipboardHistoryPolicy.Rejection.EMPTY)
             .equals(ClipboardHistoryPolicy.message(ClipboardHistoryPolicy.Rejection.TOO_LONG)),
             "the two refusals ask for different things");
@@ -81,14 +84,15 @@ public final class ClipboardHistoryPolicySmoke {
             ClipboardHistoryPolicy.editMessage(null);
             throw new AssertionError("there is no message for no result");
         } catch (IllegalArgumentException expected) { /* expected */ }
-        String key = ClipboardHistoryPolicy.editKey(1_760_000_000_000L, "synthetic entry");
-        check(key.equals(ClipboardHistoryPolicy.editKey(1_760_000_000_000L, "synthetic entry")), "the key is stable");
-        check(!key.contains("synthetic"), "the key carries no text");
-        check(!key.equals(ClipboardHistoryPolicy.editKey(1_760_000_000_001L, "synthetic entry")), "the timestamp counts");
-        check(!key.equals(ClipboardHistoryPolicy.editKey(1_760_000_000_000L, "synthetic entry.")), "the text counts");
-        String longest = ClipboardHistoryPolicy.editKey(Long.MAX_VALUE, "家".repeat(10_000));
+        check(ClipboardEditKey.format(1_760_000_000_000L, "a".repeat(64), 15)
+                .equals("1760000000000:" + "a".repeat(64) + ":15"), "the edit token format is stable");
+        check(!ClipboardEditKey.format(1_760_000_000_000L, "a".repeat(64), 15)
+                .equals(ClipboardEditKey.format(1_760_000_000_001L, "a".repeat(64), 15)), "the timestamp counts");
+        check(!ClipboardEditKey.format(1_760_000_000_000L, "a".repeat(64), 15)
+                .equals(ClipboardEditKey.format(1_760_000_000_000L, "b".repeat(64), 15)), "the tag counts");
+        String longest = ClipboardEditKey.format(Long.MAX_VALUE, "a".repeat(64), 10_000);
         check(longest.length() <= app.msime.android.HostDeepLink.MAX_STRING_ARG,
-            "the key fits a deep link argument however long the entry is");
+            "the edit token fits a deep link argument however long the entry is");
         check(app.msime.android.HostDeepLink.isAllowedArgKey(ClipboardHistoryPolicy.EDIT_ENTRY_ARG),
             "the argument name survives the deep link filter");
         check(app.msime.android.HostDeepLink.isAllowedArgKey(ClipboardHistoryPolicy.RETURN_TO_CALLER_ARG),

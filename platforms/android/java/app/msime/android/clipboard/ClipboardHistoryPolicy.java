@@ -7,8 +7,7 @@ package app.msime.android;
  * drifted apart in three ways. It counted UTF-16 code units where the shared store counts graphemes,
  * so six thousand emoji were refused here and accepted there. It had no control-character check at
  * all, so text the shared store refuses passed this and then failed remotely. And the remote refusal
- * was collapsed to a boolean at the call site, so both of those arrived at the user as 「200 条历史均
- * 已固定」, which is a third thing that was not true.
+ * 调用方曾把拒绝原因压成布尔值，导致这两种情况都被显示成「所选容量的记录全部固定」，这同样不准确。
  *
  * <p>So the bounds are gone. {@code crates/client-core/src/clipboard.rs} owns them - trimmed
  * non-blank, forty thousand UTF-8 bytes, ten thousand graphemes, no control characters other than
@@ -17,7 +16,10 @@ package app.msime.android;
  * the system clipboard held any text to offer it in the first place.
  */
 public final class ClipboardHistoryPolicy {
-    public static final int LIMIT = 200;
+    public static final int DEFAULT_LIMIT = 50;
+    public static final int[] LIMITS = {50, 100, 200, 500, 1000};
+    /** 兼容只需要一个最大值的面板布局代码；实际存储容量来自共享偏好。 */
+    public static final int LIMIT = 1000;
 
     /**
      * Why one save was refused.
@@ -32,6 +34,17 @@ public final class ClipboardHistoryPolicy {
     private static final String REASON_FULL = "full";
 
     private ClipboardHistoryPolicy() {}
+
+    public static boolean isSupportedLimit(int value) {
+        for (int limit : LIMITS) if (limit == value) return true;
+        return false;
+    }
+
+    public static int limit(org.json.JSONObject preferences) {
+        int value = NumberPolicy.strictInt(
+            preferences == null ? null : preferences.opt("clipboard_history_limit"), DEFAULT_LIMIT);
+        return isSupportedLimit(value) ? value : DEFAULT_LIMIT;
+    }
 
     /**
      * Whether there is text here at all to hand the shared store.
@@ -85,7 +98,7 @@ public final class ClipboardHistoryPolicy {
 
     /** 键盘打开应用里的编辑页时用的页面名（`PageId` 的枚举名）；键盘进程不能引用 `home/` 的类，所以写成字符串。 */
     public static final String EDIT_PAGE = "CLIPBOARD_EDIT";
-    /** 编辑页参数里那一条的键：值是 {@link #editKey}，不是文字本身。 */
+    /** 编辑页参数里那一条的令牌，不是文字本身。 */
     public static final String EDIT_ENTRY_ARG = "entry";
     /**
      * boolean 参数：编辑页、剪贴板历史页（#5973）做完之后回到原来的应用（`moveTaskToBack`）。
@@ -99,24 +112,18 @@ public final class ClipboardHistoryPolicy {
         return editorPackage == null || !editorPackage.equals(ownPackage);
     }
 
-    /**
-     * 键盘交给编辑页、用来认出要编辑哪一条的键：时间戳加文字的散列和长度。
-     *
-     * <p>不直接传文字：深链参数的字符串最长 256 个字符（{@link HostDeepLink#MAX_STRING_ARG}），剪贴板记录可以长得多；文字也不该进 Intent。编辑页按这个键在共享存储里找到那一条再显示。宿主的入口是 exported 的，别的应用也能发来这个参数，但它猜不出某一条的键，猜错了编辑页只会说这条已经不在了，保存仍要用户自己点。
-     */
-    public static String editKey(long timestamp, String text) {
-        if (text == null) throw new IllegalArgumentException("No clipboard text");
-        return BoundsPolicy.nonNegative(timestamp) + ":" + Integer.toHexString(text.hashCode()) + ":" + text.length();
-    }
-
     /** What to tell the user, naming the action that would let the save succeed. */
     public static String message(Rejection rejection) {
+        return message(rejection, DEFAULT_LIMIT);
+    }
+
+    public static String message(Rejection rejection, int limit) {
         if (rejection == null) throw new IllegalArgumentException("No clipboard rejection");
         return switch (rejection) {
             // Android has no paste permission prompt, so the Apple wording drops that clause.
             case EMPTY -> "剪贴板中没有可保存的文本";
             case TOO_LONG -> "这段文本无法保存，请缩短或去掉其中的控制字符后重试";
-            case FULL -> LIMIT + " 条历史均已固定，请先取消固定或删除一条";
+            case FULL -> limit + " 条历史均已固定，请先取消固定或删除一条";
         };
     }
 }
