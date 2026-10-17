@@ -61,6 +61,7 @@
 #endif
 #include "../src/core/BackspaceHoldPolicy.h"
 #include "../src/core/SmartPunctuationSpace.h"
+#include "../src/core/SmartPunctuationChoice.h"
 #include "../src/core/SpellingSymbols.h"
 #include "../src/core/LocalModeSwitches.h"
 #include "../src/system/KeySound.h"
@@ -76,6 +77,7 @@
 #include "../src/core/KoreanHanja.h"
 #include "../src/core/InputSchemes.h"
 #include "../src/core/JsonInteger.h"
+#include "../src/clipboard/CloudClipboardRoute.h"
 #include "../src/system/TypingStatistics.h"
 #include "SystemTheme.h"
 #include "PrecedingCharacters.h"
@@ -207,6 +209,8 @@ struct PendingPreferenceSave {
   bool theme_choice = false;
   // The value is a 辅助码方案 status-bar choice for `section` (quanpin_helpcode or shuangpin_helpcode): besides `section.schema` it clears that scheme's helpcode pack, as the settings page does, or the pack would keep overriding the schema just chosen (core/HelpcodePack.h).
   bool helpcode_schema_choice = false;
+  // The value is the 智能标点 menu toggle: smart_punctuation is written together with smart_punctuation_direct_digit and smart_punctuation_direct_letter in one save (core/SmartPunctuationChoice.h), not as three jobs that could each land on a different revision.
+  bool smart_punctuation_choice = false;
 };
 
 // ABI buffers and errors never escape into diagnostics or the panel.
@@ -250,6 +254,8 @@ Json savePreference(const PendingPreferenceSave &request) {
     msime::linux_host::apply_helpcode_schema_choice(
         snapshot["preferences"], request.section == "shuangpin_helpcode" ? "shuangpin" : "quanpin",
         request.value.get<std::string>());
+  else if (request.smart_punctuation_choice)
+    msime::linux_host::apply_smart_punctuation_choice(snapshot["preferences"], request.value.get<bool>());
   else if (request.section.empty()) snapshot["preferences"][request.key] = request.value;
   else snapshot["preferences"][request.section][request.key] = request.value;
   const auto encoded = snapshot.dump();
@@ -421,11 +427,10 @@ msime::linux_host::CandidateTheme resolveCandidateTheme(const Json &preferences,
   return resolveThemeInMode(preferences, msime::linux_host::candidate_dark_theme(preferences, system_dark), catalog);
 }
 
-// The voice overlay's theme: its mode from voice_theme by the rule it has always used (VoiceAction.h), its colours from the resolved theme as the floating toolbar takes them, so the bar MSIME draws matches the candidate window's theme rather than fixed greys. A fixed-appearance theme overrides the mode, as it does for the panel.
+// 语音浮层的主题：明暗跟随颜色模式（各界面一律跟随，存下的 voice_theme 不再读），按 VoiceAction.h 一直用的规则解析；颜色取解析出的主题，与悬浮工具栏取法相同，所以 MSIME 画的浮层与候选窗是同一套主题而不是固定的灰色。固定明暗的主题照样盖过它，与候选窗相同。
 msime::linux_host::CandidateTheme resolveVoiceOverlayTheme(const Json &preferences, bool system_dark,
                                                            const Json &catalog) {
-  const bool dark = !msime_voice_overlay_light_theme(preferences.value("voice_theme", "follow"),
-                                                     preferences.value("theme", "dark"), system_dark);
+  const bool dark = !msime_voice_overlay_light_theme("follow", preferences.value("theme", "dark"), system_dark);
   return resolveThemeInMode(preferences, dark, catalog);
 }
 
@@ -447,6 +452,14 @@ std::string providerSocket(const Json &options, const char *option,
 std::string onlineSocket(const Json &options) {
   return providerSocket(options, "online_provider_socket",
                         "MSIME_ONLINE_PROVIDER_SOCKET", "online.sock");
+}
+
+std::string explicitCloudClipboardSocket(const Json &options) {
+  auto value = options.value("cloud_clipboard_provider_socket", std::string{});
+  if (value.empty()) {
+    if (const auto *env = std::getenv("MSIME_CLOUD_CLIPBOARD_PROVIDER_SOCKET")) value = env;
+  }
+  return value;
 }
 
 std::string cloudClipboardSocket(const Json &options) {
@@ -552,6 +565,7 @@ public:
     last_smart_punctuation_ = 0;
     last_smart_punctuation_at_ = {};
     smart_punctuation_rejected_ = 0;
+    forgetSmartPunctuationShadow();
     paired_tracker_.clear();
     pending_caret_.clear();
     caret_forward_event_.reset();
@@ -579,6 +593,9 @@ public:
     clipboard_job_ = {};
     clipboard_mutation_job_ = {};
     cloud_clipboard_socket_.clear();
+    cloud_clipboard_explicit_socket_.clear();
+    cloud_clipboard_directory_.clear();
+    cloud_clipboard_relay_ = Json::object();
     ++cloud_clipboard_generation_;
     cloud_clipboard_items_.clear();
     cloud_clipboard_enabled_ = true;
@@ -1033,7 +1050,10 @@ public:
     auto snapshot = preferences_snapshot_;
     if (!snapshot.is_object() || !snapshot.contains("revision") ||
         !snapshot.contains("preferences")) return false;
-    snapshot["preferences"][key] = enabled;
+    // 智能标点总开关连同数字后、字母后直出一起写，与设置页相同；否则设置页关过一次之后，这里打开的只是一个不起作用的总开关。
+    const bool smart_choice = std::string_view(key) == "smart_punctuation";
+    if (smart_choice) msime::linux_host::apply_smart_punctuation_choice(snapshot["preferences"], enabled);
+    else snapshot["preferences"][key] = enabled;
     const auto encoded = effectiveContextSnapshot(snapshot).dump();
     view_ = response(msime_client_update_preferences(
         session_, reinterpret_cast<const uint8_t *>(encoded.data()), encoded.size())).at("view");
@@ -1043,7 +1063,8 @@ public:
     smart_punctuation_ = preferences_.value("smart_punctuation", true);
     smart_punctuation_repeat_ = preferences_.value("smart_punctuation_repeat", true);
     preferences_snapshot_ = std::move(snapshot);
-    saveBooleanPreference(key, enabled);
+    if (smart_choice) saveSmartPunctuationChoice(enabled);
+    else saveBooleanPreference(key, enabled);
     render();
     return true;
   }
@@ -1242,6 +1263,12 @@ public:
   void saveNestedNumberPreference(const char *object, const char *key, uint8_t value) {
     if (!object || !*object || !key || !*key || options_path_.empty() || private_) return;
     startPreferenceSave({options_path_, object, key, value});
+  }
+  void saveSmartPunctuationChoice(bool enabled) {
+    if (options_path_.empty() || private_) return;
+    PendingPreferenceSave request{options_path_, {}, "smart_punctuation", enabled};
+    request.smart_punctuation_choice = true;
+    startPreferenceSave(std::move(request));
   }
   void saveHelpcodeSchemaChoice(const char *section, const std::string &schema) {
     if (options_path_.empty() || private_) return;
@@ -1621,7 +1648,7 @@ public:
       slot.query.clear();
     }
   }
-  // AI 座位上的占位行（Engine 候选来源 12）换成「—」，留到组字变化为止（#6888）。座位已经换过或没开时 Host API 答 applied:false，什么都不画。
+  // 告诉 Host API 这次 AI 没有回答（#6888）。共享内核已经不放 AI 占位行，这个调用答 applied:false、不改候选列表；调用和接口留着不变；答 applied:false 时什么都不画。
   void resolveAiSeat(const std::string &query) {
     if (!session_ || query.empty()) return;
     try {
@@ -1632,7 +1659,7 @@ public:
       render();
     } catch (...) {}
   }
-  // 不会向 AI 发问的状态下，当前组字的 AI 座位直接换成「—」；同一个查询只问一次。
+  // 不会向 AI 发问的状态下，直接告诉 Host API 当前组字没有 AI 回答；同一个查询只说一次。
   void resolveAiSeatWithoutProvider() {
     try {
       const auto query = response(msime_client_online_query(session_));
@@ -1836,14 +1863,7 @@ public:
       clipboard_mutation_job_ = {};
     }
     clipboard_path_ = std::move(clipboard_path);
-    auto cloud_clipboard_socket = cloudClipboardSocket(options);
-    if (cloud_clipboard_socket != cloud_clipboard_socket_) {
-      ++cloud_clipboard_generation_;
-      cloud_clipboard_items_.clear();
-      cloud_clipboard_enabled_ = true;
-      cloud_clipboard_job_ = {};
-    }
-    cloud_clipboard_socket_ = std::move(cloud_clipboard_socket);
+    updateCloudClipboardRoute(options);
     voice_socket_ = providerSocket(options, "voice_provider_socket",
                                    "MSIME_VOICE_PROVIDER_SOCKET", "voice.sock");
     const auto voicePreferences = preferences_.value("voice_input", Json::object());
@@ -1852,8 +1872,6 @@ public:
     voice_hotkey_ralt_ = voicePreferences.value("hotkey_ralt", true);
     voice_hotkey_ctrl_win_ = voicePreferences.value("hotkey_ctrl_win", false);
     voice_hotkey_rctrl_ralt_ = voicePreferences.value("hotkey_rctrl_ralt", false);
-    voice_hotkey_hold_space_lock_ =
-        voicePreferences.value("hotkey_hold_space_lock", voice_hotkey_hold_space_lock_);
     voice_language_ = voicePreferences.value("language", std::string("zh-cn"));
     loadVoiceOptions();
     syncVoiceOverlayTheme();
@@ -1994,8 +2012,6 @@ public:
             voice_hotkey_ralt_ = voicePreferences.value("hotkey_ralt", voice_hotkey_ralt_);
             voice_hotkey_ctrl_win_ = voicePreferences.value("hotkey_ctrl_win", voice_hotkey_ctrl_win_);
             voice_hotkey_rctrl_ralt_ = voicePreferences.value("hotkey_rctrl_ralt", voice_hotkey_rctrl_ralt_);
-            voice_hotkey_hold_space_lock_ =
-                voicePreferences.value("hotkey_hold_space_lock", voice_hotkey_hold_space_lock_);
             voice_language_ = voicePreferences.value("language", voice_language_);
             loadVoiceOptions();
             syncVoiceOverlayTheme();
@@ -2062,14 +2078,7 @@ public:
         clipboard_mutation_job_ = {};
         clipboard_path_ = std::move(nextClipboard);
       }
-      auto nextCloudClipboard = cloudClipboardSocket(options);
-      if (nextCloudClipboard != cloud_clipboard_socket_) {
-        ++cloud_clipboard_generation_;
-        cloud_clipboard_items_.clear();
-        cloud_clipboard_enabled_ = true;
-        cloud_clipboard_job_ = {};
-        cloud_clipboard_socket_ = std::move(nextCloudClipboard);
-      }
+      updateCloudClipboardRoute(options);
       auto nextVoice = providerSocket(options, "voice_provider_socket",
                                       "MSIME_VOICE_PROVIDER_SOCKET", "voice.sock");
       if (nextVoice != voice_socket_) {
@@ -2119,7 +2128,7 @@ public:
             applied = reply.value("applied", false);
             render();
           }
-          // AI 的网络请求落空（失败、空回答、被拒）：AI 座位上的占位行换成「—」，后面的候选不挪位（#6888）。
+          // AI 的网络请求落空（失败、空回答、被拒）：告诉 Host API 这次没有回答（#6888）。
           if (source == 1 && !slot.cache_only && !applied) resolveAiSeat(slot.query);
         }
       }
@@ -2480,6 +2489,48 @@ public:
     if (text.empty()) return;
     ic_.commitString(text);
     if (typingStatistics) recordTypingStatistics(text, source.value_or(typingSource()));
+    rememberSmartPunctuationCommit(text);
+  }
+  // surrounding text 不可用时，只用本会话由输入法自己上屏的末尾文本判断智能标点；交给应用的按键或光标编辑会使它失效。
+  void rememberSmartPunctuationCommit(const std::string &text) {
+    if (!ic_.hasFocus() || restricted() || privateInput()) {
+      forgetSmartPunctuationShadow();
+      return;
+    }
+    smart_punctuation_shadow_ += text;
+    if (smart_punctuation_shadow_.size() > 1024) {
+      size_t cut = smart_punctuation_shadow_.size() - 1024;
+      while (cut < smart_punctuation_shadow_.size() &&
+             (static_cast<unsigned char>(smart_punctuation_shadow_[cut]) & 0xc0) == 0x80)
+        ++cut;
+      smart_punctuation_shadow_.erase(0, cut);
+    }
+    smart_punctuation_shadow_valid_ = true;
+  }
+  void forgetSmartPunctuationShadow() {
+    smart_punctuation_shadow_.clear();
+    smart_punctuation_shadow_valid_ = false;
+  }
+  void eraseSmartPunctuationShadowLast() {
+    if (!smart_punctuation_shadow_valid_ || smart_punctuation_shadow_.empty()) {
+      forgetSmartPunctuationShadow();
+      return;
+    }
+    size_t last = smart_punctuation_shadow_.size() - 1;
+    while (last > 0 &&
+           (static_cast<unsigned char>(smart_punctuation_shadow_[last]) & 0xc0) == 0x80)
+      --last;
+    smart_punctuation_shadow_.erase(last);
+  }
+  std::optional<uint32_t> smartPunctuationShadowLast() const {
+    if (!smart_punctuation_shadow_valid_ || smart_punctuation_shadow_.empty())
+      return std::nullopt;
+    auto start = smart_punctuation_shadow_.end();
+    do {
+      --start;
+    } while (start != smart_punctuation_shadow_.begin() &&
+             (static_cast<unsigned char>(*start) & 0xc0) == 0x80);
+    return fcitx::utf8::getChar(start, smart_punctuation_shadow_.end());
   }
   bool pasteClipboard(size_t index = 0) {
     if (restricted() || privateInput() || !ic_.hasFocus()) return false;
@@ -2530,7 +2581,31 @@ public:
     });
     return true;
   }
+  void invalidateCloudClipboard() {
+    ++cloud_clipboard_generation_;
+    cloud_clipboard_items_.clear();
+    cloud_clipboard_enabled_ = true;
+    cloud_clipboard_job_ = {};
+  }
+  void updateCloudClipboardPreferences() {
+    const auto relay = preferences_.value("cloud_clipboard_relay", Json::object());
+    if (cloud_clipboard_directory_ == options_path_ && cloud_clipboard_relay_ == relay) return;
+    invalidateCloudClipboard();
+    cloud_clipboard_directory_ = options_path_;
+    cloud_clipboard_relay_ = relay;
+  }
+  void updateCloudClipboardRoute(const Json &options) {
+    const auto nextCloudClipboard = cloudClipboardSocket(options);
+    const auto explicitSocket = explicitCloudClipboardSocket(options);
+    if (nextCloudClipboard != cloud_clipboard_socket_ || explicitSocket != cloud_clipboard_explicit_socket_) {
+      invalidateCloudClipboard();
+      cloud_clipboard_socket_ = nextCloudClipboard;
+      cloud_clipboard_explicit_socket_ = explicitSocket;
+    }
+    updateCloudClipboardPreferences();
+  }
   void refreshCloudClipboard() {
+    updateCloudClipboardPreferences();
     try {
       if (cloud_clipboard_job_.valid()) {
         if (cloud_clipboard_job_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
@@ -2538,6 +2613,7 @@ public:
         cloud_clipboard_job_ = {};
         if (ic_.hasFocus() && !restricted() && !privateInput() && result.is_object() &&
             result.value("_socket", std::string{}) == cloud_clipboard_socket_ &&
+            result.value("_directory", std::string{}) == options_path_ &&
             msime::linux_host::strict_json_value(result, "_generation", uint64_t{}) == cloud_clipboard_generation_)
         {
           cloud_clipboard_enabled_ = result.value("enabled", true);
@@ -2549,7 +2625,7 @@ public:
     } catch (...) { cloud_clipboard_items_.clear(); }
   }
   bool pasteCloudClipboard(size_t index = 0) {
-    if (cloud_clipboard_socket_.empty() || restricted() || privateInput() || !ic_.hasFocus()) return false;
+    if ((cloud_clipboard_socket_.empty() && options_path_.empty()) || restricted() || privateInput() || !ic_.hasFocus()) return false;
     refreshCloudClipboard();
     if (!cloud_clipboard_enabled_) return false;
     if (index < cloud_clipboard_items_.size()) {
@@ -2561,13 +2637,28 @@ public:
     if (cloud_clipboard_job_.valid()) return false;
     const auto socket = cloud_clipboard_socket_;
     const auto generation = cloud_clipboard_generation_;
-    cloud_clipboard_job_ = detachedJob([socket, generation] {
-      const auto request = Json{{"operation", "list"}, {"search", ""}}.dump();
-      auto raw = response(msime_client_cloud_clipboard_provider_request(
-          reinterpret_cast<const uint8_t *>(request.data()), request.size(),
-          reinterpret_cast<const uint8_t *>(socket.data()), socket.size()));
+    const auto explicitSocket = cloud_clipboard_explicit_socket_;
+    const auto directory = options_path_;
+    cloud_clipboard_job_ = detachedJob([socket, explicitSocket, directory, generation] {
+      auto raw = msime::linux_host::cloud_clipboard_list(directory, explicitSocket, socket,
+          [](const std::string &path) {
+            return response(msime_client_cloud_clipboard_source(
+                reinterpret_cast<const uint8_t *>(path.data()), path.size()));
+          },
+          [](const Json &request) {
+            const auto encoded = request.dump();
+            return response(msime_client_relay_cloud_clipboard(
+                reinterpret_cast<const uint8_t *>(encoded.data()), encoded.size()));
+          },
+          [](const std::string &path, const Json &action) {
+            const auto encoded = action.dump();
+            return response(msime_client_cloud_clipboard_provider_request(
+                reinterpret_cast<const uint8_t *>(encoded.data()), encoded.size(),
+                reinterpret_cast<const uint8_t *>(path.data()), path.size()));
+          });
       if (!raw.is_object()) return Json::object();
       raw["_socket"] = socket;
+      raw["_directory"] = directory;
       raw["_generation"] = generation;
       return raw;
     });
@@ -3234,6 +3325,7 @@ public:
             ascii, fullwidthOutput(), *characters))
       return false;
     ic_.deleteSurroundingText(-1, 1);
+    eraseSmartPunctuationShadowLast();
     commitText(std::string(chinese));
     forgetSmartPunctuationRepeat();
     space_convert_mark_.clear();
@@ -3246,9 +3338,11 @@ public:
     uint32_t preceding = 0;
     std::optional<size_t> surroundingLength;
     const auto &surrounding = ic_.surroundingText();
-    if (!privateInput() && ic_.capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
-        surrounding.isValid() && surrounding.cursor() > 0 &&
-        surrounding.cursor() == surrounding.anchor()) {
+    const bool surroundingPublished =
+        !privateInput() &&
+        ic_.capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+        surrounding.isValid();
+    if (surroundingPublished && surrounding.cursor() == surrounding.anchor()) {
       const auto &text = surrounding.text();
       const auto length = fcitx::utf8::lengthValidated(text);
       if (length != fcitx::utf8::INVALID_LENGTH) {
@@ -3257,6 +3351,11 @@ public:
           preceding = fcitx::utf8::getChar(
               fcitx::utf8::nextNChar(text.begin(), surrounding.cursor() - 1), text.end());
       }
+    }
+    // 有效 surrounding 即使光标在文档开头、位于选择中或光标位置越界，也代表宿主文档的权威状态；只有宿主没有发布可用 surrounding 时才回退本会话影子。
+    if (!surroundingPublished) {
+      if (const auto shadow = smartPunctuationShadowLast())
+        preceding = *shadow;
     }
     // Engine is about to commit the Chinese mark for this key. Record what the
     // caret follows now, while the document still predates the commit; a Space
@@ -3318,6 +3417,7 @@ public:
   }
   std::optional<bool> caretShiftHeld() const;
   void forwardCaret(fcitx::KeySym sym) {
+    forgetSmartPunctuationShadow();
     // Wayland 虚拟键盘沿用物理修饰状态；Shift 尚未松开时不能发送方向键，否则会选中文字。
     if (std::string_view(ic_.frontend()).find("wayland") == 0 && caretShiftHeld().value_or(caret_shift_)) {
       pending_caret_.push_back(sym);
@@ -3427,6 +3527,7 @@ public:
                                                               *characters))
       return false;
     ic_.deleteSurroundingText(-1, 1);
+    eraseSmartPunctuationShadowLast();
     commitText(replacement);
     return true;
   }
@@ -3774,6 +3875,8 @@ public:
   char last_smart_punctuation_ = 0;
   std::chrono::steady_clock::time_point last_smart_punctuation_at_{};
   char smart_punctuation_rejected_ = 0;
+  std::string smart_punctuation_shadow_;
+  bool smart_punctuation_shadow_valid_ = false;
   // The ASCII key whose Chinese mark Engine just committed with nothing
   // composing, and the character that stood in front of it at that moment. A
   // bare Space arriving next takes the mark back to ASCII; any other key
@@ -3789,10 +3892,10 @@ public:
     std::shared_future<Json> job;
     std::string query;
     uint64_t epoch = 0;
-    // 只查缓存的 AI 探测：它落空只是还没到网络请求，不能把 AI 座位换成「—」。
+    // 只查缓存的 AI 探测：它落空只是还没到网络请求，不算 AI 没有回答。
     bool cache_only = false;
   } online_slots_[2];
-  // 不会向 AI 发问时（没有在线服务、私密输入框）最近一次把 AI 座位换成「—」的查询，避免每个定时周期都再问一遍。
+  // 不会向 AI 发问时（没有在线服务、私密输入框）最近一次告诉 Host API 没有 AI 回答的查询，避免每个定时周期都再说一遍。
   std::string ai_resolved_query_;
   uint64_t online_epoch_ = 0;
   std::chrono::steady_clock::time_point online_due_{};
@@ -3811,6 +3914,9 @@ public:
   std::shared_future<Json> clipboard_job_;
   std::shared_future<Json> clipboard_mutation_job_;
   std::string cloud_clipboard_socket_;
+  std::string cloud_clipboard_explicit_socket_;
+  std::string cloud_clipboard_directory_;
+  Json cloud_clipboard_relay_ = Json::object();
   uint64_t cloud_clipboard_generation_ = 0;
   Json cloud_clipboard_items_ = Json::array();
   bool cloud_clipboard_enabled_ = true;
@@ -3846,6 +3952,7 @@ public:
   bool voice_hotkey_ralt_ = true;
   bool voice_hotkey_ctrl_win_ = false;
   bool voice_hotkey_rctrl_ralt_ = false;
+  // 空格锁定固定为开，不读存下的 `hotkey_hold_space_lock`：空格只在按住录音组合键期间才被拦下，平常打字不受影响，设置页也不再给这个开关（`voice_space_lock_switch`）。
   bool voice_hotkey_hold_space_lock_ = true;
   bool voice_ralt_held_ = false;
   bool voice_f9_held_ = false;
@@ -3924,7 +4031,7 @@ public:
 // `variant` 是繁体变体的编号，只在 `traditional` 为真时用到。
 fcitx::Text candidateRowText(const Json &candidate, bool traditional, bool annotations,
                              const std::string &hanjaGloss, uint32_t variant) {
-  // Engine 候选来源 12 是 AI 座位上的占位行（「…」或「—」）：Fcitx5 的文本格式没有颜色，用斜体表示它是次要的，并标明不上屏（#6888）。
+  // Engine 候选来源 12 是 AI 占位行（「…」或「—」）：Fcitx5 的文本格式没有颜色，用斜体表示它是次要的，并标明不上屏（#6888）。共享内核已经不再产出这种行（AI 回答到达时直接插在第一页最后一格），这里的处理留着，旧的库或数据里出现时仍按占位行对待。
   if (msime::linux_host::strict_json_value(candidate, "source", uint64_t{}) == 12)
     return fcitx::Text(candidate.at("text").get<std::string>(),
                        fcitx::TextFormatFlags{fcitx::TextFormatFlag::Italic,
@@ -6552,6 +6659,8 @@ public:
       return PanelInputDelivery::Restricted;
     if (request.kind == msime::linux_host::PanelInputRequest::Kind::Text) {
       ic->commitString(request.text);
+      if (!request.text.empty())
+        ic->propertyFor(&factory_)->rememberSmartPunctuationCommit(request.text);
       return PanelInputDelivery::Delivered;
     }
     auto sym = fcitx::Key::keySymFromString(request.key);
@@ -6684,7 +6793,10 @@ public:
         const auto comboBefore = state->typing_combo_;
         state->keyDown(event);
         if (state->key(event)) event.filterAndAccept();
-        else state->countPassthroughKey(event);
+        else {
+          if (!event.isRelease()) state->forgetSmartPunctuationShadow();
+          state->countPassthroughKey(event);
+        }
         state->keySettled(comboBefore);
       }
     }
@@ -7146,9 +7258,9 @@ void FcitxState::maintenance(int operation) {
   }
 }
 
-// The badge's theme, by the macOS badge's rule: its mode is toolbar_theme when that names one, otherwise the global mode, whose "system" (跟随系统) default follows the desktop. A global theme with a fixed appearance (水杉 is dark, 纸白 light) decides it either way, and the colours are that theme's palette as the floating toolbar takes it.
+// 模式角标的主题：与 macOS 的角标一样跟随颜色模式，"system"（跟随系统，也是默认值）看桌面明暗，存下的 toolbar_theme 不再读。固定明暗的全局主题（水杉是深色，纸白是浅色）照样决定明暗，颜色取那个主题的调色板，与悬浮工具栏取法相同。
 msime::linux_host::CandidateTheme fcitx_mode_badge_theme(const Json &preferences, bool system_dark, const Json &catalog) {
-  const bool dark = msime::linux_host::surface_dark_theme(preferences, "toolbar_theme", system_dark);
+  const bool dark = msime::linux_host::surface_dark_theme(preferences, system_dark);
   return resolveThemeInMode(preferences, dark, catalog);
 }
 
@@ -7169,9 +7281,9 @@ void FcitxState::showInputModeHud() {
   }
   // 两个提示各补一半：面板那个由合成器按光标矩形定位，跟着输入点走，但只能显示文字；
   // 自绘徽章带得了 logo，却只能用屏幕坐标固定在一个角上。两者同时发是所有者的选择。
-  // Sized by the shared floating toolbar preferences and coloured by the resolved theme, both read at every switch so a settings change shows at the next one.
+  // A fixed size of its own (the toolbar size is not offered on Linux) and the resolved theme's colours, read at every switch so a theme change shows at the next one.
   const msime::linux_host::ModeBadgeStyle style{
-      msime::linux_host::mode_badge_metrics(preferences_),
+      msime::linux_host::ModeBadgeMetrics{},
       msime::linux_host::floating_surface_colors(
           fcitx_mode_badge_theme(preferences_, system_dark_, candidate_skin_document_))};
   if (mode_badge_ && mode_badge_->show(label, MSIME_MODE_BADGE_ICON, style)) scheduleModeBadgeHide();
@@ -7202,6 +7314,12 @@ bool FcitxState::key(fcitx::KeyEvent &event) {
   const auto &key = event.key();
   const auto sym = key.sym();
   const auto states = key.states();
+  if (!event.isRelease() &&
+      (sym == FcitxKey_BackSpace || sym == FcitxKey_Delete || sym == FcitxKey_Left ||
+       sym == FcitxKey_Right || sym == FcitxKey_Up || sym == FcitxKey_Down ||
+       sym == FcitxKey_Home || sym == FcitxKey_End || sym == FcitxKey_Page_Up ||
+       sym == FcitxKey_Page_Down))
+    forgetSmartPunctuationShadow();
   // 和裸 Shift 一样，切换之后松开事件照常交给应用；布防了的按下也只交给应用。
   if (observeCapsLockTap(event)) return false;
   // 规范化后的符号可能已丢掉 Shift 位，光标转发必须按原始事件判断。

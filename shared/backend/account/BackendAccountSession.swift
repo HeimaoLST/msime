@@ -192,7 +192,7 @@ func backendClipboardKeystoreValue(_ data: Data) -> String? {
 }
 
 #if os(macOS)
-/// The macOS account session: `account-session.json` in the input method's Application Support directory, read and written by this process and by the settings app (`FileAccountSessionStorage` in `crates/client-core`). Both take `account-refresh.lock` beside it around every write, so neither refreshes from a refresh token the other has already spent; the server revokes the session when one comes back. Owner-only, and never followed through a symlink.
+/// macOS 的账号会话：输入法 Application Support 目录下的 `account-session.json`，由本进程和设置应用（`crates/client-services` 中的 `FileAccountSessionStorage`）读写。双方每次写入前后都持有旁边的 `account-refresh.lock`，因此谁都不会用对方已经用掉的刷新令牌去刷新；一旦有已用过的令牌被交回，服务端会吊销该会话。仅属主可访问，且从不跟随符号链接。
 struct BackendDesktopSessionFile: BackendSessionStorage {
   static let fileName = "account-session.json"
   static let maximumBytes = 64 * 1024
@@ -603,6 +603,24 @@ actor BackendAccountSession {
   func requireSession(matchingUserID userID: String, matchingSessionID sessionID: UUID) throws {
     try load()
     guard saved?.tokens.user.id == userID, saved?.sessionID == sessionID else { throw CancellationError() }
+  }
+  /// 在账号共享锁内核对持久化身份并完成一次短同步读写，校验与写入之间不能挂起。
+  func withSessionStorage<T: Sendable>(matchingUserID userID: String, matchingSessionID sessionID: UUID,
+                                      _ body: @escaping @Sendable () throws -> T) async throws -> T {
+    let version = generation
+    return try await refreshLock.run {
+      try await self.withSessionStorageHoldingLock(userID: userID, sessionID: sessionID,
+                                                   version: version, body)
+    }
+  }
+  private func withSessionStorageHoldingLock<T: Sendable>(userID: String, sessionID: UUID, version: Int,
+                                                          _ body: @Sendable () throws -> T) throws -> T {
+    try Task.checkCancellation()
+    guard generation == version else { throw CancellationError() }
+    // 共享锁等待期间别的进程可能已经换号；即使本 actor 缓存未变也必须重读磁盘。
+    let current = try storage.load().map { try BackendSavedSession.validated($0) }
+    guard current?.tokens.user.id == userID, current?.sessionID == sessionID else { throw CancellationError() }
+    return try body()
   }
   /// Perform one authenticated request and retry it once when the backend rejects the
   /// still locally valid access token. The returned token is the one paired with the

@@ -8,12 +8,12 @@
 // the workspace adds later.
 #![allow(unsafe_code)]
 
-use msime_client_core::ai::AiSuggestionRequest;
-use msime_client_core::dictionary::access::DictionaryAccess;
 use msime_client_core::edition::Edition;
 use msime_client_core::host_surface::{
     offered_input_schemes, HostCapabilities, HostPlatform, SurfaceRoute,
 };
+use msime_client_providers::ai::AiSuggestionRequest;
+use msime_client_services::dictionary::access::DictionaryAccess;
 pub mod clipboard_history;
 pub mod cloud_clipboard;
 pub mod cloud_dictionary;
@@ -28,15 +28,15 @@ use msime_client_core::preferences::{
 use msime_client_core::punctuation::{
     route as punctuation_route, PunctuationContext, PunctuationRoute,
 };
-use msime_client_core::resource_packs::{self, ResourcePack};
 use msime_client_core::resources::{ResourceSet, ResourceStore, VerifiedMarker};
-use msime_client_core::typing_statistics::{
-    CommitEfficiency, TypingSource, TypingStatisticsStore, RANKS,
-};
-use msime_client_core::voice::doubao_frame::{
+use msime_client_providers::resource_packs::{self, ResourcePack};
+use msime_client_providers::voice::doubao_frame::{
     audio_frame, decode_error_code, decode_json_frame, start_frame,
 };
-use msime_client_core::voice::VoiceSessionState;
+use msime_client_providers::voice::VoiceSessionState;
+use msime_client_services::typing_statistics::{
+    CommitEfficiency, TypingSource, TypingStatisticsStore, RANKS,
+};
 use msime_engine::host::{
     check_nine_key_shuangpin_table, check_shuangpin_custom_profile,
     nine_key_shuangpin_builtin_table, nine_key_shuangpin_table_key_hints,
@@ -69,8 +69,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(unix)]
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+/// `msime_client_account` 在 #8201 新增的操作。
+mod account_ops;
 mod bounded_file;
 mod chinese_english_spacing;
+/// 多分类自动云同步的驱动；C 入口在 `ffi::cloud_sync`。与 `cloud_dictionary` 一样和 C 入口模块同名，所以公开，免得遮住 `ffi` 的同名模块。
+pub mod cloud_sync;
 mod dictionary;
 // The exports live in `ffi`, but Rust consumers - this crate's own tests and
 // examples, and anything linking the rlib - have always reached them at the
@@ -108,6 +112,29 @@ pub use ffi::*;
 /// 会话实际用的每页候选数：偏好或宿主覆盖的值，按本库编译到的平台能排的上限截断（`HostPlatform::max_candidate_page_size`）。共享文档在别的设备上存了 10 时，只排得下九个的宿主仍拿到 9。
 fn host_page_size(requested: u8) -> u8 {
     requested.min(ffi::host::compiled_platform().max_candidate_page_size())
+}
+
+/// 会话实际用的中英混输触发字符数：本库编译到的平台不读这一项时（macOS、Windows 和 Linux 三个桌面宿主，`HostPlatform::reads_mixed_input_minimum_prefix`）固定为默认值，文档里存的数不起作用，设置页也不再给出这一行。
+fn host_english_minimum_prefix(stored: u8) -> u8 {
+    english_minimum_prefix_for(ffi::host::compiled_platform(), stored)
+}
+
+fn english_minimum_prefix_for(
+    platform: msime_client_core::host_surface::HostPlatform,
+    stored: u8,
+) -> u8 {
+    if platform.reads_mixed_input_minimum_prefix() {
+        stored
+    } else {
+        msime_client_core::preferences::DEFAULT_MIXED_INPUT_MINIMUM_PREFIX
+    }
+}
+
+/// 会话实际用的 AI 联想候选数量：本库编译到的平台固定了这个数（`HostPlatform::fixed_ai_candidate_limit`，macOS、Windows、Linux、鸿蒙）时用固定值，不读偏好里存的值；否则用偏好。座位配置、在线查询和请求描述都从这里取，`chat_completion_http_request` 要求请求和配置里的数量一致。
+fn host_ai_candidate_limit(stored: u8) -> u8 {
+    ffi::host::compiled_platform()
+        .fixed_ai_candidate_limit()
+        .unwrap_or(stored)
 }
 mod doubao_auth;
 #[cfg(not(any(target_os = "android", target_env = "ohos")))]
@@ -429,19 +456,6 @@ impl HostSession {
         self.ai_provider_config()
             .is_some_and(|config| query.ai_assistant.as_ref() == Some(config))
     }
-    /// 按最新请求的偏好和会话密钥重新决定 AI 座位（`ai_seat_ready`）。
-    fn ai_seat_ready(&self) -> bool {
-        let preferences = self
-            .requested
-            .as_ref()
-            .map(|snapshot| &snapshot.preferences)
-            .unwrap_or(&self.applied);
-        ai_seat_ready(&preferences.ai_assistant, self.ai_credential.as_ref())
-    }
-    fn refresh_ai_seat(&mut self) -> Result<(), String> {
-        let ready = self.ai_seat_ready();
-        self.runtime.set_ai_seat(ready).map_err(|e| e.to_string())
-    }
     fn set_ai_provider_cache(&mut self, preferences: &Preferences) {
         let ai = &preferences.ai_assistant;
         self.ai_provider_cache = ai.enabled.then(|| AiAssistantProviderConfig {
@@ -449,7 +463,7 @@ impl HostSession {
             provider: ai.provider.clone(),
             model: ai.model.clone(),
             endpoint: ai.endpoint.clone(),
-            candidate_limit: ai.candidate_limit,
+            candidate_limit: host_ai_candidate_limit(ai.candidate_limit),
             prompt_id: ai.prompt_id.clone(),
             prompt_custom_1: ai.prompt_custom_1.clone(),
             prompt_custom_2: ai.prompt_custom_2.clone(),
@@ -625,7 +639,8 @@ impl HostSession {
         options.frequency_trigger_count = preferences.frequency.trigger_count;
         options.frequency_linear_step = preferences.frequency.linear_step;
         options.mixed_english = preferences.mixed_input.english;
-        options.english_minimum_prefix = preferences.mixed_input.minimum_prefix;
+        options.english_minimum_prefix =
+            host_english_minimum_prefix(preferences.mixed_input.minimum_prefix);
         options.mixed_emoji = preferences.mixed_input.emoji;
         options.mixed_kaomoji = preferences.mixed_input.kaomoji;
         options.mixed_symbols = preferences.mixed_input.symbols;
@@ -737,8 +752,6 @@ impl HostSession {
         engine
             .set_mention_places(preferences.local_modes.mention_places)
             .map_err(|e| e.to_string())?;
-        // AI 座位跟着最新请求的偏好（与 `ai_provider_cache` 同一份），每个新 Engine 都要重新告诉它。
-        engine.set_ai_seat(self.ai_seat_ready());
         self.runtime
             .replace_engine_with_touch_layout(engine, page_size, preferences.touch_keyboard_layout)
             .map_err(|e| e.to_string())?;
@@ -980,11 +993,19 @@ impl HostSession {
             .preferences
             .clone();
         self.set_ai_provider_cache(&requested_preferences);
-        // 关掉或打开 AI 不必等组字结束：占位行跟着请求的偏好立刻出现或消失。
-        self.refresh_ai_seat()?;
+        self.runtime
+            .set_cloud_candidates_enabled(requested_preferences.cloud_candidates)
+            .map_err(|e| e.to_string())?;
         // 宿主状态，不是 Engine 状态：跟着最新请求的偏好走，不必等这次偏好重建 Engine，也不必等组字结束。
         self.runtime
+            .set_backspace_reverts_selection(requested_preferences.backspace_reverts_selection);
+        // 左右键的候选回退（`navigation.left_right`）同样是宿主状态：改完立刻生效，左右键不必等 Engine 重建。
+        self.runtime
+            .set_left_right_navigation(requested_preferences.navigation.left_right);
+        self.runtime
             .set_wubi_auto_commit_unique(requested_preferences.wubi_auto_commit_unique);
+        self.runtime
+            .set_wubi_candidate_selection(requested_preferences.wubi_candidate_selection.clone());
         self.sound.update(key_sound::SoundSettings::new(
             &requested_preferences.plugins,
             &self.plugin_roots,
@@ -1006,6 +1027,7 @@ fn profile_code(profile: ShuangpinProfile) -> u8 {
         ShuangpinProfile::Ziranma => 1,
         ShuangpinProfile::Shoudao => 2,
         ShuangpinProfile::Microsoft => 3,
+        ShuangpinProfile::SmartAbc => 5,
         ShuangpinProfile::Custom => 4,
     }
 }
@@ -1544,6 +1566,9 @@ struct HostOptions {
     /// the field would otherwise show nothing for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     phrase_preedit: Option<bool>,
+    /// macOS 把普通组字里的快捷短语也作为候选显示；缺省关闭以保持其他宿主和旧文档的入口契约。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quick_phrase_candidates: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     clipboard_history_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1676,7 +1701,9 @@ impl HostOptions {
             frequency_trigger_count: self.preferences.frequency.trigger_count,
             frequency_linear_step: self.preferences.frequency.linear_step,
             mixed_english: self.preferences.mixed_input.english,
-            english_minimum_prefix: self.preferences.mixed_input.minimum_prefix,
+            english_minimum_prefix: host_english_minimum_prefix(
+                self.preferences.mixed_input.minimum_prefix,
+            ),
             mixed_emoji: self.preferences.mixed_input.emoji,
             mixed_kaomoji: self.preferences.mixed_input.kaomoji,
             mixed_symbols: self.preferences.mixed_input.symbols,
@@ -1699,6 +1726,7 @@ impl HostOptions {
             plugin_commands: Vec::new(),
             mention_entries: Vec::new(),
             quick_phrase_table: Vec::new(),
+            quick_phrase_candidates: false,
             helpcode_table: None,
             sentence_association: engine_sentence_association(
                 &self.preferences.sentence_association,
@@ -2066,6 +2094,7 @@ fn prepare_shipped_host_configuration(
                 .to_owned(),
         ),
         phrase_preedit: None,
+        quick_phrase_candidates: None,
         clipboard_history_path: None,
         online_provider_socket: None,
         translation_provider_socket: None,
@@ -2396,6 +2425,36 @@ pub fn edit_personal_dictionary(
     replacement: Option<&msime_engine::host::DictionaryEntry>,
     request_id: &str,
 ) -> Result<(), String> {
+    validate_personal_dictionary_edit(options, previous, replacement, request_id)?;
+    let access = DictionaryAccess::try_maintenance(
+        std::path::Path::new(&options.user_data),
+        std::path::Path::new(&options.dictionaries),
+    )
+    .map_err(|_| "dictionary access unavailable")?
+    .ok_or("dictionary maintenance busy")?;
+    edit_personal_dictionary_with_access(&access, options, previous, replacement, request_id)
+}
+
+/// 在调用方持有维护租约时校验并应用一个词条改动。
+/// 租约按借用传入，让有界批次共用一个独占窗口，不必为每个待处理词条重新取锁。
+pub(crate) fn edit_personal_dictionary_with_access(
+    _access: &DictionaryAccess,
+    options: &EngineOptions,
+    previous: Option<&msime_engine::host::DictionaryEntry>,
+    replacement: Option<&msime_engine::host::DictionaryEntry>,
+    request_id: &str,
+) -> Result<(), String> {
+    validate_personal_dictionary_edit(options, previous, replacement, request_id)?;
+    msime_engine::host::dictionary_edit(options, previous, replacement, request_id)
+        .map_err(|_| "dictionary edit rejected".into())
+}
+
+fn validate_personal_dictionary_edit(
+    options: &EngineOptions,
+    previous: Option<&msime_engine::host::DictionaryEntry>,
+    replacement: Option<&msime_engine::host::DictionaryEntry>,
+    request_id: &str,
+) -> Result<(), String> {
     for entry in previous.iter().chain(replacement.iter()) {
         require_dictionary_kind(options, entry.kind)?;
     }
@@ -2408,17 +2467,10 @@ pub fn edit_personal_dictionary(
         msime_engine::host::dictionary_validate(entry)
             .map_err(|error| invalid_dictionary_entry(&error.to_string()))?;
     }
-    let _access = DictionaryAccess::try_maintenance(
-        std::path::Path::new(&options.user_data),
-        std::path::Path::new(&options.dictionaries),
-    )
-    .map_err(|_| "dictionary access unavailable")?
-    .ok_or("dictionary maintenance busy")?;
     if request_id.is_empty() {
         return Err("dictionary request id required".into());
     }
-    msime_engine::host::dictionary_edit(options, previous, replacement, request_id)
-        .map_err(|_| "dictionary edit rejected".into())
+    Ok(())
 }
 
 /// A host-owned view of one entry in the verified local Emoji catalog.
@@ -2467,11 +2519,11 @@ pub fn local_emoji_catalog_slice(
         .map_err(|_| "local emoji catalog unavailable")
 }
 
-pub use msime_client_core::plugins::symbol_set::PluginSymbolGroup;
+pub use msime_client_services::plugins::symbol_set::PluginSymbolGroup;
 
 /// 插件目录 `root` 下已安装的符号集的全部组，供宿主追加到内置符号目录之后：`symbols` 组放在以 `pack_name` 为上级分类的分组下，`kaomoji` 组放在颜文字的 All 之后。读几个小清单：不要在按键路径上调用。
 pub fn plugin_symbol_groups(root: &std::path::Path) -> Vec<PluginSymbolGroup> {
-    msime_client_core::plugins::symbol_set::plugin_symbol_groups(root)
+    msime_client_services::plugins::symbol_set::plugin_symbol_groups(root)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2596,6 +2648,7 @@ fn dispatch_call(handle: u64, action: Action, host: Option<lifecycle::InputClass
         with_session(handle, |session| {
             // 大写锁定改道先于其余处理，后面看到的都是改道后的动作。
             let action = session.caps_lock_punctuation(action);
+            let action = session.runtime.candidate_shortcut(action);
             let currency_punctuation = matches!(
                 action,
                 Action::Character { value: b'$', .. } | Action::Punctuation(b'$')
@@ -2673,13 +2726,6 @@ const PRIVATE_SESSIONS_SKIP_STATISTICS: bool = cfg!(any(
     test
 ));
 
-/// 桌面 Linux 的 AI 请求经用户自己的在线服务发出，密钥只在那个服务的私有配置里，Host API 看不到它；其他宿主的请求由 `msime_client_ai_request_for_query` 用偏好或会话里的密钥签名。
-const AI_CREDENTIALS_IN_PROVIDER: bool = cfg!(all(
-    target_os = "linux",
-    not(target_env = "ohos"),
-    not(test)
-));
-
 /// `translation_query` 使用的偏好字段；这些变化都要撤销旧代次的释义回包。
 fn translation_query_preferences_changed(previous: &Preferences, next: &Preferences) -> bool {
     previous.candidate_translations != next.candidate_translations
@@ -2691,22 +2737,6 @@ fn translation_query_preferences_changed(previous: &Preferences, next: &Preferen
         || previous.custom_translation != next.custom_translation
         || previous.tencent_tmt != next.tencent_tmt
         || previous.niutrans != next.niutrans
-}
-
-/// 这个会话的 AI 座位开不开（#6888）：AI 开着，而且请求真的发得出去。macOS 和 Windows 默认开着 AI 却没有密钥，这时不发请求，也就不该在每次组字时留一个永远等不到回答的占位行。
-fn ai_seat_ready(
-    ai: &msime_client_core::preferences::AiAssistantPreferences,
-    credential: Option<&SessionAiCredential>,
-) -> bool {
-    if !ai.enabled {
-        return false;
-    }
-    if AI_CREDENTIALS_IN_PROVIDER {
-        return true;
-    }
-    msime_client_core::ai::endpoint::validate(&ai.endpoint).is_ok()
-        && (credential.is_some_and(|credential| credential.endpoint == ai.endpoint)
-            || msime_client_core::ai::credential_for_endpoint(ai).is_some())
 }
 
 /// 一个会话在两次写统计之间最多记下多少次上屏。正常情况下 `SELECTION_BATCH` 次选词就会写一次，这只是兜底。

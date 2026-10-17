@@ -2,7 +2,7 @@
 
 #[cfg(any(target_os = "ios", target_os = "android"))]
 pub(crate) mod mobile_account_helpers;
-// The account preference mapping is plain data, so host tests compile it to exercise the iOS upload and apply rules.
+// 振动强度的校验是纯数据，桌面上的测试也编译它；iOS 的账号设置映射已经搬到 client-services 的 `account::ios_settings`。
 pub(crate) mod mobile_account_preferences;
 #[cfg(any(target_os = "ios", target_os = "android", test))]
 pub(crate) mod mobile_ai_skin_requests;
@@ -10,7 +10,7 @@ pub(crate) mod mobile_ai_skin_requests;
 pub(crate) mod mobile_community;
 
 #[cfg(any(target_os = "ios", target_os = "android"))]
-use msime_client_core::account::{BackendAccountClient, BackendAccountSession};
+use msime_client_services::account::{BackendAccountClient, BackendAccountSession};
 
 /// The account session storage of the running mobile target. Shared commands name it instead of either platform's type, so one body compiles for both.
 #[cfg(target_os = "android")]

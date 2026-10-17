@@ -7,7 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 public final class EditorSmoke {
-    static final class Sink implements EditorBridge.Sink {
+    static class Sink implements EditorBridge.Sink {
         final List<String> calls = new ArrayList<>();
         boolean reject;
         public void begin() { calls.add("begin"); }
@@ -17,8 +17,61 @@ public final class EditorSmoke {
         public boolean select(int start, int end) { calls.add("select:" + start + "," + end); return true; }
         public void end() { calls.add("end"); }
     }
+    static final class VerificationSink extends Sink {
+        boolean batch;
+        String pending;
+        String applied;
+        boolean rejectVerification;
+        boolean disconnectVerification;
+        boolean disconnectEnd;
+        @Override public void begin() { super.begin(); batch = true; }
+        @Override public boolean compose(String text) { pending = text; return super.compose(text); }
+        @Override public void end() {
+            super.end();
+            if (disconnectEnd) throw new IllegalStateException("synthetic disconnect");
+            applied = pending;
+            batch = false;
+        }
+        @Override public boolean verify() {
+            calls.add("verify");
+            check(!batch && "n".equals(applied));
+            if (disconnectVerification) throw new IllegalStateException("synthetic disconnect");
+            return !rejectVerification;
+        }
+    }
+    static final class DisconnectedSink implements EditorBridge.Sink {
+        public void begin() {}
+        public boolean commit(String value) { throw new AssertionError("commit must not run"); }
+        public boolean compose(String value) { throw new IllegalStateException("synthetic disconnected editor"); }
+        public boolean finish() { throw new AssertionError("finish must not run"); }
+        public boolean select(int start, int end) { throw new AssertionError("select must not run"); }
+        public void end() { throw new IllegalStateException("synthetic disconnected editor"); }
+    }
     static void check(boolean condition) { if (!condition) throw new AssertionError(); }
     public static void main(String[] args) {
+        // 读回验证必须在编辑器应用整批命令之后运行，拒写和断开仍由调用方统一处理。
+        EditorBridge deferredBridge = new EditorBridge();
+        VerificationSink deferred = new VerificationSink();
+        check(deferredBridge.apply(deferred, null, "n"));
+        check(deferred.calls.equals(List.of("begin", "compose:n", "end", "verify")));
+        deferred.rejectVerification = true;
+        check(!deferredBridge.apply(deferred, null, "n"));
+        deferred.rejectVerification = false;
+        deferred.disconnectVerification = true;
+        check(!deferredBridge.apply(deferred, null, "n"));
+        deferred.calls.clear();
+        deferred.reject = true;
+        check(!deferredBridge.apply(deferred, null, "n"));
+        check(deferred.calls.equals(List.of("begin", "compose:n", "end")));
+        deferred.calls.clear();
+        deferred.reject = false;
+        deferred.disconnectEnd = true;
+        check(!deferredBridge.apply(deferred, null, "n"));
+        check(deferred.calls.equals(List.of("begin", "compose:n", "end")));
+        deferred.calls.clear();
+        deferred.disconnectEnd = false;
+        deferredBridge.settle(deferred, "n", 0, 1, 1, 1);
+        check(deferred.calls.equals(List.of("begin", "compose:n", "finish", "select:1,1", "end")));
         EditorBridge bridge = new EditorBridge();
         Sink sink = new Sink();
         check(bridge.apply(sink, null, "nihao"));
@@ -101,12 +154,18 @@ public final class EditorSmoke {
         sink.reject = true;
         check(!bridge.apply(sink, "🌲", "next"));
         check(sink.calls.equals(List.of("begin", "commit:🌲", "end")));
+        // 宿主可能在两次跨进程调用之间撤销 InputConnection；断开的编辑器应当只是本次编辑失败，不能让输入法进程崩溃。
+        check(!bridge.apply(new DisconnectedSink(), null, "next"));
         check(EditorPolicy.useEngine(1));
         // No-suggestion text, and Chrome's address bar (URI + no suggestions), still compose.
         check(EditorPolicy.useEngine(0x80001));
         check(EditorPolicy.useEngine(0x80011));
         for (int type : new int[] {2, 3, 0x81, 0x91, 0xe1}) check(!EditorPolicy.useEngine(type));
         check(EditorPolicy.useEngine(0));
+        check(EditorPolicy.numberInput(InputType.TYPE_CLASS_NUMBER));
+        check(EditorPolicy.numberInput(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD));
+        check(EditorPolicy.numberInput(InputType.TYPE_CLASS_PHONE));
+        check(!EditorPolicy.numberInput(InputType.TYPE_CLASS_TEXT));
         check(EditorPolicy.allowLearning(0));
         check(!EditorPolicy.allowLearning(0x1000000));
         // Key heatmap exclusion: text and numeric passwords, and fields that ask for no learning.
@@ -118,13 +177,17 @@ public final class EditorSmoke {
             | InputType.TYPE_TEXT_VARIATION_URI));
         check(EditorPolicy.prefersLatin(InputType.TYPE_CLASS_TEXT
             | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS));
-        // #6147：邮箱后缀只在系统标记为邮箱的输入框里出现。
-        check(EditorPolicy.emailAddress(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS));
-        check(EditorPolicy.emailAddress(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS));
-        check(!EditorPolicy.emailAddress(InputType.TYPE_CLASS_TEXT));
-        check(!EditorPolicy.emailAddress(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI));
-        check(!EditorPolicy.emailAddress(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD));
-        check(!EditorPolicy.emailAddress(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS));
+        // #6147：邮箱后缀除了密码框都给，普通文本框、聊天框（不给建议、短消息）、搜索框、网址框和邮箱框都算。
+        check(EditorPolicy.offersEmailSuffixes(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS));
+        check(EditorPolicy.offersEmailSuffixes(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS));
+        check(EditorPolicy.offersEmailSuffixes(InputType.TYPE_CLASS_TEXT));
+        check(EditorPolicy.offersEmailSuffixes(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS));
+        check(EditorPolicy.offersEmailSuffixes(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_SHORT_MESSAGE));
+        check(EditorPolicy.offersEmailSuffixes(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI));
+        check(EditorPolicy.offersEmailSuffixes(0x80011));
+        check(EditorPolicy.offersEmailSuffixes(0));
+        // 密码框（三种文字密码和数字密码）一律不给，也不读上文。
+        for (int type : new int[] {0x81, 0x91, 0xe1, 0x12}) check(!EditorPolicy.offersEmailSuffixes(type));
         // 只要求不给建议的聊天框、搜索框按用户的默认中英文进框（#5998）；Chrome 地址栏仍因 URI 进英文。
         check(!EditorPolicy.prefersLatin(InputType.TYPE_CLASS_TEXT
             | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS));

@@ -125,6 +125,8 @@ public final class SyncMergePolicySmoke {
         check(total == 301 && batches.size() == 3, "deduped and batched: " + total);
         check("quickPhrase".equals(batches.get(2).get(batches.get(2).size() - 1).kind()), "kind converted");
         check(SyncMergePolicy.uploadBlocked(1) && !SyncMergePolicy.uploadBlocked(0), "pending queue blocks upload");
+        check(SyncMergePolicy.uploadBlocked(0, 1) && SyncMergePolicy.uploadBlocked(1, 0)
+            && !SyncMergePolicy.uploadBlocked(0, 0), "both dictionary queues block upload");
 
         // 节流：满 5 分钟，或有改动时满 30 秒；时钟回拨当作到期。
         long now = 10_000_000L;

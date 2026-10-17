@@ -61,7 +61,7 @@ pub struct EngineOptions {
     pub scheme: u8,
     /// 会话允许运行的方案，`prepare_options` 填 [`SchemeSet::ALL`]，`prepare_options_for` 填调用方给的集合。宿主按产品版本收窄它：`scheme` 不在其中时建会话失败（`INPUT_SCHEME_NOT_ENABLED`），不在其中的方案不构造 provider。
     pub enabled_schemes: SchemeSet,
-    /// 0 xiaohe, 1 ziranma, 2 shoudao, 3 microsoft, 4 custom（表在 `shuangpin_custom_profile`）。双拼不在 `enabled_schemes` 里时不校验，不合法的值按小鹤处理。
+    /// 0 小鹤，1 自然码，2 首道，3 微软，4 自定义（表在 `shuangpin_custom_profile`），5 智能 ABC。双拼不在 `enabled_schemes` 里时不校验，不合法的值按小鹤处理。
     pub shuangpin_profile: u8,
     /// `shuangpin_profile` 为 4 时的键位表（`SessionOptions::shuangpin_custom_profile`）。双拼在 `enabled_schemes` 里时缺表或表不合法，建会话失败（`INVALID_CUSTOM_SHUANGPIN_PROFILE`）；宿主应先用 `validate_shuangpin_custom_profile` 校验，不合法就不要传 4。
     pub shuangpin_custom_profile: Option<ShuangpinCustomTable>,
@@ -126,6 +126,8 @@ pub struct EngineOptions {
     pub mention_entries: Vec<MentionEntry>,
     /// K 模式在数据库行之后追加的宿主短语（已启用的短语表插件）。用不了的行被丢弃，最多保留 `local::quick_phrase::TABLE_LIMIT` 行。
     pub quick_phrase_table: Vec<QuickPhraseEntry>,
+    /// 普通候选是否追加编码匹配的快捷短语。仅 macOS 桌面宿主打开。
+    pub quick_phrase_candidates: bool,
     pub sentence_association: SentenceAssociationOptions,
     pub rescoring_context: String,
     /// Ask for every whole-sentence reading; the runtime reorders and crops them.
@@ -228,6 +230,7 @@ pub fn prepare_options_for(
         plugin_commands: Vec::new(),
         mention_entries: Vec::new(),
         quick_phrase_table: Vec::new(),
+        quick_phrase_candidates: false,
         sentence_association: SentenceAssociationOptions::default(),
         rescoring_context: String::new(),
         sentence_alternatives: false,
@@ -341,6 +344,7 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
     session.plugin_commands = options.plugin_commands.clone();
     session.mention_entries = options.mention_entries.clone();
     session.quick_phrase_table = options.quick_phrase_table.clone();
+    session.quick_phrase_candidates = options.quick_phrase_candidates;
     session.sentence_alternatives = options.sentence_alternatives;
     session.sentence_association = options.sentence_association;
     session.first_page_rows = options.first_page_rows;

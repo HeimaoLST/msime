@@ -1,20 +1,19 @@
 import type { ReactNode } from "react";
 import type { CustomSkinLibraryClient } from "../keyboard/touch-keyboard-skin-design";
-import {
-  CommunityHomePage,
-  type CommunityLocalDictionaryClient,
-  type CommunityResourceClient,
-  type CommunityResourceKind,
-  type CommunityResourceScope,
-} from "./community-resources";
-import { CommunitySkinsPage, type CommunitySkinClient } from "./community-skins";
-import {
-  CommunityCandidateSkinsPage,
-  type CandidateSkinCommunityClient,
-} from "./community-candidate-skins";
+import { CommunityHomePage } from "./community-home-page";
+import type {
+  CommunityLocalDictionaryClient,
+  CommunityResourceClient,
+  CommunityResourceKind,
+  CommunityResourceScope,
+} from "./community-resource-model";
+import { CommunitySkinsPage } from "./community-skins";
+import { type CommunitySkinClient } from "./community-skin-model";
+import { CommunityCandidateSkinsPage } from "./community-candidate-skins";
+import { type CandidateSkinCommunityClient } from "./community-candidate-skin-model";
 import type { SkinCatalog } from "../skin/external-skins";
 import type { SkinImageReader } from "../skin/skin-image";
-import type { Preferences } from "../index";
+import type { Preferences } from "../core/preferences-model";
 
 export interface CommunityPageProps {
   skins?: CommunitySkinClient;

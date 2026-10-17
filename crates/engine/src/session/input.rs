@@ -31,8 +31,8 @@ use crate::time::Instant;
 use crate::types::{
     CandidateSource, Command, CommandTableEntry, EnglishInputOptions, FirstPageRows,
     FrequencyAdjustmentOptions, KeyResult, LocalInputMode, LocalModeOptions, MentionEntry,
-    MixedExpressiveOptions, OnlineQuery, PluginCommand, QuickPhraseEntry, SchemeKey, SchemeType,
-    WordItem, WubiInputOptions,
+    MixedExpressiveOptions, PluginCommand, QuickPhraseEntry, SchemeKey, SchemeType, WordItem,
+    WubiInputOptions,
 };
 use crate::user_dictionary::ngram_store::PersonalNgramStore;
 use crate::user_dictionary::removal::learn_entered_english_word;
@@ -58,6 +58,7 @@ pub(super) struct InputSession {
     pub journal_path: PathBuf,
     pub engine: ImeSession,
     pub queries: CandidateQueries,
+    pub quick_phrase_candidates: bool,
     pub clock: Clock,
     pub profile: &'static ShuangpinProfile,
     pub caret: Option<usize>,
@@ -88,13 +89,12 @@ pub(super) struct InputSession {
     pub temporary_original_scheme: Option<SchemeType>,
     pub local_preedit: String,
     pub local_candidates: Vec<WordItem>,
+    /// 上一枚按键是交给宿主的大写字母（没有组字时 Shift+字母就走这条路）。连续按住 Shift 打大写时它让这一串开了头：后面的字母不再进快捷模式，第一枚仍照旧（#7616）。
+    pub uppercase_passthrough: bool,
     /// 插件指令行的缓存：（问的是哪一份本地预编辑串，插件给的行）。只有一槽，预编辑串一变就清掉，所以 `/uuid` 退成 `/uui` 再打回 `/uuid` 会重新问插件；预编辑串不变时（方向键、翻页、列表重建）行一直在，不再问。0 行也缓存成空表。
     pub plugin_rows: Option<(String, Vec<WordItem>)>,
     pub online_requests: OnlineRequestGuard,
-    /// 宿主为这个会话开着 AI 候选：可以问 AI 的组字先在 AI 座位上放占位行（#6888）。
-    pub ai_seat: bool,
-    /// 回答为空或失败的那次查询；它仍是当前查询时占位行显示「—」。
-    pub ai_seat_resolved: Option<OnlineQuery>,
+    pub cloud_candidates_enabled: bool,
     pub chain: CommitChain,
     pub personal_context: Arc<PersonalNgramStore>,
     pub typo_profile: Arc<PersonalTypoProfile>,
@@ -142,6 +142,7 @@ impl InputSession {
         );
         let mut session = Self {
             queries: CandidateQueries::new(&paths, profile),
+            quick_phrase_candidates: options.quick_phrase_candidates,
             engine,
             clock: Clock::default(),
             profile,
@@ -171,10 +172,11 @@ impl InputSession {
             temporary_original_scheme: None,
             local_preedit: String::new(),
             local_candidates: Vec::new(),
+            uppercase_passthrough: false,
             plugin_rows: None,
             online_requests: OnlineRequestGuard::new(),
-            ai_seat: false,
-            ai_seat_resolved: None,
+            // 宿主创建会话后显式打开；测试和嵌入式引擎默认保持离线。
+            cloud_candidates_enabled: false,
             chain: CommitChain::default(),
             personal_context: PersonalNgramStore::for_journal(&journal),
             typo_profile: PersonalTypoProfile::shared(&journal),
@@ -259,6 +261,18 @@ impl InputSession {
 
     /// input_session.cpp:88-245: caret insertion, dedicated English, local modes and their Shift entries, the acceptance gate, then the scheme. Handled iff the preedit changed.
     pub fn handle_character(&mut self, value: u8, shift_only: bool) -> KeyResult {
+        let result = self.dispatch_character(value, shift_only);
+        // #7616：交还给宿主的大写字母让这一串开了头，直到下一枚不是大写字母的键为止。
+        self.uppercase_passthrough = value.is_ascii_uppercase() && !result.handled;
+        result
+    }
+
+    /// 这一串大写到此为止：不是「交给宿主的大写字母」的按键都算结束，下一枚字母重新算这一串的第一枚（#7616）。
+    pub(super) fn end_uppercase_run(&mut self) {
+        self.uppercase_passthrough = false;
+    }
+
+    fn dispatch_character(&mut self, value: u8, shift_only: bool) -> KeyResult {
         // 改字时能写进组字的键先退出改字再照常键入；数字和空格等留给候选选择，宿主或 runtime 再按选择处理。
         if self.conversion.is_some() {
             if !(value.is_ascii_alphabetic() || value == b'\'' || value == b';') {
@@ -300,7 +314,8 @@ impl InputSession {
             return self.handle_stroke_character(value);
         }
         if !self.has_composition() {
-            let entry = if shift_only {
+            // 连续大写里只有第一枚字母能进快捷模式，第二枚起留给宿主当大写字母。
+            let entry = if shift_only && !self.uppercase_passthrough {
                 self.local_mode_for_entry(value)
             } else {
                 None
@@ -310,7 +325,7 @@ impl InputSession {
                 return KeyResult::handled().with_diagnostic(self.enter_local_mode(mode, value));
             }
         }
-        // 组字原文是 `www`、`http` 等时，`.` `:`（五笔还有 `http` 后的 `s`）把组字转成网址，必须在下面的接受过滤之前判断。
+        // 组字原文是 `www`、`http` 等时，`.` `:`（五笔还有 `http` 后的 `s`）把组字转成网址；原文由 ASCII 字母、数字组成时，`@` 把它转成邮箱。必须在下面的接受过滤之前判断。
         if let Some(text) = self.url_entry(value) {
             self.enter_url_mode(text);
             return KeyResult::handled();
@@ -407,10 +422,11 @@ impl InputSession {
                 value.is_ascii_hexdigit() || (value == b'+' && self.local_preedit == "U")
             }
             LocalInputMode::Expression => {
-                // A unit (`3jin'g`) follows a number, so letters are taken only once a digit is in, and one apostrophe only right after a letter; the spelling symbols, which tell a host what to send as a character, stay digits and operators.
-                let unit_letter = value.is_ascii_lowercase()
-                    && self.local_preedit.bytes().any(|byte| byte.is_ascii_digit());
-                let unit_separator = value == b'\'' && self.expression_takes_unit_separator();
+                // 单位字母只在数字后接收；唯一的撇号分隔单位与目标，必须紧跟单位字母。宿主的拼写符号仍只含数字与运算符。
+                let unit_letter =
+                    self.expression_takes_unit_letter(value, self.local_preedit.len());
+                let unit_separator = value == b'\''
+                    && self.expression_takes_unit_separator(self.local_preedit.len());
                 self.local_preedit.len() < GENERATED_MODE_INPUT_LIMIT
                     && (unit_letter
                         || unit_separator
@@ -426,7 +442,8 @@ impl InputSession {
                 }
                 self.local_preedit.len() < GENERATED_MODE_INPUT_LIMIT
                     && (value.is_ascii_lowercase()
-                        || (value == b'\'' && self.command_takes_word_separator()))
+                        || (value == b'\''
+                            && self.command_takes_word_separator(self.local_preedit.len())))
             }
             LocalInputMode::Url => {
                 // 网址不收的符号（`"` `<` `|` 等）和空格结束网址：交还 runtime，由它先上屏网址再处理这个键。
@@ -780,6 +797,7 @@ impl InputSession {
 
     /// input_session.cpp:294-406.
     pub fn handle_command(&mut self, command: Command) -> KeyResult {
+        self.end_uppercase_run();
         if !self.has_composition() {
             // With nothing composed every command is left to the host, which edits the text, moves the caret or inserts a newline, so the chain no longer ends where the host's text does.
             self.chain.reset();
@@ -952,6 +970,7 @@ impl InputSession {
 
     /// input_session.cpp:247-258.
     pub fn handle_candidate_key(&mut self, value: u8) -> KeyResult {
+        self.end_uppercase_run();
         // A VNI digit spells the composing word; there is no list to select from.
         if self.vietnamese_rules_apply()
             && self
@@ -984,6 +1003,7 @@ impl InputSession {
 
     /// input_session.cpp:260-292. `/` and `@` never open their modes here: a runtime finishes the composition before it asks for the mark, so an empty composition at this point does not mean the key was typed with nothing composed. They open through `handle_character`, which the runtime reaches first.
     pub fn handle_punctuation(&mut self, value: u8) -> KeyResult {
+        self.end_uppercase_run();
         if matches!(
             self.local_mode,
             LocalInputMode::Command | LocalInputMode::Mention
@@ -1097,17 +1117,26 @@ impl InputSession {
             && !self.is_all_complete_pure_pinyin()
     }
 
-    /// One apostrophe, right after a unit letter, splits `3jin'g` into the unit and its target.
-    fn expression_takes_unit_separator(&self) -> bool {
-        let preedit = self.local_preedit.as_bytes();
-        preedit.last().is_some_and(u8::is_ascii_lowercase) && !preedit.contains(&b'\'')
+    /// 数值已经出现后，表达式才收单位小写字母；光标插入与末尾输入共用这条规则。
+    pub(super) fn expression_takes_unit_letter(&self, value: u8, caret: usize) -> bool {
+        let text = self.local_preedit.as_bytes();
+        value.is_ascii_lowercase() && text[..caret.min(text.len())].iter().any(u8::is_ascii_digit)
     }
 
-    /// Whether an apostrophe now is a separator of the expression or command mode (`3jin'g`, `/fyhello'world`) rather than punctuation that ends it.
+    /// 数值单位与目标之间的单个撇号只能插在单位字母后，且整段尚无其他撇号。
+    pub(super) fn expression_takes_unit_separator(&self, caret: usize) -> bool {
+        let text = self.local_preedit.as_bytes();
+        let caret = caret.min(text.len());
+        text[..caret].last().is_some_and(u8::is_ascii_lowercase) && !text.contains(&b'\'')
+    }
+
+    /// 当前光标处的撇号是否分隔本地模式的单位、单词或部件，而非结束组字的标点。
     pub fn takes_local_separator(&self) -> bool {
         match self.local_mode {
-            LocalInputMode::Expression => self.expression_takes_unit_separator(),
-            LocalInputMode::Command => self.command_takes_word_separator(),
+            LocalInputMode::Expression => {
+                self.expression_takes_unit_separator(self.caret_position())
+            }
+            LocalInputMode::Command => self.command_takes_word_separator(self.caret_position()),
             LocalInputMode::Chaizi => self.chaizi_takes_symbol(b'\'', self.caret_position()),
             _ => false,
         }
@@ -1137,12 +1166,12 @@ impl InputSession {
         }
     }
 
-    /// One apostrophe after each word of `/fy` separates it from the next.
-    fn command_takes_word_separator(&self) -> bool {
+    /// 翻译命令只在光标前已有触发词和单词字母时接受分词撇号。
+    pub(super) fn command_takes_word_separator(&self, caret: usize) -> bool {
         self.local_mode == LocalInputMode::Command
             && self
                 .local_preedit
-                .get(1..)
+                .get(1..caret)
                 .is_some_and(crate::local::command::takes_word_separator)
     }
 
@@ -1209,9 +1238,9 @@ impl InputSession {
                 String::new()
             };
         }
-        // 组字原文是网址触发词时发布触发键，runtime 才会把它当作字符送进来，而不是先结束组字。发布的键必须正是 `url_entry` 接受的键。
+        // 组字原文是网址触发词时发布触发键，原文能做邮箱的本地部分时发布 `@`，runtime 才会把它当作字符送进来，而不是先结束组字。发布的键必须正是 `url_entry` 接受的键。
         if let Some(keys) = self.url_entry_keys() {
-            return keys.to_owned();
+            return keys;
         }
         if self.has_composition() || !self.scheme().opens_table_modes() {
             return String::new();
@@ -1382,6 +1411,14 @@ impl InputSession {
         }
     }
 
+    pub fn set_cloud_candidates_enabled(&mut self, enabled: bool) {
+        if self.cloud_candidates_enabled == enabled {
+            return;
+        }
+        self.cloud_candidates_enabled = enabled;
+        self.update_mixed_candidates();
+    }
+
     pub fn set_rescoring_context(&mut self, context: &str) {
         self.engine.set_rescoring_context(context);
     }
@@ -1424,6 +1461,7 @@ impl InputSession {
 
     /// Resets the chain and recomputes when the list was personally reranked.
     pub fn reset_commit_context(&mut self) {
+        self.end_uppercase_run();
         self.chain.reset();
         // A list reordered for the forgotten context must not stay on screen.
         if self.personal_reranked {
@@ -1722,8 +1760,8 @@ impl InputSession {
                 .is_none_or(|caret| caret >= self.editing_text_len())
     }
 
-    /// 当前组字的网址触发键；组字原文不是触发词或条件不满足时为 `None`。
-    fn url_entry_keys(&self) -> Option<&'static str> {
+    /// 当前组字进入网址模式的按键（触发键和邮箱的 `@`）；没有这样的键或条件不满足时为 `None`。
+    fn url_entry_keys(&self) -> Option<String> {
         if !self.url_entry_ready() {
             return None;
         }
@@ -1741,13 +1779,66 @@ impl InputSession {
         opens.then(|| format!("{raw}{}", char::from(value)))
     }
 
-    /// 丢弃组字（连同引擎里的原文和候选），以 `text` 为预编辑进入网址模式。
-    fn enter_url_mode(&mut self, text: String) {
+    /// 丢弃组字（连同引擎里的原文和候选），以 `text` 为预编辑进入网址模式；已在网址模式时换成新的预编辑（选中网址补全）。
+    pub(super) fn enter_url_mode(&mut self, text: String) {
         self.reset_composition();
         self.local_mode = LocalInputMode::Url;
         self.local_preedit = text;
         self.chain.reset();
         self.add_local_fallback_candidate();
+        self.add_url_completions();
+    }
+
+    /// 网址模式在整段网址那一行后面接上补全：邮箱后缀和顶级域名（`url::email_completions`、`url::tld_completions`）。整段网址留在第一行，空格、失焦和结束网址的标点上屏的仍是用户打的网址，补全要明确选中才用。来源记成 `Fallback` 而不是 `Generated`：runtime 的整句读法降位按 `Generated` 认词网格整句，同样宽的补全会被当成整句挪位。
+    pub(super) fn add_url_completions(&mut self) {
+        let completions = url::email_completions(&self.local_preedit)
+            .into_iter()
+            .chain(url::tld_completions(&self.local_preedit));
+        self.local_candidates.extend(
+            completions.map(|text| WordItem::new("", text, 0, CandidateSource::Fallback, "")),
+        );
+    }
+
+    /// 组字原文是 `ht`、`www` 这类网址开头时，在候选里接上 `https://`、`www.` 等补全（`url::scheme_completions`）：第一行是词典或英文词典里的词（五笔 `www` 的“众”）时排在它后面，否则排在最前面。五笔四码（`http`）不加：runtime 的顶字在第 5 个字母上选第一行，补全领先时 `s` 会接到 `https://` 后面，而 `http` 加 `s` 本来直接进入网址模式。
+    pub(super) fn insert_url_scheme_completions(&self, items: &mut Vec<WordItem>) {
+        if !self.url_entry_ready() || (self.is_wubi() && self.raw_with_cases().len() >= 4) {
+            return;
+        }
+        let at = usize::from(items.first().is_some_and(|item| {
+            item.source.is_dictionary() || item.source == CandidateSource::EnglishDictionary
+        }));
+        let completions = url::scheme_completions(self.raw_with_cases())
+            .map(|text| WordItem::new("", text, 0, CandidateSource::Fallback, ""));
+        items.splice(at..at, completions);
+    }
+
+    /// 这一行是网址补全：组字里的 `https://` 等，或网址模式里补全了邮箱后缀、顶级域名的行。补全不算回答了按键，重排模型不拿它比较。
+    pub(super) fn is_url_completion(&self, item: &WordItem) -> bool {
+        if item.source != CandidateSource::Fallback {
+            return false;
+        }
+        match self.local_mode {
+            LocalInputMode::None => {
+                self.url_entry_ready()
+                    && url::scheme_completions(self.raw_with_cases()).any(|text| text == item.word)
+            }
+            LocalInputMode::Url => item.word != self.local_preedit,
+            _ => false,
+        }
+    }
+
+    /// 选中第 `index` 行时不上屏、以它为预编辑（重新）进入网址模式的行：组字里的 `https://` 等，和网址模式里补全了顶级域名的行（之后还可能接着打路径）。邮箱补全选中即上屏，不在此列。
+    pub(super) fn url_continuation(&self, index: usize) -> Option<String> {
+        let item = self.candidates().get(index)?;
+        let continues = match self.local_mode {
+            LocalInputMode::None => self.is_url_completion(item),
+            LocalInputMode::Url => {
+                item.source == CandidateSource::Fallback
+                    && url::tld_completions(&self.local_preedit).contains(&item.word)
+            }
+            _ => false,
+        };
+        continues.then(|| item.word.clone())
     }
 
     fn enter_local_mode(&mut self, mode: LocalInputMode, letter: u8) -> Option<String> {
@@ -1817,7 +1908,7 @@ impl InputSession {
         KeyResult::handled()
     }
 
-    /// 网址模式删掉 `removed` 后剩下 `remaining` 时是否退回组字：恰为进入网址模式的逆操作，即组字原文 `remaining` 按下 `removed` 正好会进入网址模式（`www.` 删掉 `.`、五笔 `https` 删掉 `s`），误触发后还能选回原来的字（五笔 `www` 的“众”）。`www.example` 删掉中间的 `.` 不满足，留在网址模式。退格和光标处的删除走同一条规则。
+    /// 网址模式删掉末尾的 `removed` 后剩下 `remaining` 时是否退回组字：恰为进入网址模式的逆操作，即组字原文 `remaining` 按下 `removed` 正好会进入网址模式（`www.` 删掉 `.`、五笔 `https` 删掉 `s`、`zhangsan@` 删掉 `@`），误触发后还能选回原来的字（五笔 `www` 的“众”）。`www.example` 删掉中间的 `.` 不满足，留在网址模式。退格和光标处的删除走同一条规则；删的不是末尾那个字符时由调用方排除（`abc@def` 删掉 `@`）。
     pub(super) fn url_reverts(&self, remaining: &str, removed: char) -> bool {
         let Ok(key) = u8::try_from(removed) else {
             return false;
@@ -1839,21 +1930,14 @@ impl InputSession {
         }
     }
 
-    fn commit_raw(&mut self) -> KeyResult {
+    pub(super) fn commit_raw(&mut self) -> KeyResult {
         // 笔画的预编辑是字形，Enter 上屏的是键入的字母串（与粤拼一致）。
         let mut raw = if self.stroke_rules_apply() {
             self.engine.request().raw_input.clone()
         } else {
             self.preedit()
         };
-        // The temporary modes' prefix letter is a mode marker, not text; every other local mode commits it (core-session.md §15.5).
-        if matches!(
-            self.local_mode,
-            LocalInputMode::TemporaryEnglish | LocalInputMode::TemporaryJapanese
-        ) && !raw.is_empty()
-        {
-            raw.remove(0);
-        }
+        // 回车上屏的是屏幕上这段预编辑原文，本地模式的入口字母也算在内：临时模式以前把入口字母当标记丢掉，空输入时回车什么都不上屏（#7616）。进词库的词仍要去掉标记，见下面学习那一处。
         // 五笔临时拼音反查的引导键 `z` 同样是标记：回车上屏的是键入的拼音。
         if self.local_mode == LocalInputMode::None
             && !self.dedicated_english
@@ -1866,7 +1950,7 @@ impl InputSession {
             && learn_entered_english_word(
                 &self.paths.dictionary(assets::ENGLISH_DICTIONARY),
                 self.journal_path(),
-                &raw,
+                self.local_mode.without_entry_marker(&raw),
                 ENTERED_ENGLISH_WORD_WEIGHT,
             )
             .is_err()

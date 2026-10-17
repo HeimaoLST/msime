@@ -800,12 +800,13 @@ inline std::vector<Slice> source_slices(Breakdown const &breakdown) {
     const wchar_t *title;
     const wchar_t *symbol;
   };
-  static constexpr std::array<Source, 21> sources{{{"quanpin", L"全拼 26 键", L"全"},
+  static constexpr std::array<Source, 22> sources{{{"quanpin", L"全拼 26 键", L"全"},
                                                    {"nineKey", L"全拼 9 键", L"9"},
                                                    {"shuangpin", L"小鹤双拼", L"鹤"},
                                                    {"ziranma", L"自然码双拼", L"自"},
                                                    {"microsoft", L"微软双拼", L"微"},
                                                    {"shoudao", L"首道双拼", L"首"},
+                                                   {"smart_abc", L"智能 ABC 双拼", L"智"},
                                                    {"wubi", L"五笔", L"五"},
                                                    {"japanese", L"日语", L"日"},
                                                    {"korean", L"韩语", L"韩"},
@@ -833,7 +834,7 @@ inline std::vector<Slice> language_slices(Breakdown const &breakdown) {
   auto source = [&breakdown](const char *id) { return value_of(breakdown.sources, id); };
   return {
       {"chinese", L"中文模式",
-       sum_values(breakdown.sources, {"quanpin", "nineKey", "shuangpin", "ziranma", "microsoft", "shoudao", "wubi",
+       sum_values(breakdown.sources, {"quanpin", "nineKey", "shuangpin", "ziranma", "microsoft", "shoudao", "smart_abc", "wubi",
                                       "cantonese", "zhuyin", "stroke"}),
        chart_palette[0], L"中"},
       {"japanese", L"日语模式", source("japanese"), chart_palette[4], L"日"},
@@ -1345,6 +1346,43 @@ inline std::string retention_value(std::string const &retention) {
     if (retention == choice.value)
       return retention;
   return "forever";
+}
+
+// msime_client_account 的 typing_upload_* 回答的 {enabled, last_upload_ms, signed_in}。
+struct UploadStatus {
+  bool enabled = false;
+  std::optional<uint64_t> last_upload_ms;
+  bool signed_in = false;
+};
+
+// 「上传到云端」（`typing-statistics-upload.tsx`）：开关的说明随登录状态变；上传和删除失败时的说法（uploadErrorMessage）。Windows 经 msime_client_account 的 typing_upload_*，统计目录读写失败是 account_storage，和共享应用的 storage 同一句。
+inline std::wstring_view upload_description(bool signed_in, bool enabled) {
+  return signed_in || enabled
+             ? L"把每天的字数、活跃时长、时段、输入方式和候选位次上传到你的水杉账号，供 QQ 群助手的 /stats 查看。只有计数，不含输入内容；关闭时删除云端的数据。"
+             : L"登录水杉账号后可以打开，供 QQ 群助手的 /stats 查看。只有计数，不含输入内容。";
+}
+
+inline std::wstring upload_error_message(std::wstring_view code, bool enabling) {
+  if (code == L"account_unauthorized")
+    return L"先在「账号」页登录水杉账号，再打开上传。";
+  if (code == L"account_rate_limited")
+    return L"上传过于频繁，过一会儿会自动再传。";
+  if (code == L"storage" || code == L"account_storage")
+    return L"无法读取或保存上传设置，请稍后重试。";
+  return enabling ? L"已打开上传，但这次没有传上去，稍后会自动再试。"
+                  : L"已关闭上传，但云端的数据没有删掉，请联网后打开再关闭一次。";
+}
+
+inline std::wstring_view upload_done_message(bool enabled) {
+  return enabled ? L"已打开上传，最近 7 天的每日计数已传到你的水杉账号。"
+                 : L"已关闭上传，云端的打字统计已删除。";
+}
+
+// 统计关着时的说明和页底的隐私说明：打开了上传时改写「只保存在本机」（typing-statistics.tsx 的 uploadEnabled 分支）。
+inline std::wstring_view disabled_notice(bool upload_enabled) {
+  return upload_enabled
+             ? L"开启后这里会显示输入字数、速度、时段分布与按键热力图。统计不记录输入内容；已打开「上传到云端」，每日计数会上传到你的水杉账号。"
+             : L"开启后这里会显示输入字数、速度、时段分布与按键热力图。统计只保存在本机，不记录输入内容，也不联网。";
 }
 
 } // namespace msime::settings::typing

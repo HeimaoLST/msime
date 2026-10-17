@@ -60,8 +60,8 @@ int main(int argc, char **argv) {
            true, "Alt/Ctrl+digit is taken while incremental candidates are open");
     expect(sink, "_candidateMode == CANDIDATE_ORIGINAL &&\n            !_serverUnavailableFallbackActive", false,
            "the gloss shortcut no longer waits for the wildcard candidate list");
-    // 排队路径：看投影里的组字，不只看 CANDIDATE_ORIGINAL。
-    expect(sink, "_deferredKeyProjectionValid ? (_deferredProjectedInputLength > 0 || _deferredProjectedCandidateActive)\n                                    : (_candidateMode != CANDIDATE_NONE);",
+    // 排队初次分类看投影，执行时重分类看真实候选状态，不只认 CANDIDATE_ORIGINAL。
+    expect(sink, "useProjection ? (_deferredProjectedInputLength > 0 || _deferredProjectedCandidateActive)\n                                    : (_candidateMode != CANDIDATE_NONE);",
            true, "a queued gloss shortcut sees the projected composition");
     expect_before(sink, "projectedCandidateListOpen &&", "IsGlossColumnShortcut(*classifiedCode, capturedModifiers)",
                   "a queued Alt/Ctrl+digit is gated on the projected candidate list");
@@ -77,8 +77,8 @@ int main(int argc, char **argv) {
     // 宿主会话拥有组字时数字在 _HandleCandidateWorker 里选词：先读 Server 的回复，CommitExactText 时上屏释义，不向宿主会话选词。
     const std::string worker = between(presenter, "HRESULT CMetasequoiaIME::_HandleCandidateWorker(", "\n}\n");
     expect_before(worker, "TryReadDataFromServerPipeWithTimeout(requestId, /*abortTransportOnTimeout=*/false)",
-                  "host->select(displayed._EngineGeneration", "the host digit path reads the Server's reply before selecting");
-    expect_before(worker, "Global::DataFromServerMsgType::CommitExactText", "host->select(displayed._EngineGeneration",
+                  "_SelectHighlightedHostCandidate(ec, pContext)", "the host digit path reads the Server's reply before selecting");
+    expect_before(worker, "Global::DataFromServerMsgType::CommitExactText", "_SelectHighlightedHostCandidate(ec, pContext)",
                   "an exact-text reply is committed instead of the host candidate");
     expect(worker, "return _CommitServerExactText(ec, pContext, exactText);", true, "the host digit path commits the gloss");
     // 空格、回车和非宿主会话的数字走 _HandleCandidateFinalize，同一个上屏函数。

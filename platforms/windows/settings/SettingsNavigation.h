@@ -24,8 +24,8 @@ struct Page {
 
 inline constexpr std::size_t page_group_count = 6;
 
-// 侧栏，顺序和分组与共享设置 UI 的 `settingsNavGroups`（`packages/ui/src/settings/settings-page-registry.ts`）一致：打字、外观、更多输入方式、工具、账号、支持。打字排在外观之前，因为打字会反复调整，外观通常只设一次。分组标题在 `main.cpp` 里。
-inline constexpr std::array<Page, 18> pages{{
+// 侧栏，顺序和分组与共享设置 UI 在桌面上的侧栏一致，即 `settingsNavGroups`（`packages/ui/src/settings/settings-page-registry.ts`）去掉 `desktopMergedPages` 里并进别的页的那些：打字、外观、更多输入方式、工具、账号、支持。「帮助与反馈」并进了「关于」，所以支持组没有 feedback，它的路由打开「关于」。打字排在外观之前，因为打字会反复调整，外观通常只设一次。分组标题在 `main.cpp` 里。「手写输入」没有单独的页面：Windows 的手写设置只有一个打开面板的按钮，与共享设置 UI 的 `settingsPageProjections`（`handwritingOnScreenKeyboardPage`）一样并进「屏幕键盘」页，那一页在提供手写的版本里叫「屏幕键盘与手写」。
+inline constexpr std::array<Page, 16> pages{{
     {"typing", 0, PageHost::Native, {}},
     {"expression", 0, PageHost::Native, {}},
     {"shortcuts", 0, PageHost::Native, {}},
@@ -35,14 +35,12 @@ inline constexpr std::array<Page, 18> pages{{
     {"toolbar", 1, PageHost::Native, {}},
     {"osk", 2, PageHost::Native, {}},
     {"voice", 2, PageHost::Native, {}},
-    {"hand", 2, PageHost::Native, {}},
     {"clip", 3, PageHost::Native, {}},
     {"stats", 3, PageHost::Native, {}},
     {"plugins", 3, PageHost::Native, {}},
     {"ai", 3, PageHost::Native, {}},
     {"account", 4, PageHost::Native, {}},
     {"dev", 5, PageHost::Native, {}},
-    {"feedback", 5, PageHost::Native, {}},
     {"about", 5, PageHost::Native, {}},
 }};
 
@@ -67,7 +65,7 @@ struct RouteAlias {
   std::string_view page;
 };
 
-// 共享路由词汇表（`client-core` 的 `host_surface::SettingsCategory`）认识的每个设置类别，映射到现在承载它的页面。每个 id 保持它在其他所有宿主上的含义：`appearance` 是候选窗口页，`skin` 是主题页。托盘会打开 `skin`、`dictionary` 和 `about`，其他桌面启动入口也用同样的名字。本窗口没有单独的社区页，社区皮肤是主题页的一个标签，所以 `community` 打开主题页；AI 对话是 AI 辅助的子页（Windows 不提供，见 README），`chat` 打开 AI 辅助。
+// 共享路由词汇表（`client-core` 的 `host_surface::SettingsCategory`）认识的每个设置类别，映射到现在承载它的页面。每个 id 保持它在其他所有宿主上的含义：`appearance` 是候选窗口页，`skin` 是主题页。托盘会打开 `skin`、`dictionary` 和 `about`，其他桌面启动入口也用同样的名字。本窗口没有单独的社区页，社区皮肤是主题页的一个标签，所以 `community` 打开主题页；AI 对话是 AI 辅助的子页（Windows 不提供，见 README），`chat` 打开 AI 辅助。帮助与反馈和共享桌面侧栏一样并进了「关于」（`desktopMergedPages`），托盘和工具栏菜单的「帮助」「反馈」（`help`、`feedback`）都打开「关于」。
 inline constexpr std::array<RouteAlias, 22> route_aliases{{
     {"account", "account"},
     {"chat", "ai"},
@@ -81,16 +79,16 @@ inline constexpr std::array<RouteAlias, 22> route_aliases{{
     {"vocabulary", "lexicon"},
     {"skin", "themes"},
     {"screen-keyboard", "osk"},
-    {"handwriting", "hand"},
+    {"handwriting", "osk"},
     {"voice", "voice"},
     {"ai", "ai"},
     {"tools", "clip"},
     {"plugins", "plugins"},
     {"floating-toolbar", "toolbar"},
     {"developer", "dev"},
-    {"help", "feedback"},
+    {"help", "about"},
     {"about", "about"},
-    {"feedback", "feedback"},
+    {"feedback", "about"},
 }};
 
 constexpr const Page *find_page(std::string_view id) {
@@ -110,15 +108,11 @@ constexpr std::string_view page_for_route(std::string_view route) {
   return default_page;
 }
 
-// 本次构建是否提供这个页面。手写识别器只认汉字，不提供手写的版本（日文、越南文和藏文版的 `MSIME_EDITION_HANDWRITING` 为 0）没有「手写输入」页，其他页面每个版本都有。版本的开关由调用方传进来，这个头文件因此不依赖版本宏，主机上的单元测试也能把两种答案都查到。
-constexpr bool page_offered(std::string_view id, bool handwriting) {
-  return id != "hand" || handwriting;
-}
-
-// 传入的路由在本次构建里打开的页面：与 `page_for_route` 相同，只是本版本不提供的页面改为打开默认页。
+// 传入的路由在本次构建里打开的页面：与 `page_for_route` 相同，只是手写识别器只认汉字，不提供手写的版本（日文、越南文和藏文版的 `MSIME_EDITION_HANDWRITING` 为 0）没有手写可设置，`handwriting` 改为打开默认页，与共享设置 UI 只在有手写时才把 `handwriting` 别名到屏幕键盘页一致。每个页面每个版本都有。版本的开关由调用方传进来，这个头文件因此不依赖版本宏，主机上的单元测试也能把两种答案都查到。
 constexpr std::string_view offered_page_for_route(std::string_view route, bool handwriting) {
-  const auto page = page_for_route(route);
-  return page_offered(page, handwriting) ? page : default_page;
+  if (route == "handwriting" && !handwriting)
+    return default_page;
+  return page_for_route(route);
 }
 
 } // namespace msime::settings

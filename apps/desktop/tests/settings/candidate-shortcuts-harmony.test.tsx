@@ -53,6 +53,8 @@ test("the HarmonyOS phone's paging keys use the design's labels in a two-column 
       wordCharacter={wordCharacter}
       linux={false}
       harmonyPhone
+      // HarmonyOS 把 Tab 和 PageUp/PageDown 固定为开（HostCapabilities.tab_page_paging_switches 为假），网格里只剩五项。
+      tabPageSwitches={false}
       onChange={onChange}
     />,
   );
@@ -67,11 +69,15 @@ test("the HarmonyOS phone's paging keys use the design's labels in a two-column 
     "，/ 。",
     "[ / ]",
     "↑ / ↓",
-    "Shift+Tab / Tab",
-    "PgUp / PgDn",
+    "← / →",
   ]);
+  expect(
+    screen.getByText("Shift+Tab / Tab 和 PageUp / PageDown 在候选栏显示时始终翻页"),
+  ).toBeTruthy();
   expect(screen.queryByText(/鼠标滚轮/)).toBeNull();
   expect(screen.getByRole("checkbox", { name: "↑ / ↓" })).toHaveProperty("checked", true);
+  // 左右键移动候选是后加的可选开关：文档里没有它时按关闭显示。
+  expect(screen.getByRole("checkbox", { name: "← / →" })).toHaveProperty("checked", false);
 
   // 打开以词定字正在使用的那对按键时，仍会把它让出去，与「输入」页一致。
   fireEvent.click(screen.getByRole("checkbox", { name: "[ / ]" }));
@@ -178,9 +184,12 @@ test("the HarmonyOS phone 候选栏 page has only the 候选栏 group, with the 
   expect(within(candidate).getByRole("slider", { name: "候选字号" })).toHaveProperty("value", "18");
   const more = candidate.querySelector("details");
   expect(more).not.toBeNull();
-  for (const title of ["候选字体", "预编辑字号", "候选栏预编辑"]) {
+  for (const title of ["候选字体", "预编辑字号"]) {
     expect(screen.getByText(title).closest("details")).toBe(more);
   }
+  // 触屏键盘把拼写写进输入框、候选栏不画它，没有「候选栏预编辑」和「行内预编辑」。
+  expect(screen.queryByText("候选栏预编辑")).toBeNull();
+  expect(screen.queryByText("行内预编辑")).toBeNull();
 });
 
 // ---- 外接键盘快捷键 ----
@@ -385,14 +394,17 @@ function renderShortcutsPage(setDraft = vi.fn(), overrides: Partial<SettingsForm
 
 test("the HarmonyOS phone 外接键盘快捷键 page writes the paging keys it shows", () => {
   const setDraft = vi.fn();
-  renderShortcutsPage(setDraft);
+  renderShortcutsPage(setDraft, { showTabPagePagingSwitches: false });
 
   const paging = groupTitled("翻页");
-  fireEvent.click(within(paging).getByRole("checkbox", { name: "PgUp / PgDn" }));
+  // Tab 和 PageUp/PageDown 固定开启，这一页不再列出它们。
+  expect(within(paging).queryByRole("checkbox", { name: "Shift+Tab / Tab" })).toBeNull();
+  expect(within(paging).queryByRole("checkbox", { name: "PgUp / PgDn" })).toBeNull();
+  fireEvent.click(within(paging).getByRole("checkbox", { name: "↑ / ↓" }));
   const update = setDraft.mock.calls.at(-1)?.[0] as (current: Preferences) => Preferences;
   expect(update({ navigation } as Preferences).navigation).toEqual({
     ...navigation,
-    page_up_down: false,
+    arrows: false,
   });
 });
 

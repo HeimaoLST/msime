@@ -1,9 +1,36 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// 「社区」标签页的根页面：标题下固定一排「皮肤 / 词库」分段，固定方式与皮肤页的分类相同。两段分别嵌入完整的皮肤社区和词库社区列表，搜索、分类、详情、获取或添加、举报和发布都在各自的列表里，右上角的发布按钮跟着当前分段走。所选分段存在 `AppNavigation` 里，推入详情页再返回、切换标签页再回来都保留，词库页的「浏览更多词库」也靠它直接落在「词库」。回复模板不在这里，仍在「AI 润色与回复」页里浏览。
+struct CommunityHomeView: View {
+  @EnvironmentObject private var navigation: AppNavigation
+  @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+  var body: some View {
+    Group {
+      switch navigation.communitySegment {
+      case .skin: SkinCommunityView(embedded: true)
+      case .dictionary: CommunityResourcesView(kind: .dictionary, embedded: true)
+      }
+    }
+    .designPinnedSegments {
+      DesignSegmentedControl(items: [("皮肤", AppNavigation.CommunitySegment.skin), ("词库", .dictionary)],
+                             selection: $navigation.communitySegment, style: .rounded, identifierPrefix: "communityTab")
+        .frame(maxWidth: horizontalSizeClass == .regular ? CommunityLayout.regularMaxWidth : .infinity)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 16).padding(.vertical, 8)
+    }
+    .designCanvasBackground()
+    .navigationTitle("社区")
+    .navigationBarTitleDisplayMode(.large)
+  }
+}
+
 struct CommunityResourcesView: View {
   let kind: CommunityResourceKind
   var initialScope = ""
+  /// 嵌在「社区」标签页的「词库」分段里时为 true：不设自己的导航标题，沿用「社区」；发布按钮照常放在导航栏右侧。
+  var embedded = false
   private var scope: String { initialScope }
   @State private var search = ""
   @State private var items: [CommunityResource] = []
@@ -32,6 +59,13 @@ struct CommunityResourcesView: View {
     return signedIn
   }
   var body: some View {
+    if embedded { page } else {
+      page.navigationTitle(initialScope.isEmpty ? "\(kind.title)社区" : "\(initialScope == "saved" ? "收藏的" : "我发布的")\(kind.title)")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+  }
+
+  private var page: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 16) {
         CommunitySearchField(text: $search, placeholder: "搜索\(kind.title)") { startLoad() }
@@ -56,8 +90,6 @@ struct CommunityResourcesView: View {
       }.communityPageContent(regular: horizontalSizeClass == .regular)
     }
     .background(MetasequoiaTheme.canvas)
-    .navigationTitle(initialScope.isEmpty ? "\(kind.title)社区" : "\(initialScope == "saved" ? "收藏的" : "我发布的")\(kind.title)")
-    .navigationBarTitleDisplayMode(.inline)
     .toolbar {
       if offersPublishing {
         ToolbarItem(placement: .navigationBarTrailing) {
@@ -81,7 +113,6 @@ struct CommunityResourcesView: View {
       }
     }) { AccountLoginSheet() }
     .task {
-      request.appear()
       let state = (try? await SkinCommunityAPI.shared.signedIn()) ?? false
       guard request.isVisible, !Task.isCancelled else { return }
       signedIn = state
@@ -89,11 +120,11 @@ struct CommunityResourcesView: View {
     }
     .refreshable { await refreshInstalled(); await load() }
     // 每次回到列表都重读：详情页里导入词库、添加或移除回复模板后，返回时胶囊按钮跟着变。
-    .onAppear { request.appear(); Task { await refreshInstalled() } }
-    .onDisappear {
-      ViewRequestTask.disappear(request: $request, pending: $pending)
+    .trackViewRequest(request: $request, pending: $pending, onAppear: {
+      Task { await refreshInstalled() }
+    }, onDisappear: {
       busy = false
-    }
+    })
     .confirmationDialog("导入这版词库到本机？", isPresented: Binding(get: { confirmingImport != nil }, set: { if !$0 { confirmingImport = nil } }),
                         titleVisibility: .visible, presenting: confirmingImport) { item in
       Button("导入 \(item.content.entries?.count ?? 0) 条词条") { add(item) }
@@ -282,17 +313,14 @@ struct CommunityReplyTemplatesSection: View {
       NavigationLink { CommunityResourcesView(kind: .reply) } label: { Text("浏览更多回复模板") }
         .accessibilityIdentifier("replyCommunityLink")
         .task {
-          request.appear()
           startLoad()
         }
-        .onAppear { request.appear() }
-        .onDisappear {
-          ViewRequestTask.disappear(request: $request, pending: $pending)
+        .trackViewRequest(request: $request, pending: $pending, onDisappear: {
           addGeneration.invalidate()
           addTasks.values.forEach { $0.cancel() }
           addTasks.removeAll()
           adding.removeAll()
-        }
+        })
         .alert("社区回复模板", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
           Button("好", role: .cancel) {}
         } message: { Text(message ?? "") }
@@ -428,7 +456,7 @@ struct CommunityResourceDetail: View {
           Text("提示词预览").font(.headline)
           Text(item.content.prompt ?? "").font(.body).textSelection(.enabled)
             .padding().frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+            .background(MetasequoiaTheme.surface, in: RoundedRectangle(cornerRadius: 12))
           Button("添加到高情商回复键盘") { run { id in
             try await SkinCommunityAPI.shared.saveResource(item.id, saved: true)
             try request.checkCurrent(id)
@@ -480,9 +508,8 @@ struct CommunityResourceDetail: View {
         }
         if busy { ProgressView() }
       }.padding(20)
-    }.background(Color(uiColor: .systemGroupedBackground)).navigationTitle(item.kind == .dictionary ? "词库详情" : "回复模板")
+    }.designCanvasBackground().navigationTitle(item.kind == .dictionary ? "词库详情" : "回复模板")
       .task {
-        request.appear()
         run { id in
         let latest = try await SkinCommunityAPI.shared.resource(initial.id)
         try request.checkCurrent(id)
@@ -514,11 +541,9 @@ struct CommunityResourceDetail: View {
       .alert("社区", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
         Button("好", role: .cancel) {}
       } message: { Text(message ?? "") }
-      .onAppear { request.appear() }
-      .onDisappear {
-      ViewRequestTask.disappear(request: $request, pending: $pending)
-      busy = false
-      }
+      .trackViewRequest(request: $request, pending: $pending, onDisappear: {
+        busy = false
+      })
   }
   private func run(_ action: @escaping @MainActor (UUID) async throws -> Void) {
     ViewRequestTask.run(request: $request, busy: $busy, message: $message, pending: $pending, action: action)
@@ -575,6 +600,9 @@ struct CommunityResourceEditor: View {
               } catch { message = error.localizedDescription }
             }.disabled(code.isEmpty || word.isEmpty)
             Button("从词库 JSON 文件选择") { importing = true }
+            // iOS 把细胞词库导入个人词库时不记来源，没法像共享设置页那样逐条核对，只能写明规则。
+            Text("只发布你自己整理的词条。从搜狗细胞词库等第三方词库导入的词不能发布：它们的整理成果属于原作者，公开分享可能侵犯原作者的权利。")
+              .font(.caption).foregroundStyle(.secondary)
           }
           Section("待发布预览 · \(words.count)/128") {
             ForEach(words) { entry in
@@ -633,11 +661,9 @@ struct CommunityResourceEditor: View {
         } message: { Text(message ?? "") }
     }
     .navigationViewStyle(.stack)
-    .onAppear { request.appear() }
-    .onDisappear {
-      ViewRequestTask.disappear(request: $request, pending: $pending)
+    .trackViewRequest(request: $request, pending: $pending, onDisappear: {
       busy = false
-    }
+    })
   }
 
 

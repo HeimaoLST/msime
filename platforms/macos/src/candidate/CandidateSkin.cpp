@@ -114,7 +114,7 @@ SkinTokens NativeCandidateTokens(bool dark)
     return tokens;
 }
 
-void DeriveSelectedForegrounds(SkinTokens &tokens, bool text, bool number)
+void DeriveSelectedForegrounds(SkinTokens &tokens, bool text, bool number, bool translation)
 {
     if (text)
     {
@@ -124,6 +124,12 @@ void DeriveSelectedForegrounds(SkinTokens &tokens, bool text, bool number)
     {
         const Rgba contrast = ContrastingText(tokens.selected, tokens.number);
         tokens.selectedNumber = tokens.selected.a < 0.85f ? tokens.number : Rgba{contrast.r, contrast.g, contrast.b, 0.82f};
+    }
+    if (translation && tokens.translation)
+    {
+        // 选中释义是选中底色上的次要色，设计稿里就是选中序号的颜色（dc.html L1533 candSelTr），所以取同样的 0.82。更淡的 0.72 在 #4D6BFE 这样的中等亮度底色上对比度只剩 3:1 左右，读音行再减淡就读不清了。
+        const Rgba contrast = ContrastingText(tokens.selected, *tokens.translation);
+        tokens.selectedTranslation = tokens.selected.a < 0.85f ? *tokens.translation : Rgba{contrast.r, contrast.g, contrast.b, 0.82f};
     }
 }
 
@@ -503,6 +509,7 @@ SkinTokens ToolbarSkinTokens(const ResolvedSkin &skin, const std::filesystem::pa
     // A package's card radius is in skin.tokens.radius; the toolbar starts from the native radius instead and takes only the package's toolbar radius.
     tokens.radius = NativeCandidateTokens(skin.dark).radius;
     tokens.translation.reset();
+    tokens.selectedTranslation.reset();
     tokens.divider.reset();
     if (!skin.candidateSkin.empty())
     {
@@ -527,7 +534,7 @@ SkinTokens ToolbarSkinTokens(const ResolvedSkin &skin, const std::filesystem::pa
     return tokens;
 }
 
-// LoadSkinPackage and ScanSkinCatalog live in SkinManifestBridge.mm: manifests are validated by the shared client-core loader over the host C ABI.
+// `LoadSkinPackage` 和 `ScanSkinCatalog` 在 SkinManifestBridge.mm 中：清单经宿主 C ABI 交给共享的 client-services 加载器校验。
 
 SkinSlot SkinSlotOfBase(std::string_view base)
 {
@@ -601,7 +608,7 @@ std::vector<SkinListEntry> ListSkins(const std::filesystem::path &skinsRoot)
     return entries;
 }
 
-// ThemeCatalog and ResolveSkin live in SkinManifestBridge.mm as well: both are answered by the shared client-core theme module over the host C ABI.
+// `ThemeCatalog` 和 `ResolveSkin` 也在 SkinManifestBridge.mm 中：两者都经宿主 C ABI 由共享的 client-services 主题模块应答。
 
 std::filesystem::path DefaultSkinsRoot()
 {

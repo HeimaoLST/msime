@@ -168,8 +168,7 @@ inline bool IsPunctuationLocked()
 }
 
 inline std::atomic_bool PagingCommaPeriodEnabled{false};
-// Opt-in: keep the safe disabled state until the Server sends persisted
-// settings, including during a transient worker reconnect.
+// 在 Server 送来已存的设置之前（包括 worker 短暂重连期间）保持关：智能标点虽然默认开，但用户可能关掉了它，没拿到设置就改写标点会违背用户的选择；Server 一连上就按偏好文档发来真实的值。
 inline std::atomic_bool SmartPunctuationEnabled{false};
 inline std::atomic_bool SmartPunctuationRepeatToChineseEnabled{false};
 inline std::atomic_bool SmartPunctuationSpaceConvertEnabled{false};
@@ -180,6 +179,8 @@ inline std::atomic_bool PairedPunctuationEnabled{true};
 inline std::atomic_bool MicrosoftShuangpinEnabled{false};
 // 组字时 ';' 和 '\'' 选第二、第三个候选。Server 用 SecondThirdCandidateChanged 推送之前保持关闭，两个键照常是标点。
 inline std::atomic_bool SecondThirdCandidateEnabled{false};
+// 两个选词字符及开关在一份原子快照里，未收到配置时保持关闭。
+inline std::atomic_uint32_t WubiCandidateKeys{0};
 // 引号与方头括号样式，Server 用 PunctuationMarksChanged 推送之前是弯引号、实心括号。GetPunctuation 按它们换字（PairedPunctuationHostPolicy.h 的 StyledPunctuation）。
 inline std::atomic_bool CornerQuotes{false};
 inline std::atomic_bool HollowBrackets{false};

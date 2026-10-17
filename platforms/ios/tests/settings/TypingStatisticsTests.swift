@@ -193,7 +193,7 @@ final class TypingStatisticsTests: XCTestCase {
     XCTAssertEqual(unreachable?.contains("允许完全访问"), false)
   }
 
-  /// 按 `crates/client-core/src/typing_statistics/metrics.rs` 的序列化方式给出的 `summary` 应答，包含 null 字段。
+  /// 按 `crates/client-services/src/typing_statistics/metrics.rs` 的序列化方式给出的 `summary` 应答，包含 null 字段。
   private static let summaryFixture = """
   {"overview":{"week_total":12846,"previous_week_total":10886,
     "last7":[{"day":"2026-10-01","count":1620},{"day":"2026-10-02","count":2140},{"day":"2026-10-03","count":1880},
@@ -378,9 +378,9 @@ final class TypingStatisticsTests: XCTestCase {
     // 分隔格 1 不带字母，所以胜出的是带字母的格子里按得最多的那个。
     XCTAssertEqual(heatmap.busiestLetterKey(nineKey: true), "Nine4")
     XCTAssertNil(TypingKeyHeatmap(counts: [:]).busiestLetterKey(nineKey: false))
-    // 九键键盘的侧边键在九键热力图上有自己的位置，所以不列在其他键里；26 键热力图上没有它们，就列出来。
+    // 九键侧栏标点在九键热力图上有自己的位置，所以不列在其他键里；26 键热力图上没有它，就列出来。句点只在九键数字层的右列，两块都不画。
     let sides = TypingKeyHeatmap(counts: ["Period": 3, TypingKeyID.punctuation: 2, "Comma": 1])
-    XCTAssertEqual(sides.others(nineKey: true).map(\.id), ["Comma"])
-    XCTAssertEqual(sides.others(nineKey: false).map(\.id), ["Period", "SoftPunctuation", "Comma"])
+    XCTAssertEqual(sides.others(nineKey: true).map(\.id), ["Period", "Comma"])
+    XCTAssertEqual(sides.others(nineKey: false).map(\.id), ["Period", "SoftPunctuation"])
   }
 }

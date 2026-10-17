@@ -14,9 +14,9 @@ export const TYPING_EFFECT_AUTO_REPEAT: number = 0x100;
 /** Flag: sounds must stay quiet now; the tier-up sound is not reported due. */
 export const TYPING_EFFECT_MUTED: number = 0x200;
 
-/** `COMBO_MILESTONES` in client-core: the counts that move the combo up a tier. */
+/** client-services 中的 `COMBO_MILESTONES`：连击达到这些次数时升一档。 */
 export const COMBO_MILESTONES: number[] = [10, 25, 50, 100];
-/** `COMBO_IDLE_RESET_MILLIS` in client-core: the combo ends after this long without a counted key, so the badge goes with it. */
+/** client-services 中的 `COMBO_IDLE_RESET_MILLIS`：超过这么久没有计数的按键，连击就结束，徽标也随之消失。 */
 export const COMBO_IDLE_RESET_MILLIS: number = 3000;
 /** `TIER_SEMITONES` in host-api: the tier-up sound rises this many semitones per tier, so the fourth tier is an octave up. */
 export const TIER_SEMITONES: number = 3;
@@ -88,7 +88,7 @@ export const TYPING_EFFECTS_OFF: TypingEffectSettings = {
 };
 
 const COLOR_PATTERN: RegExp = /^#[0-9a-fA-F]{6}$/;
-/** `effect.duration_ms`'s bounds in client-core. */
+/** client-services 中 `effect.duration_ms` 的取值范围。 */
 const MIN_FLASH_MILLIS: number = 60;
 const MAX_FLASH_MILLIS: number = 1500;
 
@@ -98,21 +98,15 @@ export class TypingEffectPolicy {
     return Math.min(Math.max(intensity, 0), 100);
   }
 
-  /** The settings `preferences.plugins` asks for; a missing record or an unknown style is off. */
+  /** 从 `preferences.plugins` 读取设置；缺少记录或样式未知时关闭效果。强度固定为 `DEFAULT_INTENSITY`，不读 `plugins.effect_intensity`（client-core 的 `HostPlatform::fixed_effect_intensity`）：这里每种样式都是亮度不同的卡片闪光，样式本身就是强度的粗调，设置页也不再给「效果强度」。特效包自带的强度仍由 `resolve` 换上。 */
   static settings(plugins: PluginPreferenceDocument | undefined): TypingEffectSettings {
     if (plugins === undefined) {
       return TYPING_EFFECTS_OFF;
     }
-    const intensity: number =
-      typeof plugins.effect_intensity === "number" &&
-      plugins.effect_intensity >= 0 &&
-      plugins.effect_intensity <= 100
-        ? Math.round(plugins.effect_intensity)
-        : DEFAULT_INTENSITY;
     const comboCounter: boolean = plugins.combo_counter === true;
     return {
       style: TypingEffectPolicy.style(plugins.effect_style),
-      intensity: intensity,
+      intensity: DEFAULT_INTENSITY,
       comboCounter: comboCounter,
       tierSound: comboCounter && plugins.combo_tier_sound === true,
       pack: typeof plugins.effect_pack === "string" ? plugins.effect_pack : "",

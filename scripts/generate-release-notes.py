@@ -254,7 +254,7 @@ def model_notes(label: str, version: str, groups: list[dict[str, object]], pulls
     if not token or not groups:
         return None
     endpoint = os.environ.get("EVERYAPI_RELEASE_NOTES_ENDPOINT", "https://api.everyapi.ai/v1/chat/completions")
-    model = os.environ.get("EVERYAPI_RELEASE_NOTES_MODEL", "claude-sonnet-5-5")
+    model = os.environ.get("EVERYAPI_RELEASE_NOTES_MODEL", "").strip() or "claude-sonnet-5-5"
     heading = f"## v{version} 更新内容"
     prompt = f"""你是水杉输入法的发行说明编辑。请为 {label} {version} 写简体中文 Markdown 发布说明，格式和措辞照下面的样例。
 

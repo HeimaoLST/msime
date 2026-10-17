@@ -43,7 +43,7 @@ public final class ClipboardHistoryStore {
      * source that imports androidx, and being excluded from that compile is worse than a
      * contract stated in prose. The
      * reason used to be discarded, so a refusal for a control character or an over-long text
-     * reached the user as 「50 条历史均已固定」 - the one refusal it could not have been.
+     * reached the user as 「200 条历史均已固定」 - the one refusal it could not have been.
      */
     public String add(String text) {
         if (!ClipboardHistoryPolicy.hasText(text)) {
@@ -80,6 +80,16 @@ public final class ClipboardHistoryStore {
                 ? ClipboardHistoryPolicy.EditResult.MERGED : ClipboardHistoryPolicy.EditResult.SAVED;
         }
         return ClipboardHistoryPolicy.editRejection(JsonPolicy.strictStringOrEmpty(response.opt("reason")));
+    }
+
+    /** 全文格式由共享 Rust 生成，Android 只负责把快照写到用户选定的位置。 */
+    public record Export(String text, int count) {}
+
+    public Export exportText() {
+        JSONObject value = request("export_text", null, false);
+        if (value == null || !(value.opt("text") instanceof String))
+            throw new IllegalStateException("Clipboard export had no answer");
+        return new Export(value.optString("text"), value.optInt("count", 0));
     }
 
     public void clear() {

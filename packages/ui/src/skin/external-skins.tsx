@@ -64,6 +64,11 @@ export type ExternalSkin = {
   /** The image drawn in the decoration band, set only for a decorated package. */
   decorationImage?: string | null;
   decorationAlign?: "left" | "center" | "right";
+  /** 候选窗在屏幕上时装饰图的待机动效，由原生候选窗播放；设置页的预览不播放。 */
+  decorationMotion?: "none" | "float" | "sway" | "breathe" | "bounce";
+  decorationMotionPeriodMs?: number;
+  /** 装饰图的帧数：没有装饰图为 0，静态图为 1，APNG 为它的动画帧数。 */
+  decorationFrames?: number;
   background?: SkinBackground | null;
   toolbar?: { cornerRadiusDip: number | null; dark: ToolbarPalette; light: ToolbarPalette };
   toolbarStylesheet: string | null;
@@ -142,8 +147,8 @@ export function usePreviewBackground(
 ) {
   const background = skin.background ?? null;
   const image = useSkinImage(readImage, skin.id, background?.image ?? null, revision);
-  const [decodeFailed, setDecodeFailed] = useState(false);
-  useEffect(() => setDecodeFailed(false), [image]);
+  const [failedImage, setFailedImage] = useState<ReturnType<typeof useSkinImage>>();
+  const decodeFailed = image !== undefined && failedImage === image;
   const drawn =
     background && image?.url && !decodeFailed
       ? {
@@ -155,7 +160,7 @@ export function usePreviewBackground(
   return {
     drawn,
     failed: Boolean(image?.failed || decodeFailed),
-    onError: () => setDecodeFailed(true),
+    onError: () => setFailedImage(image),
   };
 }
 
@@ -167,13 +172,13 @@ export function useSkinPreviewAssets(
   revision: number,
 ) {
   const image = useSkinImage(readImage, skin.id, decoration, revision);
-  const [decodeFailed, setDecodeFailed] = useState(false);
-  useEffect(() => setDecodeFailed(false), [image]);
+  const [failedImage, setFailedImage] = useState<ReturnType<typeof useSkinImage>>();
+  const decodeFailed = image !== undefined && failedImage === image;
   const background = usePreviewBackground(readImage, skin, revision);
   return {
     image,
     decodeFailed,
-    onImageError: () => setDecodeFailed(true),
+    onImageError: () => setFailedImage(image),
     background,
   };
 }

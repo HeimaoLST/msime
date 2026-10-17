@@ -21,7 +21,7 @@ public final class KeyboardLayout {
     /** 全拼 14 键：{@link FourteenKeyLayout} 的三行两字母键，点按经 `gridKey` 送这一组的首字母；123 层、底行和 26 键相同。 */
     public static final int FOURTEEN_KEY_LAYOUT = 8;
 
-    /** 画着的是引擎组码网格的键面（拼音九键或 14 键）：读音行显示 `nine_key_reading`，组字不写进输入框，展开候选是三栏面板。 */
+    /** 画着的是引擎组码网格的键面（拼音九键或 14 键）：读音取 `nine_key_reading`（九键写进输入框，14 键画在读音行上），展开候选是三栏面板。 */
     public static boolean drawsKeyGrid(int layout) {
         return layout == QUANPIN_NINE_KEY_LAYOUT || layout == FOURTEEN_KEY_LAYOUT;
     }
@@ -44,8 +44,22 @@ public final class KeyboardLayout {
 
     private KeyboardLayout() {}
 
+    /** 数字网格只换显示：中文的常规入口复用九宫格，本地模式与独立语言布局保留原符号行。 */
+    public static boolean drawsNumberPad(Layer layer, int layout, boolean chinese, boolean localMode) {
+        if (layer != Layer.SYMBOLS) return false;
+        if (layout == QUANPIN_NINE_KEY_LAYOUT) return true;
+        return chinese && !localMode && (layout == STANDARD_TOUCH_LAYOUT
+            || layout == FOURTEEN_KEY_LAYOUT || layout == HANDWRITING_LAYOUT
+            || layout == STROKE_LAYOUT || layout == ZHUYIN_NINE_KEY_LAYOUT);
+    }
+
+    /** 数字九宫格只属于中文方案：日文罗马字、越南语、藏文等独立语言与 iOS、HarmonyOS 一样保留各自的符号层；视图还没给出方案时沿用中文默认。 */
+    public static boolean numberPadLanguage(int scheme, boolean english) {
+        return !english && (!InputSchemeTraits.known(scheme) || InputSchemeTraits.isChinese(scheme));
+    }
+
     /**
-     * 这一刻要不要在字母上方画数字行（#6022）：设置打开、在字母层、画的是标准 26 键一族或韩文两套式，并且窗口够高。九键、笔画、手写、日文假名网格和注音（大千的数字本身是注音键，注音 9 键是网格）都不画；123 / #+= 层也不画，它第一行本来就是数字；窗口低于 {@link #NUMBER_ROW_MIN_WINDOW_HEIGHT_DP}（横屏手机）时也不画，存着的设置不变，转回竖屏自动回来。
+     * 这一刻要不要在字母上方画数字行（#6022）：设置打开、在字母层、画的是标准 26 键一族或韩文两套式，并且窗口够高。九键、笔画、手写、日文假名网格和注音（大千的数字本身是注音键，注音 9 键是网格）都不画；123 / #+= 层由补充符号行保留同一排高度；窗口低于 {@link #NUMBER_ROW_MIN_WINDOW_HEIGHT_DP}（横屏手机）时也不画，存着的设置不变，转回竖屏自动回来。
      *
      * @param enabled 本地设置 `platform.android.number_row`
      * @param windowHeightDp 键盘所在窗口的可用高度（`Configuration.screenHeightDp`）；未知（0 或负数）时不按高度拦
@@ -54,6 +68,26 @@ public final class KeyboardLayout {
         return enabled && layer == Layer.LETTERS
             && (touchLayout == STANDARD_TOUCH_LAYOUT || touchLayout == KOREAN_LAYOUT)
             && (windowHeightDp <= 0 || windowHeightDp >= NUMBER_ROW_MIN_WINDOW_HEIGHT_DP);
+    }
+
+    /** 符号层沿用源字母页的第五排资格；借用数字九宫格也不缩高。 */
+    public static boolean drawsSymbolExtraRow(boolean enabled, Layer layer, int layout, int heightDp) {
+        return layer == Layer.SYMBOLS && drawsNumberRow(enabled, Layer.LETTERS, layout, heightDp);
+    }
+
+    /** 数字页补原来没有的符号，扩展符号页补数字；网格页的括号随标点设置。 */
+    public static List<String> symbolExtraRow(boolean more, boolean numberPad, boolean chinesePunctuation) {
+        if (more) return NUMBER_ROW;
+        if (!numberPad) return MORE_SYMBOLS_FIRST;
+        return List.of(chinesePunctuation ? "（" : "(", chinesePunctuation ? "）" : ")",
+            "%", "¥", "$", "€", "£", "‰", "²", "³");
+    }
+
+    /** 只替换中文全拼字母页的 Shift；直输状态由宿主作为 chinese=false 排除。 */
+    public static boolean usesQuanpinSeparator(boolean quanpin, boolean chinese,
+            Layer layer, int touchLayout, String localMode) {
+        return quanpin && chinese && layer == Layer.LETTERS
+            && touchLayout == STANDARD_TOUCH_LAYOUT && "none".equals(localMode);
     }
 
     /** Resolves the host surface from the Engine view without conflating Japanese nine-key. */
@@ -188,12 +222,20 @@ public final class KeyboardLayout {
     /** 同 {@link #numberLayer(boolean, boolean)}；`cornerQuotes` 为真时中文标点下的两个引号键是「」。 */
     public static List<List<LayerKey>> numberLayer(boolean chinese, boolean chinesePunctuation,
             boolean cornerQuotes) {
+        return numberLayer(chinese, chinesePunctuation, cornerQuotes, false);
+    }
+
+    /** 顶部已有表情入口时，同一位置直接打开符号面板；关闭顶部入口时保留表情兜底。 */
+    public static List<List<LayerKey>> numberLayer(boolean chinese, boolean chinesePunctuation,
+            boolean cornerQuotes, boolean toolbarEmojiAvailable) {
         return layer(NUMBER_DIGITS,
             chinesePunctuation ? (cornerQuotes ? CHINESE_CORNER_NUMBER_SYMBOLS : CHINESE_NUMBER_SYMBOLS)
                 : ENGLISH_NUMBER_SYMBOLS,
             new LayerKey("#+=", "更多符号", LayerKeyKind.LAYER_TOGGLE, LAYER_EDGE_WEIGHT),
             chinese, chinesePunctuation,
-            new LayerKey("😀", "表情", LayerKeyKind.EMOJI, LAYER_EMOJI_WEIGHT),
+            toolbarEmojiAvailable
+                ? new LayerKey("符号", "切换符号键盘", LayerKeyKind.SYMBOL_PANEL, LAYER_EMOJI_WEIGHT)
+                : new LayerKey("😀", "表情", LayerKeyKind.EMOJI, LAYER_EMOJI_WEIGHT),
             punctuationToggle(chinesePunctuation));
     }
 

@@ -1,22 +1,17 @@
-import { useId, useState, type KeyboardEvent } from "react";
 import { ScreenKeyboardPreview } from "./screen-keyboard-preview";
-import { groupTitle } from "../core/platform-controls-style";
 import { globalThemeTitle, keyboardThemeId, themeEntry } from "../theme/global-theme";
 import { useCandidatePreviewTheme } from "../candidate/candidate-preview-theme";
 import { ActionButton } from "../core/action-button";
-import { FluentIcon } from "../core/fluent-icons";
-import { NavGroup, NavRow } from "../core/platform-controls";
-import type { ImeSetupClient } from "../core/host-contracts";
-import type { Preferences } from "../index";
+import { NavGroup } from "../core/platform-controls";
+import { openHomeKeyboard, type HomePageActions } from "./home-model";
+import { useHomeSearch } from "./use-home-search";
+import type { Preferences } from "../core/preferences-model";
+import type { SurfaceTheme } from "../settings/theme-preferences";
 import { touchKeyboardSchemeTitle } from "../settings/touch-keyboard-scheme-helpers";
 import { SetupStatusCard } from "./setup-status-card";
 import { logo } from "../settings/app-resources";
-import {
-  RootSettingsList,
-  RootSettingsRowView,
-  rootSettingsGroups,
-  type RootPage,
-} from "./root-settings-list";
+import { RootSettingsList, RootSettingsRowView } from "./root-settings-list";
+import type { RootPage } from "./root-settings-model";
 
 // Every tappable surface on this page is the same card: full width, a hairline that strengthens on
 // hover, and the shared press animation. Named here rather than repeated at each of the five call
@@ -31,12 +26,6 @@ const cardNote = "mt-1";
 // what lets the note beside it ellipsise instead of pushing the chevron off the edge.
 const rowBody = "min-w-0 flex-1";
 const rowChevron = "shrink-0 grow-0 basis-auto text-lg text-muted";
-// The pages that have no tab of their own are one grouped list, not a stack of separate cards:
-// thirteen floating cards is thirteen shadows and a screenful of gaps, and the source draws this as
-// a single inset list with a hairline between the rows.
-const listGroup = "overflow-hidden rounded-[14px] border border-edge bg-card shadow-card";
-const listRow =
-  "press-spring flex w-full items-center gap-3 px-3.5 py-[11px] text-left text-[15px] text-body hover:bg-raised active:opacity-[0.88] motion-reduce:transition-none not-first:border-t not-first:border-edge";
 
 const quickTile =
   "press-spring flex min-w-0 flex-col items-start gap-[5px] rounded-[11px] border border-edge bg-subtle p-3 text-left text-body hover:border-edge-strong hover:bg-raised active:scale-[0.96] active:opacity-[0.88] motion-reduce:transition-none max-tight:px-2 max-tight:py-2.5";
@@ -46,13 +35,6 @@ const quickTitle = "text-[13px] font-semibold";
 const quickNote =
   "m-0 w-full overflow-hidden text-ellipsis whitespace-nowrap max-tight:text-[11px]";
 
-/**
- * A settings page that has no tab of its own.
- *
- * The phone bar holds the source's four tabs and nothing more, so every other page has to be
- * reachable from inside one of them. They land here, at the foot of the 键盘 tab, the same way the
- * source keeps them inside its own 键盘 tab rather than growing the bar.
- */
 // 快捷方式格子上的图标块。桌面端保留六种浅色，因为在更宽的网格里，颜色是一眼区分格子的方式；触屏首页已经没有格子，它的页面是「设置」根页的行。
 function QuickIcon({ desktopClass, glyph }: { desktopClass: string; glyph: string }) {
   return (
@@ -74,27 +56,7 @@ function RowIcon({ glyph, chip = false }: { glyph: string; chip?: boolean }) {
   );
 }
 
-export interface MoreSettingsPage {
-  id: string;
-  title: string;
-  icon: string;
-}
-
-/** 「全部设置」里的一组页面；`title` 是导航组名，为空时不显示组名。 */
-export interface MoreSettingsGroup {
-  title?: string;
-  pages: readonly MoreSettingsPage[];
-}
-
-export interface HomePageActions {
-  openKeyboard?: () => Promise<void>;
-  openEmojiPanel?: () => Promise<void>;
-  openClipboardPanel?: () => Promise<void>;
-  openSystemKeyboardSettings?: () => Promise<void>;
-  showInputMethodPicker?: () => Promise<void>;
-  /** 本输入法是否已启用、是否为当前输入法，供触屏首页的状态卡片使用；没有它的宿主照常显示卡片并提供两个步骤。 */
-  setup?: ImeSetupClient;
-}
+export type { HomePageActions } from "./home-model";
 
 export function HomePage({
   preferences,
@@ -104,12 +66,15 @@ export function HomePage({
   touchLayout = false,
   ios = false,
   rootPages,
+  keyboardSurfaceTheme,
 }: {
   preferences: Preferences;
   actions?: HomePageActions;
   onOpenPage: (page: string) => void;
   onOpenChat?: () => void;
   touchLayout?: boolean;
+  /** 桌面首页键盘预览的单独明暗，取宿主真正会用的那个值：各界面跟随颜色模式的宿主不读存下的 `screen_keyboard_theme`，调用方就不传，预览照颜色模式画。触屏首页忽略它。 */
+  keyboardSurfaceTheme?: SurfaceTheme;
   /** iOS opens the keyboard extension's settings, where 完全访问 lives; Android and HarmonyOS open the system input method settings. */
   ios?: boolean;
   /** 触屏首页以分组行列出的页面，标题与手机上显示的一致；桌面首页忽略它。 */
@@ -132,6 +97,7 @@ export function HomePage({
       onOpenPage={onOpenPage}
       onOpenChat={onOpenChat}
       ios={ios}
+      keyboardSurfaceTheme={keyboardSurfaceTheme}
     />
   );
 }
@@ -144,7 +110,7 @@ const searchField =
 /**
  * 触屏首页，即「设置」根页（大标题由外壳绘制）：一个搜索胶囊、设置状态卡片，以及分组行形式的各页面。有查询时隐藏卡片和分组，列出标题或当前值包含查询的行，与 Android 的「设置」页一样；Escape 清空查询。
  *
- * 「试用键盘」在宿主有对应窗口时打开宿主的键盘，否则切到「对话」标签并弹出键盘，与 Android 和 iOS 一样：试键盘就是在那里打字发给 AI。没有对话的宿主打开子页面「试用键盘」；宿主打开窗口失败时也按同样的顺序回退。
+ * 「试用键盘」在宿主有对应窗口时打开宿主的键盘，否则打开 AI 对话二级页并弹出键盘，与 Android 和 iOS 一样：试键盘就是在那里打字发给 AI。没有对话的宿主打开子页面「试用键盘」；宿主打开窗口失败时也按同样的顺序回退。
  */
 function TouchHomePage({
   preferences,
@@ -159,35 +125,12 @@ function TouchHomePage({
   onOpenChat?: () => void;
   rootPages?: readonly RootPage[];
 }) {
-  const [query, setQuery] = useState("");
-  const groups = rootPages ? rootSettingsGroups(rootPages, preferences) : [];
-  const needle = query.trim().toLowerCase();
-  const matches = needle
-    ? groups
-        .flat()
-        .filter(
-          (row) =>
-            row.title.toLowerCase().includes(needle) ||
-            Boolean(row.value?.toLowerCase().includes(needle)),
-        )
-    : [];
-
-  const tryInPage = () => (onOpenChat ? onOpenChat() : onOpenPage("try-keyboard"));
-  const tryKeyboard = () => {
-    const openKeyboard = actions?.openKeyboard;
-    if (!openKeyboard) {
-      tryInPage();
-      return;
-    }
-    void openKeyboard().catch(tryInPage);
-  };
-  const searchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-    if (event.key !== "Escape" || !query) return;
-    event.preventDefault();
-    event.stopPropagation();
-    setQuery("");
-  };
+  const { query, setQuery, groups, needle, matches, searchKeyDown } = useHomeSearch(
+    preferences,
+    rootPages,
+  );
+  const tryKeyboard = () =>
+    openHomeKeyboard(actions?.openKeyboard, onOpenChat ?? (() => onOpenPage("try-keyboard")));
 
   return (
     <section className="flex flex-col gap-5" aria-label="首页">
@@ -231,18 +174,7 @@ function TouchHomePage({
       ) : (
         <>
           <SetupStatusCard actions={actions} preferences={preferences} onTry={tryKeyboard} />
-          {rootPages ? (
-            <RootSettingsList groups={groups} onOpenPage={onOpenPage} />
-          ) : (
-            // 外壳没有说明自己有哪些页面时，这些页面仍能通过「全部设置」列表到达。
-            <NavGroup>
-              <NavRow
-                icon={<FluentIcon name="settings" size={20} />}
-                title="全部设置"
-                onClick={() => onOpenPage("more")}
-              />
-            </NavGroup>
-          )}
+          <RootSettingsList groups={groups} onOpenPage={onOpenPage} />
         </>
       )}
     </section>
@@ -255,14 +187,16 @@ function DesktopHomePage({
   onOpenPage,
   onOpenChat,
   ios,
+  keyboardSurfaceTheme,
 }: {
   preferences: Preferences;
   actions?: HomePageActions;
   onOpenPage: (page: string) => void;
   onOpenChat?: () => void;
   ios: boolean;
+  keyboardSurfaceTheme?: SurfaceTheme;
 }) {
-  const theme = useCandidatePreviewTheme(preferences.theme, preferences.screen_keyboard_theme);
+  const theme = useCandidatePreviewTheme(preferences.theme, keyboardSurfaceTheme);
   const selected = themeEntry(preferences.global_theme).id;
   const skin = keyboardThemeId(selected, preferences.custom_theme);
   const customDesign = preferences.custom_theme?.keyboard ?? undefined;
@@ -270,22 +204,11 @@ function DesktopHomePage({
   const invokeAction = (action?: () => Promise<void>) => {
     if (action) void action();
   };
-  const openKeyboard = () => {
-    if (!actions?.openKeyboard) {
-      // iOS has no separate desktop-style panel. Its Apple home card opens a
-      // real text field so the system keyboard extension can be tried in place.
-      if (onOpenChat) {
-        onOpenChat();
-        return;
-      }
-      onOpenPage("screen-keyboard");
-      return;
-    }
-    void actions.openKeyboard().catch(() => {
-      if (onOpenChat) onOpenChat();
-      else onOpenPage("screen-keyboard");
-    });
-  };
+  const openKeyboard = () =>
+    openHomeKeyboard(
+      actions?.openKeyboard?.bind(actions),
+      onOpenChat ?? (() => onOpenPage("screen-keyboard")),
+    );
 
   return (
     <section className="flex flex-col gap-3.5 pb-6" aria-label="首页">
@@ -388,16 +311,6 @@ function DesktopHomePage({
           </span>
         </button>
       )}
-      <button type="button" className={rowCard} onClick={() => onOpenPage("more")}>
-        <RowIcon glyph="⚙" />
-        <span className={rowBody}>
-          <strong className={cardTitle}>全部设置</strong>
-          <small className={cardNote}>打字、外观、语音与词库</small>
-        </span>
-        <span className={rowChevron} aria-hidden="true">
-          ›
-        </span>
-      </button>
       <div className="flex flex-wrap gap-[9px]">
         {actions?.openEmojiPanel && (
           <ActionButton
@@ -429,76 +342,5 @@ function DesktopHomePage({
         )}
       </div>
     </section>
-  );
-}
-
-/**
- * 没有独立标签的设置页。
- *
- * 从「键盘」标签进入，而不是在标签栏里加第五格：来源应用的标签栏只有四格，其余页面都在第一个标签下一层。每组画成一张带分隔线的列表，而不是每页一张卡片。
- *
- * 每组列表上方显示导航的组名（与桌面侧栏同一份 `settingsNavGroups`），手机上只剩一项的组也能看出它属于哪一类。
- */
-export function MoreSettingsPage({
-  groups,
-  onOpenPage,
-}: {
-  /** 导航分组，每组画成组名下的一张列表。 */
-  groups: readonly MoreSettingsGroup[];
-  onOpenPage: (page: string) => void;
-}) {
-  return (
-    <section className="flex flex-col gap-3" aria-label="全部设置">
-      {groups.map((group) => (
-        <MoreSettingsGroupList key={group.pages[0]?.id} group={group} onOpenPage={onOpenPage} />
-      ))}
-    </section>
-  );
-}
-
-function MoreSettingsGroupList({
-  group,
-  onOpenPage,
-}: {
-  group: MoreSettingsGroup;
-  onOpenPage: (page: string) => void;
-}) {
-  const titleId = useId();
-  return (
-    <div
-      className="flex flex-col gap-[var(--p-g-title-gap)]"
-      role={group.title ? "group" : undefined}
-      aria-labelledby={group.title ? titleId : undefined}
-    >
-      {group.title && (
-        <h3 id={titleId} className={groupTitle}>
-          {group.title}
-        </h3>
-      )}
-      <div className={listGroup}>
-        {group.pages.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            className={listRow}
-            onClick={() => onOpenPage(item.id)}
-          >
-            {/* 页面图标画的是浅色，亮色主题下和桌面侧栏一样反转成深色。 */}
-            <img
-              src={item.icon}
-              alt=""
-              aria-hidden="true"
-              className="size-[20px] shrink-0 light-theme:[filter:invert(1)_brightness(0.25)]"
-            />
-            <span className={rowBody}>
-              <strong className="block font-medium">{item.title}</strong>
-            </span>
-            <span className={rowChevron} aria-hidden="true">
-              ›
-            </span>
-          </button>
-        ))}
-      </div>
-    </div>
   );
 }

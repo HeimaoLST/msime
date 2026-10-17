@@ -415,6 +415,12 @@ NSMenu *CreateMetasequoiaFloatingToolbarUtilityMenu(id target)
         [menu addItem:item];
     }
     [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *promotion = [[NSMenuItem alloc] initWithTitle:@"宣传水杉输入法"
+                                                       action:@selector(insertPromotion:)
+                                                keyEquivalent:@""];
+    promotion.target = target;
+    promotion.enabled = YES;
+    [menu addItem:promotion];
     NSMenuItem *website = [[NSMenuItem alloc] initWithTitle:@"访问 msime.app"
                                                      action:@selector(openWebsite:)
                                               keyEquivalent:@""];
@@ -781,9 +787,8 @@ static void MSIMELogToolbarAction(const char *action, BOOL hasDelegate, id sende
 
 - (void)applyThemePreferences:(NSDictionary *)preferences
 {
-    NSString *surface = preferences[@"toolbar_theme"];
-    NSString *mode = preferences[@"theme"];
-    NSString *resolved = ([surface isEqual:@"dark"] || [surface isEqual:@"light"]) ? surface : mode;
+    // macOS 的工具栏一律跟随颜色模式，不读工具栏单独的明暗设置；固定明暗的主题由 InputController 把 `theme` 钉成那种明暗再交过来。
+    NSString *resolved = preferences[@"theme"];
     if ([resolved isEqual:@"light"])
         self.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
     else if (resolved == nil || [resolved isEqual:@"system"])
@@ -1117,6 +1122,13 @@ static void MSIMELogToolbarAction(const char *action, BOOL hasDelegate, id sende
     (void)sender;
     MSIMELogToolbarAction("openWebsite", self.toolbarDelegate != nil, sender);
     [self.toolbarDelegate floatingToolbarDidRequestOpenWebsite:self];
+}
+
+- (void)insertPromotion:(id)sender
+{
+    (void)sender;
+    MSIMELogToolbarAction("insertPromotion", self.toolbarDelegate != nil, sender);
+    [self.toolbarDelegate floatingToolbarDidRequestPromotion:self];
 }
 
 - (void)openHelp:(id)sender

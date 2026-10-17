@@ -103,10 +103,13 @@ test("Harmony capability chrome stays split between phone and 2-in-1", async () 
   expect(screen.getByRole("button", { name: "悬浮工具栏" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "快捷键" }));
   expect(screen.getByRole("group", { name: "输入模式切换快捷键" })).toBeTruthy();
-  expect(screen.getByRole("group", { name: "面板快捷键" })).toBeTruthy();
+  // 2-in-1 不是鸿蒙手机：面板快捷键并进「按键速查」。
+  expect(
+    within(screen.getByRole("region", { name: "按键速查" })).getByText("打开屏幕键盘"),
+  ).toBeTruthy();
   expect(screen.getByRole("switch", { name: "数字键选词" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "标点与翻译" }));
-  selectSettingsTab("候选翻译");
+  selectSettingsTab("候选释义");
   expect(screen.getByRole("combobox", { name: "候选词翻译第二种语言" })).toBeTruthy();
 
   cleanup();
@@ -140,10 +143,11 @@ test("Harmony capability chrome stays split between phone and 2-in-1", async () 
   expect(within(phoneSettings).queryByRole("button", { name: "悬浮工具栏" })).toBeNull();
   expect(within(phoneSettings).queryByRole("button", { name: "快捷键" })).toBeNull();
   expect(within(phoneSettings).queryByRole("button", { name: "外接键盘快捷键" })).toBeNull();
-  // 手机把候选翻译放在 输入 页的 翻译 分组里。
+  // 手机把候选翻译放在 输入 页的 翻译 分组里，只显示一种候选翻译，没有第二种语言。
   fireEvent.click(within(phoneSettings).getByRole("button", { name: "输入" }));
-  selectSettingsTab("候选翻译");
-  expect(screen.getByRole("combobox", { name: "候选词翻译第二种语言" })).toBeTruthy();
+  selectSettingsTab("候选释义");
+  expect(screen.getByRole("combobox", { name: "候选词翻译目标语言" })).toBeTruthy();
+  expect(screen.queryByRole("combobox", { name: "候选词翻译第二种语言" })).toBeNull();
 });
 
 test("Harmony appearance names only the surfaces the form factor actually has", async () => {
@@ -168,7 +172,7 @@ test("Harmony appearance names only the surfaces the form factor actually has", 
   expect(screen.queryByRole("region", { name: "候选栏预览" })).toBeNull();
   expect(screen.getByRole("slider", { name: "候选字号" })).toBeTruthy();
   expect(screen.getByRole("combobox", { name: "预编辑字号" })).toBeTruthy();
-  expect(screen.getByRole("combobox", { name: "候选栏预编辑" })).toBeTruthy();
+  expect(screen.queryByRole("combobox", { name: "候选栏预编辑" })).toBeNull();
   expect(screen.queryByText("候选窗口预览")).toBeNull();
   expect(screen.queryByRole("combobox", { name: "候选窗口预编辑" })).toBeNull();
 
@@ -203,11 +207,16 @@ test("Harmony appearance names only the surfaces the form factor actually has", 
   expect(screen.getByRole("button", { name: "悬浮工具栏" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "候选窗口" }));
   expect(screen.getByRole("region", { name: "候选窗口预览" })).toBeTruthy();
-  fireEvent.click(screen.getByRole("tab", { name: "预编辑" }));
+  // 预编辑各行在「候选窗口」页的「更多选项」里，不再有「预编辑」标签。
   expect(screen.getByRole("combobox", { name: "候选窗口预编辑" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "主题" }));
-  expect(screen.getByRole("combobox", { name: "候选窗口主题" })).toBeTruthy();
-  expect(screen.getByRole("combobox", { name: "悬浮工具栏主题" })).toBeTruthy();
+  // 2in1 的各界面跟随颜色模式（`surface_themes_follow`）：候选窗口主题在「明暗」组里，没有工具栏主题和「高级」组。
+  const candidateTheme = screen.getByRole("combobox", { name: "候选窗口主题" });
+  expect(screen.getByRole("region", { name: "明暗", hidden: true }).contains(candidateTheme)).toBe(
+    true,
+  );
+  expect(screen.queryByRole("combobox", { name: "悬浮工具栏主题" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "高级", hidden: true })).toBeNull();
   expect(screen.queryByRole("combobox", { name: "候选栏主题" })).toBeNull();
 
   fireEvent.click(screen.getByRole("button", { name: "快捷键" }));
@@ -379,7 +388,8 @@ test("a touch host calls the keyboard pages by their touch names", async () => {
   cleanup();
   renderSettings("windows", {}, "screen-keyboard");
   await settingsFormReady();
-  expect(screen.getByRole("heading", { level: 1, name: "屏幕键盘" })).toBeTruthy();
+  // 桌面上手写并进了这一页，标题随之是「屏幕键盘与手写」。
+  expect(screen.getByRole("heading", { level: 1, name: "屏幕键盘与手写" })).toBeTruthy();
 });
 
 // 每个标签页只在对应页面存在时出现，每个页面又取决于它背后的客户端能力。社区客户端在，但触屏宿主已没有「社区」标签页。
@@ -642,43 +652,38 @@ test("a HarmonyOS phone titles the 设置, 统计 and 我的 roots", async () =>
   expect(untitled.parentElement?.className).toContain("max-phone:sr-only");
 });
 
-// 「对话」是标签页的根页面：鸿蒙手机照设计稿给它加大标题，但不滑入、不带返回按钮；其他触屏宿主也不再有回到「AI 辅助」的返回链接。
-test("the 对话 tab is a titled tab root with no way back to AI 辅助", async () => {
+// 对话是有标题和返回按钮的二级页，不带底部标签栏。
+test("AI chat keeps a secondary title and way back", async () => {
   const chat = {
     models: vi.fn().mockResolvedValue({ data: [], defaultModel: "" }),
     complete: vi.fn(),
   };
-  renderSettings("harmony", {}, undefined, { chat });
+  renderSettings("harmony", {}, "ai", { chat });
   await settingsFormReady();
-  const bar = screen.getByRole("navigation", { name: "主要功能" });
-  fireEvent.click(within(bar).getByRole("button", { name: "对话" }));
+  fireEvent.click(await screen.findByRole("button", { name: /^AI 对话/ }));
   const title = await screen.findByRole("heading", { level: 1, name: "AI 对话" });
   expect(title.parentElement?.className).not.toContain("max-phone:sr-only");
-  expect(screen.queryByRole("button", { name: "返回" })).toBeNull();
-  cleanup();
-
-  renderSettings("android", {}, "chat", { chat });
-  await screen.findByRole("region", { name: "AI 对话" });
-  expect(screen.queryByRole("button", { name: "返回AI 辅助" })).toBeNull();
-  expect(
-    within(screen.getByRole("navigation", { name: "主要功能" }))
-      .getByRole("button", { name: "对话" })
-      .getAttribute("aria-current"),
-  ).toBe("page");
+  expect(screen.getByRole("button", { name: "返回" })).toBeTruthy();
+  expect(screen.queryByRole("navigation", { name: "主要功能" })).toBeNull();
 });
 
-// 设计稿把手机页面叫作 皮肤、表达、开发者选项 和 反馈，桌面侧栏则叫 主题、标点与翻译、维护与诊断 和 帮助与反馈。
+// 设计稿把手机页面叫作 皮肤、表达、开发者选项 和 反馈，桌面侧栏则叫 主题、标点与翻译、维护与诊断 和 帮助与反馈。皮肤在「设置」的列表里；底部第二格是「社区」，不是皮肤。
 test("a touch host uses the design's page names", async () => {
-  renderSettings("harmony", {}, "expression");
+  renderSettings("harmony", {}, "expression", {
+    communitySkins: { list: vi.fn().mockResolvedValue({ skins: [], has_more: false }) },
+  });
   await settingsFormReady();
   expect(screen.getByRole("heading", { level: 1, name: "表达" })).toBeTruthy();
   const sidebar = screen.getByRole("navigation", { name: "设置分类" });
   for (const name of ["皮肤", "表达", "反馈"]) {
     expect(within(sidebar).getByRole("button", { name })).toBeTruthy();
   }
-  for (const name of ["主题", "标点与翻译", "帮助与反馈", "首页"]) {
+  for (const name of ["主题", "标点与翻译", "帮助与反馈", "首页", "社区"]) {
     expect(within(sidebar).queryByRole("button", { name })).toBeNull();
   }
+  const bar = screen.getByRole("navigation", { name: "主要功能" });
+  expect(within(bar).getByRole("button", { name: "社区" })).toBeTruthy();
+  expect(within(bar).queryByRole("button", { name: "皮肤" })).toBeNull();
 });
 
 // 推入标签页的页面在标题前放设计稿里的圆形返回按钮，取代回到上级页面的文字链接；标签页根页面没有这个按钮。它和边缘滑动一样沿 WebView 历史返回。

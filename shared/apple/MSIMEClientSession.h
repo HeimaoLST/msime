@@ -76,7 +76,7 @@ FOUNDATION_EXPORT NSNotificationName const MSIMEClientSessionDidReplaceSnapshotN
 /// Engine validates candidate limit, eligibility and query identity. No network I/O.
 - (nullable NSDictionary *)applyOnlineCandidates:(NSArray<NSString *> *)candidates source:(NSUInteger)source
                                            query:(NSDictionary *)query error:(NSError **)error;
-/// AI 回答为空、失败，或 applyOnlineCandidates 没有采用时调用（source 只认 1）：AI 座位上的占位行换成「—」，留到组字变化为止。返回 {applied, view}。
+/// AI 回答为空、失败，或 applyOnlineCandidates 没有采用时宿主会调用它。共享内核不再放 AI 占位行，这个入口为已发布的宿主留着：参数照旧校验（source 只认 0 和 1），合法调用一律返回 {applied: false, view}，不改候选、不换代。
 - (nullable NSDictionary *)resolveOnlineCandidatesForSource:(NSUInteger)source
                                                      query:(NSDictionary *)query error:(NSError **)error;
 /// Copied enabled translation query, or nil when no candidates are eligible.
@@ -88,7 +88,10 @@ FOUNDATION_EXPORT NSNotificationName const MSIMEClientSessionDidReplaceSnapshotN
 + (nullable NSDictionary *)tencentTranslationHTTPRequest:(NSDictionary *)request error:(NSError **)error;
 /// Signed NiuTrans v2 form descriptor. Send body_utf8 unchanged; never log it.
 + (nullable NSDictionary *)niuTransTranslationHTTPRequest:(NSDictionary *)request error:(NSError **)error;
+/// OpenAI 兼容的 AI 翻译请求描述器；描述器带凭据，不得记录。
++ (nullable NSDictionary *)aiTranslationHTTPRequest:(NSDictionary *)request error:(NSError **)error;
 + (nullable NSString *)parseNiuTransTranslationResponse:(NSData *)body error:(NSError **)error;
++ (nullable NSString *)parseAITranslationResponse:(NSData *)body error:(NSError **)error;
 /// A gloss this host produced itself, formatted as provider replies are: whitespace collapsed, ends trimmed. nil when nothing usable is left.
 + (nullable NSString *)formatTranslationGloss:(NSString *)gloss error:(NSError **)error;
 /// Pure AI descriptor with credentials; never log it or follow HTTP redirects.

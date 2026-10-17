@@ -1,4 +1,6 @@
-import type { Preferences, ProviderCredentialStatus, SettingsClient } from "../index";
+import type { ProviderCredentialStatus } from "../core/provider-credential-contracts";
+import type { SettingsClient } from "../core/settings-client";
+import type { Preferences } from "../core/preferences-model";
 import type { useProviderCredentials } from "./use-provider-credentials";
 import {
   customTranslationCredentialTestConfig,
@@ -9,7 +11,15 @@ import {
   tencentTranslationCredentialTestDisabled,
 } from "./translation-credential-test-config";
 import type { TranslationProviderSettingsSectionProps } from "./translation-provider-settings-section";
-import { type TranslationProvider } from "./translation-service-selector-section";
+import {
+  translationOfflineFallback,
+  type TranslationProvider,
+} from "./translation-service-selector-section";
+import type {
+  CustomTranslationPreferences,
+  NiuTransPreferences,
+  TencentTranslationPreferences,
+} from "./translation-credential-preferences";
 import {
   customTranslationKeyIssue,
   tencentCredentialIssue,
@@ -17,9 +27,6 @@ import {
 } from "./translation-validation";
 import { tencentSecretConfigured } from "./credential-utils";
 
-type CustomTranslationPreferences = NonNullable<Preferences["custom_translation"]>;
-type NiuTransPreferences = NonNullable<Preferences["niutrans"]>;
-type TencentTranslationPreferences = NonNullable<Preferences["tencent_tmt"]>;
 type ProviderCredentials = ReturnType<typeof useProviderCredentials>;
 
 export interface TranslationProviderSettingsOptions {
@@ -29,6 +36,8 @@ export interface TranslationProviderSettingsOptions {
   linux: boolean;
   windows: boolean;
   macos: boolean;
+  /** 只决定缺腾讯云凭据时警告的说法（`translationOfflineFallback`）。 */
+  harmony?: boolean;
   customTranslation: CustomTranslationPreferences;
   tencentTranslation: TencentTranslationPreferences;
   niutrans: NiuTransPreferences;
@@ -53,6 +62,7 @@ export function createTranslationProviderSettings({
   linux,
   windows,
   macos,
+  harmony = false,
   customTranslation,
   tencentTranslation,
   niutrans,
@@ -101,6 +111,7 @@ export function createTranslationProviderSettings({
         !customTranslation.enabled &&
         !tencentSecretConfigured(tencentTranslation.secret_id) &&
         !tencentSecretConfigured(tencentTranslation.secret_key),
+      offlineFallback: translationOfflineFallback({ macos, windows, linux, harmony }),
       status: providerCredentials
         ? {
             tencent: providerCredentials.tencent,

@@ -1,4 +1,4 @@
-import type { HostCapabilities } from "../index";
+import type { HostCapabilities } from "../core/host-capabilities";
 
 export interface SettingsCapabilitiesInput {
   host?: HostCapabilities;
@@ -38,6 +38,9 @@ export function settingsCapabilities({
   const showFloatingToolbar = host ? host.floating_toolbar : true;
   const showToolbarAppearance = host ? host.floating_toolbar_appearance : true;
   const showToolbarComponents = host ? host.floating_toolbar_components : true;
+  // 屏幕键盘的高度和间距：没有宿主（网页预览）或宿主没报这两项时照旧给出。
+  const showTouchKeyboardHeight = host?.touch_keyboard_height !== false;
+  const showTouchKeyboardSpacing = host?.touch_keyboard_spacing !== false;
   const showCandidateFontControls = host ? host.candidate_font_controls : true;
   const showCandidatePreeditFont =
     showCandidateFontControls && (host ? host.candidate_preedit_font : true);
@@ -52,9 +55,17 @@ export function settingsCapabilities({
   const showVoiceCommitMode = host ? host.voice_commit_mode : true;
   const showVoiceProviderSettings = host ? host.voice_provider_settings : true;
   const showVoiceStreamPreedit = host ? host.voice_stream_preedit : true;
+  // 宿主没有报这三项时（旧宿主、网页预览）照旧给出控件；只有明确报 false 的宿主把值固定下来（见 `HostCapabilities` 各字段说明）。
+  const showVoiceSpaceLockSwitch = host?.voice_space_lock_switch !== false;
+  const showVoiceCueSwitches = host?.voice_cue_switches !== false;
+  const showVoiceCaptureBackends = host?.voice_capture_backends !== false;
   const showCandidateRowColors = host ? host.candidate_row_colors : true;
   const showCandidateSelectionAppearance = host ? host.candidate_selection_appearance : true;
   const showCandidateBorderColor = host ? host.candidate_border_color : true;
+  // 缺省（宿主还没报告这一项）按读取处理，与加这一项之前一样给出取色器。
+  const showCandidateNumberColor = host ? host.candidate_number_color !== false : true;
+  // 宿主让各界面一律跟随颜色模式时，主题页只留候选窗口的单独明暗，设置窗口和各面板也不再读其余几项。
+  const surfaceThemesFollow = host?.surface_themes_follow === true;
   const showCandidateFollowCursor = host ? host.candidate_follow_cursor : false;
   const showCandidateWindowScale = host ? host.candidate_window_scale : true;
   const showCandidateWindowOpacity = host ? host.candidate_window_opacity : true;
@@ -69,6 +80,9 @@ export function settingsCapabilities({
     ? host.maintenance_shortcuts || host.panel_windows
     : true;
   const showFullwidthChord = host ? host.fullwidth_chord : false;
+  // 宿主把 Tab、PageUp/PageDown 两组翻页键（macOS、Windows、HarmonyOS）或中英混输的触发字符数（macOS、Windows、Linux）固定下来时不再给开关；没有宿主或宿主没写这两项时照旧显示。
+  const showTabPagePagingSwitches = host?.tab_page_paging_switches ?? true;
+  const showMixedInputMinimumPrefix = host?.mixed_input_minimum_prefix ?? true;
   const clientHostedPlatform =
     windows || linux || android || macos || harmony || host?.platform === "ios";
   const desktopPanels = host ? host.panel_windows : true;
@@ -78,10 +92,14 @@ export function settingsCapabilities({
   const showMusic = host ? host.music : false;
   const showPluginTriggers = host ? host.plugin_triggers : false;
   const showTypingEffects = host ? host.typing_effects : false;
-  // Linux shows the combo count as text in the candidate panel's aux line and draws no flash or sparks, so only the counter switch has an effect there.
+  // Linux 只在候选辅助行显示连击数，不画闪光和火花，所以样式、特效包和强度都不起作用；连击开关和 host-api 从按键音效包播放的升档音仍然有效。
   const showTypingEffectStyles = showTypingEffects && !linux;
   // An effect pack only sets a drawn style's parameters, so it is offered wherever a style is.
   const showTypingEffectPacks = showTypingEffectStyles;
+  // 宿主固定了效果强度（`HostCapabilities.fixed_effect_intensity`，macOS、Windows、鸿蒙）时不给「效果强度」；没有宿主时（网页预览）照样给出。
+  const showEffectIntensity = host ? host.fixed_effect_intensity === undefined : true;
+  // 宿主固定了 AI 联想的候选数量（`HostCapabilities.fixed_ai_candidate_limit`，macOS、Windows、Linux、鸿蒙）时不给「候选数量」。
+  const showAiCandidateLimit = host ? host.fixed_ai_candidate_limit === undefined : true;
   // HarmonyOS 没有粒子浮层：每种样式都是候选卡片闪一下，火花和 Power Mode 闪得更亮，所以那里的样式说明不能许诺火花。Windows 和 macOS 一样在光标处画火花。
   const typingEffectsFlashOnly = showTypingEffectStyles && harmony;
   const showWordbookPacks = host ? host.wordbook_packs : false;
@@ -99,6 +117,8 @@ export function settingsCapabilities({
     showFloatingToolbar,
     showToolbarAppearance,
     showToolbarComponents,
+    showTouchKeyboardHeight,
+    showTouchKeyboardSpacing,
     showCandidateFontControls,
     showCandidatePreeditFont,
     showCandidateEnglishFont,
@@ -111,9 +131,14 @@ export function settingsCapabilities({
     showVoiceCommitMode,
     showVoiceProviderSettings,
     showVoiceStreamPreedit,
+    showVoiceSpaceLockSwitch,
+    showVoiceCueSwitches,
+    showVoiceCaptureBackends,
     showCandidateRowColors,
     showCandidateSelectionAppearance,
     showCandidateBorderColor,
+    showCandidateNumberColor,
+    surfaceThemesFollow,
     showCandidateFollowCursor,
     showCandidateWindowScale,
     showCandidateWindowOpacity,
@@ -124,6 +149,8 @@ export function settingsCapabilities({
     showVoiceCaptureDevices,
     showDesktopMaintenanceShortcuts,
     showFullwidthChord,
+    showTabPagePagingSwitches,
+    showMixedInputMinimumPrefix,
     clientHostedPlatform,
     desktopPanels,
     showVoiceHotkeys,
@@ -133,6 +160,8 @@ export function settingsCapabilities({
     showTypingEffects,
     showTypingEffectStyles,
     showTypingEffectPacks,
+    showEffectIntensity,
+    showAiCandidateLimit,
     typingEffectsFlashOnly,
     showWordbookPacks,
     showSymbolSetPacks,

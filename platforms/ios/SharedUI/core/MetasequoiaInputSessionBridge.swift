@@ -47,6 +47,8 @@ private func msimeClientBalancePairedPunctuationAfterAutoClose(_ session: UInt64
 private func msimeClientSmartPunctuationArm(_ session: UInt64, _ request: UnsafePointer<MSIMEByte>?, _ length: UInt) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("msime_client_smart_punctuation_decide")
 private func msimeClientSmartPunctuationDecide(_ session: UInt64, _ request: UnsafePointer<MSIMEByte>?, _ length: UInt) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("msime_client_nine_key_shuangpin_layout")
+private func msimeClientNineKeyShuangpinLayout(_ request: UnsafePointer<MSIMEByte>?, _ length: UInt) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("msime_client_shuangpin_key_hints")
 private func msimeClientShuangpinKeyHints(_ profile: UnsafePointer<MSIMEByte>?, _ length: UInt) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("msime_client_choose_nine_key_spelling")
@@ -81,6 +83,11 @@ private func msimeClientAllCandidates(_ session: UInt64) -> UnsafeMutablePointer
 @_silgen_name("msime_client_english_completions")
 private func msimeClientEnglishCompletions(
   _ session: UInt64, _ prefix: UnsafePointer<MSIMEByte>?, _ prefixLength: UInt, _ limit: UInt
+) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("msime_client_english_completions_request")
+private func msimeClientEnglishCompletionsRequest(
+  _ request: UnsafePointer<MSIMEByte>?, _ requestLength: UInt,
+  _ resources: UnsafePointer<MSIMEByte>?, _ resourcesLength: UInt
 ) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("msime_client_candidate_gloss_request")
 private func msimeClientCandidateGlossRequest(
@@ -118,6 +125,10 @@ private func msimeClientTencentTranslationHTTPRequest(_ request: UnsafePointer<M
 private func msimeClientNiuTransTranslationHTTPRequest(_ request: UnsafePointer<MSIMEByte>?, _ length: UInt) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("msime_client_custom_translation_http_request")
 private func msimeClientCustomTranslationHTTPRequest(_ request: UnsafePointer<MSIMEByte>?, _ length: UInt) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("msime_client_ai_translation_http_request")
+private func msimeClientAITranslationHTTPRequest(_ request: UnsafePointer<MSIMEByte>?, _ length: UInt) -> UnsafeMutablePointer<CChar>?
+@_silgen_name("msime_client_parse_ai_translation_response")
+private func msimeClientParseAITranslationResponse(_ body: UnsafePointer<MSIMEByte>?, _ length: UInt) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("msime_client_parse_tencent_translation_response")
 private func msimeClientParseTencentTranslationResponse(_ body: UnsafePointer<MSIMEByte>?, _ length: UInt, _ expected: UInt) -> UnsafeMutablePointer<CChar>?
 @_silgen_name("msime_client_parse_niutrans_translation_response")
@@ -266,11 +277,12 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   private var documentRevision: UInt64 = 0
   private var appliedFuzzyPinyinRules: UInt32?
   private var suspended = false
-  /// 引擎的组码网格，取值与 `msime_client_set_key_grid` 的 `grid` 相同：0 不用网格（26 键），1 九键，2 全拼 14 键。
+  /// 引擎的组码网格，取值与 `msime_client_set_key_grid` 的 `grid` 相同：0 不用网格（26 键），1 九键，2 全拼 14 键，3 九键双拼。
   enum KeyGrid: UInt8 {
     case none = 0
     case nineKey = 1
     case fourteenKey = 2
+    case nineKeyShuangpin = 3
   }
   // 网格（九键或 14 键）是会话状态，不在选项带的偏好里，所以重建的会话要再告诉一次，否则会回到 26 键。
   private var keyGrid = KeyGrid.none
@@ -400,6 +412,9 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     // 输入页五笔组的混拼与四码唯一自动上屏：都是引擎字段，会话空闲时重建 Engine 应用它，所以要交给活着的会话，而不等键盘扩展被杀掉后重建会话。
     "wubi_mixed_pinyin",
     "wubi_auto_commit_unique",
+    "wubi_candidate_selection",
+    // 退格回退已选词段由 Runtime 立即应用，不等待组字结束。
+    "backspace_reverts_selection",
     // Laid over the document by `hostOverrides` from the iOS switch, so a change to that switch reaches the live session too.
     "cloud_candidates",
     // Laid over the document from the iOS page size, like cloud candidates; the session applies it once idle, so an open composition keeps its page.
@@ -500,6 +515,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     switch selected {
     case .nineKey, .japaneseNineKey: layout = "nine_key"
     case .fourteenKey: layout = "fourteen_key"
+    case .nineKeyShuangpin: layout = "nine_key_shuangpin"
     case .handwriting: layout = "handwriting"
     default: layout = "twenty_six_key"
     }
@@ -575,7 +591,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     persistSharedPreferences(stateRoot: sharedStateRoot(stateRoot), marksCloudSync: stateRoot == nil, mutate) != nil
   }
 
-  /// `msime_client_plugins` 失败时的失败码和 client-core 给的原因（码表不合格时带文件名和行号），见 `include/msime_client.h`。
+  /// `msime_client_plugins` 失败时的失败码和 client-services 给的原因（码表不合格时带文件名和行号），见 `include/msime_client.h`。
   struct PluginFailure: Error, Equatable {
     let code: String
     var detail: String? = nil
@@ -857,6 +873,27 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     }
   }
 
+  /// 从共享引擎读取原文和唯一纠错；查询不改变键盘组字，也不学习当前词。
+  func englishCorrections(forPrefix prefix: String) -> [String] {
+    guard handle != 0, !prefix.isEmpty, prefix.utf8.count <= 128,
+          let resources = options["resources"] as? String,
+          NSString(string: resources).isAbsolutePath else { return [] }
+    do {
+      let request = try JSONSerialization.data(withJSONObject: ["prefix": prefix, "limit": 2, "correction": true])
+      let resourceData = Data(resources.utf8)
+      let response = try request.withUnsafeBytes { requestBytes in
+        try resourceData.withUnsafeBytes { resourceBytes in
+          try Self.decode(msimeClientEnglishCompletionsRequest(
+            requestBytes.bindMemory(to: MSIMEByte.self).baseAddress, UInt(request.count),
+            resourceBytes.bindMemory(to: MSIMEByte.self).baseAddress, UInt(resourceData.count)))
+        }
+      }
+      guard let value = response as? [String: Any], value["prefix"] as? String == prefix,
+            let items = value["items"] as? [String], items.first == prefix, items.count <= 2 else { return [] }
+      return items
+    } catch { return [] }
+  }
+
   func candidateGlossResources() -> String? {
     options["resources"] as? String
   }
@@ -979,6 +1016,21 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     }
   }
 
+  static func aiTranslationRequest(request: [String: Any]) -> [String: Any]? {
+    guard JSONSerialization.isValidJSONObject(request),
+          let data = try? JSONSerialization.data(withJSONObject: request), data.count <= 65_536 else { return nil }
+    return data.withUnsafeBytes { bytes in
+      (try? decode(msimeClientAITranslationHTTPRequest(bytes.bindMemory(to: MSIMEByte.self).baseAddress, UInt(data.count)))) as? [String: Any]
+    }
+  }
+
+  static func parseAITranslationResponse(body: Data) -> String? {
+    guard !body.isEmpty, body.count <= 1_048_576 else { return nil }
+    return body.withUnsafeBytes { bytes in
+      (try? decode(msimeClientParseAITranslationResponse(bytes.bindMemory(to: MSIMEByte.self).baseAddress, UInt(body.count)))) as? String
+    }
+  }
+
   /// One gloss per requested text, in order, from a provider's reply; nil when the reply is unusable as a whole. Tencent answers a batch of `expected` texts, the others one text each.
   static func parseTranslationResponse(provider: String, body: Data, expected: Int) -> [String?]? {
     guard !body.isEmpty, body.count <= 1_048_576 else { return nil }
@@ -1022,7 +1074,7 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
     }
   }
 
-  /// AI 回答为空、失败或被拒时调用（`source` 只认 1）：AI 座位上的占位行换成「—」，留到组字变化为止。Returns `{applied, view}`.
+  /// AI 回答为空、失败或被拒时调用（`source` 只认 1）。共享内核已经不放 AI 占位行，这个调用不改候选列表，总是答 `applied:false`；保留它只为宿主和 C ABI 不变。Returns `{applied, view}`.
   func resolveOnlineCandidates(query: Data, source: UInt8) throws -> [String: Any] {
     guard handle != 0 else { throw InputBridgeFailure.unavailable }
     guard !query.isEmpty, query.count <= 16_384, source <= 1 else {
@@ -1087,6 +1139,8 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   func `switch`(toShuangpinProfile profile: String) -> MetasequoiaInputSnapshot {
     switchScheme("shuangpin", profile: profile)
   }
+  func switchToNineKeyShuangpin() -> MetasequoiaInputSnapshot { switchToKeyGrid(.nineKeyShuangpin) }
+
   func switchToNineKey() -> MetasequoiaInputSnapshot { switchToKeyGrid(.nineKey) }
   /// 全拼 14 键：方案是全拼，按键经 `gridKey` 送组码。
   func switchToFourteenKey() -> MetasequoiaInputSnapshot { switchToKeyGrid(.fourteenKey) }
@@ -1187,6 +1241,17 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
   func openLocalMode(_ trigger: String) -> MetasequoiaInputSnapshot {
     guard let byte = Self.ascii(trigger) else { return diagnostic("本地输入模式无效") }
     return dispatch { pointer(for: String(UnicodeScalar(byte)), shift: true) }
+  }
+
+  /// 设置与键面共用引擎的方案表和带位置的校验结果，不创建输入会话。
+  static func nineKeyShuangpinLayout(profile: String, table: NineKeyShuangpinLayout.Table? = nil) throws -> NineKeyShuangpinLayout {
+    var request: [String: Any] = ["profile": profile]
+    if let table { request["table"] = table }
+    let data = try JSONSerialization.data(withJSONObject: request)
+    let value = try data.withUnsafeBytes { bytes in
+      try decode(msimeClientNineKeyShuangpinLayout(bytes.bindMemory(to: MSIMEByte.self).baseAddress, UInt(data.count)))
+    }
+    return try JSONDecoder().decode(NineKeyShuangpinLayout.self, from: JSONSerialization.data(withJSONObject: value))
   }
 
   func nineKeySpellings() -> [String] {

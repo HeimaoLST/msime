@@ -1,4 +1,4 @@
-import type { Preferences } from "../index";
+import type { Preferences } from "../core/preferences-model";
 import type { PluginKind } from "./plugin-types";
 
 /** Mirrors `client-core::preferences::KeySoundMode`. */
@@ -26,7 +26,7 @@ export type MusicPreferences = { enabled: boolean; pack: string; volume: number 
 /** Mirrors `client-core::preferences::AchievementPreferences`. */
 export type AchievementPreferences = { enabled: boolean };
 
-/** Mirrors `client-core::plugins::EffectStyle`: what a host draws on keys and commits. */
+/** 对应 `client-core::preferences::EffectStyle`：宿主在按键和上屏时画的特效。 */
 export type EffectStyle = "off" | "flash" | "sparks" | "power_mode";
 
 /** Mirrors `client-core::preferences::PluginPreferences`. The document leaves the whole section out while it is at these defaults, so a page reading one merges it over `defaultPluginPreferences`. */
@@ -56,10 +56,12 @@ export type PluginPreferences = {
   helpcode_pack_shuangpin: string;
 };
 
-/** `client-core::plugins::DEFAULT_SOUND_PACK`. */
+/** `client-core::preferences::DEFAULT_SOUND_PACK`。 */
 export const DEFAULT_SOUND_PACK = "default";
-/** `client-core::plugins::DEFAULT_MELODY_PACK`. */
+/** `client-core::preferences::DEFAULT_MELODY_PACK`。 */
 export const DEFAULT_MELODY_PACK = "twinkle";
+/** `client-services::plugins::BUILTIN_MUSIC_PACKS`：安装包随带的音乐包，按这个顺序挑默认的那一个。 */
+export const BUILTIN_MUSIC_PACKS = ["msime-music-lofi", "msime-music-ambient"] as const;
 /** `PluginPreferences::MAX_COMMAND_TABLES`. */
 export const MAX_COMMAND_TABLES = 16;
 /** `PluginPreferences::MAX_PHRASE_TABLES`。 */
@@ -152,6 +154,21 @@ export function withoutRemovedPack(
         : preferences.key_sound,
     melody: preferences.melody.pack === id ? { pack: DEFAULT_MELODY_PACK } : preferences.melody,
   };
+}
+
+/**
+ * 打开「背景音乐」开关时还没选音乐包，就替用户选的那个包：宿主只在开关打开并且选了包时播放，只打开开关什么也听不到。优先安装包随带的音乐包（按 `BUILTIN_MUSIC_PACKS` 的顺序），其次插件目录里的第一个音乐包；没有包存储的宿主列不出目录（`listed` 为假），只能播放随带的包，就选随带的第一个。目录读到了却一个音乐包都没有时为空字符串，这时开关不能打开。
+ */
+export function musicPackToSelect(
+  packages: readonly { kind: PluginKind; id: string; builtin: boolean }[],
+  listed: boolean,
+): string {
+  if (!listed) return BUILTIN_MUSIC_PACKS[0];
+  const music = packages.filter((pack) => pack.kind === "music");
+  const builtin = BUILTIN_MUSIC_PACKS.find((id) =>
+    music.some((pack) => pack.id === id && pack.builtin),
+  );
+  return builtin ?? music[0]?.id ?? "";
 }
 
 /** 把一个包设为它所属类型的当前选择：选用声音或音乐包就同时打开对应的播放开关，声音包还切到能播放所选包的发声方式；特效包成为特效，指令表和短语表启用在已启用的之后。 */

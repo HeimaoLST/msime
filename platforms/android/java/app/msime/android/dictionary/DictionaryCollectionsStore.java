@@ -12,7 +12,7 @@ import org.json.JSONObject;
 /**
  * 词库页的数据入口：命名词库（`msime_client_dictionary_collections`）、内置词库的条数与词条（`msime_client_dictionary`），以及经个人词库队列写入的词条（`msime_client_personal_dictionary_request`）。
  *
- * <p>键盘活着的时候 `msime_client_dictionary` 的编辑会返回 busy，所以这里所有写词条的路径都走队列：命名词库的增删由 client-core 自己分批送进队列，内置词库的新词经 {@link #queueWord} 入队，键盘在下一次会话开始时应用。列表、条数和导出只读，直接问 Engine。
+ * <p>键盘活着的时候 `msime_client_dictionary` 的编辑会返回 busy，所以这里所有写词条的路径都走队列：命名词库的增删由 client-services 自己分批送进队列，内置词库的新词经 {@link #queueWord} 入队，导入后趁空闲立即应用，忙碌时由键盘在后续空闲时继续。列表、条数和导出只读，直接问 Engine。
  *
  * <p>所有方法都读写磁盘或等词库锁，只能在工作线程调用；失败不抛异常，而是一个带可直接展示原因的 {@link Result}。写词条成功后标记「个人词库」同步分类有本机改动（命名词库的元数据不同步，P9）。
  */
@@ -21,11 +21,11 @@ public final class DictionaryCollectionsStore {
     public static final String BUILTIN_PREFIX = "builtin:";
     /** 内置拼音词库的 id。 */
     public static final String BUILTIN_PINYIN = BUILTIN_PREFIX + "pinyin";
-    /** 集合名最多的字数，与 client-core 一致。 */
+    /** 集合名最多的字数，与 client-services 一致。 */
     public static final int MAX_NAME_CHARS = 32;
-    /** 导入文件读进内存的上限，与 client-core 的导入文本上限一致。 */
+    /** 导入文件读进内存的上限，与 client-services 的导入文本上限一致。 */
     public static final int MAX_IMPORT_BYTES = 16 * 1024 * 1024;
-    /** 二进制词库（搜狗细胞词库）的上限，与 client-core 的 `scel::MAX_SCEL_BYTES` 一致：按 base64 传，8 MiB 编码后约 10.7 MiB，加上宿主选项仍在 17 MiB 的请求上限之内。 */
+    /** 二进制词库（搜狗细胞词库）的上限，与 client-services 的 `scel::MAX_SCEL_BYTES` 一致：按 base64 传，8 MiB 编码后约 10.7 MiB，加上宿主选项仍在 17 MiB 的请求上限之内。 */
     public static final int MAX_SCEL_IMPORT_BYTES = 8 * 1024 * 1024;
     /** 单次导出上限，与 iOS 个人词库导出一致，避免分页结果在 Java 堆中无限累积。 */
     public static final int MAX_EXPORT_BYTES = 8 * 1024 * 1024;
@@ -33,15 +33,21 @@ public final class DictionaryCollectionsStore {
     public static final long DEFAULT_WEIGHT = 10000;
     private static final int EXPORT_PAGE = 1000;
 
+    /** 待写入个人词库的条数；键盘会话结束后才会应用，零条时不显示。 */
+    public static String pendingDescription(int pending) {
+        return pending <= 0 ? "" : "，还有 " + NumberPolicy.groupedCount(pending) + "等键盘同步";
+    }
+
     /** 一个命名词库；`sourceType` 是 `user`、`import` 或 `community`，社区词库带 `resourceId`。 */
     public record Collection(String id, String name, String kind, String sourceType, String resourceId,
                              boolean enabled, int entryCount, int pending) {}
 
     /** 一次导入的结果。 */
-    public record ImportReport(int imported, int duplicates, int failed, boolean truncated) {}
+    public record ImportReport(int imported, int duplicates, int failed, boolean truncated, String applicationNotice) {}
 
-    /** 集合操作返回的整份视图；`formats` 是 client-core 接受的导入格式，`importReport` 只在导入后非空。 */
-    public record View(List<Collection> collections, List<String> formats, ImportReport importReport) {
+    /** 集合操作返回的整份视图；`formats` 是 client-services 接受的导入格式，`importReport` 只在导入后非空。 */
+    public record View(List<Collection> collections, List<String> formats, int outboxPending,
+                       ImportReport importReport) {
         /** 按 id 找集合，找不到时为 null。 */
         public Collection find(String id) {
             for (Collection collection : collections) if (collection.id().equals(id)) return collection;
@@ -63,7 +69,7 @@ public final class DictionaryCollectionsStore {
     /** 一页词条。 */
     public record WordPage(List<Word> words, boolean hasMore) {}
 
-    /** 一个导入来源：client-core 的格式名、展示文字和文件选择器用的 MIME 类型。 */
+    /** 一个导入来源：client-services 的格式名、展示文字和文件选择器用的 MIME 类型。 */
     public record ImportSource(String format, String label, String[] mimeTypes) {}
 
     /** 一次操作的结果：成功时 `value` 非空、`failure` 为空串；失败时 `value` 为空、`failure` 是可直接展示的原因。 */
@@ -115,6 +121,21 @@ public final class DictionaryCollectionsStore {
         return Result.of(sent == null ? 0 : sent);
     }
 
+    /** 还没交给个人词库队列的集合增删总数；云同步导出前必须等它清零。 */
+    public static Result<Integer> pendingOutbox(Context context) {
+        String options = hostOptions(context);
+        if (options.isEmpty()) return Result.failed(failureMessage("unavailable"));
+        try {
+            JSONObject value = value(NativeClient.dictionaryCollections(new JSONObject()
+                .put("options", new JSONObject(options)).put("action", action("load")).toString()));
+            if (value == null) return Result.failed(failureMessage(""));
+            Integer pending = JsonPolicy.nonNegativeInteger(value.opt("outbox_pending"));
+            return pending == null ? Result.failed(failureMessage("")) : Result.of(pending);
+        } catch (JSONException | RuntimeException | LinkageError error) {
+            return Result.failed(failureMessage(""));
+        }
+    }
+
     /** 新建一个空的拼音词库。 */
     public static Result<View> create(Context context, String name) {
         if (!validName(name)) return Result.failed(failureMessage("collections_name_invalid"));
@@ -150,7 +171,7 @@ public final class DictionaryCollectionsStore {
         }
     }
 
-    /** 往命名词库里加词，client-core 负责去重和分批入队。 */
+    /** 往命名词库里加词，client-services 负责去重和分批入队。 */
     public static Result<View> addWords(Context context, String id, List<Word> words) {
         try {
             return collections(context, action("add_words").put("id", id).put("entries", personalWords(words)), true);
@@ -170,7 +191,7 @@ public final class DictionaryCollectionsStore {
     /**
      * 把一个文件导入成新的拼音词库。
      *
-     * @param format client-core 的格式名（来自 {@link View#formats}）
+     * @param format client-services 的格式名（来自 {@link View#formats}）
      * @param name 新词库的名字，已经按 {@link #nameFromFile} 收好
      * @param bytes 文件内容；`scel` 这类二进制格式按 base64 传，其余按 UTF-8 文本传
      */
@@ -195,7 +216,7 @@ public final class DictionaryCollectionsStore {
     /**
      * 把一个社区词库装成命名词库。
      *
-     * @param resource 社区条目的原始 JSON（`CommunityCatalog.Item#raw`），原样交给 client-core 校验
+     * @param resource 社区条目的原始 JSON（`CommunityCatalog.Item#raw`），原样交给 client-services 校验
      */
     public static Result<View> installCommunity(Context context, JSONObject resource) {
         try {
@@ -292,11 +313,11 @@ public final class DictionaryCollectionsStore {
         }
     }
 
-    /** 一次 {@link #queueUnownedWords} 最多送的词数，与 client-core 的 `MAX_QUEUED_WORDS` 一致。 */
+    /** 一次 {@link #queueUnownedWords} 最多送的词数，与 client-services 的 `MAX_QUEUED_WORDS` 一致。 */
     public static final int MAX_QUEUED_WORDS = 20_000;
 
     /**
-     * 把一批不属于任何命名词库的词（`kind` 已是个人词库写法，见 {@link SyncMergePolicy#batches}）排进集合的待发送队列（client-core `queue_words`），返回排进去的词数；不合规的词被跳过、不计数。个人词库队列同时只收 128 个未完成的请求，待发送队列先收下全部的词，再由键盘空闲时的同步和词库页一批批送进去。本地备份恢复个人词库时用；调用方负责标记同步改动。
+     * 把一批不属于任何命名词库的词（`kind` 已是个人词库写法，见 {@link SyncMergePolicy#batches}）排进集合的待发送队列（client-services `queue_words`），返回排进去的词数；不合规的词被跳过、不计数。个人词库队列同时只收 128 个未完成的请求，待发送队列先收下全部的词，再由键盘空闲时的同步和词库页一批批送进去。本地备份恢复个人词库时用；调用方负责标记同步改动。
      */
     public static Result<Integer> queueUnownedWords(Context context, List<SyncMergePolicy.Word> words) {
         if (words.size() > MAX_QUEUED_WORDS) throw new IllegalArgumentException("too many words in one call");
@@ -320,7 +341,7 @@ public final class DictionaryCollectionsStore {
         return Result.of(queued == null ? 0 : queued);
     }
 
-    /** 集合名能否使用，与 client-core 一致：1–32 个字，首尾没有空白，不含控制字符和换行。 */
+    /** 集合名能否使用，与 client-services 一致：1–32 个字，首尾没有空白，不含控制字符和换行。 */
     public static boolean validName(String name) {
         if (name == null || name.isEmpty() || !name.equals(TextPolicy.stripped(name))) return false;
         if (!TextPolicy.withinCodePoints(name, MAX_NAME_CHARS)) return false;
@@ -392,7 +413,7 @@ public final class DictionaryCollectionsStore {
     }
 
     /**
-     * 导入来源对话框的选项：只列 client-core 实际接受的格式，按「文本、搜狗、Rime、纯汉字」排；`standard` 和 `windows` 是文本文件的两种列顺序，由 client-core 在 `txt` 里自动识别，不单独列出。
+     * 导入来源对话框的选项：只列 client-services 实际接受的格式，按「文本、搜狗、Rime、纯汉字」排；`standard` 和 `windows` 是文本文件的两种列顺序，由 client-services 在 `txt` 里自动识别，不单独列出。
      */
     public static List<ImportSource> importSources(List<String> formats) {
         List<ImportSource> sources = new ArrayList<>(formats.size());
@@ -411,7 +432,7 @@ public final class DictionaryCollectionsStore {
         return ListPolicy.copyOrEmpty(sources);
     }
 
-    /** 把 client-core 的错误码换成可直接展示的话；不认识的码一律按通用失败处理。 */
+    /** 把 client-services 的错误码换成可直接展示的话；不认识的码一律按通用失败处理。 */
     public static String failureMessage(String code) {
         if (code == null) code = "";
         switch (code) {
@@ -470,8 +491,10 @@ public final class DictionaryCollectionsStore {
             JsonPolicy.nonNegativeInteger(report.opt("imported"), 0),
             JsonPolicy.nonNegativeInteger(report.opt("duplicates"), 0),
             JsonPolicy.nonNegativeInteger(report.opt("failed"), 0),
-            JsonPolicy.strictTrue(report.opt("truncated")));
-        return new View(ListPolicy.copyOrEmpty(collections), ListPolicy.copyOrEmpty(formats), importReport);
+            JsonPolicy.strictTrue(report.opt("truncated")), "");
+        Integer outboxPending = JsonPolicy.nonNegativeInteger(value.opt("outbox_pending"), 0);
+        return new View(ListPolicy.copyOrEmpty(collections), ListPolicy.copyOrEmpty(formats),
+            outboxPending, importReport);
     }
 
     /** 解析一页词条（`value`）。 */
@@ -507,7 +530,24 @@ public final class DictionaryCollectionsStore {
         JSONObject value = value(response);
         if (value == null) return Result.failed(failureMessage(errorOf(response)));
         if (changesWords) SyncSignals.markDirty(context, SyncSwitch.DICTIONARY);
-        return Result.of(parseView(value));
+        View view = parseView(value);
+        if (view.importReport() != null) {
+            DictionaryImportSynchronization.Outcome outcome = DictionaryImportSynchronization.run(() -> {
+                JSONObject synchronizedWords = value(NativeClient.personalDictionarySync(options));
+                if (synchronizedWords == null) throw new IllegalStateException("dictionary synchronization unavailable");
+                Result<Integer> flushed = flushSent(context);
+                if (!flushed.ok()) throw new IllegalStateException("dictionary collections unavailable");
+                return new DictionaryImportSynchronization.Batch(
+                    JsonPolicy.nonNegativeInteger(synchronizedWords.opt("pending_count"), -1),
+                    flushed.value(),
+                    JsonPolicy.nonNegativeInteger(synchronizedWords.opt("failed_count"), -1));
+            }, System::nanoTime);
+            ImportReport report = view.importReport();
+            view = new View(view.collections(), view.formats(), view.outboxPending(), new ImportReport(
+                report.imported(), report.duplicates(), report.failed(), report.truncated(),
+                DictionaryImportSynchronization.notice(outcome)));
+        }
+        return Result.of(view);
     }
 
     private static JSONObject dictionary(Context context, JSONObject action) throws JSONException {

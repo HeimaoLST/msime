@@ -1,12 +1,14 @@
 import type { ReactNode } from "react";
 import { GroupList } from "../core/platform-controls";
-import {
-  LinuxTencentCredentialsSection,
-  type LinuxTencentCredentialInput,
-  type LinuxTencentCredentialStatus,
-} from "./linux-tencent-credentials-section";
+import { LinuxTencentCredentialsSection } from "./linux-tencent-credentials-section";
+import type {
+  TencentCredentialInput,
+  TencentCredentialSaveInput,
+  TencentCredentialStatus,
+} from "./tencent-credential-model";
 import { TencentTranslationSection } from "./tencent-translation-section";
 import type { CredentialStatusMessageValue } from "./credential-status-message";
+import type { TranslationOfflineFallback } from "./translation-service-selector-section";
 
 export interface TencentTranslationSettingsSectionProps {
   grouped?: boolean;
@@ -18,15 +20,18 @@ export interface TencentTranslationSettingsSectionProps {
   region: string;
   credentialIssue?: string;
   showMissingCredentialsWarning?: boolean;
-  status?: LinuxTencentCredentialStatus;
-  input: LinuxTencentCredentialInput;
+  offlineFallback?: TranslationOfflineFallback;
+  /** 见 `TencentTranslationSectionProps.foldRegion`；Linux 的凭据表单不受影响。 */
+  foldRegion?: boolean;
+  status?: TencentCredentialStatus;
+  input: TencentCredentialInput;
   busy: boolean;
   message?: CredentialStatusMessageValue;
   onSecretIdChange: (value: string) => void;
   onSecretKeyChange: (value: string) => void;
   onRegionChange: (value: string) => void;
-  onInputChange?: (patch: Partial<LinuxTencentCredentialInput>) => void;
-  onSave?: (credential: { secretId?: string; secretKey?: string; region: string }) => void;
+  onInputChange?: (patch: Partial<TencentCredentialInput>) => void;
+  onSave?: (credential: TencentCredentialSaveInput) => void;
   onClear?: () => void;
   linuxCredentialTest?: ReactNode;
   serviceCredentialTest?: ReactNode;
@@ -43,6 +48,8 @@ export function TencentTranslationSettingsSection({
   region,
   credentialIssue,
   showMissingCredentialsWarning = false,
+  offlineFallback,
+  foldRegion = true,
   status,
   input,
   busy,
@@ -77,6 +84,8 @@ export function TencentTranslationSettingsSection({
       region={region}
       credentialIssue={credentialIssue}
       showMissingCredentialsWarning={showMissingCredentialsWarning}
+      offlineFallback={offlineFallback}
+      foldRegion={foldRegion}
       onSecretIdChange={onSecretIdChange}
       onSecretKeyChange={onSecretKeyChange}
       onRegionChange={onRegionChange}

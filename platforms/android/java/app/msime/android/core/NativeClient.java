@@ -10,6 +10,7 @@ import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.json.JSONException;
 import org.json.JSONObject;
 
 /** JNI transport for an Android IME host. Session operations use the creating thread.
@@ -203,13 +204,24 @@ public final class NativeClient {
             throw new IllegalArgumentException("Invalid candidate gloss request", error);
         }
     }
-    /** Reads bounded English completions from the packaged dictionary. Call on a worker. */
+    /** 在工作线程读取固定英文词库的有界补全。 */
     public static String englishCompletions(String prefix, String resources) {
+        return englishCandidates(prefix, resources, false);
+    }
+
+    /** 共享引擎返回原文第一行及可选的唯一纠错，不改变输入会话。 */
+    public static String englishCorrections(String prefix, String resources) {
+        return englishCandidates(prefix, resources, true);
+    }
+
+    private static String englishCandidates(String prefix, String resources, boolean correction) {
         if (prefix == null || prefix.isEmpty() || prefix.length() > 128
-                || !prefix.chars().allMatch(TextPolicy::isAsciiLetter))
+                || !prefix.chars().allMatch(value -> TextPolicy.isAsciiLetter(value)
+                    || (correction && value == '\'')))
             throw new IllegalArgumentException("Invalid English completion prefix");
         try {
-            JSONObject request = new JSONObject().put("prefix", prefix).put("limit", 12);
+            JSONObject request = new JSONObject().put("prefix", prefix).put("limit", correction ? 2 : 12)
+                .put("correction", correction);
             byte[] requestBytes = request.toString().getBytes(StandardCharsets.UTF_8);
             byte[] resourcesBytes = resources.getBytes(StandardCharsets.UTF_8);
             if (resourcesBytes.length > ENGLISH_COMPLETION_RESOURCES_LIMIT)
@@ -419,6 +431,11 @@ public final class NativeClient {
         return TextPolicy.utf8(voiceHotwordCorrectRaw(utf8(request)));
     }
 
+    /** 本地模型最终文本里汉字写的数字改成数字：`{"text","kind"}` in, `{"text"}` out。只改写不自带 ITN 的 kind，其他 kind 原样返回；只用于最终文本。Pure. */
+    public static String voiceNormalizeNumbers(String request) {
+        return TextPolicy.utf8(voiceNormalizeNumbersRaw(utf8(request)));
+    }
+
     /** Whether the sherpa-onnx runtime loads: the one packaged in the APK, or the one named by {@link #localSpeechRuntime}. Loads it on the first call, so call on a worker. */
     public static boolean localSpeechAvailable() {
         return localSpeechAvailableRaw();
@@ -563,6 +580,12 @@ public final class NativeClient {
         NativeHandlePolicy.requirePositive(handle);
         byte[] partial = localSpeechAcceptRaw(handle, pcm, count);
         return partial == null ? null : TextPolicy.utf8(partial);
+    }
+
+    /** 经过 VAD 的整段模型此刻是否判定在说话；流式模型始终为 false。在送音频的那个工作线程上调用。 */
+    public static boolean localSpeechSpeaking(long handle) {
+        NativeHandlePolicy.requirePositive(handle);
+        return localSpeechSpeakingRaw(handle);
     }
 
     /** Flush and return the whole transcript. Throws IllegalStateException once cancelled or on failure. */
@@ -732,6 +755,30 @@ public final class NativeClient {
     public static String aiRequestForQuery(long session, String query) {
         return TextPolicy.utf8(aiRequestForQueryRaw(session, boundedQuery(query)));
     }
+    /** 使用当前 AI 凭据构造一次候选翻译请求。 */
+    public static String aiTranslationHttpRequest(String config, String text, String source,
+            String target) {
+        if (config == null || text == null || source == null || target == null)
+            throw new IllegalArgumentException("Missing AI translation request");
+        JSONObject request;
+        try {
+            request = new JSONObject(config)
+                .put("input", new JSONObject().put("text", text)
+                    .put("source_language", source).put("target_language", target));
+        } catch (JSONException error) {
+            throw new IllegalArgumentException("Invalid AI translation configuration", error);
+        }
+        return TextPolicy.utf8(aiTranslationHttpRequestRaw(request.toString().getBytes(StandardCharsets.UTF_8)));
+    }
+    public static String parseAiTranslationResponse(byte[] body) {
+        if (body == null || body.length > GLOSS_RESPONSE_LIMIT) throw new IllegalArgumentException("AI response is too large");
+        return TextPolicy.utf8(parseAiTranslationResponseRaw(body));
+    }
+    /** 判断 AI 翻译服务回复是否失败；合法的空译文不算失败。 */
+    public static boolean aiTranslationReplyFailed(byte[] body) {
+        if (body == null || body.length > GLOSS_RESPONSE_LIMIT) return true;
+        return aiTranslationReplyFailedRaw(body);
+    }
     public static String applyCloudResponse(long session, String query, String body) {
         byte[] payload = body.getBytes(StandardCharsets.UTF_8);
         if (payload.length > OnlineCandidatePolicy.MAX_CLOUD_RESPONSE_BYTES)
@@ -748,7 +795,7 @@ public final class NativeClient {
             throw new IllegalArgumentException("Online candidates are too large");
         return TextPolicy.utf8(applyOnlineCandidatesRaw(session, boundedQuery(query), payload, source));
     }
-    /** AI 回答为空、失败或被拒时调用（source 只认 1）：AI 座位上的占位行换成「—」，留到组字变化为止。 */
+    /** AI 回答为空、失败或被拒时调用（source 只认 1）。共享内核已经不放 AI 占位行，这个调用答 applied:false、不改候选列表；调用和接口留着不变。 */
     public static String resolveOnlineCandidates(long session, String query, int source) {
         if (source != 0 && source != 1)
             throw new IllegalArgumentException("Unknown online candidate source");
@@ -865,6 +912,9 @@ public final class NativeClient {
     private static native byte[] onlineQueryRaw(long session);
     private static native byte[] cloudRequestUrlRaw(byte[] query);
     private static native byte[] aiRequestForQueryRaw(long session, byte[] query);
+    private static native byte[] aiTranslationHttpRequestRaw(byte[] request);
+    private static native byte[] parseAiTranslationResponseRaw(byte[] body);
+    private static native boolean aiTranslationReplyFailedRaw(byte[] body);
     private static native byte[] applyCloudResponseRaw(long session, byte[] query, byte[] body);
     private static native byte[] applyOnlineCandidatesRaw(long session, byte[] query,
         byte[] candidates, int source);
@@ -874,6 +924,7 @@ public final class NativeClient {
     private static native byte[] updatePreferencesRaw(long session, byte[] snapshot);
     private static native byte[] voiceHotwordsRaw(byte[] request);
     private static native byte[] voiceHotwordCorrectRaw(byte[] request);
+    private static native byte[] voiceNormalizeNumbersRaw(byte[] request);
     private static native boolean localSpeechAvailableRaw();
     private static native void localSpeechRuntimeRaw(byte[] path);
     private static native byte[] resourcePacksRaw(byte[] request);
@@ -899,6 +950,7 @@ public final class NativeClient {
     private static native byte[] localSpeechStartRaw(long handle, byte[] model, byte[] language,
                                                      byte[] hotwords, int threads);
     private static native byte[] localSpeechAcceptRaw(long handle, short[] pcm, int count);
+    private static native boolean localSpeechSpeakingRaw(long handle);
     private static native byte[] localSpeechFinishRaw(long handle);
     private static native void localSpeechCancelRaw(long handle);
     private static native void localSpeechDestroyRaw(long handle);

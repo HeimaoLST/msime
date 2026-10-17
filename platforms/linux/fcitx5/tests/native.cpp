@@ -215,17 +215,17 @@ void modeBadgeTheme() {
   const auto dark = [](const Json &preferences, bool system_dark) {
     return fcitx_mode_badge_theme(preferences, system_dark, Json()).dark;
   };
-  // toolbar_theme "follow" defers to the global mode, whose "system" follows the desktop, so a light desktop gets a light badge.
-  require(!dark(Json{{"toolbar_theme", "follow"}, {"theme", "system"}}, false), "follow on a light desktop gives a light badge");
-  require(dark(Json{{"toolbar_theme", "follow"}, {"theme", "system"}}, true), "follow on a dark desktop gives a dark badge");
-  require(dark(Json{{"toolbar_theme", "follow"}, {"theme", "dark"}}, false), "follow defers to a dark global theme");
-  // An explicit toolbar mode wins over the global mode and over the candidate mode.
-  require(!dark(Json{{"toolbar_theme", "light"}, {"theme", "dark"}, {"candidate_theme", "dark"}}, true),
-          "an explicit light toolbar theme wins");
-  require(dark(Json{{"toolbar_theme", "dark"}, {"theme", "light"}, {"candidate_theme", "light"}}, false),
-          "an explicit dark toolbar theme wins");
+  // 角标跟随颜色模式：全局的 "system" 跟随桌面，浅色桌面得到浅色角标。
+  require(!dark(Json{{"theme", "system"}}, false), "system on a light desktop gives a light badge");
+  require(dark(Json{{"theme", "system"}}, true), "system on a dark desktop gives a dark badge");
+  require(dark(Json{{"theme", "dark"}}, false), "the badge follows a dark colour mode");
+  // 存下的 toolbar_theme 不再起作用（各界面一律跟随颜色模式），候选窗的明暗也不参与。
+  require(dark(Json{{"toolbar_theme", "light"}, {"theme", "dark"}, {"candidate_theme", "light"}}, false),
+          "a stored light toolbar theme is ignored");
+  require(!dark(Json{{"toolbar_theme", "dark"}, {"theme", "light"}, {"candidate_theme", "dark"}}, true),
+          "a stored dark toolbar theme is ignored");
   require(!dark(Json{{"toolbar_theme", "follow"}, {"theme", "system"}, {"candidate_theme", "dark"}}, false),
-          "the candidate mode does not colour the badge when toolbar_theme is present");
+          "the candidate mode does not colour the badge");
   // A global theme with a fixed appearance draws the panel in it, so the badge follows it too.
   require(dark(Json{{"global_theme", "ink"}, {"toolbar_theme", "light"}}, false), "a dark global theme gives a dark badge");
   require(!dark(Json{{"global_theme", "paper"}, {"toolbar_theme", "dark"}}, true), "a light global theme gives a light badge");
@@ -240,6 +240,11 @@ void modeBadgeTheme() {
   // The voice overlay resolves the same theme in its own mode.
   const auto voice = resolveVoiceOverlayTheme(Json{{"global_theme", "ink"}, {"voice_theme", "light"}}, false, Json());
   require(voice.dark, "a fixed-appearance theme overrides the voice overlay's mode too");
+  // 语音浮层同样跟随颜色模式，存下的 voice_theme 被忽略。
+  require(!resolveVoiceOverlayTheme(Json{{"voice_theme", "dark"}, {"theme", "light"}}, true, Json()).dark,
+          "a stored dark voice theme is ignored");
+  require(resolveVoiceOverlayTheme(Json{{"voice_theme", "light"}, {"theme", "dark"}}, false, Json()).dark,
+          "a stored light voice theme is ignored");
 }
 // classicui's options belong to every input method, so the first takeover records what it replaced for msime-linux-setup --unregister, and a later write keeps that value while the option still holds MSIME's. Runs against a scratch XDG_STATE_HOME before the resource fixture; the fixture instance does not load classicui, so this drives the recording step the addon's writes go through.
 void classicuiTakeoverRecord() {
@@ -1033,8 +1038,59 @@ int candidateThemeHint() {
   return 0;
 }
 #endif
+// 不需要词库的真实上下文回归，普通 Linux 构建门禁也必须执行。
+int cloudClipboardResultFencing() {
+  char temporary[] = "/tmp/msime-fcitx-cloud-route-XXXXXX";
+  const auto *directory = mkdtemp(temporary);
+  require(directory != nullptr, "创建合成云剪贴板测试目录");
+  for (const auto *name : {"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"})
+    setenv(name, directory, 1);
+  {
+    char program[] = "msime-cloud-route-test";
+    char disabled[] = "--disable=all";
+    char *args[] = {program, disabled, nullptr};
+    fcitx::Instance instance(2, args);
+    instance.initialize();
+    FixtureContext ic(instance.inputContextManager());
+    ic.focusIn();
+    FcitxState state(ic, nullptr, instance.eventLoop(), false);
+    state.options_path_ = directory;
+    state.updateCloudClipboardPreferences();
+    {
+      // 中继空间或偏好目录变化后，即使旧请求已经完成，也不能采用旧条目。
+      for (const auto &relay : {
+               Json{{"url", "https://relay.example.test/one"}, {"token", "synthetic-one"}},
+               Json{{"url", "https://relay.example.test/one"}, {"token", "synthetic-two"}},
+               Json{{"url", "https://relay.example.test/two"}, {"token", "synthetic-two"}}}) {
+        const auto generationBefore = state.cloud_clipboard_generation_;
+        state.cloud_clipboard_items_ = Json::array({Json{{"text", "旧空间合成条目"}}});
+        std::promise<Json> completed;
+        state.cloud_clipboard_job_ = completed.get_future().share();
+        completed.set_value(Json{{"enabled", true}, {"items", state.cloud_clipboard_items_},
+            {"_socket", state.cloud_clipboard_socket_}, {"_directory", state.options_path_},
+            {"_generation", generationBefore}});
+        state.preferences_["cloud_clipboard_relay"] = relay;
+        state.refreshCloudClipboard();
+        require(state.cloud_clipboard_generation_ > generationBefore &&
+                    state.cloud_clipboard_items_.empty() && !state.cloud_clipboard_job_.valid(),
+                "切换中继地址或令牌使旧空间列表和已完成请求失效");
+      }
+      const auto generationBefore = state.cloud_clipboard_generation_;
+      state.cloud_clipboard_items_ = Json::array({Json{{"text", "旧目录合成条目"}}});
+      state.options_path_ = (std::filesystem::path(directory) / "other-preferences").string();
+      state.refreshCloudClipboard();
+      require(state.cloud_clipboard_generation_ > generationBefore && state.cloud_clipboard_items_.empty(),
+              "切换偏好目录使缓存列表失效");
+    }
+  }
+  std::filesystem::remove_all(directory);
+  std::cout << "Fcitx5 云剪贴板旧结果失效回归通过\n";
+  return 0;
+}
+
 int main(int argc, char **argv) {
   try {
+    if (argc == 2 && std::string(argv[1]) == "--cloud-clipboard") return cloudClipboardResultFencing();
     if (argc == 2 && std::string(argv[1]) == "--theme-priority") return candidateThemePriority();
 #ifdef MSIME_FCITX5_HINT_FONT
     if (argc == 2 && std::string(argv[1]) == "--theme-hint") return candidateThemeHint();
@@ -1069,8 +1125,9 @@ int main(int argc, char **argv) {
                                        std::string(argv[2]) == "--ctrl-space" ||
                                        std::string(argv[2]) == "--caps-lock" ||
                                        std::string(argv[2]) == "--japanese-toggle" ||
-                                       std::string(argv[2]) == "--local-modes")),
-            "usage: fcitx5-native-test <verified-resources> [--ai|--ctrl-space|--caps-lock|--japanese-toggle|--local-modes]");
+                                       std::string(argv[2]) == "--local-modes" ||
+                                       std::string(argv[2]) == "--smart-abc")),
+            "usage: fcitx5-native-test <verified-resources> [--ai|--ctrl-space|--caps-lock|--japanese-toggle|--local-modes|--smart-abc]");
     const bool ai = argc == 3 && std::string(argv[2]) == "--ai";
     const std::string suggestion = ai ? "合成候选" : "在线";
     char temporary[] = "/tmp/msime-fcitx5-test-XXXXXX";
@@ -1084,6 +1141,7 @@ int main(int argc, char **argv) {
     options["preferences"]["learning"] = false;
     options["preferences"]["candidate_page_size"] = 2;
     options["preferences"]["clipboard_history"] = true;
+    // 存着关掉的空格锁定：宿主不再读它，下面检查锁定照旧打开。
     options["preferences"]["voice_input"]["hotkey_hold_space_lock"] = false;
     // A stored commit strategy, which the Linux settings page does not offer and the hosts ignore: the streaming preedit below must still appear.
     options["preferences"]["voice_input"]["commit_mode"] = "ctrl_v";
@@ -1375,9 +1433,45 @@ int main(int argc, char **argv) {
       }
       require(state->session_ != 0, ("focus must unpack transition view: " + reason).c_str());
     }
-    require(!state->voice_hotkey_hold_space_lock_,
-            "initial voice context reads the hold-to-lock preference");
+    require(state->voice_hotkey_hold_space_lock_,
+            "a stored false no longer turns off the hold-to-lock space lock");
     require(state->view_.contains("candidates"), "focus must unpack transition view");
+    // 标准双拼方案的独立验收也在完整上下文套件中运行，避免通用测试的其它失败掩盖新增入口。
+    {
+      const auto press = [&](fcitx::KeySym sym) {
+        fcitx::KeyEvent event(&ic, fcitx::Key(sym));
+        engine.keyEvent(entry, event);
+        return event.accepted();
+      };
+      engine.scheme_shuangpin_action_.activate(&ic);
+      for (int attempt = 0; attempt < 5 &&
+           state->view_.value("shuangpin_profile", std::string{}) != "smart_abc"; ++attempt)
+        engine.shuangpin_profile_action_.activate(&ic);
+      const auto profilePreferencesDirectory = options.at("preferences_directory").get<std::string>();
+      const auto stored = response(msime_client_load_preferences(
+          reinterpret_cast<const uint8_t *>(profilePreferencesDirectory.data()), profilePreferencesDirectory.size()));
+      require(state->view_.value("shuangpin_profile", std::string{}) == "smart_abc" &&
+                  stored.at("preferences").at("shuangpin_profile") == "smart_abc" &&
+                  engine.shuangpin_profile_action_.shortText(&ic) == "双拼方案：智能 ABC",
+              "智能 ABC 状态栏选择、标签或持久化失败");
+      const auto committedBeforeAbc = ic.committed;
+      for (const auto character : {FcitxKey_n, FcitxKey_i, FcitxKey_h, FcitxKey_k})
+        require(press(character), "智能 ABC 字母未进入组合");
+      require(press(FcitxKey_space) && ic.committed == committedBeforeAbc + "你好",
+              "智能 ABC 状态栏选择后未按键位组词上屏");
+      engine.shuangpin_profile_action_.activate(&ic);
+      require(state->view_.value("shuangpin_profile", std::string{}) == "xiaohe",
+              "智能 ABC 作为末项应轮换回小鹤");
+      engine.scheme_quanpin_action_.activate(&ic);
+      require(state->view_.value("scheme", 0u) == 0, "智能 ABC 夹具应恢复全拼");
+      ic.committed.clear();
+      if (argc == 3 && std::string(argv[2]) == "--smart-abc") {
+        state->close();
+        removeFixtureTree(directory);
+        std::cout << "Fcitx5 智能 ABC 状态栏切换、保存与组词上屏通过\n";
+        return 0;
+      }
+    }
     // A pre-preference-store runtime options document may omit newly added keys.
     // The shared preference contract treats candidate translations as enabled when absent;
     // the Fcitx host must preserve that default when the status action toggles it.
@@ -1412,8 +1506,11 @@ int main(int argc, char **argv) {
                 "Uppercase without Shift must pass through");
         require(state->view_.value("local_mode", std::string("none")) == "none",
                 "Uppercase without Shift must not enter a local mode");
+        // #7616 连续大写期间不再进入快捷模式；用小写输入结束这一串，取消合成组字后再测入口。
+        require(!press(sym, shiftState), "连续大写中的 Shift 字母应留给编辑器");
+        require(press(FcitxKey_n) && press(FcitxKey_Escape), "快捷模式夹具应先结束连续大写并清空合成组字");
         press(FcitxKey_Shift_L, shiftState);
-        require(press(sym, shiftState), "Shift local-mode shortcut must be consumed");
+        require(press(sym, shiftState), (std::string("Shift 快捷模式未处理：") + mode).c_str());
         require(state->view_.value("local_mode", std::string("none")) == mode,
                 "Shift local-mode shortcut must enter its mode");
         press(sym, shiftState, true);
@@ -1464,6 +1561,7 @@ int main(int argc, char **argv) {
     changedPreferences["smart_punctuation"] = true;
     changedPreferences["smart_punctuation_repeat"] = true;
     changedPreferences["learning"] = true;
+    changedPreferences["candidate_translations"] = true;
     const auto preferenceDirectory = options["preferences_directory"].get<std::string>();
     if (argc == 3 && std::string(argv[2]) == "--ctrl-space") {
       const auto press = [&](bool release = false, bool ctrl = true) {
@@ -2048,9 +2146,34 @@ int main(int argc, char **argv) {
     engine.smart_punctuation_action_.activate(&ic);
     require(!state->preferences_.value("smart_punctuation", true),
             "smart punctuation status action toggles live mode");
+    // 与设置页相同，总开关连同数字后、字母后直出一起写；否则设置页关过一次之后，这里打开的只是一个不起作用的总开关。
+    require(!state->preferences_.value("smart_punctuation_direct_digit", true) &&
+                !state->preferences_.value("smart_punctuation_direct_letter", true),
+            "turning smart punctuation off from the status bar turns both halves off");
     engine.smart_punctuation_action_.activate(&ic);
     require(state->preferences_.value("smart_punctuation", false),
             "smart punctuation status action restores live mode");
+    require(state->preferences_.value("smart_punctuation_direct_digit", false) &&
+                state->preferences_.value("smart_punctuation_direct_letter", false),
+            "turning smart punctuation on from the status bar turns both halves on");
+    {
+      // 三个键在同一次保存里落盘。
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      Json saved;
+      auto halvesOn = [&] {
+        const auto stored = saved.value("preferences", Json::object());
+        return stored.value("smart_punctuation", false) &&
+               stored.value("smart_punctuation_direct_digit", false) &&
+               stored.value("smart_punctuation_direct_letter", false);
+      };
+      while (std::chrono::steady_clock::now() < deadline) {
+        saved = response(msime_client_load_preferences(
+            reinterpret_cast<const uint8_t *>(preferenceDirectory.data()), preferenceDirectory.size()));
+        if (halvesOn()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      require(halvesOn(), "the status bar persists smart punctuation with both halves");
+    }
     require(engine.smart_punctuation_repeat_action_.isChecked(&ic),
             "smart punctuation repeat status action reflects preference");
     engine.smart_punctuation_repeat_action_.activate(&ic);
@@ -2472,6 +2595,44 @@ int main(int argc, char **argv) {
                                                     fcitx::KeyStates{fcitx::KeyState::Ctrl, fcitx::KeyState::Shift}), true);
       engine.keyEvent(entry, narrowRelease);
       require(narrow.accepted() && !state->fullwidthOutput(), "Ctrl+Shift+Space restores halfwidth");
+      // surrounding text 无效时，输入法自己刚上屏的 ASCII 数字仍应作为智能标点前文。
+      // Unicode 模式生成固定的数字，避免把测试依赖到编辑器原有内容。
+      require(ctrlSpace() && state->input_enabled_,
+              "smart punctuation shadow test could not return to Chinese mode");
+      const auto shadowDigit = committedBy(FcitxKey_U, fcitx::KeyStates(fcitx::KeyState::Shift));
+      require(shadowDigit.first, "Unicode mode could not start for smart punctuation shadow");
+      for (const auto sym : {FcitxKey_0, FcitxKey_0, FcitxKey_3, FcitxKey_0})
+        require(committedBy(sym).first, "Unicode digit input was not consumed");
+      // Publish an authoritative empty document before leaving Unicode mode; the key below commits the
+      // synthetic digit through the normal input-method path and must not make the test lose its shadow.
+      ic.surroundingText().setText("", 0, 0);
+      const auto unicodeSpace = committedBy(FcitxKey_space);
+      require(unicodeSpace == std::make_pair(true, std::string("0")),
+              "Unicode mode did not commit the synthetic ASCII digit");
+      fcitx::KeyEvent unicodeSpaceRelease(&ic, fcitx::Key(FcitxKey_space), true);
+      engine.keyEvent(entry, unicodeSpaceRelease);
+      require(!unicodeSpaceRelease.accepted(),
+              "Unicode Space release was unexpectedly consumed");
+      // Valid empty surrounding at the document start is authoritative and must not fall back to the old shadow digit.
+      require(committedBy(FcitxKey_period) == std::make_pair(true, std::string("。")),
+              "Fcitx5 fell back to the shadow after receiving empty surrounding text");
+      // Rebuild the shadow after the Chinese mark above; the next press verifies that a genuinely unavailable document still uses it after a real release.
+      ic.surroundingText().invalidate();
+      require(committedBy(FcitxKey_U, fcitx::KeyStates(fcitx::KeyState::Shift)).first,
+              "Unicode mode could not restart for the released-key shadow check");
+      for (const auto sym : {FcitxKey_0, FcitxKey_0, FcitxKey_3, FcitxKey_0})
+        require(committedBy(sym).first, "Unicode digit input was not consumed after restart");
+      const auto unicodeSpaceAgain = committedBy(FcitxKey_space);
+      require(unicodeSpaceAgain == std::make_pair(true, std::string("0")),
+              "Unicode mode did not commit the second synthetic ASCII digit");
+      fcitx::KeyEvent unicodeSpaceAgainRelease(&ic, fcitx::Key(FcitxKey_space), true);
+      engine.keyEvent(entry, unicodeSpaceAgainRelease);
+      require(!unicodeSpaceAgainRelease.accepted(),
+              "second Unicode Space release was unexpectedly consumed");
+      require(committedBy(FcitxKey_period) == std::make_pair(false, std::string{}),
+              "Fcitx5 did not keep an input-method ASCII digit as smart-punctuation context");
+      require(ctrlSpace() && !state->input_enabled_,
+              "smart punctuation shadow test could not restore English mode");
       // Ctrl+. works in English mode too, as Windows does with the IME closed: the chord is eaten, commas become Chinese until the next mode switch, and nothing is saved. A pinned English lock keeps ASCII whatever Ctrl+. says.
       const auto ctrlPeriod = [&] {
         fcitx::KeyEvent event(&ic, fcitx::Key(FcitxKey_period, fcitx::KeyStates(fcitx::KeyState::Ctrl)));
@@ -3343,6 +3504,16 @@ int main(int argc, char **argv) {
       require(engine.deliverPanelInput(panelText) == PanelInputDelivery::Delivered &&
                   ic.committed == beforePanelText + "好" && ic.forwarded.size() == 2,
               "panel text commits as it is");
+      panelText.text = "0";
+      const auto beforePanelDigit = ic.committed;
+      require(engine.deliverPanelInput(panelText) == PanelInputDelivery::Delivered &&
+                  ic.committed == beforePanelDigit + "0",
+              "panel ASCII text commits as it is");
+      ic.surroundingText().invalidate();
+      fcitx::KeyEvent panelPeriod(&ic, fcitx::Key(FcitxKey_period));
+      engine.keyEvent(entry, panelPeriod);
+      require(!panelPeriod.accepted() && ic.committed == beforePanelDigit + "0",
+              "panel ASCII text did not provide smart-punctuation shadow context");
     }
     // Real translation socket: no HTTP, credentials, or user input in this fixture.
     const auto translationPath = std::string(directory) + "/translation.sock";

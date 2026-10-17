@@ -36,7 +36,7 @@ bool launchable(const ShellTarget &target) {
 } // namespace
 int main() {
   try {
-    // 侧栏：18 个互不重复的页面，分在 6 个非空组里，按组的顺序排列。
+    // 侧栏：16 个互不重复的页面，分在 6 个非空组里，按组的顺序排列。
     std::set<std::string_view> ids;
     std::set<std::size_t> groups;
     std::size_t previous_group = 0;
@@ -47,15 +47,15 @@ int main() {
       previous_group = page.group;
       groups.insert(page.group);
     }
-    require(ids.size() == 18);
+    require(ids.size() == 16);
     require(groups.size() == page_group_count);
-    // 分组和顺序与 `packages/ui/src/settings/settings-page-registry.ts` 里的 `settingsNavGroups` 相同（打字、外观、更多输入方式、工具、账号、支持），这样原生窗口和共享设置 UI 以同样的方式列出同样的页面。
-    const std::array<std::pair<std::string_view, std::size_t>, 18> sidebar{{
-        {"typing", 0},   {"expression", 0}, {"shortcuts", 0}, {"lexicon", 0},
-        {"themes", 1},   {"candidate", 1},  {"toolbar", 1},   {"osk", 2},
-        {"voice", 2},    {"hand", 2},       {"clip", 3},      {"stats", 3},
-        {"plugins", 3},  {"ai", 3},         {"account", 4},   {"dev", 5},
-        {"feedback", 5}, {"about", 5}}};
+    // 分组和顺序与共享设置 UI 的桌面侧栏相同：`packages/ui/src/settings/settings-page-registry.ts` 里的 `settingsNavGroups`（打字、外观、更多输入方式、工具、账号、支持）去掉 `desktopMergedPages` 并进「关于」的「帮助与反馈」，这样原生窗口和共享设置 UI 以同样的方式列出同样的页面。
+    const std::array<std::pair<std::string_view, std::size_t>, 16> sidebar{{
+        {"typing", 0},  {"expression", 0}, {"shortcuts", 0}, {"lexicon", 0},
+        {"themes", 1},  {"candidate", 1},  {"toolbar", 1},   {"osk", 2},
+        {"voice", 2},   {"clip", 3},       {"stats", 3},     {"plugins", 3},
+        {"ai", 3},      {"account", 4},    {"dev", 5},
+        {"about", 5}}};
     require(sidebar.size() == pages.size());
     for (std::size_t i = 0; i < pages.size(); ++i)
       require(pages[i].id == sidebar[i].first &&
@@ -82,9 +82,11 @@ int main() {
     require(find_page("community") == nullptr);
     // 下载链接已移到关于页，所以不再有下载页。
     require(find_page("download") == nullptr);
+    // 手写设置只有一个打开面板的按钮，并进了屏幕键盘页，没有单独的手写页。
+    require(find_page("hand") == nullptr);
     // MCP stays in this window's developer page and the core pages stay native.
     for (auto id : {"themes", "candidate", "typing", "expression", "shortcuts", "lexicon",
-                    "clip", "stats", "plugins", "ai", "account", "dev", "feedback", "about"})
+                    "clip", "stats", "plugins", "ai", "account", "dev", "about"})
       require(find_page(id)->host == PageHost::Native);
     // 本窗口不再打开共享应用的任何设置页：留下的都是输入工具的面板。
     for (const auto &target : shell_links::all) {
@@ -127,7 +129,10 @@ int main() {
     require(page_for_route("chat") == "ai");
     require(page_for_route("community") == "themes");
     require(page_for_route("tools") == "clip");
-    require(page_for_route("help") == "feedback");
+    // 帮助与反馈并进了「关于」（共享页的 `desktopMergedPages`），托盘和工具栏菜单的「帮助」「反馈」都打开它；本窗口没有 feedback 页。
+    require(page_for_route("help") == "about");
+    require(page_for_route("feedback") == "about");
+    require(find_page("feedback") == nullptr);
     require(page_for_route("expression") == "expression");
     require(page_for_route("developer") == "dev");
     require(page_for_route("plugins") == "plugins");
@@ -139,15 +144,17 @@ int main() {
     require(page_for_route("") == default_page);
     require(page_for_route("nonexistent") == default_page);
     require(find_page(default_page) != nullptr);
-    // 手写页只在提供手写的版本里：没有手写的版本（日文、越南文和藏文版）不列出它，指向它的路由打开默认页；其他页面每个版本都有。
-    for (const auto &page : pages) {
-      require(page_offered(page.id, true));
-      require(page_offered(page.id, false) == (page.id != "hand"));
-    }
-    require(offered_page_for_route("handwriting", true) == "hand");
+    // `handwriting` 打开并进了手写的屏幕键盘页；没有手写的版本（日文、越南文和藏文版）没有手写可设置，它打开默认页。其他路由和每个页面在每个版本里都一样。
+    require(page_for_route("handwriting") == "osk");
+    require(offered_page_for_route("handwriting", true) == "osk");
     require(offered_page_for_route("handwriting", false) == default_page);
-    require(offered_page_for_route("hand", false) == default_page);
+    require(offered_page_for_route("screen-keyboard", false) == "osk");
     require(offered_page_for_route("voice", false) == "voice");
+    for (const auto &page : pages)
+      for (const bool handwriting : {true, false})
+        require(offered_page_for_route(page.id, handwriting) == page.id);
+    // 旧的页面 id `hand` 不再是页面，也不是共享路由的类别，和其他未知 id 一样打开默认页。
+    require(page_for_route("hand") == default_page);
   } catch (const std::exception &error) {
     std::fputs(error.what(), stderr);
     std::fputs("\n", stderr);

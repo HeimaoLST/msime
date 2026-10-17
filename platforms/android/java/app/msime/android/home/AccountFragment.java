@@ -267,7 +267,7 @@ public final class AccountFragment extends HomeTabFragment {
                 super.onInitializeAccessibilityNodeInfo(host, info);
                 info.setClassName(Switch.class.getName());
                 info.setCheckable(true);
-                info.setChecked(toggle.isChecked());
+                androidx.core.view.accessibility.AccessibilityNodeInfoCompat.wrap(info).setChecked(toggle.isChecked());
             }
         });
         if (real) {
@@ -281,6 +281,11 @@ public final class AccountFragment extends HomeTabFragment {
         String devices = !signedIn ? "—" : online == null || online.devices() < 0 ? null : online.devices() + " 台";
         row(group, R.drawable.ic_ms_devices, "我的设备", null, devices,
             signedIn ? () -> SettingsNavigator.open(context, PageId.DEVICES, null) : null);
+        // 绑定后在 QQ 群里发 /stats 看打字数据；只有真实账号能绑定。
+        LinearLayout qq = row(group, R.drawable.ic_ms_link, "绑定 QQ 群助手",
+            real ? "在群里发 /stats 查看打字数据" : "登录后可用", null,
+            real ? () -> SettingsNavigator.open(context, PageId.QQ_LINKS, null) : null);
+        if (!real) ViewPolicy.setEnabledWithAlpha(qq, false, 0.38f);
     }
 
     private void setSync(boolean enabled) {
@@ -313,7 +318,8 @@ public final class AccountFragment extends HomeTabFragment {
         row(group, R.drawable.ic_ms_shield_lock, "隐私", null, "本地优先",
             () -> SettingsNavigator.open(context, PageId.PRIVACY, null));
         AppIconStyle icon = AppIcons.selected(context);
-        row(group, R.drawable.ic_ms_smartphone, "App 图标", null, icon.title(), this::showIcons);
+        group.addView(KeyboardSheets.iconNavRow(context, context.getDrawable(AppIcons.resource(icon)),
+            "App 图标", null, icon.title(), this::showIcons));
     }
 
     // ---- 收尾组 ----
@@ -343,10 +349,9 @@ public final class AccountFragment extends HomeTabFragment {
     private void showIcons() {
         Context context = requireContext();
         AppIconStyle current = AppIcons.selected(context);
-        OptionSheet sheet = new OptionSheet(context, "App 图标",
-            "切换时桌面图标会短暂消失再出现，这是系统在重建启动项");
+        AppIconSheet sheet = new AppIconSheet(context);
         for (AppIconStyle style : AppIconStyle.all()) {
-            sheet.option(style.title() + " · " + style.description(), style == current, () -> {
+            sheet.option(style, style == current, () -> {
                 boolean changed = AppIcons.select(context, style);
                 MsToast.show(context, changed
                     ? "已切换为「" + style.title() + "」，桌面图标稍后更新"

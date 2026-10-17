@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { createRoot } from "react-dom/client";
+import { createMobileSettingsHistoryState } from "../../../packages/ui/src/settings/mobile-history-state";
 import { trackAsyncSubscription } from "../../../packages/ui/src/core/async-subscription";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke, isTauri } from "@tauri-apps/api/core";
@@ -37,6 +38,8 @@ import {
   useCandidatePreviewTheme,
   type AccountClient,
   type AccountProfile,
+  type AccountQqLink,
+  type QqLinksClient,
   type ApiCredentialTestResult,
   type ApiCredentialTestService,
   type ClipboardHistoryEntry,
@@ -53,6 +56,7 @@ import {
   type ProviderCredentialStatus,
   type VoiceCredentialSaveResult,
   type TypingStatisticsClient,
+  type TypingStatisticsUploadClient,
   VocabularyReviewPanel,
   type VocabularyReviewClient,
   type PanelClient,
@@ -96,7 +100,12 @@ import {
 import "@msime/ui/styles.css";
 import { subscribeWindowState } from "./input/window-state";
 import { discoverFontReader } from "./candidate/system-font-client";
-import { DesktopKeyboard, useHostPlatform } from "./input/desktop-keyboard";
+import {
+  DesktopKeyboard,
+  panelSurfaceTheme,
+  useHostPlatform,
+  usePanelHost,
+} from "./input/desktop-keyboard";
 import { DesktopHandwriting } from "./input/desktop-handwriting";
 import { DesktopCloudDictionary } from "./dictionary/desktop-cloud-dictionary";
 import { testDesktopApiCredential } from "./account/credential-test-client";
@@ -199,7 +208,7 @@ const plugins: PluginClient = {
   remove: (kind, id) => invoke<void>("remove_plugin_pack", { kind, id }),
   loadMentions: () => invoke<MentionEntry[]>("load_plugin_mentions"),
   saveMentions: (entries) => invoke<void>("save_plugin_mentions", { entries }),
-  // 脚本插件的授权：设置应用经 client-core 的 `script_grants` 写入。页面只在宿主声明了 `script_plugins` 时调用。
+  // 脚本插件的授权：设置应用经 client-services 的 `script_grants` 写入。页面只在宿主声明了 `script_plugins` 时调用。
   scriptGrants: () => invoke<ScriptGrantsResult>("script_grants"),
   setScriptGrant: (id, hash, enabled, granted) =>
     invoke<ScriptGrantsResult>("set_script_grant", { id, hash, enabled, granted }),
@@ -211,6 +220,24 @@ const typingStatistics: TypingStatisticsClient = {
   setRetention: (retention: string) => invoke("set_typing_statistics_retention", { retention }),
   reset: () => invoke("reset_typing_statistics"),
 };
+// 「上传到云端」：节流（十分钟一次）、构建和状态文件都在 Rust 侧，页面只开关和触发。
+const typingStatisticsUpload: TypingStatisticsUploadClient = {
+  status: () => invoke("typing_statistics_upload_status"),
+  setEnabled: (enabled: boolean) => invoke("set_typing_statistics_upload", { enabled }),
+  sync: () => invoke("upload_typing_statistics"),
+};
+// 「绑定 QQ 群助手」：Rust 侧回的是服务端的 snake_case，这里换成页面的写法。
+type QqLinkDto = { id: string; created_at: string };
+const qqLink = (link: QqLinkDto): AccountQqLink => ({ id: link.id, createdAt: link.created_at });
+const qqLinks: QqLinksClient = {
+  list: async () => (await invoke<{ links: QqLinkDto[] }>("account_qq_links")).links.map(qqLink),
+  redeem: async (code) => qqLink(await invoke<QqLinkDto>("account_qq_link_redeem", { code })),
+  remove: (id) => invoke<void>("account_qq_link_delete", { id }),
+};
+/** 账号会话接在 Tauri 设置应用里的三个桌面宿主。 */
+function isDesktopAccountHost(platform: string): boolean {
+  return platform === "windows" || platform === "macos" || platform === "linux";
+}
 // Every method answers with the whole status, so the page keeps one request in flight rather than
 // following each change with a read of its own. The local day is resolved on the Rust side, which
 // is the process that knows the machine's timezone.
@@ -268,6 +295,11 @@ const client: SettingsClient = {
   validateShuangpinCustomProfile: (profile) =>
     invoke("validate_shuangpin_custom_profile", { profile }),
   builtinShuangpinTable: (name) => invoke("builtin_shuangpin_table", { name }),
+  nineKeyShuangpinLayout: (request) =>
+    invoke("nine_key_shuangpin_layout", {
+      profile: request.profile,
+      table: request.table ?? {},
+    }),
   readSkinToolbarCss: (id, relative) =>
     relative
       ? invoke("read_skin_stylesheet", { id, relative })
@@ -290,7 +322,7 @@ const client: SettingsClient = {
     list: () => invoke<AppNotice[]>("notices_list"),
     dismiss: (id) => invoke<void>("notice_dismiss", { id }),
   },
-  // 与其他宿主一样，发布列表由 Rust（`msime_client_core::update_check`）读取和比较。
+  // 与其他宿主一样，发布列表由 Rust（`msime_client_services::update_check`）读取和比较。
   checkUpdate: (request) => invoke<UpdateCheckResult>("update_check", request),
   openThirdPartyLicenses: () => invoke("open_third_party_licenses"),
   loadMacosShuangpinKeymap: () => invoke<boolean>("load_macos_shuangpin_keymap"),
@@ -488,18 +520,21 @@ function DesktopPanelTheme({
   surface,
   children,
 }: {
-  preferences: Pick<SettingsClient, "load" | "onPreferencesChanged">;
+  preferences: Pick<SettingsClient, "load" | "onPreferencesChanged" | "host">;
   surface: "handwriting" | "voice" | "emoji";
   children: (theme: "dark" | "light") => ReactNode;
 }) {
   const snapshot = usePreferencesSnapshot(preferences);
+  const host = usePanelHost(preferences.host);
   const surfaceTheme =
     surface === "handwriting"
       ? snapshot?.preferences.handwriting_theme
       : surface === "voice"
         ? snapshot?.preferences.voice_theme
         : snapshot?.preferences.emoji_theme;
-  return children(useCandidatePreviewTheme(snapshot?.preferences.theme, surfaceTheme));
+  return children(
+    useCandidatePreviewTheme(snapshot?.preferences.theme, panelSurfaceTheme(host, surfaceTheme)),
+  );
 }
 // The host reports what it supports; outside Tauri (the browser preview) there is no host.
 async function discoverHostCapabilities(): Promise<HostCapabilities | null> {
@@ -542,11 +577,7 @@ function DesktopSettings() {
   const navigateMobilePanel = (next: NonNullable<typeof mobilePanel>, replace = false) => {
     if (typeof window !== "undefined") {
       const current = window.history.state;
-      const state = {
-        ...(current && typeof current === "object" ? current : {}),
-        msimeSettings: true,
-        panel: next,
-      };
+      const state = createMobileSettingsHistoryState(current, { panel: next });
       if (replace) window.history.replaceState(state, "");
       else window.history.pushState(state, "");
     }
@@ -683,6 +714,9 @@ function DesktopSettings() {
       setMacosInstall(macosInstallPending);
       setBootstrapRequired((android || ios) && !ready);
       setInitialPage(page ?? undefined);
+      // 应用启动时补传一次打字统计；没打开上传、没登录或十分钟内传过时宿主什么也不做，失败也不打扰用户。
+      if (host?.typing_statistics && isDesktopAccountHost(host.platform))
+        void typingStatisticsUpload.sync().catch(() => undefined);
       const hosted: SettingsClient = host
         ? {
             ...client,
@@ -698,14 +732,19 @@ function DesktopSettings() {
               host.platform === "ios",
             // A file manager is only reachable on the desktop hosts; iOS and Android get the same
             // page without the button rather than one that fails when pressed.
+            // macOS 也不给「打开数据目录」：统计文件就在偏好目录里，和「维护与诊断 › 在 Finder 中显示」打开的是同一个文件夹（Tauri 的 `open_typing_statistics_directory` 与 `open_diagnostic_log_directory` 在 macOS 上都指向 `preferences_directory`）。Linux 和 Windows 上统计页这一个按钮是唯一入口，照旧保留。
             ...(host.typing_statistics
               ? {
-                  typingStatistics: isMobileHost(host.platform)
-                    ? typingStatistics
-                    : {
-                        ...typingStatistics,
-                        openDirectory: () => invoke<void>("open_typing_statistics_directory"),
-                      },
+                  typingStatistics: {
+                    ...typingStatistics,
+                    ...(isMobileHost(host.platform) || host.platform === "macos"
+                      ? {}
+                      : { openDirectory: () => invoke<void>("open_typing_statistics_directory") }),
+                    // 「上传到云端」只接在三个桌面宿主的账号会话上；移动端和鸿蒙还没有。
+                    ...(isDesktopAccountHost(host.platform)
+                      ? { cloudUpload: typingStatisticsUpload }
+                      : {}),
+                  },
                 }
               : {}),
             ...(host.platform === "macos" ||
@@ -891,6 +930,7 @@ function DesktopSettings() {
                     logout: (all: boolean) => invoke("account_logout", { all }),
                     deleteAccount: () => invoke("account_delete"),
                     clearExpired: () => invoke("account_forget"),
+                    qqLinks,
                     // 设置同步只在 Windows 接到账号会话上；macOS 由输入法自己的账号窗口同步它的原生设置，Linux 还没有接入。
                     ...(host.platform === "windows"
                       ? { settingsSync: createDesktopSettingsSync(invoke) }

@@ -1,10 +1,12 @@
+import { NativeCleanup } from '../keyboard/NativeCleanup';
 import web_webview from '@ohos.web.webview';
 import common from '@ohos.app.ability.common';
 import client, { DoubaoFrameResult } from 'libmsimeclient.so';
 import pasteboard from '@ohos.pasteboard';
 import Want from '@ohos.app.ability.Want';
 import bundleManager from '@ohos.bundle.bundleManager';
-import font from '@ohos.font';
+import { UIContext } from '@ohos.arkui.UIContext';
+import { InputMethodListDialog } from '@ohos.inputMethodList';
 import deviceInfo from '@ohos.deviceInfo';
 import http from '@ohos.net.http';
 import { installNoRedirectGuard } from '../network/HarmonyHttpSecurity';
@@ -210,6 +212,70 @@ interface TypingStatisticsSkinRequest {
   action: TypingStatisticsSkinAction;
 }
 
+/** 「上传到云端」页面发来的请求：`status`、`set_enabled` 或 `sync`。 */
+interface TypingUploadAction {
+  operation: string;
+  enabled?: boolean;
+}
+
+/** `msime_client_typing_statistics` 的上传动作：`upload_status`、`set_upload_enabled`、`upload_request`、`upload_succeeded`。 */
+interface TypingUploadNativeAction {
+  operation: string;
+  enabled?: boolean;
+  day?: string;
+  platform?: string;
+  force?: boolean;
+  device?: string;
+}
+
+interface TypingUploadNativeRequest {
+  directory: string;
+  action: TypingUploadNativeAction;
+}
+
+interface TypingUploadState {
+  enabled: boolean;
+  lastUploadMs: number | null;
+}
+
+interface TypingUploadStateReply {
+  ok: boolean;
+  value?: TypingUploadState;
+  error?: string;
+}
+
+/** `upload_request` 的回答：要发时有 `device` 和 `body`，不发时只有 `skip`。 */
+interface TypingUploadPrepared {
+  skip?: string;
+  device?: string;
+  body?: Object;
+}
+
+interface TypingUploadPreparedReply {
+  ok: boolean;
+  value?: TypingUploadPrepared;
+  error?: string;
+}
+
+/** 账号桥接的信封，这里只读成败和错误码。 */
+interface AccountEnvelope {
+  ok: boolean;
+  error?: string;
+}
+
+/** 回给页面的状态，与桌面 `typing_statistics_upload_status` 的形状相同。 */
+interface TypingUploadPageStatus {
+  enabled: boolean;
+  lastUploadMs: number | null;
+  signedIn: boolean;
+}
+
+interface TypingUploadPageReply {
+  ok: boolean;
+  value?: TypingUploadPageStatus;
+  error?: string;
+}
+
 /** The installed family names, or a refusal the page can report rather than an empty list. */
 interface FontFamilyReply {
   ok: boolean;
@@ -366,6 +432,18 @@ interface PluginImportCall {
   state_root: string;
   sound_packs: string;
   action: PluginImportAction;
+}
+
+/** 单表导入复用 Rust 插件边界，页面不能指定状态目录。 */
+interface HelpcodeImportAction {
+  operation: string;
+  file_name: string;
+  text: string;
+}
+
+interface HelpcodeImportCall {
+  state_root: string;
+  action: HelpcodeImportAction;
 }
 
 interface TypingStatisticsDocument {
@@ -566,8 +644,15 @@ interface DoubaoStartRequest {
 @Component
 struct Settings {
   private controller: web_webview.WebviewController = new web_webview.WebviewController();
-  private context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+  private context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
   private bridge: SettingsBridge = new SettingsBridge();
+  private inputMethodDialog: CustomDialogController = new CustomDialogController({
+    builder: InputMethodListDialog(),
+    onWillDismiss: (action: DismissDialogAction): void => {
+      action.dismiss();
+      this.bridge.refreshSetupState();
+    }
+  });
   // Notices from the MSIME service that the user has not dismissed, newest first; the card shows the first.
   @State notices: NoticeItem[] = [];
   private noticeController: web_webview.WebviewController = new web_webview.WebviewController();
@@ -585,6 +670,8 @@ struct Settings {
 
   aboutToAppear(): void {
     this.bridge.attach(this.context);
+    this.bridge.uiContext = this.getUIContext();
+    this.bridge.onInputMethodPicker = (): void => this.inputMethodDialog.open();
     this.bridge.useWebview(this.controller);
     this.bridge.onNoticeHold = (held: boolean): void => {
       this.noticeHeld = held;
@@ -640,7 +727,7 @@ struct Settings {
   }
 
   /**
-   * Fetches the notices when the window opens or comes back to the front, never on a timer: client-core answers from its copy for a minute after a fetch, which is as often as the service wants to be asked.
+   * 在窗口打开或回到前台时获取公告，从不按定时器获取：client-services 在一次获取后的一分钟内都用自己的副本回答，这正是服务希望被询问的频率。
    */
   private loadNotices(): void {
     const generation: number = ++this.noticeRequest;
@@ -805,7 +892,7 @@ struct Settings {
               this.controller.registerJavaScriptProxy(this.bridge, BRIDGE_NAME,
                 ['loadPreferences', 'savePreferences', 'hostCapabilities', 'appVersion',
                   'scanSkinCatalog', 'readSkinImage', 'readSkinFont', 'readSkinToolbarCss',
-                  'dictionaryManifest', 'dictionary', 'cloudDictionaryDownload',
+                  'dictionaryManifest', 'dictionary', 'nineKeyShuangpinLayout', 'cloudDictionaryDownload',
                   'typingStatistics', 'openExternalUrl', 'copyText',
                   'openSystemKeyboardSettings', 'listVoiceCaptureDevices', 'listFontFamilies',
                   'keyboardFeedback', 'onboardingStatus',
@@ -840,6 +927,8 @@ struct Settings {
  * arrives at the page as the refusal rather than as an exception thrown across the bridge.
  */
 class SettingsBridge {
+  uiContext: UIContext | undefined = undefined;
+  onInputMethodPicker: (() => void) | undefined = undefined;
   private stateDirectory: string = '';
   private sharedSandboxAvailable: boolean = false;
   // 与键盘交换状态的共享沙箱镜像，拿不到共享目录时为 null；`sharedPublishTimer` 合并短时间内的多次改动，只发布一次。
@@ -879,6 +968,8 @@ class SettingsBridge {
   private webview: web_webview.WebviewController | undefined = undefined;
   private context: common.UIAbilityContext | undefined = undefined;
   private accountBridge: HarmonyAccountCloudBridge | undefined = undefined;
+  /** 「上传到云端」的串行队列，见 `typingUpload`。 */
+  private typingUploadQueue: Promise<string> = Promise.resolve('');
   private aiSkins: HarmonyAiSkins | undefined = undefined;
   private cloudDownloadRequest: number = 0;
   // 「从文件导入」从打开选择器到安装结束的模型 id。复制进缓存的那段时间原生安装还没登记，原生取消找不到它，所以取消先记在 voiceImportsCancelled 里，由导入流程在复制每个文件前和开始安装前检查。
@@ -1045,7 +1136,11 @@ class SettingsBridge {
     let picked: string[] = [];
     try {
       const options: picker.DocumentSelectOptions = new picker.DocumentSelectOptions();
-      options.selectMode = picker.DocumentSelectMode.FOLDER;
+      if (canIUse('SystemCapability.FileManagement.UserFileService.FolderSelection')) {
+        options.selectMode = picker.DocumentSelectMode.FOLDER;
+      } else {
+        throw new Error('folder_selection_unavailable');
+      }
       options.maxSelectNumber = 1;
       picked = await new picker.DocumentViewPicker(this.context).select(options);
     } catch (error) {
@@ -1149,6 +1244,8 @@ class SettingsBridge {
       });
     } else if (kind === 'typing_statistics') {
       this.typingStatisticsOnWorker(payload).then(deliver).catch(failed);
+    } else if (kind === 'typing_upload') {
+      this.typingUpload(payload).then(deliver).catch(failed);
     } else if (kind === 'cloud_dictionary_snapshot') {
       this.cloudDictionarySnapshot(payload).then(deliver).catch(failed);
     } else if (kind === 'ai_models') {
@@ -1162,6 +1259,8 @@ class SettingsBridge {
         KeyboardLog.error(`local voice model request failed: ${describeError(error)}`);
         deliver(LocalVoiceModelPolicy.refusal('local_model_failed'));
       });
+    } else if (kind === 'helpcode_import') {
+      this.importHelpcodeTable().then(deliver).catch(failed);
     } else if (kind === 'plugin_import') {
       this.importPlugin(payload).then(deliver).catch((error: Object): void => {
         KeyboardLog.error(`plugin import failed: ${describeError(error)}`);
@@ -1306,8 +1405,11 @@ class SettingsBridge {
       return LocalVoiceModelPolicy.rewrite(
         await client.voiceLocalModelRemove(JSON.stringify(request)));
     }
-    if (!fs.accessSync(root)) {
-      fs.mkdirSync(root, true);
+    try {
+      if (!fs.accessSync(root)) fs.mkdirSync(root, true);
+    } catch {
+      KeyboardLog.error('voice model storage unavailable');
+      return LocalVoiceModelPolicy.refusal('local_model_failed');
     }
     if (action.operation === 'import') {
       this.voiceImportsPending.add(id);
@@ -1329,77 +1431,84 @@ class SettingsBridge {
   /**
    * 「从文件导入」：用系统选择器让用户多选自己下载好的模型文件，不联网安装。
    *
-   * 选择器给的是原生库打不开的文档 URI，所以先把文件复制进私有缓存目录，用固定的序号作文件名，再把这些路径交给和下载同一个 `msime_client_voice_local_model_install`（带 `files`），由 client-core 按长度和 SHA-256 认文件、校验、解压并发布，和其他宿主完全相同。长度和目录里任何一个需要的文件都对不上的选择不复制。缓存副本不论成败都在安装结束后删掉。用户关掉选择器时回答 null，不算失败。
+   * 选择器给的是原生库打不开的文档 URI，所以先把文件复制进私有缓存目录，用固定的序号作文件名，再把这些路径交给和下载同一个 `msime_client_voice_local_model_install`（带 `files`），由 client-providers 按长度和 SHA-256 认文件、校验、解压并发布，和其他宿主完全相同。长度和目录里任何一个需要的文件都对不上的选择不复制。缓存副本不论成败都在安装结束后删掉。用户关掉选择器时回答 null，不算失败。
    */
   private async importVoiceModel(root: string, id: string): Promise<string> {
-    const context: common.UIAbilityContext | undefined = this.context;
-    if (context === undefined) {
-      return LocalVoiceModelPolicy.refusal('local_model_failed');
-    }
-    let picked: string[] = [];
     try {
-      const options: picker.DocumentSelectOptions = new picker.DocumentSelectOptions();
-      options.selectMode = picker.DocumentSelectMode.FILE;
-      options.maxSelectNumber = MAX_VOICE_MODEL_IMPORT_PICKS;
-      picked = await new picker.DocumentViewPicker(context).select(options);
-    } catch (error) {
-      KeyboardLog.error(`voice model picker refused: ${describeError(error)}`);
-      return LocalVoiceModelPolicy.refusal('local_model_failed');
-    }
-    if (picked.length === 0) {
-      return JSON.stringify({ ok: true, value: null, error: '' });
-    }
-    if (this.voiceImportsCancelled.has(id)) {
-      return LocalVoiceModelPolicy.refusal('local_model_cancelled');
-    }
-    const listRequest: LocalVoiceModelRequest = { root: root };
-    const sizes: number[] = LocalVoiceModelPolicy.importSizes(
-      client.voiceLocalModels(JSON.stringify(listRequest)), id);
-    const importRoot: string = `${context.cacheDir}/voice-model-import`;
-    const staging: string = `${importRoot}/${util.generateRandomUUID(false)}`;
-    try {
-      if (!this.safeDirectory(context.cacheDir)) {
-        return LocalVoiceModelPolicy.refusal('local_model_io');
+      const context: common.UIAbilityContext | undefined = this.context;
+      if (context === undefined) {
+        return LocalVoiceModelPolicy.refusal('local_model_failed');
       }
-      if (!fs.accessSync(importRoot)) fs.mkdirSync(importRoot, true);
-      if (!this.safeDirectory(importRoot)) {
-        return LocalVoiceModelPolicy.refusal('local_model_io');
-      }
-      fs.mkdirSync(staging, true);
-      if (!this.safeDirectory(staging)) {
-        return LocalVoiceModelPolicy.refusal('local_model_io');
-      }
-      const files: string[] = [];
-      for (const uri of picked) {
-        if (this.voiceImportsCancelled.has(id)) {
-          return LocalVoiceModelPolicy.refusal('local_model_cancelled');
+      let picked: string[] = [];
+      try {
+        const options: picker.DocumentSelectOptions = new picker.DocumentSelectOptions();
+        if (canIUse('SystemCapability.FileManagement.UserFileService.FolderSelection')) {
+          options.selectMode = picker.DocumentSelectMode.FILE;
         }
-        const file: fs.File = fs.openSync(uri, fs.OpenMode.READ_ONLY);
-        try {
-          const opened: fs.Stat = fs.statSync(file.fd);
-          if (!opened.isFile() || !sizes.includes(opened.size)) {
-            continue;
-          }
-          const copy: string = `${staging}/${files.length}`;
-          await fs.copyFile(file.fd, copy);
-          files.push(copy);
-        } finally {
-          fs.closeSync(file);
-        }
+        options.maxSelectNumber = MAX_VOICE_MODEL_IMPORT_PICKS;
+        picked = await new picker.DocumentViewPicker(context).select(options);
+      } catch (error) {
+        KeyboardLog.error(`voice model picker refused: ${describeError(error)}`);
+        return LocalVoiceModelPolicy.refusal('local_model_failed');
+      }
+      if (picked.length === 0) {
+        return JSON.stringify({ ok: true, value: null, error: '' });
       }
       if (this.voiceImportsCancelled.has(id)) {
         return LocalVoiceModelPolicy.refusal('local_model_cancelled');
       }
-      const request: LocalVoiceModelRequest = { root: root, id: id, files: files };
-      const reply: string = await client.voiceLocalModelInstall(JSON.stringify(request),
-        (progress: string): void => this.deliverVoiceModelProgress(progress));
-      return LocalVoiceModelPolicy.installReply(reply);
-    } finally {
+      const listRequest: LocalVoiceModelRequest = { root: root };
+      const sizes: number[] = LocalVoiceModelPolicy.importSizes(
+        client.voiceLocalModels(JSON.stringify(listRequest)), id);
+      const importRoot: string = `${context.cacheDir}/voice-model-import`;
+      const staging: string = `${importRoot}/${util.generateRandomUUID(false)}`;
       try {
-        StagedResources.removeDirectory(staging);
-      } catch (error) {
-        KeyboardLog.error(`voice model import staging not removed: ${describeError(error)}`);
+        if (!this.safeDirectory(context.cacheDir)) {
+          return LocalVoiceModelPolicy.refusal('local_model_io');
+        }
+        if (!fs.accessSync(importRoot)) fs.mkdirSync(importRoot, true);
+        if (!this.safeDirectory(importRoot)) {
+          return LocalVoiceModelPolicy.refusal('local_model_io');
+        }
+        fs.mkdirSync(staging, true);
+        if (!this.safeDirectory(staging)) {
+          return LocalVoiceModelPolicy.refusal('local_model_io');
+        }
+        const files: string[] = [];
+        for (const uri of picked) {
+          if (this.voiceImportsCancelled.has(id)) {
+            return LocalVoiceModelPolicy.refusal('local_model_cancelled');
+          }
+          const file: fs.File = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+          try {
+            const opened: fs.Stat = fs.statSync(file.fd);
+            if (!opened.isFile() || !sizes.includes(opened.size)) {
+              continue;
+            }
+            const copy: string = `${staging}/${files.length}`;
+            await fs.copyFile(file.fd, copy);
+            files.push(copy);
+          } finally {
+            fs.closeSync(file);
+          }
+        }
+        if (this.voiceImportsCancelled.has(id)) {
+          return LocalVoiceModelPolicy.refusal('local_model_cancelled');
+        }
+        const request: LocalVoiceModelRequest = { root: root, id: id, files: files };
+        const reply: string = await client.voiceLocalModelInstall(JSON.stringify(request),
+          (progress: string): void => this.deliverVoiceModelProgress(progress));
+        return LocalVoiceModelPolicy.installReply(reply);
+      } finally {
+        try {
+          StagedResources.removeDirectory(staging);
+        } catch (error) {
+          KeyboardLog.error(`voice model import staging not removed: ${describeError(error)}`);
+        }
       }
+    } catch (error) {
+      KeyboardLog.error('pages.Settings.importVoiceModel failed');
+      throw error as Error;
     }
   }
 
@@ -1456,10 +1565,63 @@ class SettingsBridge {
     return this.context === undefined ? '' : `${this.context.resourceDir}/sound-packs`;
   }
 
+  /** 原始字节有界读取、严格 UTF-8 解码；码表格式与原子安装仍由共享 Rust 负责。 */
+  private async importHelpcodeTable(): Promise<string> {
+    const context: common.UIAbilityContext | undefined = this.context;
+    if (context === undefined) return JSON.stringify({ ok: false, error: 'storage' });
+    let handle: fs.File | null = null;
+    try {
+      const options: picker.DocumentSelectOptions = new picker.DocumentSelectOptions();
+      options.maxSelectNumber = 1;
+      options.fileSuffixFilters = ['辅助码表|.txt'];
+      const picked: string[] = await new picker.DocumentViewPicker(context).select(options);
+      if (picked.length === 0) return JSON.stringify({ ok: true, value: null });
+      const expected: fs.Stat = fs.lstatSync(picked[0]);
+      if (expected.isSymbolicLink() || !expected.isFile()) {
+        return JSON.stringify({ ok: false, error: 'plugin_invalid', detail: '辅助码表不是普通文件' });
+      }
+      handle = fs.openSync(picked[0], fs.OpenMode.READ_ONLY);
+      const stat: fs.Stat = fs.statSync(handle.fd);
+      const maximum: number = 1024 * 1024;
+      if (!stat.isFile() || stat.ino !== expected.ino || stat.size < 1 || stat.size > maximum) {
+        return JSON.stringify({ ok: false, error: 'plugin_invalid', detail: '辅助码表为空、超过 1 MiB 或文件已变化' });
+      }
+      // 多读一个字节识别读取期间增长；分段读取避免把合法短读误认为完整文件。
+      const buffer: ArrayBuffer = new ArrayBuffer(stat.size + 1);
+      let count: number = 0;
+      while (count < buffer.byteLength) {
+        const chunk: ArrayBuffer = new ArrayBuffer(buffer.byteLength - count);
+        const read: number = fs.readSync(handle.fd, chunk);
+        if (read === 0) break;
+        new Uint8Array(buffer).set(new Uint8Array(chunk, 0, read), count);
+        count += read;
+      }
+      if (count !== stat.size) {
+        return JSON.stringify({ ok: false, error: 'plugin_invalid', detail: '读取辅助码表期间文件大小发生变化' });
+      }
+      let text: string;
+      try {
+        text = util.TextDecoder.create('utf-8', { fatal: true }).decodeToString(new Uint8Array(buffer, 0, count));
+      } catch {
+        return JSON.stringify({ ok: false, error: 'plugin_invalid', detail: '辅助码表必须是 UTF-8 文本' });
+      }
+      const action: HelpcodeImportAction = {
+        operation: 'import_helpcode_table', file_name: new fileUri.FileUri(picked[0]).name, text: text
+      };
+      const call: HelpcodeImportCall = { state_root: this.stateDirectory, action: action };
+      return await client.pluginsAsync(JSON.stringify(call));
+    } catch {
+      // 不记录文档 URI、文件名或码表正文。
+      return JSON.stringify({ ok: false, error: 'storage' });
+    } finally {
+      if (handle !== null) NativeCleanup.close(handle);
+    }
+  }
+
   /**
-   * Installs a pack folder or `.zip` file the user picks with the system picker.
+   * 安装用户用系统选择器选中的包目录或 `.zip` 文件。
    *
-   * What the picker hands back is a document URI the native library cannot open, so the pick is copied into a private staging directory first, under a fixed name rather than the picked one, and installed from there by `msime_client_plugins` on a worker thread, which checks it by the same rules as every other host and leaves nothing installed when it refuses. The copy stops at client-core's bounds (`PluginImportPolicy`), so a wrong pick is refused before it is copied whole. The staging copy is removed however the import ends, after the worker has finished with it. The reply is the installed pack, or null when the user closed the picker, which is not a failure.
+   * 选择器交回的是原生库打不开的文档 URI，所以先把选中的内容复制进私有暂存目录，用固定的名字而不是选中时的名字，再在工作线程上由 `msime_client_plugins` 从那里安装；它按与其他所有宿主相同的规则检查，拒绝时不留下任何已安装的内容。复制到 client-services 的上限（`PluginImportPolicy`）就停止，因此选错的文件在被整份复制之前就会被拒绝。不论导入怎样结束，暂存副本都会在工作线程用完之后删掉。回答是安装好的包；用户关掉选择器时回答 null，不算失败。
    */
   private async importPlugin(document: string): Promise<string> {
     const context: common.UIAbilityContext | undefined = this.context;
@@ -1476,7 +1638,11 @@ class SettingsBridge {
     let picked: string[] = [];
     try {
       const options: picker.DocumentSelectOptions = new picker.DocumentSelectOptions();
-      options.selectMode = folder ? picker.DocumentSelectMode.FOLDER : picker.DocumentSelectMode.FILE;
+      if (canIUse('SystemCapability.FileManagement.UserFileService.FolderSelection')) {
+        options.selectMode = folder ? picker.DocumentSelectMode.FOLDER : picker.DocumentSelectMode.FILE;
+      } else if (folder) {
+        throw new Error('folder_selection_unavailable');
+      }
       options.maxSelectNumber = 1;
       if (!folder) {
         options.fileSuffixFilters = ['插件|.zip'];
@@ -1555,38 +1721,43 @@ class SettingsBridge {
    * Copy the top level of a picked pack folder to `destination`, or answer why it cannot be a pack without copying anything. Every entry is looked at before the first byte is copied, and the look stops at the first entry that rules the folder out: a subfolder, a link, or more files or bytes than any pack may hold.
    */
   private async copyPluginFolder(picked: string, destination: string): Promise<PluginImportRefusal | null> {
-    const scan: PluginFolderScan = new PluginFolderScan();
-    for (const name of fs.listFileSync(picked)) {
-      if (PluginImportPolicy.hidden(name)) {
-        continue;
-      }
-      const stat: fs.Stat = fs.lstatSync(`${picked}/${name}`);
-      const kind: PickedEntryKind = stat.isSymbolicLink() ? PickedEntryKind.LINK
-        : stat.isDirectory() ? PickedEntryKind.DIRECTORY
-        : stat.isFile() ? PickedEntryKind.FILE : PickedEntryKind.OTHER;
-      const refusal: PluginImportRefusal | null = scan.take(name, kind, stat.size);
-      if (refusal !== null) {
-        return refusal;
-      }
-    }
-    fs.mkdirSync(destination);
-    for (const name of scan.files) {
-      const sourcePath: string = `${picked}/${name}`;
-      const destinationPath: string = `${destination}/${name}`;
-      const file: fs.File = fs.openSync(sourcePath, fs.OpenMode.READ_ONLY);
-      try {
-        const pathStat: fs.Stat = fs.lstatSync(sourcePath);
-        const opened: fs.Stat = fs.statSync(file.fd);
-        if (pathStat.isSymbolicLink() || !pathStat.isFile()
-          || !opened.isFile() || opened.ino !== pathStat.ino) {
-          return { ok: false, error: 'plugin_invalid', detail: `${name} 文件发生变化` };
+    try {
+      const scan: PluginFolderScan = new PluginFolderScan();
+      for (const name of fs.listFileSync(picked)) {
+        if (PluginImportPolicy.hidden(name)) {
+          continue;
         }
-        await fs.copyFile(file.fd, destinationPath);
-      } finally {
-        fs.closeSync(file);
+        const stat: fs.Stat = fs.lstatSync(`${picked}/${name}`);
+        const kind: PickedEntryKind = stat.isSymbolicLink() ? PickedEntryKind.LINK
+          : stat.isDirectory() ? PickedEntryKind.DIRECTORY
+          : stat.isFile() ? PickedEntryKind.FILE : PickedEntryKind.OTHER;
+        const refusal: PluginImportRefusal | null = scan.take(name, kind, stat.size);
+        if (refusal !== null) {
+          return refusal;
+        }
       }
+      fs.mkdirSync(destination);
+      for (const name of scan.files) {
+        const sourcePath: string = `${picked}/${name}`;
+        const destinationPath: string = `${destination}/${name}`;
+        const file: fs.File = fs.openSync(sourcePath, fs.OpenMode.READ_ONLY);
+        try {
+          const pathStat: fs.Stat = fs.lstatSync(sourcePath);
+          const opened: fs.Stat = fs.statSync(file.fd);
+          if (pathStat.isSymbolicLink() || !pathStat.isFile()
+            || !opened.isFile() || opened.ino !== pathStat.ino) {
+            return { ok: false, error: 'plugin_invalid', detail: `${name} 文件发生变化` };
+          }
+          await fs.copyFile(file.fd, destinationPath);
+        } finally {
+          fs.closeSync(file);
+        }
+      }
+      return null;
+    } catch (error) {
+      KeyboardLog.error('pages.Settings.copyPluginFolder failed');
+      throw error as Error;
     }
-    return null;
   }
 
   /** The shared settings page uses the same validated catalog as desktop presenters. */
@@ -1776,6 +1947,11 @@ class SettingsBridge {
     return await client.customSkinLibrary(request);
   }
 
+  /** 复用键盘已有的无状态计算，网页不另存方案表或校验规则。 */
+  nineKeyShuangpinLayout(request: string): string {
+    return client.nineKeyShuangpinLayout(request);
+  }
+
   /**
    * Which packaged dictionary is installed.
    *
@@ -1854,9 +2030,14 @@ class SettingsBridge {
    */
   /** Whether an input scheme's dictionary, if it needs one, is in the staged language-dictionaries directory. */
   private languageDictionaryInstalled(scheme: string): boolean {
-    const file: string | null = KeyboardScheme.languageDictionary(scheme);
-    return file === null
-      || (this.context !== undefined && fs.accessSync(`${this.context.filesDir}/language-dictionaries/${file}`));
+    try {
+      const file: string | null = KeyboardScheme.languageDictionary(scheme);
+      return file === null
+        || (this.context !== undefined && fs.accessSync(`${this.context.filesDir}/language-dictionaries/${file}`));
+    } catch (error) {
+      KeyboardLog.error('pages.Settings.languageDictionaryInstalled failed');
+      return false;
+    }
   }
 
   hostCapabilities(): string {
@@ -1897,6 +2078,7 @@ class SettingsBridge {
       value['typing_effects'] = projection.typingEffects;
       value['wordbook_packs'] = projection.wordbookPacks;
       value['symbol_set_packs'] = projection.symbolSetPacks;
+      value['touch_toolbar_tools'] = projection.touchToolbarTools;
       value['harmony_shared_sandbox'] = this.sharedSandboxAvailable;
       if (release !== null) {
         value['os_version'] = release;
@@ -2147,6 +2329,107 @@ class SettingsBridge {
     }
     const request: TypingStatisticsSummaryRequest = { directory: this.stateDirectory, action: summary };
     return await client.typingStatisticsAsync(JSON.stringify(request));
+  }
+
+  /**
+   * 打字统计「上传到云端」。构建请求、十分钟的节流、设备标识和上次上传的时间都在 Rust 的统计存储里（`msime_client_typing_statistics` 的 `upload_*` 动作），这里只负责带登录账号把请求发出去。取请求、发送、记成功和关掉后的删除排在同一个串行队列里，免得关掉上传后的删除和还在路上的上传交错。
+   */
+  private typingUpload(document: string): Promise<string> {
+    const run: () => Promise<string> = (): Promise<string> => this.typingUploadNow(document);
+    const next: Promise<string> = this.typingUploadQueue.then(run, run);
+    this.typingUploadQueue = next;
+    return next;
+  }
+
+  private async typingUploadNow(document: string): Promise<string> {
+    const bridge: HarmonyAccountCloudBridge | undefined = this.accountBridge;
+    if (bridge === undefined) return JSON.stringify({ ok: false, error: 'account_unavailable' } as AccountEnvelope);
+    let action: TypingUploadAction;
+    try {
+      action = JSON.parse(document) as TypingUploadAction;
+    } catch {
+      return JSON.stringify({ ok: false, error: 'account_invalid' } as AccountEnvelope);
+    }
+    if (action.operation === 'set_enabled') {
+      if (typeof action.enabled !== 'boolean') {
+        return JSON.stringify({ ok: false, error: 'account_invalid' } as AccountEnvelope);
+      }
+      return action.enabled ? await this.enableTypingUpload(bridge) : await this.disableTypingUpload(bridge);
+    }
+    if (action.operation === 'sync') {
+      // 没登录时不发也不报错，开关保持原样，登录后下一次照常上传。
+      if (bridge.signedIn()) {
+        const failure: string | null = await this.sendTypingUpload(bridge, false);
+        if (failure !== null) return JSON.stringify({ ok: false, error: failure } as AccountEnvelope);
+      }
+      return await this.typingUploadStatus(bridge);
+    }
+    if (action.operation === 'status') return await this.typingUploadStatus(bridge);
+    return JSON.stringify({ ok: false, error: 'account_invalid' } as AccountEnvelope);
+  }
+
+  /** 打开上传：要求已登录；在本地打开后立刻上传一次。上传失败时开关保持打开、回那次上传的错误码，下一次自动上传再试。 */
+  private async enableTypingUpload(bridge: HarmonyAccountCloudBridge): Promise<string> {
+    if (!bridge.signedIn()) return JSON.stringify({ ok: false, error: 'account_unauthorized' } as AccountEnvelope);
+    const state: TypingUploadStateReply =
+      await this.typingUploadNative({ operation: 'set_upload_enabled', enabled: true });
+    if (state.ok !== true) return JSON.stringify({ ok: false, error: 'storage' } as AccountEnvelope);
+    const failure: string | null = await this.sendTypingUpload(bridge, true);
+    if (failure !== null) return JSON.stringify({ ok: false, error: failure } as AccountEnvelope);
+    return await this.typingUploadStatus(bridge);
+  }
+
+  /** 关闭上传：先在本地关掉，再删除云端副本。删除失败时开关仍是关的，回删除的错误码，页面据此提示云端副本没删掉。 */
+  private async disableTypingUpload(bridge: HarmonyAccountCloudBridge): Promise<string> {
+    const state: TypingUploadStateReply =
+      await this.typingUploadNative({ operation: 'set_upload_enabled', enabled: false });
+    if (state.ok !== true) return JSON.stringify({ ok: false, error: 'storage' } as AccountEnvelope);
+    const reply: AccountEnvelope = JSON.parse(await bridge.typingStatisticsDelete()) as AccountEnvelope;
+    if (reply.ok !== true) {
+      return JSON.stringify({ ok: false, error: reply.error ?? 'account_unavailable' } as AccountEnvelope);
+    }
+    return await this.typingUploadStatus(bridge);
+  }
+
+  /** 发一次上传：存储说不用发（没打开、不到十分钟、没有字数）时什么也不做。成功返回 null，失败返回错误码；发送失败不用告诉存储，下一次照样交回请求。 */
+  private async sendTypingUpload(bridge: HarmonyAccountCloudBridge, force: boolean): Promise<string | null> {
+    const prepared: TypingUploadPreparedReply = JSON.parse(await client.typingStatisticsAsync(JSON.stringify({
+      directory: this.stateDirectory,
+      action: {
+        operation: 'upload_request', day: TypingStatisticsPolicy.day(new Date()), platform: 'harmony', force: force
+      }
+    } as TypingUploadNativeRequest))) as TypingUploadPreparedReply;
+    if (prepared.ok !== true || prepared.value === undefined) return 'storage';
+    const value: TypingUploadPrepared = prepared.value;
+    if (typeof value.skip === 'string') return null;
+    if (typeof value.device !== 'string' || value.body === undefined) return 'storage';
+    const sent: AccountEnvelope = JSON.parse(await bridge.typingStatisticsUpload(value.body)) as AccountEnvelope;
+    if (sent.ok !== true) return sent.error ?? 'account_unavailable';
+    const recorded: TypingUploadStateReply =
+      await this.typingUploadNative({ operation: 'upload_succeeded', device: value.device });
+    return recorded.ok === true ? null : 'storage';
+  }
+
+  private async typingUploadStatus(bridge: HarmonyAccountCloudBridge): Promise<string> {
+    const state: TypingUploadStateReply = await this.typingUploadNative({ operation: 'upload_status' });
+    if (state.ok !== true || state.value === undefined) {
+      return JSON.stringify({ ok: false, error: 'storage' } as AccountEnvelope);
+    }
+    const status: TypingUploadPageStatus = {
+      enabled: state.value.enabled === true,
+      lastUploadMs: typeof state.value.lastUploadMs === 'number' ? state.value.lastUploadMs : null,
+      signedIn: bridge.signedIn()
+    };
+    return JSON.stringify({ ok: true, value: status } as TypingUploadPageReply);
+  }
+
+  private async typingUploadNative(action: TypingUploadNativeAction): Promise<TypingUploadStateReply> {
+    const request: TypingUploadNativeRequest = { directory: this.stateDirectory, action: action };
+    try {
+      return JSON.parse(await client.typingStatisticsAsync(JSON.stringify(request))) as TypingUploadStateReply;
+    } catch {
+      return { ok: false, error: 'storage' };
+    }
   }
 
   /** 记下应用了某个皮肤，供「换装达人」徽章使用。皮肤 id 的形式由存储决定；这里只限制大小。 */
@@ -2668,7 +2951,7 @@ class SettingsBridge {
           start.request.corpus = { boosting_table_id: boostingTableId } as DoubaoCorpus;
         }
         const encoder: util.TextEncoder = util.TextEncoder.create('utf-8');
-        const startPayload: ArrayBuffer = encoder.encode(JSON.stringify(start)).buffer as ArrayBuffer;
+        const startPayload: ArrayBuffer = encoder.encodeInto(JSON.stringify(start)).buffer as ArrayBuffer;
         const audioPayload: ArrayBuffer = new Uint8Array(32000).buffer as ArrayBuffer;
         const startFrame: ArrayBuffer = client.doubaoEncodeFrame(1, 1, 1, startPayload);
         const finalFrame: ArrayBuffer = client.doubaoEncodeFrame(2, 3, -2, audioPayload);
@@ -2688,8 +2971,8 @@ class SettingsBridge {
   private silentMultipart(boundary: string, model: string): ArrayBuffer {
     const encoder: util.TextEncoder = util.TextEncoder.create('utf-8');
     const wav: Uint8Array = this.silentWav();
-    const prefix: Uint8Array = encoder.encode(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="credential-test.wav"\r\nContent-Type: audio/wav\r\n\r\n`);
-    const modelPart: Uint8Array = encoder.encode(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n${model}\r\n--${boundary}--\r\n`);
+    const prefix: Uint8Array = encoder.encodeInto(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="credential-test.wav"\r\nContent-Type: audio/wav\r\n\r\n`);
+    const modelPart: Uint8Array = encoder.encodeInto(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n${model}\r\n--${boundary}--\r\n`);
     const output: ArrayBuffer = new ArrayBuffer(prefix.length + wav.length + modelPart.length);
     const bytes: Uint8Array = new Uint8Array(output);
     bytes.set(prefix, 0);
@@ -2718,7 +3001,7 @@ class SettingsBridge {
 
   private writeAscii(bytes: Uint8Array, offset: number, value: string): void {
     const encoder: util.TextEncoder = util.TextEncoder.create('utf-8');
-    bytes.set(encoder.encode(value), offset);
+    bytes.set(encoder.encodeInto(value), offset);
   }
 
   private writeU16(bytes: Uint8Array, offset: number, value: number): void {
@@ -2865,7 +3148,8 @@ class SettingsBridge {
    */
   listFontFamilies(): string {
     try {
-      const families: string[] = font.getSystemFontList().filter((name: string): boolean =>
+      if (this.uiContext === undefined) throw new Error('settings UI context unavailable');
+      const families: string[] = this.uiContext.getFont().getSystemFontList().filter((name: string): boolean =>
         name.length > 0 && name.length <= 128 && !/[\u0000-\u001f\u007f]/.test(name));
       return JSON.stringify({ ok: true, value: families, error: '' } as FontFamilyReply);
     } catch (error) {
@@ -3061,11 +3345,13 @@ class SettingsBridge {
    */
   showInputMethodPicker(): string {
     // 选择器是覆盖在本窗口上的对话框，所以窗口可能始终不离开前台，激活时的重新读取不会运行。在选择器返回时以及系统键盘变化事件上重新读取，「设为默认」这一步才能往前推进。
-    inputMethod.getSetting().showOptionalInputMethods().then((shown: boolean): void => {
-      this.refreshSetupState();
-    }).catch((error: Object): void => {
+    try {
+      if (this.onInputMethodPicker === undefined) throw new Error('settings picker unavailable');
+      this.onInputMethodPicker();
+    } catch (error) {
       KeyboardLog.error(`keyboard picker would not open: ${describeError(error)}`);
-    });
+      return JSON.stringify({ ok: false, value: false, ready: true, error: '无法打开输入法选择器' } as OnboardingReply);
+    }
     return JSON.stringify({ ok: true, value: true, ready: true, error: '' } as OnboardingReply);
   }
 
@@ -3263,13 +3549,13 @@ class SettingsBridge {
       if (count !== stat.size) {
         return null;
       }
-      return util.TextDecoder.create('utf-8').decode(new Uint8Array(buffer, 0, count));
+      return util.TextDecoder.create('utf-8').decodeToString(new Uint8Array(buffer, 0, count));
     } catch {
       // 从未写过的文件是常见情况，不是错误。
       return null;
     } finally {
       if (handle !== null) {
-        fs.closeSync(handle);
+        NativeCleanup.close(handle);
       }
     }
   }

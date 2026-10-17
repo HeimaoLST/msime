@@ -1,6 +1,5 @@
 package app.msime.android.test;
 
-import android.os.SystemClock;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -23,15 +22,10 @@ public final class PreferencesDeviceSmoke extends DeviceSmoke {
         try {
             stage = "baseline preferences";
             publish(preferences, snapshot.toString().getBytes(StandardCharsets.UTF_8));
-            // Clear the previous editor's focus before the instrumentation-driven
-            // rebind; otherwise its delayed hide request can hide the new keyboard.
+            // 先清除上个编辑器的焦点，避免延迟的隐藏请求收起新键盘。
             shellDiscard("am start -W -n app.msime.android/app.msime.android.home.HomeActivity");
-            // Instrumenting the IME package restarts its process. Rebind the system
-            // service before opening the editor; this fixture runs only on the guarded AVD.
-            shellDiscard("ime disable app.msime.android/.MSIMEInputService");
-            shellDiscard("ime enable app.msime.android/.MSIMEInputService");
-            shellDiscard("ime set app.msime.android/.MSIMEInputService");
-            SystemClock.sleep(1000);
+            // 等实际选中被测输入法，避免系统的异步回退覆盖选择。
+            restartIme();
             shellDiscard("am start -W -f 0x10008000 -n app.msime.android.test/app.msime.android.test.EditorActivity");
             stage = "baseline editor focus";
             tap(field("msime-test-plain"));
@@ -82,6 +76,7 @@ public final class PreferencesDeviceSmoke extends DeviceSmoke {
             publish(preferences, snapshot.toString().getBytes(StandardCharsets.UTF_8));
             // 键盘每秒轮询一次设置文件，读到新设置后会按「中文标点」重建 123 层，第三排的逗号键面随之从 `,` 换成 `，`。写入后立刻去点，重建可能落在点逗号之后（插进去的还是旧设置的半角逗号），也可能落在点 123 和点逗号之间（拿到的逗号键已被替换，点击返回 false）；API 35 模拟器慢，两种都出现过。所以先等到全角键面：它出现说明新设置已生效、这一层已重建，之后不会再换。
             tap(key("123"));
+            tap(key("#+="));
             await(key("，").and(node -> node.isClickable()));
             tap(key("，"));
             tap(described("切换到字母键盘"));

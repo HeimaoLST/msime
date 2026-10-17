@@ -105,16 +105,13 @@ final class KeyboardExtensionEditorUITests: XCTestCase {
     app.launchArguments = ["-hasCompletedOnboarding", "YES"]
     if toolbarTest { app.launchArguments.append("--keyboard-toolbar-ui-test") }
     app.launch()
-    if toolbarTest {
-      // 工具栏验收直接进入对话标签，避免上一轮深链接留下的设置导航栈。
-      let chatTab = app.tabBars.buttons["对话"]
-      XCTAssertTrue(chatTab.waitForExistence(timeout: 10), "对话标签必须可用")
-      chatTab.tap()
-    } else {
-      let tryout = app.buttons["keyboardTryoutLink"]
-      XCTAssertTrue(tryout.waitForExistence(timeout: 20), "试用入口必须可用")
-      tryout.tap()
-    }
+    let settings = app.tabBars.buttons["设置"]
+    XCTAssertTrue(settings.waitForExistence(timeout: 10))
+    settings.tap()
+    settings.tap()
+    let tryout = app.buttons["keyboardTryoutLink"]
+    XCTAssertTrue(tryout.waitForExistence(timeout: 20), "试用入口必须可用")
+    tryout.tap()
 
     let field = app.textFields["keyboardTryoutField"]
     XCTAssertTrue(field.waitForExistence(timeout: 15), "试用编辑器必须可用")
@@ -172,6 +169,52 @@ final class KeyboardExtensionEditorUITests: XCTestCase {
         + "\(globe.exists) keys=[\(buttons)]")
   }
 
+  /// 在系统加载的扩展里点按英文按键，校验原文、默认纠错和明确拒绝纠错。
+  func testEnglishCorrectionCommitsThroughTheHostDocument() throws {
+    let app = XCUIApplication()
+    let field = try focusedTryoutKeyboard(app, toolbarTest: true)
+    app.buttons["schemeButton"].tap()
+    let quanpin = app.buttons["schemeCard-quanpin"]
+    XCTAssertTrue(quanpin.waitForExistence(timeout: 5))
+    quanpin.tap()
+    let language = app.buttons["bottomLanguageKey"]
+    if language.label == "切换到英文输入" { language.tap() }
+    XCTAssertEqual(language.value as? String, "英文输入")
+    var committed = (field.value as? String) ?? ""
+    if committed == "输入消息，试试键盘" { committed = "" }
+    for (raw, corrected) in [("whatisthat", "what is that"), ("langiage", "language"),
+                             ("imchinese", "I'm Chinese"), ("speskebglish", "speak English"),
+                             ("hello", "hello"), ("thx", "thx")] {
+      for letter in raw { app.buttons["字母 \(String(letter).uppercased())"].tap() }
+      XCTAssertEqual(field.value as? String, committed + raw, "按键必须先按原文输入")
+      let original = app.buttons["candidate-1"]
+      XCTAssertTrue(original.waitForExistence(timeout: 5))
+      XCTAssertTrue(original.label.contains(raw))
+      if raw != corrected {
+        XCTAssertTrue(app.buttons["candidate-2"].label.contains(corrected))
+      } else {
+        XCTAssertFalse(app.buttons["candidate-2"].exists, "正确词不提供普通前缀补全")
+      }
+      app.buttons["spaceKey"].tap()
+      committed += corrected + " "
+      XCTAssertEqual(field.value as? String, committed)
+    }
+    for letter in "languge" { app.buttons["字母 \(String(letter).uppercased())"].tap() }
+    app.buttons["candidate-1"].tap()
+    app.buttons["spaceKey"].tap()
+    XCTAssertEqual(field.value as? String, committed + "languge ", "点原文后空格不能重新纠错")
+    committed += "languge "
+    for letter in "languge" { app.buttons["字母 \(String(letter).uppercased())"].tap() }
+    app.buttons["bottomPeriodKey"].tap()
+    committed += "language. "
+    XCTAssertEqual(field.value as? String, committed, "标点紧随纠错词，随后追加 ASCII 空格")
+    app.buttons["shiftButton"].tap()
+    app.buttons["大写 L"].tap()
+    for letter in "anguaage" { app.buttons["字母 \(String(letter).uppercased())"].tap() }
+    app.buttons["spaceKey"].tap()
+    XCTAssertEqual(field.value as? String, committed + "Language ", "手动首字母大写必须保留")
+  }
+
   /// 从系统键盘真实点按工具栏，确认每次只打开或关闭一次面板。
   func testToolbarTapsTogglePanelsInHostEditor() throws {
     let app = XCUIApplication()
@@ -218,6 +261,124 @@ final class KeyboardExtensionEditorUITests: XCTestCase {
                   "添加语言应打开应用的输入设置")
   }
 
+  /// 数字页只接受字面输入，不能在结束拼音时悄悄选中首选候选。
+  func testNumberPadCommitsRawCompositionBeforeEveryLiteral() throws {
+    let app = XCUIApplication()
+    let field = try focusedTryoutKeyboard(app)
+    app.buttons["schemeButton"].tap()
+    let card = app.buttons["schemeCard-quanpin"]
+    XCTAssertTrue(card.waitForExistence(timeout: 5))
+    card.tap()
+    func key(_ id: String) -> XCUIElement {
+      app.descendants(matching: .any)[id].firstMatch
+    }
+    var expected = ""
+    for (identifier, literal) in [("nineKey1", "1"), ("nineKeyZero", "0"),
+                                  ("nineKeyMiddleKey", "."), ("运算符 +", "+"),
+                                  ("运算符 -", "-"), ("运算符 *", "*"), ("运算符 /", "/")] {
+      key("字母 N").tap()
+      key("字母 I").tap()
+      XCTAssertTrue(app.buttons["candidate-1"].exists, "必须先建立可选词的拼音组合")
+      key("layoutToggleButton").tap()
+      let target = key(identifier)
+      XCTAssertTrue(target.isHittable)
+      target.tap()
+      expected += "ni" + literal
+      XCTAssertEqual(field.value as? String, expected, "数字页必须原样结束组合，再写入 \(literal)")
+      XCTAssertTrue(key("numberPadMoreSymbols").isHittable, "输入后必须留在数字页")
+      key("layoutToggleButton").tap()
+    }
+  }
+
+  /// 常规中文和原九键的数字页在系统编辑器里连续输入，扩展符号往返不丢失原方案。
+  func testNumberPadTypesContinuousArithmeticIntoTheHostEditor() throws {
+    let app = XCUIApplication()
+    let field = try focusedTryoutKeyboard(app)
+    func key(_ id: String) -> XCUIElement {
+      app.descendants(matching: .any)[id].firstMatch
+    }
+    var expected = ""
+    for scheme in ["quanpin", "nineKey"] {
+      app.buttons["schemeButton"].tap()
+      let card = app.buttons["schemeCard-\(scheme)"]
+      XCTAssertTrue(card.waitForExistence(timeout: 5), "默认中文方案必须可用：\(scheme)")
+      card.tap()
+      let toggle = key("layoutToggleButton")
+      XCTAssertTrue(toggle.isHittable)
+      toggle.tap()
+      for digit in 1...9 {
+        XCTAssertTrue(key("nineKey\(digit)").isHittable, "数字 \(digit) 必须可点")
+      }
+      let one = key("nineKey1").frame
+      let two = key("nineKey2").frame
+      let four = key("nineKey4").frame
+      XCTAssertEqual(one.minY, two.minY, accuracy: 1)
+      XCTAssertEqual(one.minX, four.minX, accuracy: 1)
+      XCTAssertLessThan(one.maxX, two.minX)
+      XCTAssertLessThan(one.maxY, four.minY)
+      for character in "12.3+4-5*6/7001234567890123456789" {
+        let target: XCUIElement
+        switch character {
+        case "0": target = key("nineKeyZero")
+        case "1"..."9": target = key("nineKey\(character)")
+        case ".": target = key("nineKeyMiddleKey")
+        default: target = app.buttons["运算符 \(character)"]
+        }
+        XCTAssertTrue(target.isHittable, "数字页必须能直接输入 \(character)")
+        target.tap()
+        expected.append(character)
+      }
+      XCTAssertEqual(field.value as? String, expected, "数字与运算符必须按字面跨进程上屏")
+      key("nineKeyDelete").tap()
+      expected.removeLast()
+      XCTAssertEqual(field.value as? String, expected)
+      key("numberPadMoreSymbols").tap()
+      XCTAssertTrue(key("symbolLayerToggle").waitForExistence(timeout: 5))
+      key("symbolLayerToggle").tap()
+      XCTAssertTrue(key("nineKey1").isHittable)
+      toggle.tap()
+      XCTAssertTrue((scheme == "quanpin" ? key("字母 A") : key("nineKey2")).isHittable,
+                    "返回后必须恢复原中文方案")
+    }
+  }
+
+  /// 用系统键盘在真实编辑器中验收全拼分词和英文大写，覆盖跨进程上屏。
+  func testQuanpinSeparatorCommitsXianAndRestoresEnglishShift() throws {
+    let app = XCUIApplication()
+    let field = try focusedTryoutKeyboard(app)
+    app.buttons["schemeButton"].tap()
+    let card = app.buttons["schemeCard-quanpin"]
+    XCTAssertTrue(card.waitForExistence(timeout: 5))
+    card.tap()
+    let separator = app.buttons["shiftButton"]
+    XCTAssertTrue(separator.waitForExistence(timeout: 5))
+    XCTAssertEqual(separator.label, "拼音分词")
+    let idle = field.value as? String
+    separator.tap()
+    XCTAssertEqual(field.value as? String, idle)
+    func letter(_ label: String) throws {
+      let key = app.descendants(matching: .any)[label].firstMatch
+      XCTAssertTrue(key.waitForExistence(timeout: 5), label)
+      key.tap()
+    }
+    try letter("字母 X")
+    try letter("字母 I")
+    separator.tap()
+    try letter("字母 A")
+    try letter("字母 N")
+    let candidate = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'candidate-' AND label CONTAINS %@", "西安")).firstMatch
+    XCTAssertTrue(candidate.waitForExistence(timeout: 8))
+    candidate.tap()
+    XCTAssertEqual(field.value as? String, "西安")
+    app.buttons["bottomLanguageKey"].tap()
+    XCTAssertNotEqual(separator.label, "拼音分词")
+    separator.tap()
+    try letter("大写 A")
+    XCTAssertEqual(field.value as? String, "西安A")
+    app.buttons["bottomLanguageKey"].tap()
+    XCTAssertEqual(separator.label, "拼音分词")
+  }
+
   /// Pinyin typed on the real keyboard reaches a text field the extension does not own.
   ///
   /// The candidate is committed through `UITextDocumentProxy`, which is a cross-process call the
@@ -244,6 +405,40 @@ final class KeyboardExtensionEditorUITests: XCTestCase {
     XCTAssertFalse(value.isEmpty, "nothing reached the host editor")
     XCTAssertTrue(value.contains(candidate) || candidate.contains(value),
                   "the editor holds \(value) but the chip that was tapped said \(candidate)")
+  }
+
+  /// 从原生设置保存方案，再由系统加载扩展，在真实编辑器里用九键双拼提交候选。
+  func testNineKeyShuangpinTypesIntoTheHostEditor() throws {
+    let app = XCUIApplication()
+    app.launchArguments = ["-hasCompletedOnboarding", "YES"]
+    app.launch()
+    app.tabBars.buttons["设置"].tap()
+    let input = app.buttons["inputSettingsLink"].firstMatch
+    for _ in 0..<6 where !input.isHittable { app.swipeUp() }
+    XCTAssertTrue(input.waitForExistence(timeout: 10))
+    input.tap()
+    let settings = app.buttons["nineKeyShuangpinSettingsLink"]
+    XCTAssertTrue(settings.waitForExistence(timeout: 10))
+    settings.tap()
+    let save = app.buttons["nineKeyShuangpinSave"]
+    for _ in 0..<8 where !save.isHittable { app.swipeUp() }
+    XCTAssertTrue(save.isEnabled)
+    save.tap()
+    XCTAssertTrue(app.staticTexts["已保存，键盘将使用这张方案表"].waitForExistence(timeout: 5))
+    app.terminate()
+
+    let field = try focusedTryoutKeyboard(app)
+    XCTAssertTrue((app.buttons["schemeButton"].value as? String)?.contains("九键双拼") == true)
+    XCTAssertTrue(app.buttons["nineKeyZero"].exists)
+    for digit in "6447" {
+      let key = app.buttons["nineKey\(digit)"]
+      XCTAssertTrue(key.waitForExistence(timeout: 5))
+      key.tap()
+    }
+    let shown = (1...5).map { app.buttons["candidate-\($0)"] }.filter(\.exists)
+    let nihao = try XCTUnwrap(shown.first { $0.label.contains("你好") }, "九键双拼应给出你好候选")
+    nihao.tap()
+    XCTAssertTrue((field.value as? String ?? "").contains("你好"))
   }
 
   /// 全拼 14 键当成系统键盘来用：点方案卡片切到 14 键，按 BN UI GH AS OP 打出「你好」，从候选条上选它上屏到别人的编辑框里。bu 和 ni 同组码，锁定词库里「不好」的权重高于「你好」，所以只要求「你好」在前几个候选里，与 Android 设备验收和 FourteenKeyKeyboardTests 相同。14 键要用户自己打开，没打开时跳过。

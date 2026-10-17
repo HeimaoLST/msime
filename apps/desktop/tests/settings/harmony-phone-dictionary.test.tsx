@@ -208,7 +208,7 @@ test("the HarmonyOS phone 词库 page lists dictionaries the way Android does, w
   await screen.findByText("工作");
   expect(groupTitles()).toEqual(["已安装", "发现词库", "学习", "更多"]);
   for (const desktop of [
-    "编码前缀",
+    "词条或编码",
     "文件格式",
     "导出当前类型",
     "导出全部",
@@ -546,7 +546,7 @@ test.each(["成功", "失败"])(
   },
 );
 
-// 「发现词库」只列前几个，最后一行打开本页上的完整社区词库图库；在图库里添加的词库，关掉图库时读进「已安装」。
+// 「发现词库」只列前几个，最后一行经 `openCommunityGallery` 去完整的社区词库（外壳把它切到底部「社区」标签的「词库」分类）；本页上开着的词库图库（「我的」里的作品与收藏）关掉时，在里面添加的词库读进「已安装」。
 test("发现词库 ends with 浏览更多词库, and closing the gallery reads the dictionaries again", async () => {
   const { collections, openCommunityGallery, showGallery } = setup();
   const discover = group("发现词库");
@@ -716,7 +716,7 @@ test("学习 writes the preference and 更多 opens 背单词 and 云词库", as
 
 test("other hosts keep the desktop dictionary form", () => {
   setup({ harmonyPhone: false });
-  expect(screen.getByText("编码前缀")).toBeTruthy();
+  expect(screen.getByText("词条或编码")).toBeTruthy();
   expect(screen.queryByText("添加词库")).toBeNull();
 });
 
@@ -739,7 +739,12 @@ test("添加词库 offers the Sogou cell dictionary after text and sends its byt
   await waitFor(() => expect(collections.importBytes).toHaveBeenCalled());
   expect(collections.importBytes).toHaveBeenCalledWith("化学词汇", "scel", "QBUAAERDUwH/");
   expect(collections.importFile).not.toHaveBeenCalled();
-  expect(await screen.findByText("已导入「化学词汇」，2 条，1 行无法识别")).toBeTruthy();
+  // 细胞词库导入后提示只供本机使用、不能发布到社区。
+  expect(
+    await screen.findByText(
+      "已导入「化学词汇」，2 条，1 行无法识别。搜狗细胞词库的整理成果属于原作者，导入的词只供你在本机使用，不能发布到社区。",
+    ),
+  ).toBeTruthy();
 });
 
 test("a host that cannot send bytes does not offer the Sogou cell dictionary", async () => {

@@ -26,6 +26,10 @@ struct NavigationAction {
 };
 // 共享偏好的 `second_third_candidate`：整个对象缺省（关闭时不写进文档）为关闭，缺字段时取 client-core 的默认值。键位名不认识时拒绝整份偏好，和以词定字一样，不会悄悄换成别的键。
 inline bool preference_second_third_candidate(const nlohmann::json &preferences) {
+  // 五笔专用规则必须保留少候选时的标点回退，不能再走通用二三候选的吞键路径。
+  if (preferences.value("scheme", std::string{}) == "wubi" &&
+      preferences.value("wubi_candidate_selection", nlohmann::json::object()).value("enabled", false))
+    return false;
   if (!preferences.contains("second_third_candidate"))
     return false;
   const auto &value = preferences.at("second_third_candidate");
@@ -47,6 +51,9 @@ preference_navigation(const nlohmann::json &preferences) {
                 value.at("arrows").get<bool>(),
                 value.value("mouse_wheel", false)};
   }
+  // Tab 和 PageUp/PageDown 两组翻页键固定开启，不读存着的值：候选窗显示或组字时 TIP 总把这几个键交给 Server，关掉的绑定在 navigation_action 里只回答 Ignored，键被吃掉，并不会还给应用。设置页也不再给这两组的开关（HostCapabilities.tab_page_paging_switches）。开发者预览的 key_bindings（PreviewConfig.h）是显式指定的快照，不经过这里。
+  bindings.tab = true;
+  bindings.page_up_down = true;
   bindings.second_third_candidate = preference_second_third_candidate(preferences);
   return bindings;
 }

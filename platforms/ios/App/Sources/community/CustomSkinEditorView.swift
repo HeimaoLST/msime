@@ -9,7 +9,7 @@ struct CustomSkinEditorView: View {
   var publishable = true
   @Environment(\.scenePhase) private var scenePhase
   @State private var design = CustomKeyboardSkinStore.current
-  @State private var nineKey = InputSchemePreference.scheme == .nineKey
+  @State private var nineKey = InputSchemePreference.scheme.isMandarinNineKey
   @State private var confirmReset = false
   @State private var section = "背景"
   @State private var undo: [CustomKeyboardSkin] = []
@@ -118,7 +118,7 @@ struct CustomSkinEditorView: View {
         }.buttonStyle(.plain).accessibilityIdentifier("skinEditorTab_" + title)
           .accessibilityAddTraits(activeCategory == title ? .isSelected : [])
       }
-    }.background(Color(uiColor: .systemBackground))
+    }.background(MetasequoiaTheme.surface)
   }
 
   private func previewDock() -> some View {
@@ -141,7 +141,7 @@ struct CustomSkinEditorView: View {
           Label(selected == GlobalThemeCatalog.customId ? "正在使用" : "使用皮肤", systemImage: "checkmark.circle.fill")
             .font(.caption.weight(.semibold))
         }.accessibilityIdentifier("applyCustomSkin")
-      }.padding(.horizontal, 12).background(Color(uiColor: .systemBackground))
+      }.padding(.horizontal, 12).background(MetasequoiaTheme.surface)
       KeyboardSkinPreview(skin: .designed(design), nineKey: nineKey).id(design)
         .accessibilityIdentifier("fullKeyboardSkinPreview")
     }
@@ -216,7 +216,7 @@ struct CustomSkinEditorView: View {
   }
 
   private var editorControls: some View {
-  Form {
+  Form { Group {
     if section == "背景" { backgroundGallery }
     if section == "设计" {
       Section("水杉设计 · 14 款") {
@@ -344,7 +344,10 @@ if section == "我的" {
   }
 }
     if section == "音效" { soundControls }
+  }.designRow()
   }
+  // 表单默认的分组底色在深色下是纯黑：隐藏它，透出编辑器的季节页面色，各行与其他设置页一样用卡片色。
+  .scrollContentBackground(.hidden)
   .id(section)
   .accessibilityIdentifier("skinEditorControls")
   }
@@ -363,9 +366,9 @@ if section == "我的" {
           previewDock()
         }
       }
-      .background(Color(uiColor: .systemGroupedBackground))
+      .designCanvasBackground()
     }
-    .onChange(of: scenePhase) { phase in
+    .onChange(of: scenePhase) { _, phase in
       guard phase == .active else { return }
       let current = CustomKeyboardSkinStore.current
       if current != design { design = current; undo.removeAll(); redo.removeAll() }
@@ -409,7 +412,7 @@ if section == "我的" {
       NavigationView {
         Form {
           TextField("皮肤名称", text: $name).accessibilityIdentifier("customSkinName")
-            .onChange(of: name) { if $0.count > 32 { name = String($0.prefix(32)) } }
+            .onChange(of: name) { _, value in if value.count > 32 { name = String(value.prefix(32)) } }
           Button("保存") {
             let title = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(32))
             guard !saved.contains(where: { $0.id != renaming && $0.name == title }) else {

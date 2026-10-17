@@ -96,6 +96,78 @@ final class KeyboardFormFactorTests: XCTestCase {
     XCTAssertEqual(withRow.height - plain.height, 61, accuracy: 0.5, "the digit row adds a 54pt row and its 7pt gap")
   }
 
+  /// #8210：原字母页的第五排在数字与扩展符号页保留，借用网格不影响源方案。
+  @MainActor
+  func testNumberAndSymbolPagesRetainTheFifthRow() throws {
+    enableAllInputSchemes()
+    let stored = KeyboardLayoutPreference.defaults.object(forKey: KeyboardLayoutPreference.tabletFullKeysKey)
+    let previousScheme = InputSchemePreference.scheme
+    defer {
+      KeyboardLayoutPreference.defaults.set(stored, forKey: KeyboardLayoutPreference.tabletFullKeysKey)
+      InputSchemePreference.scheme = previousScheme
+    }
+    KeyboardLayoutPreference.tabletFullKeys = true
+    InputSchemePreference.scheme = .quanpin
+    let controller = tabletController()
+    func layout() throws -> CGFloat {
+      let height = try XCTUnwrap(controller.view.constraints.first { $0.identifier == "keyboardHeight" }).constant
+      controller.view.frame.size.height = height
+      controller.view.layoutIfNeeded()
+      return height
+    }
+    let height = try layout()
+    let digitHeight = try key("numberRowKey1", in: controller).bounds.height
+    try key("layoutToggleButton", in: controller).sendActions(for: .primaryActionTriggered)
+    XCTAssertEqual(try layout(), height, accuracy: 0.5)
+    XCTAssertFalse(try view("symbolExtraRow", in: controller).isHidden)
+    XCTAssertEqual(try key("symbolExtraKey7", in: controller).configuration?.title, "‰")
+    XCTAssertEqual(try key("symbolExtraKey7", in: controller).bounds.height, digitHeight, accuracy: 0.5)
+    try key("numberPadMoreSymbols", in: controller).sendActions(for: .primaryActionTriggered)
+    XCTAssertEqual(try layout(), height, accuracy: 0.5)
+    XCTAssertEqual(try key("symbolExtraKey0", in: controller).configuration?.title, "1")
+    XCTAssertEqual(try key("symbolExtraKey9", in: controller).configuration?.title, "0")
+    try key("symbolLayerToggle", in: controller).sendActions(for: .primaryActionTriggered)
+    XCTAssertEqual(try layout(), height, accuracy: 0.5)
+    try key("layoutToggleButton", in: controller).sendActions(for: .primaryActionTriggered)
+    XCTAssertEqual(try layout(), height, accuracy: 0.5)
+    try key("bottomLanguageKey", in: controller).sendActions(for: .primaryActionTriggered)
+    try key("layoutToggleButton", in: controller).sendActions(for: .primaryActionTriggered)
+    XCTAssertEqual(try layout(), height, accuracy: 0.5)
+    XCTAssertEqual(try key("symbolExtraKey0", in: controller).configuration?.title, "[")
+    XCTAssertEqual(try key("symbolExtraKey9", in: controller).configuration?.title, "=")
+    XCTAssertEqual(InputSchemePreference.scheme, .quanpin)
+  }
+
+  @MainActor
+  func testExtraSymbolRowRequiresTheSourceNumberRow() throws {
+    enableAllInputSchemes()
+    let stored = KeyboardLayoutPreference.defaults.object(forKey: KeyboardLayoutPreference.tabletFullKeysKey)
+    let previousScheme = InputSchemePreference.scheme
+    defer {
+      KeyboardLayoutPreference.defaults.set(stored, forKey: KeyboardLayoutPreference.tabletFullKeysKey)
+      InputSchemePreference.scheme = previousScheme
+    }
+    for fullKeys in [true, false] {
+      KeyboardLayoutPreference.tabletFullKeys = fullKeys
+      for scheme in [ChineseInputScheme.quanpin, .nineKey, .fourteenKey, .handwriting] {
+        InputSchemePreference.scheme = scheme
+        let tablet = tabletController()
+        try key("layoutToggleButton", in: tablet).sendActions(for: .primaryActionTriggered)
+        XCTAssertEqual(try view("symbolExtraRow", in: tablet).isHidden, !fullKeys || scheme != .quanpin, scheme.rawValue)
+      }
+    }
+    KeyboardLayoutPreference.tabletFullKeys = true
+    InputSchemePreference.scheme = .quanpin
+    for compactPad in [true, false] {
+      let phone = KeyboardViewController()
+      phone.traitOverrides.userInterfaceIdiom = compactPad ? .pad : .phone
+      phone.traitOverrides.horizontalSizeClass = .compact
+      phone.loadViewIfNeeded()
+      try key("layoutToggleButton", in: phone).sendActions(for: .primaryActionTriggered)
+      XCTAssertTrue(try view("symbolExtraRow", in: phone).isHidden)
+    }
+  }
+
   /// 不论操作行上方显示哪几排，第一排键都位于顶栏下方设计稿规定的间隙处。
   @MainActor
   func testTheKeysStartTheDesignGapUnderTheTopRow() throws {
@@ -203,6 +275,9 @@ final class KeyboardFormFactorTests: XCTestCase {
     XCTAssertEqual(rightShift.superview, z.superview)
     XCTAssertGreaterThan(frame(rightShift, in: tablet).minX, try frame(key("letterRowPeriodKey", in: tablet), in: tablet).maxX)
     for shift in [leftShift, rightShift] {
+      XCTAssertEqual(shift.configuration?.title, "分词")
+      XCTAssertNil(shift.configuration?.image)
+      XCTAssertEqual(shift.accessibilityLabel, "拼音分词")
       XCTAssertEqual(shift.bounds.width, z.bounds.width * TabletLetterLayout.shiftWeight, accuracy: 0.5)
     }
 
@@ -301,7 +376,7 @@ final class KeyboardFormFactorTests: XCTestCase {
 
   /// 26 键字母方案分，九键、全拼 14 键、笔画、假名九键、注音大千和手写不分；英文和本地输入模式画的是字母，照样分。
   func testOnlyTheLetterLayoutsSplit() {
-    let unsplit: Set<ChineseInputScheme> = [.nineKey, .fourteenKey, .stroke, .japaneseNineKey, .zhuyin, .handwriting]
+    let unsplit: Set<ChineseInputScheme> = [.nineKey, .nineKeyShuangpin, .fourteenKey, .stroke, .japaneseNineKey, .zhuyin, .handwriting]
     for scheme in ChineseInputScheme.allCases {
       XCTAssertEqual(KeyboardSplitLayout.splitsLayout(scheme: scheme, chinese: true, localMode: false),
                      !unsplit.contains(scheme), scheme.rawValue)
@@ -477,15 +552,23 @@ final class KeyboardFormFactorTests: XCTestCase {
       relayout(controller)
       XCTAssertEqual(visibleGaps(in: controller).count, 5)
 
-      // 123 符号页同样分开：数字 12345 | 67890。
+      // 中文 123 默认九宫格，保持完整网格；英文 123 的数字行仍按 12345 | 67890 分开。
       try key("layoutToggleButton", in: controller).sendActions(for: .primaryActionTriggered)
       controller.view.layoutIfNeeded()
-      XCTAssertEqual(visibleGaps(in: controller).count, 4, "three symbol rows and the bottom row")
+      XCTAssertTrue(visibleGaps(in: controller).isEmpty)
+      XCTAssertFalse(try key("nineKey1", in: controller).isHidden)
+      try key("layoutToggleButton", in: controller).sendActions(for: .primaryActionTriggered)
+      try key("bottomLanguageKey", in: controller).sendActions(for: .primaryActionTriggered)
+      try key("layoutToggleButton", in: controller).sendActions(for: .primaryActionTriggered)
+      controller.view.layoutIfNeeded()
+      XCTAssertEqual(visibleGaps(in: controller).count, 5, "补充行、三行英文符号与底行均保留中缝")
       let five = try frame(titled("5", in: controller), in: controller)
       let six = try frame(titled("6", in: controller), in: controller)
       XCTAssertEqual(six.minX - five.maxX, gap, accuracy: 1)
       try key("layoutToggleButton", in: controller).sendActions(for: .primaryActionTriggered)
       controller.view.layoutIfNeeded()
+
+      try key("bottomLanguageKey", in: controller).sendActions(for: .primaryActionTriggered)
 
       // 关掉数字行与 Tab 键后字母照样分开。
       KeyboardLayoutPreference.tabletFullKeys = false

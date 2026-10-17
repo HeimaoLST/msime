@@ -1,5 +1,17 @@
+import type {
+  AccountUser,
+  AccountProviders,
+  AccountProfile,
+  AccountPreferences,
+  AccountPreferenceSchema,
+  AppIconInfo,
+  AppIconClient,
+  SettingsSyncClient,
+  AccountClient,
+  AccountCommunityDestination,
+} from "./account-model";
 import { useEffect, useId, useState, type ReactNode } from "react";
-import type { Preferences } from "../index";
+import type { Preferences } from "../core/preferences-model";
 import { ActionButton } from "../core/action-button";
 import { errorCode } from "../core/error-code";
 import { FluentIcon, type FluentIconName } from "../core/fluent-icons";
@@ -22,9 +34,9 @@ import { AccountVerificationForm } from "./account-verification-form";
 import { AccountStatusMessages } from "./account-status-messages";
 import { AccountIdentityDetails, AccountIdentityRows } from "./account-identity-details";
 import { AppThemeRow } from "./app-theme-row";
+import { QqLinkCard } from "./qq-link-card";
 import { BottomSheet, LoginSheet } from "./login-sheet";
 import { MeSubpageHeader, MobileDownloadPage, otherPlatformCount } from "./mobile-download-page";
-import { pushMobileSettingsState } from "../settings/mobile-navigation";
 import { StatusMessage } from "../core/status-message";
 import { copyAccountId as copyAccountIdToClipboard } from "./account-id-copy";
 import { useAccountAction } from "./account-operation";
@@ -33,104 +45,22 @@ import { runAccountSessionAction, useAccountSessionActions } from "./use-account
 import { useAccountRename } from "./use-account-rename";
 import { useAccountGoogleLogin } from "./use-account-google-login";
 import { useAccountVerification, type AccountChannel } from "./use-account-verification";
-import { useMobilePopState } from "../settings/use-mobile-pop-state";
+import { useMobileSettingsSubview } from "../settings/use-mobile-settings-subview";
 
-export type AccountUser = {
-  id: string;
-  displayName: string;
-  createdAt: string;
-  /** The verified email of a linked Google account. */
-  email?: string;
-  /** Changes whenever the avatar does; the image itself comes from `AccountClient.avatar`, since the page loads no remote image. */
-  avatarUrl?: string;
-  /** The avatar is one the user uploaded, which they can remove, rather than their Google picture. */
-  avatarUploaded?: boolean;
-};
-
-export type AccountProviders = {
-  email: boolean;
-  phone: boolean;
-  apple?: boolean;
-  google?: boolean;
-};
-
-export type AccountChallenge = {
-  challengeId: string;
-  expiresIn: number;
-};
-
-export type AccountProfile = {
-  user: AccountUser;
-  providers: string[];
-};
-
-export type AccountPreferenceValue = boolean | number | string;
-
-export type AccountPreferences = {
-  revision: number;
-  settings: Record<string, AccountPreferenceValue>;
-};
-
-export type AccountPreferenceSchema = {
-  fields: Record<string, { type: string }>;
-  maximumBytes: number;
-  updateMode: string;
-  revisionRequired: boolean;
-};
-
-export type AppIconInfo = {
-  supported: boolean;
-  selected: string;
-};
-
-export interface AppIconClient {
-  info(): Promise<AppIconInfo>;
-  set(style: string): Promise<AppIconInfo>;
-}
-
-export interface SettingsSyncClient {
-  /** 卡片上说明同步哪些设置。宿主同步的范围不同（Windows 只同步各平台共有的输入设置）时自己给，缺省是移动端的说明。 */
-  description?: string;
-  /** 应用云端设置成功后的提示。缺省是移动端的说法，要用户重新打开键盘；设置当场生效的宿主（Windows 的 Server 从共享偏好里实时读到）自己给。 */
-  appliedMessage?: string;
-  schema(): Promise<AccountPreferenceSchema>;
-  load(): Promise<AccountPreferences>;
-  upload(): Promise<AccountPreferences>;
-  apply(userId: string, preferences: AccountPreferences): Promise<void>;
-}
-
-export interface AccountClient {
-  status(): Promise<{ user?: AccountUser | null }>;
-  providers(): Promise<AccountProviders>;
-  requestCode(provider: "email" | "phone", target: string): Promise<AccountChallenge>;
-  login(challengeId: string, code: string): Promise<{ user?: AccountUser | null }>;
-  /** iOS performs the nonce and AuthenticationServices exchange natively. */
-  appleLogin?: () => Promise<{ user?: AccountUser | null }>;
-  /** Desktop hosts run the Google browser and loopback redirect natively; the page never sees the authorization code. */
-  googleLogin?: () => Promise<{ user?: AccountUser | null }>;
-  /** Ends a pending googleLogin, which then rejects as cancelled. The browser cannot report a closed Google tab, so this is how the user gives up without waiting for the timeout. */
-  googleCancel?: () => Promise<void>;
-  profile(): Promise<AccountProfile>;
-  rename(displayName: string): Promise<AccountProfile>;
-  /** The signed-in user's avatar as a `data:` URL, or null without one. Absent on hosts that do not fetch avatars, which show the name's first character. */
-  avatar?: () => Promise<string | null>;
-  /** Opens the platform's file dialog for a PNG or JPEG and uploads it; null when the user closes the dialog. The page never names a path. */
-  chooseAvatar?: () => Promise<AccountProfile | null>;
-  /** Removes the uploaded avatar; the Google picture, if any, shows again. */
-  removeAvatar?: () => Promise<AccountProfile>;
-  logout(all: boolean): Promise<void>;
-  deleteAccount(): Promise<void>;
-  clearExpired(): Promise<void>;
-  settingsSync?: SettingsSyncClient;
-  appIcon?: AppIconClient;
-}
-
-export type AccountCommunityDestination =
-  | "published-skins"
-  | "published-dictionary"
-  | "saved-dictionary"
-  | "published-reply"
-  | "saved-reply";
+export type {
+  AccountUser,
+  AccountProviders,
+  AccountChallenge,
+  AccountProfile,
+  AccountPreferenceValue,
+  AccountPreferences,
+  AccountPreferenceSchema,
+  AppIconInfo,
+  AppIconClient,
+  SettingsSyncClient,
+  AccountClient,
+  AccountCommunityDestination,
+} from "./account-model";
 
 type Confirmation = "logout-all" | "delete" | null;
 
@@ -858,6 +788,7 @@ function AccountDetailsPage({
   onOpenLocalDesigns?: () => void;
   onOpenCommunity?: (destination: AccountCommunityDestination) => void;
   communityHasSkins?: boolean;
+  /** 触屏宿主的「我的」里打开云词库。桌面的云词库入口在「词库」页，账号页不再列出。 */
   onOpenCloudDictionary?: () => void;
   onOpenCloudClipboard?: () => void;
   onOpenAbout?: () => void;
@@ -876,11 +807,25 @@ function AccountDetailsPage({
   const [notice, setNotice] = useState("");
   const [providers, setProviders] = useState<AccountProviders>({ email: false, phone: false });
   const [user, setUser] = useState<AccountUser | null>(null);
+  // 读不出本机保存的登录状态（`status()` 失败，例如登录状态文件坏了）。只有这时才给「清除失效登录状态」，平常未登录时它只是噪音。
+  const [sessionUnreadable, setSessionUnreadable] = useState(false);
   const [profile, setProfile] = useState<AccountProfile | null>(null);
   const [name, setName] = useState("");
   const [confirmation, setConfirmation] = useState<Confirmation>(null);
   const [editingProfile, setEditingProfile] = useState(false);
-  const [mobileSubpage, setMobileSubpage] = useState<AccountSubpage | null>(null);
+  const {
+    value: mobileSubpage,
+    open: openMobileSubpage,
+    close: closeMobileSubpage,
+    reset: resetMobileSubpage,
+  } = useMobileSettingsSubview<AccountSubpage>({
+    mobile,
+    initialValue:
+      mobile && typeof window !== "undefined" ? accountSubpageOf(window.history.state) : null,
+    stateKey: "accountSubpage",
+    decode: (state) => (state?.msimeSettings === true ? accountSubpageOf(state) : null),
+    encode: (value) => ({ page: "account", accountSubpage: value }),
+  });
   const [loginOpen, setLoginOpen] = useState(false);
   const [copiedAccountId, showCopiedAccountId] = useTemporaryFlag(1800);
   const { busy, mounted, clientGeneration, perform } = useAccountAction(
@@ -917,6 +862,7 @@ function AccountDetailsPage({
     onProvidersChange: setProviders,
     onClearedExpired: () => {
       clearSession();
+      setSessionUnreadable(false);
       setNotice("已清除失效登录状态。");
     },
   });
@@ -939,22 +885,8 @@ function AccountDetailsPage({
   // Leaving the page must not leave the loopback listener waiting for a browser the user abandoned.
   useEffect(() => () => cancelGoogle(), [client]);
 
-  useEffect(() => {
-    if (!mobile || typeof window === "undefined") return;
-    setMobileSubpage(accountSubpageOf(window.history.state));
-  }, [mobile]);
-  useMobilePopState(mobile, (event) => {
-    setMobileSubpage(event.state?.msimeSettings === true ? accountSubpageOf(event.state) : null);
-  });
-
-  const openSubpage = (subpage: AccountSubpage) => {
-    pushMobileSettingsState({ page: "account", accountSubpage: subpage });
-    setMobileSubpage(subpage);
-  };
-  const closeSubpage = () => {
-    if (typeof window !== "undefined") window.history.back();
-    else setMobileSubpage(null);
-  };
+  const openSubpage = openMobileSubpage;
+  const closeSubpage = closeMobileSubpage;
 
   const applyProfile = (value: AccountProfile) => {
     setProfile(value);
@@ -973,6 +905,11 @@ function AccountDetailsPage({
     },
   });
 
+  // 登录成功（任何一种方式）或者读出了已登录的用户，说明保存的登录状态是可读的，之前那次读不出来的结论作废；否则退出登录后又会冒出「清除失效登录状态」。
+  useEffect(() => {
+    if (user) setSessionUnreadable(false);
+  }, [user]);
+
   const loadProfile = async (generation = clientGeneration.current) => {
     const value = await client.profile();
     if (mounted.current && generation === clientGeneration.current) applyProfile(value);
@@ -986,6 +923,7 @@ function AccountDetailsPage({
       if (available.status === "fulfilled") setProviders(available.value);
       else if (!isAccountCancellation(available.reason)) setError(accountMessage(available.reason));
       if (status.status === "fulfilled") {
+        setSessionUnreadable(false);
         const nextUser = status.value.user ?? null;
         setUser(nextUser);
         if (nextUser) {
@@ -1003,7 +941,10 @@ function AccountDetailsPage({
           }
         }
       } else {
-        if (!isAccountCancellation(status.reason)) setError(accountMessage(status.reason));
+        if (!isAccountCancellation(status.reason)) {
+          setError(accountMessage(status.reason));
+          setSessionUnreadable(true);
+        }
       }
       if (mounted.current && generation === clientGeneration.current) setLoading(false);
     });
@@ -1093,7 +1034,7 @@ function AccountDetailsPage({
         profile={profile}
         onBack={closeSubpage}
         onSignedOut={(message) => {
-          setMobileSubpage(null);
+          resetMobileSubpage();
           setUser(null);
           setProfile(null);
           setName("");
@@ -1122,7 +1063,7 @@ function AccountDetailsPage({
         profile={profile}
         onBack={closeSubpage}
         onSignedOut={() => {
-          setMobileSubpage(null);
+          resetMobileSubpage();
           setUser(null);
           setProfile(null);
           setName("");
@@ -1319,6 +1260,8 @@ function AccountDetailsPage({
             )}
           </MeGroup>
         )}
+        {/* 「绑定 QQ 群助手」：/bind 拿到的码多半就在这台手机的 QQ 里。 */}
+        {user && client.qqLinks && <QqLinkCard client={client.qqLinks} userId={user.id} />}
         {(appTheme || onOpenPage || onOpenUrl) && (
           <MeGroup title="通用">
             {appTheme && <AppThemeRow client={appTheme} disabled={busy} />}
@@ -1461,7 +1404,10 @@ function AccountDetailsPage({
                   ? "我们会发送一个 6 位验证码完成登录"
                   : mobile
                     ? "登录，分享你的键盘设计"
-                    : "登录后在设备之间同步设置和词库，还可以发布你的候选窗口皮肤"}
+                    : // 设置同步只接在 Windows 的账号会话上（`settingsSync`），别的桌面不许诺同步设置。
+                      client.settingsSync
+                      ? "登录后在设备之间同步设置和词库，还可以发布你的候选窗口皮肤"
+                      : "登录后在设备之间同步词库，还可以发布你的候选窗口皮肤"}
               </p>
             </div>
           </div>
@@ -1511,20 +1457,27 @@ function AccountDetailsPage({
                   </p>
                 )}
               </div>
-              <div className={account.signInFooter}>
-                <ActionButton
-                  action={refreshProviders}
-                  className={account.link}
-                  disabled={busy}
-                  label="刷新登录方式"
-                />
-                <ActionButton
-                  action={clearExpired}
-                  className={account.link}
-                  disabled={busy}
-                  label="清除失效登录状态"
-                />
-              </div>
+              {/* 两个恢复动作只在出了问题时出现：登录方式只在进入本页时读一次，读失败或一个都没有时（上面那句「请稍后重试」）才给「刷新登录方式」；读不出本机登录状态时才给「清除失效登录状态」。 */}
+              {(enabledProviders === 0 || sessionUnreadable) && (
+                <div className={account.signInFooter}>
+                  {enabledProviders === 0 && (
+                    <ActionButton
+                      action={refreshProviders}
+                      className={account.link}
+                      disabled={busy}
+                      label="刷新登录方式"
+                    />
+                  )}
+                  {sessionUnreadable && (
+                    <ActionButton
+                      action={clearExpired}
+                      className={account.link}
+                      disabled={busy}
+                      label="清除失效登录状态"
+                    />
+                  )}
+                </div>
+              )}
             </>
           ) : (
             <div className={account.signInBody}>
@@ -1641,14 +1594,11 @@ function AccountDetailsPage({
       {user && !mobile && client.settingsSync && (
         <SettingsSyncCard client={client.settingsSync} userId={user.id} />
       )}
-      {user && !mobile && (onOpenCloudDictionary || onOpenCloudClipboard) && (
+      {user && !mobile && client.qqLinks && <QqLinkCard client={client.qqLinks} userId={user.id} />}
+      {/* 桌面的云词库入口只在「词库」页：那里不登录也看得到，这里不再放第二个。macOS 不在设置里打开云剪贴板（要输入法提供输入会话），这一组在 macOS 上因此整组不出现。 */}
+      {user && !mobile && onOpenCloudClipboard && (
         <GroupList title="云端">
-          {onOpenCloudDictionary && (
-            <MeRow title="云词库" disabled={busy} onClick={onOpenCloudDictionary} />
-          )}
-          {onOpenCloudClipboard && (
-            <MeRow title="云剪贴板" disabled={busy} onClick={onOpenCloudClipboard} />
-          )}
+          <MeRow title="云剪贴板" disabled={busy} onClick={onOpenCloudClipboard} />
         </GroupList>
       )}
       {!mobile && (onOpenLocalDesigns || (user && (openPublishedSkins || onOpenCommunity))) && (
@@ -1755,6 +1705,8 @@ function AccountDetailsPage({
           {user && client.settingsSync && (
             <SettingsSyncCard client={client.settingsSync} userId={user.id} />
           )}
+          {/* 「绑定 QQ 群助手」在手机上同样要有：/bind 拿到的码可能就在手机的 QQ 里。 */}
+          {user && client.qqLinks && <QqLinkCard client={client.qqLinks} userId={user.id} />}
           {(onOpenLocalDesigns || (user && (openPublishedSkins || onOpenCommunity))) && (
             <GroupList title="我的内容">
               {onOpenLocalDesigns && (

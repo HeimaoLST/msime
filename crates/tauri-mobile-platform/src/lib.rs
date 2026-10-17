@@ -2,6 +2,7 @@ use msime_client_core::is_bounded_text;
 use serde::{Deserialize, Serialize};
 #[cfg(any(target_os = "ios", test))]
 use serde_json::json;
+#[cfg(any(target_os = "ios", test))]
 use serde_json::Value;
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::Runtime;
@@ -13,6 +14,11 @@ use tauri::Manager;
 
 #[cfg(target_os = "ios")]
 tauri::ios_plugin_binding!(init_plugin_msime_mobile_platform);
+
+/// Android 语音桥调用或参数校验失败，不携带平台返回的敏感内容。
+#[cfg(target_os = "android")]
+#[derive(Debug)]
+pub struct AndroidVoiceError;
 
 #[cfg(target_os = "android")]
 #[derive(Clone)]
@@ -57,8 +63,8 @@ pub struct AndroidVoicePolishRequest {
 #[cfg(any(target_os = "android", test))]
 impl AndroidVoicePolishRequest {
     pub fn is_valid(&self) -> bool {
-        msime_client_core::voice::provider::valid_mobile_voice_endpoint(&self.endpoint, false)
-            && msime_client_core::voice::provider::bounded_voice_fields(
+        msime_client_providers::voice::provider::valid_mobile_voice_endpoint(&self.endpoint, false)
+            && msime_client_providers::voice::provider::bounded_voice_fields(
                 &self.endpoint,
                 &self.model,
                 &self.token,
@@ -84,7 +90,7 @@ struct AndroidVoiceResponse {
 
 #[cfg(any(target_os = "android", test))]
 fn valid_android_voice_request(request_id: &str, language: &str) -> bool {
-    msime_client_core::voice::is_valid_request_id(request_id)
+    msime_client_providers::voice::is_valid_request_id(request_id)
         && !language.is_empty()
         && is_bounded_text(language, 64)
 }
@@ -106,9 +112,9 @@ impl<R: Runtime> AndroidVoicePlatform<R> {
         language: &str,
         provider: Option<MobileVoiceTranscriptionRequest>,
         polish: Option<AndroidVoicePolishRequest>,
-    ) -> Result<String, ()> {
+    ) -> Result<String, AndroidVoiceError> {
         if !valid_android_voice_request(request_id, language) {
-            return Err(());
+            return Err(AndroidVoiceError);
         }
         let provider = provider.filter(MobileVoiceTranscriptionRequest::is_valid);
         let polish = polish.filter(AndroidVoicePolishRequest::is_valid);
@@ -124,41 +130,41 @@ impl<R: Runtime> AndroidVoicePlatform<R> {
                 },
             )
             .await
-            .map_err(|_| ())?;
+            .map_err(|_| AndroidVoiceError)?;
         if !msime_client_core::is_bounded_chars_without_nul(&response.text, 10_000) {
-            return Err(());
+            return Err(AndroidVoiceError);
         }
         Ok(response.text)
     }
 
-    pub fn stop_voice(&self, request_id: &str) -> Result<(), ()> {
+    pub fn stop_voice(&self, request_id: &str) -> Result<(), AndroidVoiceError> {
         if !valid_android_voice_request(request_id, "und") {
-            return Err(());
+            return Err(AndroidVoiceError);
         }
         self.0
             .run_mobile_plugin("stopVoice", serde_json::json!({ "requestId": request_id }))
-            .map_err(|_| ())
+            .map_err(|_| AndroidVoiceError)
     }
 
-    pub fn cancel_voice(&self, request_id: Option<&str>) -> Result<(), ()> {
+    pub fn cancel_voice(&self, request_id: Option<&str>) -> Result<(), AndroidVoiceError> {
         if request_id.is_some_and(|value| !valid_android_voice_request(value, "und")) {
-            return Err(());
+            return Err(AndroidVoiceError);
         }
         self.0
             .run_mobile_plugin(
                 "cancelVoice",
                 serde_json::json!({ "requestId": request_id }),
             )
-            .map_err(|_| ())
+            .map_err(|_| AndroidVoiceError)
     }
 
-    pub fn save_voice_text(&self, text: &str) -> Result<(), ()> {
+    pub fn save_voice_text(&self, text: &str) -> Result<(), AndroidVoiceError> {
         if !valid_mobile_voice_text(text) {
-            return Err(());
+            return Err(AndroidVoiceError);
         }
         self.0
             .run_mobile_plugin("saveVoiceText", serde_json::json!({ "text": text }))
-            .map_err(|_| ())
+            .map_err(|_| AndroidVoiceError)
     }
 }
 
@@ -169,7 +175,6 @@ pub struct AppIconInfo {
     pub selected: String,
 }
 
-const MAX_IOS_CUSTOM_KEYBOARD_SKIN_BYTES: usize = 800_000;
 #[cfg(any(target_os = "ios", test))]
 const MAX_IOS_CLIPBOARD_TEXT_UTF16_UNITS: usize = 4_000;
 #[cfg(any(target_os = "android", target_os = "ios", test))]
@@ -182,33 +187,8 @@ const MAX_MOBILE_VOICE_HOTWORDS: usize = 1_000;
 const MAX_MOBILE_VOICE_HOTWORD_TEXT_BYTES: usize = 256;
 const MAX_MOBILE_VOICE_HOTWORD_PINYIN_BYTES: usize = 1_024;
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct IosKeyboardPreferences {
-    pub input_scheme: String,
-    pub traditional_chinese_output: bool,
-    pub sound_enabled: bool,
-    pub haptics_enabled: bool,
-    pub haptic_strength: String,
-    pub english_suggestions: bool,
-    /// The candidate strip draws the shared desktop candidate skin and colours instead of the keyboard skin's; the switch lives in the App Group because the keyboard reads it on every redraw.
-    pub candidate_palette_follows_desktop: bool,
-    /// 行内预编辑: the keyboard also writes the composition into the text field as marked text. Off by default and kept in the App Group, because the shared `tsf_preedit_style` defaults to raw in every document and would switch every existing iOS user over.
-    pub inline_preedit: bool,
-    /// Whether this device can vibrate for key presses: false on iPad, which has no Taptic Engine. Read-only; the plugin reports it and never stores it.
-    pub haptics_available: bool,
-    /// 数字行与 Tab 键 on the iPad full-width keyboard, kept in the App Group. The plugin reports it only on an iPad and writes it only when present, so a phone neither shows nor stores it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tablet_full_keys: Option<bool>,
-    /// 横屏分离式键盘：iPad 全宽键盘横屏时把键区分成左右两半，存在 App Group 的 `keyboard.tablet.split`，默认关。和 `tablet_full_keys` 一样只在 iPad 上报告、只在请求里带着时才写入。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tablet_split_keyboard: Option<bool>,
-    pub dictionary_learning: bool,
-    /// 全局主题 id（`Preferences::global_theme`），存在 App Group 的 `globalTheme` 下，键盘扩展不读偏好文档也能拿到。只有八个主题 id 有效。
-    pub global_theme: String,
-    /// The custom theme's keyboard design (`Preferences::custom_theme.keyboard`) as JSON; `None` when the custom theme has no design and draws its base theme's keyboard. The App Group keeps it under `customKeyboardSkin.v1`.
-    pub custom_keyboard_skin: Option<String>,
-}
+/// iOS 键盘在 App Group 里的设置，定义在 client-core，账号设置的 iOS 映射（client-services 的 `account::ios_settings`）和 C ABI 也用它。
+pub use msime_client_core::ios_keyboard::IosKeyboardPreferences;
 
 /// The small, native-facing AI configuration shared by the Tauri settings app
 /// and the keyboard extension. The extension deliberately receives only the
@@ -253,7 +233,7 @@ pub struct MobileVoiceRequestHeader {
 pub struct MobileVoiceTranscriptionRequest {
     pub request_id: String,
     pub provider: String,
-    /// 请求格式（`msime_client_core::voice::provider::asr_request_format`）：`multipart`、`chat_audio`、`doubao_websocket` 或 `local`。原生插件按它挑请求构造，不按 provider 名字判断。
+    /// 请求格式（`msime_client_providers::voice::provider::asr_request_format`）：`multipart`、`chat_audio`、`doubao_websocket` 或 `local`。原生插件按它挑请求构造，不按 provider 名字判断。
     pub request_format: String,
     pub endpoint: String,
     pub model: String,
@@ -271,7 +251,7 @@ pub struct MobileVoiceTranscriptionRequest {
     pub hotwords: Vec<MobileVoiceHotword>,
 }
 
-/// One user-dictionary word for on-device recognition, shaped like `msime_client_core::voice::hotwords::Hotword`.
+/// 一个用于设备端识别的用户词库词，形状同 `msime_client_providers::voice::hotwords::Hotword`。
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileVoiceHotword {
@@ -291,8 +271,8 @@ fn valid_mobile_voice_hotwords(hotwords: &[MobileVoiceHotword]) -> bool {
 
 impl MobileVoiceTranscriptionRequest {
     pub fn is_valid(&self) -> bool {
-        let common = msime_client_core::voice::is_valid_request_id(&self.request_id)
-            && msime_client_core::voice::provider::bounded_voice_fields(
+        let common = msime_client_providers::voice::is_valid_request_id(&self.request_id)
+            && msime_client_providers::voice::provider::bounded_voice_fields(
                 &self.endpoint,
                 &self.model,
                 &self.token,
@@ -305,7 +285,7 @@ impl MobileVoiceTranscriptionRequest {
             && valid_mobile_voice_hotwords(&self.hotwords);
         // 格式必须就是这个 provider 的格式，插件只看格式，所以两者不一致的请求一律拒绝。
         if !common
-            || msime_client_core::voice::provider::asr_request_format(&self.provider)
+            || msime_client_providers::voice::provider::asr_request_format(&self.provider)
                 != Some(self.request_format.as_str())
         {
             return false;
@@ -325,10 +305,10 @@ impl MobileVoiceTranscriptionRequest {
         // multipart 和 chat_audio 都是带 Bearer 密钥的 HTTPS 整句上传，形状检查相同；豆包是流式 WebSocket，在下面单独检查。
         if matches!(
             self.request_format.as_str(),
-            msime_client_core::voice::provider::ASR_REQUEST_MULTIPART
-                | msime_client_core::voice::provider::ASR_REQUEST_CHAT_AUDIO
+            msime_client_providers::voice::provider::ASR_REQUEST_MULTIPART
+                | msime_client_providers::voice::provider::ASR_REQUEST_CHAT_AUDIO
         ) {
-            return msime_client_core::voice::provider::valid_mobile_voice_endpoint(
+            return msime_client_providers::voice::provider::valid_mobile_voice_endpoint(
                 &self.endpoint,
                 false,
             ) && !self.model.trim().is_empty()
@@ -336,7 +316,10 @@ impl MobileVoiceTranscriptionRequest {
                 && self.boosting_table_id.is_empty();
         }
         self.provider == "doubao"
-            && msime_client_core::voice::provider::valid_mobile_voice_endpoint(&self.endpoint, true)
+            && msime_client_providers::voice::provider::valid_mobile_voice_endpoint(
+                &self.endpoint,
+                true,
+            )
             && self.model.is_empty()
             && self.token.is_empty()
             && valid_doubao_headers(&self.headers)
@@ -380,44 +363,6 @@ pub struct MobileVoiceTranscriptionResponse {
 impl MobileVoiceTranscriptionResponse {
     fn is_valid(&self) -> bool {
         msime_client_core::is_bounded_chars_without_nul(&self.text, MAX_MOBILE_VOICE_TEXT_CHARS)
-    }
-}
-
-impl IosKeyboardPreferences {
-    pub fn is_valid(&self) -> bool {
-        matches!(
-            self.input_scheme.as_str(),
-            "quanpin"
-                | "nineKey"
-                | "shuangpin"
-                | "ziranma"
-                | "microsoft"
-                | "shoudao"
-                | "wubi"
-                | "japaneseNineKey"
-                | "japanese"
-                | "korean"
-                | "handwriting"
-                | "cantonese"
-                | "zhuyin"
-                | "vietnamese"
-                | "tibetan"
-                | "stroke"
-                | "fourteenKey"
-        ) && matches!(
-            self.haptic_strength.as_str(),
-            "light" | "medium" | "strong" | "system"
-        )
-            // The ids of msime_client_core::skin::theme::GlobalTheme, which this crate does not depend on; the desktop crate's iOS account tests hold the two lists together.
-            && matches!(
-                self.global_theme.as_str(),
-                "system" | "native" | "shuishan" | "light" | "paper" | "night" | "ink" | "custom"
-            )
-            && self.custom_keyboard_skin.as_ref().is_none_or(|value| {
-                value.len() <= MAX_IOS_CUSTOM_KEYBOARD_SKIN_BYTES
-                    && serde_json::from_str::<Value>(value)
-                        .is_ok_and(|document| document.is_object())
-            })
     }
 }
 
@@ -770,7 +715,7 @@ impl<R: Runtime> MobilePlatform<R> {
     }
 
     pub fn stop_voice(&self, request_id: &str) -> Result<(), ()> {
-        if !msime_client_core::voice::is_valid_request_id(request_id) {
+        if !msime_client_providers::voice::is_valid_request_id(request_id) {
             return Err(());
         }
         self.0
@@ -784,7 +729,9 @@ impl<R: Runtime> MobilePlatform<R> {
     }
 
     pub fn cancel_voice(&self, request_id: Option<&str>) -> Result<(), ()> {
-        if request_id.is_some_and(|value| !msime_client_core::voice::is_valid_request_id(value)) {
+        if request_id
+            .is_some_and(|value| !msime_client_providers::voice::is_valid_request_id(value))
+        {
             return Err(());
         }
         self.0

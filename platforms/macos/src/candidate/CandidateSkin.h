@@ -41,6 +41,8 @@ struct SkinTokens
     bool showSelectedBar = false;
     // The translation line when a package gives one (the resolved `secondary` differs from `number`); none draws it like the numbers.
     std::optional<Rgba> translation;
+    // 选中行的释义行（连同它下面的读音行），只在有 `translation` 时才有：选中底色不透明时按底色挑白或近黑、0.82 不透明度，和选中序号一样；底色半透明时就是 `translation` 本身。没有它时选中行仍画 `translation`，皮肤的释义色和不透明的选中底色常常是同一色系（`selected = "#4D6BFE"`、`translation = "#2F5BD3"`），蓝字压在蓝底上读不出来。
+    std::optional<Rgba> selectedTranslation;
     // The floating toolbar's separator, set only by a package's `[toolbar]` colours; none draws it in the border colour. The candidate window does not read it.
     std::optional<Rgba> divider;
 };
@@ -134,6 +136,19 @@ struct SkinToolbar
     SkinToolbarColors light;
 };
 
+// 装饰图的待机动效（清单 `decoration.motion`）：候选窗在屏幕上时整张装饰图的小幅循环动作，与显隐动效无关。`float` 是关键字，所以浮动叫 floating。
+enum class DecorationMotion
+{
+    none,
+    floating,
+    sway,
+    breathe,
+    bounce,
+};
+
+// 有待机动效的装饰图在窗口顶边和左右两边至少留出的点数。各动效的最大位移都不超过它（见 CandidateMotion.mm），候选窗内容视图裁掉越界部分时装饰图不会被切掉。
+constexpr double kDecorationMotionMargin = 4.0;
+
 enum class SkinAnimationPreset
 {
     none,
@@ -144,6 +159,7 @@ enum class SkinAnimationPreset
     glow,
 };
 
+// 皮肤包清单显式写出的动效；没写的预设是 none，内置主题和不画包时全为 none（即时显隐）。
 struct SkinAnimation
 {
     SkinAnimationPreset enter = SkinAnimationPreset::none;
@@ -189,19 +205,36 @@ struct DecorationRect
 };
 
 // The decoration as every host draws it: the window is `band` taller than the card and that band is transparent; the image is `width` wide at its own aspect ratio, its bottom `pad` below the card's top edge so it sits over the edge, and it is drawn after the card. An image too tall for the band and the overlap is scaled down whole rather than squashed. None for an empty band, width or image.
+// `margin` 是待机动效要的余量（有动效时传 kDecorationMotionMargin）：图片顶边离窗口顶边、左右两边离窗口边缘都至少这么远，放不下就整张等比缩小，底边仍压在卡片顶边上的同一位置。
 inline std::optional<DecorationRect> DecorationPlacement(DecorationAlign align, double cardWidth, double pad, double band,
-                                                         double width, double imageWidth, double imageHeight)
+                                                         double width, double imageWidth, double imageHeight,
+                                                         double margin = 0.0)
 {
     if (!(band > 0.0) || !(width > 0.0) || !(imageWidth > 0.0) || !(imageHeight > 0.0))
         return std::nullopt;
     const double room = band + pad;
+    const bool moving = margin > 0.0;
+    const double tallest = moving ? room - margin : room;
+    const double widest = cardWidth - 2.0 * margin;
+    if (!(tallest > 0.0) || (moving && !(widest > 0.0)))
+        return std::nullopt;
     double height = width * imageHeight / imageWidth;
-    if (height > room)
+    if (height > tallest)
     {
-        width *= room / height;
-        height = room;
+        width *= tallest / height;
+        height = tallest;
     }
-    return DecorationRect{DecorationLeft(align, cardWidth, pad, width), room - height, width, height};
+    if (moving && width > widest)
+    {
+        height *= widest / width;
+        width = widest;
+    }
+    double left = DecorationLeft(align, cardWidth, pad, width);
+    if (moving && left < margin)
+        left = margin;
+    if (moving && left + width > cardWidth - margin)
+        left = cardWidth - margin - width;
+    return DecorationRect{left, room - height, width, height};
 }
 
 struct SkinRect
@@ -273,6 +306,11 @@ struct SkinPackage
     // The image drawn in the decoration band, package-relative: the manifest's `decoration.image`, or else an image preview. Empty unless decorated.
     std::string decorationImage;
     DecorationAlign decorationAlign = DecorationAlign::right;
+    DecorationMotion decorationMotion = DecorationMotion::none;
+    // 1200–8000，共享加载器已经校验过。
+    double decorationMotionPeriodMs = 3000.0;
+    // 装饰图的帧数：没有装饰图为 0，静态图为 1，APNG 为它的动画帧数。
+    unsigned decorationFrames = 0;
     std::optional<SkinBackground> background;
     SkinToolbar toolbar;
     SkinAnimation animation;
@@ -344,6 +382,8 @@ struct ResolvedSkin
     double decorationTopDip = 0.0;
     double decorationWidthDip = 0.0;
     DecorationAlign decorationAlign = DecorationAlign::right;
+    DecorationMotion decorationMotion = DecorationMotion::none;
+    double decorationMotionPeriodMs = 3000.0;
     // Absolute path of the drawn package's background image, empty for none.
     std::string backgroundPath;
     BackgroundFit backgroundFit = BackgroundFit::cover;
@@ -355,8 +395,8 @@ struct ResolvedSkin
 bool IsSafeSkinId(std::string_view id);
 // The native macOS candidate tokens (design-tokens-desktop §1.2) that every null slot of a resolved theme falls back to.
 SkinTokens NativeCandidateTokens(bool dark);
-// The selected row's foregrounds for a palette that left them to the platform, derived from the fill actually drawn (THEME_CONTRACT §5 step 6): white or near-black on an opaque fill, the number at 0.82 like the native one, and the row's own text and number colours on a translucent fill, where they are what stays readable. On the native solid accent this gives the native white.
-void DeriveSelectedForegrounds(SkinTokens &tokens, bool text, bool number);
+// The selected row's foregrounds for a palette that left them to the platform, derived from the fill actually drawn (THEME_CONTRACT §5 step 6): white or near-black on an opaque fill, the number at 0.82 like the native one, and the row's own text and number colours on a translucent fill, where they are what stays readable. On the native solid accent this gives the native white. `translation` 为真且皮肤给了释义色时，选中行的释义色按选中序号同样的规则推导。
+void DeriveSelectedForegrounds(SkinTokens &tokens, bool text, bool number, bool translation = true);
 // A resolved candidate skin with the user's style laid over it, for the candidate window and its preview only: the floating toolbar and the colour wells keep the skin as resolved.
 //
 // The radius goes user value, then the package's corner_radius_dip (already in tokens.radius), then the native card radius, and a row is never rounder than the card it sits in. The opacity reaches the card surface, its border and the package background image and nothing else, so text, numbers and the selected fill stay as legible as the theme made them. The scale multiplies every length the skin carries, the radii, the inset and the package's decoration and minimum width, so the card keeps its proportions at any size; the hairline border keeps its width.
@@ -375,7 +415,7 @@ enum class SkinSlot
     both,
     unknown,
 };
-// 以 `base` 为底的皮肤包所属的槽位，即 base 那个内置主题的明暗（client-core 的 `theme::skin_appearance`）；system 和目录里没有的 id 都是 both。
+// 以 `base` 为底的皮肤包所属的槽位，即 base 那个内置主题的明暗（client-services 的 `theme::skin_appearance`）；system 和目录里没有的 id 都是 both。
 SkinSlot SkinSlotOfBase(std::string_view base);
 // 把皮肤包 `id`（清单 base 为 `base`）放进它所属的槽位，规则与 packages/ui/src/theme/global-theme.ts 的 `applyCandidateSkin` 相同：深色皮肤写深色槽位，并清掉旧文档放在浅色槽位里的深色皮肤；浅色皮肤写浅色槽位，深色槽位空着而原来浅色槽位里的是深色或 system 底的皮肤（`slotOf` 给出 dark 或 both）时先把它挪进深色槽位，unknown 的直接覆盖；system 底的写两个槽位。`base` 照旧写成包的 base，取色器不动。
 CustomTheme ApplyCandidateSkin(CustomTheme custom, const std::string &id, const std::string &base,

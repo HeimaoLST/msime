@@ -23,17 +23,26 @@ from pathlib import Path
 # is exactly what a defect looks like from the outside.
 NOT_APPLICABLE = {
     "settings_theme": "the settings application's own appearance; the input method has no window to theme",
-    "touch_key_spacing_tenths": "the touch keyboard",
-    "touch_row_spacing_tenths": "the touch keyboard",
-    "touch_keyboard_height_adjustment": "the touch keyboard",
+    # macOS 的这些界面一律跟随颜色模式（HostCapabilities 的 surface_themes_follow），设置页不给这几行；固定明暗的主题由 InputController 钉住传给面板的 `theme`。
+    "toolbar_theme": "the floating toolbar and the mode badge follow the colour mode on macOS (surface_themes_follow)",
+    "menu_theme": "the input menu and the candidate context menu follow the colour mode on macOS (surface_themes_follow)",
+    "screen_keyboard_theme": "the screen keyboard follows the colour mode on macOS (surface_themes_follow)",
+    "emoji_theme": "the emoji panel follows the colour mode on macOS (surface_themes_follow)",
+    "handwriting_theme": "the handwriting panel follows the colour mode on macOS (surface_themes_follow)",
+    "voice_theme": "the voice overlay follows the colour mode on macOS (surface_themes_follow)",
+    "touch_key_spacing_tenths": "the touch keyboard; the macOS screen keyboard panel draws the default spacing whatever is stored, and the page offers no slider (`touch_keyboard_spacing` is false)",
+    "touch_row_spacing_tenths": "the touch keyboard; the macOS screen keyboard panel draws the default spacing whatever is stored, and the page offers no slider (`touch_keyboard_spacing` is false)",
+    "touch_keyboard_height_adjustment": "the touch keyboard and the Windows panel window; the macOS screen keyboard window has a fixed height, and the page offers no slider (`touch_keyboard_height` is false)",
     "touch_voice_shortcut": "the touch keyboard",
     "touch_number_keypad_order": "the touch keyboard's nine-key digit layer",
     "touch_twenty_six_key_number_layout": "the touch keyboard's 26-key digit layer",
     "touch_shuangpin_key_hints": "the touch keyboard's 26-key shuangpin letter keys",
     "touch_toolbar": "the touch keyboard's row above the keys",
+    "harmony_toolbar": "the HarmonyOS phone keyboard's toolbar tools and display mode; the page offers them only where the host reports `touch_toolbar_tools`",
     "number_row_selection": "releasing the number row back to the editor, offered only where the host advertises it - Linux and HarmonyOS; Windows and macOS both keep number selection",
     "english_suggestions": "the mobile suggestion strip; desktop hosts show English candidates through mixed_input instead",
     "game_compatibility": "Windows TSF only: whether the TIP skips ITfUIElementMgr for games that declare UI-less and draw nothing; macOS has no UI-less host contract",
+    "smart_punctuation_migrated": "not a setting: the one-time marker client-core's PreferencesStore sets while reading the document, after turning the old macOS default (smart punctuation off) on; the host reads the migrated values through msime_client_load_preferences",
     "second_third_candidate": "';' and '\\'' picking the second and third candidate are routed only by the Windows TIP and Server so far (.agents/notes/implemented/feature/2026-10-09-second-third-candidate-keys.md); the shared page does not show the switch, so no macOS user can turn on something the host ignores",
 }
 

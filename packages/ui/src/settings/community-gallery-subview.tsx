@@ -1,15 +1,16 @@
-import { useLayoutEffect, useRef } from "react";
-import {
-  CommunityResourcesPage,
-  type CommunityLocalDictionaryClient,
-  type CommunityResourceClient,
-} from "../community/community-resources";
-import { CommunitySkinsPage, type CommunitySkinClient } from "../community/community-skins";
+import { CommunityResourcesPage } from "../community/community-resources";
+import type {
+  CommunityLocalDictionaryClient,
+  CommunityResourceClient,
+} from "../community/community-resource-model";
+import { CommunitySkinsPage } from "../community/community-skins";
+import { type CommunitySkinClient } from "../community/community-skin-model";
 import type { CustomSkinLibraryClient } from "../keyboard/touch-keyboard-skin-design";
 import { fullScreenColumn, fullScreenSurface } from "../core/full-screen-style";
-import type { Preferences } from "../index";
+import type { Preferences } from "../core/preferences-model";
 import { SettingsPageHeader } from "./settings-page-header";
 import { communityGalleryPage, type CommunityGalleryView } from "./use-community-gallery-subview";
+import { useFullScreenScrollToTop } from "../core/use-full-screen-scroll-to-top";
 
 const titles = {
   skin: "社区皮肤",
@@ -18,7 +19,7 @@ const titles = {
 } as const satisfies Record<CommunityGalleryView["category"], string>;
 
 /**
- * 触屏宿主在功能页里打开的完整社区图库：「皮肤」页的「浏览更多皮肤」、「词库」页的「浏览更多词库」、「AI 辅助」页的「浏览更多回复模板」，以及「我的」里社区作品各行。和 AI 皮肤抽卡一样以页面背景覆盖整个设置界面，标题前带返回按钮；搜索、分类、详情、评分、举报、试用、发布、我的作品和收藏都在图库里。
+ * 触屏宿主在功能页里打开的完整社区图库：「AI 辅助」页的「浏览更多回复模板」，以及「我的」里社区作品与收藏各行。「浏览更多皮肤」「浏览更多词库」去的是「社区」标签，不打开这个视图。和 AI 皮肤抽卡一样以页面背景覆盖整个设置界面，标题前带返回按钮；搜索、分类、详情、评分、举报、试用、发布、我的作品和收藏都在图库里。
  *
  * 详情的历史记录留在所在的功能页上（`historyPage`），返回先关详情、再关图库。
  */
@@ -51,11 +52,8 @@ export function CommunityGallerySubview({
 }) {
   const title = titles[view.category];
   const historyPage = communityGalleryPage(view.category);
-  const column = useRef<HTMLElement>(null);
   // 和 AI 皮肤抽卡的全屏视图一样，打开时让标题和返回按钮出现在屏幕顶部，而不是停在功能页原来的滚动位置。
-  useLayoutEffect(() => {
-    column.current?.scrollIntoView?.({ block: "start" });
-  }, []);
+  const column = useFullScreenScrollToTop<HTMLElement>();
   const gallery =
     view.category === "skin"
       ? skins && (

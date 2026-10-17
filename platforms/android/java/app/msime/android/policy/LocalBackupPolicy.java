@@ -44,7 +44,7 @@ public final class LocalBackupPolicy {
     /** 与原生侧输入习惯文件的上限相同；整句联想最多 20 万行，远到不了。 */
     public static final long MAX_HABITS_BYTES = 256L * 1024 * 1024;
 
-    /** 设置文档的字段最多这么多个，与 client-core 的上限相同。 */
+    /** 设置文档的字段最多这么多个，与 client-services 的上限相同。 */
     static final int MAX_SETTINGS_FIELDS = 512;
 
     private static final DateTimeFormatter STAMP = DateTimeFormatter.ofPattern("yyyyMMdd-HHmm", Locale.ROOT);
@@ -83,10 +83,11 @@ public final class LocalBackupPolicy {
     }
 
     /**
-     * Android 本地设置里哪些键进备份、从备份恢复。语音数据贡献（{@code AndroidLocalSettings.VOICE_CONTRIBUTE_AUDIO}）是用户在本机看过说明、点了确认才开的上传授权，开发者选项（`platform.android.developer.*`：输入日志、调试信息、日志级别和 MCP 可访问的日志）是排查一次问题时临时打开的开关；从备份恢复它们会绕过确认，在另一台设备上悄悄开始上传语音或记录输入日志。所以这两类既不导出，也不从（旧版或别人改过的）备份里恢复；其余的本地设置照常带走。
+     * Android 本地设置里哪些键进备份、从备份恢复。语音数据贡献（{@code AndroidLocalSettings.VOICE_CONTRIBUTE_AUDIO}）是用户在本机看过说明、点了确认才开的上传授权，开发者选项（`platform.android.developer.*`：输入日志、调试信息、日志级别和 MCP 可访问的日志）是排查一次问题时临时打开的开关；从备份恢复它们会绕过确认，在另一台设备上悄悄开始上传语音或记录输入日志。剪贴板导出目录也是本机文档授权，不能在其他设备复用。所以这些设置既不导出，也不从（旧版或别人改过的）备份里恢复；其余的本地设置照常带走。
      */
     public static boolean backsUpLocalSetting(String key) {
         return key != null && !key.equals(AndroidLocalSettings.VOICE_CONTRIBUTE_AUDIO)
+            && !key.equals(AndroidLocalSettings.CLIPBOARD_EXPORT_TREE)
             && !key.startsWith(DEVELOPER_PREFIX);
     }
 
@@ -129,7 +130,7 @@ public final class LocalBackupPolicy {
     }
 
     /**
-     * 恢复设置时交给 {@code msime_client_account_settings_apply} 的字段类型：备份里的设置文档是 client-core 自己导出的，每个键按它自己的值声明类型，这样应用的逻辑和云同步完全相同，只是没有服务端字段表。值不是布尔、整数、小数或字符串的键不声明（client-core 会跳过它），超过字段上限时返回 null。
+     * 恢复设置时交给 {@code msime_client_account_settings_apply} 的字段类型：备份里的设置文档是 client-services 自己导出的，每个键按它自己的值声明类型，这样应用的逻辑和云同步完全相同，只是没有服务端字段表。值不是布尔、整数、小数或字符串的键不声明（client-services 会跳过它），超过字段上限时返回 null。
      */
     public static Map<String, String> fieldTypes(Map<String, ?> settings) {
         if (settings.size() > MAX_SETTINGS_FIELDS) return null;

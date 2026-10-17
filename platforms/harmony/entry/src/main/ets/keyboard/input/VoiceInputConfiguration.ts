@@ -48,6 +48,8 @@ export interface VoiceInputConfiguration {
   asr_model_path?: string;
   /** 宿主注入的根目录；本地识别只接受 `<filesDir>/voice-models` 下的模型。 */
   local_model_root?: string;
+  /** 宿主注入的临时目录（扩展上下文的 `tempDir`）；离线 transducer 的热词文件在这里写下、加载完即删。 */
+  local_model_scratch?: string;
   /** Download mirror the settings page uses for model installs; the keyboard only carries it through. */
   asr_model_mirror?: string;
   polish_enabled: boolean;
@@ -155,6 +157,18 @@ export class DoubaoCredentialPolicy {
   static token(config: VoiceInputConfiguration): string {
     const flat: string = config.asr_token.trim();
     return flat.length > 0 ? flat : (config.asr_tokens?.doubao ?? "").trim();
+  }
+
+  /** 豆包接口地址：留空时用默认的双向流式地址。设置页把空地址显示成「双向流式」预设，Windows 的 `resolved_asr_endpoint` 和 HTTP 服务商的 `HttpAsrConfigurationPolicy` 也这样回退，这里不能把空地址当成没配置。 */
+  static endpoint(config: VoiceInputConfiguration): string {
+    const value: string = config.asr_endpoint.trim();
+    return value.length > 0 ? value : DEFAULT_VOICE_INPUT_CONFIGURATION.asr_endpoint;
+  }
+
+  /** 豆包资源 ID：留空时用 `volc.seedasr.sauc.duration`，与 client-providers 的录音解析和 macOS、Windows 宿主一致；设置页「检查」按钮（共享的 `asrServiceCredentialTestConfig`）也按这个值回退，两边对空资源 ID 的结论相同。 */
+  static resourceId(config: VoiceInputConfiguration): string {
+    const value: string = config.asr_resource_id.trim();
+    return value.length > 0 ? value : DEFAULT_VOICE_INPUT_CONFIGURATION.asr_resource_id;
   }
 
   /** 选了豆包，并且至少填过一项凭据。 */

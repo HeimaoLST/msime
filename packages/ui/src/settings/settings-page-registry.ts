@@ -66,7 +66,7 @@ export const pages = [
     title: "账号与同步",
     icon: settingsIcons.account,
   },
-  // 「社区」页不属于任何导航分组，桌面宿主的侧栏没有这一页：候选窗口皮肤在「主题」页浏览，插件包在「插件」页浏览，Windows 只从账号页「我的内容」里的词库、回复模板几行进入这一页。触屏宿主没有这一页，社区内容列在皮肤、词库、AI 辅助这些功能页里。
+  // 「社区」页不属于任何导航分组，桌面宿主的侧栏没有这一页：候选窗口皮肤在「主题」页浏览，插件包在「插件」页浏览，桌面上只有账号页「我的内容」里的几行（发布的与收藏的词库、回复模板等）经 `useSettingsDestinationActions` 的 `openCommunity` 进入这一页，词库页的「社区词库」组和 AI 辅助页的回复模板只在触屏宿主渲染。Windows 的设置入口不打开这一页（React 设置页只在直接运行 `MSIME.exe` 时出现）：原生设置窗口在「账号与同步」页里自己画社区词库与回复模板，`community` 路由打开原生的「主题」页（`platforms/windows/settings/SettingsNavigation.h`）。触屏宿主上这一页是底部「社区」标签的根页，顶部分「皮肤 / 词库」两类完整图库；回复模板仍在「AI 辅助」页上打开。
   {
     id: "community",
     title: "社区",
@@ -83,7 +83,7 @@ export const pages = [
     icon: settingsIcons.feedback,
   },
   { id: "about", title: "关于", icon: settingsIcons.about },
-  // 不在导航分组里。桌面从「AI 辅助」页里的一行进入（见 `subPageParents`）；触屏宿主上它是底部的「对话」标签页（见 `mobilePrimaryPageIds`），在那里没有上级页面。
+  // 不在导航分组里。桌面从「AI 辅助」页里的一行进入（见 `subPageParents`）；触屏宿主上它从「AI 辅助」页作为二级页面进入。
   { id: "chat", title: "AI 对话", icon: settingsIcons.help },
   {
     id: "vocabulary",
@@ -97,6 +97,12 @@ export const pages = [
     title: "发送哪些内容",
     icon: settingsIcons.about,
   },
+  // 「维护与诊断」里「连接 AI 助手」那一行打开：本机 `msime-mcp` 服务的连接命令、配置和两个权限开关。整块原来直接摊在维护页上，是那一页最长的一块，收成一行后维护页只剩服务、日志、数据目录和卸载。
+  {
+    id: "mcp",
+    title: "连接 AI 助手",
+    icon: settingsIcons.developer,
+  },
   // 触屏宿主「我的 › 隐私」打开：数据怎么处理的几句话、匿名使用统计开关和完整隐私政策的链接。桌面的这些在「关于」里。
   {
     id: "privacy",
@@ -109,18 +115,12 @@ export const pages = [
     title: "试用键盘",
     icon: settingsIcons.screenKeyboard,
   },
-  // Mobile only, and the one page that is a list of the other pages. The phone bar carries the source's four tabs, so everything else is reached the way the source reaches it: through the 设置 tab, down one level, into a list.
-  {
-    id: "more",
-    title: "全部设置",
-    icon: settingsIcons.utilities,
-  },
 ] as const;
 
 export type SettingsPageId = (typeof pages)[number]["id"];
 
 /**
- * 一级导航的分组：桌面侧栏、手机「全部设置」列表和旧的分组导出都从这里派生，页面顺序只有这一个来源。Windows 原生设置窗口的 `SettingsNavigation.h` 也要与它保持一致。
+ * 一级导航的分组：桌面侧栏、手机「设置」列表和旧的分组导出都从这里派生，页面顺序只有这一个来源。Windows 原生设置窗口的 `SettingsNavigation.h` 也要与它保持一致：和共享桌面侧栏一样，是这里去掉 `desktopMergedPages` 之后的页面。
  *
  * 「打字」排在「外观」之前：打字行为会反复调整，外观通常只调一次。
  */
@@ -141,4 +141,29 @@ export const subPageParents: Partial<Record<SettingsPageId, SettingsPageId>> = {
   "usage-reporting": "about",
   privacy: "account",
   "try-keyboard": "home",
+  mcp: "developer",
 };
+
+/**
+ * 桌面上并进另一页的页面，键是并进去的页，值是承载它的页。它们仍是可路由的 id：宿主菜单、托盘、旧链接和页内跳转打开它时显示承载页，桌面侧栏不再列出它。`settingsNavGroups` 不变，触屏宿主照旧列出这些页；Windows 原生设置窗口（`SettingsNavigation.h`）和共享桌面侧栏一样不列它们，路由别名把它们指向承载页。
+ *
+ * 「帮助与反馈」没有一项偏好，只有帮助入口、问题报告和反馈渠道，桌面上画在「关于」里。
+ */
+export const desktopMergedPages: Partial<Record<SettingsPageId, SettingsPageId>> = {
+  feedback: "about",
+};
+
+/** 桌面上真正显示的页面：并进别的页的 id 换成承载它的页，其他原样返回。 */
+export function desktopPage(id: SettingsPageId): SettingsPageId {
+  return desktopMergedPages[id] ?? id;
+}
+
+/** 桌面宿主按平台改写的页名；触屏宿主的页名由 `mobilePageTitle` 改写。macOS 和 Linux 的账号页没有设置同步（设置同步只接在 Windows 和鸿蒙的账号会话上），叫「账号」。 */
+export function desktopPageTitle(
+  id: SettingsPageId,
+  title: string,
+  platform: string | undefined,
+): string {
+  if (id === "account" && (platform === "macos" || platform === "linux")) return "账号";
+  return title;
+}

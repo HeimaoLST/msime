@@ -67,7 +67,7 @@ public final class KeyboardFragment extends HomeTabFragment {
             DimensionPolicy.pixels(requireContext(), Ui.NAV_GROUP_RADIUS)));
 
         MaterialButton trial = view.findViewById(R.id.keyboard_try);
-        // 这里和 Apple 一样打开一个输入框而不是系统的输入法选择器：试用键盘就是用它打字，选择器只能把它换走。试用的输入框就是「对话」tab 的那一个，所以切过去并弹出键盘，不再另开一页。
+        // 这里和 Apple 一样打开一个输入框而不是系统的输入法选择器：试用键盘就是用它打字，选择器只能把它换走。试用入口打开 AI 对话二级页并弹出键盘。
         ViewPolicy.bindClick(trial, () -> {
             if (getActivity() instanceof HomeActivity home) home.openChat();
         });

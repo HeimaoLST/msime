@@ -72,7 +72,7 @@ struct MetasequoiaImeApp: App {
       applicationContent
       #endif
     }
-    .onChange(of: scenePhase) { phase in
+    .onChange(of: scenePhase) { _, phase in
       guard phase == .active else { return }
       // 「水杉四季」跟随月份，所以启动或从后台返回时会重新解析季节；季节变化时发出 `AppThemePalette.didChange`。
       AppThemePalette.refresh()
@@ -81,6 +81,8 @@ struct MetasequoiaImeApp: App {
       Task.detached(priority: .utility) { UsageReporting.flush() }
       // 与 Android 的 `HomeActivity.onResume` 相同：回到前台时按节流决定要不要跑一轮云同步。
       CloudSync.shared.onActive()
+      // 打开了「上传到云端」时补传打字统计，十分钟内只真正发一次（节流在共享层）。
+      Task.detached(priority: .utility) { await TypingUpload.shared.onActive() }
     }
   }
 
@@ -200,6 +202,75 @@ private struct FirstRunContainer: View {
   }
 }
 
+/// SwiftUI 在部分系统版本上不会把重复选择写回 Binding，转发系统回调以恢复设置根页。
+private struct TabReselectionObserver: UIViewControllerRepresentable {
+  let reselectSettings: () -> Void
+
+  func makeUIViewController(context: Context) -> Probe {
+    Probe(reselectSettings: reselectSettings)
+  }
+  func updateUIViewController(_ controller: Probe, context: Context) {
+    controller.reselectSettings = reselectSettings
+    controller.attachLater()
+  }
+  static func dismantleUIViewController(_ controller: Probe, coordinator: ()) { controller.detach() }
+
+  final class Probe: UIViewController, UITabBarControllerDelegate {
+    var reselectSettings: () -> Void
+    private weak var observed: UITabBarController?
+    private weak var originalDelegate: UITabBarControllerDelegate?
+
+    init(reselectSettings: @escaping () -> Void) {
+      self.reselectSettings = reselectSettings
+      super.init(nibName: nil, bundle: nil)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func viewDidAppear(_ animated: Bool) {
+      super.viewDidAppear(animated)
+      attach()
+    }
+    override func viewDidLayoutSubviews() {
+      super.viewDidLayoutSubviews()
+      attach()
+    }
+    override func didMove(toParent parent: UIViewController?) {
+      super.didMove(toParent: parent)
+      if parent == nil { detach() }
+      else { attachLater() }
+    }
+    func attachLater() {
+      DispatchQueue.main.async { [weak self] in self?.attach() }
+    }
+    func attach() {
+      guard let controller = tabBarController, controller.delegate !== self else { return }
+      detach()
+      observed = controller
+      originalDelegate = controller.delegate
+      controller.delegate = self
+    }
+    func detach() {
+      if observed?.delegate === self { observed?.delegate = originalDelegate }
+      observed = nil
+      originalDelegate = nil
+    }
+    func tabBarController(_ controller: UITabBarController, shouldSelect viewController: UIViewController) -> Bool {
+      let reselectedSettings = controller.selectedIndex == 0 && controller.selectedViewController === viewController
+      let allowed = originalDelegate?.tabBarController?(controller, shouldSelect: viewController) ?? true
+      // 重选已经显示的标签不需要一次新的选择，即使 SwiftUI 拒绝重复选择也要恢复根页。
+      if reselectedSettings { reselectSettings() }
+      return allowed
+    }
+    // 其余可选回调交还 SwiftUI 原来的委托，保留系统选择、动画及适配行为。
+    override func responds(to selector: Selector!) -> Bool {
+      super.responds(to: selector) || originalDelegate?.responds(to: selector) == true
+    }
+    override func forwardingTarget(for selector: Selector!) -> Any? {
+      originalDelegate?.responds(to: selector) == true ? originalDelegate : super.forwardingTarget(for: selector)
+    }
+  }
+}
+
 private struct MainTabView: View {
   @ObservedObject var navigation: AppNavigation
   @ObservedObject var router: SettingsRouter
@@ -207,10 +278,13 @@ private struct MainTabView: View {
   var body: some View {
     // On iOS 26 and later the system draws this as the floating glass pill; earlier releases keep the classic bar.
     TabView(selection: Binding(get: { navigation.tab }, set: { navigation.select($0, router: router) })) {
-      settingsTab.id(navigation.settingsRoot)
+      settingsTab
+        .background(TabReselectionObserver {
+          navigation.select(.settings, router: router)
+        }.frame(width: 0, height: 0))
         .tabItem { Label("设置", systemImage: "gearshape.fill") }.tag(AppNavigation.Tab.settings)
-      NavigationStack { KeyboardTryoutView(title: "对话", focusRequest: navigation.chatFocusRequest) }
-        .tabItem { Label("对话", systemImage: "bubble.left.and.bubble.right.fill") }.tag(AppNavigation.Tab.chat)
+      NavigationStack { CommunityHomeView() }.id(navigation.communityRoot)
+        .tabItem { Label("社区", systemImage: "globe.asia.australia.fill") }.tag(AppNavigation.Tab.community)
       NavigationStack { TypingStatisticsView() }
         .tabItem { Label("统计", systemImage: "chart.bar.fill") }.tag(AppNavigation.Tab.statistics)
       NavigationStack { AccountSettingsView() }
@@ -226,6 +300,11 @@ private struct MainTabView: View {
       if GIDSignIn.sharedInstance.handle(url) { return }
       #endif
       guard url.scheme == MSIMEAppEdition.urlScheme else { return }
+      // 链接指名了设置页时先把设置栈重建回根页面：切走标签页时那条栈原样保留，同一页面已经开着时写入相同的值不会触发导航，用户会停在上次在那里打开的更深一层页面，而不是链接要的页面。
+      if SettingsRouter.settingsPage(in: url) != nil {
+        navigation.settingsRoot = UUID()
+        navigation.settingsChat = false
+      }
       navigation.tab = router.handle(url) ?? .settings
       if url.host == "voice" { navigation.recordsVoice = true }
     }
@@ -241,8 +320,18 @@ private struct MainTabView: View {
 
   // Both idiom and width class: a Max-size iPhone turned sideways is regular width but stays a phone, and an iPad in a narrow Split View or Slide Over pane gets the phone's stack.
   @ViewBuilder private var settingsTab: some View {
-    if UIDevice.current.userInterfaceIdiom == .pad && widthClass == .regular { TabletSettingsView() }
-    else { NavigationStack { SettingsView() } }
+    if UIDevice.current.userInterfaceIdiom == .pad && widthClass == .regular {
+      TabletSettingsView().id(navigation.settingsRoot)
+    }
+    else {
+      NavigationStack {
+        SettingsView()
+          .navigationDestination(isPresented: $navigation.settingsChat) {
+            KeyboardTryoutView(title: "AI 对话", focusRequest: navigation.chatFocusRequest)
+          }
+      }
+      .id(navigation.settingsRoot)
+    }
   }
 }
 

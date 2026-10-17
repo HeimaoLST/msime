@@ -183,8 +183,8 @@ fn capabilities_describe_each_host() {
     assert!(!linux.candidate_preedit_font);
     assert!(linux.candidate_row_colors);
     assert!(!linux.candidate_selection_appearance);
-    // The Fcitx5 classic UI theme draws the border even though neither Linux panel has a hover state.
-    assert!(linux.candidate_border_color);
+    // Fcitx5 经典界面的边框跟随主题和皮肤，宿主不读用户选的边框色。
+    assert!(!linux.candidate_border_color);
     // IBus owns the candidate list's placement, so the host cannot pin it.
     assert!(!linux.candidate_follow_cursor);
     // The host chooses the preedit string the panel draws, so the raw keys
@@ -232,7 +232,7 @@ fn capabilities_describe_each_host() {
     assert!(windows.candidate_preedit_font);
     assert!(windows.candidate_row_colors);
     assert!(windows.candidate_selection_appearance);
-    assert!(windows.candidate_border_color);
+    assert!(!windows.candidate_border_color);
     // Windows positions its own card, so pinning it is a real choice there.
     assert!(windows.candidate_follow_cursor);
     let macos = HostCapabilities::for_platform(HostPlatform::Macos);
@@ -250,7 +250,23 @@ fn capabilities_describe_each_host() {
     assert!(macos.candidate_font_controls);
     assert!(macos.candidate_row_colors);
     assert!(macos.candidate_selection_appearance);
-    assert!(macos.candidate_border_color);
+    // 桌面宿主的编号色和边框色固定跟随主题，宿主不读这两个槽位，设置页也不给取色器；桌面宿主上只有候选窗口还能单独设明暗，其余界面一律跟随颜色模式。
+    for platform in [
+        HostPlatform::Macos,
+        HostPlatform::Windows,
+        HostPlatform::Linux,
+        HostPlatform::Harmony,
+    ] {
+        let host = HostCapabilities::for_platform(platform);
+        assert!(!host.candidate_number_color && !host.candidate_border_color);
+        assert!(host.surface_themes_follow);
+    }
+    // Android 和 iOS 的键盘仍读这两个槽位和各界面的单独明暗。
+    for platform in [HostPlatform::Android, HostPlatform::Ios] {
+        let host = HostCapabilities::for_platform(platform);
+        assert!(host.candidate_number_color && host.candidate_border_color);
+        assert!(!host.surface_themes_follow);
+    }
     assert!(macos.candidate_follow_cursor);
     assert!(macos.panel_shortcuts);
     assert!(macos.app_logo);
@@ -397,8 +413,11 @@ fn capabilities_describe_each_host() {
             other.touch_toolbar_components,
             platform == HostPlatform::Android
         );
+        // 只有 HarmonyOS 的键盘按 `harmony_toolbar` 选工具和显示方式。
+        assert_eq!(other.touch_toolbar_tools, platform == HostPlatform::Harmony);
     }
     assert!(ios.touch_toolbar_components);
+    assert!(!ios.touch_toolbar_tools);
     // Windows handles Ctrl+Shift+Win+K on its maintenance hook, so the
     // panel shortcut row is real there now.
     assert!(windows.panel_shortcuts);
@@ -610,7 +629,7 @@ fn harmony_groups_with_mobile_hosts_and_claims_nothing_unwritten() {
     assert!(harmony.candidate_font_controls);
     assert!(harmony.candidate_row_colors);
     assert!(harmony.candidate_selection_appearance);
-    assert!(harmony.candidate_border_color);
+    assert!(!harmony.candidate_border_color);
     assert!(harmony.candidate_follow_cursor);
     // The 2in1 status-bar badge is the only mode readout a machine with a hardware keyboard
     // gets when the toolbar is off, so the switch that governs it belongs on this host too.
@@ -697,6 +716,30 @@ fn voice_commit_mode_is_offered_only_where_a_host_chooses_between_paths() {
         HostPlatform::Harmony,
     ] {
         assert!(!HostCapabilities::for_platform(platform).voice_commit_mode);
+    }
+}
+
+/// 空格锁定和开始、结束提示音的细分只有 Android、iOS 还读存下的值；录音后端只有 Linux 有得选。macOS、Windows、HarmonyOS 只给一个「麦克风」下拉。
+#[test]
+fn only_mobile_reads_space_lock_and_cue_split_and_only_linux_picks_capture_backend() {
+    for (platform, space_lock, cues, backends) in [
+        (HostPlatform::Macos, false, false, false),
+        (HostPlatform::Windows, false, false, false),
+        (HostPlatform::Linux, false, false, true),
+        (HostPlatform::Harmony, false, false, false),
+        (HostPlatform::Android, true, true, true),
+        (HostPlatform::Ios, true, true, true),
+    ] {
+        let capabilities = HostCapabilities::for_platform(platform);
+        assert_eq!(
+            capabilities.voice_space_lock_switch, space_lock,
+            "{platform:?} space lock"
+        );
+        assert_eq!(capabilities.voice_cue_switches, cues, "{platform:?} cues");
+        assert_eq!(
+            capabilities.voice_capture_backends, backends,
+            "{platform:?} capture backends"
+        );
     }
 }
 
@@ -792,6 +835,36 @@ fn candidate_window_style_is_offered_where_the_host_draws_the_card() {
     assert_eq!(flags(HostPlatform::Ios), (false, false, false));
 }
 
+/// macOS、Windows 和 HarmonyOS 把 Tab、PageUp/PageDown 两组翻页键固定为开（关掉只让键失效，不会还给应用），Linux 和 Android、iOS 照旧读偏好并显示开关。三个桌面宿主把中英混输的触发字符数固定为默认值，触屏宿主照旧读。
+#[test]
+fn hosts_fix_the_tab_page_paging_keys_and_the_mixed_input_prefix() {
+    // (宿主, 读 Tab/PageUp 开关, 读触发字符数)
+    for (platform, reads_paging, reads_prefix) in [
+        (HostPlatform::Windows, false, false),
+        (HostPlatform::Macos, false, false),
+        (HostPlatform::Linux, true, false),
+        (HostPlatform::Harmony, false, true),
+        (HostPlatform::Android, true, true),
+        (HostPlatform::Ios, true, true),
+    ] {
+        let host = HostCapabilities::for_platform(platform);
+        assert_eq!(host.tab_page_paging_switches, reads_paging, "{platform:?}");
+        assert_eq!(
+            host.mixed_input_minimum_prefix, reads_prefix,
+            "{platform:?}"
+        );
+        assert_eq!(
+            platform.reads_mixed_input_minimum_prefix(),
+            reads_prefix,
+            "{platform:?}"
+        );
+    }
+    assert_eq!(
+        crate::preferences::MixedInputPreferences::default().minimum_prefix,
+        crate::preferences::DEFAULT_MIXED_INPUT_MINIMUM_PREFIX
+    );
+}
+
 /// 卡片内边距目前只有 macOS 候选窗读，其他宿主不显示这个滑块（#7316）。
 #[test]
 fn only_macos_offers_the_candidate_padding() {
@@ -806,6 +879,31 @@ fn only_macos_offers_the_candidate_padding() {
         assert_eq!(
             HostCapabilities::for_platform(platform).candidate_padding,
             platform == HostPlatform::Macos,
+            "{platform:?}"
+        );
+    }
+}
+
+/// 「键盘高度」只给真正按它改变键盘高度的宿主：macOS 和 Linux 的键盘窗口高度固定。间距只在 macOS 上固定成默认值，其余宿主照旧可调。
+#[test]
+fn touch_keyboard_geometry_is_offered_where_the_keyboard_applies_it() {
+    for platform in [
+        HostPlatform::Windows,
+        HostPlatform::Macos,
+        HostPlatform::Linux,
+        HostPlatform::Harmony,
+        HostPlatform::Android,
+        HostPlatform::Ios,
+    ] {
+        let capabilities = HostCapabilities::for_platform(platform);
+        assert_eq!(
+            capabilities.touch_keyboard_height,
+            !matches!(platform, HostPlatform::Macos | HostPlatform::Linux),
+            "{platform:?}"
+        );
+        assert_eq!(
+            capabilities.touch_keyboard_spacing,
+            platform != HostPlatform::Macos,
             "{platform:?}"
         );
     }
@@ -922,5 +1020,55 @@ fn editions_without_a_chinese_scheme_offer_no_handwriting_or_offline_glosses() {
         let edition = capabilities.edition.unwrap();
         assert!(edition.handwriting, "{id}");
         assert!(edition.offline_glosses, "{id}");
+    }
+}
+
+#[test]
+fn fixed_ai_candidate_limit_and_effect_intensity_sit_at_their_defaults() {
+    // 不给「候选数量」「效果强度」的宿主固定用默认值；固定的值必须正好是新档案的默认值，否则没改过的人升级后也会变。
+    let limit = crate::preferences::AiAssistantPreferences::default().candidate_limit;
+    let intensity = crate::preferences::PluginPreferences::default().effect_intensity;
+    for platform in [
+        HostPlatform::Macos,
+        HostPlatform::Windows,
+        HostPlatform::Linux,
+        HostPlatform::Harmony,
+    ] {
+        let host = HostCapabilities::for_platform(platform);
+        assert_eq!(host.fixed_ai_candidate_limit, Some(limit), "{platform:?}");
+        let json = serde_json::to_value(&host).unwrap();
+        assert_eq!(json["fixed_ai_candidate_limit"], 3, "{platform:?}");
+    }
+    for platform in [
+        HostPlatform::Macos,
+        HostPlatform::Windows,
+        HostPlatform::Harmony,
+    ] {
+        let host = HostCapabilities::for_platform(platform);
+        assert_eq!(host.fixed_effect_intensity, Some(intensity), "{platform:?}");
+        let json = serde_json::to_value(&host).unwrap();
+        assert_eq!(json["fixed_effect_intensity"], 50, "{platform:?}");
+    }
+    // Android、iOS 仍按偏好决定 AI 候选数量；Linux 不画效果样式，没有强度，Android、iOS 也按偏好。按偏好的宿主不写这些键，旧版本设置页读到的能力文档不变。
+    for platform in [HostPlatform::Android, HostPlatform::Ios] {
+        let host = HostCapabilities::for_platform(platform);
+        assert_eq!(host.fixed_ai_candidate_limit, None, "{platform:?}");
+        assert_eq!(platform.fixed_ai_candidate_limit(), None, "{platform:?}");
+        let json = serde_json::to_value(&host).unwrap();
+        assert!(
+            json.get("fixed_ai_candidate_limit").is_none(),
+            "{platform:?}"
+        );
+    }
+    for platform in [
+        HostPlatform::Linux,
+        HostPlatform::Android,
+        HostPlatform::Ios,
+    ] {
+        let host = HostCapabilities::for_platform(platform);
+        assert_eq!(host.fixed_effect_intensity, None, "{platform:?}");
+        assert_eq!(platform.fixed_effect_intensity(), None, "{platform:?}");
+        let json = serde_json::to_value(&host).unwrap();
+        assert!(json.get("fixed_effect_intensity").is_none(), "{platform:?}");
     }
 }

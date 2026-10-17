@@ -1,3 +1,5 @@
+import { isComposingKeyEvent } from "../core/ime-key-event";
+import { focusAndRevealNearest } from "../core/focus-and-reveal-nearest";
 import type {
   KeyboardInputRequest,
   InkStroke,
@@ -80,13 +82,15 @@ import {
 } from "./keyboard-input";
 import { keyboardSkinStyles } from "./keyboard-skin-styles";
 import { keyboardDeliveryNotice, MACOS_KEYBOARD_GUIDANCE } from "./keyboard-delivery-notice";
-import { keyboardRows, nineKeyRows } from "./panel-keyboard-layouts";
+import { keyboardRows, nineKeyRows, nineKeyShuangpinRows } from "./panel-keyboard-layouts";
+import type { NineKeyShuangpinKeyFace } from "../settings/nine-key-shuangpin-profile";
 import { CloudDictionaryEntryForm } from "./cloud-dictionary-entry-form";
 import { CloudDictionaryEntryCard } from "./cloud-dictionary-entry-card";
 import { CloudDictionaryItem } from "./cloud-dictionary-item";
 import { CloudPanelHeader } from "./cloud-panel-header";
 import { CloudDictionaryPagination } from "./cloud-dictionary-pagination";
 import { NativePanelHeader } from "./native-panel-header";
+import { PanelActivationButtons, type PanelActivationMode } from "./panel-activation-buttons";
 import { CloudDictionaryKindTabs } from "./cloud-dictionary-kind-tabs";
 import { CloudDictionaryKindSelect } from "./cloud-dictionary-kind-select";
 import { CloudDictionarySelectField } from "./cloud-dictionary-select-field";
@@ -177,6 +181,7 @@ export function KeyboardPanel({
   platform,
   theme = "dark",
   layout = "twenty_six_key",
+  nineKeyShuangpinKeys,
   keySpacingTenths,
   rowSpacingTenths,
   voiceShortcut = false,
@@ -186,19 +191,29 @@ export function KeyboardPanel({
   client: PanelClient;
   platform?: string;
   theme?: "dark" | "light";
-  layout?: "twenty_six_key" | "nine_key";
+  layout?: "twenty_six_key" | "nine_key" | "nine_key_shuangpin";
+  nineKeyShuangpinKeys?: readonly NineKeyShuangpinKeyFace[];
   keySpacingTenths?: number;
   rowSpacingTenths?: number;
   voiceShortcut?: boolean;
   skin?: GlobalTheme;
   customDesign?: TouchKeyboardSkinDesign;
 }) {
-  const [activeLayout, setActiveLayout] = useState<"twenty_six_key" | "nine_key">(() => {
+  const [activeLayout, setActiveLayout] = useState<
+    "twenty_six_key" | "nine_key" | "nine_key_shuangpin"
+  >(() => {
     const saved = readOptionalStorage("msime.keyboard.layout");
-    return saved === "nine_key" || saved === "twenty_six_key" ? saved : layout;
+    return saved === "nine_key" || saved === "twenty_six_key" || saved === "nine_key_shuangpin"
+      ? saved
+      : layout;
   });
   function switchLayout() {
-    const next = activeLayout === "nine_key" ? "twenty_six_key" : "nine_key";
+    const next =
+      activeLayout === "twenty_six_key"
+        ? layout === "nine_key_shuangpin"
+          ? "nine_key_shuangpin"
+          : "nine_key"
+        : "twenty_six_key";
     setActiveLayout(next);
     writeOptionalStorage("msime.keyboard.layout", next);
   }
@@ -209,7 +224,12 @@ export function KeyboardPanel({
     previousHostLayout.current = layout;
     setActiveLayout(layout);
   }, [layout]);
-  const sourceRows = activeLayout === "nine_key" ? nineKeyRows : keyboardRows;
+  const sourceRows =
+    activeLayout === "nine_key_shuangpin"
+      ? nineKeyShuangpinRows(nineKeyShuangpinKeys ?? [])
+      : activeLayout === "nine_key"
+        ? nineKeyRows
+        : keyboardRows;
   const rows =
     platform === "macos"
       ? sourceRows.map((row) => {
@@ -303,9 +323,12 @@ export function KeyboardPanel({
       if (!button) return;
       const letter = item.label.length === 1 && /[a-z]/i.test(item.label);
       const shifted = modifiers.has("Shift") && item.label.length === 1;
-      button.textContent = shifted
+      const face = shifted
         ? item.shifted || (letter ? item.label.toUpperCase() : item.label)
         : item.label;
+      const label = button.querySelector<HTMLElement>("[data-key-label]");
+      if (label) label.textContent = face;
+      else button.textContent = face;
       if (item.modifier)
         button.setAttribute("aria-pressed", modifiers.has(item.modifier) ? "true" : "false");
     });
@@ -507,7 +530,7 @@ export function KeyboardPanel({
           {notice}
         </span>
         <button type="button" aria-label="切换键盘布局" onClick={switchLayout}>
-          {activeLayout === "nine_key" ? "全键" : "九宫格"}
+          {activeLayout === "twenty_six_key" ? "九宫格" : "全键"}
         </button>
         {voiceShortcut && client.openVoice && (
           <button
@@ -538,7 +561,7 @@ export function KeyboardPanel({
                     key={`${keyToRender.label}-${keyIndex}`}
                     style={{
                       flexGrow:
-                        activeLayout === "nine_key"
+                        activeLayout === "nine_key" || activeLayout === "nine_key_shuangpin"
                           ? 1
                           : keyboardKeyWeight(
                               keyToRender.label,
@@ -573,7 +596,10 @@ export function KeyboardPanel({
                         );
                     }}
                   >
-                    {label}
+                    <span data-key-label="">{label}</span>
+                    {keyToRender.hint && (
+                      <span className={surface.keyboardKeyHint}>{keyToRender.hint}</span>
+                    )}
                   </button>
                 );
               })}
@@ -615,8 +641,7 @@ function HandwritingCandidateButton({
       !onCopy ||
       disabled ||
       event.defaultPrevented ||
-      event.nativeEvent.isComposing ||
-      event.keyCode === 229 ||
+      isComposingKeyEvent(event) ||
       !event.ctrlKey ||
       event.metaKey ||
       event.altKey ||
@@ -668,7 +693,7 @@ export function HandwritingPanel({
     ensuredModel.current = true;
     packs.ensure("handwriting");
   }, [handwritingPack, packs]);
-  const [activationMode, setActivationMode] = useState<"copy" | "input">(() => {
+  const [activationMode, setActivationMode] = useState<PanelActivationMode>(() => {
     return readOptionalStorage("msime.handwriting.activation") === "input" ? "input" : "copy";
   });
   const effectiveMode =
@@ -677,7 +702,7 @@ export function HandwritingPanel({
       : activationMode === "input" && !client.submitHandwritingCandidate
         ? "copy"
         : activationMode;
-  function selectActivation(mode: "copy" | "input") {
+  function selectActivation(mode: PanelActivationMode) {
     if (!recognitionQueue.current.active || closingRef.current) return;
     setActivationMode(mode);
     writeOptionalStorage("msime.handwriting.activation", mode);
@@ -921,13 +946,7 @@ export function HandwritingPanel({
     setNotice("请在左侧书写，松开鼠标后自动识别");
   }
   function editInk(event: import("react").KeyboardEvent<HTMLElement>) {
-    if (
-      event.defaultPrevented ||
-      event.nativeEvent.isComposing ||
-      event.keyCode === 229 ||
-      event.altKey
-    )
-      return;
+    if (event.defaultPrevented || isComposingKeyEvent(event) || event.altKey) return;
     const target = event.target as HTMLElement;
     if (target.closest("input, textarea, select, [contenteditable=true]")) return;
     const key = event.key.toLowerCase();
@@ -943,8 +962,7 @@ export function HandwritingPanel({
   function navigateCandidates(event: import("react").KeyboardEvent<HTMLDivElement>) {
     if (
       event.defaultPrevented ||
-      event.nativeEvent.isComposing ||
-      event.keyCode === 229 ||
+      isComposingKeyEvent(event) ||
       event.ctrlKey ||
       event.metaKey ||
       event.altKey ||
@@ -978,8 +996,7 @@ export function HandwritingPanel({
                   : 4);
     event.preventDefault();
     const target = buttons[clamp(next, 0, buttons.length - 1)];
-    target.focus({ preventScroll: true });
-    target.scrollIntoView({ block: "nearest", inline: "nearest" });
+    focusAndRevealNearest(target);
   }
   async function chooseCandidate(candidate: string, copyOnly = false) {
     if (
@@ -1107,24 +1124,13 @@ export function HandwritingPanel({
           <h2>识别结果</h2>
           <div className={surface.handwritingActions} role="group" aria-label="点击手写候选的操作">
             <span>点击候选：</span>
-            <button
-              type="button"
-              aria-pressed={effectiveMode === "copy"}
-              disabled={closing || submitting || !client.copyHandwritingCandidate}
-              onClick={() => selectActivation("copy")}
-            >
-              复制
-            </button>
-            {client.submitHandwritingCandidate && (
-              <button
-                type="button"
-                aria-pressed={effectiveMode === "input"}
-                disabled={closing || submitting}
-                onClick={() => selectActivation("input")}
-              >
-                输入
-              </button>
-            )}
+            <PanelActivationButtons
+              mode={effectiveMode}
+              onModeChange={selectActivation}
+              disabled={closing || submitting}
+              copyDisabled={!client.copyHandwritingCandidate}
+              inputAvailable={Boolean(client.submitHandwritingCandidate)}
+            />
           </div>
           <div
             className={surface.candidateGrid}
@@ -3875,7 +3881,7 @@ export function EmojiPanel({
   } = usePanelAction(setNotice);
   const [clipboardLoadFailed, setClipboardLoadFailed] = useState(false);
   const [clipboardRefresh, setClipboardRefresh] = useState(0);
-  const [activationMode, setActivationMode] = useState<"copy" | "input">("copy");
+  const [activationMode, setActivationMode] = useState<PanelActivationMode>("copy");
   const [clipboardEnabled, setClipboardEnabled] = useState<boolean | null>(null);
   const clipboardGeneration = useAsyncGeneration();
   const deletedRowFocus = useRef<{ element: HTMLElement; index: number; query: string } | null>(
@@ -4245,8 +4251,7 @@ export function EmojiPanel({
   function clipboardItemKey(event: import("react").KeyboardEvent<HTMLButtonElement>, text: string) {
     if (
       event.defaultPrevented ||
-      event.nativeEvent.isComposing ||
-      event.keyCode === 229 ||
+      isComposingKeyEvent(event) ||
       event.altKey ||
       event.metaKey ||
       event.shiftKey ||
@@ -4472,38 +4477,23 @@ export function EmojiPanel({
             aria-label="点击项目时的操作"
           >
             <span>点击项目：</span>
-            <button
-              type="button"
-              className={`rounded-md border px-[9px] py-[5px] font-[inherit] disabled:cursor-wait disabled:opacity-55 ${
-                effectiveMode === "copy"
-                  ? `${panelAccentBorder} ${panelChosen}`
-                  : "border-transparent bg-transparent text-inherit"
-              }`}
-              aria-pressed={effectiveMode === "copy"}
+            <PanelActivationButtons
+              mode={effectiveMode}
               disabled={clipboardBusy}
-              onClick={() => {
-                setActivationMode("copy");
-                setNotice("点击项目即可复制");
+              inputAvailable
+              inputLabel="输入到原应用"
+              onModeChange={(mode) => {
+                setActivationMode(mode);
+                setNotice(mode === "copy" ? "点击项目即可复制" : "点击项目即可输入到原应用");
               }}
-            >
-              复制
-            </button>
-            <button
-              type="button"
-              className={`rounded-md border px-[9px] py-[5px] font-[inherit] disabled:cursor-wait disabled:opacity-55 ${
-                effectiveMode === "input"
-                  ? `${panelAccentBorder} ${panelChosen}`
-                  : "border-transparent bg-transparent text-inherit"
-              }`}
-              aria-pressed={effectiveMode === "input"}
-              disabled={clipboardBusy}
-              onClick={() => {
-                setActivationMode("input");
-                setNotice("点击项目即可输入到原应用");
-              }}
-            >
-              输入到原应用
-            </button>
+              buttonClassName={(selected) =>
+                `rounded-md border px-[9px] py-[5px] font-[inherit] disabled:cursor-wait disabled:opacity-55 ${
+                  selected
+                    ? `${panelAccentBorder} ${panelChosen}`
+                    : "border-transparent bg-transparent text-inherit"
+                }`
+              }
+            />
           </div>
         )}
       {categoryPage && page !== "symbols" && (

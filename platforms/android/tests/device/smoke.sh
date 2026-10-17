@@ -95,6 +95,10 @@ run_instrumentation() {
 result=$(run_instrumentation app.msime.android.test/app.msime.android.test.DeviceSmoke)
 printf '%s\n' "$result"
 [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "System input acceptance failed" >&2; exit 1; }
+# Compose 可在批量结束时才执行写入，核心验收覆盖延迟组字和中英往返。
+result=$(run_instrumentation app.msime.android.test/app.msime.android.test.BatchCompositionDeviceSmoke)
+printf '%s\n' "$result"
+[[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Deferred batch composition acceptance failed" >&2; exit 1; }
 # 菜单复制使用真实系统剪贴板与组字会话，最低 API 的核心验收也必须覆盖。
 result=$(run_instrumentation app.msime.android.test/app.msime.android.test.CopyDeviceInfoDeviceSmoke)
 printf '%s\n' "$result"
@@ -103,6 +107,10 @@ printf '%s\n' "$result"
 result=$(run_instrumentation app.msime.android.test/app.msime.android.test.InputFailureCategoryDeviceSmoke)
 printf '%s\n' "$result"
 [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Input failure category acceptance failed" >&2; exit 1; }
+# 批量结束才应用的编辑器也要保留组字；限长回退的两批选区回声都不能取消候选。
+result=$(run_instrumentation app.msime.android.test/app.msime.android.test.CompositionBatchDeviceSmoke)
+printf '%s\n' "$result"
+[[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Composition batch acceptance failed" >&2; exit 1; }
 # 旧菜单、展开按钮和拼写回调只检查身份，不写编辑器、不停止当前会话。
 result=$(run_instrumentation app.msime.android.test/app.msime.android.test.StaleCandidateDeviceSmoke)
 printf '%s\n' "$result"
@@ -121,17 +129,42 @@ if [[ "$feedback" == true ]]; then
   printf '%s\n' "$result"
   [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Feedback input stability acceptance failed" >&2; exit 1; }
 fi
+# 剪贴板全文导出涉及存储授权，API 28/35 核心套件都覆盖。
+bash platforms/android/tests/device/clipboard-export.sh "$serial"
 if [[ "$diagnostics" == true ]]; then
   # 只生成合成日志包，覆盖原生导出到上传请求的契约，不发网络请求。
   result=$(run_instrumentation app.msime.android.test/app.msime.android.test.DiagnosticsBundleDeviceSmoke)
   printf '%s\n' "$result"
   [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Diagnostics bundle acceptance failed" >&2; exit 1; }
+  result=$(run_instrumentation app.msime.android.test/app.msime.android.test.VoiceDiagnosticsPrivacyDeviceSmoke)
+  printf '%s\n' "$result"
+  [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Voice diagnostics privacy acceptance failed" >&2; exit 1; }
   bash platforms/android/tests/device/diagnostics-export-directory.sh "$serial"
 fi
 # 三万条以上的码表也要经应用沙箱的 JNI 和真实 Engine 验证，API 28 的核心套件同样执行。
 result=$(run_instrumentation app.msime.android.test/app.msime.android.test.HelpcodeImportDeviceSmoke)
 printf '%s\n' "$result"
 [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Helpcode import acceptance failed" >&2; exit 1; }
+# 导入必须经过安装产品的 Java 入口和 JNI，第六项不能等到下一次收起键盘才出现。
+result=$(run_instrumentation app.msime.android.test/app.msime.android.test.DictionaryImportDeviceSmoke)
+printf '%s\n' "$result"
+[[ "$result" == *MSIME_DICTIONARY_IMPORT_PASSED* ]] || { echo "Dictionary import acceptance failed" >&2; exit 1; }
+# 数字默认九宫格涉及常规键面和字面提交，API 28 的核心验收同样覆盖。
+result=$(run_instrumentation app.msime.android.test/app.msime.android.test.NumberPadDeviceSmoke)
+printf '%s\n' "$result"
+[[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Number pad acceptance failed" >&2; exit 1; }
+# 导航必须在原生宿主中验收：设置列表有「皮肤」一行，底部第二格是没有返回按钮、顶部为「皮肤 / 词库」分类的社区根页，AI 对话从设置压入二级页。
+result=$(run_instrumentation app.msime.android.test/app.msime.android.test.ChatNavigationDeviceSmoke)
+printf '%s\n' "$result"
+[[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Native chat navigation acceptance failed" >&2; exit 1; }
+# 工具栏编辑入口在最低 API 上也支持，核心验收覆盖真实长按和原生设置跳转。
+result=$(run_instrumentation app.msime.android.test/app.msime.android.test.ToolbarEditorDeviceSmoke)
+printf '%s\n' "$result"
+[[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Toolbar editor entry acceptance failed" >&2; exit 1; }
+# 本地语音句柄经过真实 JNI；不加载模型或录音，最低 API 的核心验收也执行。
+result=$(run_instrumentation app.msime.android.test/app.msime.android.test.LocalSpeechHandleDeviceSmoke)
+printf '%s\n' "$result"
+[[ "$result" == *MSIME_LOCAL_SPEECH_HANDLES_PASSED* ]] || { echo "Local speech handle acceptance failed" >&2; exit 1; }
 if [[ "$core" == true ]]; then
   bash platforms/android/tests/device/clipboard-edit-lifecycle.sh "$serial" app.msime.android
   echo "Dedicated Android AVD: install, resource setup, core typing and clipboard save lifecycle acceptance passed"
@@ -142,19 +175,29 @@ skipped_suites=()
 for entry in \
     "CandidatePanelDeviceSmoke|Candidate panel acceptance failed" \
     "MoreToolsDeviceSmoke|More tools acceptance failed" \
+    "ToolbarEdgesDeviceSmoke|Toolbar fixed edges acceptance failed" \
+    "ToolbarScrollDeviceSmoke|Toolbar swipe acceptance failed" \
     "EmojiPickerDeviceSmoke|Emoji picker acceptance failed" \
+    "EmojiCombinationLayoutDeviceSmoke|Combination emoji layout acceptance failed" \
+    "EmojiCombinationDeviceSmoke|Combination emoji input acceptance failed" \
     "PairedPunctuationDeviceSmoke|Paired punctuation acceptance failed" \
     "LetterHintPunctuationDeviceSmoke|Letter hint punctuation acceptance failed" \
+    "SuperscriptShortcutDeviceSmoke|Superscript shortcut acceptance failed" \
     "PreferencesDeviceSmoke|Preferences acceptance failed" \
     "ThemeModeDeviceSmoke|Theme mode acceptance failed" \
     "LanguageNumberKeySwapDeviceSmoke|Language/number key swap acceptance failed" \
     "ChineseLanguageReturnDeviceSmoke|Chinese language return acceptance failed" \
+    "BottomPaddingSettingsDeviceSmoke|Bottom padding settings acceptance failed" \
+    "BottomPaddingHeightDeviceSmoke|Bottom padding height acceptance failed" \
     "KeyboardHeightDeviceSmoke|Keyboard height acceptance failed" \
     "FuzzyPinyinDeviceSmoke|Fuzzy pinyin acceptance failed" \
     "CandidateGlossDeviceSmoke|Candidate gloss acceptance failed" \
     "InitialKeyboardRowDeviceSmoke|Initial keyboard row acceptance failed" \
+    "NineKeyNumericLayoutDeviceSmoke|Nine-key numeric layout acceptance failed" \
     "NineKeyEnglishDeviceSmoke|Nine-key English acceptance failed" \
+    "EnglishCorrectionDeviceSmoke|Mobile English correction acceptance failed" \
     "NineKeyPanelDeviceSmoke|Nine-key panel acceptance failed" \
+    "QuanpinSeparatorDeviceSmoke|Quanpin separator acceptance failed" \
     "FourteenKeyDeviceSmoke|Fourteen-key acceptance failed" \
     "NineKeyShuangpinDeviceSmoke|Nine-key shuangpin acceptance failed" \
     "ChineseHelpcodeDeviceSmoke|Chinese helpcode acceptance failed" \
@@ -164,11 +207,15 @@ for entry in \
     "LongSymbolCellDeviceSmoke|Long symbol cell acceptance failed" \
     "EmailSuffixDeviceSmoke|Email suffix acceptance failed" \
     "NumberRowDeviceSmoke|Number row acceptance failed" \
+    "NumberLayerEntryDeviceSmoke|Number layer entry acceptance failed" \
+    "QuickDeleteUndoDeviceSmoke|Quick delete undo acceptance failed" \
+    "QuickDeletePreviewDeviceSmoke|Quick delete held preview acceptance failed" \
     "EmptyEditorBackspaceDeviceSmoke|Empty editor backspace acceptance failed" \
     "ClipboardImageDeviceSmoke|Clipboard image acceptance failed" \
+    "TextEditRecentClipboardDeviceSmoke|Text edit recent clipboard acceptance failed" \
     "CaretCandidatesDeviceSmoke|Caret candidates acceptance failed" \
     "HardwareTranslationDeviceSmoke|Hardware Ctrl+Enter translation acceptance failed" \
-    "AiPlaceholderDeviceSmoke|AI placeholder acceptance failed" \
+    "AiCandidateSeatDeviceSmoke|AI candidate seat acceptance failed" \
     "WubiLookupDeviceSmoke|Wubi lookup acceptance failed"
 do
   suite=${entry%%|*}

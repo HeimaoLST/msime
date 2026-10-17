@@ -2,18 +2,24 @@ import { expect, test } from "vitest";
 
 test("community publication dialogs reuse the shared metadata fields", () => {
   const resources = Object.values(
-    import.meta.glob<string>("../../../../packages/ui/src/community/community-resources.tsx", {
-      eager: true,
-      query: "?raw",
-      import: "default",
-    }),
+    import.meta.glob<string>(
+      "../../../../packages/ui/src/community/community-resource-editor.tsx",
+      {
+        eager: true,
+        query: "?raw",
+        import: "default",
+      },
+    ),
   )[0];
   const plugins = Object.values(
-    import.meta.glob<string>("../../../../packages/ui/src/community/community-plugins.tsx", {
-      eager: true,
-      query: "?raw",
-      import: "default",
-    }),
+    import.meta.glob<string>(
+      "../../../../packages/ui/src/community/community-plugin-publish-dialog.tsx",
+      {
+        eager: true,
+        query: "?raw",
+        import: "default",
+      },
+    ),
   )[0];
   const skins = Object.values(
     import.meta.glob<string>(

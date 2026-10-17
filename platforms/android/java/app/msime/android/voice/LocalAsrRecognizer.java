@@ -27,6 +27,8 @@ import org.json.JSONObject;
  * <p>The recognizer is the shared one every desktop host uses (`shared/voice/LocalAsr`), compiled into this host's JNI library; the runtime is the pinned sherpa-onnx `.aar`'s native libraries, packaged beside it or, where the package leaves them out, taken from the downloaded voice-runtime resource pack. This class owns the microphone and the two threads between it and that recognizer: capture reads the microphone into a queue so a slow decode never drops audio, and the calling worker loads the model, decodes, reports partial text and finishes.
  *
  * <p>Hotwords come from the user's own pinyin dictionary through the shared host API. A model that biases natively gets them at session start; one whose manifest says `"hotwords": "pinyin"` gets the final transcript corrected by the shared pinyin matcher instead.
+ *
+ * <p>最终文本最后经共享层 `msime_client_voice_normalize_numbers` 按清单的 `kind` 把汉字数字改成数字（只改写不自带 ITN 的 transducer 模型），中间结果不改。
  */
 public final class LocalAsrRecognizer {
     /** Roughly 100 ms of 16 kHz mono audio per read. */
@@ -38,6 +40,9 @@ public final class LocalAsrRecognizer {
     /** What the caller shows while the user speaks. Called on the recognizing worker. */
     public interface Listener {
         void onPartial(String text);
+
+        /** 经过 VAD 的整段模型（SenseVoice、离线 X-ASR 等）开始或停止判定在说话时调用一次。这类模型一段说完才出文字，调用方按「多久没有新文字」判断说完时，要在说话期间推迟，否则用户接着说下去会被截断。流式模型不报。 */
+        default void onSpeech(boolean speaking) { }
     }
 
     /** Why a recognition did not produce text. The caller maps these onto its own messages. */
@@ -59,6 +64,19 @@ public final class LocalAsrRecognizer {
             this.runtimeMissing = runtimeMissing;
         }
 
+        /** 固定诊断类别与界面文案独立，避免把提示或异常详情写进日志。 */
+        public DiagnosticEventKind diagnosticKind() {
+            return switch (failure) {
+                case PERMISSION -> DiagnosticEventKind.VOICE_FAILURE_PERMISSION;
+                case UNAVAILABLE -> DiagnosticEventKind.VOICE_FAILURE_AUDIO;
+                case MODEL -> DiagnosticEventKind.VOICE_FAILURE_MODEL;
+                case RUNTIME -> runtimeMissing ? DiagnosticEventKind.VOICE_FAILURE_RUNTIME_MISSING
+                    : DiagnosticEventKind.VOICE_FAILURE_RUNTIME;
+                case CANCELLED -> DiagnosticEventKind.VOICE_CANCELLED;
+                case EMPTY -> DiagnosticEventKind.VOICE_EMPTY;
+            };
+        }
+
         public Failure failure() {
             return failure;
         }
@@ -72,6 +90,17 @@ public final class LocalAsrRecognizer {
     private static final Object RUNTIME_LOCK = new Object();
     private static final String ONNXRUNTIME_LIBRARY = "libonnxruntime.so";
     private static final String SHERPA_LIBRARY = "libsherpa-onnx-c-api.so";
+
+    private java.util.function.Consumer<DiagnosticEventKind> diagnostics = kind -> { };
+
+    /** 由调用方回传到唯一的日志写入进程；识别器不保存诊断文件。 */
+    public void diagnostics(java.util.function.Consumer<DiagnosticEventKind> sink) {
+        diagnostics = sink == null ? kind -> { } : sink;
+    }
+
+    private void diagnostic(DiagnosticEventKind kind) {
+        diagnostics.accept(kind);
+    }
 
     private final AtomicBoolean stopped = new AtomicBoolean();
     private final AtomicBoolean cancelled = new AtomicBoolean();
@@ -141,14 +170,19 @@ public final class LocalAsrRecognizer {
     public String recognize(String modelDirectory, Path trustedRoot, String language, String hostOptions,
                             String[] hotwordTexts, String[] hotwordPinyin,
                             Listener listener) throws Refused {
+        diagnostic(DiagnosticEventKind.VOICE_LOCAL_MODEL_CHECK);
         if (!LocalAsrPolicy.installed(modelDirectory, trustedRoot)) throw new Refused(Failure.MODEL);
-        String hotwordMode = hotwordMode(modelDirectory, trustedRoot);
-        if (hotwordMode == null) throw new Refused(Failure.MODEL);
+        JSONObject manifest = manifest(modelDirectory, trustedRoot);
+        if (manifest == null) throw new Refused(Failure.MODEL);
+        String hotwordMode = manifestString(manifest, "hotwords");
+        String kind = manifestString(manifest, "kind");
         JSONArray hotwords = supplied(hotwordTexts, hotwordPinyin);
         if (hotwords.length() == 0) hotwords = hotwords(hostOptions);
+        diagnostic(DiagnosticEventKind.VOICE_LOCAL_RUNTIME_CHECK);
         requireRuntime(trustedRoot);
         BlockingQueue<short[]> audio = new LinkedBlockingQueue<>();
         AtomicBoolean captureFailed = new AtomicBoolean();
+        diagnostic(DiagnosticEventKind.VOICE_LOCAL_RECORDER_OPEN);
         AudioRecord recorder = openRecorder();
         Thread capture = ThreadPolicy.namedThread("msime-local-asr-capture",
             () -> capture(recorder, audio, captureFailed));
@@ -158,6 +192,7 @@ public final class LocalAsrRecognizer {
             // Native session creation can fail before the cleanup scope used to
             // own the recorder exists. Keep both resources in this scope so a
             // linker/runtime failure cannot leave the microphone allocated.
+            diagnostic(DiagnosticEventKind.VOICE_LOCAL_NATIVE_START);
             created = NativeClient.localSpeechCreate();
             synchronized (handleLock) {
                 handle = created;
@@ -174,6 +209,7 @@ public final class LocalAsrRecognizer {
             if (LocalAsrPolicy.correctsByPinyin(hotwordMode) && hotwords.length() > 0) {
                 text = corrected(text, hotwords);
             }
+            text = numbersNormalized(text, kind);
             text = TextPolicy.trimmed(text);
             if (text.isEmpty()) throw new Refused(Failure.EMPTY);
             return text;
@@ -228,6 +264,7 @@ public final class LocalAsrRecognizer {
     private String decode(long session, Thread capture, BlockingQueue<short[]> audio,
                           Listener listener) {
         String last = "";
+        boolean speaking = false;
         while (!cancelled.get()) {
             short[] chunk;
             try {
@@ -246,6 +283,11 @@ public final class LocalAsrRecognizer {
             if (partial != null && !partial.equals(last)) {
                 last = partial;
                 if (listener != null) listener.onPartial(partial);
+            }
+            boolean now = NativeClient.localSpeechSpeaking(session);
+            if (now != speaking) {
+                speaking = now;
+                if (listener != null) listener.onSpeech(now);
             }
         }
         return LocalAsrPolicy.transcript(NativeClient.localSpeechFinish(session));
@@ -272,8 +314,10 @@ public final class LocalAsrRecognizer {
     private void capture(AudioRecord recorder, BlockingQueue<short[]> audio,
                          AtomicBoolean failed) {
         try {
+            diagnostic(DiagnosticEventKind.VOICE_LOCAL_CAPTURE_START);
             recorder.startRecording();
             if (recorder.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
+                diagnostic(DiagnosticEventKind.VOICE_LOCAL_CAPTURE_START_FAILURE);
                 failed.set(true);
                 return;
             }
@@ -285,6 +329,7 @@ public final class LocalAsrRecognizer {
                 if (requested == 0) break;
                 int read = recorder.read(chunk, 0, requested);
                 if (read < 0) {
+                    diagnostic(DiagnosticEventKind.VOICE_LOCAL_CAPTURE_READ_FAILURE);
                     failed.set(true);
                     return;
                 }
@@ -302,6 +347,7 @@ public final class LocalAsrRecognizer {
                 audio.add(read == chunk.length ? chunk : java.util.Arrays.copyOf(chunk, read));
             }
         } catch (IllegalStateException error) {
+            diagnostic(DiagnosticEventKind.VOICE_LOCAL_CAPTURE_EXCEPTION);
             failed.set(true);
         } finally {
             VoicePcmRecorder.stopIfRecording(recorder);
@@ -318,16 +364,20 @@ public final class LocalAsrRecognizer {
         }
     }
 
-    /** The manifest's hotword mode ("native", "pinyin" or ""), or null when it is not a manifest. */
-    private static String hotwordMode(String modelDirectory, Path trustedRoot) {
+    /** 已安装模型的清单；读不出来或不是 JSON 对象时为 null。 */
+    private static JSONObject manifest(String modelDirectory, Path trustedRoot) {
         try {
             byte[] bytes = LocalAsrPolicy.readManifest(modelDirectory, trustedRoot);
-            JSONObject manifest = new JSONObject(TextPolicy.utf8(bytes));
-            if (manifest.isNull("hotwords")) return "";
-            return JsonPolicy.strictStringOrEmpty(manifest.opt("hotwords"));
+            return new JSONObject(TextPolicy.utf8(bytes));
         } catch (IOException | JSONException error) {
             return null;
         }
+    }
+
+    /** 清单里的一个字符串字段（`hotwords` 是 "native"、"pinyin" 或 ""，`kind` 是模型类型）；缺失、null 或不是字符串时为空串。 */
+    private static String manifestString(JSONObject manifest, String key) {
+        if (manifest.isNull(key)) return "";
+        return JsonPolicy.strictStringOrEmpty(manifest.opt(key));
     }
 
     /**
@@ -388,6 +438,21 @@ public final class LocalAsrRecognizer {
             String corrected = LocalAsrPolicy.transcript(value.opt("text"));
             return corrected.isEmpty() ? text : corrected;
         } catch (JSONException | RuntimeException error) {
+            return text;
+        }
+    }
+
+    /** 共享层按模型 kind 把最终文本里的汉字数字改成数字；kind 不需要改写时共享层原样返回。调用失败时退回未改写的文本，数字写法不值得让一次识别失败。 */
+    private static String numbersNormalized(String text, String kind) {
+        if (kind.isEmpty() || text.isEmpty()) return text;
+        try {
+            JSONObject request = new JSONObject().put("text", text).put("kind", kind);
+            JSONObject response = new JSONObject(NativeClient.voiceNormalizeNumbers(request.toString()));
+            JSONObject value = JsonPolicy.objectValue(response);
+            if (value == null || value.isNull("text")) return text;
+            String normalized = LocalAsrPolicy.transcript(value.opt("text"));
+            return normalized.isEmpty() ? text : normalized;
+        } catch (JSONException | RuntimeException | LinkageError error) {
             return text;
         }
     }

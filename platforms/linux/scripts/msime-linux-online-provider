@@ -3,6 +3,7 @@
 import argparse
 import base64
 import concurrent.futures
+import ctypes
 import datetime
 import functools
 import hashlib
@@ -12,7 +13,6 @@ import ipaddress
 import json
 import os
 from pathlib import Path
-import secrets
 import signal
 import socket
 import socketserver
@@ -21,7 +21,6 @@ import struct
 import string
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from types import SimpleNamespace
@@ -29,6 +28,131 @@ import urllib.parse
 import urllib.request
 
 from msime_provider_runtime import open_server
+
+
+class RustAccountApi:
+    """通过共享 Rust 账号和翻译契约访问 host-api。
+
+    Linux 仍由 Python 负责 provider 的传输，但账号身份、令牌轮换和响应
+    校验归 host-api 所有。库延迟加载，源码树测试没有可选的宿主库时也能
+    启动 provider。
+    """
+
+    def __init__(self, directory):
+        self.directory = Path(directory).absolute()
+        self._library = None
+        self._responses = None
+        self._load_failed = False
+        self._lock = threading.Lock()
+
+    def _load(self):
+        with self._lock:
+            if self._library is not None or self._load_failed:
+                return self._library
+            candidates = []
+            configured = os.environ.get("MSIME_HOST_LIBRARY")
+            if configured:
+                candidates.append(configured)
+            # 安装脚本在 <prefix>/bin，匹配的库在
+            # <prefix>/lib/<client-directory>。配置路径给非 full 版本和开发测试使用。
+            script_root = Path(__file__).resolve().parent.parent
+            candidates.extend([
+                script_root / "lib" / "msime-client" / "libmsime_host_api.so",
+                script_root / "lib" / "msime-client" / "libmsime_host_api_full.so",
+                Path(__file__).resolve().parents[3] / "target" / "debug" / "libmsime_host_api.so",
+                Path(__file__).resolve().parents[3] / "target" / "debug" / "libmsime_host_api.dylib",
+            ])
+            installed_library_directory = script_root / "lib" / "msime-client"
+            if installed_library_directory.is_dir():
+                candidates.extend(sorted(installed_library_directory.glob("libmsime_host_api*.so")))
+            development_library_directory = Path(__file__).resolve().parents[3] / "target" / "debug" / "deps"
+            if development_library_directory.is_dir():
+                candidates.extend(sorted(development_library_directory.glob("libmsime_host_api*.so")))
+                candidates.extend(sorted(development_library_directory.glob("libmsime_host_api*.dylib")))
+            for candidate in candidates:
+                try:
+                    library = ctypes.CDLL(str(candidate))
+                except (OSError, TypeError):
+                    continue
+                try:
+                    for name in ("msime_client_ensure_anonymous_account",
+                                 "msime_client_account_access_token",
+                                 "msime_client_account_gloss"):
+                        function = getattr(library, name)
+                        function.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
+                        function.restype = ctypes.c_void_p
+                    self._library = library
+                    self._responses = ResponseDecoder(library)
+                    return library
+                except (AttributeError, TypeError):
+                    continue
+            self._load_failed = True
+            return None
+
+    def _call(self, name, payload):
+        library = self._load()
+        if library is None:
+            return None
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        try:
+            pointer = getattr(library, name)(encoded, len(encoded))
+            return self._responses.decode(pointer)
+        except (OSError, UnicodeError, ValueError, TypeError):
+            return None
+
+    def ensure_anonymous(self):
+        encoded = str(self.directory).encode("utf-8")
+        library = self._load()
+        if library is None:
+            return False
+        try:
+            pointer = library.msime_client_ensure_anonymous_account(encoded, len(encoded))
+            response = self._responses.decode(pointer)
+        except (OSError, UnicodeError, ValueError, TypeError):
+            return False
+        return isinstance(response, dict) and response.get("ok") is True and response.get("value") is True
+
+    def access_token(self, rejected_token=None):
+        payload = {"directory": str(self.directory)}
+        if isinstance(rejected_token, str) and rejected_token:
+            payload["rejected_token"] = rejected_token
+        response = self._call("msime_client_account_access_token", payload)
+        value = response.get("value") if isinstance(response, dict) and response.get("ok") is True else None
+        token = value.get("access_token") if isinstance(value, dict) else None
+        return token if isinstance(token, str) and token else None
+
+    def prepare_translation(self, texts, source, target):
+        response = self._call("msime_client_account_gloss", {
+            "operation": "request", "texts": texts,
+            "source_lang": source, "target_lang": target,
+        })
+        value = response.get("value") if isinstance(response, dict) and response.get("ok") is True else None
+        body = value.get("body") if isinstance(value, dict) else None
+        return body if isinstance(body, str) else None
+
+    def parse_translation(self, texts, status, body, retry_after=None):
+        payload = {"operation": "parse", "texts": texts, "status": status, "body": body}
+        if retry_after is not None:
+            payload["retry_after"] = retry_after
+        response = self._call("msime_client_account_gloss", payload)
+        return response.get("value") if isinstance(response, dict) and response.get("ok") is True else None
+
+
+class ResponseDecoder:
+    """解码并释放 Rust host-api 分配的响应。"""
+
+    def __init__(self, library):
+        self.library = library
+        self.library.msime_client_string_free.argtypes = [ctypes.c_void_p]
+        self.library.msime_client_string_free.restype = None
+
+    def decode(self, pointer):
+        if not pointer:
+            raise ValueError("missing native response")
+        try:
+            return json.loads(ctypes.string_at(pointer).decode("utf-8"))
+        finally:
+            self.library.msime_client_string_free(pointer)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -43,20 +167,17 @@ MAX_AI_CACHE_ENTRIES = 4096
 MAX_TRANSLATION_CACHE_ENTRIES = 4096
 NEGATIVE_TRANSLATION_CACHE_TTL = 480
 ANONYMOUS_ACCOUNT_ORIGIN = "https://api.msime.app"
-ANONYMOUS_ACCOUNT_MAX_BYTES = 16 * 1024
-ANONYMOUS_ACCOUNT_SUBJECT_LENGTH = 16
-ANONYMOUS_ACCOUNT_SECRET_LENGTH = 48
-ANONYMOUS_ACCOUNT_TIMEOUT = 10.0
 CLOUD_REQUEST_TIMEOUT = 2.0
-# AI 推理与 Windows、client-core 保持 8 秒总预算和 2.5 秒连接预算；匿名账号认证另用 10 秒，HTTP worker 必须接受两者。
+# AI 推理与 Windows、client-providers 保持 8 秒总预算和 2.5 秒连接预算。
 AI_REQUEST_TIMEOUT = 8.0
 AI_CONNECT_TIMEOUT = 2.5
-HTTP_WORKER_MAX_TIMEOUT = max(AI_REQUEST_TIMEOUT, ANONYMOUS_ACCOUNT_TIMEOUT)
+HTTP_WORKER_MAX_TIMEOUT = AI_REQUEST_TIMEOUT
 # One request line from client-core. UnixSocketProvider::ai_test lets a polish test carry an 8192-byte prompt and an 8192-byte sample in a request up to 32768 bytes, so that kind alone gets the larger limit; every other request keeps the 16384-byte one.
 REQUEST_LINE_LIMIT = 16384
 AI_TEST_REQUEST_LINE_LIMIT = 32768
-# The associative prompt a blank prompt slot stands for: Windows compiles it into AiAssistantConfig::prompt (ime_config.h) and client-core keeps the same text as ai::DEFAULT_CANDIDATE_PROMPT for the hosts that build their request there. The shared preferences leave the slot empty, so without this every Linux AI request carried an empty system message and the model answered prose the JSON parser rejects. ai_service_contract.py keeps this copy equal to the client-core one.
+# 空白提示词槽位所代表的联想提示词：Windows 把它编译进 AiAssistantConfig::prompt（ime_config.h），client-providers 把同样的文本存为 ai::DEFAULT_CANDIDATE_PROMPT，供在那里构造请求的宿主使用。共享偏好让这个槽位留空，所以没有这一份时，Linux 的每个 AI 请求都带着空的 system 消息，模型回的是 JSON 解析器拒收的散文。ai_service_contract.py 保证这份副本与 client-providers 的那份相同。
 DEFAULT_AI_PROMPT = "你是一个中文全拼输入法联想引擎。输入为已经切分好的拼音数组、前文上下文和候选数量。\n\n优先生成与拼音严格对应的中文候选：若有 N 段拼音，首选必须尽量为 N 个汉字，每段拼音对应一个汉字，不得随意增删或改变读音。结合上下文、常用程度、语义完整性和固定搭配排序。\n\n若去掉分词后能明显组成更合理的英文单词、缩写、产品名或技术术语，如 `deep + seek → DeepSeek`、`git + hub → GitHub`，可优先返回英文；不要生造英文或做牵强匹配。\n\n只输出合法 JSON，不要解释或输出 Markdown：\n\n{\n\"candidates\": [\n{\n\"text\": \"候选内容\",\n\"type\": \"chinese或english\",\n\"confidence\": 0.98\n}\n]\n}\n\n候选按推荐程度降序排列，数量不超过指定上限；没有合理结果时返回空数组。"
+DEFAULT_TRANSLATION_PROMPT = "你是一个机器翻译服务。把用户给出的文本从 source_language 翻译成 target_language。只翻译文本本身，保留原意和标点，不要解释、注释或改写。只输出合法 JSON，不要输出 Markdown：{\"translation\":\"译文\"}。没有合适译文时输出空字符串。"
 
 
 class ConnectBoundedHTTPSConnection(http.client.HTTPSConnection):
@@ -232,7 +353,7 @@ def ai_prompt(options):
     prompt = options.get("prompt_" + selected, "")
     if not isinstance(prompt, str) or len(prompt.encode()) > 8192:
         return None
-    # Blank means "not customised" and gets the same built-in text client-core falls back to.
+    # 空白表示「没有自定义」，取 client-providers 回退时用的同一份内置文本。
     return prompt if prompt.strip() else DEFAULT_AI_PROMPT
 
 
@@ -327,7 +448,7 @@ def configured_ai(query, path, cache=None, cache_lock=None):
 
 
 def strip_code_fence(content):
-    """去掉包在正文外面的 Markdown 代码块，与 client-core 的 `strip_code_fence` 一致：不支持 `response_format` 的模型（如经网关调用的 Claude）会把 JSON 写成 ```json ... ```。"""
+    """去掉包在正文外面的 Markdown 代码块，与 client-providers 的 `strip_code_fence` 一致：不支持 `response_format` 的模型（如经网关调用的 Claude）会把 JSON 写成 ```json ... ```。"""
     trimmed = content.strip()
     if len(trimmed) < 6 or not trimmed.startswith("```") or not trimmed.endswith("```"):
         return trimmed
@@ -418,176 +539,64 @@ def translation_gloss(value):
     return value if candidate(value, 0) and not any(127 <= ord(c) <= 159 for c in value) else None
 
 
-def _anonymous_private_path(path):
-    """Read one owner-only anonymous-account document, or return None when absent."""
-    if path is None:
+def ai_translation(text, target, options, path):
+    """使用候选栏 AI 的私有配置翻译一个候选词，不把令牌经过 provider socket。"""
+    direction = translation_direction(text, target)
+    if direction is None or not isinstance(options, dict) or not options.get("enabled"):
         return None
-    try:
-        return load_private_config(path)
-    except FileNotFoundError:
+    config = None
+    if path:
+        loaded = load_ai_config(path)
+        provider = options.get("provider")
+        config = loaded if loaded.get("provider") == provider else loaded.get("profiles", {}).get(provider)
+    if not ai_config_matches(options, config):
         return None
-
-
-def _write_anonymous_private(path, document):
-    """Atomically publish a small owner-only JSON document beside provider config."""
-    if path is None or not path.is_absolute() or not isinstance(document, dict):
-        return False
-    encoded = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    if len(encoded) > ANONYMOUS_ACCOUNT_MAX_BYTES:
-        return False
-    try:
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        info = path.parent.stat()
-        if info.st_uid != os.getuid() or info.st_mode & 0o077 or not stat.S_ISDIR(info.st_mode):
-            return False
-        descriptor, temporary_name = tempfile.mkstemp(prefix="." + path.name + ".", dir=path.parent)
-        temporary = Path(temporary_name)
-        os.fchmod(descriptor, 0o600)
-        try:
-            with os.fdopen(descriptor, "wb") as target:
-                descriptor = None
-                target.write(encoded)
-                target.flush()
-                os.fsync(target.fileno())
-            os.replace(temporary, path)
-            return True
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
-    except OSError:
-        return False
-
-
-def _anonymous_identity(server):
-    """Return the local anonymous subject and secret, creating them if needed."""
-    path = getattr(server, "anonymous_account_path", None)
-    try:
-        current = _anonymous_private_path(path)
-    except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+    source, destination = direction
+    body = {"model": config["model"], "stream": False, "temperature": 0.0,
+            "max_tokens": 512, "response_format": {"type": "json_object"},
+            "messages": [{"role": "system", "content": DEFAULT_TRANSLATION_PROMPT},
+                         {"role": "user", "content": json.dumps({
+                             "source_language": source, "target_language": destination,
+                             "text": text, "output_format": "json"}, ensure_ascii=False)}]}
+    if config["provider"] == "deepseek":
+        body["thinking"] = {"type": "disabled"}
+    result = fetch(config["endpoint"], AI_REQUEST_TIMEOUT, body, config["token"],
+                   connect_timeout=AI_CONNECT_TIMEOUT)
+    content = result.get("choices", [{}])[0].get("message", {}).get("content")
+    if not isinstance(content, str):
         return None
-    if current:
-        subject, secret = current.get("subject"), current.get("secret")
-        if (isinstance(subject, str) and isinstance(secret, str) and
-                subject.startswith("msime-") and len(subject) == 6 + ANONYMOUS_ACCOUNT_SUBJECT_LENGTH and
-                all(ch in "abcdefghijklmnopqrstuvwxyz0123456789" for ch in subject[6:]) and
-                len(secret) == ANONYMOUS_ACCOUNT_SECRET_LENGTH and
-                all(ch in "abcdefghijklmnopqrstuvwxyz0123456789" for ch in secret)):
-            return subject, secret
-        return None
-    if path is None:
-        return None
-    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
-    identity = {
-        "subject": "msime-" + "".join(secrets.choice(alphabet) for _ in range(ANONYMOUS_ACCOUNT_SUBJECT_LENGTH)),
-        "secret": "".join(secrets.choice(alphabet) for _ in range(ANONYMOUS_ACCOUNT_SECRET_LENGTH)),
-    }
-    if _write_anonymous_private(path, identity):
-        return identity["subject"], identity["secret"]
-    # Another provider thread may have published the identity first.
-    try:
-        current = _anonymous_private_path(path)
-    except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
-        return None
-    if current:
-        return _anonymous_identity(SimpleNamespace(anonymous_account_path=path))
-    return None
-
-
-def _anonymous_tokens(server):
-    path = getattr(server, "anonymous_session_path", None)
-    try:
-        current = _anonymous_private_path(path)
-    except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(current, dict):
-        return None
-    tokens = current.get("tokens")
-    expiry = current.get("expires_at_unix_ms")
-    if not isinstance(tokens, dict) or not isinstance(expiry, (int, float)):
-        return None
-    token = tokens.get("access_token")
-    if (isinstance(token, str) and len(token) == 64 and
-            all(ch in string.hexdigits for ch in token) and
-            expiry > int(time.time() * 1000) + 30_000):
-        return token
-    return None
-
-
-def _validated_anonymous_tokens(document):
-    if not isinstance(document, dict):
-        return None
-    access = document.get("access_token")
-    refresh = document.get("refresh_token")
-    expires = document.get("expires_in")
-    user = document.get("user")
-    if (not isinstance(access, str) or len(access) != 64 or not all(ch in string.hexdigits for ch in access) or
-            not isinstance(refresh, str) or len(refresh) != 64 or not all(ch in string.hexdigits for ch in refresh) or
-            document.get("token_type") != "Bearer" or not isinstance(expires, int) or not 0 < expires <= 86_400 * 30 or
-            not isinstance(user, dict) or not isinstance(user.get("id"), str) or not user["id"]):
-        return None
-    return {"access_token": access, "refresh_token": refresh, "token_type": "Bearer",
-            "expires_in": expires, "user": user}
-
-
-def anonymous_access_token(server):
-    """Get the translation token, creating the device's anonymous backend account when needed."""
-    lock = getattr(server, "anonymous_lock", None)
-    if lock is None:
-        return None
-    with lock:
-        current = _anonymous_tokens(server)
-        if current:
-            return current
-        identity = _anonymous_identity(server)
-        if identity is None:
-            return None
-        subject, secret = identity
-        # A refresh avoids creating another account when a long-lived device token expires.
-        try:
-            saved = _anonymous_private_path(getattr(server, "anonymous_session_path", None))
-        except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
-            saved = None
-        saved_tokens = saved.get("tokens") if isinstance(saved, dict) else None
-        refresh = saved_tokens.get("refresh_token") if isinstance(saved_tokens, dict) else None
-        if isinstance(refresh, str) and len(refresh) == 64 and all(ch in string.hexdigits for ch in refresh):
-            refreshed = safely(fetch, ANONYMOUS_ACCOUNT_ORIGIN + "/v1/auth/refresh", ANONYMOUS_ACCOUNT_TIMEOUT,
-                               {"refresh_token": refresh})
-            tokens = _validated_anonymous_tokens(refreshed)
-            if tokens and _write_anonymous_private(
-                    server.anonymous_session_path,
-                    {"tokens": tokens, "expires_at_unix_ms": int(time.time() * 1000) + tokens["expires_in"] * 1000}):
-                return tokens["access_token"]
-        challenge = safely(fetch, ANONYMOUS_ACCOUNT_ORIGIN + "/v1/auth/challenges", ANONYMOUS_ACCOUNT_TIMEOUT,
-                           {"provider": "anonymous", "target": subject, "purpose": "login"})
-        challenge_id = challenge.get("challenge_id") if isinstance(challenge, dict) else None
-        if not isinstance(challenge_id, str) or not challenge_id:
-            return None
-        logged_in = safely(fetch, ANONYMOUS_ACCOUNT_ORIGIN + "/v1/auth/login", ANONYMOUS_ACCOUNT_TIMEOUT,
-                           {"challenge_id": challenge_id, "credential": secret})
-        tokens = _validated_anonymous_tokens(logged_in)
-        if not tokens or not _write_anonymous_private(
-                server.anonymous_session_path,
-                {"tokens": tokens, "expires_at_unix_ms": int(time.time() * 1000) + tokens["expires_in"] * 1000}):
-            return None
-        return tokens["access_token"]
+    value = json.loads(strip_code_fence(content)).get("translation")
+    return translation_gloss(value)
 
 
 def anonymous_translation(texts, source, target, server):
-    token = anonymous_access_token(server)
-    if not token:
-        return [None] * len(texts)
-    result = safely(fetch, ANONYMOUS_ACCOUNT_ORIGIN + "/v1/translate", 2.5,
-                    {"texts": texts, "source_lang": source.upper(), "target_lang": target.upper()}, token)
-    if (not isinstance(result, dict) or result.get("code") not in (200, "200") or
-            not isinstance(result.get("data"), list)):
-        return [None] * len(texts)
-    values = result["data"]
-    return [translation_gloss(values[index]) if index < len(values) else None
-            for index in range(len(texts))]
+    rust_account = getattr(server, "rust_account", None)
+    if rust_account is not None:
+        # Registration and token refresh are Rust-owned. The provider only
+        # sends the already selected translation request and asks Rust to
+        # apply the same per-item response rules as every other platform.
+        if not rust_account.ensure_anonymous():
+            return [None] * len(texts)
+        token = rust_account.access_token()
+        if not token:
+            return [None] * len(texts)
+        body = rust_account.prepare_translation(texts, source, target)
+        if not body:
+            return [None] * len(texts)
+        try:
+            request = json.loads(body)
+        except (TypeError, ValueError):
+            return [None] * len(texts)
+        result = safely(fetch, ANONYMOUS_ACCOUNT_ORIGIN + "/v1/translate", 2.5,
+                        request, token)
+        if not isinstance(result, dict):
+            return [None] * len(texts)
+        parsed = rust_account.parse_translation(texts, 200, json.dumps(result, ensure_ascii=False))
+        values = parsed.get("translations") if isinstance(parsed, dict) else None
+        if not isinstance(values, list):
+            return [None] * len(texts)
+        return [value if isinstance(value, str) and value else None for value in values[:len(texts)]] + [None] * max(0, len(texts) - len(values))
+    return [None] * len(texts)
 
 
 # DeepL 官方 API 的两个主机，与 crates/client-core/src/translation.rs 的 custom_translation_request 一致：Free 密钥（以 :fx 结尾）走 api-free.deepl.com，其余走 api.deepl.com。
@@ -646,7 +655,7 @@ def custom_translation(config, text, source, target, timeout):
     return None
 
 
-# AI 辅助接口地址的传输策略，与 crates/client-core/src/ai/endpoint.rs 一致：https 不限主机；http 只能指向本机或局域网，公网主机必须走 https，API Token 不能明文经过互联网。不做 DNS 解析，除 localhost 和 .local 以外的域名一律按公网处理。用例在 shared/contracts/ai-endpoint/cases.json，tests/provider/ai_service_contract.py 逐条核对。
+# AI 辅助接口地址的传输策略，与 crates/client-providers/src/ai/endpoint.rs 一致：https 不限主机；http 只能指向本机或局域网，公网主机必须走 https，API Token 不能明文经过互联网。不做 DNS 解析，除 localhost 和 .local 以外的域名一律按公网处理。用例在 shared/contracts/ai-endpoint/cases.json，tests/provider/ai_service_contract.py 逐条核对。
 AI_LOCAL_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
     "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
     "100.64.0.0/10", "169.254.0.0/16", "::1/128", "fe80::/10", "fc00::/7"))
@@ -767,7 +776,7 @@ def translations(query, server):
     texts = query.get("candidates")
     target = query.get("target_language", "en")
     sentence = query.get("sentence", False)
-    max_text_chars = 512 if sentence else 40
+    max_text_chars = 512 if sentence else 256
     if (not isinstance(sentence, bool) or not isinstance(texts, list) or
         len(texts) > (1 if sentence else 9) or
         any(not isinstance(text, str) or len(text.encode()) > 4096 for text in texts) or
@@ -785,11 +794,12 @@ def translations(query, server):
         # MSIME account and no user-owned service is usable. Keep that choice
         # visible to this process instead of falling back to Tencent.
         selected = "account"
-    if (selected not in ("tencent", "niutrans", "custom", "account") or
+    if (selected not in ("tencent", "niutrans", "custom", "account", "ai") or
         (selected == "niutrans" and not niutrans) or (selected == "custom" and not custom)):
         return []
     if selected == "account":
-        provider = ("account", str(getattr(server, "anonymous_account_path", "")))
+        account = getattr(server, "rust_account", None)
+        provider = ("account", str(getattr(account, "directory", "")))
     elif selected == "niutrans":
         app_id = niutrans.get("app_id", "")
         apikey = niutrans.get("apikey", "")
@@ -816,6 +826,8 @@ def translations(query, server):
         custom = {**custom, "endpoint": endpoint, "api_key": token}
         # Keep credentials out of cache keys and separate caches when they change.
         provider = (endpoint, hashlib.sha256(token.encode()).digest())
+    elif selected == "ai":
+        provider = ("ai", options.get("provider", ""))
     else:
         # Each request keeps one credential snapshot, including both directions.
         # A removed or invalid file disables Tencent until a valid file is restored.
@@ -826,6 +838,16 @@ def translations(query, server):
         scope = json.dumps(tencent_config, sort_keys=True, separators=(",", ":")).encode()
         provider = ("tencent", hashlib.sha256(scope).digest())
     deadline = time.monotonic() + 6
+    if selected == "ai":
+        options = query.get("ai_assistant")
+        rows = []
+        for text in texts:
+            if time.monotonic() >= deadline:
+                break
+            value = safely(ai_translation, text, target, options, server.ai_config_path)
+            if value:
+                rows.append({"text": text, "translation": value})
+        return rows
     found = {}
     groups = {}
     for text in dict.fromkeys(texts):
@@ -833,7 +855,9 @@ def translations(query, server):
                      if 0 < len(text) and len(text) <= max_text_chars else None)
         if direction is None:
             continue
-        key = (provider, direction, text)
+        # 候选释义和 /fy 整句请求的长度上限不同，缓存也要分开，不能让
+        # 合法的整句结果绕过较短的候选上限。
+        key = (provider, sentence, direction, text)
         with server.translation_lock:
             cached = server.translation_cache.get(key)
         if cached and cached[0] > time.monotonic():
@@ -866,7 +890,7 @@ def translations(query, server):
                 found[text] = value
                 if len(server.translation_cache) >= MAX_TRANSLATION_CACHE_ENTRIES:
                     server.translation_cache.pop(next(iter(server.translation_cache)))
-                server.translation_cache[(provider, (source, destination), text)] = (
+                server.translation_cache[(provider, sentence, (source, destination), text)] = (
                     float("inf") if value else
                     time.monotonic() + NEGATIVE_TRANSLATION_CACHE_TTL, value)
     return [{"text": text, "translation": found[text]} for text in dict.fromkeys(texts) if found.get(text)]
@@ -1201,9 +1225,7 @@ def load_ai_config(path):
 def anonymous_server(config_directory):
     config_directory = config_directory.absolute()
     return SimpleNamespace(
-        anonymous_account_path=config_directory / "anonymous-account.json",
-        anonymous_session_path=config_directory / "anonymous-session.json",
-        anonymous_lock=threading.Lock(),
+        rust_account=RustAccountApi(config_directory),
     )
 
 
@@ -1230,8 +1252,7 @@ def main():
     if args.ensure_anonymous_account:
         if args.socket is not None:
             parser.error("--ensure-anonymous-account does not take a socket")
-        token = anonymous_access_token(anonymous_server(args.config_directory))
-        if not token:
+        if not RustAccountApi(args.config_directory).ensure_anonymous():
             parser.error("anonymous account could not be created")
         return
     if args.socket is None:
@@ -1267,9 +1288,7 @@ def main():
     server.ai_config_path = args.ai_config.absolute() if args.ai_config else None
     server.tencent_config_path = args.tencent_config.absolute() if args.tencent_config else None
     account = anonymous_server(args.config_directory) if args.config_directory else None
-    server.anonymous_account_path = account.anonymous_account_path if account else None
-    server.anonymous_session_path = account.anonymous_session_path if account else None
-    server.anonymous_lock = account.anonymous_lock if account else None
+    server.rust_account = account.rust_account if account else None
     server.translation_cache = {}
     server.translation_lock = threading.Lock()
     server.ai_candidate_cache = {}

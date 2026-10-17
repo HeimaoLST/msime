@@ -6,7 +6,8 @@ use serde_json::Value;
 use sha2::Digest;
 use sha2::Sha256;
 
-pub const MAX_SOURCE_CHARS: usize = 40;
+/// 候选可能是完整句子；按 Unicode 标量值限制长度，确保各宿主在发送私密文本前使用同一上限。
+pub const MAX_SOURCE_CHARS: usize = 256;
 const MAX_PERSIST_GLOSS_CHARS: usize = 32;
 
 /// Tencent TC3 signing primitive. The caller owns credential lifetime.
@@ -182,9 +183,9 @@ pub fn niutrans_auth_string(
     hex::encode(digest)
 }
 
-/// 不管文字是什么都不请求释义的候选来源。Engine `CandidateSource::Emoji`（6）和 `CandidateSource::Kaomoji`（7）照参考实现的 `BuildTranslationQuery`：颜文字如 "(*Φ皿Φ*)" 带汉字，按文字判断会当成中文，把一张图送给释义模型，只会在它下面放噪音。`CandidateSource::MixedJapanese`（13）是全拼、双拼里混进来的日文转换，私、開始 这样的汉字是日文，当中文释义会在日文下面写出中文意思，还白白花掉账号的释义额度；Engine 也不为日文方案和临时日文出释义。`CandidateSource::Plugin`（14）是脚本插件在 `/` 指令里给的行：插件的文字不交给任何释义服务。
+/// 不管文字是什么都不请求释义的候选来源。Engine `CandidateSource::Emoji`（6）和 `CandidateSource::Kaomoji`（7）照参考实现的 `BuildTranslationQuery`：颜文字如 "(*Φ皿Φ*)" 带汉字，按文字判断会当成中文，把一张图送给释义模型，只会在它下面放噪音。`CandidateSource::MixedJapanese`（13）是全拼、双拼里混进来的日文转换，私、開始 这样的汉字是日文，当中文释义会在日文下面写出中文意思，还白白花掉账号的释义额度；Engine 也不为日文方案和临时日文出释义。`CandidateSource::Plugin`（14）是脚本插件在 `/` 指令里给的行：插件的文字不交给任何释义服务。`CandidateSource::CloudPending`（15）只是云请求的占位行，也不应发起释义请求。
 pub fn source_gets_no_gloss(source: u8) -> bool {
-    matches!(source, 6 | 7 | 13 | 14)
+    matches!(source, 6 | 7 | 13 | 14 | 15)
 }
 
 pub fn is_cloud_translatable_english(text: &str) -> bool {
@@ -225,7 +226,7 @@ pub fn is_secure_endpoint(endpoint: &str) -> bool {
     if !crate::text::is_bounded_text(endpoint, 2048) {
         return false;
     }
-    let Ok(url) = reqwest::Url::parse(endpoint) else {
+    let Ok(url) = url::Url::parse(endpoint) else {
         return false;
     };
     match url.scheme() {
@@ -261,7 +262,7 @@ pub fn endpoint_issue(endpoint: &str) -> &'static str {
     {
         return "接口地址不能包含控制字符。";
     }
-    let Ok(url) = reqwest::Url::parse(endpoint) else {
+    let Ok(url) = url::Url::parse(endpoint) else {
         return "请填写以 http:// 或 https:// 开头的完整接口地址。";
     };
     // `new URL` 的 username、password、hash 和 hostname 为空字符串时不算有。
@@ -294,7 +295,7 @@ pub struct CustomTranslationRequest {
 
 /// 地址是否指向 DeepL 官方 API：https、默认端口，主机名恰好是 `api.deepl.com` 或 `api-free.deepl.com`。只看主机名，不看路径：自建 DeepLX 也提供 `/v2/translate`，按路径识别会改掉这些用户现有的请求格式。
 pub fn is_deepl_api_endpoint(endpoint: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(endpoint) else {
+    let Ok(url) = url::Url::parse(endpoint) else {
         return false;
     };
     // `Url` 会把写明的 443 当作默认端口去掉，所以 `port()` 为空即默认端口。
@@ -448,9 +449,13 @@ fn value_as_text(value: &Value) -> Option<String> {
         .map(str::to_owned)
         .or_else(|| {
             value.as_object().and_then(|object| {
-                ["text", "translation", "data"]
-                    .iter()
-                    .find_map(|key| object.get(*key).and_then(Value::as_str).map(str::to_owned))
+                ["text", "translation", "data"].iter().find_map(|key| {
+                    object
+                        .get(*key)
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_owned)
+                })
             })
         })
         .filter(|text| !text.is_empty())
@@ -462,7 +467,7 @@ mod tests {
 
     #[test]
     fn emoji_kaomoji_and_mixed_japanese_sources_get_no_gloss() {
-        for source in [6, 7, 13, 14] {
+        for source in [6, 7, 13, 14, 15] {
             assert!(source_gets_no_gloss(source), "source {source}");
         }
         // 词库、生成、英文、云候选照文字判断。
@@ -583,6 +588,70 @@ mod tests {
     }
 
     #[test]
+    fn translation_object_fallback_skips_empty_text_aliases() {
+        for value in [
+            serde_json::json!({"text":"", "translation":"synthetic"}),
+            serde_json::json!({"text":"", "data":"synthetic"}),
+            serde_json::json!({"translation":"", "data":"synthetic"}),
+            serde_json::json!({"text":"", "translation":"", "data":"synthetic"}),
+        ] {
+            for mut document in [
+                serde_json::json!({"data":value}),
+                serde_json::json!({"translation":value}),
+                serde_json::json!({"result":[value]}),
+                serde_json::json!({"translations":[value]}),
+            ] {
+                for code in [
+                    Value::Null,
+                    serde_json::json!(200),
+                    serde_json::json!("200"),
+                ] {
+                    if !code.is_null() {
+                        document["code"] = code;
+                    }
+                    let response = document.to_string();
+                    assert!(!translation_response_failed(&response), "{response}");
+                    assert_eq!(
+                        parse_translation_response(&response).as_deref(),
+                        Some("synthetic"),
+                        "{response}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn translation_object_fallback_preserves_priority_and_empty_answers() {
+        for (response, expected) in [
+            (
+                r#"{"data":{"text":"first","translation":"second","data":"third"}}"#,
+                Some("first"),
+            ),
+            (
+                r#"{"data":{"text":"","translation":"second","data":"third"}}"#,
+                Some("second"),
+            ),
+            (r#"{"data":{"text":"","translation":"","data":""}}"#, None),
+            (r#"{"data":[{"text":""},{"translation":"second"}]}"#, None),
+            (
+                r#"{"error":"synthetic failure","data":{"text":"","translation":"second"}}"#,
+                None,
+            ),
+            (
+                r#"{"code":500,"data":{"text":"","translation":"second"}}"#,
+                None,
+            ),
+        ] {
+            assert_eq!(
+                parse_translation_response(response).as_deref(),
+                expected,
+                "{response}"
+            );
+        }
+    }
+
+    #[test]
     fn tencent_tc3_signature_is_deterministic_and_message_bound() {
         let first = tencent_tc3_derive("secret", "20240101", "tmt", "request");
         assert_eq!(
@@ -645,7 +714,8 @@ Signature=fdaffffbe1460ecd8cbc30e296ff6f49cc3b4af10b11e099462cca023fdb2c6c"
         assert_eq!(value["Target"], "en");
         assert_eq!(value["ProjectId"], 0);
         assert_eq!(value["SourceTextList"][0], "你好");
-        assert!(tencent_tmt_payload("zh", "en", &["字".repeat(41)]).is_none());
+        assert!(tencent_tmt_payload("zh", "en", &["字".repeat(257)]).is_none());
+        assert!(tencent_tmt_payload("zh", "en", &["字".repeat(256)]).is_some());
         assert!(tencent_tmt_payload("zh", "en", &[String::new()]).is_none());
         for codepoint in (0..=0x1f).chain(0x7f..=0x9f) {
             let control = char::from_u32(codepoint).unwrap();

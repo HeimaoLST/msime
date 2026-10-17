@@ -6,7 +6,7 @@ use rusqlite::Connection;
 
 use super::glosses::{candidate_gloss_display, candidate_gloss_key};
 use super::*;
-use crate::types::SchemeType;
+use crate::types::{CandidateSource, SchemeType, WordItem};
 
 fn options(root: &Path) -> EngineOptions {
     let path = |name| {
@@ -67,6 +67,7 @@ fn options(root: &Path) -> EngineOptions {
         plugin_commands: Vec::new(),
         mention_entries: Vec::new(),
         quick_phrase_table: Vec::new(),
+        quick_phrase_candidates: false,
         helpcode_table: None,
         sentence_association: SentenceAssociationOptions {
             word_lattice: true,
@@ -1769,7 +1770,8 @@ fn local_mode_raw_commit_is_learned_as_an_english_word() {
     assert_eq!(session.snapshot().unwrap().local_mode, "temporary_english");
     let result = session.command(Command::CommitRaw).unwrap();
     assert!(result.has_commit);
-    assert_eq!(result.commit, "rustacean");
+    // 回车上屏的是所见预编辑：临时英文的入口字母 `Y` 算文本（#7616）；进词库的词仍不带它。
+    assert_eq!(result.commit, "Yrustacean");
     assert_eq!(result.diagnostic, "");
     assert_eq!(english_word_count(&value, "rustacean"), 1);
 }
@@ -1821,16 +1823,11 @@ fn temporary_japanese_raw_commit_learns_with_the_r_prefix() {
     assert_eq!(session.snapshot().unwrap().local_mode, "temporary_japanese");
     let result = session.command(Command::CommitRaw).unwrap();
     assert!(result.has_commit);
-    assert!(!result.commit.starts_with('R'), "{:?}", result.commit);
-    assert!(
-        result.commit.bytes().all(|byte| byte.is_ascii_alphabetic()),
-        "{:?}",
-        result.commit
-    );
+    // 回车上屏所见预编辑，入口字母 `R` 算文本（#7616）；词库里学的仍是不带标记、带 `r` 前缀的词（bridge.cpp:1349-1357）。
+    assert_eq!(result.commit, "Rkk");
     assert_eq!(result.diagnostic, "");
-    let learned = format!("r{}", result.commit).to_ascii_lowercase();
-    assert_eq!(english_word_count(&value, &learned), 1);
-    assert_eq!(english_word_count(&value, &result.commit), 0);
+    assert_eq!(english_word_count(&value, "rkk"), 1);
+    assert_eq!(english_word_count(&value, "kk"), 0);
 }
 
 /// bridge.cpp:1349-1357: a local-mode commit that is not an English word (here the Unicode mode's hex digits) is still committed; the failed learning is reported beside it rather than undoing it.
@@ -2531,6 +2528,39 @@ fn wubi_reverse_code_fast_path_requires_the_display_word_identity() {
             "座位错位时应回退到按词查找"
         );
     }
+}
+
+#[test]
+fn wubi_reverse_code_fast_path_requires_full_candidate_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let mut options = helpcode_fixture(
+        root.path(),
+        "INSERT INTO wubi86 VALUES('wqvb','你好',300);",
+        "",
+    );
+    options.scheme = SchemeType::Wubi as u8;
+    options.show_helpcode = false;
+    let mut session = Session::new(&options).unwrap();
+    type_text(&mut session, b"wq");
+    let snapshot = session.snapshot().unwrap();
+    let index = snapshot
+        .candidates
+        .iter()
+        .position(|candidate| candidate == "你好")
+        .unwrap();
+    let different_identity = WordItem::new(
+        "different",
+        "你好",
+        0,
+        CandidateSource::Database,
+        "different",
+    );
+
+    assert_eq!(
+        session.candidate_wubi_code_for_display_item(index, &different_identity),
+        None,
+        "同词面但候选身份不同，不得复用该座位的反查码"
+    );
 }
 
 #[test]
@@ -3488,9 +3518,29 @@ fn hidden_helpcode_snapshot_does_not_recompute_annotations() {
     let (snapshot, allocations) =
         crate::ime::personal_rerank::allocations::count(|| session.snapshot().unwrap());
     eprintln!("隐藏辅助码快照分配: {allocations}");
+    // 其中一次是 `spelling_symbols` 里的邮箱入口 `@`。
     assert!(
-        allocations <= 32,
+        allocations <= 33,
         "隐藏辅助码重复构造分配了 {allocations} 次"
     );
     assert!(!snapshot.candidates.is_empty());
+}
+
+/// #7616：只按了入口键就回车时，上屏的是入口字母本身，去掉标记后没有正文可学——以前会报「英文词学不了」（`Y`），临时日文还会把补出来的 `r` 写进英文词库。
+#[test]
+fn a_bare_entry_letter_raw_commit_learns_nothing() {
+    for (letter, mode, word) in [
+        (b'Y', "temporary_english", "y"),
+        (b'R', "temporary_japanese", "r"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let value = options(dir.path());
+        let mut session = Session::new(&value).unwrap();
+        assert!(session.character(letter, true).unwrap().handled);
+        assert_eq!(session.snapshot().unwrap().local_mode, mode);
+        let result = session.command(Command::CommitRaw).unwrap();
+        assert_eq!(result.commit, (letter as char).to_string());
+        assert_eq!(result.diagnostic, "");
+        assert_eq!(english_word_count(&value, word), 0);
+    }
 }

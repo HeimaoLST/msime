@@ -25,11 +25,11 @@ pub(crate) struct VoiceRecognitionResult {
 // 润色配置只有 Android 的语音面板读；iOS 和测试构建只用到提供方配置。
 #[cfg(any(target_os = "ios", target_os = "android", test))]
 #[cfg_attr(not(target_os = "android"), allow(unused_imports))]
-pub(crate) use msime_client_core::voice::provider::{
+pub(crate) use msime_client_providers::voice::provider::{
     mobile_voice_polish_configuration, mobile_voice_provider_configuration,
 };
 
-#[cfg(any(unix, windows))]
+#[cfg(all(any(unix, windows), not(mobile)))]
 #[derive(serde::Serialize, Clone)]
 pub(crate) struct VoiceRecognitionUpdate {
     pub(crate) text: String,
@@ -61,10 +61,9 @@ pub(crate) fn voice_provider_options(document: &Value) -> Result<Value, HostActi
         return Ok(Value::Object(Default::default()));
     };
     let mut options = serde_json::Map::new();
+    // 开始、结束提示音（`start_sound`、`end_sound`）不转发：设置页只给提示音总开关（`voice_cue_switches` 为 false），语音服务没收到这两项时按缺省都播放，与 IBus、Fcitx5 的转发一致。
     for key in [
         "sound_enabled",
-        "start_sound",
-        "end_sound",
         "mute_system_audio",
         "polish_enabled",
         "polish_text",
@@ -99,6 +98,15 @@ pub(crate) fn voice_provider_options(document: &Value) -> Result<Value, HostActi
                 Value::String(utf8_prefix(value, 512).to_owned()),
             );
         }
+    }
+    // 语音服务只认这几种录音后端，别的一律拒绝录音。别的平台写下的后端（从 macOS、Windows 拷来的配置里的 `macos`、`windows`）连同它的设备一起不转发，服务改用自己的录音设置照常录音，与 IBus、Fcitx5 的转发一致。后端名区分大小写，与服务和 Linux 设置页的「录音后端」一致：存着的 `Pulse` 在页面上写「此平台不可用」，这里也不转发。
+    if options
+        .get("capture_backend")
+        .and_then(Value::as_str)
+        .is_some_and(|backend| !matches!(backend, "" | "auto" | "pulse" | "pipewire" | "alsa"))
+    {
+        options.remove("capture_backend");
+        options.remove("capture_device");
     }
     // A path is not cut like the names above: a truncated path names a different file. One too long for any host is left out and the provider reports the model missing.
     if let Some(path) = voice
@@ -158,7 +166,7 @@ pub(crate) const PROVIDER_OPTIONS_BUDGET: usize = 16_384 - 512;
 /// The user's dictionary words for a mobile `local` session; none for a network provider, whose request may not carry them.
 #[cfg(any(target_os = "ios", target_os = "android"))]
 fn mobile_session_hotwords(
-    configuration: &msime_client_core::voice::provider::MobileVoiceProviderConfiguration,
+    configuration: &msime_client_providers::voice::provider::MobileVoiceProviderConfiguration,
     dictionary: &DictionaryHostOptions,
 ) -> Vec<msime_tauri_mobile_platform::MobileVoiceHotword> {
     if configuration.provider != "local" {
@@ -173,6 +181,7 @@ fn mobile_session_hotwords(
         .collect()
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub(crate) fn refresh_voice_preferences(
     mut document: Value,
     store: &PreferencesStore,
@@ -203,7 +212,7 @@ pub(crate) async fn recognize_voice(
     let _ = (&runtime, &store);
     #[cfg(not(any(unix, windows)))]
     let _ = (&app, &runtime, &store, &dictionary);
-    if !msime_client_core::voice::is_valid_request_id(&request.request_id)
+    if !msime_client_providers::voice::is_valid_request_id(&request.request_id)
         || request.language.is_empty()
         || request.language.len() > 64
         || msime_client_core::has_disallowed_control_with_options(&request.language, false)
@@ -218,10 +227,7 @@ pub(crate) async fn recognize_voice(
     }
     #[cfg(target_os = "android")]
     {
-        let platform = app
-            .state::<AndroidVoicePlatform<tauri::Wry>>()
-            .inner()
-            .clone();
+        let platform = app.state::<AndroidVoicePlatform<tauri::Wry>>().inner();
         // A configured transcription provider is used when there is one, and its absence is not an
         // error: this host has a platform recognizer that works with no account at all, and that
         // stays the default. `unsupported_voice` is what an unset or unknown provider produces, and
@@ -285,7 +291,7 @@ pub(crate) async fn recognize_voice(
             .map_err(|_| HostActionError {
                 code: "unavailable",
             })?;
-        return Ok(VoiceRecognitionResult { text });
+        Ok(VoiceRecognitionResult { text })
     }
     #[cfg(all(unix, not(any(target_os = "ios", target_os = "android"))))]
     {

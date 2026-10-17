@@ -2,6 +2,8 @@
 
 Status: implemented
 
+触屏壳重新有社区标签页，见 [触屏宿主底部第二格恢复为社区](2026-10-16-mobile-community-bottom-tab.md)；功能页里的社区内容仍按本篇。
+
 ## Problem
 
 共享设置界面在触屏宿主上有四个底部标签页：设置 / 社区 / 统计 / 我的（来自全平台设计稿，见 [iOS 与鸿蒙按全平台设计稿改版](2026-10-07-ios-harmony-all-platform-design.md)）。「社区」把三类互不相干的东西放在一个分段控件后面：键盘皮肤、词库，以及鸿蒙上叫「短语」、实际是 AI 高情商回复用的回复模板。用户要换皮肤得先离开皮肤页去另一个标签页，装词库同理；而皮肤页的网格（[鸿蒙手机皮肤网格列出皮肤库里的设计和社区皮肤](2026-10-11-harmony-skin-grid-saved-designs.md)）和词库页的「发现词库」已经各自直接列出社区的第一页，「社区」标签页成了同一批内容的第二个入口。
@@ -19,6 +21,8 @@ Status: implemented
 - 图库子视图由 `useCommunityGallerySubview` 管理，状态放在设置外壳的模型里，`CommunityGallerySubview` 画在设置 `<form>` 之外：图库自带搜索和发布表单，嵌在设置表单里会被 WebView 当成外层表单提交（`harmony-phone-dictionary.tsx` 的对话框为此不用 `<form>`）。它和 AI 皮肤抽卡一样以页面背景覆盖整个界面（复用 `fullScreenSurface` / `fullScreenColumn`），标题前带返回按钮。图库内容就是原来的 `CommunitySkinsPage` / `CommunityResourcesPage`，鸿蒙手机上用 `look="harmony"`，搜索、分类、详情、评分、举报、试用、发布、我的作品和收藏都在。
 - 历史记录约定：打开图库时先 `selectPage` 到所在功能页，再压一条 `{ page: <功能页>, communityGallery: { category, scope, initialMine } }`，与皮肤页的 `skinSubpage` 是同一种做法。`popstate` 时图库的开关只取自记录里的 `communityGallery`，且记录的 `page` 要等于它所在的功能页；离开那一页时图库随之关上。图库里的详情原先压的是写死的 `page: "community"`，现在由 `historyPage` 传入所在功能页（缺省仍是 `community`，桌面不变），而 `pushMobileSettingsState` 会带上当前记录里的 `communityGallery`，所以系统返回依次关掉详情、图库，最后才离开功能页。
 - 图库关上时功能页重读它依赖的本机数据：皮肤网格在图库打开期间不算可见，关上后重读皮肤库和社区第一页；鸿蒙手机词库页在图库关上后重读词库列表，图库里添加的词库出现在「已安装」，「发现词库」的「添加」变成「已添加」。图库里「添加」词库与原来的社区页一样：宿主有命名词库时 `installCommunity` 装成独立词库，否则导入本机词库。
+
+共享 React 的资源模型与添加操作分别归入 `community-resource-model.ts` 和 `community-resource-actions.ts`，原图库页面保留兼容导出。详情与图库共用词库安装操作，各入口的提示及生命周期保持原样，见[社区资源公共操作](../../implemented/simplification/2026-10-16-community-resource-actions.md)。共享图库的列表、详情历史和会话添加状态由[资源图库状态](../../implemented/simplification/2026-10-16-community-resource-gallery.md)持有，原有功能页历史约定保持。
 
 ## Alternatives considered
 

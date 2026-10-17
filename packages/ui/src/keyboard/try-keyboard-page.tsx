@@ -1,6 +1,7 @@
+import { isComposingKeyEvent } from "../core/ime-key-event";
 import { SendStopButton } from "../core/send-stop-button";
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
-import type { ChatClient, ChatMessage } from "../chat/chat-page";
+import type { ChatClient, ChatMessage } from "../chat/chat-model";
 import { chatRequest } from "../chat/chat-prompt";
 import { resizeChatComposer } from "../chat/chat-composer-size";
 import { chatError } from "../chat/chat-errors";
@@ -10,7 +11,7 @@ import { makeDefaultAction, useImeSetupState, type SetupActions } from "./setup-
 import { useHostAction } from "../core/use-host-action";
 import { createMarkdownLinkHandler, linkedMarkdownHtml } from "../core/linked-markdown";
 
-/** 草稿上限，与 Android 和 Apple 的试用页相同。2000 个字符最多 8000 字节，在 client-core 单条消息 16 KiB 的上限之内，所以发送前不必再按字节检查。 */
+/** 草稿上限，与 Android 和 Apple 的试用页相同。2000 个字符最多 8000 字节，在 client-services 单条消息 16 KiB 的上限之内，所以发送前不必再按字节检查。 */
 const DRAFT_LIMIT = 2000;
 /** 对话区最多保留的气泡数，超过时从最早的开始丢，与 Android 相同。 */
 const BUBBLE_LIMIT = 60;
@@ -179,13 +180,7 @@ export function TryKeyboardPage({
 
   const fieldKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     // 聊天页的回车是发送；组字中的回车属于输入法，Shift+回车照常换行。
-    if (
-      event.key !== "Enter" ||
-      event.shiftKey ||
-      event.nativeEvent.isComposing ||
-      event.keyCode === 229
-    )
-      return;
+    if (event.key !== "Enter" || event.shiftKey || isComposingKeyEvent(event)) return;
     if (!chat) return;
     event.preventDefault();
     void send();

@@ -60,7 +60,7 @@ struct SymbolGroup {
   std::vector<std::wstring> items;
 };
 
-// `client-core::plugins::scan` 列出的一个包：清单的字段，加上它那一类的内容（`PluginPackage`）。没有的数字是 nullopt，没有的文字是空串。
+// `client-services::plugins::scan` 列出的一个包：清单的字段，加上它那一类的内容（`PluginPackage`）。没有的数字是 nullopt，没有的文字是空串。
 struct Package {
   std::wstring id, name, version, license, author, description;
   bool builtin = false;
@@ -157,6 +157,28 @@ struct Preferences {
 
 inline constexpr std::wstring_view default_sound_pack = L"default";
 inline constexpr std::wstring_view default_melody_pack = L"twinkle";
+// `client-core::plugins::BUILTIN_MUSIC_PACKS`：安装包随带的音乐包，按这个顺序挑默认的那一个。
+inline constexpr std::array<std::wstring_view, 2> builtin_music_packs{L"msime-music-lofi",
+                                                                      L"msime-music-ambient"};
+
+// 打开「背景音乐」开关时还没选音乐包，就替用户选的那个包（`musicPackToSelect`）：宿主只在开关打开并且选了包时播放，只打开开关什么也听不到。优先安装包随带的音乐包（按 `builtin_music_packs` 的顺序），其次目录里的第一个音乐包；目录还没读到（`listed` 为假）时选随带的第一个。目录读到了却一个音乐包都没有时为空，这时开关不能打开。
+inline std::wstring music_pack_to_select(std::vector<Package> const &packages, bool listed) {
+  if (!listed)
+    return std::wstring(builtin_music_packs[0]);
+  for (auto const id : builtin_music_packs)
+    for (auto const &pack : packages)
+      if (pack.kind == L"music" && pack.id == id && pack.builtin)
+        return pack.id;
+  for (auto const &pack : packages)
+    if (pack.kind == L"music")
+      return pack.id;
+  return {};
+}
+
+// 「成就音效」不能打开：成就按打字统计计数，统计关着时打开它什么也不会响。已经打开的仍然可以关掉，不把用户锁在改不回来的状态里；还不知道统计开没开（没读到）时按打开处理。
+inline bool achievements_blocked(std::optional<bool> statistics_enabled, bool achievements_enabled) {
+  return statistics_enabled.has_value() && !*statistics_enabled && !achievements_enabled;
+}
 inline constexpr std::size_t max_command_tables = 16;
 inline constexpr std::size_t max_phrase_tables = 16;
 
@@ -654,7 +676,7 @@ inline std::wstring symbol_group_preview(SymbolGroup const &group) {
 
 // ---- 出错说明 ----
 
-// 宿主调用失败时的句子（`pluginErrorMessage`）：code 是 client-core 的 `PluginFailure`，detail 是它报告的规则。
+// 宿主调用失败时的句子（`pluginErrorMessage`）：code 是 client-services 的 `PluginFailure`，detail 是它报告的规则。
 inline std::wstring error_message(std::wstring_view code, std::wstring const &detail,
                                   std::wstring const &fallback) {
   const std::wstring reason = detail.empty() ? std::wstring() : L"（" + detail + L"）";
@@ -696,7 +718,7 @@ inline std::wstring imported_notice(Package const &pack) {
 
 // ---- 脚本插件（实验） ----
 
-// 「脚本插件（实验）」分组、详情和授权对话框，照 `plugin-script-view.tsx` 和 `plugin-list-view.tsx` 的脚本分组移植。规则（依赖、互斥、哈希绑定、准入）的权威在 client-core 的 `script_grants`，这里只是让页面先按同样的规则勾选和说明，宿主还会再查一遍。
+// 「脚本插件（实验）」分组、详情和授权对话框，照 `plugin-script-view.tsx` 和 `plugin-list-view.tsx` 的脚本分组移植。规则（依赖、互斥、哈希绑定、准入）的权威在 client-services 的 `script_grants`，这里只是让页面先按同样的规则勾选和说明，宿主还会再查一遍。
 
 // 脚本插件的能力，按 `msime_script_runtime::Capability::ALL` 的顺序（`SCRIPT_CAPABILITIES`）。
 inline constexpr std::array<std::wstring_view, 8> script_capabilities{
@@ -846,7 +868,7 @@ inline std::vector<std::wstring> toggle_capability(std::vector<std::wstring> con
   return sorted();
 }
 
-// `script-grants.json` 的一条（client-core 的 `ScriptGrantView`）。
+// `script-grants.json` 的一条（client-services 的 `ScriptGrantView`）。
 struct ScriptGrant {
   std::wstring id;
   // 授权时包的内容哈希；与包现在的 `content_hash` 不同时授权已经作废。
@@ -860,7 +882,7 @@ struct ScriptHealth {
   std::wstring id, hash, disabled;
 };
 
-// 一条插件 `/` 指令在输入法里的状态（client-core 的 `script_commands::ResolvedCommand`，`ScriptCommandState`）。`status` 是 `active`、`shadowed_by_user_table`（和用户指令表里的 `/conflict` 冲突）或 `shadowed_by_plugin`（和执行顺序在前的插件 `conflict_id` 的 `/conflict` 冲突）；用不到的字段是空串。
+// 一条插件 `/` 指令在输入法里的状态（client-services 的 `script_commands::ResolvedCommand`，`ScriptCommandState`）。`status` 是 `active`、`shadowed_by_user_table`（和用户指令表里的 `/conflict` 冲突）或 `shadowed_by_plugin`（和执行顺序在前的插件 `conflict_id` 的 `/conflict` 冲突）；用不到的字段是空串。
 struct ScriptCommandState {
   std::wstring id, trigger, title, status, conflict, conflict_id;
 };
@@ -1043,7 +1065,12 @@ inline std::wstring script_status(Package const &pack, ScriptGrantState state,
                 : std::wstring(L"已启用。");
 }
 
-// 详情「执行顺序」的说明（只在启用时显示）。`position` 为 -1 时排在第 8 个之后。
+// 详情是否给出「执行顺序」一组（启用时）：只有一个脚本在运行时两个按钮都不能按，顺序也无从谈起，所以至少两个在运行时才给；排在第 8 个之后（`position` 为 -1）不会运行时仍要说明。
+inline bool script_order_shown(std::ptrdiff_t position, std::size_t count) {
+  return count >= 2 || position < 0;
+}
+
+// 详情「执行顺序」的说明（只在 `script_order_shown` 时显示）。`position` 为 -1 时排在第 8 个之后。
 inline std::wstring script_order_note(std::ptrdiff_t position, std::size_t count) {
   if (position < 0)
     return L"同时启用的脚本插件超过 8 个，这个插件排在第 8 个之后，不会运行。";
@@ -1123,7 +1150,7 @@ inline constexpr std::wstring_view grant_dialog_failed = L"授权没有写入，
 
 // ---- @ 名单 ----
 
-// `client-core::plugins::mentions::MentionEntry`。
+// `client-services::plugins::mentions::MentionEntry`。
 struct Mention {
   std::wstring text, key;
   bool operator==(Mention const &other) const { return text == other.text && key == other.key; }

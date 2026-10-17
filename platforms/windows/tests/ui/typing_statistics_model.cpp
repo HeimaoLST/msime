@@ -168,6 +168,12 @@ int main() {
   check(legend_slices(character_slices(Breakdown{})).size() == 7, "an empty unknown is not in the legend");
   const auto languages = language_slices(whole);
   check(languages[0].count == 1000 && languages[9].count == 100 && languages[10].count == 200, "language modes");
+  Breakdown smart_abc;
+  smart_abc.sources["smart_abc"] = 12;
+  const auto smart_abc_sources = ranked_slices(source_slices(smart_abc));
+  check(smart_abc_sources.size() == 1 && smart_abc_sources[0].title == L"智能 ABC 双拼" &&
+            smart_abc_sources[0].count == 12, "Smart ABC source counts");
+  check(language_slices(smart_abc)[0].count == 12, "Smart ABC counts as Chinese");
   const auto ranked = ranked_slices(source_slices(whole));
   check(ranked.size() == 3 && ranked[0].id == "quanpin" && ranked[1].id == "unknown" && ranked[2].id == "voice",
         "the ranking is by count");
@@ -210,6 +216,19 @@ int main() {
   check(key_heat_level(0, 10) == 0 && key_heat_level(1, 10) == 1 && key_heat_level(10, 10) == 4, "key levels");
   check(day_heat_level(0, 10) == 0 && day_heat_level(3, 10) == 2, "day levels");
   check(retention_value("90d") == "90d" && retention_value("7d") == "forever", "retention");
+
+  // 「上传到云端」的说明和失败时的说法与 typing-statistics-upload.tsx 相同。
+  check(upload_description(false, false).find(L"登录水杉账号后") == 0 &&
+            upload_description(true, false).find(L"/stats") != std::wstring_view::npos,
+        "upload description");
+  check(upload_error_message(L"account_unauthorized", true).find(L"登录") != std::wstring::npos &&
+            upload_error_message(L"account_storage", false) == upload_error_message(L"storage", true) &&
+            upload_error_message(L"account_network", true).find(L"稍后会自动再试") != std::wstring::npos &&
+            upload_error_message(L"account_network", false).find(L"没有删掉") != std::wstring::npos,
+        "upload errors");
+  check(disabled_notice(true).find(L"上传到云端") != std::wstring_view::npos &&
+            disabled_notice(false).find(L"不联网") != std::wstring_view::npos,
+        "local-only notice follows the upload switch");
 
   if (failures == 0)
     std::puts("typing statistics model: ok");

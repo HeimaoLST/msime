@@ -6,10 +6,6 @@ import UIKit.UIGestureRecognizerSubclass
 @MainActor
 final class FourteenKeyKeyboardTests: XCTestCase {
   private var previousScheme = InputSchemePreference.scheme
-  /// 测试里会改的键盘偏好，结束时还原成模拟器上原来的值。
-  private var savedPreferences: [(UserDefaults, String, Any?)] = []
-  private let preferenceKeys = [(InlinePreeditPreference.defaults, InlinePreeditPreference.key),
-                                (InlinePreeditPreference.defaults, InlinePreeditPreference.styleKey)]
 
   // 认领全部方案，免得对 `InputSchemePreference.scheme` 的赋值落到模拟器上残留的别的方案。14 键要用户自己打开，不先启用就选不上。见 InputSchemeTestSupport。
   override func setUp() {
@@ -17,14 +13,10 @@ final class FourteenKeyKeyboardTests: XCTestCase {
     enableAllInputSchemes()
     previousScheme = InputSchemePreference.scheme
     InputSchemePreference.scheme = .fourteenKey
-    savedPreferences = preferenceKeys.map { defaults, key in (defaults, key, defaults.object(forKey: key)) }
   }
 
   override func tearDown() {
     InputSchemePreference.scheme = previousScheme
-    for (defaults, key, value) in savedPreferences {
-      if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
-    }
     super.tearDown()
   }
 
@@ -43,7 +35,7 @@ final class FourteenKeyKeyboardTests: XCTestCase {
     XCTAssertTrue(l.holdLetters.isEmpty)
     XCTAssertTrue(FourteenKeyLayout.rows[2][3].holdLetters.isEmpty, "M has no hold menu")
     XCTAssertEqual(qw.keyID, "FourteenQW")
-    // 每个键都记到 client-core 认得的 id 上，否则整批按键统计会被拒收。
+    // 每个键都记到 client-services 认得的 id 上，否则整批按键统计会被拒收。
     for key in FourteenKeyLayout.rows.joined() {
       XCTAssertNotNil(key.keyID, key.face)
     }
@@ -121,6 +113,8 @@ final class FourteenKeyKeyboardTests: XCTestCase {
         XCTAssertTrue(shown(try button(id, in: controller)), id)
       }
       XCTAssertFalse(shown(try button("nineKeyZero", in: controller)))
+      // 第三排已有 符，底行不再重复 26 键的 符。
+      XCTAssertFalse(shown(try button("symbolPanelKey", in: controller)))
       XCTAssertEqual(try button("quickPunctuationKey", in: controller).configuration?.title, "，")
       XCTAssertEqual(try button("schemeButton", in: controller).accessibilityValue, "全拼 14 键")
       attachScreenshot(of: controller, named: "Fourteen-key keyboard at \(Int(width))pt")
@@ -230,7 +224,7 @@ final class FourteenKeyKeyboardTests: XCTestCase {
     XCTAssertEqual(height.constant, twentySix)
   }
 
-  /// 英文模式画 26 键，切回中文仍是 14 键；123 打开与 26 键相同的设计层，返回后仍是 14 键。
+  /// 英文模式画 26 键，切回中文仍是 14 键；123 打开数字九宫格，返回键印「14键」，返回后仍是 14 键。
   func testEnglishAndTheSymbolLayerReturnToTheFourteenKeys() throws {
     let controller = makeController(width: 390)
     let qw = try button("fourteenKeyQW", in: controller)
@@ -246,16 +240,18 @@ final class FourteenKeyKeyboardTests: XCTestCase {
     try button("layoutToggleButton", in: controller).sendActions(for: .primaryActionTriggered)
     controller.view.layoutIfNeeded()
     XCTAssertFalse(shown(qw))
-    XCTAssertTrue(shown(try button("symbolLayerKey0_0", in: controller)), "123 opens the design layer")
-    XCTAssertEqual(try button("layoutToggleButton", in: controller).configuration?.title, "拼音")
+    XCTAssertTrue(shown(try button("nineKey1", in: controller)))
+    XCTAssertEqual(try button("nineKey1", in: controller).configuration?.title, "1")
+    // 与 Android 一样，借用的数字页上返回键印 14 键自己的短名。
+    XCTAssertEqual(try button("layoutToggleButton", in: controller).configuration?.title, "14键")
+    XCTAssertEqual(try button("layoutToggleButton", in: controller).accessibilityLabel, "切换到字母键盘")
     try button("layoutToggleButton", in: controller).sendActions(for: .primaryActionTriggered)
     controller.view.layoutIfNeeded()
     XCTAssertTrue(shown(qw))
   }
 
-  /// 行内预编辑开着时，14 键的组码不写进输入框；本地输入模式画 26 键，组字照常标记，与全拼 26 键和 Android 相同。
+  /// 14 键的组码不写进输入框；本地输入模式画 26 键，组字照常标记，与全拼 26 键和 Android 相同。
   func testInlinePreeditSkipsTheCodesButMarksALocalMode() throws {
-    InlinePreeditPreference.style = .pinyin
     let controller = makeController(width: 390)
     try tap(["BN", "UI"], in: controller)
     XCTAssertFalse(preedit(in: controller).isEmpty)

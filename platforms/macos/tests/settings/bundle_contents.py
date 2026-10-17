@@ -132,7 +132,7 @@ def main() -> int:
         if not staged.is_file() or staged.stat().st_size == 0:
             failures.append(f"audios/{cue} was not staged; the voice cue falls back to a system sound")
 
-    # The built-in sound packs are what a fresh profile selects; without them key sounds have nothing to play. Every folder in the repository's resources/sound-packs has to arrive, since client-core lists each one as built in.
+    # 内置音效包是全新配置默认选中的；没有它们，按键音就没有东西可播。仓库 resources/sound-packs 里的每个文件夹都必须到位，因为 client-services 把每一个都列为内置包。
     packs = Path(__file__).resolve().parents[4] / "resources/sound-packs"
     for pack in sorted(path.name for path in packs.iterdir() if path.is_dir()):
         if not (resources / "sound-packs" / pack / "plugin.toml").is_file():
@@ -197,6 +197,8 @@ def main() -> int:
     # 拆字表里的读音、名次和繁体字形取自 Unihan，Unicode License V3 要求随数据附上它的声明。
     if not (contents / "Resources" / "Licenses" / "Unicode-License-V3.txt").is_file():
         failures.append("Contents/Resources/Licenses/Unicode-License-V3.txt is missing; the Unihan readings in the built-in component reverse lookup table ship without their licence")
+    if not (contents / "Resources" / "Licenses" / "OpenCC-Apache-2.0.txt").is_file():
+        failures.append("缺少 OpenCC-Apache-2.0.txt，内嵌的简繁词表必须附带许可证")
     # Cantonese and Zhuyin read dictionaries built from rime-cantonese (CC BY 4.0) and libchewing-data (LGPL-2.1-or-later). The notices ship unconditionally, so a build that later gains the dictionaries is never without them.
     for notice in ("rime-cantonese-CC-BY-4.0.txt", "libchewing-data-LGPL-2.1.txt"):
         if not (contents / "Resources" / "Licenses" / notice).is_file():

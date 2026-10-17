@@ -1,4 +1,4 @@
-import type { Preferences } from "../index";
+import type { Preferences } from "../core/preferences-model";
 import type { CandidateTranslationSettingsSectionProps } from "./candidate-translation-settings-section";
 import type {
   TranslationLanguage,
@@ -6,7 +6,10 @@ import type {
   TranslationSecondaryLanguage,
   TranslationSecondaryLanguageOption,
 } from "./translation-language-helpers";
-import type { TranslationProvider } from "./translation-service-selector-section";
+import {
+  translationOfflineFallback,
+  type TranslationProvider,
+} from "./translation-service-selector-section";
 
 export interface CandidateTranslationSettingsOptions {
   grouped?: boolean;
@@ -23,6 +26,8 @@ export interface CandidateTranslationSettingsOptions {
   linux: boolean;
   /** Windows 的候选窗把每种目标语言的释义画成一行，所以也显示「第二种候选语言」；Server 的翻译线程会问水杉账号，所以翻译服务里也列出「水杉账号」。 */
   windows?: boolean;
+  /** 触屏键盘（iOS、Android、HarmonyOS 手机）只显示一种候选翻译：第二种语言让每个候选下多一行，候选栏太高，所以不给「第二种候选语言」。 */
+  mobile?: boolean;
   translationAccount: boolean;
   onPreferencesChange: (patch: Partial<Preferences>) => void;
   onDeviceMissingLanguages: readonly (readonly [string, string])[];
@@ -42,11 +47,11 @@ export function createCandidateTranslationSettings({
   visibleTranslationLanguages,
   visibleSecondaryLanguages,
   android,
-  ios,
   macos,
   harmony,
   linux,
   windows = false,
+  mobile = false,
   translationAccount,
   onPreferencesChange,
   onDeviceMissingLanguages,
@@ -63,7 +68,7 @@ export function createCandidateTranslationSettings({
     candidateGlossLanguagesEnabled,
     visibleLanguages: visibleTranslationLanguages,
     visibleSecondaryLanguages,
-    showSecondaryLanguage: android || ios || macos || harmony || windows,
+    showSecondaryLanguage: !mobile && (macos || harmony || windows),
     showAccountTranslation: android,
     accountTranslation: translationAccount,
     onEnabledChange: (enabled) => onPreferencesChange({ candidate_translations: enabled }),
@@ -81,6 +86,8 @@ export function createCandidateTranslationSettings({
     showTranslationService: !android,
     translationProvider,
     showAccountProvider: macos || linux || windows,
+    // 不选在线服务时宿主仍会出的释义：macOS 还有系统本机翻译，叫「离线翻译」；Windows、Linux、HarmonyOS 只有离线词库，叫「不使用在线服务」；Android、iOS 沿用「关闭」，等各自核对过再改。
+    offlineFallback: translationOfflineFallback({ macos, windows, linux, harmony }),
     onTranslationProviderChange: setTranslationProvider,
   };
 }

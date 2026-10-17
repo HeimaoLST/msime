@@ -2,42 +2,31 @@ import { SettingsGroupNote } from "../settings-group-note";
 import { Fragment } from "react";
 import { GroupList, MoreOptions } from "../../core/platform-controls";
 import { SelectRow } from "../select-row";
+import { ActionRow } from "../action-row";
 import { SwitchRow } from "../switch-row";
-import { pluginPreferences, type PluginPreferences } from "../plugin-preferences";
+import { pluginPreferences } from "../plugin-preferences";
 import { SettingsPageFieldset } from "../settings-page-fieldset";
 
-export type HelpcodeSchema =
-  | "lantian"
-  | "ziranma"
-  | "shouyou2_0"
-  | "shouyouplus"
-  | "xiaohe"
-  | "jiajia"
-  | "wubi86"
-  | `custom/${string}`;
+import {
+  defaultHelpcode,
+  helpcodeSchemaOptions,
+  type CustomHelpcodeSchema,
+  type HelpcodeKey,
+  type HelpcodePackOption,
+  type HelpcodePreferences,
+  type HelpcodeSchema,
+  type HelpcodeSettings,
+} from "../helpcode-preferences";
 
-/** Metadata for a helper-code table discovered below the host's resource directory. */
-export type CustomHelpcodeSchema = {
-  schema: `custom/${string}`;
-  file_stem: string;
-  name: string;
-  name_en: string;
-};
-
-export type HelpcodePreferences = {
-  enabled: boolean;
-  schema: HelpcodeSchema;
-  show_in_candidate_window?: boolean;
-};
-
-export type HelpcodeKey = "quanpin_helpcode" | "shuangpin_helpcode";
-/** 辅助码设置，以及选中辅助码表插件的 `plugins.helpcode_pack_*`。 */
-export type HelpcodeSettings = Partial<Record<HelpcodeKey, HelpcodePreferences>> & {
-  plugins?: PluginPreferences;
-};
-
-/** 一个已安装的辅助码表插件，供下拉框选用。 */
-export type HelpcodePackOption = { id: string; name: string };
+export { defaultHelpcode } from "../helpcode-preferences";
+export type {
+  CustomHelpcodeSchema,
+  HelpcodeKey,
+  HelpcodePackOption,
+  HelpcodePreferences,
+  HelpcodeSchema,
+  HelpcodeSettings,
+} from "../helpcode-preferences";
 
 /** 下拉框里辅助码表插件的值前缀：`pack:<插件 id>`。 */
 const PACK_PREFIX = "pack:";
@@ -46,30 +35,6 @@ const packKeys = {
   quanpin_helpcode: "helpcode_pack_quanpin",
   shuangpin_helpcode: "helpcode_pack_shuangpin",
 } as const;
-
-/** The core's `default_quanpin_helpcode` / `default_shuangpin_helpcode`, used wherever a document carries no helpcode object for a scheme: this form and the candidate previews. */
-export const defaultHelpcode: Readonly<Record<HelpcodeKey, HelpcodePreferences>> = {
-  quanpin_helpcode: {
-    enabled: true,
-    schema: "ziranma",
-    show_in_candidate_window: false,
-  },
-  shuangpin_helpcode: {
-    enabled: true,
-    schema: "lantian",
-    show_in_candidate_window: true,
-  },
-};
-
-const helpcodeSchemas: readonly (readonly [HelpcodeSchema, string])[] = [
-  ["lantian", "蓝天小雨点"],
-  ["ziranma", "自然码"],
-  ["shouyou2_0", "首右2.0"],
-  ["shouyouplus", "首右plus"],
-  ["xiaohe", "小鹤"],
-  ["jiajia", "加加"],
-  ["wubi86", "五笔 86"],
-];
 
 function customSchemaLabel(schema: CustomHelpcodeSchema): string {
   if (schema.name && schema.name_en && schema.name !== schema.name_en) {
@@ -88,8 +53,11 @@ export interface HelpcodeSettingsPageProps {
   customSchemas?: readonly CustomHelpcodeSchema[];
   /** 已安装的辅助码表插件；选中后替换该方案的辅助码方案。没有插件目录的宿主为空。 */
   packs?: readonly HelpcodePackOption[];
-  /** HarmonyOS 手机的紧凑形式，类似 Android 的 `TypingPage`：分组只显示这一族（当前方案所用的那一族）的 辅助码方案，两族的其他控件都移进 更多选项 折叠区。 */
+  /** 当前方案所用的那一族。HarmonyOS 手机（`mobile`）用紧凑形式，类似 Android 的 `TypingPage`：分组只显示这一族的 辅助码方案，两族的其他控件都移进 更多选项 折叠区。桌面显示这一族的三行，另一族的三行收进 更多选项：另一族的设置对当前方案不起作用。 */
   activeFamily?: HelpcodeKey;
+  onImport?: (family: HelpcodeKey) => Promise<void>;
+  importBusy?: boolean;
+  importStatus?: string;
   onChange: (patch: HelpcodeSettings) => void;
 }
 
@@ -121,11 +89,14 @@ export function HelpcodeSettingsGroup({
   customSchemas = [],
   packs = [],
   activeFamily,
+  onImport,
+  importBusy = false,
+  importStatus,
   onChange,
 }: HelpcodeSettingsGroupProps) {
   const plugins = pluginPreferences(draft);
   const schemaOptions = [
-    ...helpcodeSchemas,
+    ...helpcodeSchemaOptions,
     ...customSchemas.map((schema): readonly [HelpcodeSchema, string] => [
       schema.schema,
       customSchemaLabel(schema),
@@ -204,6 +175,24 @@ export function HelpcodeSettingsGroup({
     );
   };
 
+  const importRow = (key: HelpcodeKey, label: string) =>
+    onImport && (
+      <ActionRow
+        title="导入辅助码表"
+        description="UTF-8 文本，最大 1 MiB，每行「字=码」，码为一到两个小写字母。"
+        label={importBusy ? "导入中…" : "导入…"}
+        ariaLabel={`导入${label}辅助码表`}
+        ariaBusy={importBusy}
+        disabled={importBusy}
+        action={() => onImport(key)}
+      />
+    );
+  const importNote = importStatus && (
+    <SettingsGroupNote>
+      <span role="status">{importStatus}</span>
+    </SettingsGroupNote>
+  );
+
   const displayRow = (key: HelpcodeKey, label: string) => {
     const current = currentOf(key);
     // Named after its own scheme, the way the reference window names these: both rows are on the page at once, so one shared wording left two switches with the same accessible name and nothing to tell a screen reader -- or a test -- which one it had.
@@ -226,11 +215,39 @@ export function HelpcodeSettingsGroup({
     </SettingsGroupNote>
   );
 
+  if (activeFamily && !mobile) {
+    const activeLabel = activeFamily === "shuangpin_helpcode" ? "双拼" : "全拼";
+    return (
+      <GroupList title="辅助码">
+        {shiftNote}
+        {enabledRow(activeFamily, activeLabel)}
+        {schemaRow(activeFamily, activeLabel, `${activeLabel}辅助码方案`)}
+        {importRow(activeFamily, activeLabel)}
+        {importNote}
+        {displayRow(activeFamily, activeLabel)}
+        <MoreOptions>
+          {families
+            .filter(([key]) => key !== activeFamily)
+            .map(([key, label]) => (
+              <Fragment key={key}>
+                {enabledRow(key, label)}
+                {schemaRow(key, label, `${label}辅助码方案`)}
+                {importRow(key, label)}
+                {displayRow(key, label)}
+              </Fragment>
+            ))}
+        </MoreOptions>
+      </GroupList>
+    );
+  }
+
   if (activeFamily) {
     const activeLabel = activeFamily === "shuangpin_helpcode" ? "双拼" : "全拼";
     return (
       <GroupList title="辅助码">
         {schemaRow(activeFamily, activeLabel, "辅助码方案", activeLabel)}
+        {importRow(activeFamily, activeLabel)}
+        {importNote}
         <MoreOptions>
           {shiftNote}
           {families.map(([key, label]) => (
@@ -248,11 +265,13 @@ export function HelpcodeSettingsGroup({
   return (
     <GroupList title="辅助码">
       {shiftNote}
+      {importNote}
       {/* 全拼在前，和输入方案选择器「全拼、双拼」的顺序一致。 */}
       {families.map(([key, label]) => (
         <Fragment key={key}>
           {enabledRow(key, label)}
           {schemaRow(key, label, `${label}辅助码方案`)}
+          {importRow(key, label)}
           {displayRow(key, label)}
         </Fragment>
       ))}

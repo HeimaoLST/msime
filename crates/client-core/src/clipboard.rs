@@ -1,5 +1,6 @@
 //! Bounded persistent clipboard history. Hosts decide which clipboard events to observe.
 
+#[cfg(test)]
 use std::fs;
 #[cfg(not(unix))]
 use std::io::Write;
@@ -7,7 +8,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_segmentation::UnicodeSegmentation;
 
-const MAX_ENTRIES: usize = 50;
+/// 共享存储保留的本机移动端剪贴板历史条数上限。
+pub const MAX_ENTRIES: usize = 200;
 /// Keep the decoder's allocation bounded before deduplication and the visible-entry limit. The plain string arrays the Windows server writes may contain duplicates, so this is larger than `MAX_ENTRIES` while still rejecting an unbounded JSON array of tiny strings.
 const MAX_INPUT_ENTRIES: usize = MAX_ENTRIES * 100;
 pub const MAX_TEXT_UTF16_UNITS: usize = 4000;
@@ -139,6 +141,19 @@ impl ClipboardHistoryStore {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// 导出供阅读的全文快照；不改历史顺序、原文或换行，也不更新存储。
+    pub fn export_text(&self) -> String {
+        use std::fmt::Write;
+        let mut text = format!("水杉剪贴板历史，共 {} 条\n", self.entries.len());
+        for (index, entry) in self.entries.iter().enumerate() {
+            let pinned = if entry.pinned { " · 已置顶" } else { "" };
+            let _ = writeln!(text, "\n========== {}{} ==========", index + 1, pinned);
+            text.push_str(&entry.text);
+            text.push('\n');
+        }
+        text
     }
 
     pub fn entries(&self) -> &[ClipboardHistoryEntry] {
@@ -283,7 +298,7 @@ impl ClipboardHistoryStore {
         Ok(outcome)
     }
 
-    fn lock_writer(&self) -> std::io::Result<fs::File> {
+    fn lock_writer(&self) -> std::io::Result<crate::file_lock::ScopedFileLock> {
         let parent = self
             .path
             .parent()
@@ -301,7 +316,7 @@ impl ClipboardHistoryStore {
         let mut lock_path = self.path.as_os_str().to_owned();
         lock_path.push(".lock");
         let lock = crate::file_lock::open_private_lock_file(lock_path)?;
-        crate::file_lock::exclusive(&lock)?;
+        let lock = crate::file_lock::ScopedFileLock::exclusive(lock)?;
         Ok(lock)
     }
 
@@ -428,6 +443,20 @@ fn valid_characters(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn finished_scope_releases_inherited_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ClipboardHistoryStore::open(root.path().join("history.json"));
+        let held = store.lock_writer().unwrap();
+        let inherited = crate::file_lock::testing::duplicate(&held);
+        crate::file_lock::testing::assert_finished_scope_releases_lock(
+            held,
+            inherited,
+            &root.path().join("history.json.lock"),
+        );
+    }
 
     fn texts(store: &ClipboardHistoryStore) -> Vec<&str> {
         store
@@ -591,15 +620,15 @@ mod tests {
     fn load_deduplicates_before_applying_entry_limit() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("history.json");
-        let mut values = vec!["synthetic-first".to_string(); 55];
-        values.extend((0..60).map(|i| format!("synthetic-{i}")));
+        let mut values = vec!["synthetic-first".to_string(); 205];
+        values.extend((0..250).map(|i| format!("synthetic-{i}")));
         fs::write(&path, serde_json::to_vec(&values).unwrap()).unwrap();
         let mut store = ClipboardHistoryStore::open(&path);
         store.load().unwrap();
         assert_eq!(store.entries().len(), MAX_ENTRIES);
         assert_eq!(store.entries.capacity(), MAX_ENTRIES);
         assert_eq!(store.entries()[0].text, "synthetic-first");
-        assert_eq!(store.entries()[49].text, "synthetic-48");
+        assert_eq!(store.entries()[199].text, "synthetic-198");
     }
 
     #[test]
@@ -1075,5 +1104,30 @@ mod tests {
                 .count(),
             MAX_TEXT_UTF16_UNITS
         );
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    #[test]
+    fn export_preserves_long_unicode_text_order_and_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.json");
+        let mut store = ClipboardHistoryStore::open(&path);
+        let long = format!("  合成😀\r\n{}\n尾行  ", "家".repeat(5_000));
+        store.push_mobile(long.clone()).unwrap();
+        store.push_mobile("合成新记录".into()).unwrap();
+        store.set_pinned(&long, true).unwrap();
+        let before = fs::read(&path).unwrap();
+        let text = store.export_text();
+        assert!(text.contains("共 2 条"));
+        assert!(text.contains(&format!("1 · 已置顶 ==========\n{long}\n")));
+        assert!(text.find(&long).unwrap() < text.find("合成新记录").unwrap());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        store.clear().unwrap();
+        assert_eq!(store.export_text(), "水杉剪贴板历史，共 0 条\n");
+        assert!(!path.exists());
     }
 }

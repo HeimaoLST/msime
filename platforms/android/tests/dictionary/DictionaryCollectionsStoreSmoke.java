@@ -25,6 +25,9 @@ public final class DictionaryCollectionsStoreSmoke {
         check(DictionaryCollectionsStore.normalizePinyin(" Shui Shan ").equals("shui'shan"));
         check(DictionaryCollectionsStore.normalizePinyin("hou’xuan").equals("hou'xuan"));
         check(DictionaryCollectionsStore.displayCode("hou'xuan'xiang").equals("hou’xuan’xiang"));
+        check(DictionaryCollectionsStore.pendingDescription(0).isEmpty());
+        check(DictionaryCollectionsStore.pendingDescription(1).equals("，还有 1 条等键盘同步"));
+        check(DictionaryCollectionsStore.pendingDescription(128406).equals("，还有 128,406 条等键盘同步"));
 
         check(NumberPolicy.groupedCount(128406).equals("128,406 条"));
         check(NumberPolicy.groupedCount(-3).equals("0 条"));
@@ -62,7 +65,7 @@ public final class DictionaryCollectionsStoreSmoke {
         DictionaryCollectionsStore.View view = new DictionaryCollectionsStore.View(List.of(
             new DictionaryCollectionsStore.Collection("c1", "网络流行语", "pinyin", "community", "r1", true, 10, 0),
             new DictionaryCollectionsStore.Collection("c2", "工作", "pinyin", "user", "", false, 0, 0)),
-            List.of("txt"), null);
+            List.of("txt"), 0, null);
         check(view.installed("r1") && !view.installed("r2"));
         check(view.find("c2").name().equals("工作") && view.find("c3") == null);
 

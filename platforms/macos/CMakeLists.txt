@@ -236,6 +236,8 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/libhangul-h
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/kfcd-chaizi-CC-BY-3.0.txt" "${MSIME_LEGAL_DIRECTORY}/kfcd-chaizi-CC-BY-3.0.txt" COPYONLY)
 # 同一张拆字表里每个字的读音、名次和繁体字形取自 Unicode 汉字数据库（Unihan 17.0.0），Unicode License V3 要求随数据附上它的版权与许可声明。
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/Unicode-License-V3.txt" "${MSIME_LEGAL_DIRECTORY}/Unicode-License-V3.txt" COPYONLY)
+# 简繁转换内嵌 OpenCC 词表，Apache-2.0 原文随宿主分发。
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/OpenCC-Apache-2.0.txt" "${MSIME_LEGAL_DIRECTORY}/OpenCC-Apache-2.0.txt" COPYONLY)
 # The Cantonese and Zhuyin schemes, whose syllables and words come from the dictionaries in language-dictionaries/ (when installed), built from rime-cantonese (CC BY 4.0, which requires attribution) and libchewing-data (LGPL-2.1-or-later, which requires the licence text and a source pointer).
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/rime-cantonese-CC-BY-4.0.txt" "${MSIME_LEGAL_DIRECTORY}/rime-cantonese-CC-BY-4.0.txt" COPYONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/libchewing-data-LGPL-2.1.txt" "${MSIME_LEGAL_DIRECTORY}/libchewing-data-LGPL-2.1.txt" COPYONLY)
@@ -286,8 +288,8 @@ set(MSIME_VOICE_CUE_RESOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/../windows/installer/assets/audios/end.mp3")
 target_sources(MSIMEClientInputMethod PRIVATE ${MSIME_VOICE_CUE_RESOURCES})
 set_source_files_properties(${MSIME_VOICE_CUE_RESOURCES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/audios")
-# The built-in sound packs, synthesized by scripts/generate_sound_packs.py, one folder per pack under Resources/sound-packs: the directory the input method and the settings page name to client-core as the built-in pack root. Beside EngineResources rather than in it, because that directory has to hold exactly what the dictionary lock pins.
-# Every folder there is staged, so a pack the generator adds ships without being named here too.
+# 内置音效包由 scripts/generate_sound_packs.py 合成，每个包一个文件夹，放在 Resources/sound-packs 下：输入法和设置页把这个目录作为内置包根目录告诉 client-services。放在 EngineResources 旁边而不是里面，因为那个目录必须恰好只装词库锁所固定的内容。
+# 那里的每个文件夹都会被暂存，所以生成器新增的包不必在这里再点一次名就会随之发布。
 file(GLOB MSIME_SOUND_PACK_DIRECTORIES LIST_DIRECTORIES true CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/sound-packs/*")
 foreach(MSIME_SOUND_PACK_DIRECTORY ${MSIME_SOUND_PACK_DIRECTORIES})
   if(NOT IS_DIRECTORY "${MSIME_SOUND_PACK_DIRECTORY}")
@@ -839,7 +841,7 @@ add_executable(ai-settings-snapshot-test tests/settings/AISettingsSnapshotTest.m
 target_compile_options(ai-settings-snapshot-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(ai-settings-snapshot-test PRIVATE "-framework Foundation")
 add_test(NAME ai-settings-snapshot COMMAND ai-settings-snapshot-test)
-# AI 接口地址策略逐条跑 shared/contracts/ai-endpoint/cases.json，与 client-core 的权威实现对照。
+# AI 接口地址策略逐条跑 shared/contracts/ai-endpoint/cases.json，与 client-providers 的权威实现对照。
 add_executable(ai-endpoint-policy-test tests/settings/AIEndpointPolicyTest.mm)
 target_compile_options(ai-endpoint-policy-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(ai-endpoint-policy-test PRIVATE "-framework Foundation")
@@ -986,9 +988,9 @@ target_include_directories(shuangpin-keymap-input-test PRIVATE src)
 target_compile_options(shuangpin-keymap-input-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(shuangpin-keymap-input-test PRIVATE apple-client "-framework AppKit")
 add_test(NAME shuangpin-keymap-input COMMAND shuangpin-keymap-input-test)
-add_executable(candidate-panel-test tests/candidate/CandidatePanelTests.mm src/candidate/CandidatePanel.mm src/core/DiagnosticLog.cpp src/candidate/CandidateSkinAppearance.mm src/candidate/CandidateSkin.cpp)
+add_executable(candidate-panel-test tests/candidate/CandidatePanelTests.mm src/candidate/CandidatePanel.mm src/candidate/CandidateMotion.mm src/core/DiagnosticLog.cpp src/candidate/CandidateSkinAppearance.mm src/candidate/CandidateSkin.cpp)
 target_compile_options(candidate-panel-test PRIVATE -fobjc-arc -Wall -Wextra -Werror)
-target_link_libraries(candidate-panel-test PRIVATE apple-client "-framework AppKit" "-framework InputMethodKit" "-framework QuartzCore")
+target_link_libraries(candidate-panel-test PRIVATE apple-client "-framework AppKit" "-framework InputMethodKit" "-framework QuartzCore" "-framework ImageIO")
 add_test(NAME candidate-panel COMMAND candidate-panel-test)
 # The shared gloss-sense rule (shared/input/GlossSenses.h) pinned case by case, and the Windows, Linux and macOS forwarders asked the same questions, because a sense that stops being offered on one host looks like a dictionary difference rather than a bug.
 add_executable(translation-senses-agreement-test tests/candidate/TranslationSensesAgreementTest.cpp)
@@ -1245,7 +1247,7 @@ foreach(msime_target IN LISTS MSIME_DIRECTORY_TARGETS)
   endforeach()
 endforeach()
 
-# CandidateSkin.cpp reads external skin manifests through SkinManifestBridge.mm, which calls the shared client-core loader in the Rust host library. Every target compiling the one needs the other and apple-client, so this loop keeps them together instead of a hand-kept list that a new consumer could miss.
+# CandidateSkin.cpp 通过 SkinManifestBridge.mm 读取外部皮肤清单，后者调用 Rust 宿主库里共享的 client-services 加载器。编译其中一个文件的每个目标都需要另一个文件和 apple-client，所以由这个循环把它们绑在一起，而不是手工维护一份新使用方可能漏掉的列表。
 set_source_files_properties(src/candidate/SkinManifestBridge.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 get_property(MSIME_SKIN_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(msime_target IN LISTS MSIME_SKIN_TARGETS)
@@ -1268,7 +1270,7 @@ foreach(msime_target IN LISTS MSIME_VOICE_SERVICE_TARGETS)
   endif()
 endforeach()
 
-# InputController.mm draws typing effects through TypingEffectPanel.mm, which animates with Core Animation. Every target compiling the controller next to its HUD panel - the input method and each controller test - takes the panel and QuartzCore, found by source like the loops above so a new controller test cannot miss it.
+# InputController.mm draws typing effects through TypingEffectPanel.mm and candidate skin motion through CandidateMotion.mm, both Core Animation. Every target compiling the controller next to its HUD panel - the input method and each controller test - takes both and QuartzCore, found by source like the loops above so a new controller test cannot miss it.
 get_property(MSIME_TYPING_EFFECT_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(msime_target IN LISTS MSIME_TYPING_EFFECT_TARGETS)
   get_target_property(msime_target_sources ${msime_target} SOURCES)
@@ -1279,8 +1281,9 @@ foreach(msime_target IN LISTS MSIME_TYPING_EFFECT_TARGETS)
      AND NOT "src/core/FloatingToolbarPanel.mm" IN_LIST msime_target_sources)
     continue()
   endif()
-  target_sources(${msime_target} PRIVATE src/input/TypingEffectPanel.mm)
-  target_link_libraries(${msime_target} PRIVATE "-framework QuartzCore")
+  target_sources(${msime_target} PRIVATE src/input/TypingEffectPanel.mm src/candidate/CandidateMotion.mm)
+  # CandidateMotion.mm 用 ImageIO 读 APNG 装饰图的各帧。
+  target_link_libraries(${msime_target} PRIVATE "-framework QuartzCore" "-framework ImageIO")
 endforeach()
 
 # The typing effect panel on its own: the packed answer decoded, the Reduce Motion and Low Power fallback, and the idle state that leaves no emitter running and no window on screen.

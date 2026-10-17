@@ -10,17 +10,21 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 
 namespace msime::windows {
+// AI 翻译沿用共享 AI 端点策略：HTTPS 不限主机，HTTP 只允许本机或局域网。
+bool ai_translation_url_allowed(std::string_view url);
+
 class TranslationWorker final {
 public:
   struct Result {
     FocusLease lease;
     uint64_t generation = 0;
     std::string translations;
-    // 这一页候选的读音（打开「显示读音」时）和整句逐词拆解（打开离线英文释义时），只用于显示，不交给会话；见 CandidateMailbox::translations。
+    // 这一页候选的读音（打开「显示读音」时），只用于显示，不交给会话；见 CandidateMailbox::translations。
     CandidateReadings readings{};
   };
   using Completed = std::function<void(Result)>;

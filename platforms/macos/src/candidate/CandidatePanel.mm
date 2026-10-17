@@ -1,4 +1,6 @@
 #import "CandidatePanel.h"
+#import "CandidateMotion.h"
+#import "CandidatePlacement.h"
 #import "CandidateSkinAppearance.h"
 #import "CandidateTypography.h"
 #import "CandidateWindowLevel.h"
@@ -30,8 +32,10 @@
 }
 @end
 
-@interface MetasequoiaCandidateButton : NSButton
+@interface MetasequoiaCandidateButton : NSButton <MSIMECandidateSelectionFillHost>
 @property(nonatomic) BOOL candidateHighlighted;
+// 选中动效期间高亮底色由 MSIMECandidateMotion 的图层画。
+@property(nonatomic) BOOL selectionFillDetached;
 @property(nonatomic) BOOL candidateHovered;
 @property(nonatomic, strong) NSFont *numberFont;
 @property(nonatomic, copy) NSColor *fillColor;
@@ -86,7 +90,7 @@
     (void)dirtyRect;
     NSRectClip(self.bounds);
     NSColor *rowFill = self.candidateHighlighted
-        ? (self.candidateHovered ? self.selectedHoverColor : self.fillColor)
+        ? (self.selectionFillDetached ? nil : (self.candidateHovered ? self.selectedHoverColor : self.fillColor))
         : (self.candidateHovered ? self.hoverColor : nil);
     if (rowFill != nil && rowFill.alphaComponent > 0.01)
     {
@@ -186,13 +190,15 @@
 {
     NSPanel *_window;
     MetasequoiaCandidateChromeView *_chrome;
-    NSImageView *_decorationView;
+    MSIMECandidateDecorationView *_decorationView;
     NSArray<NSAttributedString *> *_data;
     NSFont *_font;
     NSInteger _selected;
     metasequoia::mac::ResolvedSkin _skin;
     NSImage *_decorationImage;
+    MSIMEDecorationFrames *_decorationFrames;
     CGFloat _tallestVerticalHeight;
+    MSIMECandidateMotion *_motion;
 }
 
 - (void)setDelegate:(id<MetasequoiaCandidatePanelDelegate>)delegate
@@ -222,14 +228,8 @@
         _window.hasShadow = YES;
         _window.collectionBehavior =
             NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary;
-        _chrome = [[MetasequoiaCandidateChromeView alloc] initWithFrame:NSZeroRect];
-        _chrome.appearanceTarget = self;
-        _chrome.appearanceAction = @selector(reloadSkin);
-        _window.contentView = _chrome;
-        _decorationView = [[NSImageView alloc] initWithFrame:NSZeroRect];
-        _decorationView.imageScaling = NSImageScaleProportionallyUpOrDown;
-        _decorationView.imageAlignment = NSImageAlignTopRight;
-        _decorationView.wantsLayer = YES;
+        _motion = [MSIMECandidateMotion new];
+        [self installChrome];
         [self reloadSkin];
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(reloadSkin)
@@ -241,7 +241,19 @@
 - (void)dealloc
 {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [_motion stop];
     [_window orderOut:nil];
+}
+// 卡片和装饰视图。退场把旧卡片连同装饰带进退场窗淡出，窗口换上一套新的，下一次排版画在新卡片上。卡片有自己的图层，进场和退场都加在它上面。
+- (void)installChrome
+{
+    _chrome = [[MetasequoiaCandidateChromeView alloc] initWithFrame:_window.contentView.frame];
+    _chrome.wantsLayer = YES;
+    _chrome.appearanceTarget = self;
+    _chrome.appearanceAction = @selector(reloadSkin);
+    _window.contentView = _chrome;
+    _decorationView = [[MSIMECandidateDecorationView alloc] initWithFrame:NSZeroRect];
+    _decorationView.identifier = @"candidate-decoration";
 }
 - (NSPanel *)window
 {
@@ -252,9 +264,11 @@
     _skin = MetasequoiaResolveStoredTheme(MetasequoiaAppearanceIsDark(_chrome.effectiveAppearance),
                                           _panelType == kIMKSingleColumnScrollingCandidatePanel);
     _decorationImage = nil;
+    _decorationFrames = nil;
     if (_skin.decorationTopDip > 0.0 && !_skin.decorationPath.empty())
     {
         _decorationImage = [[NSImage alloc] initWithContentsOfFile:@(_skin.decorationPath.c_str())];
+        _decorationFrames = [MSIMEDecorationFrames framesWithContentsOfFile:@(_skin.decorationPath.c_str())];
     }
     [self layoutCandidates];
 }
@@ -291,9 +305,10 @@
 {
     _data = [candidates copy];
     _selected = _data.count > 0 ? 0 : NSNotFound;
-    [self layoutCandidates];
+    // 先收起再排版：退场带走的是屏幕上那一页，而不是排空之后的卡片。
     if (_data.count == 0)
         [self hide];
+    [self layoutCandidates];
 }
 - (NSScreen *)screenForCaret
 {
@@ -307,6 +322,8 @@
     MetasequoiaCandidateWindow *window = (MetasequoiaCandidateWindow *)_window;
     window.hasPreviousPage = _hasPreviousPage;
     window.hasNextPage = _hasNextPage;
+    // 选中装饰挂在旧按钮下面，按钮要重建了。
+    [_motion endSelection];
     for (NSView *view in [_chrome.subviews copy])
         [view removeFromSuperview];
     const CGFloat inset = msime::mac::CandidateInset(_skin.tokens);
@@ -364,17 +381,21 @@
     _chrome.cornerRadius = _skin.tokens.radius;
     _chrome.lineWidth = _skin.tokens.borderWidth;
     _chrome.needsDisplay = YES;
-    if (decorationHeight > 0.0 && _decorationImage != nil)
+    const double decorationMargin =
+        _skin.decorationMotion != msime::mac::DecorationMotion::none ? msime::mac::kDecorationMotionMargin : 0.0;
+    const auto placed = decorationHeight > 0.0 && _decorationImage != nil
+                            ? msime::mac::DecorationPlacement(_skin.decorationAlign, size.width, inset, decorationHeight,
+                                                              _skin.decorationWidthDip > 0.0 ? _skin.decorationWidthDip
+                                                                                             : MIN(size.width, _decorationImage.size.width),
+                                                              _decorationImage.size.width, _decorationImage.size.height,
+                                                              decorationMargin)
+                            : std::nullopt;
+    if (placed)
     {
-        const CGFloat decorationWidth =
-            _skin.decorationWidthDip > 0.0 ? _skin.decorationWidthDip : MIN(size.width, _decorationImage.size.width);
+        // 与产品路径 InputController 的摆法相同：底边压进卡片顶边一个内边距，有待机动效时四周留出余量。
         _decorationView.image = _decorationImage;
-        _decorationView.imageAlignment = _skin.decorationAlign == msime::mac::DecorationAlign::left     ? NSImageAlignTopLeft
-                                         : _skin.decorationAlign == msime::mac::DecorationAlign::center ? NSImageAlignTop
-                                                                                                        : NSImageAlignTopRight;
-        _decorationView.frame =
-            NSMakeRect(msime::mac::DecorationLeft(_skin.decorationAlign, size.width, inset, decorationWidth),
-                       size.height - decorationHeight, decorationWidth, decorationHeight);
+        _decorationView.frames = _decorationFrames;
+        _decorationView.frame = NSMakeRect(placed->x, size.height - placed->top - placed->height, placed->width, placed->height);
         [_chrome addSubview:_decorationView];
     }
     CGFloat x = inset;
@@ -431,6 +452,16 @@
             [_chrome addSubview:button];
         }
     }
+    // 面板已经在屏幕上时重排（换了候选、翻页）不经过 show:，装饰图在这里接着动。
+    if (_window.isVisible)
+        [self animateDecoration];
+}
+// 装饰图的待机动效和 APNG 帧动画，只在面板可见时挂上；这一页没画装饰图时撤掉。
+- (void)animateDecoration
+{
+    [_motion animateDecoration:_decorationView.superview != nil ? _decorationView : nil
+                        motion:_skin.decorationMotion
+                      periodMs:_skin.decorationMotionPeriodMs];
 }
 - (void)selectFromMouse:(NSButton *)button
 {
@@ -456,38 +487,46 @@
     if (!std::isfinite(caret.origin.x) || !std::isfinite(caret.origin.y) || !std::isfinite(caret.size.width) ||
         !std::isfinite(caret.size.height) || caret.size.height <= 0)
     {
-        [self hide];
+        [self hideAllowingExit:NO];
         return;
     }
     [self layoutCandidates];
     NSRect bounds = [self screenForCaret].visibleFrame;
     NSSize size = _window.frame.size;
-    CGFloat x = MIN(MAX(NSMinX(caret), NSMinX(bounds)), MAX(NSMinX(bounds), NSMaxX(bounds) - size.width));
     const BOOL vertical = _panelType == kIMKSingleColumnScrollingCandidatePanel;
     if (vertical)
         _tallestVerticalHeight = MAX(_tallestVerticalHeight, size.height);
-    const CGFloat decisionHeight = vertical ? _tallestVerticalHeight : size.height;
-    CGFloat y = NSMinY(caret) - size.height - 4;
-    // Use the tallest vertical page seen in this composition to choose the
-    // side of the caret, but place the current page with its actual height.
-    // This prevents a growing page from jumping below-to-above while avoiding
-    // an empty gap when a later page is shorter.
-    const CGFloat decisionY = NSMinY(caret) - decisionHeight - 4;
-    if (decisionY < NSMinY(bounds))
-        y = NSMaxY(caret) + 4;
-    y = MIN(MAX(y, NSMinY(bounds)), MAX(NSMinY(bounds), NSMaxY(bounds) - size.height));
-    [_window setFrameOrigin:NSMakePoint(x, y)];
-    _window.animationBehavior = NSWindowAnimationBehaviorNone;
-    _window.alphaValue = 1.0;
-    [_window orderFrontRegardless];
+    // Use the tallest vertical page seen in this composition to choose the side of the caret, but place the current page with its actual height. This prevents a growing page from jumping below-to-above while avoiding an empty gap when a later page is shorter.
+    // 和产品面板同一套摆法：layoutCandidates 在卡片顶上留的装饰带不算进光标和卡片之间的距离。
+    const CGFloat decorationHeight = _skin.decorationTopDip > 0.0 ? _skin.decorationTopDip : 0.0;
+    const NSPoint origin = MSIMECandidateOrigin(caret, size, bounds, vertical ? _tallestVerticalHeight : size.height, decorationHeight);
+    [_window setFrameOrigin:origin];
+    NSMutableArray<NSView *> *rows = [NSMutableArray array];
+    for (NSView *view in _chrome.subviews)
+        if ([view isKindOfClass:MetasequoiaCandidateButton.class] && view.tag >= 0)
+            [rows addObject:view];
+    [_motion showPanel:_window animation:_skin.animation rows:rows];
+    [self animateDecoration];
     msime_macos_diagnostic_writef("candidate-position hint=%ld rows=%lu vertical=%d size=(%.0f,%.0f) origin=(%.0f,%.0f) flipped=%d",
-        (long)hint, (unsigned long)_data.count, vertical ? 1 : 0, size.width, size.height, x, y, y >= NSMaxY(caret) ? 1 : 0);
+        (long)hint, (unsigned long)_data.count, vertical ? 1 : 0, size.width, size.height, origin.x, origin.y, origin.y >= NSMaxY(caret) ? 1 : 0);
 }
 - (void)hide
 {
+    [self hideAllowingExit:YES];
+}
+// 光标无效时立即收起，不留旧候选；普通收起可以播皮肤写了的退场。两种情况窗口都立即不可见。
+- (void)hideAllowingExit:(BOOL)allowExit
+{
     if (msime_macos_diagnostic_enabled() && _window.isVisible) msime_macos_diagnostic_write("candidate hide reason=panel_hide");
     _tallestVerticalHeight = 0;
-    [_window orderOut:nil];
+    // 退场的旧卡片换窗口时不能再回头重排它：那会把正在淡出的候选换成排空之后的样子。
+    MetasequoiaCandidateChromeView *leaving = _chrome;
+    leaving.appearanceTarget = nil;
+    [_motion hidePanel:_window animation:_skin.animation allowExit:allowExit];
+    if (_window.contentView != leaving)
+        [self installChrome];
+    else
+        leaving.appearanceTarget = self;
 }
 - (BOOL)isVisible
 {
@@ -513,7 +552,9 @@
 {
     if ([self candidateIdentifierAtLineNumber:identifier] == NSNotFound)
         return NO;
+    const BOOL changed = _selected != identifier;
     _selected = identifier;
+    MetasequoiaCandidateButton *highlighted = nil;
     for (NSView *view in _chrome.subviews)
         if ([view isKindOfClass:MetasequoiaCandidateButton.class])
         {
@@ -525,8 +566,16 @@
             button.numberColor = button.candidateHighlighted ? MetasequoiaColorFromRgba(_skin.tokens.selectedText)
                                                              : MetasequoiaColorFromRgba(_skin.tokens.number);
             view.needsDisplay = YES;
-
+            if (button.candidateHighlighted)
+                highlighted = button;
         }
+    // 高亮已经在上面同步换好；动效只装饰新高亮行的底色。
+    if (changed && highlighted != nil && _window.isVisible)
+        [_motion decorateSelectionOfRow:highlighted
+                                   fill:highlighted.fillColor
+                           cornerRadius:highlighted.cornerRadius
+                                 accent:MetasequoiaColorFromRgba(_skin.tokens.accent)
+                              animation:_skin.animation];
     return YES;
 }
 - (NSInteger)selectedCandidate

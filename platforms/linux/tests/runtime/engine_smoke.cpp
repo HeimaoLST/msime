@@ -540,7 +540,7 @@ int main(int argc, char **argv) {
     invoke("FocusIn");
     require(!wait_until([&] { return seen.auxiliary_visible; }) || seen.auxiliary != "中",
             "A repeated focus showed the input mode again");
-    // GNOME Shell 以外，IBus 宿主告诉设置页它的面板只接收字体和颜色（candidate-panel.json 的 ibus_panel），设置页据此说明圆角、边框颜色和皮肤的装饰图不生效。目录名随安装版本，所以按文件名找。
+    // GNOME Shell 以外，IBus 宿主告诉设置页它的面板只接收字体和颜色（candidate-panel.json 的 ibus_panel），设置页据此说明圆角和皮肤的装饰图不生效。目录名随安装版本，所以按文件名找。
     const auto panel_status = [&] {
       std::error_code error;
       for (const auto &entry : std::filesystem::recursive_directory_iterator(runtime, error))
@@ -3140,7 +3140,7 @@ int main(int argc, char **argv) {
     invoke("Reset");
     for (guint delete_key : {IBUS_Delete, IBUS_KP_Delete}) {
       phrase();
-      require(key(IBUS_Left) && key(delete_key) && seen.preedit == "niha" &&
+      require(key(IBUS_Left, IBUS_CONTROL_MASK) && key(delete_key) && seen.preedit == "niha" &&
                   seen.preedit_visible && seen.committed.empty(),
               "Forward delete cancelled incremental composition instead of editing at caret");
       invoke("Reset");
@@ -3158,13 +3158,12 @@ int main(int argc, char **argv) {
                   .c_str());
       seen.committed.clear();
     }
-    // Ctrl-only segment editing follows the Windows composition behavior:
-    // arrows cross one pinyin unit and Backspace removes the unit to the left.
+    // 全拼的 Ctrl+左右移动一个字母，Ctrl+退格仍删除左侧拼音段；普通左右键用于整句改字。
     phrase();
-    require(key(IBUS_Left, IBUS_CONTROL_MASK) && seen.preedit_cursor == 2,
-            "Ctrl+Left did not move to the preceding pinyin segment");
+    require(key(IBUS_Left, IBUS_CONTROL_MASK) && seen.preedit_cursor == 4,
+            "Ctrl+Left did not move to the preceding pinyin letter");
     require(key(IBUS_Right, IBUS_CONTROL_MASK) && seen.preedit_cursor == 5,
-            "Ctrl+Right did not move to the following pinyin segment");
+            "Ctrl+Right did not move to the following pinyin letter");
     require(key(IBUS_BackSpace, IBUS_CONTROL_MASK) && seen.preedit == "ni" &&
                 seen.preedit_cursor == 2,
             "Ctrl+Backspace did not remove one pinyin segment");
@@ -3185,13 +3184,14 @@ int main(int argc, char **argv) {
             "Candidate numeric label missing");
     require(seen.second_candidate_color == 0x123456,
             "Candidate text color attribute missing");
-    // A picked selection colour carries black or white text by its luminance (client-core skin/theme.rs), so the dark fixture fill gives white.
+    // 自选的选中色按亮度配黑字或白字（client-core 的 `theme.rs`），所以夹具里的深色填充得到白字。
     require(seen.first_candidate_color == 0xffffff,
             "Highlighted candidate text is not readable on the picked selection colour");
     require(seen.first_candidate_background == 0x204060,
             "Selected candidate color attribute missing");
-    require(seen.second_candidate_number_color == 0xabcdef,
-            "Candidate number color attribute missing");
+    // 存下的编号色 #abcdef 不再读（编号色跟随主题，HostCapabilities::candidate_number_color 在 Linux 为假）：编号色由文字颜色 #123456 按 PICKED_NUMBER_ALPHA（0x9D）推出，再合成到表面色 #654321 上。
+    require(seen.second_candidate_number_color == 0x323a42,
+            "Candidate number color is not derived from the picked text color");
     // The host publishes the candidate menu on a 400ms timer after the page changes, so wait for it rather than reading it in the turn that drew the page.
     const auto candidate_actions_deadline = g_get_monotonic_time() + 2 * G_USEC_PER_SEC;
     while ((seen.first_candidate_fix_name.empty() || seen.first_candidate_clear_name.empty()) &&
@@ -3218,7 +3218,7 @@ int main(int argc, char **argv) {
                          PROP_STATE_UNCHECKED));
     require(seen.candidates.front().find("固定") == std::string::npos,
             "Candidate position clear did not release the fixed candidate");
-    require(key(IBUS_Left) && seen.auxiliary.find("niha|o") != std::string::npos,
+    require(key(IBUS_Left, IBUS_CONTROL_MASK) && seen.auxiliary.find("niha|o") != std::string::npos,
             "Candidate auxiliary text did not expose the preedit caret");
     const auto stale_candidate_action = seen.first_candidate_fix_name;
     invoke("Reset");
@@ -3403,6 +3403,21 @@ int main(int argc, char **argv) {
                 !seen.lookup_visible,
             "Unicode candidate was not committed through IBus");
 
+    // surrounding text 无效时，输入法自己刚上屏的 ASCII 数字仍应作为智能标点前文。
+    // Unicode 模式生成固定的数字，避免把测试依赖到编辑器原有内容。
+    invoke("Reset");
+    seen.committed.clear();
+    require(key('u', IBUS_SHIFT_MASK), "Unicode mode could not start for smart punctuation shadow");
+    for (const char character : std::string("0030"))
+      require(key(static_cast<guint>(character)), "Unicode digit input was not consumed");
+    require(key(IBUS_space) && seen.committed == "0",
+            "Unicode mode did not commit the synthetic ASCII digit");
+    require(!key(IBUS_space, IBUS_RELEASE_MASK),
+            "Unicode Space release was unexpectedly consumed");
+    IBUS_ENGINE_GET_CLASS(engine)->set_surrounding_text(engine, nullptr, 0, 0);
+    require(key(IBUS_period) && seen.committed == "0.",
+            "IBus did not keep an input-method ASCII digit as smart-punctuation context");
+
     invoke("Reset");
     seen.committed.clear();
     require(key('t', IBUS_SHIFT_MASK), "Date-time mode could not restart");
@@ -3484,9 +3499,13 @@ int main(int argc, char **argv) {
             "Temporary English mode did not expose its raw candidate");
     const bool settled_commit_5 = key(IBUS_Return);
     settle_lookup();
-    require(settled_commit_5 && seen.committed == "MSIME" && !seen.preedit_visible &&
+    require(settled_commit_5 && seen.committed == "YMSIME" && !seen.preedit_visible &&
                 !seen.lookup_visible,
-            "Temporary English raw text was not committed through IBus");
+            ("Temporary English raw text was not committed through IBus: handled=" +
+             std::to_string(settled_commit_5) + " committed=[" + seen.committed +
+             "] preedit=[" + seen.preedit + "] preedit_visible=" +
+             std::to_string(seen.preedit_visible) + " lookup_visible=" +
+             std::to_string(seen.lookup_visible)).c_str());
 
     invoke("Reset");
     seen.committed.clear();
@@ -3530,14 +3549,13 @@ int main(int argc, char **argv) {
     require(key('n') && seen.preedit == "n",
             "Temporary Japanese candidate commit did not restore Chinese input");
 
-    // Enter commits the raw Romaji spelling, without the display-only R
-    // prefix, and also returns to the original Chinese session.
+    // 回车按共享契约原样上屏含入口字母的预编辑，再恢复中文会话。
     invoke("Reset");
     seen.committed.clear();
     require(key('r', IBUS_SHIFT_MASK) && key('k') && key('a') && key(IBUS_Return),
             "Temporary Japanese raw Enter path was not consumed");
-    require(seen.committed == "ka",
-            "Temporary Japanese raw Enter committed the display-only prefix");
+    require(seen.committed == "Rka",
+            "临时日文回车未原样上屏包含入口字母的预编辑");
     require(key('n') && seen.preedit == "n",
             "Temporary Japanese raw Enter did not restore Chinese input");
 
@@ -4403,6 +4421,14 @@ int main(int argc, char **argv) {
       require(wait_until([&] { return seen.committed == before + "好"; }) &&
                   seen.forwarded.size() == 2,
               "Panel text did not commit as it is");
+      before = seen.committed;
+      require(panel({{"op", "text"}, {"text", "0"}}),
+              "Panel ASCII text was refused");
+      require(wait_until([&] { return seen.committed == before + "0"; }),
+              "Panel ASCII text did not commit");
+      IBUS_ENGINE_GET_CLASS(engine)->set_surrounding_text(engine, nullptr, 0, 0);
+      require(!key(IBUS_period) && seen.committed == before + "0",
+              "Panel ASCII text did not provide smart-punctuation shadow context");
       // Under CapsLock a physical letter arrives uppercase with the lock and goes to the editor; the screen keyboard's lowercase letter has to do the same rather than start a composition.
       require(!key('N', IBUS_LOCK_MASK) && !key('N', IBUS_LOCK_MASK | IBUS_RELEASE_MASK) &&
                   !seen.preedit_visible,

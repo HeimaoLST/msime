@@ -9,6 +9,7 @@ import type {
 import { ShortcutRow } from "./shortcut-row";
 import { SettingsShortcutKey } from "./settings-shortcut-key";
 import { SwitchRow } from "./switch-row";
+import { enabledPagingShortcuts, wordCharacterKeys } from "./candidate-paging-options";
 
 export interface CandidateShortcutsSectionProps {
   navigation: NavigationPreferences;
@@ -24,21 +25,9 @@ export interface CandidateShortcutsSectionProps {
   onRestoreDefaults?: () => void;
   /** HarmonyOS 手机的「翻页」分组内容（外接键盘翻页键），排在「候选」和「按键速查」之间。 */
   paging?: ReactNode;
+  /** 接在候选参考行之后、一起收进「按键速查」的其他只读行（面板快捷键）。 */
+  extraReference?: ReactNode;
 }
-
-/** 「向前 / 向后翻页」的各组按键，顺序与输入页的翻页方式一致。 */
-const pagingKeys: [keyof NavigationPreferences, string][] = [
-  ["minus_equal", "- / ="],
-  ["comma_period", ", / ."],
-  ["brackets", "[ / ]"],
-  ["tab", "Shift+Tab / Tab"],
-  ["page_up_down", "Page Up / Page Down"],
-];
-
-const wordCharacterKeys: Record<WordCharacterPreferences["keys"], string> = {
-  brackets: "[ / ]",
-  minus_equal: "- / =",
-};
 
 /** 设计稿中的行内按钮：胶囊形，使用平台的按钮 token，13px 文字。 */
 const rowButton =
@@ -55,6 +44,7 @@ export function CandidateShortcutsSection({
   harmonyPhone = false,
   onRestoreDefaults,
   paging,
+  extraReference,
 }: CandidateShortcutsSectionProps) {
   const numberRowSwitch = showNumberRowSelection && (
     <SwitchRow
@@ -97,12 +87,22 @@ export function CandidateShortcutsSection({
       </>
     );
   }
+  // 参考行不是设置，却占了这一页的大半；和鸿蒙手机一样收进「按键速查」。翻页键和以词定字在输入页设置，这里只列出它们现在用哪些键。
   return (
-    <GroupList title="候选操作">
-      <SettingsGroupNote>输入和选取候选词时使用</SettingsGroupNote>
-      {numberRowSwitch}
-      {reference}
-    </GroupList>
+    <>
+      {numberRowSwitch && (
+        <GroupList title="候选操作">
+          <SettingsGroupNote>输入和选取候选词时使用</SettingsGroupNote>
+          {numberRowSwitch}
+        </GroupList>
+      )}
+      <GroupList title="按键速查">
+        <MoreOptions>
+          {reference}
+          {extraReference}
+        </MoreOptions>
+      </GroupList>
+    </>
   );
 }
 
@@ -116,7 +116,7 @@ function CandidateShortcutReference({
   CandidateShortcutsSectionProps,
   "navigation" | "wordCharacter" | "numberRowSelection" | "mobile"
 >) {
-  const paging = pagingKeys.filter(([option]) => navigation[option]);
+  const paging = enabledPagingShortcuts(navigation);
   return (
     <>
       <ShortcutRow title="选择候选" chord={`Space${numberRowSelection ? " 或 1–9" : ""}`} />
@@ -138,6 +138,10 @@ function CandidateShortcutReference({
         <ShortcutRow title={mobile ? "候选栏翻页" : "候选窗口翻页"} chord="鼠标滚轮" />
       )}
       {navigation.arrows && <ShortcutRow title="移动候选项" chord="↑ / ↓" />}
+      {/* 打开左右键移动候选时，左右键先编辑输入串，光标到了这一端才移高亮，所以两行标题都要写清是什么时候发生的。 */}
+      {navigation.left_right && (
+        <ShortcutRow title="移动候选项（输入串两端）" chord="← / →" />
+      )}
       {wordCharacter?.enabled && (
         <ShortcutRow
           title="以词定字（上屏首字 / 末字）"

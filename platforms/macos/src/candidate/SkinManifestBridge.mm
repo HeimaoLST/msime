@@ -1,4 +1,4 @@
-// External skin manifests are validated by the shared client-core loader over the host C ABI, the one the settings page and the other hosts use. Windows parses skin.toml with toml++ (server/src/skin/candidate_skin_catalog.cpp), so the loader has to be a full TOML 1.0 parser too; a hand-written subset here would draw Fluent for packages the settings page lists as valid.
+// 外部皮肤清单经宿主 C ABI 由共享的 client-services 加载器校验，设置页和其他宿主用的也是它。Windows 用 toml++ 解析 skin.toml（server/src/skin/candidate_skin_catalog.cpp），所以这个加载器也必须是完整的 TOML 1.0 解析器；在这里手写一个子集，会让设置页列为有效的包被画成 Fluent。
 #include "CandidateSkin.h"
 
 #import <Foundation/Foundation.h>
@@ -100,13 +100,22 @@ SkinAnimationPreset AnimationPreset(NSString *value)
     return SkinAnimationPreset::none;
 }
 
+// 清单写了这个预设才播放：省略 [animation] 或其中某个预设时，共享解析器补上的活泼默认组合在 macOS 上一律按 none 处理，见 .agents/notes/implemented/feature/2026-10-16-macos-candidate-declared-motion.md。没有 declared 的旧库同样不播放。
+SkinAnimationPreset DeclaredAnimationPreset(NSDictionary *object, NSDictionary *declared, NSString *key)
+{
+    NSNumber *written = [declared isKindOfClass:NSDictionary.class] ? declared[key] : nil;
+    if (![written isKindOfClass:NSNumber.class] || !written.boolValue) return SkinAnimationPreset::none;
+    return AnimationPreset(object[key]);
+}
+
 SkinAnimation AnimationFromJSON(NSDictionary *object)
 {
     SkinAnimation animation;
     if (![object isKindOfClass:NSDictionary.class]) return animation;
-    animation.enter = AnimationPreset(object[@"enter"]);
-    animation.exit = AnimationPreset(object[@"exit"]);
-    animation.selection = AnimationPreset(object[@"selection"]);
+    NSDictionary *declared = object[@"declared"];
+    animation.enter = DeclaredAnimationPreset(object, declared, @"enter");
+    animation.exit = DeclaredAnimationPreset(object, declared, @"exit");
+    animation.selection = DeclaredAnimationPreset(object, declared, @"selection");
     const double duration = NumberField(object, @"durationMs");
     const double stagger = NumberField(object, @"staggerMs");
     if (duration >= 40.0 && duration <= 600.0) animation.durationMs = duration;
@@ -200,6 +209,16 @@ std::optional<SkinPackage> PackageFromJSON(id value)
     package.decorationAlign = align == "left"     ? DecorationAlign::left
                               : align == "center" ? DecorationAlign::center
                                                   : DecorationAlign::right;
+    const std::string motion = StringField(object, @"decorationMotion");
+    package.decorationMotion = motion == "float"     ? DecorationMotion::floating
+                               : motion == "sway"    ? DecorationMotion::sway
+                               : motion == "breathe" ? DecorationMotion::breathe
+                               : motion == "bounce"  ? DecorationMotion::bounce
+                                                     : DecorationMotion::none;
+    const double period = NumberField(object, @"decorationMotionPeriodMs");
+    if (period >= 1200.0 && period <= 8000.0) package.decorationMotionPeriodMs = period;
+    const double frames = NumberField(object, @"decorationFrames");
+    package.decorationFrames = frames >= 0.0 && frames <= 1000.0 ? static_cast<unsigned>(frames) : 0;
     NSDictionary *background = object[@"background"];
     if ([background isKindOfClass:NSDictionary.class] && !StringField(background, @"image").empty())
     {
@@ -312,6 +331,22 @@ std::string LocalizedReason(const std::string &reason)
     if (reason == "invalid decoration")
     {
         return "decoration 尺寸、图片或对齐方式无效";
+    }
+    if (reason == "decoration motion requires schema_version 2")
+    {
+        return "decoration.motion 需要 schema_version 2";
+    }
+    if (reason == "invalid decoration motion" || reason == "invalid decoration motion_period_ms")
+    {
+        return "decoration.motion 须为 none、float、sway、breathe 或 bounce，motion_period_ms 在 1200–8000 之间，且包要有装饰";
+    }
+    if (reason == "animated image has too many frames")
+    {
+        return "APNG 动画帧数超过 120";
+    }
+    if (reason == "image dimensions exceed limits")
+    {
+        return "图片尺寸超出限制：每边最多 2048 像素，全部图片（APNG 每一帧都算一张）合计最多 800 万像素";
     }
     for (std::string_view key : {"image ", "align "})
     {
@@ -628,8 +663,12 @@ ResolvedSkin ResolveSkin(std::string_view globalTheme, const CustomTheme &custom
             ApplyThemeColor(palette, @"selected", tokens.selected);
             const bool selectedText = ApplyThemeColor(palette, @"selected_text", tokens.selectedText);
             const bool selectedNumber = ApplyThemeColor(palette, @"selected_number", tokens.selectedNumber);
+            // 皮肤清单可以写 `selected_translation`；共享层哪天把它放进解析结果，就照它画，不再推导。
+            Rgba selectedTranslation;
+            const bool givenSelectedTranslation = tokens.translation && ApplyThemeColor(palette, @"selected_translation", selectedTranslation);
+            if (givenSelectedTranslation) tokens.selectedTranslation = selectedTranslation;
             // Over a system base the shared resolver leaves these two to the platform, and the native white is only readable on the native solid accent: a package's translucent `selected` or a light picked colour needs them from the fill that is actually drawn.
-            DeriveSelectedForegrounds(tokens, !selectedText, !selectedNumber);
+            DeriveSelectedForegrounds(tokens, !selectedText, !selectedNumber, !givenSelectedTranslation);
             ApplyThemeColor(palette, @"hover", tokens.hover);
             tokens.selectedHover = tokens.selected;
             NSNumber *bar = palette[@"show_selected_bar"];
@@ -650,6 +689,8 @@ ResolvedSkin ResolveSkin(std::string_view globalTheme, const CustomTheme &custom
                 resolved.decorationTopDip = package->decorationTopDip;
                 resolved.decorationWidthDip = package->decorationWidthDip;
                 resolved.decorationAlign = package->decorationAlign;
+                resolved.decorationMotion = package->decorationMotion;
+                resolved.decorationMotionPeriodMs = package->decorationMotionPeriodMs;
                 resolved.minWidthDip = package->minWidthDip;
                 if (package->cornerRadiusDip)
                 {

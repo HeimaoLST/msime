@@ -8,10 +8,21 @@
  */
 import { HitOffset, KeyboardGeometry } from "../entry/src/main/ets/keyboard/KeyboardGeometry";
 import {
+  LOCAL_ASR_SAMPLE_RATE,
+  LOCAL_ONLINE_TAIL_SAMPLES,
   LocalAsrPolicy,
+  OFFLINE_TRANSDUCER_MAX_ACTIVE_PATHS,
   PcmFrameSlicer,
   SpeechSentenceAccumulator,
+  TRANSDUCER_HOTWORDS_SCORE,
 } from "../entry/src/main/ets/keyboard/input/LocalAsrPolicy";
+import {
+  SPACE_DRAG_THRESHOLD_VP,
+  SPACE_LONG_PRESS_MS,
+  SpaceGestureOutcome,
+  SpaceGestureState,
+  SpaceVoiceGesture,
+} from "../entry/src/main/ets/keyboard/input/SpaceVoiceGesture";
 import {
   LocalAsrPathTrust,
   PathTrustStat,
@@ -97,6 +108,15 @@ import {
   DIRECTION_DOWN,
 } from "../entry/src/main/ets/keyboard/input/JapaneseNineKeyLayout";
 import { JapaneseNineKeyActions } from "../entry/src/main/ets/keyboard/input/JapaneseNineKeyActions";
+import {
+  nineKeyShuangpinCompactHint,
+  nineKeyShuangpinDescription,
+  nineKeyShuangpinLabel,
+  nineKeyShuangpinProblemMessage,
+  nineKeyShuangpinProfileTitle,
+  normalizedNineKeyShuangpinProfile,
+  validNineKeyShuangpinKey,
+} from "../entry/src/main/ets/keyboard/input/NineKeyShuangpinKeypad";
 import { ChineseHelpcodePolicy } from "../entry/src/main/ets/keyboard/input/ChineseHelpcodePolicy";
 import { WubiCodeHintPolicy } from "../entry/src/main/ets/keyboard/input/WubiCodeHintPolicy";
 import { LetterKeyFacePolicy } from "../entry/src/main/ets/keyboard/input/LetterKeyFacePolicy";
@@ -198,6 +218,11 @@ import {
   EnglishReplacement,
   EnglishSuggestionPolicy,
 } from "../entry/src/main/ets/keyboard/input/EnglishSuggestionPolicy";
+import {
+  EMAIL_SUFFIXES,
+  EmailSuffixMatch,
+  EmailSuffixPolicy,
+} from "../entry/src/main/ets/keyboard/input/EmailSuffixPolicy";
 import { ImeModeScopePolicy } from "../entry/src/main/ets/keyboard/input/ImeModeScopePolicy";
 import {
   HARMONY_CAPTURE_BACKEND,
@@ -222,6 +247,7 @@ import { AppThemeStore } from "../entry/src/main/ets/keyboard/skin/AppThemeStore
 import {
   FunctionPanelItem,
   FunctionPanelPolicy,
+  PickerGrid,
 } from "../entry/src/main/ets/keyboard/FunctionPanelPolicy";
 import { KeyboardIconPaths } from "../entry/src/main/ets/keyboard/KeyboardIconPaths";
 import { OneHandedMode, OneHandedPolicy } from "../entry/src/main/ets/keyboard/OneHandedPolicy";
@@ -1255,6 +1281,59 @@ group("merges translation rows without unbounded display growth", () => {
   check(entries[0].translation === "hello / greeting", "oversized glosses are ignored");
 });
 
+group("touch keyboards request only the primary translation language", () => {
+  // 手机上只显示一种候选翻译：偏好里配了第二种语言，共享查询会照样带上它，触屏键盘不请求它、不查它的离线词典，候选栏也只预留一行。
+  const query: TranslationQuery = {
+    generation: 4,
+    target_language: "ja",
+    target_languages: ["ja", "en"],
+    candidates: [{ text: "你好", source: 0 }],
+    english_gloss: true,
+    offline_gloss_languages: ["ja", "de"],
+  };
+  TranslationPolicy.keepPrimaryOnly(query);
+  check(
+    TranslationPolicy.targets(query).join(",") === "ja",
+    "the secondary language is not requested",
+  );
+  check(
+    TranslationPolicy.offlineTargets(query).join(",") === "ja",
+    "only the primary language's offline dictionary is read",
+  );
+  check(!query.english_gloss, "an English secondary language draws no offline English gloss");
+  const english: TranslationQuery = {
+    generation: 5,
+    target_language: "en",
+    target_languages: ["en", "fr"],
+    candidates: [{ text: "你好", source: 0 }],
+    english_gloss: true,
+    offline_gloss_languages: ["fr"],
+  };
+  TranslationPolicy.keepPrimaryOnly(english);
+  check(
+    TranslationPolicy.targets(english).join(",") === "en" &&
+      english.english_gloss &&
+      TranslationPolicy.offlineTargets(english).length === 0,
+    "an English primary keeps its offline gloss and drops the secondary dictionary",
+  );
+  const providers = {
+    customEnabled: true,
+    customEndpoint: "https://translate.example/api",
+    niuTransEnabled: false,
+    niuTransAppId: "",
+    niuTransApiKey: "",
+    tencentEnabled: false,
+    tencentSecretId: "",
+    tencentSecretKey: "",
+  };
+  check(
+    CandidateGlossLayoutPolicy.rows(true, TranslationPolicy.targets(query), true, providers, [
+      "ja",
+    ]) === 1,
+    "a configured secondary language reserves no second gloss row",
+  );
+});
+
 group("offline dictionaries fill only what the user's own translator left", () => {
   const query: TranslationQuery = {
     generation: 3,
@@ -1285,6 +1364,17 @@ group("offline dictionaries fill only what the user's own translator left", () =
       answered[0].translation === "salut" &&
       answered[1].translation === "monde",
     "the online answer stays and the dictionary fills the unanswered candidate",
+  );
+});
+
+group("a silence timer waits while the VAD still hears speech", () => {
+  check(
+    VoiceRecognitionPolicy.silenceStops(false),
+    "silence ends a dictation nobody is speaking in",
+  );
+  check(
+    !VoiceRecognitionPolicy.silenceStops(true),
+    "a long VAD segment without new text does not end the dictation mid-sentence",
   );
 });
 
@@ -1451,6 +1541,39 @@ group(
   },
 );
 
+group("an empty Doubao address or resource ID takes the defaults the settings page shows", () => {
+  const doubao = { ...DEFAULT_VOICE_INPUT_CONFIGURATION, asr_provider: "doubao" };
+  // 设置页的「流式接口」把空地址显示成「双向流式」，「检查」按钮（共享的 `asrServiceCredentialTestConfig`）把空资源 ID 回退成 seedasr；键盘录音必须一样，两边对空地址、空资源 ID 的结论要相同。
+  const blank = { ...doubao, asr_endpoint: " ", asr_resource_id: "" };
+  check(
+    DoubaoCredentialPolicy.endpoint(blank) ===
+      "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async",
+    "an empty address is the bidirectional streaming endpoint",
+  );
+  check(
+    DoubaoCredentialPolicy.resourceId(blank) === "volc.seedasr.sauc.duration",
+    "an empty resource ID is the seedasr duration resource",
+  );
+  check(
+    DoubaoHeaderPolicy.validValue(DoubaoCredentialPolicy.resourceId(blank), 256),
+    "and the fallback is a valid handshake header",
+  );
+  const set = {
+    ...doubao,
+    asr_endpoint: " wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream ",
+    asr_resource_id: " volc.bigasr.sauc.duration ",
+  };
+  check(
+    DoubaoCredentialPolicy.endpoint(set) ===
+      "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream",
+    "a chosen address is kept, trimmed",
+  );
+  check(
+    DoubaoCredentialPolicy.resourceId(set) === "volc.bigasr.sauc.duration",
+    "a chosen resource ID is kept, trimmed",
+  );
+});
+
 group("keeps desktop-only chrome off touch devices", () => {
   check(KeyboardFormFactorPolicy.isDesktop("2in1"), "a 2-in-1 gets the desktop candidate window");
   check(!KeyboardFormFactorPolicy.isDesktop("phone"), "a phone keeps the touch keyboard");
@@ -1506,6 +1629,10 @@ group("projects the same form factor into every settings capability", () => {
     "phone settings hide the candidate card opacity and radius the strip ignores",
   );
   check(
+    phone.touchToolbarTools && !desktop.touchToolbarTools,
+    "only the phone keyboard has the toolbar row whose tools and display mode the page offers",
+  );
+  check(
     desktop.candidateWindowOpacity && desktop.candidateCornerRadius,
     "2-in-1 settings offer the candidate card opacity and radius",
   );
@@ -1547,7 +1674,7 @@ group("SymbolPanelPolicy", () => {
     "the symbol panel keeps its stable category order",
   );
   check(
-    symbolCategories.map((category) => category.symbols.length).join(",") === "30,50,40,50,30",
+    symbolCategories.map((category) => category.symbols.length).join(",") === "30,79,40,50,48",
     "the complete committed symbol catalog is present",
   );
   check(
@@ -1888,6 +2015,10 @@ group("every tool in the shortcut bar has a name", () => {
   check(
     KeyAccessibilityPolicy.englishSuggestion(2, "hello") === "英文补全 2：hello",
     "english completions get a spoken candidate label",
+  );
+  check(
+    KeyAccessibilityPolicy.emailSuffix(2, "@163.com") === "邮箱后缀 2：@163.com",
+    "邮箱后缀与 Android 读法相同",
   );
   check(
     KeyAccessibilityPolicy.spelling("ni hao") === "选择拼音 ni hao",
@@ -2246,6 +2377,10 @@ group("preference ids resolve to their scheme", () => {
     KeyboardScheme.fromPreferenceId("nine_key") === KeyboardScheme.QUANPIN_NINE_KEY,
     "nine_key is the quanpin nine-key scheme, not a layout flag",
   );
+  check(
+    KeyboardScheme.fromPreferenceId("nine_key_shuangpin") === KeyboardScheme.NINE_KEY_SHUANGPIN,
+    "nine_key_shuangpin resolves to the nine-key shuangpin scheme",
+  );
   check(KeyboardScheme.fromPreferenceId("unknown") === null, "an unknown id resolves to nothing");
   check(KeyboardScheme.fromPreferenceId(null) === null, "a null id resolves to nothing");
 });
@@ -2258,6 +2393,11 @@ group("engine preferences map back to the right scheme", () => {
   check(
     KeyboardScheme.fromPreferences("quanpin", null, "nine_key") === KeyboardScheme.QUANPIN_NINE_KEY,
     "quanpin plus nine_key is the nine-key scheme",
+  );
+  check(
+    KeyboardScheme.fromPreferences("quanpin", null, "nine_key_shuangpin") ===
+      KeyboardScheme.NINE_KEY_SHUANGPIN,
+    "quanpin plus nine_key_shuangpin is the nine-key shuangpin scheme",
   );
   check(
     KeyboardScheme.fromPreferences("japanese", null, "nine_key") ===
@@ -2288,6 +2428,32 @@ group("engine preferences map back to the right scheme", () => {
   );
 });
 
+group("nine-key shuangpin keypad labels and validation follow the host contract", () => {
+  const face = { key: "2", initials: ["b", "p"], finals: ["a", "ai"], zeroInitial: true };
+  check(nineKeyShuangpinLabel(face) === "零 b p\na ai", "face label includes initials and finals");
+  check(nineKeyShuangpinCompactHint(face) === "零 b p", "compact hint uses initials");
+  check(
+    nineKeyShuangpinDescription(face) === "2，声母 b p 和零声母，韵母 a ai",
+    "screen reader description includes both parts",
+  );
+  check(normalizedNineKeyShuangpinProfile("unknown") === "migala3", "unknown profile defaults");
+  check(nineKeyShuangpinProfileTitle("gushi2_low") === "辜氏 2 低重码", "profile title resolves");
+  check(
+    validNineKeyShuangpinKey("initials", "2") && !validNineKeyShuangpinKey("initials", "20"),
+    "initial keys are one digit",
+  );
+  check(
+    validNineKeyShuangpinKey("zero_initials", "20") &&
+      !validNineKeyShuangpinKey("zero_initials", "2"),
+    "zero initials are two digits",
+  );
+  check(
+    nineKeyShuangpinProblemMessage("invalid_key", "zero_initials", "a", "2") ===
+      "零声母「a」的键「2」不对：零声母要两位数字",
+    "invalid key has a useful message",
+  );
+});
+
 group("enabled schemes keep the fixed order and never resolve to nothing", () => {
   const enabled = KeyboardScheme.enabledFromPreferenceIds(["wubi", "quanpin", "xiaohe"]);
   check(enabled.length === 3, "three known ids yield three schemes");
@@ -2304,7 +2470,7 @@ group("enabled schemes keep the fixed order and never resolve to nothing", () =>
   );
   check(
     KeyboardScheme.enabledFromPreferenceIds(null) === KeyboardScheme.DEFAULT_ENABLED &&
-      KeyboardScheme.DEFAULT_ENABLED.length === KeyboardScheme.SCHEMES.length - 6,
+      KeyboardScheme.DEFAULT_ENABLED.length === KeyboardScheme.SCHEMES.length - 7,
     "a null list means every scheme but the six the user turns on",
   );
 });
@@ -2355,7 +2521,7 @@ group("输入方式面板里双拼只留用户设置的那一种（#6450）", ()
   check(
     KeyboardScheme.pickerSchemes(all, KeyboardScheme.QUANPIN, null).indexOf(
       KeyboardScheme.HANDWRITING,
-    ) < 7,
+    ) < 8,
     "手写回到第一页的八格之内（英文占第三格）",
   );
   check(
@@ -2682,6 +2848,40 @@ group("the digit layer re-labels the grid instead of handing over ten across", (
     "the sidebar keeps its four cells across the switch",
   );
   check(
+    NineKeyLayout.digitPunctuation().join(" ") === "+ - * /",
+    "the number pad exposes all four arithmetic operators",
+  );
+  check(
+    NineKeyLayout.opensNumberPad(true, false, false, "none", false),
+    "the ordinary Chinese numeric entry opens a number grid",
+  );
+  for (const state of [
+    [false, false, false, "none", false],
+    [true, true, false, "none", false],
+    [true, false, true, "none", false],
+    [true, false, false, "unicode", false],
+    [true, false, false, "none", true],
+  ] as [boolean, boolean, boolean, string, boolean][]) {
+    check(
+      !NineKeyLayout.opensNumberPad(...state),
+      "letters, extended symbols, English, local modes and independent languages keep their layouts",
+    );
+  }
+  // Android KeyboardActionRow.layerTitle(layout, true, true) and iOS numberPadReturnTitle print the same faces.
+  check(
+    NineKeyLayout.numberPadReturnTitle(false, false) === "拼音",
+    "a borrowed pad from the 26-key family or handwriting returns to 拼音",
+  );
+  check(
+    NineKeyLayout.numberPadReturnTitle(false, true) === "14键",
+    "a borrowed pad from the 14-key face returns to 14键",
+  );
+  check(
+    NineKeyLayout.numberPadReturnTitle(true, false) === "笔" &&
+      NineKeyLayout.numberPadReturnTitle(true, true) === "笔",
+    "a borrowed pad from the stroke keypad returns to 笔, which wins as it does in typingFace",
+  );
+  check(
     NineKeyLayout.digitPunctuation().every(
       (symbol: string) => !NineKeyLayout.punctuation().includes(symbol),
     ),
@@ -2847,7 +3047,7 @@ group("全拼 14 键的键表与引擎的组码表是同一张", () => {
 group("全拼 14 键是追加在最后的一张卡，只给全拼，默认不启用", () => {
   const fourteen: SchemeDefinition = KeyboardScheme.QUANPIN_FOURTEEN_KEY;
   check(
-    KeyboardScheme.SCHEMES[16] === fourteen && KeyboardScheme.SCHEMES.length === 17,
+    KeyboardScheme.SCHEMES[17] === fourteen && KeyboardScheme.SCHEMES.length === 18,
     "按 append-only 排在笔画之后",
   );
   check(
@@ -2917,8 +3117,10 @@ group("14 键的网格与键面", () => {
   check(
     KeyboardScheme.keyGrid("fourteen_key", "quanpin", false) === KeyGrid.FOURTEEN_KEY &&
       KeyboardScheme.keyGrid("nine_key", "quanpin", false) === KeyGrid.NINE_KEY &&
+      KeyboardScheme.keyGrid("nine_key_shuangpin", "quanpin", false) ===
+        KeyGrid.NINE_KEY_SHUANGPIN &&
       KeyboardScheme.keyGrid("twenty_six_key", "quanpin", false) === KeyGrid.NONE,
-    "全拼的 14 键、九键各开各的网格，26 键不开",
+    "全拼的 14 键、九键和九键双拼各开各的网格，26 键不开",
   );
   check(
     KeyboardScheme.keyGrid("fourteen_key", "quanpin", true) === KeyGrid.NONE &&
@@ -2931,8 +3133,11 @@ group("14 键的网格与键面", () => {
     "日语九键和其他方案不开引擎网格",
   );
   check(
-    KeyGrid.NONE === 0 && KeyGrid.NINE_KEY === 1 && KeyGrid.FOURTEEN_KEY === 2,
-    "取值与 msime_client_set_key_grid 的 0、1、2 相同",
+    KeyGrid.NONE === 0 &&
+      KeyGrid.NINE_KEY === 1 &&
+      KeyGrid.FOURTEEN_KEY === 2 &&
+      KeyGrid.NINE_KEY_SHUANGPIN === 3,
+    "取值与 msime_client_set_key_grid 的 0、1、2、3 相同",
   );
   check(KeyboardScheme.usesFourteenKeyFace(true, false, "none"), "14 键布局画 14 键键面");
   check(
@@ -3078,6 +3283,37 @@ group("九键外框底行：符 | 123 | 空格 | 中 | 回车，数字层把 符
   );
 });
 
+group("26 键底行保留逗号并长按句号；14 键和大千注音保留独立句号", () => {
+  const leads = (
+    scheme: string,
+    english: boolean,
+    fourteenKey: boolean,
+    symbols: boolean,
+  ): boolean =>
+    KeyboardScheme.designRowUsesCommaSecondaryPeriod(
+      SchemeCompositionPolicy.selectedRulesScheme(scheme, english, "none"),
+      KeyboardScheme.usesFourteenKeyFace(fourteenKey, english, "none"),
+      symbols,
+    );
+  for (const scheme of ["quanpin", "shuangpin", "wubi", "korean", "vietnamese", "tibetan"]) {
+    check(leads(scheme, false, false, false), `${scheme} 的 26 键字母层使用逗号长按句号`);
+    check(leads(scheme, true, false, false), `${scheme} 切到英文仍使用逗号长按句号`);
+    check(!leads(scheme, false, false, true), `${scheme} 的符号行不带 符`);
+  }
+  check(!leads("quanpin", false, true, false), "14 键第三行已有 符，底行保留逗号句号");
+  check(leads("quanpin", true, true, false), "14 键切到英文画 26 键，底行使用逗号长按句号");
+  check(!leads("zhuyin", false, false, false), "大千注音保留逗号句号");
+  check(leads("zhuyin", true, false, false), "注音切到英文画 26 键，底行使用逗号长按句号");
+  check(
+    KeyboardScheme.designRowUsesCommaSecondaryPeriod(
+      SchemeCompositionPolicy.selectedRulesScheme("zhuyin", false, "unicode"),
+      false,
+      false,
+    ),
+    "本地模式画 26 键，底行使用逗号长按句号",
+  );
+});
+
 console.log("NumberSymbolLayout");
 
 function texts(row: LayerKey[]): string {
@@ -3108,6 +3344,32 @@ group("the 123 layer carries Android's rows in both languages", () => {
       [LayerKeyKind.LETTERS, LayerKeyKind.EMOJI, LayerKeyKind.SPACE, LayerKeyKind.RETURN].join(","),
     "the bottom row's kinds",
   );
+});
+
+group("数字页的表情入口随顶部可用性切换，符号面板不留空位", () => {
+  for (const chinese of [false, true]) {
+    for (const corner of [false, true]) {
+      const fallback = NumberSymbolLayout.rows(false, chinese, corner, false);
+      const toolbar = NumberSymbolLayout.rows(false, chinese, corner, true);
+      check(fallback[3][1].kind === LayerKeyKind.EMOJI, "顶部不可用时保留表情");
+      check(toolbar[3][1].kind === LayerKeyKind.SYMBOL_PANEL, "顶部已有表情时直接打开符号面板");
+      check(toolbar[3][1].text === "符号", "符号入口键面");
+      check(
+        !toolbar[3].some((key: LayerKey): boolean => key.kind === LayerKeyKind.EMOJI),
+        "没有重复表情键",
+      );
+      check(rowWeight(toolbar[3]) === rowWeight(fallback[3]), "替换不改变底行总宽");
+      check(
+        JSON.stringify(toolbar.slice(0, 3)) === JSON.stringify(fallback.slice(0, 3)),
+        "字符和标点行不变",
+      );
+      check(
+        JSON.stringify(NumberSymbolLayout.rows(true, chinese, corner, true)) ===
+          JSON.stringify(NumberSymbolLayout.rows(true, chinese, corner, false)),
+        "扩展页仍保留符号入口",
+      );
+    }
+  }
 });
 
 group("the #+= layer swaps the first two rows, its toggle and the emoji key", () => {
@@ -3550,34 +3812,62 @@ group("the wubi hint shows only the untyped suffix", () => {
 
 group("the letter face and the engine input are decided separately", () => {
   check(
-    LetterKeyFacePolicy.face("a", true, false, false) === "a",
-    "Chinese mode draws lowercase faces, as the design, Android and iOS do",
+    LetterKeyFacePolicy.face("a", true, false, false, false) === "A",
+    "Chinese mode draws uppercase faces, as Sogou, WeChat, Baidu, Doubao, Android and iOS do",
   );
   check(
-    LetterKeyFacePolicy.face("a", true, false, true) === "A",
+    LetterKeyFacePolicy.face("a", true, false, false, true) === "A",
     "a Chinese key that will type uppercase helpcode draws it",
   );
+  // 中文的本地输入模式（英文补全、Unicode、快捷短语等）按字面输入，键面回到小写。
   check(
-    LetterKeyFacePolicy.face("a", true, true, false) === "a",
-    "a local mode keeps the lowercase face",
+    LetterKeyFacePolicy.face("a", true, false, true, false) === "a",
+    "a Chinese local mode draws the lowercase it types",
   );
   check(
-    LetterKeyFacePolicy.face("a", true, true, true) === "a",
-    "a Chinese local mode keeps the lowercase face under Shift",
+    LetterKeyFacePolicy.face("a", true, false, true, true) === "a",
+    "a Chinese local mode stays lowercase under Shift",
   );
   check(
-    LetterKeyFacePolicy.face("a", false, false, false) === "a",
+    LetterKeyFacePolicy.face("a", false, false, false, false) === "a",
     "English unshifted is lowercase",
   );
-  check(LetterKeyFacePolicy.face("a", false, false, true) === "A", "English shifted is uppercase");
-  check(LetterKeyFacePolicy.face("", true, false, false) === "", "an empty face stays empty");
+  check(
+    LetterKeyFacePolicy.face("a", false, false, false, true) === "A",
+    "English shifted is uppercase",
+  );
+  // 越南语、藏文由调用方传 chineseMode = false，键面跟 Shift 走。
+  check(
+    LetterKeyFacePolicy.face("a", false, false, false, false) === "a",
+    "Vietnamese unshifted is lowercase",
+  );
+  check(
+    LetterKeyFacePolicy.face("a", false, false, false, true) === "A",
+    "Vietnamese follows Shift",
+  );
+  check(
+    LetterKeyFacePolicy.face("a", true, true, false, false) === "a",
+    "Japanese romaji keeps lowercase faces",
+  );
+  check(
+    LetterKeyFacePolicy.face("a", true, true, false, true) === "A",
+    "Japanese romaji draws the uppercase Shift types",
+  );
+  check(
+    LetterKeyFacePolicy.face("a", true, true, true, true) === "a",
+    "a Japanese local mode keeps the lowercase face under Shift",
+  );
+  check(
+    LetterKeyFacePolicy.face("", true, false, false, false) === "",
+    "an empty face stays empty",
+  );
   check(
     LetterKeyFacePolicy.accessibilityLabel("a", false, false, true) === "大写 A",
     "a shifted English key announces uppercase",
   );
   check(
     LetterKeyFacePolicy.accessibilityLabel("a", true, false, false) === "字母 A",
-    "a Chinese key announces the letter",
+    "a Chinese uppercase face still announces the letter, not uppercase input",
   );
   check(
     LetterKeyFacePolicy.accessibilityLabel("a", true, false, true) === "大写 A",
@@ -4052,6 +4342,49 @@ group("a theme with a fixed mode is offered and drawn only in that mode", () => 
   );
 });
 
+// 编号色和边框色跟随主题（HostCapabilities 的 candidate_number_color、candidate_border_color 在 HarmonyOS 为假）：解析请求里的自定义主题去掉存下的这两个槽位，其余原样带上，原文档不变。
+group("the resolve request drops the number and border colours the host does not draw", () => {
+  const stored = {
+    base: "paper",
+    candidate_skin: "sakura",
+    candidate_skin_dark: "dusk",
+    candidate_colors: {
+      text: "#102030",
+      number: "#123456",
+      accent: "#203040",
+      selected: "#304050",
+      hover: "#405060",
+      surface: "#506070",
+      border: "#654321",
+    },
+  };
+  const drawn = GlobalTheme.hostDrawnCustomTheme(stored);
+  check(
+    JSON.stringify(drawn?.candidate_colors) ===
+      JSON.stringify({
+        text: "#102030",
+        accent: "#203040",
+        selected: "#304050",
+        hover: "#405060",
+        surface: "#506070",
+      }),
+    `only the drawn slots reach the resolver: ${JSON.stringify(drawn?.candidate_colors)}`,
+  );
+  check(
+    drawn?.base === "paper" &&
+      drawn.candidate_skin === "sakura" &&
+      drawn.candidate_skin_dark === "dusk",
+    "the base and both skin slots are kept",
+  );
+  check(stored.candidate_colors.number === "#123456", "the stored document is left alone");
+  check(GlobalTheme.hostDrawnCustomTheme(undefined) === undefined, "no custom theme stays absent");
+  const plain = { base: "night" };
+  check(
+    GlobalTheme.hostDrawnCustomTheme(plain) === plain,
+    "a theme without colours passes through",
+  );
+});
+
 group("maps safe external toolbar CSS to ArkUI values", () => {
   const base = GlobalTheme.candidateColors(null, true);
   const toolbar = ToolbarSkinPolicy.fromCss(
@@ -4510,11 +4843,19 @@ group("keeps Engine candidate selection independent from row order", () => {
 
 group("keeps candidate source badges bounded to known Engine sources", () => {
   check(CandidatePresentationPolicy.badge(2) === " ☁️", "cloud candidates get a cloud badge");
+  check(CandidatePresentationPolicy.badge(15) === "", "cloud placeholders carry no badge");
   check(CandidatePresentationPolicy.badge(3) === " 🤖", "AI candidates get a robot badge");
   check(CandidatePresentationPolicy.badge(0) === "", "local candidates stay unbadged");
   check(CandidatePresentationPolicy.badge(12) === "", "the AI placeholder carries no badge");
   check(CandidatePresentationPolicy.aiPlaceholder(12), "source 12 is the AI placeholder");
   check(!CandidatePresentationPolicy.aiPlaceholder(3), "a real AI candidate is not a placeholder");
+  check(!CandidatePresentationPolicy.isVisible(15), "cloud pending rows stay out of the keyboard");
+  check(CandidatePresentationPolicy.isVisible(2), "answered cloud candidates remain visible");
+  check(
+    JSON.stringify(CandidatePresentationPolicy.visibleIndices([15, 0, 2, 15, 3])) ===
+      JSON.stringify([1, 2, 4]),
+    "visible positions map back to Engine indexes",
+  );
 });
 
 group("offers all fixed candidate slots and checks the active one", () => {
@@ -6302,6 +6643,10 @@ group("a capture device choice is only read when it names this host", () => {
     "a windows endpoint id is not reinterpreted as a harmony device",
   );
   check(VoiceCaptureDevicePolicy.selects("pulse") === false, "nor is a pulse source name");
+  // 设置页的「麦克风」下拉不分大小写，这里也一样，免得页面显示选中的设备而键盘悄悄用系统默认设备。
+  check(VoiceCaptureDevicePolicy.selects("Harmony") === true, "the backend name ignores case");
+  check(VoiceCaptureDevicePolicy.selects(" AUTO ") === true, "including auto");
+  check(VoiceCaptureDevicePolicy.selects("Windows") === false, "a foreign backend stays foreign");
 });
 
 group("a capture device id survives a restart", () => {
@@ -6600,6 +6945,7 @@ group("the word being completed is read backwards from the caret", () => {
     "with nothing before it the word is all of it",
   );
   check(EnglishSuggestionPolicy.currentWord("hello ") === "", "a space ends the word");
+  check(EnglishSuggestionPolicy.currentWord("say you're") === "you're", "撇号保留在整词内");
   check(EnglishSuggestionPolicy.currentWord("say,hel") === "hel", "so does punctuation");
   check(
     EnglishSuggestionPolicy.currentWord("\uff48\uff45\uff4c") === "hel",
@@ -6622,6 +6968,109 @@ group("the word being completed is read backwards from the caret", () => {
   );
 });
 
+// 与 Android 的 EmailSuffixPolicySmoke 逐条相同（#6147），另加宿主何时读上文。
+group("光标前打到 xxx@ 时给出邮箱后缀", () => {
+  const all: string[] = EMAIL_SUFFIXES;
+  check(all.length === 20 && new Set(all).size === all.length, "twenty distinct suffixes");
+  check(
+    all.slice(0, 7).join(" ") ===
+      "@qq.com @163.com @126.com @foxmail.com @139.com @189.cn @aliyun.com",
+    "domestic suffixes come first",
+  );
+  for (const suffix of all) {
+    check(
+      suffix.startsWith("@") && suffix.indexOf("@", 1) < 0 && suffix === suffix.toLowerCase(),
+      `${suffix} is one lowercase @domain`,
+    );
+  }
+
+  const bare: EmailSuffixMatch | null = EmailSuffixPolicy.match("abc@");
+  check(
+    bare !== null && bare.typedDomain === "" && bare.suffixes.join(" ") === all.join(" "),
+    "abc@ offers every suffix",
+  );
+  const digit: EmailSuffixMatch | null = EmailSuffixPolicy.match("abc@1");
+  check(
+    digit !== null && digit.suffixes.join(" ") === "@163.com @126.com @139.com @189.cn",
+    "abc@1 narrows to the numeric domains",
+  );
+  const yahoo: EmailSuffixMatch | null = EmailSuffixPolicy.match("abc@yahoo.c");
+  check(
+    yahoo !== null && yahoo.suffixes.join(" ") === "@yahoo.com @yahoo.co.jp",
+    "abc@yahoo.c offers both",
+  );
+  const gm: EmailSuffixMatch | null = EmailSuffixPolicy.match("abc@gm");
+  check(
+    gm !== null && gm.suffixes.join(" ") === "@gmail.com @gmx.com",
+    "abc@gm offers gmail and gmx",
+  );
+  const upper: EmailSuffixMatch | null = EmailSuffixPolicy.match("Abc@GMa");
+  check(
+    upper !== null && upper.typedDomain === "GMa" && upper.suffixes.join(" ") === "@gmail.com",
+    "typed domains match without case",
+  );
+  check(EmailSuffixPolicy.match("abc@163.com") === null, "a finished suffix offers nothing");
+  check(EmailSuffixPolicy.match("abc@example.org") === null, "an unknown domain offers nothing");
+  check(EmailSuffixPolicy.match("a.b_c+d-e%f@") !== null, "the local part may carry ._%+-");
+  const last: EmailSuffixMatch | null = EmailSuffixPolicy.match("x@y@");
+  check(last !== null && last.typedDomain === "", "the last @ counts");
+  check(
+    EmailSuffixPolicy.match("我的邮箱 hi@") !== null,
+    "only the characters next to @ need to be ASCII",
+  );
+
+  check(EmailSuffixPolicy.match("@") === null, "a lone @ is not an address");
+  check(EmailSuffixPolicy.match("微信@") === null, "a Chinese mention is not an address");
+  check(EmailSuffixPolicy.match("a b @") === null, "a space before @ is not an address");
+  check(EmailSuffixPolicy.match("a@@") === null, "@@ is not an address");
+  check(EmailSuffixPolicy.match("abc\uff20") === null, "a full-width ＠ does not count");
+  check(EmailSuffixPolicy.match("abc@ ") === null, "the caret must sit right after the domain");
+  check(
+    EmailSuffixPolicy.match("") === null && EmailSuffixPolicy.match(null) === null,
+    "no text, no suffixes",
+  );
+  check(EmailSuffixPolicy.MAX_CONTEXT === 64, "上文长度与 Android 的 MAX_CONTEXT 相同");
+
+  const fresh = EmailSuffixPolicy.replacement(bare, "@163.com");
+  check(
+    fresh !== null && fresh.deleteCount === 0 && fresh.insert === "163.com",
+    "abc@ completes to abc@163.com",
+  );
+  const partial = EmailSuffixPolicy.replacement(upper, "@gmail.com");
+  check(
+    partial !== null && partial.deleteCount === 3 && partial.insert === "gmail.com",
+    "a typed GMa is replaced by the lowercase domain",
+  );
+  check(
+    EmailSuffixPolicy.replacement(digit, "@gmail.com") === null,
+    "a suffix outside the match is refused",
+  );
+  check(EmailSuffixPolicy.replacement(null, "@163.com") === null, "no match, no replacement");
+
+  check(
+    EmailSuffixPolicy.same(EmailSuffixPolicy.match("a@1"), EmailSuffixPolicy.match("bc@1")),
+    "同样的已打域名和后缀不重画",
+  );
+  check(!EmailSuffixPolicy.same(bare, digit), "后缀范围变了要重画");
+  check(
+    !EmailSuffixPolicy.same(bare, null) && EmailSuffixPolicy.same(null, null),
+    "出现和收起要重画",
+  );
+  check(
+    !EmailSuffixPolicy.same(EmailSuffixPolicy.match("a@G"), EmailSuffixPolicy.match("a@g")),
+    "已打域名的大小写不同，补全时删的仍是同样长度，但按原样比较",
+  );
+
+  check(EmailSuffixPolicy.readsContext(false, true, false, false), "普通输入框里读上文");
+  check(!EmailSuffixPolicy.readsContext(false, true, true, false), "密码框里不读上文");
+  check(
+    !EmailSuffixPolicy.readsContext(false, false, false, false),
+    "属性到达前不读，那时还不知道是不是密码框",
+  );
+  check(!EmailSuffixPolicy.readsContext(false, true, false, true), "组字时候选栏归引擎");
+  check(!EmailSuffixPolicy.readsContext(true, true, false, false), "2in1 的候选窗没有地方画后缀");
+});
+
 group("a prefix is only queried when it could mean something", () => {
   check(EnglishSuggestionPolicy.suggestible("hel") === true, "three letters is a word being typed");
   check(EnglishSuggestionPolicy.suggestible("he") === true, "two is the threshold");
@@ -6631,6 +7080,9 @@ group("a prefix is only queried when it could mean something", () => {
   );
   check(EnglishSuggestionPolicy.suggestible("") === false, "and none matches nothing");
   check(EnglishSuggestionPolicy.suggestible("he1") === false, "a digit is not part of a word");
+  check(EnglishSuggestionPolicy.suggestible("i", true), "手机可查询单字母固有大小写");
+  check(EnglishSuggestionPolicy.suggestible("you're", true), "手机允许完整的撇号形式");
+  check(!EnglishSuggestionPolicy.suggestible("you're"), "旧补全仍只接受字母前缀");
 });
 
 group("accepting a completion replaces exactly what was typed", () => {
@@ -7740,16 +8192,23 @@ group("each voice shortcut obeys its own switch", () => {
   );
 });
 
-group("the recording tones follow their own switches under one master", () => {
+group("the recording tones follow the master switch alone", () => {
   const base: VoiceInputConfiguration = DEFAULT_VOICE_INPUT_CONFIGURATION;
   check(
     VoiceRecordingBehaviourPolicy.playsStartTone(base) === true,
     "both tones are on by default",
   );
   check(VoiceRecordingBehaviourPolicy.playsEndTone(base) === true, "including the closing one");
-  const noStart: VoiceInputConfiguration = { ...base, start_sound: false };
-  check(VoiceRecordingBehaviourPolicy.playsStartTone(noStart) === false, "one can be turned off");
-  check(VoiceRecordingBehaviourPolicy.playsEndTone(noStart) === true, "without taking the other");
+  // 设置页不再给开始、结束提示音的开关，存下的 false 不再读。
+  const noStart: VoiceInputConfiguration = { ...base, start_sound: false, end_sound: false };
+  check(
+    VoiceRecordingBehaviourPolicy.playsStartTone(noStart) === true,
+    "a stored start switch no longer silences the opening tone",
+  );
+  check(
+    VoiceRecordingBehaviourPolicy.playsEndTone(noStart) === true,
+    "nor does a stored end switch silence the closing one",
+  );
   const silent: VoiceInputConfiguration = { ...base, sound_enabled: false };
   check(
     VoiceRecordingBehaviourPolicy.playsStartTone(silent) === false,
@@ -9213,7 +9672,7 @@ group("the function panel follows the design's order, then the Harmony extras", 
   check(
     labels.join(",") ===
       "全角,中文标点,模糊音,繁体,手写,词库,键盘高度,设置," +
-        "按键音,振动,单手模式,隐私模式,反馈,关于,候选翻译,符号," +
+        "按键音,振动,单手模式,隐私模式,反馈,关于,宣传,候选翻译,符号," +
         "本地输入,语音输入,高情商回复,AI 润色,振动强度",
     `the tiles in page order: ${labels.join(",")}`,
   );
@@ -9227,6 +9686,67 @@ group("the function panel follows the design's order, then the Harmony extras", 
   const ids = FunctionPanelPolicy.items().map((item: FunctionPanelItem) => item.id);
   check(new Set(ids).size === ids.length, "every id is unique");
 });
+
+group(
+  "the function panel and the scheme picker page three rows in portrait and two in phone landscape",
+  () => {
+    // 视图的键区：四行键高加高度调整，再加三份行距（KeyboardView.surfaceHeight）。
+    const keyArea = (adjustment: number, rowSpacingTenths: number): number =>
+      KeyboardMetrics.ROW_HEIGHT_VP * KeyboardMetrics.KEY_ROWS +
+      KeyboardGeometry.heightAdjustment(adjustment) +
+      KeyboardMetrics.touchRowGapsVp(KeyboardGeometry.rowSpacing(rowSpacingTenths));
+    // KeyboardView 的磁贴网格：每行至少 52vp，上方留白 10、页点 14、下方留白 4。
+    const row: number = 52;
+    const chrome: number = 10 + 14 + 4;
+    const same = (grid: PickerGrid, rows: number, rowsGap: number): boolean =>
+      grid.rows === rows && grid.rowsGap === rowsGap;
+    const minimum: number = keyArea(
+      KeyboardGeometry.MIN_HEIGHT_ADJUSTMENT_VP,
+      KeyboardGeometry.MIN_ROW_SPACING_TENTHS,
+    );
+    const standard: number = keyArea(0, KeyboardGeometry.DEFAULT_ROW_SPACING_TENTHS);
+    const tallest: number = keyArea(
+      KeyboardGeometry.MAX_HEIGHT_ADJUSTMENT_VP,
+      KeyboardGeometry.MAX_ROW_SPACING_TENTHS,
+    );
+    check(
+      minimum === 176 && standard === 197 && tallest === 254,
+      "the key area spans 176–254vp, 197 by default",
+    );
+    check(
+      same(FunctionPanelPolicy.pickerGrid(false, tallest, row, chrome), 3, 12),
+      "a tall key area shows three rows 12vp apart, as on iOS",
+    );
+    const portrait: PickerGrid = FunctionPanelPolicy.pickerGrid(false, standard, row, chrome);
+    check(same(portrait, 3, 6), "the default key area narrows the gap to keep three rows");
+    check(
+      3 * row + 2 * portrait.rowsGap + chrome <= standard,
+      "three rows fit the default key area",
+    );
+    check(
+      same(FunctionPanelPolicy.pickerGrid(true, tallest, row, chrome), 2, 16),
+      "phone landscape stays two rows 16vp apart however tall the keys are",
+    );
+    // 最矮的键区连行距 0 也放不下三行，退回两行；两行放得下。
+    check(3 * row + chrome > minimum, "three rows overflow the minimum key area");
+    const short: PickerGrid = FunctionPanelPolicy.pickerGrid(false, minimum, row, chrome);
+    check(same(short, 2, 16), "the minimum key area falls back to two rows");
+    check(2 * row + short.rowsGap + chrome <= minimum, "two rows fit the minimum key area");
+    check(
+      same(FunctionPanelPolicy.pickerGrid(false, 3 * row + chrome + 7, row, chrome), 2, 16),
+      "a gap under 4vp drops to two rows instead",
+    );
+    check(
+      KeyboardFormFactorPolicy.phoneLandscape(800, 360),
+      "a phone on its side is phone landscape",
+    );
+    check(!KeyboardFormFactorPolicy.phoneLandscape(360, 800), "an upright phone is not");
+    check(
+      !KeyboardFormFactorPolicy.phoneLandscape(1280, 800),
+      "a tablet on its side keeps three rows",
+    );
+  },
+);
 
 /** 具有此 id 的磁贴，查找方式与视图按 id 查找相同。 */
 function panelItem(id: string): FunctionPanelItem | null {
@@ -12545,6 +13065,70 @@ group("local preference documents require an object", () => {
   );
 });
 
+// 两半不上云。云端的智能标点和本机不同时，等于别的设备替用户切了一次总开关，两半跟着写；相同时本机单独调过的一半不动。与 client-services 的 apply_input_settings 相同。
+group("a changed smart punctuation from the account writes both halves", () => {
+  const schema = fullPreferenceSchema();
+  // 别的设备上先关掉（设置页把两半一起写成假），再在另一台打开：同步过来时两半要跟着打开，否则看着开着却不起作用。
+  const applied = applyAccountPreferences(
+    {
+      smart_punctuation: false,
+      smart_punctuation_direct_digit: false,
+      smart_punctuation_direct_letter: false,
+    },
+    { revision: 2, settings: { "input.smart_punctuation": true } },
+    schema,
+    syncFeedback,
+  );
+  check(applied.preferences.smart_punctuation === true, "the master switch is applied");
+  check(
+    applied.preferences.smart_punctuation_direct_digit === true &&
+      applied.preferences.smart_punctuation_direct_letter === true,
+    "both halves follow a changed master switch",
+  );
+  const off = applyAccountPreferences(
+    {},
+    { revision: 3, settings: { "input.smart_punctuation": false } },
+    schema,
+    syncFeedback,
+  );
+  check(
+    off.preferences.smart_punctuation === false &&
+      off.preferences.smart_punctuation_direct_digit === false &&
+      off.preferences.smart_punctuation_direct_letter === false,
+    "turning it off elsewhere turns both halves off, reading a missing local switch as on",
+  );
+});
+
+group("an unchanged smart punctuation from the account leaves a tuned half alone", () => {
+  const applied = applyAccountPreferences(
+    {
+      smart_punctuation: true,
+      smart_punctuation_direct_digit: true,
+      smart_punctuation_direct_letter: false,
+    },
+    { revision: 2, settings: { "input.smart_punctuation": true } },
+    fullPreferenceSchema(),
+    syncFeedback,
+  );
+  check(applied.preferences.smart_punctuation === true, "the master switch stays on");
+  check(
+    applied.preferences.smart_punctuation_direct_digit === true &&
+      applied.preferences.smart_punctuation_direct_letter === false,
+    "the halves tuned on this device are kept",
+  );
+  const absent = applyAccountPreferences(
+    { smart_punctuation_direct_letter: false },
+    { revision: 3, settings: {} },
+    fullPreferenceSchema(),
+    syncFeedback,
+  );
+  check(
+    absent.preferences.smart_punctuation_direct_letter === false &&
+      absent.preferences.smart_punctuation_direct_digit === undefined,
+    "a cloud document without the switch touches neither half",
+  );
+});
+
 group("the digit order and 跟随系统 travel with the account", () => {
   const schema = fullPreferenceSchema();
   const uploaded = localAccountPreferences(
@@ -12648,8 +13232,8 @@ group("the 26-key digit layer choice travels with the account", () => {
 
 group("the shuangpin key hint switch travels with the account", () => {
   check(
-    localAccountPreferences({}, syncFeedback)["platform.harmony.shuangpin_key_hints"] === true,
-    "a document from before the switch uploads the hints as shown",
+    localAccountPreferences({}, syncFeedback)["platform.harmony.shuangpin_key_hints"] === false,
+    "a document from before the switch uploads the hints as hidden",
   );
   check(
     localAccountPreferences({ touch_shuangpin_key_hints: false }, syncFeedback)[
@@ -15175,8 +15759,8 @@ group("candidate snapshots keep generation identities exact", () => {
   }
 });
 
-group("「候选栏预编辑：不显示」 hides the spelling on the phone line", () => {
-  // Windows candidate_window_preedit_style = "empty" is preeditVisible=false. The phone showed the spelling whatever the setting said; Android honours it through the same policy.
+group("the composition line hides the spelling when it is not to be drawn", () => {
+  // 2in1 的「候选窗口预编辑：不显示」即 Windows candidate_window_preedit_style = "empty"（preeditVisible=false）；手机在拼写写进输入框时走同一条规则。
   const shown = CandidatePreeditStylePolicy.visible(true, "", "nihao", "none");
   check(shown.text === "nihao" && shown.caret, "pinyin shows the spelling and its caret");
   const hidden = CandidatePreeditStylePolicy.visible(false, "", "nihao", "none");
@@ -15553,7 +16137,7 @@ group("AI model catalogs keep each provider's protocol and path", () => {
   );
 });
 
-// 与 crates/client-core/src/ai/endpoint.rs 跑同一组用例；这里的判断和 Rust 不一致时，鸿蒙宿主会放行或拒绝与其他平台不同的地址。
+// 与 crates/client-providers/src/ai/endpoint.rs 跑同一组用例；这里的判断和 Rust 不一致时，鸿蒙宿主会放行或拒绝与其他平台不同的地址。
 declare const __dirname: string;
 declare function require(name: "fs"): { readFileSync(path: string, encoding: "utf8"): string };
 interface AiEndpointContractCase {
@@ -15843,8 +16427,8 @@ group("the 2in1 draws the composition inline as tsf_preedit_style says", () => {
     "empty leaves the document alone",
   );
   check(
-    InlinePreeditPolicy.text("raw", false, true, "nihao", "ni'hao", "") === "",
-    "a phone keeps the spelling above its keys",
+    InlinePreeditPolicy.text("raw", false, true, "nihao", "ni'hao", "") === "ni'hao",
+    "a phone writes the segmented spelling into the field whatever the desktop style says",
   );
   check(
     InlinePreeditPolicy.text("raw", true, false, "nihao", "ni'hao", "") === "",
@@ -15867,6 +16451,138 @@ group("the 2in1 draws the composition inline as tsf_preedit_style says", () => {
     "an editor that keeps preview text out of its content is read as is",
   );
   check(InlinePreeditPolicy.beforePreview("好a", "") === "好a", "no preview, nothing removed");
+});
+
+group(
+  "a phone always writes the composition into the field and the strip leaves the reading out",
+  () => {
+    // 产品决定：与 Apple 键盘、Gboard 一样，组字总以拼音分词写进输入框，候选栏不画读音，候选从行首开始不再左右移动；没有开关。
+    for (const style of ["raw", "pinyin", "empty"]) {
+      check(
+        InlinePreeditPolicy.text(style, false, true, "nihao", "ni'hao", "") === "ni'hao",
+        `the phone ignores the desktop style ${style}`,
+      );
+    }
+    check(
+      InlinePreeditPolicy.text("raw", false, true, "nihao", "", "") === "nihao",
+      "without a segmented spelling the phone falls back to the letters",
+    );
+    check(
+      InlinePreeditPolicy.text("raw", false, true, "hao", "hao", "你") === "你hao",
+      "a held phrase piece leads the spelling on a phone too",
+    );
+    check(
+      InlinePreeditPolicy.text("raw", false, true, "", "", "海滩") === "海滩",
+      "a held phrase piece alone stays in the field",
+    );
+    check(
+      InlinePreeditPolicy.text("raw", false, false, "nihao", "ni'hao", "") === "",
+      "an editor that takes no preview text gets none",
+    );
+    check(
+      InlinePreeditPolicy.text("raw", false, true, "", "", "") === "",
+      "no composition, no preview on a phone",
+    );
+    check(
+      InlinePreeditPolicy.text("raw", false, true, "shi", "shi", "", false, true) === "",
+      "14 键和日语读音（stripOnly）不写进输入框",
+    );
+    check(
+      InlinePreeditPolicy.text("raw", true, true, "nihao", "ni'hao", "", false, true) === "nihao",
+      "stripOnly only concerns the phone; a 2in1 still follows its style",
+    );
+
+    check(
+      SchemeCompositionPolicy.keepsReadingOnStrip(SchemeTraits.QUANPIN, true),
+      "全拼 14 键的组码留在候选栏上",
+    );
+    check(
+      !SchemeCompositionPolicy.keepsReadingOnStrip(SchemeTraits.QUANPIN, false),
+      "全拼 26 键和九键写进输入框",
+    );
+    check(
+      SchemeCompositionPolicy.keepsReadingOnStrip(SchemeTraits.JAPANESE, false),
+      "日语的假名读音保持原来的做法，留在候选栏上",
+    );
+    check(
+      !SchemeCompositionPolicy.keepsReadingOnStrip(-1, true),
+      "英文和本地模式在 14 键下画 26 键，组字照常写进输入框",
+    );
+    check(
+      !SchemeCompositionPolicy.keepsReadingOnStrip(SchemeTraits.SHUANGPIN, true) &&
+        !SchemeCompositionPolicy.keepsReadingOnStrip(SchemeTraits.WUBI, false) &&
+        !SchemeCompositionPolicy.keepsReadingOnStrip(SchemeTraits.STROKE, false),
+      "其他方案都写进输入框",
+    );
+
+    check(
+      InlinePreeditPolicy.hidesStripReading(false, "ni'hao", false),
+      "the strip leaves the reading out while the field shows it",
+    );
+    check(
+      !InlinePreeditPolicy.hidesStripReading(false, "", false),
+      "with nothing in the field (an editor without preview text, 14 键, Japanese) the strip still draws it",
+    );
+    check(
+      !InlinePreeditPolicy.hidesStripReading(false, "한", true),
+      "a composition that is the text itself keeps its place on the strip as before",
+    );
+    check(
+      !InlinePreeditPolicy.hidesStripReading(true, "nihao", false),
+      "a 2in1 candidate window follows its own preedit setting",
+    );
+    const hidden = CandidatePreeditStylePolicy.visible(
+      !InlinePreeditPolicy.hidesStripReading(false, "ni'hao", false),
+      "",
+      "nihao",
+      "none",
+    );
+    check(hidden.text === "" && !hidden.caret, "so the phone line draws no spelling and no caret");
+  },
+);
+
+group("nine-key writes its pinyin reading into the field, never the digits", () => {
+  // iOS 真机上九键打 nihao，输入框里出现的是 64426：写进去的是 preedit 的数字。这里写的必须是 nine_key_reading。
+  const reading: string = SchemeCompositionPolicy.reading(
+    SchemeTraits.QUANPIN,
+    "64426",
+    "64'426",
+    "ni'hao",
+  );
+  const spelling: string = SchemeCompositionPolicy.fieldSpelling(
+    SchemeTraits.QUANPIN,
+    "64426",
+    "64'426",
+    "ni'hao",
+  );
+  check(spelling === "ni'hao", "the segmented form for nine-key is the Engine's reading");
+  const preview: string = InlinePreeditPolicy.text(
+    "raw",
+    false,
+    true,
+    reading,
+    spelling,
+    "",
+    false,
+    SchemeCompositionPolicy.keepsReadingOnStrip(SchemeTraits.QUANPIN, false),
+  );
+  check(preview === "ni'hao", "the nine-key preview text is the reading");
+  check(!/[0-9]/.test(preview), "the nine-key preview text contains no digits");
+  check(
+    InlinePreeditPolicy.text("pinyin", false, true, reading, spelling, "你") === "你ni'hao",
+    "a held phrase piece leads the nine-key reading",
+  );
+  check(
+    SchemeCompositionPolicy.fieldSpelling(SchemeTraits.QUANPIN, "64426", "ni'426", "") === "ni'426",
+    "only when the Engine has no reading does the field fall back to its preedit",
+  );
+  check(
+    SchemeCompositionPolicy.fieldSpelling(SchemeTraits.QUANPIN, "nihao", "ni'hao", "") ===
+      "ni'hao" &&
+      SchemeCompositionPolicy.fieldSpelling(SchemeTraits.STROKE, "hs", "一丨", "") === "一丨" &&
+      SchemeCompositionPolicy.fieldSpelling(-1, "hello", "hello", "") === "hello",
+    "every other composition writes its preedit",
+  );
 });
 
 console.log("Korean Dubeolsik");
@@ -15958,7 +16674,7 @@ group("Korean draws the syllable, not the key letters behind it", () => {
 
 group("the Korean scheme is one more card, and remembers the Chinese scheme it replaced", () => {
   check(
-    KeyboardScheme.SCHEMES[10] === KeyboardScheme.KOREAN && KeyboardScheme.SCHEMES.length === 17,
+    KeyboardScheme.SCHEMES[11] === KeyboardScheme.KOREAN && KeyboardScheme.SCHEMES.length === 18,
     "appended after the first ten, as the shared seventeen-entry picker has it",
   );
   check(
@@ -16885,7 +17601,7 @@ group("LocalAsrPolicy", () => {
     "the first column of tokens.txt is the token",
   );
   check(
-    LocalAsrPolicy.transducerHotwords(["你好", "你们", "AI/ML  x", "C++"], tokens) ===
+    LocalAsrPolicy.transducerHotwords(["你好", "你们", "AI/ML  x", "C++"], tokens, false) ===
       "你好\nAI ML x\n",
     "words with unknown tokens or punctuation are left out",
   );
@@ -16893,8 +17609,63 @@ group("LocalAsrPolicy", () => {
     LocalAsrPolicy.transducerHotwords(
       Array.from({ length: 250 }, () => "你好"),
       tokens,
+      false,
     ).split("\n").length === 201,
     "at most 200 transducer hotwords",
+  );
+  // X-ASR 的 token 表：每个汉字只以词首片段 `▁字` 出现，没有一个不带前缀的汉字。
+  const spelled = LocalAsrPolicy.tokenSet(
+    "<blk> 0\n\u2581写 1\n\u2581上 2\n\u2581去 3\n\u2581现 4\n\u2581在 5\n\u2581时 6\n\u2581the 7\ns 8\n",
+  );
+  check(
+    LocalAsrPolicy.cjkSpelledAsWords(spelled),
+    "a token table with only word-initial Chinese characters spells Chinese as words",
+  );
+  check(
+    !LocalAsrPolicy.cjkSpelledAsWords(tokens),
+    "a table with bare Chinese characters keeps the manifest's modeling unit",
+  );
+  check(
+    !LocalAsrPolicy.cjkSpelledAsWords(LocalAsrPolicy.tokenSet("\u2581写 1\n写 2\n")),
+    "one bare Chinese character is enough to keep the manifest's modeling unit",
+  );
+  check(
+    !LocalAsrPolicy.cjkSpelledAsWords(LocalAsrPolicy.tokenSet("<blk> 0\na 1\n\u2581ab 2\n")),
+    "a table without any word-initial three-byte piece is not spelled as words",
+  );
+  check(
+    !LocalAsrPolicy.cjkSpelledAsWords(LocalAsrPolicy.tokenSet("<blk> 0\n▁the 1\n▁and 2\n")),
+    "word-initial English pieces of three letters do not make a table spelled as Chinese words",
+  );
+  check(
+    LocalAsrPolicy.transducerHotwords(
+      ["写上去", "现在时", "写字", "AI 写/the", "C++"],
+      spelled,
+      true,
+    ) === "写 上 去\n现 在 时\nAI 写 the\n",
+    "spelled-as-words hotwords put each Chinese character apart and drop words with unknown characters",
+  );
+  const spelledPlan = LocalAsrPolicy.plan(
+    "/m",
+    JSON.stringify({
+      kind: "offline_transducer",
+      hotwords: "native",
+      modeling_unit: "cjkchar+bpe",
+      files: {
+        encoder: "e.onnx",
+        decoder: "d.onnx",
+        joiner: "j.onnx",
+        tokens: "tokens.txt",
+        bpe_vocab: "bpe.vocab",
+        vad: "v.onnx",
+      },
+    }),
+  );
+  check(
+    spelledPlan !== null &&
+      LocalAsrPolicy.hotwordModelingUnit(spelledPlan, true) === "bpe" &&
+      LocalAsrPolicy.hotwordModelingUnit(spelledPlan, false) === "cjkchar+bpe",
+    "an old manifest saying cjkchar+bpe is overridden to bpe when the tokens spell Chinese as words",
   );
   check(
     LocalAsrPolicy.funAsrHotwords(["甲乙", "", "a,b", "丙丁"]) === "甲乙,丙丁",
@@ -16965,6 +17736,202 @@ group("LocalAsrPolicy", () => {
     LocalAsrPolicy.tidyTranscript(" 你好 ， 世界  A I 模型 ") === "你好，世界 AI 模型",
     "spaces around CJK marks, inside initialisms and at the ends go",
   );
+  // 以下几条与 shared/voice/tests/local_asr.cpp 逐条相同。
+  check(
+    LocalAsrPolicy.tidyTranscript(
+      "昨天是 monday.Today is 礼拜二。The day after tomorrow 是星期三.",
+    ) === "昨天是 monday. Today is 礼拜二。The day after tomorrow 是星期三。",
+    "a sentence mark after Chinese turns full width and English sentences get their space",
+  );
+  check(
+    LocalAsrPolicy.tidyTranscript("真的吗?好的!那就这样,走吧") === "真的吗？好的！那就这样，走吧",
+    "question, exclamation and comma after Chinese turn full width",
+  );
+  check(
+    LocalAsrPolicy.tidyTranscript("版本 3.5 和 U.S. 还有 e.g. 不变") ===
+      "版本 3.5 和 U.S. 还有 e.g. 不变",
+    "decimals, initialisms and abbreviations keep their periods",
+  );
+  check(
+    LocalAsrPolicy.tidyTranscript("Done.Next step") === "Done. Next step",
+    "a run-on English sentence is split",
+  );
+  check(
+    LocalAsrPolicy.tidyTranscript("我们去 café.") === "我们去 café.",
+    "only a Chinese character before a mark makes it full width",
+  );
+  check(
+    LocalAsrPolicy.tidyTranscript("𠮷野家.") === "𠮷野家。",
+    "an ideograph beyond the BMP counts as Chinese",
+  );
+  check(
+    LocalAsrPolicy.tidyTranscript("好。.") === "好。." &&
+      LocalAsrPolicy.tidyTranscript("ok,Next") === "ok,Next",
+    "a mark after CJK punctuation and a comma between English words are left alone",
+  );
+  check(
+    LOCAL_ONLINE_TAIL_SAMPLES === LOCAL_ASR_SAMPLE_RATE * 1.2,
+    "a streaming model is finished with 1.2 seconds of trailing silence",
+  );
+  const offline = LocalAsrPolicy.plan(
+    "/m",
+    JSON.stringify({
+      kind: "offline_transducer",
+      hotwords: "native",
+      modeling_unit: "cjkchar+bpe",
+      model_type: "transducer",
+      files: {
+        encoder: "e.onnx",
+        decoder: "d.onnx",
+        joiner: "j.onnx",
+        tokens: "tokens.txt",
+        bpe_vocab: "bpe.vocab",
+        vad: "silero_vad.onnx",
+      },
+    }),
+  );
+  check(
+    offline !== null && offline.modelType === "transducer" && offline.vad === "/m/silero_vad.onnx",
+    "an offline transducer plan carries its model type and VAD",
+  );
+  check(
+    offline !== null &&
+      LocalAsrPolicy.transducerNativeHotwords(offline) &&
+      !LocalAsrPolicy.correctsWithPinyin(offline),
+    "the offline transducer takes the user's words natively, not through pinyin correction",
+  );
+  check(
+    offline !== null && LocalAsrPolicy.requiredFiles(offline).length === 5,
+    "the offline transducer needs encoder, decoder, joiner, tokens and VAD",
+  );
+  check(
+    LocalAsrPolicy.plan(
+      "/m",
+      JSON.stringify({
+        kind: "offline_transducer",
+        files: { encoder: "e.onnx", decoder: "d.onnx", joiner: "j.onnx", tokens: "tokens.txt" },
+      }),
+    ) === null,
+    "an offline transducer without its VAD is incomplete",
+  );
+  check(
+    transducer !== null && transducer.modelType === "",
+    "a manifest without model_type leaves it to sherpa",
+  );
+  check(
+    OFFLINE_TRANSDUCER_MAX_ACTIVE_PATHS === 16 && TRANSDUCER_HOTWORDS_SCORE === 2.0,
+    "the offline transducer decodes with beam 16 and hotword score 2.0 as LocalAsr.cpp does",
+  );
+  check(
+    LocalAsrPolicy.hotwordsFile("/data/temp/") === "/data/temp/local-asr-hotwords.txt" &&
+      LocalAsrPolicy.hotwordsFile("") === "" &&
+      LocalAsrPolicy.hotwordsFile("temp") === "" &&
+      LocalAsrPolicy.hotwordsFile("/data/../temp") === "" &&
+      LocalAsrPolicy.hotwordsFile("/") === "",
+    "the hotwords file goes only into an absolute scratch directory",
+  );
+});
+
+group("SpaceVoiceGesture", () => {
+  const height = 240;
+  const gesture = new SpaceVoiceGesture();
+  gesture.down(0, 100, 500, height, true);
+  check(gesture.up() === SpaceGestureOutcome.SPACE, "a short tap is a space");
+
+  gesture.down(0, 100, 500, height, true);
+  check(!gesture.tick(SPACE_LONG_PRESS_MS - 1), "not yet a long press");
+  check(gesture.tick(SPACE_LONG_PRESS_MS), "holding still for the long-press time starts voice");
+  check(!gesture.tick(SPACE_LONG_PRESS_MS + 10), "voice is entered only once");
+  gesture.move(SPACE_LONG_PRESS_MS + 20, 160, 500);
+  check(
+    gesture.state() === SpaceGestureState.VOICE && !gesture.cancelling(),
+    "sliding sideways while recording neither moves the cursor nor cancels",
+  );
+  check(gesture.up() === SpaceGestureOutcome.VOICE_FINISH, "letting go finishes the dictation");
+
+  gesture.down(0, 100, 500, height, true);
+  gesture.tick(SPACE_LONG_PRESS_MS);
+  gesture.move(SPACE_LONG_PRESS_MS + 10, 100, 500 - height * 0.25);
+  check(!gesture.cancelling(), "exactly a quarter of the keyboard up is not yet the cancel zone");
+  gesture.move(SPACE_LONG_PRESS_MS + 20, 100, 500 - height * 0.25 - 1);
+  check(gesture.cancelling(), "past a quarter of the keyboard height shows release-to-cancel");
+  gesture.move(SPACE_LONG_PRESS_MS + 30, 100, 480);
+  check(!gesture.cancelling(), "sliding back down restores release-to-finish");
+  gesture.move(SPACE_LONG_PRESS_MS + 40, 100, 300);
+  check(gesture.up() === SpaceGestureOutcome.VOICE_CANCEL, "letting go in the cancel zone cancels");
+
+  gesture.down(0, 100, 500, height, true);
+  gesture.tick(SPACE_LONG_PRESS_MS);
+  check(
+    gesture.cancel() === SpaceGestureOutcome.VOICE_CANCEL,
+    "a cancelled touch cancels the dictation",
+  );
+  check(gesture.state() === SpaceGestureState.IDLE, "the gesture is idle afterwards");
+
+  gesture.down(0, 100, 500, height, true);
+  check(
+    gesture.move(100, 100 + SPACE_DRAG_THRESHOLD_VP + 1, 500),
+    "a horizontal drag past the threshold moves the cursor",
+  );
+  check(
+    !gesture.tick(SPACE_LONG_PRESS_MS * 2),
+    "once dragging, a long press no longer starts voice",
+  );
+  check(gesture.up() === SpaceGestureOutcome.CURSOR, "the drag ends as a cursor move");
+
+  gesture.down(0, 100, 500, height, true);
+  check(
+    !gesture.move(100, 100 + SPACE_DRAG_THRESHOLD_VP, 500),
+    "within the threshold it is still a press",
+  );
+  gesture.move(SPACE_LONG_PRESS_MS, 100, 500);
+  check(
+    gesture.state() === SpaceGestureState.VOICE,
+    "a move after the long-press time enters voice first",
+  );
+  check(gesture.cancel() === SpaceGestureOutcome.VOICE_CANCEL, "and a cancel then drops it");
+
+  gesture.down(0, 100, 500, height, false);
+  check(!gesture.tick(SPACE_LONG_PRESS_MS * 4), "an unarmed press never starts voice");
+  check(gesture.up() === SpaceGestureOutcome.SPACE, "a slow unarmed press is still a space");
+  check(gesture.cancel() === SpaceGestureOutcome.NONE, "cancelling an idle gesture does nothing");
+
+  gesture.down(0, 100, 500, height, true);
+  check(
+    gesture.up() === SpaceGestureOutcome.SPACE,
+    "letting go before the long-press timer ran types a space rather than an empty dictation",
+  );
+
+  gesture.down(0, 100, 500, height, true);
+  gesture.move(100, 100, 500 - height * 0.25 - 1);
+  check(
+    gesture.tick(SPACE_LONG_PRESS_MS),
+    "the timer starts voice after the finger already slid up",
+  );
+  check(
+    gesture.cancelling(),
+    "a finger already in the cancel zone when voice starts shows release-to-cancel",
+  );
+  check(
+    gesture.up() === SpaceGestureOutcome.VOICE_CANCEL,
+    "and letting go there without moving again cancels",
+  );
+
+  check(
+    SpaceVoiceGesture.armed(true, true, false, false, "none"),
+    "an idle touch keyboard arms voice",
+  );
+  check(
+    !SpaceVoiceGesture.armed(false, true, false, false, "none"),
+    "2in1 does not arm space voice",
+  );
+  check(!SpaceVoiceGesture.armed(true, false, false, false, "none"), "voice input turned off");
+  check(!SpaceVoiceGesture.armed(true, true, true, false, "none"), "already recording");
+  check(
+    !SpaceVoiceGesture.armed(true, true, false, true, "none"),
+    "composing keeps space for the candidate",
+  );
+  check(!SpaceVoiceGesture.armed(true, true, false, false, "u_mode"), "a local mode keeps space");
 });
 
 group("LocalAsrTextReader", () => {
@@ -17818,17 +18785,19 @@ group("typing effects decode host-api's answer and draw what it asks", () => {
   });
   check(
     power.style === TypingEffectStyle.POWER_MODE &&
-      power.intensity === 80 &&
       power.comboCounter &&
       power.tierSound &&
       TypingEffectPolicy.active(power),
     "the shared preference keys are read",
   );
   check(
-    TypingEffectPolicy.settings({ effect_style: "confetti", effect_intensity: 150 }).style ===
-      TypingEffectStyle.OFF &&
+    power.intensity === 50 &&
       TypingEffectPolicy.settings({ effect_intensity: 150 }).intensity === 50,
-    "an unknown style is off and an out-of-range intensity takes the default",
+    "the stored intensity is not read: HarmonyOS fixes it at the default, as HostPlatform::fixed_effect_intensity says",
+  );
+  check(
+    TypingEffectPolicy.settings({ effect_style: "confetti" }).style === TypingEffectStyle.OFF,
+    "an unknown style is off",
   );
   check(
     TypingEffectPolicy.active(TypingEffectPolicy.settings({ combo_counter: true })),
@@ -17986,7 +18955,7 @@ group("an effect pack's parameters replace the preference values once host-api r
     duration_ms: 99999,
   });
   check(
-    odd.intensity === 40 && odd.flashMillis === 1500 && odd.color === undefined,
+    odd.intensity === 50 && odd.flashMillis === 1500 && odd.color === undefined,
     "out-of-range values are clamped or ignored rather than drawn",
   );
   check(
@@ -18290,11 +19259,11 @@ group(
   "Cantonese, Zhuyin and Vietnamese are three more cards, Cantonese and Zhuyin needing a dictionary",
   () => {
     check(
-      KeyboardScheme.SCHEMES.length === 17 &&
-        KeyboardScheme.SCHEMES[10] === KeyboardScheme.KOREAN &&
-        KeyboardScheme.SCHEMES[11] === KeyboardScheme.CANTONESE &&
-        KeyboardScheme.SCHEMES[12] === KeyboardScheme.ZHUYIN &&
-        KeyboardScheme.SCHEMES[13] === KeyboardScheme.VIETNAMESE,
+      KeyboardScheme.SCHEMES.length === 18 &&
+        KeyboardScheme.SCHEMES[11] === KeyboardScheme.KOREAN &&
+        KeyboardScheme.SCHEMES[12] === KeyboardScheme.CANTONESE &&
+        KeyboardScheme.SCHEMES[13] === KeyboardScheme.ZHUYIN &&
+        KeyboardScheme.SCHEMES[14] === KeyboardScheme.VIETNAMESE,
       "appended after Korean, in the shared picker's order",
     );
     check(
@@ -18462,9 +19431,9 @@ group("the Dachen keys wear their bopomofo and send their ASCII key", () => {
 
 group("Stroke is one more card, opt-in and needing msime-stroke.db", () => {
   check(
-    KeyboardScheme.SCHEMES.length === 17 &&
-      KeyboardScheme.SCHEMES[14] === KeyboardScheme.TIBETAN &&
-      KeyboardScheme.SCHEMES[15] === KeyboardScheme.STROKE,
+    KeyboardScheme.SCHEMES.length === 18 &&
+      KeyboardScheme.SCHEMES[15] === KeyboardScheme.TIBETAN &&
+      KeyboardScheme.SCHEMES[16] === KeyboardScheme.STROKE,
     "appended after Tibetan, as the shared TouchKeyboardScheme::ALL appends it",
   );
   const stroke: SchemeDefinition = KeyboardScheme.STROKE;
@@ -18638,8 +19607,8 @@ group("a Stroke composition draws its glyphs at the Engine's caret", () => {
   check(
     InlinePreeditPolicy.text("raw", true, true, reading, "一丨", "") === "一丨" &&
       InlinePreeditPolicy.text("pinyin", true, true, reading, "一丨", "") === "一丨" &&
-      InlinePreeditPolicy.text("raw", false, true, reading, "一丨", "") === "",
-    "a 2in1 previews the glyphs in either style when handed the drawn reading; a phone keeps them on the strip",
+      InlinePreeditPolicy.text("raw", false, true, reading, "一丨", "") === "一丨",
+    "the glyphs are previewed in either style and on a phone too, never the typed letters",
   );
 });
 
@@ -18982,7 +19951,7 @@ group("藏文是第九个方案：按 EWTS 威利转写组字，不是中文方�
     "切换方案时提交藏文，而不是威利原文",
   );
   check(
-    KeyboardScheme.SCHEMES[14] === KeyboardScheme.TIBETAN &&
+    KeyboardScheme.SCHEMES[15] === KeyboardScheme.TIBETAN &&
       KeyboardScheme.TIBETAN.preferenceId === "tibetan" &&
       KeyboardScheme.TIBETAN.engineScheme === "tibetan" &&
       KeyboardScheme.TIBETAN.touchKeyboardLayout === "twenty_six_key" &&
@@ -19683,3 +20652,33 @@ group("the punctuation styles travel with the account settings", () => {
   check(unknown.preferences.quote_style === "corner", "an unknown style skips only its key");
   check(unknown.preferences.learning === false, "and the rest still applies");
 });
+
+// 同样的字母页只有中文全拼触屏显示分词，英文、本地模式与 2in1 仍能切换大小写。
+{
+  check(
+    KeyboardScheme.usesQuanpinSeparator(KeyboardScheme.QUANPIN, true, false, false, "none"),
+    "全拼触屏显示分词",
+  );
+  for (const scheme of [
+    KeyboardScheme.QUANPIN_NINE_KEY,
+    KeyboardScheme.XIAOHE,
+    KeyboardScheme.WUBI,
+  ]) {
+    check(
+      !KeyboardScheme.usesQuanpinSeparator(scheme, true, false, false, "none"),
+      "其他方案保留原键",
+    );
+  }
+  for (const [touch, english, symbols, local] of [
+    [false, false, false, "none"],
+    [true, true, false, "none"],
+    [true, false, true, "none"],
+    [true, false, false, "calculator"],
+  ] as [boolean, boolean, boolean, string][]) {
+    check(
+      !KeyboardScheme.usesQuanpinSeparator(KeyboardScheme.QUANPIN, touch, english, symbols, local),
+      "非中文全拼字母页不显示分词",
+    );
+  }
+  check(KeyIdPolicy.character("'") === "Quote", "分词统计属于 Quote");
+}

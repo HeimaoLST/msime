@@ -54,6 +54,14 @@ public final class InputFailureCategoryDeviceSmoke extends Instrumentation {
             Field layout = type.getDeclaredField("touchLayoutHint");
             layout.setAccessible(true);
             layout.setInt(service, 0);
+            // apply() 先比较已画键面和传入的 view。真实输入法在 onCreateInputView
+            // 里创建这个辅助对象；测试夹具也创建同一个轻量对象，让拒写继续走到
+            // EditorBridge，而不是在夹具里先因 NullPointerException 失败。
+            Field rows = type.getDeclaredField("imeLetterRows");
+            rows.setAccessible(true);
+            var rowsConstructor = rows.getType().getDeclaredConstructor(type);
+            rowsConstructor.setAccessible(true);
+            rows.set(service, rowsConstructor.newInstance(service));
             int[] writes = new int[3];
             InputConnection connection = (InputConnection) Proxy.newProxyInstance(
                 InputConnection.class.getClassLoader(), new Class<?>[] {InputConnection.class},
@@ -75,6 +83,69 @@ public final class InputFailureCategoryDeviceSmoke extends Instrumentation {
             checkCategory(loader, rejected, "editor_rejected");
             check(writes[0] == 1 && writes[1] == 1 && writes[2] == 1,
                 "rejected editor write remains one ordered attempt");
+            stage = "disconnected auxiliary editor operations";
+            InputConnection disconnected = (InputConnection) Proxy.newProxyInstance(
+                InputConnection.class.getClassLoader(), new Class<?>[] {InputConnection.class},
+                (proxy, call, args) -> {
+                    throw new IllegalStateException("synthetic disconnected editor");
+                });
+            target.set(service, disconnected);
+            Field view = type.getDeclaredField("view");
+            view.setAccessible(true);
+            view.set(service, null);
+            for (String operation : new String[] {"deleteBeforeCursor", "deleteCodePointBeforeCursor",
+                    "performEditorAction", "stepOverClosingMark", "editorContext", "selectedEditorText"}) {
+                stage = "disconnected editor: " + operation;
+                switch (operation) {
+                    case "deleteBeforeCursor", "performEditorAction" ->
+                        method(type, operation, int.class).invoke(service, 1);
+                    case "stepOverClosingMark" ->
+                        method(type, operation, String.class).invoke(service, ")");
+                    case "editorContext" ->
+                        check(method(type, operation, boolean.class).invoke(service, true) == null,
+                            "disconnected context is unavailable");
+                    default -> method(type, operation).invoke(service);
+                }
+            }
+            stage = "editor disconnects after an empty context read";
+            int[] keyEvents = new int[1];
+            InputConnection emptyThenDisconnected = (InputConnection) Proxy.newProxyInstance(
+                InputConnection.class.getClassLoader(), new Class<?>[] {InputConnection.class},
+                (proxy, call, args) -> switch (call.getName()) {
+                    case "getSelectedText" -> null;
+                    case "getTextBeforeCursor" -> "";
+                    case "sendKeyEvent" -> {
+                        keyEvents[0]++;
+                        throw new IllegalStateException("synthetic disconnected editor");
+                    }
+                    default -> throw new AssertionError("Unexpected editor operation");
+                });
+            target.set(service, emptyThenDisconnected);
+            method(type, "deleteCodePointBeforeCursor").invoke(service);
+            check(keyEvents[0] == 2, "empty editor sends one guarded down/up pair");
+            target.set(service, disconnected);
+            stage = "disconnected email context";
+            Field inputType = type.getDeclaredField("editorInputType");
+            inputType.setAccessible(true);
+            inputType.setInt(service, android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS);
+            Field email = type.getDeclaredField("imeEmailSuffixes");
+            email.setAccessible(true);
+            var suffixConstructor = email.getType().getDeclaredConstructor(type);
+            suffixConstructor.setAccessible(true);
+            Object suffixes = suffixConstructor.newInstance(service);
+            method(suffixes.getClass(), "refresh").invoke(suffixes);
+            stage = "disconnected edit panel";
+            Field panel = type.getDeclaredField("imeTextEditPanel");
+            panel.setAccessible(true);
+            var panelConstructor = panel.getType().getDeclaredConstructor(type);
+            panelConstructor.setAccessible(true);
+            Object editPanel = panelConstructor.newInstance(service);
+            Class<?> action = loader.loadClass("app.msime.android.TextEditPanelModel$Action");
+            for (Object valueAction : action.getEnumConstants()) {
+                if (valueAction.toString().equals("PASTE")) continue;
+                method(editPanel.getClass(), "perform", action).invoke(editPanel, valueAction);
+            }
             stage = "private exception exclusion";
             checkCategory(loader, new JSONException("synthetic-private-marker") {
                 private static final long serialVersionUID = 1L;

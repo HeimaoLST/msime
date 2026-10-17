@@ -509,6 +509,20 @@ fn romaji_at(text: &str) -> Option<(&'static str, &'static str)> {
         .copied()
 }
 
+/// 连续促音显式隔开；其余情况只在正向扫描能识别时重复后一个假名的首辅音。
+fn sokuon_spelling(after: &str) -> &'static str {
+    match romaji_at(after) {
+        Some((kana, spelling))
+            if kana != SOKUON
+                && is_consonant(spelling.as_bytes()[0])
+                && spelling.as_bytes()[0] != b'n' =>
+        {
+            &spelling[..1]
+        }
+        _ => "xtsu",
+    }
+}
+
 fn hiragana_input(kana: &str) -> Cow<'_, str> {
     let has_katakana = kana.chars().any(|character| {
         let code_point = u32::from(character);
@@ -537,18 +551,18 @@ pub fn hiragana_to_romaji(kana: &str) -> String {
     let mut rest = hiragana.as_ref();
     while let Some(character) = rest.chars().next() {
         if let Some(after) = rest.strip_prefix(SOKUON) {
-            // A sokuon doubles the next kana's consonant; before a vowel or at the end it has to be spelled out.
-            match romaji_at(after).and_then(|(_, next)| next.bytes().next()) {
-                Some(first) if is_consonant(first) => romaji.push(char::from(first)),
-                _ => romaji.push_str("xtsu"),
-            }
+            romaji.push_str(sokuon_spelling(after));
             rest = after;
             continue;
         }
         if let Some(after) = rest.strip_prefix(MORAIC_N) {
-            // 后面是元音、や行或な行时单个 n 会和它拼成一个假名，要写成 `nn` 才转得回ん（`convert_romaji` 里 `nn` 一律是ん）。
-            let joins_next = romaji_at(after)
-                .and_then(|(_, next)| next.bytes().next())
+            // 按实际输出的首字母判断是否需要 `nn`；`っや` 输出 `yya`，不能按表中っ的别名判断。
+            let next = after
+                .strip_prefix(SOKUON)
+                .map(sokuon_spelling)
+                .or_else(|| romaji_at(after).map(|(_, spelling)| spelling));
+            let joins_next = next
+                .and_then(|next| next.bytes().next())
                 .is_some_and(|first| !is_consonant(first) || first == b'y' || first == b'n');
             romaji.push_str(if joins_next { "nn" } else { "n" });
             rest = after;
@@ -837,6 +851,26 @@ mod tests {
     }
 
     #[test]
+    fn sokuon_before_n_preserves_both_kana_on_round_trip() {
+        for reading in [
+            "っな",
+            "っに",
+            "っぬ",
+            "っね",
+            "っの",
+            "っにゃ",
+            "っん",
+            "んっな",
+        ] {
+            let romaji = hiragana_to_romaji(reading);
+            let conversion = convert_romaji(&romaji);
+            assert_eq!(conversion.hiragana, reading, "{reading} -> {romaji}");
+            assert!(conversion.pending.is_empty(), "{reading} -> {romaji}");
+        }
+        assert_eq!(hiragana_to_romaji("ッナ"), "xtsuna");
+    }
+
+    #[test]
     fn hiragana_view_borrows_already_normalized_input() {
         assert!(matches!(hiragana_input("かな"), Cow::Borrowed("かな")));
         assert_eq!(hiragana_input("カナ").as_ref(), "かな");
@@ -973,6 +1007,37 @@ mod tests {
         assert_eq!(hiragana_to_romaji("こーひー"), "ko-hi-");
         assert_eq!(hiragana_to_romaji("コーヒー"), "ko-hi-");
         assert_eq!(hiragana_to_romaji("か漢じ"), "kaji");
+    }
+
+    #[test]
+    fn contextual_kana_spellings_preserve_the_reading_on_round_trip() {
+        for reading in ["っっ", "っっか", "っっや", "っっな"] {
+            let romaji = hiragana_to_romaji(reading);
+            require_conversion(&romaji, reading, "", true);
+            assert_eq!(hiragana_to_romaji(&hiragana_to_katakana(reading)), romaji);
+        }
+    }
+
+    #[test]
+    fn contextual_moraic_n_preserves_the_reading_on_round_trip() {
+        for reading in ["んっや", "んっゆ", "んっよ", "んっっや"] {
+            let romaji = hiragana_to_romaji(reading);
+            require_conversion(&romaji, reading, "", true);
+            assert_eq!(hiragana_to_romaji(&hiragana_to_katakana(reading)), romaji);
+        }
+    }
+
+    #[test]
+    fn table_kana_pairs_preserve_readings_with_contextual_suffixes() {
+        for &(first, _) in KANA_TO_ROMAJI.iter() {
+            for &(second, _) in KANA_TO_ROMAJI.iter() {
+                for suffix in ["", "か", "や", "っ", "ん"] {
+                    let reading = format!("{first}{second}{suffix}");
+                    let romaji = hiragana_to_romaji(&reading);
+                    require_conversion(&romaji, &reading, "", true);
+                }
+            }
+        }
     }
 
     #[test]

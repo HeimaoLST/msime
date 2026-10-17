@@ -8,6 +8,7 @@ import io
 from pathlib import Path
 import subprocess
 import tempfile
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +48,25 @@ def check_model_request_user_agent() -> None:
     check(int(payload.get("max_tokens", 0)) >= 16000, "模型请求没有给足输出上限，长说明会被截断")
     prompt = payload["messages"][-1]["content"]
     check("## v0.10.0 更新内容" in prompt and "## v1.2.3 更新内容" in prompt, "模型请求没有带上格式样例和目标标题")
+
+
+def check_model_configuration() -> None:
+    groups = [{"pr": None, "commits": [{"subject": "fix: 合成修复", "commit": "1234567890", "paths": [], "body": ""}]}]
+    for configured, expected in [(None, "claude-sonnet-5-5"), ("", "claude-sonnet-5-5"), (" \t ", "claude-sonnet-5-5"), (" custom-model ", "custom-model")]:
+        sent: list[object] = []
+
+        def respond(request: object, timeout: float) -> object:
+            sent.append(request)
+            return io.BytesIO(MODULE.json.dumps({"choices": [{"message": {"content": "## v1.2.3 更新内容\n\n- 合成修复"}, "finish_reason": "stop"}]}).encode("utf-8"))
+
+        environment = {"EVERYAPI_RELEASE_NOTES_TOKEN": "test-token"}
+        if configured is not None:
+            environment["EVERYAPI_RELEASE_NOTES_MODEL"] = configured
+        with patch.dict(MODULE.os.environ, environment, clear=True), patch.object(MODULE.urllib.request, "urlopen", respond):
+            check(MODULE.model_notes("Android", "1.2.3", groups, {}) is not None, "合成模型回复没有被接受")
+        check(len(sent) == 1, "模型请求没有发出")
+        payload = MODULE.json.loads(sent[0].data)
+        check(payload["model"] == expected, f"模型配置 {configured!r} 没有选择预期的模型")
 
 
 def check_model_reply_heading() -> None:
@@ -135,6 +155,7 @@ def main() -> int:
     check("- 新增设置页 (#6)" in notes, f"维护者的条目不该带致谢：{notes}")
     check("- 缓存编译产物 (提交 `32345678`)" in notes, f"不属于 PR 的提交没有标出提交：{notes}")
     check_model_request_user_agent()
+    check_model_configuration()
     check_model_reply_heading()
     check_pull_request_assignment()
     print("release notes platform filtering: ok")

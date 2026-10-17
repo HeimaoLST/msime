@@ -18,6 +18,7 @@ public final class KeyboardHeightDeviceSmoke extends DeviceSmoke {
     /** {@code AndroidLocalSettings.BOTTOM_BAR} 与 {@code BOTTOM_PADDING}，同样写字面值。 */
     private static final String BOTTOM_BAR_SETTING = "platform.android.bottom_bar";
     private static final String BOTTOM_PADDING_SETTING = "platform.android.bottom_padding";
+    private static final String BOTTOM_PADDING_HEIGHT_SETTING = "platform.android.bottom_padding_height";
 
     @Override protected String successDescription() {
         return "keyboard height live preview, composition preservation, persistence, restart, bottom padding and a bottom row as tall as the letter rows";
@@ -116,7 +117,7 @@ public final class KeyboardHeightDeviceSmoke extends DeviceSmoke {
             if (Math.abs(restarted - resetHeight) > 2)
                 throw new AssertionError("Persisted height changed after restart");
 
-            // 底部留白（#6392）：键区下面垫 40 dp 空白，底行键整体抬高同样的距离，键本身不变高。两次都关掉键盘底栏：底栏画着时留白不叠加，手势导航的 AVD 上基线会不同。
+            // 底部留白：旧开关仍默认 40 dp，自定义目标只抬高键区，不能改变键本身的高度。
             stage = "bottom padding lifts the bottom row";
             Rect unpadded = settledKeyBounds(localSettings, new JSONObject().put(BOTTOM_BAR_SETTING, false));
             Rect padded = settledKeyBounds(localSettings, new JSONObject().put(BOTTOM_BAR_SETTING, false)
@@ -128,6 +129,15 @@ public final class KeyboardHeightDeviceSmoke extends DeviceSmoke {
             if (Math.abs(padded.height() - unpadded.height()) > 2)
                 throw new AssertionError("Bottom padding changed the key height: "
                     + unpadded.height() + " -> " + padded.height());
+            for (int heightDp : new int[] {0, 80, 160}) {
+                stage = "custom bottom padding " + heightDp;
+                Rect custom = settledKeyBounds(localSettings, new JSONObject().put(BOTTOM_BAR_SETTING, false)
+                    .put(BOTTOM_PADDING_SETTING, true).put(BOTTOM_PADDING_HEIGHT_SETTING, heightDp));
+                int expected = Math.round(heightDp * getTargetContext().getResources().getDisplayMetrics().density);
+                if (Math.abs(unpadded.bottom - custom.bottom - expected) > 2
+                        || Math.abs(custom.height() - unpadded.height()) > 2)
+                    throw new AssertionError("Independent bottom padding target was not preserved: " + heightDp);
+            }
 
             // 底行与字母键同高（#6354、#6472）：默认、75% 和 130% 时空格键都和「n」一样高——底行和三行键一起均分高度调整，两者最多差 1 dp。默认高度时从「q」的上沿到空格的下沿是四行 52 dp 加三份行距（229 dp），与原来三行 56 dp 加 39 dp 的底栏键帽（228 dp）基本相同。同样关掉键盘底栏，排除手势导航 AVD 上的差异。
             stage = "bottom row matches the letter rows";
@@ -163,7 +173,7 @@ public final class KeyboardHeightDeviceSmoke extends DeviceSmoke {
             restartIme();
             openEditor();
             Rect pair = new Rect();
-            awaitStableBounds(description("按键 Q W")).getBoundsInScreen(pair);
+            awaitSettledKeyboardKey(description("按键 Q W")).getBoundsInScreen(pair);
             Rect fourteenSpace = keyBounds("空格");
             int fourteenSpan = fourteenSpace.bottom - pair.top;
             if (Math.abs(fourteenSpan - twentySixSpan) > tolerance)
@@ -193,14 +203,15 @@ public final class KeyboardHeightDeviceSmoke extends DeviceSmoke {
         restartIme();
         openEditor();
         Rect bounds = new Rect();
-        awaitSettledKeyboardKey().getBoundsInScreen(bounds);
+        awaitSettledKeyboardKey(key("n")).getBoundsInScreen(bounds);
         return bounds;
     }
 
     /**
      * 输入法重启后，旧窗口可能在无障碍树里短暂保留；只等键位本身两次相同会把旧窗口的稳定坐标当成新窗口。这里同时比较输入法窗口的边界，并连续等四次，覆盖 API 35 上的窗口切换动画。
      */
-    private AccessibilityNodeInfo awaitSettledKeyboardKey() {
+    private AccessibilityNodeInfo awaitSettledKeyboardKey(
+            java.util.function.Predicate<AccessibilityNodeInfo> selector) {
         Rect previousKey = null;
         Rect previousWindow = null;
         int stable = 0;
@@ -209,12 +220,16 @@ public final class KeyboardHeightDeviceSmoke extends DeviceSmoke {
             for (AccessibilityWindowInfo window : automation.getWindows()) {
                 if (window.getType() != AccessibilityWindowInfo.TYPE_INPUT_METHOD)
                     continue;
-                AccessibilityNodeInfo node = find(window.getRoot(), key("n"));
+                AccessibilityNodeInfo node = find(window.getRoot(), selector);
                 if (node == null) continue;
                 Rect keyBounds = new Rect();
                 Rect windowBounds = new Rect();
                 node.getBoundsInScreen(keyBounds);
                 window.getBoundsInScreen(windowBounds);
+                if (keyBounds.isEmpty() || !windowBounds.contains(keyBounds)) {
+                    stable = 0;
+                    break;
+                }
                 if (keyBounds.equals(previousKey) && windowBounds.equals(previousWindow)) {
                     stable++;
                 } else {

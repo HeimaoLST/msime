@@ -16,10 +16,10 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
- * AndroidLocalSettings 不碰 org.json 的部分：默认值、取值校验、写入前的拒绝、读不到时回到默认值、原子写，以及参与同步的键与 client-core 的 `ANDROID_LOCAL_SETTINGS` 逐项一致（键名、类型、可选值、整数范围）。check-host 的 android.jar 里 org.json 只是抛 `Stub!` 的桩，编码与解码留给设备上的设置页与同步。
+ * AndroidLocalSettings 不碰 org.json 的部分：默认值、取值校验、写入前的拒绝、读不到时回到默认值、原子写，以及参与同步的键与 client-services 的 `ANDROID_LOCAL_SETTINGS` 逐项一致（键名、类型、可选值、整数范围）。check-host 的 android.jar 里 org.json 只是抛 `Stub!` 的桩，编码与解码留给设备上的设置页与同步。
  */
 public final class AndroidLocalSettingsSmoke {
-    private static final String SYNC_SOURCE = "crates/client-core/src/account/settings_sync.rs";
+    private static final String SYNC_SOURCE = "crates/client-services/src/account/settings_sync.rs";
 
     private static void check(boolean condition, String message) {
         if (!condition) throw new AssertionError(message);
@@ -109,7 +109,7 @@ public final class AndroidLocalSettingsSmoke {
     }
 
     private static void diagnosticDirectorySetting() {
-        String key = AndroidLocalSettings.DIAGNOSTICS_EXPORT_TREE;
+        for (String key : new String[] {AndroidLocalSettings.DIAGNOSTICS_EXPORT_TREE, AndroidLocalSettings.CLIPBOARD_EXPORT_TREE}) {
         AndroidLocalSettings.Spec spec = AndroidLocalSettings.spec(key);
         check("".equals(AndroidLocalSettings.defaults().text(key)), "export directory has no default grant");
         check(!spec.synced && !LocalBackupPolicy.backsUpLocalSetting(key), "directory stays on this device");
@@ -122,6 +122,7 @@ public final class AndroidLocalSettingsSmoke {
         AndroidLocalSettings.Snapshot selected = new AndroidLocalSettings.Snapshot(
             AndroidLocalSettings.accepted(Map.of(key, uri)));
         check(uri.equals(selected.text(key)) && !selected.synced().containsKey(key), "selection remains local");
+        }
     }
 
     private static void validation() {
@@ -165,6 +166,13 @@ public final class AndroidLocalSettingsSmoke {
         check(fresh.bool(AndroidLocalSettings.BOTTOM_BAR), "bottom bar on by default");
         // 底部留白（#6392）：默认关，老用户的键盘高度不变；只在本机。
         check(!fresh.bool(AndroidLocalSettings.BOTTOM_PADDING), "bottom padding off by default");
+        check(fresh.integer(AndroidLocalSettings.BOTTOM_PADDING_HEIGHT) == 40,
+            "legacy enabled padding retains forty dp");
+        AndroidLocalSettings.Spec paddingHeight = AndroidLocalSettings.spec(AndroidLocalSettings.BOTTOM_PADDING_HEIGHT);
+        check(Integer.valueOf(0).equals(paddingHeight.accept(0))
+            && Integer.valueOf(160).equals(paddingHeight.accept(160))
+            && paddingHeight.accept(-1) == null && paddingHeight.accept(161) == null,
+            "padding target is bounded independently of key height");
         // 「加高底行」（#6354）已移除，底行默认就和键行同高：不再是一个设置项，存着的旧值读取时丢掉。
         check(!AndroidLocalSettings.specs().containsKey("platform.android.tall_bottom_row"), "tall bottom row is no longer a setting");
         AndroidLocalSettings.Spec floatingX = AndroidLocalSettings.spec(AndroidLocalSettings.FLOATING_KEYBOARD_X);
@@ -197,7 +205,7 @@ public final class AndroidLocalSettingsSmoke {
                 AndroidLocalSettings.FLOATING_KEYBOARD_X, AndroidLocalSettings.FLOATING_KEYBOARD_Y,
                 AndroidLocalSettings.HARDWARE_CARET_CANDIDATES,
                 AndroidLocalSettings.TOOLBAR_FLOATING, AndroidLocalSettings.TOOLBAR_TEXT_EDIT, AndroidLocalSettings.BOTTOM_BAR, AndroidLocalSettings.BOTTOM_PADDING,
-                AndroidLocalSettings.DEVELOPER_DEBUG_OVERLAY,
+                AndroidLocalSettings.BOTTOM_PADDING_HEIGHT, AndroidLocalSettings.DEVELOPER_DEBUG_OVERLAY,
                 AndroidLocalSettings.DEVELOPER_LOG_LEVEL, AndroidLocalSettings.DEVELOPER_INPUT_LOG,
                 AndroidLocalSettings.MCP_RETENTION, AndroidLocalSettings.MCP_INPUT_EVENTS}) {
             check(!synced.containsKey(local), local + " never syncs");
@@ -309,7 +317,7 @@ public final class AndroidLocalSettingsSmoke {
         }
     }
 
-    /** client-core 校验 `android_local` 用的表与这里的同步键逐项一致。 */
+    /** client-services 校验 `android_local` 用的表与这里的同步键逐项一致。 */
     private static void syncedKeysMatchClientCore() throws IOException {
         String source = new String(Files.readAllBytes(repoRoot().resolve(SYNC_SOURCE)), StandardCharsets.UTF_8);
         int start = source.indexOf("const ANDROID_LOCAL_SETTINGS");

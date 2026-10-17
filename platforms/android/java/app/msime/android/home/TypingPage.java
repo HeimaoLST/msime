@@ -307,6 +307,10 @@ public final class TypingPage extends ReloadingDetailPage {
         chinese.toggle(single.title(), single.description(),
             preferences.optBoolean(single.key(), single.enabledByDefault()),
             checked -> savePreferences(values -> values.put(single.key(), checked)));
+        InputFeatureToggle backspace = InputFeatureToggle.BACKSPACE_REVERTS_SELECTION;
+        chinese.toggle(backspace.title(), backspace.description(),
+            preferences.optBoolean(backspace.key(), backspace.enabledByDefault()),
+            on -> savePreferences(values -> values.put(backspace.key(), on)));
         InputFeatureToggle cloud = InputFeatureToggle.CLOUD_CANDIDATES;
         chinese.toggle(cloud.title(), cloud.description(), preferences.optBoolean(cloud.key(), cloud.enabledByDefault()),
             checked -> savePreferences(values -> values.put(cloud.key(), checked)));
@@ -706,7 +710,7 @@ public final class TypingPage extends ReloadingDetailPage {
         }
         sheet.option("导入辅助码表…", false, () -> {
             importShuangpin = shuangpin;
-            // SAF 给 .txt 报的 MIME 不一定是 text/plain，所以一并放行 octet-stream，内容由 client-core 校验。
+            // SAF 给 .txt 报的 MIME 不一定是 text/plain，所以一并放行 octet-stream，内容由 client-services 校验。
             openTable.launch(new String[] {"text/plain", "application/octet-stream"});
         });
         List<HelpcodeChoicePolicy.Pack> packs = state.helpcodePacks();

@@ -31,7 +31,7 @@ pub unsafe extern "C" fn msime_client_create(options: *const u8, length: usize) 
                 provider: ai.provider.clone(),
                 model: ai.model.clone(),
                 endpoint: ai.endpoint.clone(),
-                candidate_limit: ai.candidate_limit,
+                candidate_limit: host_ai_candidate_limit(ai.candidate_limit),
                 prompt_id: ai.prompt_id.clone(),
                 prompt_custom_1: ai.prompt_custom_1.clone(),
                 prompt_custom_2: ai.prompt_custom_2.clone(),
@@ -89,8 +89,6 @@ pub unsafe extern "C" fn msime_client_create(options: *const u8, length: usize) 
         engine
             .set_mention_places(applied.local_modes.mention_places)
             .map_err(|e| e.to_string())?;
-        // AI 请求发得出去时，可以问 AI 的组字先在 AI 座位上放占位行，回答到达时不挪动其他候选（#6888）。会话密钥要等 `msime_client_set_ai_credential` 才到，到时再重算。
-        engine.set_ai_seat(ai_seat_ready(&applied.ai_assistant, None));
         // 默认输入状态 says which state a new focus session starts in, and the
         // host applies it as its own English passthrough - letters go straight
         // to the document, with no session involved. It is not the Engine's
@@ -104,8 +102,14 @@ pub unsafe extern "C" fn msime_client_create(options: *const u8, length: usize) 
         let mut runtime =
             Runtime::new_with_touch_layout(engine, page_size, applied.touch_keyboard_layout)
                 .map_err(|e| e.to_string())?;
+        runtime
+            .set_cloud_candidates_enabled(applied.cloud_candidates)
+            .map_err(|e| e.to_string())?;
         runtime.set_phrase_preedit(phrase_preedit);
+        runtime.set_backspace_reverts_selection(applied.backspace_reverts_selection);
+        runtime.set_left_right_navigation(applied.navigation.left_right);
         runtime.set_wubi_auto_commit_unique(applied.wubi_auto_commit_unique);
+        runtime.set_wubi_candidate_selection(applied.wubi_candidate_selection.clone());
         runtime.set_punctuation_marks(msime_client_core::punctuation::punctuation_marks(&applied));
         runtime.set_reranker(keyboard_reranker(&options, sentence_model_path.as_deref()));
 

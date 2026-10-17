@@ -1,3 +1,6 @@
+import { isComposingKeyEvent } from "../core/ime-key-event";
+import { exceptionMessage } from "../core/exception-message";
+import { LabeledInputField } from "../core/labeled-input-field";
 import { downloadBlob } from "../core/download-blob";
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ActionSheet } from "../core/action-sheet";
@@ -9,8 +12,11 @@ import { useToast } from "../core/toast";
 import { useAsyncActionRunner } from "../core/use-async-action";
 import { useDebouncedCallback } from "../core/use-debounced-callback";
 import * as dialog from "../community/community-style";
-import type { CommunityResource, CommunityResourceClient } from "../community/community-resources";
-import { communityResourceSubtitle } from "../community/community-resources";
+import type {
+  CommunityResource,
+  CommunityResourceClient,
+} from "../community/community-resource-model";
+import { communityResourceSubtitle } from "../community/community-resource-model";
 import {
   binaryCollectionFormat,
   collectionFailureMessage,
@@ -28,15 +34,15 @@ import {
   type DictionaryCollectionsView,
 } from "../dictionary/dictionary-collections";
 import { dictionaryExportName, dictionaryExportPayload } from "../dictionary/dictionary-export";
+import { SCEL_PERSONAL_USE_NOTICE } from "../dictionary/dictionary-messages";
 import {
   MAX_SCEL_FILE_BYTES,
   readDictionaryFile,
   readScelFile,
   type DictionaryEntry,
 } from "../dictionary/dictionary-file";
-import type { DictionaryClient } from "../index";
-import { pushMobileSettingsState } from "./mobile-navigation";
-import { useMobilePopState } from "./use-mobile-pop-state";
+import type { DictionaryClient } from "../dictionary/dictionary-contracts";
+import { useMobileSettingsSubview } from "./use-mobile-settings-subview";
 import { useSettingsForm } from "./settings-form-context";
 import { useAsyncGeneration } from "./use-async-generation";
 import { SwitchRow } from "./switch-row";
@@ -46,12 +52,12 @@ import * as settings from "./settings-style";
 const DISCOVER_LIMIT = 8;
 /** 内置词库详情页一次读的词条数，与 Android 的词库详情页相同。 */
 const ENTRY_PAGE_SIZE = 100;
-/** 命名词库一次导入的文本上限，与 client-core 的 `MAX_IMPORT_TEXT_BYTES` 相同。 */
+/** 命名词库一次导入的文本上限，与 client-services 的 `MAX_IMPORT_TEXT_BYTES` 相同。 */
 const MAX_COLLECTION_IMPORT_BYTES = 16 * 1024 * 1024;
 const BUILTIN = "builtin:pinyin";
 
 /**
- * HarmonyOS 手机的「词库」页，按 Android 的 `LexiconPage` 布局：「已安装」列出拼音词库和用户自己的词库，点进去启用、停用和编辑；「管理」里新建、导入、导出和刷新；「发现词库」是社区词库，「添加」后成为一个可以停用或删除的词库，末尾的「浏览更多词库」打开完整的社区词库图库；然后是学习开关和「更多」。
+ * HarmonyOS 手机的「词库」页，按 Android 的 `LexiconPage` 布局：「已安装」列出拼音词库和用户自己的词库，点进去启用、停用和编辑；「管理」里新建、导入、导出和刷新；「发现词库」是社区词库，「添加」后成为一个可以停用或删除的词库，末尾的「浏览更多词库」切到底部「社区」标签的「词库」分类；然后是学习开关和「更多」。
  *
  * 词库详情在本页内打开，推入一条历史记录，系统返回键和左上角的返回都回到列表。
  */
@@ -72,7 +78,21 @@ export function HarmonyPhoneDictionary() {
   const [view, setView] = useState<DictionaryCollectionsView | null>(null);
   const [loadFailure, setLoadFailure] = useState("");
   const [builtinCount, setBuiltinCount] = useState<number | null>(null);
-  const [detail, setDetail] = useState<string | null>(null);
+  const {
+    value: detail,
+    open: openDictionaryDetail,
+    close: closeDictionaryDetail,
+  } = useMobileSettingsSubview<string>({
+    mobile: true,
+    stateKey: "dictionaryDetail",
+    decode: (state, currentDetail) =>
+      typeof state?.dictionaryDetail === "string" &&
+      (currentDetail === null || state.dictionaryDetail === currentDetail)
+        ? state.dictionaryDetail
+        : null,
+    encode: (id) => ({ page: "dictionary", dictionaryDetail: id }),
+    isActiveState: (state) => Boolean(state?.dictionaryDetail),
+  });
   const [creating, setCreating] = useState(false);
   const [addingDictionary, setAddingDictionary] = useState(false);
   const reportFailure = useCallback(
@@ -148,21 +168,11 @@ export function HarmonyPhoneDictionary() {
   };
 
   const openDetail = (id: string) => {
-    if (typeof window !== "undefined") {
-      pushMobileSettingsState({ page: "dictionary", dictionaryDetail: id });
-    }
-    setDetail(id);
+    openDictionaryDetail(id);
   };
   const closeDetail = () => {
-    if (typeof window !== "undefined" && window.history.state?.dictionaryDetail) {
-      window.history.back();
-      return;
-    }
-    setDetail(null);
+    closeDictionaryDetail();
   };
-  useMobilePopState(true, (event) => {
-    if (detail && event.state?.dictionaryDetail !== detail) setDetail(null);
-  });
 
   if (detail === BUILTIN && dictionary) {
     return (
@@ -343,21 +353,20 @@ export function HarmonyPhoneDictionary() {
               try {
                 encoded = await readScelFile(file, MAX_SCEL_FILE_BYTES);
               } catch (error) {
-                if (isCurrent())
-                  toast(error instanceof Error ? error.message : "读取文件失败，请重新选择。");
+                if (isCurrent()) toast(exceptionMessage(error, "读取文件失败，请重新选择。"));
                 return;
               }
               if (!isCurrent()) return;
               const next = await run(() => importBytes(name, format, encoded));
-              if (next) toast(collectionImportMessage(name, next.import));
+              if (next)
+                toast(`${collectionImportMessage(name, next.import)}。${SCEL_PERSONAL_USE_NOTICE}`);
               return;
             }
             let text: string;
             try {
               text = await readDictionaryFile(file, MAX_COLLECTION_IMPORT_BYTES);
             } catch (error) {
-              if (isCurrent())
-                toast(error instanceof Error ? error.message : "读取文件失败，请重新选择。");
+              if (isCurrent()) toast(exceptionMessage(error, "读取文件失败，请重新选择。"));
               return;
             }
             if (!isCurrent()) return;
@@ -513,7 +522,7 @@ function AddDictionarySheet({
   );
 }
 
-/** 「发现词库」：社区词库的前几个，「添加」后成为一个独立的词库；已经装过的显示「已添加」。最后一行「浏览更多词库」打开完整的社区词库图库，搜索、详情、发布、我的作品和收藏都在里面。 */
+/** 「发现词库」：社区词库的前几个，「添加」后成为一个独立的词库；已经装过的显示「已添加」。最后一行「浏览更多词库」切到底部「社区」标签的「词库」分类，搜索、详情、发布、我的作品和收藏都在那里。 */
 function DiscoverDictionaries({
   community,
   view,
@@ -869,7 +878,7 @@ function FormDialog({
         aria-modal="true"
         aria-labelledby={titleId}
         onKeyDown={(event) => {
-          if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+          if (isComposingKeyEvent(event)) return;
           if (event.key === "Escape" && !submitting) onClose();
           if (event.key === "Enter" && event.target instanceof HTMLInputElement) {
             event.preventDefault();
@@ -916,16 +925,15 @@ function DialogField({
   onChange: (value: string) => void;
 }) {
   return (
-    <label className="flex flex-col gap-1.5 text-[14px] [color:var(--p-sub)]">
-      {label}
-      <input
-        className={dialog.fieldControl}
-        aria-label={label}
-        value={value}
-        placeholder={placeholder}
-        onChange={(event) => onChange(event.target.value)}
-      />
-    </label>
+    <LabeledInputField
+      label={label}
+      labelClassName="flex flex-col gap-1.5 text-[14px] [color:var(--p-sub)]"
+      className={dialog.fieldControl}
+      ariaLabel={label}
+      value={value}
+      placeholder={placeholder}
+      onChange={onChange}
+    />
   );
 }
 

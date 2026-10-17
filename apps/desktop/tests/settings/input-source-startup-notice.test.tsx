@@ -2,6 +2,8 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { InputSourceStartupNotice, type InputSourceStartupStatus } from "@msime/ui";
+import { inputSourceNeedsAdding as legacyNeedsAdding } from "../../../../packages/ui/src/settings/input-source-startup-notice";
+import { inputSourceNeedsAdding } from "../../../../packages/ui/src/settings/input-source-startup-model";
 
 afterEach(() => {
   cleanup();
@@ -14,6 +16,10 @@ const installed: InputSourceStartupStatus = {
   bundled_version: "1.0.0",
   installed_version: "1.0.0",
 };
+
+test("提示组件旧路径继续导出同一个添加判定", () => {
+  expect(legacyNeedsAdding).toBe(inputSourceNeedsAdding);
+});
 
 test("shows the installation result and can be dismissed", () => {
   const onDismiss = vi.fn();
@@ -64,7 +70,7 @@ test("does not ask for adding the source after a failed install", () => {
 
   const banner = screen.getByRole("alert", { name: "水杉输入法安装状态" });
   expect(banner.textContent).toContain("水杉输入法没能自动安装或更新");
-  // 「安装 / 更新」按钮在「维护与诊断」页，提示要把用户带到那里。
+  // 「修复」按钮在「维护与诊断」页，提示要把用户带到那里。
   expect(banner.textContent).toContain("「维护与诊断」页的「输入法服务」");
   expect(banner.textContent).not.toContain("简体中文");
   expect(screen.queryByRole("button", { name: "打开键盘设置" })).toBeNull();
@@ -81,6 +87,6 @@ test("points a missing install at the maintenance page", () => {
   );
 
   expect(screen.getByRole("status", { name: "水杉输入法安装状态" }).textContent).toContain(
-    "请在「维护与诊断」页的「输入法服务」中点「安装 / 更新」。",
+    "请在「维护与诊断」页的「输入法服务」中点「修复」。",
   );
 });

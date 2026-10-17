@@ -251,6 +251,8 @@ TEXT_ENTRY(ResolveTheme, msime_client_resolve_theme)
 // 按宿主本地月份和深色模式给出应用主题的颜色；它是纯函数，所以设置页和键盘都在主线程上解析。
 TEXT_ENTRY(ResolveAppTheme, msime_client_resolve_app_theme)
 TEXT_ENTRY(DictionaryManifest, msime_client_dictionary_manifest)
+// 九键双拼的表、问题和键面；请求与 Android、iOS 共用同一份 JSON 契约。
+TEXT_ENTRY(NineKeyShuangpinLayout, msime_client_nine_key_shuangpin_layout)
 TEXT_ENTRY(SkinResource, msime_client_skin_resource)
 TEXT_ENTRY(SkinToolbarStylesheet, msime_client_skin_toolbar_stylesheet)
 TEXT_ENTRY(KeyboardSkinTrial, msime_client_keyboard_skin_trial)
@@ -346,6 +348,8 @@ static napi_value SnapshotRestore(napi_env env, napi_callback_info info) {
 }
 
 TEXT_ENTRY(VoiceHotwordCorrect, msime_client_voice_hotword_correct)
+// 本地模型最终文本里的汉字数字改写成数字；纯函数，只改写不自带 ITN 的 kind。
+TEXT_ENTRY(VoiceNormalizeNumbers, msime_client_voice_normalize_numbers)
 TEXT_ENTRY(VoiceLocalModels, msime_client_voice_local_models)
 TEXT_ENTRY(VoiceLocalModelCancel, msime_client_voice_local_model_cancel)
 
@@ -836,8 +840,10 @@ TEXT_ENTRY(GoogleLoopback, msime_client_google_loopback)
 TEXT_ENTRY(TencentTranslationHttpRequest, msime_client_tencent_translation_http_request)
 TEXT_ENTRY(NiuTransTranslationHttpRequest, msime_client_niutrans_translation_http_request)
 TEXT_ENTRY(CustomTranslationHttpRequest, msime_client_custom_translation_http_request)
+TEXT_ENTRY(AiTranslationHttpRequest, msime_client_ai_translation_http_request)
 TEXT_ENTRY(ParseNiuTransTranslationResponse, msime_client_parse_niutrans_translation_response)
 TEXT_ENTRY(ParseCustomTranslationResponse, msime_client_parse_custom_translation_response)
+TEXT_ENTRY(ParseAiTranslationResponse, msime_client_parse_ai_translation_response)
 
 static napi_value ParseTencentTranslationResponse(napi_env env, napi_callback_info info) {
     std::vector<napi_value> argv;
@@ -926,7 +932,7 @@ static napi_value ApplyOnlineCandidates(napi_env env, napi_callback_info info) {
         static_cast<uint8_t>(source)));
 }
 
-// AI 回答为空、失败或被拒：AI 座位上的占位行换成「—」（#6888）。
+// AI 回答为空、失败或被拒时调用。共享内核已经不放 AI 占位行，这个调用答 applied:false、不改候选列表；调用和接口留着不变（#6888）。
 static napi_value ResolveOnlineCandidates(napi_env env, napi_callback_info info) {
     std::vector<napi_value> argv;
     uint64_t handle = 0;
@@ -1484,6 +1490,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         ENTRY("appThemeCatalog", AppThemeCatalog),
         ENTRY("resolveAppTheme", ResolveAppTheme),
         ENTRY("dictionaryManifest", DictionaryManifest),
+        ENTRY("nineKeyShuangpinLayout", NineKeyShuangpinLayout),
         ENTRY("skinResource", SkinResource),
         ENTRY("skinToolbarStylesheet", SkinToolbarStylesheet),
         ENTRY("skinImport", SkinImport),
@@ -1510,9 +1517,11 @@ static napi_value Init(napi_env env, napi_value exports) {
         ENTRY("tencentTranslationHttpRequest", TencentTranslationHttpRequest),
         ENTRY("niuTransTranslationHttpRequest", NiuTransTranslationHttpRequest),
         ENTRY("customTranslationHttpRequest", CustomTranslationHttpRequest),
+        ENTRY("aiTranslationHttpRequest", AiTranslationHttpRequest),
         ENTRY("parseTencentTranslationResponse", ParseTencentTranslationResponse),
         ENTRY("parseNiuTransTranslationResponse", ParseNiuTransTranslationResponse),
         ENTRY("parseCustomTranslationResponse", ParseCustomTranslationResponse),
+        ENTRY("parseAiTranslationResponse", ParseAiTranslationResponse),
         ENTRY("onlineQuery", OnlineQuery),
         ENTRY("cloudRequestUrl", CloudRequestUrl),
         ENTRY("keySoundPack", KeySoundPack),
@@ -1585,6 +1594,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         ENTRY("voiceApply", VoiceApply),
         ENTRY("voiceHotwords", VoiceHotwords),
         ENTRY("voiceHotwordCorrect", VoiceHotwordCorrect),
+        ENTRY("voiceNormalizeNumbers", VoiceNormalizeNumbers),
         ENTRY("voiceLocalModels", VoiceLocalModels),
         ENTRY("voiceLocalModelInstall", VoiceLocalModelInstall),
         ENTRY("voiceLocalModelCancel", VoiceLocalModelCancel),

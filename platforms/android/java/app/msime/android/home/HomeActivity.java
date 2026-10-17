@@ -37,7 +37,7 @@ import app.msime.android.ViewPolicy;
 import com.google.android.material.bottomnavigation.BottomNavigationView;
 
 /**
- * 宿主主界面：底部四个 tab（设置、对话、统计、我的）共用一个 Fragment 容器，详情页压在同一个容器里。第二格原先是「社区」，社区内容并进了皮肤、词库、表达和 AI 几个功能页（各页末尾的「浏览更多…」压入 {@link CommunityFragment} 的完整列表），这一格换成了 AI 对话（{@link ChatFragment}）。
+ * 宿主主界面：底部四个 tab（设置、社区、统计、我的）共用一个 Fragment 容器，详情页压在同一个容器里。第二格是社区：根页是 {@link CommunityTabPage}（皮肤 / 词库两个分类，各自是完整的社区列表），以 {@link DetailPage#asTabRoot} 承载、没有返回按钮；各处打开社区皮肤或社区词库完整列表的入口都切到这个 tab 并选中对应分类（见 {@link SettingsNavigator}）。AI 对话通过设置导航栈打开二级页面。
  *
  * First-run dictionary preparation is started from here, because this is the launcher and there is
  * nowhere else the user reliably arrives. It never enables or selects the input method on their
@@ -63,7 +63,7 @@ public final class HomeActivity extends AppCompatActivity {
     private static final long INTRO_FADE_MILLIS = 260;
     /** 按 `HostDeepLink.TAB_*` 下标排的底部导航项，顺序与 `res/menu/bottom_tabs.xml` 相同（`tests/home/BottomTabsSmoke.java` 核对）。 */
     private static final int[] TAB_IDS = {
-        R.id.tab_settings, R.id.tab_chat, R.id.tab_statistics, R.id.tab_account,
+        R.id.tab_settings, R.id.tab_community, R.id.tab_statistics, R.id.tab_account,
     };
 
     private BottomNavigationView tabs;
@@ -78,6 +78,8 @@ public final class HomeActivity extends AppCompatActivity {
     private boolean onboardingAfterIntro;
     @Nullable private ValueAnimator progress;
     @Nullable private Runnable hideDetailLoading;
+    /** 社区 tab 还没建时要选中的分类，建它的时候交给根页。 */
+    @Nullable private CommunityRequest.Kind communityKind;
     /** 这个 activity 画出来时叠的季节（`AppMode.restore` 用的那份缓存）；没有缓存时是基础主题的秋杉。 */
     private String drawnSeason = "autumn";
     /** 回到前台时读共享偏好、解析应用主题用的工作线程。 */
@@ -99,8 +101,7 @@ public final class HomeActivity extends AppCompatActivity {
             new FragmentManager.FragmentLifecycleCallbacks() {
                 @Override public void onFragmentViewCreated(@NonNull FragmentManager manager,
                         @NonNull Fragment fragment, @NonNull View view, @Nullable Bundle state) {
-                    // 根 Tab 和详情页都在 home_content 中；不能只判断 DetailPage，否则首次打开
-                    // 键盘/对话/统计/我的时全局 loading 会没有对应的关闭回调。
+                    // 根 Tab 和详情页都在 home_content 中；不能只判断 DetailPage，否则首次打开设置/社区/统计/我的时全局 loading 会没有对应的关闭回调。
                     if (fragment.getId() == R.id.home_content) setDetailLoading(false);
                 }
             }, true);
@@ -131,7 +132,10 @@ public final class HomeActivity extends AppCompatActivity {
             }
         };
         getOnBackPressedDispatcher().addCallback(this, back);
-        getSupportFragmentManager().addOnBackStackChangedListener(this::updateBack);
+        getSupportFragmentManager().addOnBackStackChangedListener(() -> {
+            updateBack();
+            updateTabsVisibility();
+        });
 
         // 第一次打开：先放开屏，放完（或被轻点跳过）再走引导——这台设备还没见过它，而它讲的正是「键盘怎么用起来」。
         // A rotation is not an arrival and plays nothing; if it lands mid-splash, the handover to onboarding that the splash owed is paid here instead.
@@ -160,6 +164,7 @@ public final class HomeActivity extends AppCompatActivity {
         // 进程恢复时 FragmentManager 已经把 tab 页和回退栈原样还原（包括谁被藏起来），有栈时再 show 会把栈底的 tab 页叠到详情页上面。
         if (getSupportFragmentManager().getBackStackEntryCount() == 0) show(selected);
         updateBack();
+        updateTabsVisibility();
 
         // The shipped dictionary is prepared on first run without the user having to find a button
         // for it: a keyboard that cannot reach the Engine is not a state worth making someone opt
@@ -189,6 +194,8 @@ public final class HomeActivity extends AppCompatActivity {
             runOnUiThread(this::recreateIfSeasonChanged);
         });
         CloudSync.onResume(this);
+        // 打开了「上传到云端」时补传打字统计；十分钟的节流在共享层，没登录真实账号时什么都不发。
+        TypingUpload.onResume(this);
     }
 
     /**
@@ -225,7 +232,7 @@ public final class HomeActivity extends AppCompatActivity {
             return;
         }
         PageId page = PageId.fromName(request.page);
-        int tab = page != null ? page.tab() : request.tab;
+        int tab = page != null ? SettingsNavigator.tab(page, request.args) : request.tab;
         if (tab == HostDeepLink.NO_TAB) return;
         selectTabIndex(tab);
         clearStack();
@@ -448,17 +455,41 @@ public final class HomeActivity extends AppCompatActivity {
         back.setEnabled(getSupportFragmentManager().getBackStackEntryCount() > 0 || selected != FIRST_TAB);
     }
 
-    /**
-     * 切到「对话」tab 并弹出键盘，设置首页状态卡上的「试用键盘」用它：试用键盘就是在对话页的输入框里打字。直接点底部那一格进来不弹键盘。
-     */
-    void openChat() {
-        openTab(R.id.tab_chat);
-        if (getSupportFragmentManager().findFragmentByTag(tag(R.id.tab_chat)) instanceof ChatFragment chat) chat.focusInput();
+    /** AI 对话压在栈顶时收起底部导航：它是二级页，返回走页面顶部；导航留着的话，键盘弹起时会夹在输入栏和键盘之间。弹出对话页后导航回来。 */
+    private void updateTabsVisibility() {
+        if (tabs == null) return;
+        ViewPolicy.setVisible(tabs,
+            !(SettingsNavigator.visibleIn(getSupportFragmentManager()) instanceof ChatFragment));
     }
 
-    /** 打开某一类社区作品的完整列表。社区 tab 撤掉以后，它是压在设置 tab 上的一页（见 {@link CommunityFragment#browse}）。 */
+    /**
+     * 打开 AI 对话二级页并弹出键盘，供设置首页的「试用键盘」使用。
+     */
+    void openChat() {
+        openChatSecondary(true);
+    }
+
+    void openChatSecondary(boolean focus) {
+        SettingsNavigator.open(this, PageId.CHAT, null);
+        if (focus && SettingsNavigator.visibleIn(getSupportFragmentManager()) instanceof ChatFragment chat) {
+            chat.focusInput();
+        }
+    }
+
+    /** 打开某一类社区作品的完整列表：皮肤和词库切到社区 tab，其余压在当前页面上面（见 {@link CommunityFragment#browse}）。 */
     public void openCommunity(CommunityRequest.Kind kind) {
         CommunityFragment.browse(this, kind);
+    }
+
+    /** 切到社区 tab 的根页并选中这一类作品的分类；只由 {@link SettingsNavigator} 调用。先选分类再切 tab：切过去时直接是要的那一类，第一次打开时也不会先把另一类的列表载入一遍。 */
+    void openCommunityTab(CommunityRequest.Kind kind) {
+        if (getSupportFragmentManager().findFragmentByTag(tag(R.id.tab_community)) instanceof CommunityTabPage page) {
+            page.select(kind);
+        } else {
+            communityKind = kind;
+        }
+        selectTabIndex(HostDeepLink.TAB_COMMUNITY);
+        clearStack();
     }
 
     /** 详情页创建时给导航一个统一的即时反馈；内容读盘仍由各页面自己管理。 */
@@ -527,7 +558,12 @@ public final class HomeActivity extends AppCompatActivity {
     }
 
     private Fragment create(int itemId) {
-        if (itemId == R.id.tab_chat) return new ChatFragment();
+        if (itemId == R.id.tab_community) {
+            CommunityTabPage page = new CommunityTabPage();
+            if (communityKind != null) page.select(communityKind);
+            communityKind = null;
+            return DetailPage.asTabRoot(page);
+        }
         if (itemId == R.id.tab_statistics) return new StatisticsFragment();
         if (itemId == R.id.tab_account) return new AccountFragment();
         return new KeyboardFragment();

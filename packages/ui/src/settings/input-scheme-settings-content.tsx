@@ -1,10 +1,10 @@
-import type { EditionInfo, InputScheme, Preferences } from "../index";
+import type { EditionInfo } from "../core/host-capabilities";
+import type { InputScheme } from "../core/input-scheme";
+import type { Preferences } from "../core/preferences-model";
 import { GroupList, MoreOptions } from "../core/platform-controls";
 import { InputModeSection } from "./input-mode-section";
-import {
-  MacosInputModeEntriesSection,
-  type MacosInputModesClient,
-} from "./macos-input-mode-entries-section";
+import { MacosInputModeEntriesSection } from "./macos-input-mode-entries-section";
+import type { MacosInputModesClient } from "./macos-input-modes";
 import {
   InputSchemeDetailsSection,
   type ShuangpinProfile,
@@ -30,7 +30,8 @@ import {
 import { TouchKeyboardSchemesSection } from "./touch-keyboard-schemes-section";
 import { LanguageCard } from "./language-card";
 import { WubiSection } from "./wubi-section";
-import { WubiCodeLookupSection, type WubiCodeLookupClient } from "./wubi-code-lookup-section";
+import { WubiCodeLookupSection } from "./wubi-code-lookup-section";
+import type { WubiCodeLookupClient } from "../dictionary/dictionary-contracts";
 import { ResourcePackRow, resourcePackForScheme, type ResourcePacks } from "./resource-packs";
 
 export interface InputSchemeSettingsContentProps {
@@ -45,6 +46,8 @@ export interface InputSchemeSettingsContentProps {
   edition?: EditionInfo;
   /** 「输入时显示双拼键位提示」的当前值，宿主不画双拼键位图时不传；改动写进共享偏好 `shuangpin_keymap_hint`。 */
   shuangpinKeymapHint?: boolean;
+  /** 「双拼预编辑」的当前样式，宿主不画双拼预编辑或在触屏宿主上时不传；改动写进共享偏好 `shuangpin_preedit_uses_raw`。 */
+  shuangpinPreedit?: "raw" | "pinyin";
   /** macOS 的输入法列表；有它时在方案组末尾显示「菜单栏入口」。 */
   macosInputModes?: MacosInputModesClient;
   onError?: (message: string) => void;
@@ -73,6 +76,7 @@ export function InputSchemeSettingsContent({
   inputSchemes = baseInputSchemes,
   edition,
   shuangpinKeymapHint,
+  shuangpinPreedit,
   macosInputModes,
   onError = () => {},
   onPreferencesChange,
@@ -168,7 +172,6 @@ export function InputSchemeSettingsContent({
                   scheme="vietnamese"
                   shuangpinProfile={preferences.shuangpin_profile}
                   wubiProfile={preferences.wubi_profile}
-                  macos={false}
                   hasTouchKeyboardSchemes={false}
                   onShuangpinProfileChange={(shuangpin_profile: ShuangpinProfile) =>
                     onPreferencesChange({ shuangpin_profile })
@@ -223,10 +226,10 @@ export function InputSchemeSettingsContent({
           scheme={preferences.scheme}
           shuangpinProfile={preferences.shuangpin_profile}
           wubiProfile={preferences.wubi_profile}
-          macos={macos}
           hasTouchKeyboardSchemes={hasTouchKeyboardSchemes}
           touchKeyboardHasWubi={touchHasWubi}
           shuangpinKeymapHint={shuangpinKeymapHint}
+          shuangpinPreedit={shuangpinPreedit}
           onShuangpinProfileChange={(shuangpin_profile: ShuangpinProfile) =>
             onPreferencesChange({ shuangpin_profile })
           }
@@ -234,6 +237,9 @@ export function InputSchemeSettingsContent({
           onWubiProfileChange={(wubi_profile: WubiProfile) => onPreferencesChange({ wubi_profile })}
           onShuangpinKeymapHintChange={(shuangpin_keymap_hint) =>
             onPreferencesChange({ shuangpin_keymap_hint })
+          }
+          onShuangpinPreeditChange={(shuangpin_preedit_uses_raw) =>
+            onPreferencesChange({ shuangpin_preedit_uses_raw })
           }
           vietnamese={preferences.vietnamese}
           onVietnameseChange={(vietnamese) => onPreferencesChange({ vietnamese })}

@@ -6,7 +6,6 @@ A valid Tencent credential file stays on disk after the user picks another servi
 import importlib.machinery
 import importlib.util
 import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import sys
 import tempfile
@@ -47,6 +46,12 @@ class TranslationProviderSelection(unittest.TestCase):
         self.assertTrue(provider.load_tencent_config(path), "fixture Tencent credential must be usable")
         self.server = SimpleNamespace(tencent_config_path=path, translation_cache={},
                                       translation_lock=threading.Lock())
+
+    def test_provider_does_not_duplicate_rust_account_storage_or_authentication(self):
+        source = Path(provider.__file__).read_text()
+        self.assertNotIn("/v1/auth/", source)
+        self.assertNotIn("anonymous-account.json", source)
+        self.assertNotIn("anonymous-session.json", source)
 
     def contacted(self, query):
         query = {"generation": 1, "candidates": ["测试"], "target_language": "en", **query}
@@ -95,7 +100,7 @@ class TranslationProviderSelection(unittest.TestCase):
                 self.assertEqual(urls, [expected])
 
     def test_sentence_requests_allow_one_long_item_without_changing_candidate_limits(self):
-        sentence = "这是一个超过普通候选词限制但仍在整句请求上限内的合成测试句子。" * 4
+        sentence = "这是一个超过普通候选词限制但仍在整句请求上限内的合成测试句子。" * 9
         custom = {"enabled": True, "endpoint": CUSTOM, "api_key": ""}
         result, urls = self.contacted({"provider": "custom", "custom_translation": custom,
                                        "sentence": True, "candidates": [sentence]})
@@ -108,123 +113,21 @@ class TranslationProviderSelection(unittest.TestCase):
         self.assertEqual(urls, [])
 
     def test_explicit_account_selection_uses_the_account_endpoint(self):
-        self.server.anonymous_account_path = None
-        self.server.anonymous_session_path = None
-        self.server.anonymous_lock = threading.Lock()
-        with mock.patch.object(provider, "anonymous_access_token", return_value="a" * 64):
-            result, urls = self.contacted({"provider": "none", "translation_account": True})
+        account = mock.Mock()
+        account.directory = Path("/synthetic/account")
+        account.ensure_anonymous.return_value = True
+        account.access_token.return_value = "a" * 64
+        account.prepare_translation.return_value = json.dumps(
+            {"texts": ["测试"], "source_lang": "ZH", "target_lang": "EN"})
+        account.parse_translation.return_value = {"translations": ["synthetic account"]}
+        self.server.rust_account = account
+        result, urls = self.contacted({"provider": "none", "translation_account": True})
         self.assertEqual(result, [{"text": "测试", "translation": "synthetic account"}])
         self.assertEqual(urls, ["https://api.msime.app/v1/translate"])
-
-    def test_account_login_and_refresh_run_through_the_http_worker(self):
-        tokens = {
-            "access_token": "a" * 64, "refresh_token": "b" * 64,
-            "token_type": "Bearer", "expires_in": 3600,
-            "user": {"id": "synthetic-user"},
-        }
-        contacted = []
-
-        class AccountHandler(BaseHTTPRequestHandler):
-            def do_POST(self):
-                self.rfile.read(int(self.headers["Content-Length"]))
-                contacted.append(self.path)
-                response = ({"challenge_id": "synthetic-challenge"}
-                            if self.path == "/v1/auth/challenges" else tokens)
-                payload = json.dumps(response).encode()
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
-
-            def log_message(self, *args):
-                pass
-
-        http = HTTPServer(("127.0.0.1", 0), AccountHandler)
-        worker = threading.Thread(target=http.serve_forever, kwargs={"poll_interval": 0.01})
-        worker.start()
-        try:
-            with tempfile.TemporaryDirectory(prefix="msime-account-http-") as directory:
-                server = provider.anonymous_server(Path(directory))
-                origin = "http://127.0.0.1:" + str(http.server_port)
-                with mock.patch.object(provider, "ANONYMOUS_ACCOUNT_ORIGIN", origin):
-                    self.assertEqual(provider.anonymous_access_token(server), "a" * 64)
-                    self.assertEqual(contacted, ["/v1/auth/challenges", "/v1/auth/login"])
-                    provider._write_anonymous_private(
-                        server.anonymous_session_path,
-                        {"tokens": tokens, "expires_at_unix_ms": 0})
-                    self.assertEqual(provider.anonymous_access_token(server), "a" * 64)
-                    self.assertEqual(contacted[-1], "/v1/auth/refresh")
-                    self.assertEqual(len(contacted), 3)
-        finally:
-            http.shutdown()
-            worker.join()
-            http.server_close()
-
-    def test_malformed_saved_tokens_recover_with_the_existing_identity(self):
-        tokens = {
-            "access_token": "a" * 64, "refresh_token": "b" * 64,
-            "token_type": "Bearer", "expires_in": 3600,
-            "user": {"id": "synthetic-user"},
-        }
-        for malformed in (None, [], ["synthetic"], "synthetic", 7, True):
-            with self.subTest(tokens=malformed):
-                with tempfile.TemporaryDirectory(prefix="msime-malformed-session-") as directory:
-                    server = provider.anonymous_server(Path(directory))
-                    identity = provider._anonymous_identity(server)
-                    self.assertTrue(provider._write_anonymous_private(
-                        server.anonymous_session_path,
-                        {"tokens": malformed, "expires_at_unix_ms": 0}))
-                    with mock.patch.object(provider, "fetch", side_effect=[
-                        {"challenge_id": "synthetic-challenge"}, tokens,
-                    ]) as fetch:
-                        self.assertEqual(provider.anonymous_access_token(server), "a" * 64)
-                        self.assertEqual(provider.anonymous_access_token(server), "a" * 64)
-                    self.assertEqual(provider._anonymous_identity(server), identity)
-                    self.assertEqual([call.args[0] for call in fetch.call_args_list], [
-                        provider.ANONYMOUS_ACCOUNT_ORIGIN + "/v1/auth/challenges",
-                        provider.ANONYMOUS_ACCOUNT_ORIGIN + "/v1/auth/login",
-                    ])
-                    self.assertEqual(fetch.call_args_list[0].args[2]["target"], identity[0])
-                    self.assertEqual(fetch.call_args_list[1].args[2]["credential"], identity[1])
-                    saved = provider._anonymous_private_path(server.anonymous_session_path)
-                    self.assertEqual(saved["tokens"], tokens)
-                    self.assertGreater(saved["expires_at_unix_ms"], 0)
-
-    def test_account_identity_is_generated_owner_only_and_stable(self):
-        with tempfile.TemporaryDirectory(prefix="msime-anonymous-account-") as directory:
-            path = Path(directory) / "anonymous-account.json"
-            server = SimpleNamespace(anonymous_account_path=path)
-            first = provider._anonymous_identity(server)
-            self.assertIsNotNone(first)
-            self.assertRegex(first[0], r"^msime-[a-z0-9]{16}$")
-            self.assertRegex(first[1], r"^[a-z0-9]{48}$")
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(provider._anonymous_identity(server), first)
-
-    def test_account_token_is_created_and_cached_without_exposing_the_secret(self):
-        with tempfile.TemporaryDirectory(prefix="msime-anonymous-session-") as directory:
-            root = Path(directory)
-            server = SimpleNamespace(
-                anonymous_account_path=root / "anonymous-account.json",
-                anonymous_session_path=root / "anonymous-session.json",
-                anonymous_lock=threading.Lock(),
-            )
-            tokens = {
-                "access_token": "a" * 64,
-                "refresh_token": "b" * 64,
-                "token_type": "Bearer",
-                "expires_in": 3600,
-                "user": {"id": "synthetic-user"},
-            }
-            with mock.patch.object(provider, "fetch", side_effect=[
-                {"challenge_id": "synthetic-challenge"}, tokens,
-            ]) as fetch:
-                self.assertEqual(provider.anonymous_access_token(server), "a" * 64)
-                self.assertEqual(provider.anonymous_access_token(server), "a" * 64)
-            self.assertEqual(fetch.call_count, 2)
-            self.assertEqual((root / "anonymous-account.json").stat().st_mode & 0o777, 0o600)
-            self.assertEqual((root / "anonymous-session.json").stat().st_mode & 0o777, 0o600)
-            self.assertNotIn("secret", (root / "anonymous-session.json").read_text())
+        account.ensure_anonymous.assert_called_once_with()
+        account.access_token.assert_called_once_with()
+        account.prepare_translation.assert_called_once_with(["测试"], "zh", "en")
+        account.parse_translation.assert_called_once()
 
 if __name__ == "__main__":
     unittest.main()

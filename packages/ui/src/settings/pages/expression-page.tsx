@@ -2,6 +2,7 @@ import { useSettingsForm } from "../settings-form-context";
 import { createSettingsDraftActions } from "../settings-draft-actions";
 import { GroupList, MoreOptions } from "../../core/platform-controls";
 import { InputLanguageOptionsSection } from "../input-language-options-section";
+import { CandidatePronunciationSection } from "../candidate-pronunciation-section";
 import { EnglishSuggestionsSection } from "../english-suggestions-section";
 import { PhonePunctuationSection, PunctuationSection } from "../punctuation-section";
 import { SentenceAssociationLevelRow } from "../sentence-association-section";
@@ -12,13 +13,7 @@ import { TranslationServiceSelectorSection } from "../translation-service-select
 import { createTranslationSettingsBindings } from "../translation-settings-bindings";
 import { MobileInputAiNotice } from "../mobile-input-ai-notice";
 import { SettingsPageFieldset } from "../settings-page-fieldset";
-
-const expressionTabs = [
-  { id: "punctuation", title: "标点" },
-  { id: "language", title: "候选与释义" },
-  { id: "translation", title: "候选翻译" },
-  { id: "providers", title: "翻译服务" },
-] as const;
+import { expressionTabs } from "../expression-tabs";
 
 /**
  * 标点与翻译页：打出来的内容以什么形式出现——标点、其他语言的候选与释义、翻译服务。混入的英文与表情颜文字是候选来源，模糊音改的是拼音怎么解析，两者都在输入页；AI 功能在「工具」组的「AI 辅助」页。
@@ -88,6 +83,7 @@ export function ExpressionSettingsPage() {
     android: androidPlatform,
     ios: iosPlatform,
     harmony: harmonyPlatform,
+    mobile: mobilePlatform,
     translationAccount: draft.translation_account ?? false,
     translationTargetLanguage,
     translationSecondaryLanguage: draft.translation_secondary_language,
@@ -103,6 +99,16 @@ export function ExpressionSettingsPage() {
     "标点与翻译设置分类",
     !mobilePlatform,
   );
+  // 「显示读音」是释义的子行，画在目标语言之后：没有任何释义来源打开时没有东西可读，这一行不出现，已存的值不动。
+  const glossCandidate = {
+    ...translation.candidate,
+    beforeMore: client.candidatePronunciation && candidateGlossLanguagesEnabled && (
+      <CandidatePronunciationSection
+        value={draft.candidate_pronunciation ?? false}
+        onChange={(candidate_pronunciation) => onPreferencesChange({ candidate_pronunciation })}
+      />
+    ),
+  };
   const harmonyPhone = harmonyPlatform && mobilePlatform;
   const ariaLabel = mobilePlatform ? "表达" : "标点与翻译";
   if (harmonyPhone) {
@@ -136,9 +142,15 @@ export function ExpressionSettingsPage() {
                 available={candidateTranslations}
                 provider={translationProvider}
                 showAccountProvider={translation.candidate.showAccountProvider ?? false}
+                offlineFallback={translation.candidate.offlineFallback}
                 onChange={setTranslationProvider}
               />
-              <TranslationProviderSettingsSection {...providers} grouped={false} />
+              {/* 这一组已经整体收在「更多选项」里，腾讯云地域不再套第二层。 */}
+              <TranslationProviderSettingsSection
+                {...providers}
+                grouped={false}
+                foldRegion={false}
+              />
             </MoreOptions>
           </GroupList>
         )}
@@ -159,34 +171,34 @@ export function ExpressionSettingsPage() {
           />
         </GroupList>,
       )}
-      {panel(
-        "language",
-        <InputLanguageOptionsSection
-          grouped
-          includeCandidateControls
-          showCandidateEnglishGloss={client.candidateEnglishGloss}
-          candidateEnglishGloss={candidateEnglishGloss}
-          onCandidateEnglishGlossChange={(candidate_english_gloss) =>
-            onPreferencesChange({ candidate_english_gloss })
-          }
-          showCandidatePronunciation={client.candidatePronunciation}
-          candidatePronunciation={draft.candidate_pronunciation ?? false}
-          candidatePronunciationDisabled={!candidateGlossLanguagesEnabled}
-          onCandidatePronunciationChange={(candidate_pronunciation) =>
-            onPreferencesChange({ candidate_pronunciation })
-          }
-          showEnglishSuggestions={showEnglishSuggestions}
-          englishSuggestions={englishSuggestions}
-          onEnglishSuggestionsChange={(english_suggestions) =>
-            onPreferencesChange({ english_suggestions })
-          }
-        />,
-      )}
       <TranslationSettingsContent
-        candidate={translation.candidate}
+        candidate={glossCandidate}
         providers={translation.providers}
         serviceInOwnGroup={!mobilePlatform}
-        renderGroup={panel}
+        renderGroup={(tab, children) =>
+          tab === "translation"
+            ? panel(
+                "gloss",
+                <>
+                  <InputLanguageOptionsSection
+                    grouped
+                    includeCandidateControls
+                    showCandidateEnglishGloss={client.candidateEnglishGloss}
+                    candidateEnglishGloss={candidateEnglishGloss}
+                    onCandidateEnglishGlossChange={(candidate_english_gloss) =>
+                      onPreferencesChange({ candidate_english_gloss })
+                    }
+                    showEnglishSuggestions={showEnglishSuggestions}
+                    englishSuggestions={englishSuggestions}
+                    onEnglishSuggestionsChange={(english_suggestions) =>
+                      onPreferencesChange({ english_suggestions })
+                    }
+                  />
+                  {children}
+                </>,
+              )
+            : panel(tab, children)
+        }
       />
       {mobilePlatform && <MobileInputAiNotice onOpenAi={() => selectPage("ai")} />}
     </SettingsPageFieldset>

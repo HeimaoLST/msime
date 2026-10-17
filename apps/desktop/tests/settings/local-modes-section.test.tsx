@@ -79,7 +79,12 @@ test("turning the Shift+letter master switch off keeps every mode switch as it w
 test("拆字反查缺键时桌面读作关、触屏读作开，切换后写回明确的布尔", () => {
   const onChange = vi.fn();
   const { rerender } = render(
-    <LocalModesSection preferences={preferences} ios={false} shiftLetterEntrySwitch onChange={onChange} />,
+    <LocalModesSection
+      preferences={preferences}
+      ios={false}
+      shiftLetterEntrySwitch
+      onChange={onChange}
+    />,
   );
   // 桌面宿主（显示总开关的那三个）缺键读作关，和 host-api 在桌面构建里的缺省一致。
   const desktop = screen.getByRole("switch", { name: /^拆字反查/ });
@@ -107,4 +112,35 @@ test("拆字反查缺键时桌面读作关、触屏读作开，切换后写回�
   expect(screen.getByText(/「更多 → 本地输入」里选「拆字」/)).toBeTruthy();
   fireEvent.click(touch);
   expect(onChange).toHaveBeenLastCalledWith({ ...preferences, chaizi: false });
+});
+
+test("desktop folds the per-mode switches into 逐个模式 under the master switch", () => {
+  render(
+    <LocalModesSection
+      preferences={preferences}
+      ios={false}
+      shiftLetterEntrySwitch
+      temporaryJapaneseExtra={<span>日文词库下载行</span>}
+      onChange={vi.fn()}
+    />,
+  );
+  const master = screen.getByRole("switch", { name: /Shift\+字母进入快捷模式/ });
+  const modes = screen.getByRole("region", { name: "逐个模式" });
+  const fold = modes.querySelector("details");
+  expect(fold?.open).toBe(false);
+  expect(fold?.contains(master)).toBe(false);
+  expect(fold?.contains(screen.getByRole("switch", { name: /^快捷短语/ }))).toBe(true);
+  // 日文词库的下载行紧跟 R 模式那一行，不再单占一组。
+  const japanese = screen.getByRole("switch", { name: /^临时日语/ });
+  const download = screen.getByText("日文词库下载行");
+  expect(fold?.contains(download)).toBe(true);
+  expect(
+    japanese.compareDocumentPosition(download) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+});
+
+test("touch hosts without the master switch keep the modes listed flat", () => {
+  render(<LocalModesSection preferences={preferences} ios onChange={vi.fn()} />);
+  expect(screen.queryByText("逐个模式")).toBeNull();
+  expect(document.querySelector("details")).toBeNull();
 });

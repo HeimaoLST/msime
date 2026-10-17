@@ -121,7 +121,7 @@ public final class SyncMergePolicy {
     /**
      * 本机要变成的常用语正文清单与要删掉的本机 id：`target` 是合并或云端的结果，`local` 是本机现有的（id → 正文）。
      *
-     * <p>本机 id 由 client-core 生成，和云端 id 不通用，所以按正文对齐：`target` 里有、本机没有的正文要新增；本机有、`target` 里没有的要删掉（只有「使用云端」和下载才会走到删除）。
+     * <p>本机 id 由 client-services 生成，和云端 id 不通用，所以按正文对齐：`target` 里有、本机没有的正文要新增；本机有、`target` 里没有的要删掉（只有「使用云端」和下载才会走到删除）。
      */
     public record LocalPlan(List<String> add, List<String> remove) {}
 
@@ -185,7 +185,7 @@ public final class SyncMergePolicy {
 
     // ---- 个人词库 ----
 
-    /** 个人词库队列一次导入最多的词条数，与 client-core 的 `MAX_QUEUED_IMPORT` 一致。 */
+    /** 个人词库队列一次导入最多的词条数，与 client-services 的 `MAX_QUEUED_IMPORT` 一致。 */
     public static final int PERSONAL_IMPORT_BATCH = 128;
 
     /** 云端快照里的一个用户词：`kind` 已换成个人词库导入文件的写法。 */
@@ -243,6 +243,11 @@ public final class SyncMergePolicy {
     /** 上传本机快照之前，个人词库队列里不能还有没被键盘应用的词，否则导出会漏掉它们、上传后云端也跟着丢。 */
     public static boolean uploadBlocked(int pendingQueueCount) {
         return pendingQueueCount > 0;
+    }
+
+    /** 个人词库队列和命名词库待发送队列任一未清空，都不能导出上传快照。 */
+    public static boolean uploadBlocked(int personalPending, int outboxPending) {
+        return personalPending > 0 || outboxPending > 0;
     }
 
     /** 下一次自动同步能不能跑：距上次尝试满 {@link #THROTTLE_MILLIS}；有分类带着待上传标记时只要满 {@link #DIRTY_DEBOUNCE_MILLIS}。时钟往回拨时当作已到期。 */

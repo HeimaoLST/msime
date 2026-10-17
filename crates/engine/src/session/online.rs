@@ -1,14 +1,13 @@
 //! Online (cloud and AI) queries and their answers (core-session.md §7.2, overlays.md §7.4-§7.5).
 
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::composition::resolve_shuangpin_composition_base;
 use super::input::InputSession;
-use crate::ime::online_batch::{
-    validate_online_candidate_batch, AI_PENDING_TEXT, AI_SEAT, AI_UNAVAILABLE_TEXT,
-};
+use crate::ime::online_batch::validate_online_candidate_batch;
 use crate::local::command::TEXT_UTF16_LIMIT;
-use crate::pinyin::active_helpcode::strip_active_helpcodes;
+use crate::pinyin::active_helpcode::detect_active_helpcode_length;
 use crate::pinyin::segment::{is_complete_pinyin_input, split_segments};
 use crate::pinyin::syllables::to_google_spelling;
 use crate::shuangpin::query::{
@@ -50,6 +49,7 @@ impl OnlineRequestGuard {
     }
 
     /// Same session, generation and every query field.
+    #[cfg(test)]
     pub fn matches(&self, live: &OnlineQuery, answered: &OnlineQuery) -> bool {
         !self.exhausted
             && answered.session_id == self.session_id
@@ -65,11 +65,49 @@ impl OnlineRequestGuard {
 }
 
 /// What the composition would ask a cloud provider (input_session_composition.cpp:913-974).
-#[derive(Debug, Default)]
-struct CloudQueryState {
+#[derive(Debug)]
+struct CloudQueryState<'a> {
     should_query: bool,
-    query_text: String,
-    cache_key: String,
+    query_text: Cow<'a, str>,
+    cache_key: Cow<'a, str>,
+}
+
+#[derive(Clone, Copy)]
+struct OnlineAnswerState {
+    cloud_eligible: bool,
+    ai_eligible: bool,
+}
+
+fn online_identity_matches(identity: &str, scheme: SchemeType, input: &str) -> bool {
+    let bytes = identity.as_bytes();
+    bytes.len() == input.len() + 2
+        && bytes[0] == b'0' + scheme as u8
+        && bytes[1] == b':'
+        && &bytes[2..] == input.as_bytes()
+}
+
+/// 不构造另一个 `Vec<String>`，直接比较提供者持有的分段和当前组字。返回值表示所有分段是否都是完整拼音。
+fn segments_match(segments: &[String], segmentation: &str) -> Option<bool> {
+    let mut complete = true;
+    let mut count = 0;
+    for (expected, actual) in segments.iter().zip(segmentation.split('\'')) {
+        if expected != actual {
+            return None;
+        }
+        complete &= is_complete_pinyin_input(actual);
+        count += 1;
+    }
+    (count == segments.len() && count == segmentation.split('\'').count()).then_some(complete)
+}
+
+impl<'a> Default for CloudQueryState<'a> {
+    fn default() -> Self {
+        Self {
+            should_query: false,
+            query_text: Cow::Borrowed(""),
+            cache_key: Cow::Borrowed(""),
+        }
+    }
 }
 
 fn online_identity(scheme: SchemeType, input: &str) -> String {
@@ -104,8 +142,8 @@ impl InputSession {
             scheme: request.scheme,
             generation: self.online_requests.generation,
             identity: online_identity(request.scheme, input),
-            query_text: state.query_text,
-            cache_key: state.cache_key,
+            query_text: state.query_text.into_owned(),
+            cache_key: state.cache_key.into_owned(),
             session_id: self.online_requests.session_id,
             ..OnlineQuery::default()
         };
@@ -224,112 +262,82 @@ impl InputSession {
         if !self.engine.apply_dynamic_candidates(words, source) {
             return false;
         }
-        // 回答的词都已经在列表里时没有 AI 行可以坐座位，占位行当作回答为空，换成「—」。
-        if source == CandidateSource::AiSuggestion
-            && !self
-                .engine
-                .candidates()
-                .iter()
-                .any(|item| item.source == CandidateSource::AiSuggestion)
-        {
-            self.ai_seat_resolved = Some(query.clone());
-        }
         self.update_mixed_candidates();
         true
-    }
-
-    /// 宿主为这个会话打开或关掉 AI 候选；返回开关是否变了。组字中途改变时立刻重排当前列表。
-    pub(super) fn set_ai_seat(&mut self, enabled: bool) -> bool {
-        if self.ai_seat == enabled {
-            return false;
-        }
-        self.ai_seat = enabled;
-        self.ai_seat_resolved = None;
-        if self.has_composition() {
-            self.update_mixed_candidates();
-        }
-        true
-    }
-
-    /// AI 回答为空、失败或被拒时宿主调用：当前查询的占位行换成「—」，留到组字变化为止，不让后面的候选挪位。只认 AI（云候选这一轮不留座位）；查询过期、会话没开 AI、或座位上已经是 AI 候选时返回 false。返回 true 表示显示的列表变了。
-    pub(super) fn resolve_online_candidates(
-        &mut self,
-        query: &OnlineQuery,
-        source: CandidateSource,
-    ) -> bool {
-        if source != CandidateSource::AiSuggestion
-            || !self.ai_seat
-            || !self.online_answer_accepted(query, source)
-            || self.ai_seat_resolved.as_ref() == Some(query)
-        {
-            return false;
-        }
-        self.ai_seat_resolved = Some(query.clone());
-        self.update_mixed_candidates();
-        self.candidates().iter().any(|item| {
-            item.source == CandidateSource::AiPending && item.word == AI_UNAVAILABLE_TEXT
-        })
-    }
-
-    /// 需要占 AI 座位时返回当前查询：会话开着 AI，当前组字可以问 AI，而且回答到了能显示出来（不在光标前缀解码里，也不是只出单字时会被滤掉的词组）。
-    fn ai_seat_query(&self) -> Option<OnlineQuery> {
-        if !self.ai_seat
-            || self.prefix_active
-            || (self.single_character_only && self.scheme().filters_to_single_characters())
-        {
-            return None;
-        }
-        self.online_query().filter(|query| query.ai_eligible)
-    }
-
-    /// 在引擎候选（混排之前）的 AI 座位上放占位行，位置规则与 AI 候选相同（`replace_online_candidate_batch`），英文行、固定位置和在线座位因此对占位行和 AI 候选一视同仁。列表里已有 AI 候选、或没有本地候选时不放。
-    pub(super) fn reserve_ai_seat(&self, decoded: &mut Vec<WordItem>) {
-        if decoded.iter().any(|item| item.source.holds_ai_seat())
-            || !decoded.iter().any(|item| !item.source.takes_online_seat())
-        {
-            return;
-        }
-        let Some(live) = self.ai_seat_query() else {
-            return;
-        };
-        let resolved = self
-            .ai_seat_resolved
-            .as_ref()
-            .is_some_and(|answered| self.online_requests.matches(&live, answered));
-        let text = if resolved {
-            AI_UNAVAILABLE_TEXT
-        } else {
-            AI_PENDING_TEXT
-        };
-        let seat = AI_SEAT.min(decoded.len());
-        decoded.insert(
-            seat,
-            WordItem::new("", text, 1, CandidateSource::AiPending, ""),
-        );
     }
 
     /// The answer belongs to the live query and the source is one that query may take.
     fn online_answer_accepted(&self, query: &OnlineQuery, source: CandidateSource) -> bool {
-        let Some(live) = self.online_query() else {
+        let Some(state) = self.online_answer_state(query) else {
             return false;
         };
-        self.online_requests.matches(&live, query)
-            && match source {
-                CandidateSource::CloudSuggestion => live.cloud_eligible,
-                CandidateSource::AiSuggestion => live.ai_eligible,
-                _ => false,
-            }
+        match source {
+            CandidateSource::CloudSuggestion => state.cloud_eligible,
+            CandidateSource::AiSuggestion => state.ai_eligible,
+            _ => false,
+        }
     }
 
-    fn cloud_query_state(&self) -> CloudQueryState {
+    /// 不重建拥有型 `OnlineQuery`，直接把回包和当前组字比较。应用回包本来就要扫描候选列表；每次回调再复制身份、缓存键和分段只会增加临时缓冲。
+    fn online_answer_state(&self, query: &OnlineQuery) -> Option<OnlineAnswerState> {
+        if self.dedicated_english
+            || self.online_requests.exhausted
+            || self.local_mode != LocalInputMode::None
+            || !self.has_composition()
+        {
+            return None;
+        }
+        if query.session_id != self.online_requests.session_id
+            || query.generation != self.online_requests.generation
+        {
+            return None;
+        }
+        let request = self.engine.request();
+        let state = self.cloud_query_state();
+        if !state.should_query || state.query_text.is_empty() || query.scheme != request.scheme {
+            return None;
+        }
+        let input = if request.raw_input_with_cases.is_empty() {
+            &request.raw_input
+        } else {
+            &request.raw_input_with_cases
+        };
+        if !online_identity_matches(&query.identity, request.scheme, input)
+            || query.query_text != state.query_text
+            || query.cache_key != state.cache_key
+        {
+            return None;
+        }
+        if request.scheme == SchemeType::JapaneseRomaji {
+            return (query.cloud_eligible
+                && !query.ai_eligible
+                && query.pinyin_segments.is_empty())
+            .then_some(OnlineAnswerState {
+                cloud_eligible: true,
+                ai_eligible: false,
+            });
+        }
+        let segmentation = if request.normalized_segmentation.is_empty() {
+            state.query_text.as_ref()
+        } else {
+            &request.normalized_segmentation
+        };
+        let ai_eligible = segments_match(&query.pinyin_segments, segmentation)?;
+        (query.cloud_eligible && query.ai_eligible == ai_eligible).then_some(OnlineAnswerState {
+            cloud_eligible: true,
+            ai_eligible,
+        })
+    }
+
+    fn cloud_query_state(&self) -> CloudQueryState<'_> {
         let request = self.engine.request();
         let mut state = CloudQueryState::default();
         match self.engine.current_scheme_type() {
             SchemeType::JapaneseRomaji => {
-                state.cache_key = request.raw_input.clone();
+                state.cache_key = Cow::Borrowed(&request.raw_input);
                 state.should_query = !request.raw_input.is_empty();
                 if state.should_query {
-                    state.query_text = request.raw_input.clone();
+                    state.query_text = Cow::Borrowed(&request.raw_input);
                 }
             }
             // 韩文音节、越南文单词和藏文音节串本身就是文字，没有可交给云端转换的东西。粤拼、注音和笔画只由各自的词库回答。
@@ -340,7 +348,7 @@ impl InputSession {
             | SchemeType::Tibetan
             | SchemeType::Stroke => {}
             // Wubi codes are not spellings a cloud provider understands, and wubi providers cannot take dynamic rows.
-            SchemeType::Wubi => state.cache_key = request.normalized_input.clone(),
+            SchemeType::Wubi => state.cache_key = Cow::Borrowed(&request.normalized_input),
             SchemeType::Shuangpin => {
                 let profile = self.shuangpin_profile();
                 let base = resolve_shuangpin_composition_base(request, profile);
@@ -348,10 +356,13 @@ impl InputSession {
                     && base.effective_raw_input.len() >= base.helpcode_length
                 {
                     let base_length = base.effective_raw_input.len() - base.helpcode_length;
-                    base.raw_input[..raw_length_for_effective_prefix(&base.raw_input, base_length)]
-                        .to_owned()
+                    Cow::Owned(
+                        base.raw_input
+                            [..raw_length_for_effective_prefix(&base.raw_input, base_length)]
+                            .to_owned(),
+                    )
                 } else {
-                    base.raw_input.clone().into_owned()
+                    base.raw_input
                 };
                 if self.has_active_helpcode() {
                     return state;
@@ -361,29 +372,33 @@ impl InputSession {
                 state.should_query =
                     ends_with_input_key && is_complete_input(&base.effective_raw_input, profile);
                 if state.should_query {
-                    state.query_text = to_google_spelling(&normalize_input_with_delimiters(
-                        &state.cache_key,
-                        profile,
+                    state.query_text = Cow::Owned(to_google_spelling(
+                        &normalize_input_with_delimiters(&state.cache_key, profile),
                     ));
                 }
             }
             SchemeType::Quanpin => {
                 state.cache_key = if request.enable_quanpin_helpcode {
-                    strip_active_helpcodes(&request.raw_input, &request.raw_input_with_cases)
+                    let length = detect_active_helpcode_length(
+                        &request.raw_input,
+                        &request.raw_input_with_cases,
+                    );
+                    Cow::Borrowed(&request.raw_input[..request.raw_input.len() - length])
                 } else {
-                    request.raw_input.clone()
+                    Cow::Borrowed(&request.raw_input)
                 };
                 if self.has_active_helpcode() {
                     return state;
                 }
                 state.should_query = !request.normalized_input.is_empty();
                 // The user's own apostrophes survive into the query (overlays.md §7.5), so `qi'e'huan` is not re-cut as `qie'huan`.
-                state.query_text =
-                    to_google_spelling(if request.normalized_segmentation.is_empty() {
+                state.query_text = Cow::Owned(to_google_spelling(
+                    if request.normalized_segmentation.is_empty() {
                         &request.normalized_input
                     } else {
                         &request.normalized_segmentation
-                    });
+                    },
+                ));
             }
         }
         state

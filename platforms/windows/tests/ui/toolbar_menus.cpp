@@ -97,7 +97,7 @@ int main() {
       const std::vector<std::pair<K, C>> expected{
           {K::Item, C::OpenSystemEmoji}, {K::Item, C::OpenSettings},
           {K::Item, C::CheckForUpdates}, {K::Separator, C::OpenSettings},
-          {K::Item, C::OpenWebsite},     {K::Item, C::OpenHelp},
+          {K::Item, C::OpenPromotion}, {K::Item, C::OpenWebsite}, {K::Item, C::OpenHelp},
           {K::Item, C::OpenAbout},       {K::Item, C::OpenFeedback},
           {K::Separator, C::OpenSettings}, {K::Item, C::HideFloatingToolbar}};
       require(utility.size() == expected.size());
@@ -113,12 +113,13 @@ int main() {
       require(utility[find(utility, C::OpenSystemEmoji)].label == "表情与符号…");
       require(utility[find(utility, C::OpenSettings)].label == "打开设置…");
       require(utility[find(utility, C::CheckForUpdates)].label == "检查更新…");
+      require(utility[find(utility, C::OpenPromotion)].label == "宣传水杉输入法");
       require(utility[find(utility, C::OpenWebsite)].label == "访问 msime.app");
       require(utility[find(utility, C::OpenHelp)].label == "使用帮助…");
       require(utility[find(utility, C::OpenAbout)].label == "关于水杉输入法…");
       require(utility[find(utility, C::OpenFeedback)].label == "问题反馈…");
       require(utility[find(utility, C::HideFloatingToolbar)].label == "隐藏悬浮状态栏");
-      // 使用帮助和问题反馈走设置窗口的路由，两者都落到「帮助与反馈」页；检查更新和「关于」一样打开设置窗口的「关于」页，检查在那一页里完成；系统表情、官网和隐藏工具栏由 Server 自己处理，不经设置窗口或共享应用的路由。
+      // 使用帮助和问题反馈走设置窗口的路由，两者都落到「关于」页（帮助与反馈并进了「关于」）；检查更新和「关于」一样打开设置窗口的「关于」页，检查在那一页里完成；系统表情、官网和隐藏工具栏由 Server 自己处理，不经设置窗口或共享应用的路由。
       const auto help = shell_surface_request(C::OpenHelp);
       require(help && help->panel.empty() && help->page == "help");
       require(shell_route_argument(*help) == L"settings:help");
@@ -128,7 +129,7 @@ int main() {
       const auto updates = shell_surface_request(C::CheckForUpdates);
       require(updates && updates->panel.empty() && updates->page == "about");
       require(shell_route_argument(*updates) == L"settings:about");
-      for (const auto command : {C::OpenSystemEmoji, C::OpenWebsite, C::HideFloatingToolbar})
+      for (const auto command : {C::OpenSystemEmoji, C::OpenPromotion, C::OpenWebsite, C::HideFloatingToolbar})
         require(!shell_surface_request(command));
       require(tray_menu_geometry(utility, TrayMenuMetrics{}).rows.size() == utility.size());
       auto bare = all;
@@ -137,7 +138,7 @@ int main() {
       for (const auto command : {C::OpenSettings, C::CheckForUpdates, C::OpenHelp,
                                  C::OpenAbout, C::OpenFeedback})
         require(!offline[find(offline, command)].available);
-      for (const auto command : {C::OpenSystemEmoji, C::OpenWebsite, C::HideFloatingToolbar})
+      for (const auto command : {C::OpenSystemEmoji, C::OpenPromotion, C::OpenWebsite, C::HideFloatingToolbar})
         require(offline[find(offline, command)].available);
     }
 

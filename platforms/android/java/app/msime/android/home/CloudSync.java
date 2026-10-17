@@ -50,7 +50,7 @@ import org.json.JSONObject;
  *
  * <p>只在真实账号（{@link SyncSwitch#LOGIN_KINDS}）且用户打开了同步开关时运行，登录本身不触发。{@link HomeActivity} 每次回到前台调用 {@link #onResume}，距上次尝试满 5 分钟、或有分类带着待上传标记且满 30 秒时才真正跑（{@link SyncMergePolicy#due}）。某个分类第一次同步而云端已有数据时，先弹「合并 / 使用云端」让用户选，选了才执行。
  *
- * <p>失败静默，下次回到前台再试；最近一次的失败原因只留一行给「我的」页的同步行副标题（{@link #statusLine}）。命名词库的名字与启用状态不同步，只同步词条（{@link #SCOPE_NOTE}）。隐私模式、开发者选项、诊断日志与语音数据贡献在 client-core 的导出里已经排除，这里上传前和应用前再各过滤一次（{@link SyncMergePolicy#withoutLocalOnly}）。
+ * <p>失败静默，下次回到前台再试；最近一次的失败原因只留一行给「我的」页的同步行副标题（{@link #statusLine}）。命名词库的名字与启用状态不同步，只同步词条（{@link #SCOPE_NOTE}）。隐私模式、开发者选项、诊断日志与语音数据贡献在 client-services 的导出里已经排除，这里上传前和应用前再各过滤一次（{@link SyncMergePolicy#withoutLocalOnly}）。
  */
 public final class CloudSync {
     /** 同步开关副标题里要说明的范围。 */
@@ -343,7 +343,7 @@ public final class CloudSync {
                     mode = SyncMergePolicy.Mode.MERGE;
                     continue;
                 }
-                // 合并结果里可能有云端独有的键，应用回本机；与本机相同的部分 client-core 不会重写。
+                // 合并结果里可能有云端独有的键，应用回本机；与本机相同的部分 client-services 不会重写。
                 synchronized (SyncSwitch.bindingLock()) {
                     if (!current()) return;
                     apply(result);
@@ -530,7 +530,7 @@ public final class CloudSync {
             }
             Path work = workDirectory();
             if (mode == SyncMergePolicy.Mode.UPLOAD) {
-                if (SyncMergePolicy.uploadBlocked(pendingQueueCount())) {
+                if (pendingQueuesBlocked()) {
                     Log.i(TAG, "dictionary upload postponed until the keyboard applies queued words");
                     return;
                 }
@@ -603,13 +603,16 @@ public final class CloudSync {
             return CloudSync.userWordCount(context);
         }
 
-        private int pendingQueueCount() throws IOException, JSONException {
+        private boolean pendingQueuesBlocked() throws IOException, JSONException {
             JSONObject value = nativeValue(NativeClient.personalDictionaryRequest(new JSONObject()
                 .put("options", new JSONObject(hostOptions()))
                 .put("action", new JSONObject().put("operation", "list").put("offset", 0).put("limit", 1)
                     .put("user_only", true)).toString()));
             Integer pending = JsonPolicy.nonNegativeInteger(value.opt("pending_count"));
-            return pending == null ? 0 : pending;
+            int personal = pending == null ? 0 : pending;
+            DictionaryCollectionsStore.Result<Integer> outbox = DictionaryCollectionsStore.pendingOutbox(context);
+            if (!outbox.ok()) throw new IOException("dictionary collection queue unavailable");
+            return SyncMergePolicy.uploadBlocked(personal, outbox.value());
         }
 
         /** 云同步上传的快照只有词，不带输入记录（学习调权、固定位置和选词计数只进本地备份）。 */
@@ -626,8 +629,12 @@ public final class CloudSync {
         /** 「合并」：把云端的词经个人词库队列导入本机，键盘下次开会话时应用。 */
         private void importWords(List<SyncMergePolicy.Word> words) throws IOException, JSONException {
             if (!current()) return;
-            int skipped = queueWords(context, words, "cloud-merge-");
-            if (skipped > 0) Log.w(TAG, skipped + " cloud words skipped during merge");
+            for (List<SyncMergePolicy.Word> batch : SyncMergePolicy.batches(
+                    words, DictionaryCollectionsStore.MAX_QUEUED_WORDS)) {
+                DictionaryCollectionsStore.Result<Integer> queued =
+                    DictionaryCollectionsStore.queueUnownedWords(context, batch);
+                if (!queued.ok()) throw new IOException("cloud dictionary merge queue unavailable");
+            }
         }
     }
 

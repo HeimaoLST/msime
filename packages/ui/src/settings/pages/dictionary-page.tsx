@@ -111,11 +111,11 @@ export function DictionarySettingsPage() {
             ))}
           </SelectRow>
           <TextInputRow
-            title="编码前缀"
-            label="编码前缀"
+            title="词条或编码"
+            label="词条或编码"
             className={settings.fieldInput}
             value={phraseSearch}
-            placeholder="留空查看全部"
+            placeholder="输入中文词条或编码前缀"
             onChange={setPhraseSearch}
           >
             <ActionButton
@@ -150,6 +150,7 @@ export function DictionarySettingsPage() {
               entries={phrases}
               form={phraseForm}
               busy={phraseBusy}
+              emptyMessage={phrasePage.status}
               listRef={phraseListRef}
               onFormChange={setPhraseForm}
               onSave={() => void savePhrase()}
@@ -269,7 +270,7 @@ export function DictionarySettingsPage() {
           />
         </GroupList>
       )}
-      {/* 触屏宿主没有「社区」页，社区词库从这里进入，完整图库在本页上打开。 */}
+      {/* 触屏宿主的社区词库也从这里进入：「浏览更多词库」切到底部「社区」标签的「词库」分类。 */}
       {mobilePlatform && client.communityResources && (
         <GroupList title="社区词库">
           <ActionRow

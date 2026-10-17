@@ -56,6 +56,7 @@ struct InputSettingsView: View {
   @State private var startsInEnglish = false
   @State private var remembersImeMode = false
   @State private var wubiAutoCommitUnique = true
+  @State private var backspaceRevertsSelection = true
   @State private var wubiMixedPinyin = MSIMEAppEdition.wubiMixedPinyinDefault
   @State private var wubiCodeHint = true
   /// 用户导入的辅助码表（#7176），列在「辅助码方案」的内置方案之后。
@@ -80,7 +81,19 @@ struct InputSettingsView: View {
   var body: some View {
     ScrollView {
       VStack(spacing: 28) {
-        DesignGroup(title: "语言与方案", footer: footer(.languages)) { languageCard }
+        DesignGroup(title: "语言与方案", footer: footer(.languages)) {
+          languageCard
+          if ChineseInputScheme.nineKeyShuangpin.isOfferedByEdition {
+            DesignDivider(leading: 16)
+            NavigationLink(destination: NineKeyShuangpinSettingsView()) {
+              HStack {
+                Text("九键双拼方案与自定义")
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+              }.padding(16)
+            }.accessibilityIdentifier("nineKeyShuangpinSettingsLink")
+          }
+        }
         chineseGroup
         helpcodeGroup
         translationGroup
@@ -431,14 +444,6 @@ struct InputSettingsView: View {
                       identifier: "candidateTranslationPrimaryPicker")
         .disabled(!glossOn).opacity(glossOn ? 1 : 0.5)
       DesignDivider()
-      DesignSelectRow(title: "第二种语言",
-                      options: [DesignOption(title: "不显示", value: -1)]
-                        + languages.indices.filter { $0 != habits.primaryLanguage }
-                          .map { DesignOption(title: languages[$0].title, value: $0) },
-                      selection: habit(\.secondaryLanguage), sheetTitle: "第二种语言",
-                      identifier: "candidateTranslationSecondaryPicker")
-        .disabled(!glossOn).opacity(glossOn ? 1 : 0.5)
-      DesignDivider()
       navRow("翻译服务", subtitle: "联网翻译需要在这里选择服务", identifier: "translationProviderLink") {
         TranslationProviderSettingsView()
       }
@@ -458,6 +463,17 @@ struct InputSettingsView: View {
 
   private var moreGroup: some View {
     DesignGroup(title: "更多", footer: footer(.more)) {
+      DesignToggleRow(title: "退格键回退已选候选词",
+                      subtitle: "关闭后，退格只删除剩余拼写，保留已选文字；拼写删空时上屏已选文字",
+                      isOn: Binding(get: { backspaceRevertsSelection }, set: { enabled in
+                        backspaceRevertsSelection = enabled
+                        record(MetasequoiaInputSessionBridge.updateSharedPreferences {
+                          $0["backspace_reverts_selection"] = enabled
+                        }, .more)
+                        reloadPreferences()
+                      }))
+        .accessibilityIdentifier("backspaceRevertsSelection")
+      DesignDivider()
       if enabledSchemes.contains(.wubi) {
         DesignToggleRow(title: "五笔拼音混输", subtitle: "五笔候选之后接着列出同一串字母的全拼候选，五笔编码打不出时直接出拼音候选",
                         isOn: Binding(get: { wubiMixedPinyin }, set: { enabled in
@@ -547,6 +563,7 @@ struct InputSettingsView: View {
     if let document { WubiProfilePreference.mirror(document) }
     wubiProfile = WubiProfilePreference.profile
     wubiAutoCommitUnique = document?["wubi_auto_commit_unique"] as? Bool ?? true
+    backspaceRevertsSelection = document?["backspace_reverts_selection"] as? Bool ?? true
     wubiMixedPinyin = WubiMixedPinyinPreference.isEnabled(in: document)
     wubiCodeHint = WubiCodeHintPreference.isEnabled(in: document)
     fuzzy = FuzzyPinyinPreference.settings(in: document) ?? .pristine
@@ -680,7 +697,7 @@ struct OnboardingView: View {
       .padding(.horizontal, 22)
       .padding(.vertical, 30)
     }
-    .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+    .designCanvasBackground()
     .tint(MetasequoiaTheme.accent)
     .navigationTitle("启用指南")
     .navigationBarTitleDisplayMode(.inline)

@@ -29,6 +29,8 @@ import app.msime.android.DrawablePolicy;
 import app.msime.android.JsonPolicy;
 import app.msime.android.BoundsPolicy;
 import app.msime.android.DictionaryCollectionsStore;
+import app.msime.android.KeyHeatmapLayout;
+import app.msime.android.KeyPressIds;
 import app.msime.android.KeyboardGeometry;
 import app.msime.android.NumberPolicy;
 import app.msime.android.R;
@@ -39,9 +41,11 @@ import app.msime.android.TypingStatisticsSummary.Habits;
 import app.msime.android.TypingStatisticsSummary.Keys;
 import app.msime.android.TypingStatisticsSummary.Overview;
 import app.msime.android.TypingStatisticsSummary.Share;
+import app.msime.android.TypingUploadApi;
 import app.msime.android.ViewPolicy;
 import app.msime.android.policy.HostOptionsPolicy;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -73,6 +77,9 @@ public final class StatisticsFragment extends HomeTabFragment {
     private Tab tab = Tab.OVERVIEW;
     @Nullable private TypingStatisticsModel statistics;
     @Nullable private TypingStatisticsSummary summary;
+    /** 「上传到云端」的状态；还没读到时为 null，概览页不画这一组。 */
+    @Nullable private TypingUpload.Status upload;
+    private boolean uploadBusy;
     /** 按键热力图上次选的布局；null 表示还没选过，按数据决定。 */
     @Nullable private Boolean nineKey;
 
@@ -151,6 +158,48 @@ public final class StatisticsFragment extends HomeTabFragment {
 
     private void reload() {
         HostTask.run(this, StatisticsFragment::load, this::adopt);
+        // 打开统计页时补传一次（与共享设置页相同），顺带读出开关；要联网，不排在读统计的队列里。
+        HostTask.runNetwork(this, TypingUpload::sync, this::adoptUpload);
+    }
+
+    private void adoptUpload(@Nullable TypingUpload.Status value) {
+        if (value != null) upload = value;
+        render();
+    }
+
+    /** 打开立刻上传一次，关闭先在本机关掉再删除云端的数据；结果用一句话告诉用户。 */
+    private void setUpload(boolean enabled) {
+        if (uploadBusy) return;
+        uploadBusy = true;
+        render();
+        HostTask.runNetwork(this, context -> TypingUpload.setEnabled(context, enabled), change -> {
+            uploadBusy = false;
+            if (change == null) {
+                MsToast.show(requireContext(), "无法读取或保存上传设置，请稍后重试。");
+                reload();
+                return;
+            }
+            upload = change.status();
+            MsToast.show(requireContext(), change.message());
+            render();
+        });
+    }
+
+    /** 概览页最后一组：「上传到云端」。没登录真实账号时不能打开，已经打开的仍能关掉。 */
+    private void upload(Context context, LinearLayout content) {
+        TypingUpload.Status current = upload;
+        if (current == null) return;
+        boolean usable = current.signedIn() || current.enabled();
+        GroupCard group = GroupCard.add(content, "云端");
+        GroupCard.Row row = group.toggle("上传到云端", usable
+                ? "把每天的字数、活跃时长、时段、输入方式和候选位次上传到你的水杉账号，供 QQ 群助手的 /stats 查看。只有计数，不含输入内容；关闭时删除云端的数据。"
+                : "登录水杉账号后可以打开，供 QQ 群助手的 /stats 查看。只有计数，不含输入内容。",
+            current.enabled(), this::setUpload);
+        row.setEnabled(usable && !uploadBusy);
+        Long last = current.lastUploadMs();
+        if (current.enabled() && last != null) {
+            group.footer("上次上传：" + TypingUploadApi.displayMillis(last, ZoneId.systemDefault()));
+        }
     }
 
     /** 工作线程上：读统计文档，取用户词条数，再取派生指标。 */
@@ -202,6 +251,10 @@ public final class StatisticsFragment extends HomeTabFragment {
         View view = getView();
         if (view == null) return;
         Context context = requireContext();
+        // 布局里写的是「只保存在本机」；打开了上传时改写，不能让这句话骗人。
+        TextView footer = view.findViewById(R.id.statistics_footer);
+        footer.setText(upload != null && upload.enabled() ? "已打开「上传到云端」：每日计数会上传到你的水杉账号，不含输入内容"
+            : "统计只保存在本机，不包含输入内容");
         TextView notice = view.findViewById(R.id.statistics_state);
         LinearLayout content = view.findViewById(R.id.statistics_content);
         content.removeAllViews();
@@ -220,7 +273,10 @@ public final class StatisticsFragment extends HomeTabFragment {
             : "统计暂时读不到，可以在右上角菜单里刷新。");
         if (summary == null) return;
         switch (tab) {
-            case OVERVIEW -> overview(context, content, summary.overview());
+            case OVERVIEW -> {
+                overview(context, content, summary.overview());
+                upload(context, content);
+            }
             case HABITS -> habits(context, content, summary.habits());
             case KEYS -> keys(context, content, summary);
             case ACHIEVEMENTS -> achievements(context, content, summary.achievements());
@@ -308,9 +364,12 @@ public final class StatisticsFragment extends HomeTabFragment {
         heatmap.setNineKey(nine);
         heatmap.setKeys(presses);
         board.addView(heatmap, LayoutPolicy.matchWidthWrapParams());
+        LinearLayout others = card(context, content, 16);
+        otherKeys(context, others, presses, nine);
         layout.setOnSelect(index -> {
             nineKey = index == 1;
             heatmap.setNineKey(nineKey);
+            otherKeys(context, others, presses, nineKey);
         });
 
         Keys keys = value.keys();
@@ -350,6 +409,34 @@ public final class StatisticsFragment extends HomeTabFragment {
             donut.setShares(methods, DistributionView.Style.DONUT);
             card.addView(donut, LayoutPolicy.matchWidthWrapParams());
         }
+    }
+
+    /**
+     * 热力图下的「其他键」卡：按过、但当前这套键盘图上没有位置的键（{@link KeyHeatmapLayout#others}），按次数从多到少，每行键名和次数，让每一次按键都能在页面上找到。没有这样的键时整张卡不显示；切换 26 键 / 9 键时重新列。
+     */
+    private static void otherKeys(Context context, LinearLayout card, Map<String, Long> presses, boolean nine) {
+        card.removeAllViews();
+        List<String> ids = KeyHeatmapLayout.others(presses, nine);
+        ViewPolicy.setVisible(card, !ids.isEmpty());
+        if (ids.isEmpty()) return;
+        card.addView(ViewPolicy.label(context, "其他键", 15, ThemeColorPolicy.text(context)));
+        for (String id : ids) {
+            String label = KeyPressIds.label(id);
+            String count = NumberPolicy.grouped(presses.get(id)) + " 次";
+            LinearLayout row = LayoutPolicy.row(context);
+            ViewPolicy.setCenteredVertically(row);
+            ViewPolicy.setMinimumHeightDp(context, row, 36);
+            row.addView(ViewPolicy.label(context, label, 15, ThemeColorPolicy.text(context)),
+                LayoutPolicy.weightedWrapParams(1f));
+            row.addView(ViewPolicy.label(context, count, 15, ThemeColorPolicy.subText(context)));
+            row.setContentDescription(label + " " + count);
+            ViewPolicy.setImportantForAccessibility(row, View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+            card.addView(row, LayoutPolicy.matchWidthWrapParams());
+        }
+        TextView note = ViewPolicy.label(context, "数字、标点、符号键等键盘图上没有位置的键。", 12,
+            ThemeColorPolicy.subText(context));
+        ViewPolicy.setPaddingDp(context, note, 0, 6, 0, 0);
+        card.addView(note);
     }
 
     /** 近 7 天每个键的按键次数，和按键 KPI 同一个时间窗。 */

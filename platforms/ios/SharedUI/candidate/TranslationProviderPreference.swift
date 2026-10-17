@@ -3,7 +3,10 @@ import CoreFoundation
 
 /// Where candidate glosses come from: nowhere online (the default), a service the user signed up for with their own credentials, or the 水杉 account's translation API. The three provider objects live in the shared preference document (`niutrans`, `custom_translation`, `tencent_tmt`) so the choice follows the same precedence as the other hosts: NiuTrans first, then the custom endpoint, then Tencent TMT when both of its secrets are usable. The account is used only when the user explicitly chose it (`translation_account`) and none of their own services applies; it is never a fallback. A chosen provider that is not usable yields no online glosses at all rather than sending the words somewhere the user did not pick.
 enum TranslationProvider: String, CaseIterable, Sendable {
-  case off, account, niutrans, tencent, custom
+  case off, account, niutrans, tencent, custom, ai
+
+  // AI 翻译复用单独的 ai_assistant 设置；它不是本页可以选择或保存的服务。
+  static let allCases: [TranslationProvider] = [.off, .account, .niutrans, .tencent, .custom]
   var title: String {
     switch self {
     case .off: "不使用在线翻译"
@@ -11,6 +14,7 @@ enum TranslationProvider: String, CaseIterable, Sendable {
     case .niutrans: "小牛翻译"
     case .tencent: "腾讯云机器翻译"
     case .custom: "自定义接口（DeepLX 或 DeepL API）"
+    case .ai: "AI 助手配置"
     }
   }
 }
@@ -21,6 +25,7 @@ enum TranslationRoute: Equatable, Sendable {
   case niutrans(appID: String, apiKey: String)
   case tencent(secretID: String, secretKey: String, region: String)
   case custom(endpoint: String, apiKey: String)
+  case ai(provider: String, endpoint: String, model: String, token: String)
   /// Nothing was chosen, or the chosen provider is not usable: no online glosses.
   case none
 
@@ -37,6 +42,7 @@ enum TranslationRoute: Equatable, Sendable {
     case .niutrans: .niutrans
     case .tencent: .tencent
     case .custom: .custom
+    case .ai: .ai
     case .none: nil
     }
   }
@@ -48,6 +54,7 @@ enum TranslationRoute: Equatable, Sendable {
     case let .niutrans(appID, apiKey): "niutrans|\(appID)|\(apiKey.hashValue)"
     case let .tencent(secretID, secretKey, region): "tencent|\(secretID)|\(secretKey.hashValue)|\(region)"
     case let .custom(endpoint, apiKey): "custom|\(endpoint)|\(apiKey.hashValue)"
+    case let .ai(provider, endpoint, model, token): "ai|\(provider)|\(endpoint)|\(model)|\(token.hashValue)"
     case .none: "none"
     }
   }
@@ -87,6 +94,15 @@ enum TranslationProviderPreference {
     if tencent["enabled"] as? Bool ?? true, usable(secretID), usable(secretKey) {
       let region = trimmed(tencent["region"] as? String ?? "")
       return .tencent(secretID: secretID, secretKey: secretKey, region: region.isEmpty ? defaultTencentRegion : region)
+    }
+    let ai = preferences?["ai_assistant"] as? [String: Any] ?? [:]
+    if ai["enabled"] as? Bool == true,
+       preferences?[accountKey] as? Bool != true,
+       let provider = ai["provider"] as? String,
+       let endpoint = ai["endpoint"] as? String,
+       let model = ai["model"] as? String,
+       !provider.isEmpty, !endpoint.isEmpty, !model.isEmpty {
+      return .ai(provider: provider, endpoint: endpoint, model: model, token: "")
     }
     return preferences?[accountKey] as? Bool == true ? .account : .none
   }
@@ -129,7 +145,7 @@ enum TranslationProviderPreference {
 /// Translates candidate words through a user-chosen provider. The shared host builds and signs every request and parses every reply; this type only moves bytes over the transport. Returns one gloss or nil per word, in order.
 struct TranslationProviderClient: Sendable {
   static let tencentBatch = 9
-  static let maxTextLength = 40
+  static let maxTextLength = 256
   var transport: any OnlineCandidateTransport = URLSessionOnlineCandidateTransport()
   var now: @Sendable () -> Date = { Date() }
 
@@ -166,10 +182,27 @@ struct TranslationProviderClient: Sendable {
         ]
         results[index] = await exchange(provider: "custom", request: request, expected: 1)?.first ?? nil
       }
+    case let .ai(provider, endpoint, model, token):
+      guard let origin = AIEndpointPolicy.origin(endpoint) else { break }
+      for index in eligible {
+        let request: [String: Any] = [
+          "config": ["enabled": true, "provider": provider, "endpoint": endpoint,
+                     "model": model, "tokens": [origin: token]],
+          "input": ["text": words[index], "source_language": "zh", "target_language": target],
+        ]
+        results[index] = await exchangeAI(request: request)
+      }
     case .account, .none:
       break
     }
     return results
+  }
+
+  private func exchangeAI(request: [String: Any]) async -> String? {
+    guard let descriptor = MetasequoiaInputSessionBridge.aiTranslationRequest(request: request),
+          let urlRequest = Self.urlRequest(descriptor),
+          let body = await transport.fetch(urlRequest) else { return nil }
+    return MetasequoiaInputSessionBridge.parseAITranslationResponse(body: body)
   }
 
   private func exchange(provider: String, request: [String: Any], expected: Int) async -> [String?]? {

@@ -185,7 +185,7 @@ resources="$(cargo run --quiet --locked -p msime-client-core --example install_r
 
 # ---- On-demand resource packs ----
 # 编译之前先用 App 运行时的同一个安装器、同一组 URL 和 SHA-256 把 macOS 会下载的四个资源包（日文词典、语言词库、手写模型、桌面神经联想模型）装一遍，失败就在这里停下：资源包不在包里，发布出去的 App 只能靠这些地址补齐，地址失效或内容漂移的发布包不该出去。离线释义和语音运行库只给 Android 按需下载，不在这里装。不接管道，安装器的退出码就是这一步的结果。
-cargo run --quiet --locked -p msime-client-core --example install_resource_pack -- "$work/pack-check" japanese language-dictionaries handwriting settled-model >/dev/null
+cargo run --quiet --locked -p msime-client-providers --example install_resource_pack -- "$work/pack-check" japanese language-dictionaries handwriting settled-model >/dev/null
 
 # ---- Input method bundle ----
 # The minimum system version goes to the C/C++ compilers and to CMake separately, never as MACOSX_DEPLOYMENT_TARGET: rustc applies that to host proc-macro dylibs too, which then fail to load (README.md, 构建与本地测试).
@@ -339,8 +339,8 @@ PY
 )"
 fi
 rm -rf "$tauri_bundle_dir"
-# No APPLE_SIGNING_IDENTITY: Tauri would sign the nested input method again without its entitlements. The outer app is signed below instead. tauri.macos.conf.json is merged automatically on macOS and is what embeds EngineResources and the input method.
-env -u APPLE_SIGNING_IDENTITY -u APPLE_CERTIFICATE \
+# No APPLE_SIGNING_IDENTITY: Tauri would sign the nested input method again without its entitlements. The outer app is signed below instead. tauri.macos.conf.json is merged automatically on macOS and is what embeds EngineResources and the input method. MSIME_PLATFORM_BUILD=1 passes apps/desktop/scripts/require-platform-build.mjs in case the Tauri CLI runs beforeBuildCommand here.
+env -u APPLE_SIGNING_IDENTITY -u APPLE_CERTIFICATE MSIME_PLATFORM_BUILD=1 \
   pnpm --filter @msime/desktop exec tauri bundle --bundles app --config "$bundle_config"
 app="$(only "$tauri_bundle_dir"/*.app)"
 app_name="$(basename "$app")"
@@ -507,7 +507,7 @@ fi
 
 if [ -n "$identity" ] && [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]; then
   xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
-  xcrun stapler staple "$dmg"
+  bash "$repo_root/platforms/macos/scripts/staple-ticket.sh" "$dmg"
   spctl -a -t open --context context:primary-signature -v "$dmg"
 else
   echo "warning: not notarized; Gatekeeper will quarantine the downloaded app until the user opens it with right-click Open" >&2

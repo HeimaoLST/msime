@@ -16,13 +16,15 @@ test("maps the settings tab icon and compact labels", () => {
   expect(mobileTabTitle("community", "社区")).toBe("社区");
 });
 
-// 「对话」标签页叫「对话」，画对话气泡：页面注册表给 `chat` 的图标是问号，放在标签栏上会被看成「帮助」。
-test("names the 对话 tab and draws it as a speech bubble", () => {
-  expect(mobileTabTitle("chat", "AI 对话")).toBe("对话");
-  expect(mobileTabIcon("chat", "help.svg")).toMatch(/feedback\.svg$/);
-  expect(harmonyTabIcon("chat")).toBe("chat");
-  expect(fluentIconPaths.chat).toMatch(/^M10 2a8 8 0 1 1/);
-  expect(harmonyTabIcon("community")).toBeUndefined();
+// 第二格是「社区」：HarmonyOS 画地球字形，与另外三格一样宽；遮罩图标沿用页面注册表里社区页的图标。皮肤页回到「设置」下面，标签栏上没有它，页名仍叫「皮肤」。
+test("names the 社区 tab and draws the community glyph", () => {
+  expect(harmonyTabIcon("community")).toBe("globe");
+  expect(fluentIconPaths.globe).toBeDefined();
+  expect(mobilePageTitle("skin", "主题")).toBe("皮肤");
+  expect(harmonyTabIcon("skin")).toBeUndefined();
+  // 「全部设置」标签已去掉，`more` 不再有标签名或图标。
+  expect(mobileTabTitle("more", "更多")).toBe("更多");
+  expect(harmonyTabIcon("more")).toBeUndefined();
 });
 
 test("uses touch friendly page titles where desktop labels differ", () => {

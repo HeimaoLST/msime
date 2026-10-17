@@ -111,7 +111,7 @@ pub unsafe extern "C" fn msime_client_ai_http_request(
         #[serde(deny_unknown_fields)]
         struct Request {
             config: msime_client_core::preferences::AiAssistantPreferences,
-            input: msime_client_core::ai::AiSuggestionRequest,
+            input: msime_client_providers::ai::AiSuggestionRequest,
         }
         let request: Request = unsafe {
             with_bounded_bytes(
@@ -124,11 +124,82 @@ pub unsafe extern "C" fn msime_client_ai_http_request(
                 },
             )?
         };
-        msime_client_core::ai::chat_completion_http_request(&request.config, &request.input)
+        msime_client_providers::ai::chat_completion_http_request(&request.config, &request.input)
             .map(|value| value.unwrap_or(Value::Null))
             .map_err(|e| e.to_string())
     })
 }
+
+/// 构造带凭据的 AI 翻译描述器。调用方只能在候选翻译已通过宿主功能和路由门禁后调用。
+/// # Safety
+/// `request` 引用 `length` 个可读 JSON 字节；函数不会保留任何缓冲区。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_ai_translation_http_request(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Request {
+            config: msime_client_core::preferences::AiAssistantPreferences,
+            input: msime_client_providers::ai::AiTranslationRequest,
+        }
+        let request: Request = unsafe {
+            with_bounded_bytes(
+                request,
+                length,
+                65536,
+                "invalid AI translation request buffer",
+                |bytes| {
+                    serde_json::from_slice(bytes)
+                        .map_err(|_| "invalid AI translation request document".into())
+                },
+            )?
+        };
+        msime_client_providers::ai::chat_translation_http_request(&request.config, &request.input)
+            .map(|value| value.unwrap_or(Value::Null))
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// 从 Chat Completions 响应中解析一个严格的 JSON 翻译结果，失败时返回空值。
+/// # Safety
+/// `body` 引用 `length` 个可读字节；函数不会保留任何缓冲区。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_parse_ai_translation_response(
+    body: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        if body.is_null() || length > 1048576 {
+            return Err("invalid AI translation response buffer".into());
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(body, length) };
+        Ok(
+            msime_client_providers::ai::parse_chat_translation_response(bytes)
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        )
+    })
+}
+
+/// 判断 Chat Completions 翻译回复是服务失败还是合法的空译文。
+/// # Safety
+/// `body` 引用 `length` 个可读字节；函数不会保留任何缓冲区。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_ai_translation_reply_failed(
+    body: *const u8,
+    length: usize,
+) -> bool {
+    if body.is_null() || length > 1_048_576 {
+        return true;
+    }
+    msime_client_providers::ai::chat_translation_response_failed(unsafe {
+        std::slice::from_raw_parts(body, length)
+    })
+}
+
 /// Parse a successful AI HTTP response into a bounded string array, or null.
 /// # Safety
 /// `body` references `length` readable bytes. No buffers are retained.
@@ -142,7 +213,7 @@ pub unsafe extern "C" fn msime_client_parse_ai_response(
         if body.is_null() || length > 1048576 || !(1..=10).contains(&limit) {
             return Err("invalid AI response buffer".into());
         }
-        Ok(msime_client_core::ai::parse_chat_completion_response(
+        Ok(msime_client_providers::ai::parse_chat_completion_response(
             unsafe { std::slice::from_raw_parts(body, length) },
             limit,
         )
@@ -871,12 +942,10 @@ pub unsafe extern "C" fn msime_client_gloss_breakdown_request(
     })
 }
 
-/// Query copied prefixes against the packaged English dictionary. This does not
-/// create or mutate an Engine session and is suitable for a host worker thread.
+/// 查询固定英文词库；`correction: true` 时返回原文与唯一纠错。此接口不创建或改变输入会话，可在宿主工作线程调用。
 ///
 /// # Safety
-/// The request and resources pointers must point to readable buffers of the supplied lengths.
-/// Neither buffer is retained after the call returns.
+/// 请求与资源指针须在所给长度内可读；函数返回后不保留缓冲区。
 #[no_mangle]
 pub unsafe extern "C" fn msime_client_english_completions_request(
     request: *const u8,
@@ -889,6 +958,8 @@ pub unsafe extern "C" fn msime_client_english_completions_request(
     struct Request {
         prefix: String,
         limit: u8,
+        #[serde(default)]
+        correction: bool,
     }
     response(|| {
         if request.is_null()
@@ -904,7 +975,10 @@ pub unsafe extern "C" fn msime_client_english_completions_request(
         if !(1..=32).contains(&request.limit)
             || request.prefix.is_empty()
             || request.prefix.len() > 128
-            || !msime_client_core::is_ascii_alphabetic(&request.prefix)
+            || !request
+                .prefix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphabetic() || (request.correction && byte == b'\''))
         {
             return Err("invalid English completion prefix".into());
         }
@@ -914,11 +988,16 @@ pub unsafe extern "C" fn msime_client_english_completions_request(
         if !Path::new(resources).is_absolute() {
             return Err("resources path must be absolute".into());
         }
-        let items = msime_engine::host::english_completions(
-            resources,
-            &request.prefix,
-            usize::from(request.limit),
-        )
+        let items = if request.correction {
+            msime_engine::host::english_corrections(resources, &request.prefix)
+                .map(|items| items.into_iter().take(usize::from(request.limit)).collect())
+        } else {
+            msime_engine::host::english_completions(
+                resources,
+                &request.prefix,
+                usize::from(request.limit),
+            )
+        }
         .map_err(|_| "English completion dictionary unavailable")?;
         Ok(json!({"prefix": request.prefix, "items": items}))
     })
@@ -938,4 +1017,75 @@ mod tests {
         assert!(retry.capacity() >= candidates.len());
         assert!(indexes.capacity() >= candidates.len());
     }
+}
+
+/// `msime_client_account_gloss` 的请求：组请求体，或解读宿主收到的响应。
+#[derive(Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+enum AccountGlossRequest {
+    Request {
+        texts: Vec<String>,
+        source_lang: String,
+        target_lang: String,
+    },
+    Parse {
+        texts: Vec<String>,
+        status: u16,
+        body: String,
+        #[serde(default)]
+        retry_after: Option<String>,
+    },
+}
+
+/// 账号释义的 sans-IO 一半，给在按键路径上自己发 HTTP 的宿主（Windows 的 curl、Linux）：`request` 校验后给出 `POST /v1/translate` 的请求体，`parse` 解读收到的响应。规则与 `msime_client_account` 的 `translate` 相同。请求、返回值和错误码见头文件。
+/// # Safety
+/// `request` 指向 `length` 个可读的 UTF-8 JSON 字节，NULL 被拒绝。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_account_gloss(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    use msime_client_services::account::{
+        translate_request_body, translate_response, AccountError, AccountTranslateRequest,
+        TRANSLATE_PATH,
+    };
+    super::account::account_failure_response(|| {
+        // SAFETY: 由调用方契约保证；长度先经过上限检查。
+        let request: AccountGlossRequest = unsafe {
+            super::with_bounded_bytes(
+                request,
+                length,
+                4 * 1024 * 1024,
+                "account_invalid",
+                |bytes| serde_json::from_slice(bytes).map_err(|_| "account_invalid".to_owned()),
+            )
+        }?;
+        match request {
+            AccountGlossRequest::Request {
+                texts,
+                source_lang,
+                target_lang,
+            } => {
+                let body = translate_request_body(&AccountTranslateRequest {
+                    texts,
+                    source_lang,
+                    target_lang,
+                })?;
+                let body =
+                    String::from_utf8(body).map_err(|_| AccountError::Invalid.code().to_owned())?;
+                Ok(json!({ "method": "POST", "path": TRANSLATE_PATH, "body": body }))
+            }
+            AccountGlossRequest::Parse {
+                texts,
+                status,
+                body,
+                retry_after,
+            } => {
+                let translations =
+                    translate_response(&texts, status, body.as_bytes(), retry_after.as_deref())?;
+                serde_json::to_value(translations)
+                    .map_err(|_| AccountError::Unavailable.code().to_owned().into())
+            }
+        }
+    })
 }

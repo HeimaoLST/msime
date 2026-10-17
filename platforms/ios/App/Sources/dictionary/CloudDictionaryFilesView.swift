@@ -105,14 +105,12 @@ struct CloudDictionaryFilesView: View {
     .settingsStatus(busy: busy, busyTitle: "正在传输…", message: message)
     .disabled(busy)
     .navigationTitle("词库文件")
-    .onAppear { request.appear() }
-    .onDisappear {
-      ViewRequestTask.disappear(request: $request, pending: $pending)
+    .trackViewRequest(request: $request, pending: $pending, onDisappear: {
       busy = false
       text = nil
       preparedSnapshot = nil
       restoreRevision = nil
-    }
+    })
     .fileImporter(isPresented: $choosing, allowedContentTypes: choosingSnapshot ? [.data] : [.plainText, .tabSeparatedText]) { result in
       guard request.isVisible else { return }
       if choosingSnapshot {
@@ -181,7 +179,7 @@ struct CloudDictionaryFilesView: View {
     var errorDescription: String? { "无法读取文件，请确认是大小不超过 64 KiB 的 UTF-8 文本。" }
   }
 
-  private static func readTextFile(from url: URL) throws -> String {
+  nonisolated private static func readTextFile(from url: URL) throws -> String {
     let content = try PersonalDictionaryImport.readText(from: url)
     guard content.utf8.count <= 65536, !content.contains("\0") else { throw InvalidTextFile() }
     return content

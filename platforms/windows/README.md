@@ -39,9 +39,9 @@ Windows 平台的实现源码在 `src/` 下；`tsf/`、`msimeui/`、`tests/`、`
 
 `settings/` 是独立的 Windows App SDK / WinUI 3 设置宿主。它只负责设置窗口和共享偏好文件的读写；TSF、Server 和共享面板仍由各自的宿主负责。
 
-设置布局参照 macOS 原生宿主：窗口初始 1000 × 760 DIP，最小 800 × 560 DIP；侧栏保留一个设置项搜索入口，正文用功能组卡片和标签／控件两列布局，窄行把控件移到说明下方。「输入方案」逐项选择方案，仅展示当前方案的专属选项；「输入习惯」从标点开始，「按键」从中英文切换开始。账号使用并排身份信息和分组登录表单，皮肤卡片与复选框按可用宽度自动排列；皮肤选择位于完整实时预览之前。候选窗口采用「布局／字体大小／窗口样式／预编辑」四个页内标签，搜索会切到结果所属标签；字体和自定义候选配色在对应标签中管理。状态栏的效果预览跟随按钮、尺寸和主题，并显示实际 DIP 大小。词库列表按编码、词条、权重和操作分列。
+设置布局参照 macOS 原生宿主：窗口初始 1000 × 760 DIP，最小 800 × 560 DIP；侧栏保留一个设置项搜索入口，正文用功能组卡片和标签／控件两列布局，窄行把控件移到说明下方。「输入方案」逐项选择方案，仅展示当前方案的专属选项；「输入习惯」从标点开始，「按键」从中英文切换开始。账号使用并排身份信息和分组登录表单，皮肤卡片与复选框按可用宽度自动排列；皮肤选择位于完整实时预览之前。候选窗口是一列：预览、「布局与字体」组，其余各行收在一个「更多选项」折叠区里，搜索落到折叠区里的行时会展开它；自定义候选配色在「主题」页的「自定义配色」折叠区里管理。状态栏的效果预览跟随按钮、尺寸和主题，并显示实际 DIP 大小。词库列表按编码、词条、权重和操作分列。
 
-Windows 原生界面验收入口是 `tests/tools/settings_ui.ps1`：通过真实 host-api DLL 生成完整默认配置，在独立合成状态中遍历 18 页的浅深色、800／1000 宽窗口并截图，另外切换双拼、五笔、全拼并核对持久化，遍历候选窗口的四个标签、搜索主字体定位到字体标签，切换工具栏语音组件并核对保存与预览尺寸一起变化。截图须同时检查页面对应关系和实际像素；本机 MinGW quick 门禁不编译 WinUI，也不能代替 Windows 上的运行验收。
+Windows 原生界面验收入口是 `tests/tools/settings_ui.ps1`：通过真实 host-api DLL 生成完整默认配置，在独立合成状态中遍历 17 页的浅深色、800／1000 宽窗口并截图，另外切换双拼、五笔、全拼并核对持久化，遍历候选窗口的四个标签、搜索主字体定位到字体标签，切换工具栏语音组件并核对保存与预览尺寸一起变化。云剪贴板回归还检查中继令牌遮罩、草稿不写盘、共享 Rust 拒绝非法地址、成对保存、重读及切回账号。截图须同时检查页面对应关系和实际像素；本机 MinGW quick 门禁不编译 WinUI，也不能代替 Windows 上的运行验收。
 
 ### `panels/` 是什么
 
@@ -56,6 +56,20 @@ Windows 原生界面验收入口是 `tests/tools/settings_ui.ps1`：通过真实
 `packaging/` 下是 winget（`Metasequoia.MetasequoiaIME`）、Scoop（`msime`）与 Chocolatey（`msime`）的包定义模板和渲染脚本 `packaging/render.py`。三个包都只静默运行发布页上 full 的 Inno Setup 安装包，不另编二进制；包描述和主页 `https://github.com/metasequoiaime/msime` 与 Linux 各发行版的定义一致。包管理器只能指向签过名的安装包：`release-windows.yml` 先行发布的安装包未签名，其 uiAccess Server 无法启动，所以 `render.py` 拒绝没有有效 Authenticode 签名的安装包；维护者把 SimplySign 签名的安装包替换到发布上之后，手动触发 `package-definitions-windows.yml` 渲染并上传构建产物 `msime-package-definitions-windows-<版本>`（含 `.nupkg`），不向任何外部仓库推送。`scripts/test-windows-package-managers.py`（由 `scripts/run-checks.sh` 自动运行）核对模板里的安装包事实与 `installer/msime_setup.iss`、`installer/editions.iss` 和发布流程一致。
 
 上架之后的安装方式：`winget install Metasequoia.MetasequoiaIME`；`scoop bucket add msime https://github.com/metasequoiaime/scoop-bucket` 后 `scoop install msime`；`choco install msime`。各仓库的发布步骤（winget-pkgs PR、Scoop bucket、`choco push`）见 [packaging/README.md](packaging/README.md#发布步骤)。
+
+## 游戏兼容范围
+
+下表记录代码里的适配点，不代表完整的游戏支持清单，也不代表这些游戏已在本仓真机验收。
+
+| 游戏或宿主 | 已有适配 | 限制与验收范围 |
+| --- | --- | --- |
+| CS2、Dota 2 | 忽略虚假的 UI-less 自绘声明，由水杉显示候选；无效锚点兜底；CS2 的签名 TIP 部署到系统目录 | 设置页可选兼容名称「拼音输入法」让游戏自绘，关闭恢复本版本名称；需要管理员权限和重启游戏，实际全屏效果未验收 |
+| 三角洲行动等由宿主绘制候选的 UI-less 游戏 | 旧管道路径的翻页、移高亮回复更新宿主页，云候选、AI 候选与静止重排后推送新页，按候选代次拒绝乱序旧页 | 有效 TIP 会话接收原始查询绑定的异步操作，刷新自己的候选与身份；旧管道仍使用页面同步；尚未在真实游戏中验收 |
+| 英雄联盟 | 保留游戏自绘候选；本地 TIP 与旧管道均补后台更新，导航在实际拥有候选的会话中执行 | 游戏内显示、选词与加载效果尚未验收，不能据代码适配宣称完整支持 |
+| 我的世界基岩版（`Minecraft.Windows.exe`） | 首键与组字布局的文本锚点统一到游戏所在显示器工作区左上角 | 系统默认组合小框不在本次处理范围；尚未游戏内验收 |
+| 我的世界 Java 版、基岩版等 IMM 宿主 | Caps Lock 等按键消息处理完再读实际锁定状态，更新语言栏并保留单按切换语言 | 合成 TSF/IMM 时序测试覆盖；不等于游戏实测 |
+
+来源为 `msime-windows` [#925](https://github.com/metasequoiaime/msime-windows/pull/925)、[#932](https://github.com/metasequoiaime/msime-windows/pull/932)、[#933](https://github.com/metasequoiaime/msime-windows/pull/933)。Rust 版不使用来源的 HTML 共享内存候选页；同步回复与推送共用 `shared/contracts/uiless_page.h`。本地会话、兼容登记名称及其恢复流程见[补齐笔记](../../.agents/notes/implemented/feature/2026-10-16-windows-source2-profile-and-local-online.md)。固定来源提交、没有直接搬运的部分与验证依据见[移植笔记](../../.agents/notes/implemented/bug-fix/2026-10-16-windows-game-uiless-and-imm.md)。
 
 ## 原生界面渲染与皮肤
 
@@ -117,7 +131,7 @@ CandidatePresentation.h 将回复投影为带焦点 lease、会话/代次、坐�
 
 Server 主循环创建 `VoiceControllerListener`：专用 I/O 线程通过单槽 `VoiceControllerMailbox` 向控制线程派发，`VoiceControllerDispatch` 分配不可跨连接复用的会话 ID，保存并复核 Server 内部焦点租约。断线、焦点失效、派发超时使对应会话失效，旧队列任务不能启动新录音；关闭时先中止并等待 I/O，再在控制线程取消匹配结果。监听失败不影响原生输入。当前一个认证连接独占端点；Hello/写回复限时 2 秒，空闲读取 5 秒，等待控制线程回复 10 秒，因此控制端应小于 5 秒轮询一次。I/O 超时后会取消并排空操作，不承诺硬实时截止。`windows-voice-controller-dispatch` 为可移植的所有权/焦点/队列测试；`windows-voice-controller-listener` 在 Windows 通过真实管道和模拟录音后端检查 Hello→Start→Stop→Poll、断线清理与未派发请求的关闭。
 
-共享 `client-core::voice_controller` 注入消息传输，校验精确 v2 帧、请求/会话 ID、阶段顺序和有界 UTF-8 结果；Windows `host-windows::voice_controller` 使用消息管道与 overlapped I/O，校验并保留 Server 的进程句柄，核对同账户/同 Windows 会话。每次 I/O 限时 12 秒并在取消后排空，消息不自动重试。Tauri Windows `recognize_voice` 接线到该控制端，每 100ms 轮询，复用现有 request_id、停止/取消标志、电平及 `voice-update` 事件；结果仅返回面板，不自动提交。原生 `Processing` 映射到面板的 `polishing` 阶段。
+共享 `client-providers::voice::controller` 注入消息传输，校验精确 v2 帧、请求/会话 ID、阶段顺序和有界 UTF-8 结果；Windows `host-windows::voice_controller` 使用消息管道与 overlapped I/O，校验并保留 Server 的进程句柄，核对同账户/同 Windows 会话。每次 I/O 限时 12 秒并在取消后排空，消息不自动重试。Tauri Windows `recognize_voice` 接线到该控制端，每 100ms 轮询，复用现有 request_id、停止/取消标志、电平及 `voice-update` 事件；结果仅返回面板，不自动提交。原生 `Processing` 映射到面板的 `polishing` 阶段。
 
 依赖 CMake 3.25+、C++17、nlohmann-json 3.11+ 以及为运行平台构建的 msime-host-api。下面这组测试在 macOS/Linux 本机驱动真实的共享 Rust/C++ 库，用于在没有 Windows 机器时检查跨平台的会话与编码边界：
 
@@ -370,7 +384,7 @@ key_bindings 可选对象示例：
 {"minus_equal":false,"comma_period":true,"brackets":false,"tab":false,"page_up_down":true,"arrows":true,"word_character":"brackets"}
 ```
 
-对象提供时七个字段必须完整且无未知字段，前六项仅接受布尔值，分别控制减号/等号、逗号/句号、方括号、Tab、PageUp/Down、上下箭头；word_character 仅 disabled/brackets/minus_equal。显式对象覆盖共享设置，修改启动文件需重启。未提供对象时使用共享 preferences.json 的 navigation 和 word_character，并通过现有监听器动态发布；旧设置缺省采用 Windows 默认值（除方括号外全部开启，以词定字关闭、键组为方括号）。共享设置禁止以词定字与同键翻页同时开启；UI 切换会同时关闭冲突项。绑定在输入队列更新，不读盘、不解析每次按键；它独立于延迟中的 Engine 方案。显式启动配置仍按以词定字优先处理同键绑定，Microsoft 分号及 Unicode 编辑优先级不变。这份配置只决定这一个 Server 实例怎么分流按键，不改变 TSF 同步契约：接在它上面的客户端必须使用匹配的吃键配置。
+对象提供时七个字段必须完整且无未知字段，前六项仅接受布尔值，分别控制减号/等号、逗号/句号、方括号、Tab、PageUp/Down、上下箭头；word_character 仅 disabled/brackets/minus_equal。显式对象覆盖共享设置，修改启动文件需重启。未提供对象时使用共享 preferences.json 的 navigation 和 word_character，并通过现有监听器动态发布；其中 Tab 和 PageUp/PageDown 两组固定开启，不读共享设置里存的值（关掉只会让这几个键在组字时被吃掉，并不交还应用，设置页也不再给这两个开关）；旧设置缺省采用 Windows 默认值（除方括号外全部开启，以词定字关闭、键组为方括号）。共享设置禁止以词定字与同键翻页同时开启：设置页不让以词定字选已用于翻页的键组，把以词定字占用的键组改为翻页时同一次保存关闭以词定字。绑定在输入队列更新，不读盘、不解析每次按键；它独立于延迟中的 Engine 方案。显式启动配置仍按以词定字优先处理同键绑定，Microsoft 分号及 Unicode 编辑优先级不变。这份配置只决定这一个 Server 实例怎么分流按键，不改变 TSF 同步契约：接在它上面的客户端必须使用匹配的吃键配置。
 
 #### 托盘菜单与共享界面
 
@@ -480,7 +494,7 @@ InputState::edit(lease, packet, style) 按 Engine 当前模式判定字母、组
 
 V（计算与数字）、/（指令）和 @（名字与地点）三个局部模式默认关闭，只在拼音方案下由 Engine 打开：空组合时 Shift+V 进入 V，`/` 与 `@` 在中文标点下进入另外两个。Engine 在 View.spelling_symbols 里列出它当前当作输入的字符：V 模式是 `0123456789+-*/.()%^`，Unicode 模式是十个数字，空组合的拼音会话是已开启的 `/`、`@`。Server 只按这份数据分流，不自己猜模式：`src/input/EditPolicy.h` 的 `edit_kind` 把文本在其中的键交给 Engine 作输入，`digit_selects_candidate` 决定数字键是否选词。Unicode 保留原来按 VK 的规则（Shift+数字选词、裸数字编码）；V 模式里数字与运算符是输入（包括 Shift+8 的 `*`、在别处翻页的 `-`），打出其他字符的数字键（美式布局的 Shift+1 即 `!`，或数字行要按 Shift 的布局上的裸数字键）按槽位选词；其余模式仍是裸数字选词。
 
-TSF 在收到 Server 回复之前就要决定一个键是组合输入还是选词，所以同一条规则在 `tsf/Global/LocalModeKeyPolicy.h` 里还有一份：键击缓冲以 V 开头且 V 模式开启时按上面的规则分类，空组合的 `/`、`@` 在中文标点且对应模式开启时作为组合的第一个字符，而不是标点。网址模式没有开关，在全拼、双拼、五笔（TIP 记作 quanpin，`scheme::DetectsUrls`）且不在专用英文模式时生效：键击缓冲恰好是 `www`、`http`、`https` 或 `ftp`、光标在末尾时，紧跟的 `.` 或 `:` 作为输入进入缓冲，而不是翻页或标点，TIP 同时记下已进入网址模式。之后 TIP 不再从缓冲前缀推断（光标处的编辑会让缓冲开头不再是触发词加触发键，而 Engine 仍在网址模式），与 Engine 一样只在删掉的恰好是触发键（剩下的正好是触发词）、缓冲删空或组字结束时退出。网址模式里网址的数字和符号 `0123456789-._~:/?#[]@!$&'()*+,;=%^`（包括 Shift+数字行的符号和别处翻页的 `-` `=` `,` `.` `[` `]`）都是输入，打出其他字符的数字键按槽位选词，规则与 V 模式相同。Server 按 Engine 列出的 spelling_symbols 做同样的判断。五笔在 `http` 后的 `s` 上已进入网址模式、在网址模式里把 `https` 删成 `http` 时退出，TIP 分不出五笔和全拼，要等触发键之后才按网址分类，删成 `http` 后也仍按网址分类；TIP 的键击缓冲最长 64 个字符，网址在 Windows 上超过这个长度后的按键输入不进去。V 模式和网址模式的符号表、网址触发词，两份拷贝都由 `scripts/test-windows-expression-symbols-parity.py` 核对。三个开关由 Server 经 Worker 帧 LocalModeTriggersChanged（28，载荷为 V、/、@ 三个 `0`/`1`）随其余 TSF 本地设置一起推送，只在拼音方案下为真；格式不对时 TIP 三个全关，旧版 TIP 把未知类型直接丢弃。这些模式上屏的是生成文本：commit_context.typing_statistics 为 false 时 Server 不记打字统计，也就不触发成就音。
+TSF 在收到 Server 回复之前就要决定一个键是组合输入还是选词，所以同一条规则在 `tsf/Global/LocalModeKeyPolicy.h` 里还有一份：键击缓冲以 V 开头且 V 模式开启时按上面的规则分类，空组合的 `/`、`@` 在中文标点且对应模式开启时作为组合的第一个字符，而不是标点。网址模式没有开关，在全拼、双拼、五笔（TIP 记作 quanpin，`scheme::DetectsUrls`）且不在专用英文模式时生效：键击缓冲恰好是 `www`、`http`、`https` 或 `ftp`、光标在末尾时，紧跟的 `.` 或 `:` 作为输入进入缓冲，而不是翻页或标点；缓冲只有 ASCII 字母和数字时紧跟的 `@` 同样进入缓冲（邮箱），而不是按槽位选词。TIP 同时记下已进入网址模式。之后 TIP 不再从缓冲前缀推断（光标处的编辑会让缓冲开头不再是触发词加触发键，而 Engine 仍在网址模式），与 Engine 一样只在删掉的是末尾那个触发键（剩下的正好是触发词，或剩下的只有字母数字而删掉的是 `@`）、缓冲删空或组字结束时退出。网址模式里网址的数字和符号 `0123456789-._~:/?#[]@!$&'()*+,;=%^`（包括 Shift+数字行的符号和别处翻页的 `-` `=` `,` `.` `[` `]`）都是输入，打出其他字符的数字键按槽位选词，规则与 V 模式相同。Server 按 Engine 列出的 spelling_symbols 做同样的判断。五笔在 `http` 后的 `s` 上已进入网址模式、在网址模式里把 `https` 删成 `http` 时退出，TIP 分不出五笔和全拼，要等触发键之后才按网址分类，删成 `http` 后也仍按网址分类；TIP 的键击缓冲最长 64 个字符，网址在 Windows 上超过这个长度后的按键输入不进去。V 模式和网址模式的符号表、网址触发词和邮箱的 `@`，两份拷贝都由 `scripts/test-windows-expression-symbols-parity.py` 核对。三个开关由 Server 经 Worker 帧 LocalModeTriggersChanged（28，载荷为 V、/、@ 三个 `0`/`1`）随其余 TSF 本地设置一起推送，只在拼音方案下为真；格式不对时 TIP 三个全关，旧版 TIP 把未知类型直接丢弃。这些模式上屏的是生成文本：commit_context.typing_statistics 为 false 时 Server 不记打字统计，也就不触发成就音。
 
 ### 韩语的汉字转换
 

@@ -13,7 +13,7 @@ import app.msime.android.KeyboardGeometry;
 import android.widget.LinearLayout;
 
 /**
- * 键盘底行：按 {@link KeyboardActionRow#designEntries} 排布 123 | ， | 空格 | 。 | 中 | ↵（拼音九键和笔画键盘是 符 | 123 | 空格 | 中 | ↵；地球键只在系统允许切换输入法时插在 123 之后），空格键的长按语音与拖动移光标，回车键始终 accent 填充。
+ * 键盘底行：按 {@link KeyboardActionRow#designEntries} 排布。26 键为 123 | 符 | 空格 | ， | 中 | ↵，逗号长按输入句号；14 键、手写和大千注音保留独立逗号句号；拼音九键和笔画为 符 | 123 | 空格 | 中 | ↵。地球键按系统能力插在 123 之后，空格保留语音与移光标手势，回车始终使用操作色。
  *
  * <p>空格与回车换成画图标的 {@link SpaceKeyFace} / {@link KeyboardIconKey}：SVC 建的原按钮留作点击的执行者（它带着计数、反馈与动作），新键点一下就让原按钮 performClick，所以 SVC 里的动作不必搬动；节点 text 照旧由 SVC 设置（「空格」、「换行/确认/…」）。
  */
@@ -21,6 +21,8 @@ final class ImeBottomRow {
     private final MSIMEInputService s;
     /** 底行的句号键（新设计里逗号右侧那个）；第一次排布时建。 */
     private Button periodButton;
+    /** 九键数字层的唯一 0，普通层不挂载。 */
+    private Button zeroButton;
     /** 分离式键盘右半边内侧的第二个空格键；第一次分离时建，换了一套控件（onCreateInputView）时作废重建。 */
     private SpaceKeyFace splitSpace;
 
@@ -129,7 +131,7 @@ final class ImeBottomRow {
         // 方向键由编辑器自己解释（换行、代理对、双向文字），落点算不出来。
         if (offset != 0) s.selectionEcho.invalidate();
         int keyCode = offset < 0 ? KeyEvent.KEYCODE_DPAD_LEFT : KeyEvent.KEYCODE_DPAD_RIGHT;
-        for (int index = 0; index < Math.abs(offset); index++) s.sendDownUpKeyEvents(keyCode);
+        for (int index = 0; index < Math.abs(offset); index++) s.sendEditorKeyEvents(keyCode);
     }
 
     /** 一个空格键自己的手势状态。分离式键盘有两个空格键，两根拇指可能先后按住它们，状态不能共用，否则后按下的会把先按下的那次长按计时和手势仲裁一起冲掉。 */
@@ -146,12 +148,19 @@ final class ImeBottomRow {
 
     /**
      * 空格键手势：{@link SpaceGesturePolicy} 仲裁长按 450 ms 打开语音（`touch_space_voice`）与水平拖动移动光标（`touch_space_cursor`），先满足的一方胜出；纵向滑走作废这次按压；两者都没发生时松手就是普通空格。
+     *
+     * <p>长按在键区里开始的语音是按住说话：松手结束录音并出结果，按住期间停顿不自动结束；手指向上滑过键盘高度的 {@link VoiceHoldPolicy#CANCEL_ZONE_FRACTION} 进入取消区，聆听面板显示「松开取消」，在那里松手或触摸被系统取消都丢掉这次录音。
      */
     void bindSpaceCursor(Button button) {
         final float[] origin = new float[2];
         final boolean[] dragging = new boolean[1];
         final boolean[] cancelled = new boolean[1];
         final boolean[] voiced = new boolean[1];
+        // 这次按压开始的语音是按住说话（键区里真的开始了一次新的聆听）。
+        final boolean[] holding = new boolean[1];
+        // 按住说话时手指此刻在取消区。
+        final boolean[] cancelZone = new boolean[1];
+        final long[] voiceBefore = new long[1];
         final int touchSlop = ViewConfiguration.get(s).getScaledTouchSlop();
         final SpacePress press = new SpacePress();
         final Runnable startVoice = () -> {
@@ -160,7 +169,14 @@ final class ImeBottomRow {
             cancelled[0] = true;
             button.setPressed(false);
             s.imeKeyFeedback.playFeedback(button);
+            voiceBefore[0] = s.imeVoiceEntry.generation();
             s.startVoiceRecognition();
+        };
+        // 手指还按着时开始的语音改成按住说话；松手那一刻才补判出的长按仍按点按开始，否则刚开始就被这次松手结束。
+        final Runnable holdVoice = () -> {
+            if (voiced[0]) return;
+            startVoice.run();
+            holding[0] = s.imeVoiceEntry.hold(voiceBefore[0]);
         };
         button.setOnTouchListener((ignored, event) -> {
             switch (event.getActionMasked()) {
@@ -170,6 +186,8 @@ final class ImeBottomRow {
                     dragging[0] = false;
                     cancelled[0] = false;
                     voiced[0] = false;
+                    holding[0] = false;
+                    cancelZone[0] = false;
                     button.setPressed(true);
                     button.getParent().requestDisallowInterceptTouchEvent(true);
                     // 组字中或关了长按语音时不武装长按：这次按压保持普通空格与拖动移光标，与 develop 一致；否则慢一点的空格会被吞掉、停顿后的拖动也移不了光标。
@@ -182,14 +200,24 @@ final class ImeBottomRow {
                             press.longPress = null;
                             press.gesture.tick(SystemClock.uptimeMillis());
                             if (press.gesture.state() == SpaceGesturePolicy.State.VOICE
-                                    && s.voiceInsertionReady()) startVoice.run();
+                                    && s.voiceInsertionReady()) holdVoice.run();
                         };
                         s.main.postDelayed(press.longPress, SpaceGesturePolicy.LONG_PRESS_MS);
                     }
                     return true;
                 }
                 case MotionEvent.ACTION_MOVE -> {
-                    if (voiced[0]) return true;
+                    if (voiced[0]) {
+                        if (holding[0]) {
+                            boolean zone = VoiceHoldPolicy.inCancelZone(origin[1], event.getY(),
+                                s.keyboardRoot == null ? 0f : s.keyboardRoot.getHeight());
+                            if (zone != cancelZone[0]) {
+                                cancelZone[0] = zone;
+                                s.imeVoiceEntry.holdCancelZone(zone);
+                            }
+                        }
+                        return true;
+                    }
                     if (!dragging[0] && !cancelled[0]) {
                         float horizontal = event.getX() - origin[0];
                         float vertical = event.getY() - origin[1];
@@ -199,7 +227,7 @@ final class ImeBottomRow {
                         if (state == SpaceGesturePolicy.State.VOICE) {
                             // VOICE is only reachable when long-press voice was on at ACTION_DOWN.
                             press.cancelLongPress();
-                            if (s.voiceInsertionReady()) startVoice.run();
+                            if (s.voiceInsertionReady()) holdVoice.run();
                             return true;
                         }
                         if (state == SpaceGesturePolicy.State.PRESSED) {
@@ -257,6 +285,10 @@ final class ImeBottomRow {
                     }
                     if (voiced[0]) {
                         s.countKey(button);
+                        if (holding[0]) {
+                            holding[0] = false;
+                            s.imeVoiceEntry.releaseHold(cancelZone[0]);
+                        }
                         return true;
                     }
                     if (dragging[0] || cancelled[0]) {
@@ -273,6 +305,10 @@ final class ImeBottomRow {
                     dragging[0] = false;
                     cancelled[0] = true;
                     resetSpaceCursor();
+                    if (holding[0]) {
+                        holding[0] = false;
+                        s.imeVoiceEntry.releaseHold(true);
+                    }
                     return true;
                 }
                 default -> { return true; }
@@ -288,9 +324,19 @@ final class ImeBottomRow {
             case GLOBE -> s.globeButton;
             case COMMA -> s.quickPunctuationButton;
             case SPACE -> s.spaceButton;
+            case ZERO -> zeroButton();
             case PERIOD -> periodButton();
             case RETURN -> s.enterButton;
         };
+    }
+
+    private Button zeroButton() {
+        if (zeroButton == null) {
+            zeroButton = s.keyId(s.nineKeyGridKey("0", "数字 0",
+                () -> s.imeLayoutRows.commitNineKeyLiteral("0")), "Nine0");
+            KeyboardTypographyPolicy.setFittedKeyTextSize(zeroButton, 14, 22);
+        }
+        return zeroButton;
     }
 
     /** 底行句号键：中文标点模式画「。」，否则「.」；发出的都是 `.`，由 Engine 按标点模式转换。 */
@@ -304,23 +350,20 @@ final class ImeBottomRow {
 
     /** 新设计的 123 / #+= 层自带底行，这时功能行整行不显示。 */
     boolean layerOwnsBottomRow() {
+        int layout = s.imeLetterRows.drawnTouchLayout();
         return s.keyboardLayer == KeyboardLayout.Layer.SYMBOLS
-            && ImeLetterRows.drawsDesignLayer(s.imeLetterRows.drawnTouchLayout());
+            && !s.imeLetterRows.numberPadDrawn(layout)
+            && (ImeLetterRows.drawsDesignLayer(layout) || layout == KeyboardLayout.QUANPIN_NINE_KEY_LAYOUT);
     }
 
-    /**
-     * Lay the bottom row out for the surface on screen.
-     *
-     * <p>Every control here is a long-lived field with its own listeners and state, so the row is
-     * re-parented rather than rebuilt: a fresh set of buttons each time would drop the space key's
-     * cursor gesture and the delete key's repeat.
-     */
+    /** 按当前键面重挂常驻按键，保留空格手势与删除连按的状态和监听器。 */
     void updateActionRow() {
         if (s.actionRow == null) return;
         ensureFaces();
         s.imeStyler.refreshSeasonIfNeeded();
         s.imeLetterRows.updateSecondRowIndent();
         int layout = s.imeLetterRows.drawnTouchLayout();
+        boolean numberPad = s.imeLetterRows.numberPadDrawn(layout);
         boolean globe = s.offersGlobeKey();
         boolean ownBottom = layerOwnsBottomRow();
         boolean chinesePunctuation = s.sendsChinesePunctuation();
@@ -333,7 +376,11 @@ final class ImeBottomRow {
             // type('.') 没有会话时也会直接上屏字面句点（密码框等），与旁边的逗号键一致。
             ViewPolicy.setEnabled(periodButton, s.connection != null);
         }
-        if (s.spaceButton instanceof SpaceKeyFace face) face.setSchemeLabel(spaceLabel());
+        if (s.spaceButton instanceof SpaceKeyFace face)
+            face.setSchemeLabel(numberPad ? "" : spaceLabel());
+        // 借用数字页的 0 记普通数字键，原拼音九键才记 Nine0；同一个常驻按键每次按当前键面重登。
+        if (numberPad) s.keyId(zeroButton(), layout == KeyboardLayout.QUANPIN_NINE_KEY_LAYOUT
+            ? "Nine0" : KeyPressIds.forCharacter('0'));
         syncSplitSpace();
         if (s.globeButton != null) s.globeButton.setContentDescription("切换输入法");
         // Every keystroke reaches render(), and re-parenting eight keys under the pressed one is a
@@ -341,10 +388,11 @@ final class ImeBottomRow {
         // 分离时空格拆成两半、空隙按可见键居中，所以常用标点键显示与否也会改变排布。
         boolean split = !ownBottom && s.splitKeyboardDrawn();
         boolean swapLanguageNumber = s.localSettings.bool(AndroidLocalSettings.SWAP_LANGUAGE_NUMBER_KEYS);
-        String signature = layout + ":" + globe + ":" + ownBottom + ":" + split + ":" + swapLanguageNumber
+        String signature = layout + ":" + numberPad + ":" + globe + ":" + ownBottom + ":" + split + ":" + swapLanguageNumber
             + (split && s.quickPunctuationButton != null ? ":" + s.quickPunctuationButton.getVisibility() : "");
         java.util.List<KeyboardActionRow.DesignEntry> entries = ownBottom ? java.util.List.of()
-            : KeyboardActionRow.designEntries(layout, globe, swapLanguageNumber);
+            : KeyboardActionRow.designEntries(numberPad ? KeyboardLayout.QUANPIN_NINE_KEY_LAYOUT : layout,
+                globe, swapLanguageNumber, numberPad);
         // Visibility is re-asserted every time: the reply surface hides this row and restores it
         // without the surface itself having changed.
         ViewPolicy.setVisible(s.actionRow, !entries.isEmpty());
@@ -366,7 +414,7 @@ final class ImeBottomRow {
             if (key.getParent() instanceof android.view.ViewGroup parent) parent.removeView(key);
             KeyboardKeyRole role = switch (entry.slot()) {
                 case RETURN -> returnKeyRole();
-                case SPACE, COMMA, PERIOD -> KeyboardKeyRole.KEY;
+                case SPACE, ZERO, COMMA, PERIOD -> KeyboardKeyRole.KEY;
                 default -> KeyboardKeyRole.ACCENT;
             };
             if (key instanceof KeyboardPressButton press) press.setKeyboardRole(role);

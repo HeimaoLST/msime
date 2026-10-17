@@ -1,3 +1,4 @@
+import { NativeCleanup } from '../NativeCleanup';
 import audio from '@ohos.multimedia.audio';
 import webSocket from '@ohos.net.webSocket';
 import util from '@ohos.util';
@@ -132,7 +133,8 @@ export class HarmonyDoubaoRecognizer {
       if (this.isCurrent(token, socket)) void this.fail('豆包语音识别超时。', token);
     }, SESSION_TIMEOUT_MS);
     try {
-      const connected: boolean = await socket.connect(config.asr_endpoint, this.headers(config));
+      const connected: boolean = await socket.connect(DoubaoCredentialPolicy.endpoint(config),
+        this.headers(config));
       if (!connected || !this.isCurrent(token, socket) || this.settled) throw new Error('connect failed');
       if (this.stopping) {
         await this.complete(token, socket);
@@ -154,7 +156,7 @@ export class HarmonyDoubaoRecognizer {
         start.request.corpus = { boosting_table_id: config.doubao_boosting_table_id };
       }
       const encoder: util.TextEncoder = util.TextEncoder.create('utf-8');
-      const payload: ArrayBuffer = encoder.encode(JSON.stringify(start)).buffer as ArrayBuffer;
+      const payload: ArrayBuffer = encoder.encodeInto(JSON.stringify(start)).buffer as ArrayBuffer;
       const frame: ArrayBuffer = client.doubaoEncodeFrame(1, 1, 1, payload);
       if (!await socket.send(frame)) throw new Error('start frame rejected');
       this.connected = true;
@@ -231,11 +233,16 @@ export class HarmonyDoubaoRecognizer {
       this.onAudio(data, token);
     };
     this.readCallback = readCallback;
-    capturer.on('readData', readCallback);
+    try {
+      capturer.on('readData', readCallback);
+    } catch (error) {
+      await this.releaseCapturer();
+      throw error as Error;
+    }
     // `stop()` may have arrived after the capturer was created but before `start()`;
     // do not bring a microphone up for a session that is already finishing.
     if (!this.isCurrent(token, socket) || this.settled || this.stopping) {
-      capturer.off('readData', readCallback);
+      NativeCleanup.detach(capturer, readCallback);
       if (this.capturer === capturer) {
         this.readCallback = undefined;
         this.capturer = undefined;
@@ -246,7 +253,7 @@ export class HarmonyDoubaoRecognizer {
     try {
       await capturer.start();
     } catch (error) {
-      capturer.off('readData', readCallback);
+      NativeCleanup.detach(capturer, readCallback);
       if (this.capturer === capturer) {
         this.readCallback = undefined;
         this.capturer = undefined;
@@ -297,19 +304,24 @@ export class HarmonyDoubaoRecognizer {
   }
 
   private async finishFrame(): Promise<void> {
-    await this.releaseCapturer();
-    const socket: webSocket.WebSocket | undefined = this.socket;
-    if (socket === undefined || this.settled || !this.connected) return;
-    const token: number = this.sessionToken;
-    const pending: ArrayBuffer = this.pending.buffer.slice(
-      this.pending.byteOffset, this.pending.byteOffset + this.pending.byteLength) as ArrayBuffer;
-    this.pending = new Uint8Array(0);
-    const finalFrame: ArrayBuffer = client.doubaoEncodeFrame(2, 3, -this.sequence, pending);
-    this.sequence += 1;
-    const sent: boolean = await this.sendChain;
-    if (!this.isCurrent(token, socket) || this.settled) return;
-    if (!sent || !await socket.send(finalFrame)) {
-      await this.fail('豆包语音识别结束帧发送失败。', token);
+    try {
+      await this.releaseCapturer();
+      const socket: webSocket.WebSocket | undefined = this.socket;
+      if (socket === undefined || this.settled || !this.connected) return;
+      const token: number = this.sessionToken;
+      const pending: ArrayBuffer = this.pending.buffer.slice(
+        this.pending.byteOffset, this.pending.byteOffset + this.pending.byteLength) as ArrayBuffer;
+      this.pending = new Uint8Array(0);
+      const finalFrame: ArrayBuffer = client.doubaoEncodeFrame(2, 3, -this.sequence, pending);
+      this.sequence += 1;
+      const sent: boolean = await this.sendChain;
+      if (!this.isCurrent(token, socket) || this.settled) return;
+      if (!sent || !await socket.send(finalFrame)) {
+        await this.fail('豆包语音识别结束帧发送失败。', token);
+      }
+    } catch (error) {
+      KeyboardLog.error('keyboard.input.HarmonyDoubaoRecognizer.finishFrame failed');
+      throw error as Error;
     }
   }
 
@@ -373,7 +385,7 @@ export class HarmonyDoubaoRecognizer {
     const capturer: audio.AudioCapturer | undefined = this.capturer;
     this.capturer = undefined;
     if (capturer === undefined) return;
-    if (this.readCallback !== undefined) capturer.off('readData', this.readCallback);
+    if (this.readCallback !== undefined) NativeCleanup.detach(capturer, this.readCallback);
     this.readCallback = undefined;
     try {
       await capturer.stop();
@@ -390,7 +402,7 @@ export class HarmonyDoubaoRecognizer {
   private headers(config: VoiceInputConfiguration): webSocket.WebSocketRequestOptions {
     const requestId: string = util.generateRandomUUID(false);
     const token: string = DoubaoCredentialPolicy.token(config);
-    const resourceId: string = config.asr_resource_id.trim();
+    const resourceId: string = DoubaoCredentialPolicy.resourceId(config);
     const appKey: string = config.asr_app_key.trim();
     if (config.doubao_auth_mode === 'legacy') {
       return { header: { 'x-api-resource-id': resourceId, 'x-api-request-id': requestId,
@@ -401,11 +413,11 @@ export class HarmonyDoubaoRecognizer {
   }
 
   private validConfig(config: VoiceInputConfiguration): boolean {
-    return TextPolicy.validAuthority(config.asr_endpoint, ['wss://'])
+    return TextPolicy.validAuthority(DoubaoCredentialPolicy.endpoint(config), ['wss://'])
       && DoubaoHeaderPolicy.validConfiguration(
         config.doubao_auth_mode,
         DoubaoCredentialPolicy.token(config),
-        config.asr_resource_id,
+        DoubaoCredentialPolicy.resourceId(config),
         config.asr_app_key,
       );
   }

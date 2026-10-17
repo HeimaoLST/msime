@@ -247,7 +247,7 @@ fn install_effect(state: &Path, style: &str) {
 
 #[test]
 fn the_selected_effect_pack_replaces_the_preferences_style_and_follows_a_reimport() {
-    use msime_client_core::plugins::EffectStyle;
+    use msime_client_services::plugins::EffectStyle;
 
     let state = tempfile::tempdir().unwrap();
     let roots = PluginRoots::new(state.path().to_str(), None, None, "");
@@ -258,13 +258,16 @@ fn the_selected_effect_pack_replaces_the_preferences_style_and_follows_a_reimpor
         ..PluginPreferences::default()
     };
 
-    // No pack: the preferences' own style and intensity, and the host's defaults for the rest.
+    // 没有特效包时使用偏好的样式和强度，其他参数取宿主默认值；固定强度的平台（macOS、Windows、鸿蒙）不读存下的 30，使用固定值。
+    let intensity = crate::ffi::host::compiled_platform()
+        .fixed_effect_intensity()
+        .unwrap_or(30);
     let settings = SoundSettings::new(&preferences, &roots);
     assert!(settings.stamps.effect_pack.is_none());
     let value = effect_settings(&SessionSound::new(settings));
     assert_eq!(
         value,
-        serde_json::json!({"pack": null, "issue": null, "style": "flash", "intensity": 30, "colors": [], "duration_ms": null, "particles": null, "combo_counter": true})
+        serde_json::json!({"pack": null, "issue": null, "style": "flash", "intensity": intensity, "colors": [], "duration_ms": null, "particles": null, "combo_counter": true})
     );
 
     // A pack that is not installed draws nothing and says why.
@@ -741,7 +744,7 @@ mod playback {
             "broken",
             "[sounds]\ndefault = \"long.wav\"\nspace = \"space.wav\"\ncommit = \"space.wav\"\nachievement = \"long.wav\"\n",
         );
-        // client-core 导入时能过（文件头正确），解码器拒绝（8 kHz 下 2 秒，超过 1.5 秒上限）。
+        // client-services 导入时能过（文件头正确），解码器拒绝（8 kHz 下 2 秒，超过 1.5 秒上限）。
         wav(&broken.join("long.wav"), 1, 8_000, 16_000);
         std::fs::copy(
             builtin_sounds().join("default/space.wav"),

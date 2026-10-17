@@ -16,15 +16,17 @@ ctest --test-dir build/shared-voice --output-on-failure
 
 The synthetic routing test exercises the platform-neutral entry points and pre-cancelled requests without contacting cloud services. `tests/transport.py` runs the real curl adapter against a loopback fixture server and checks the multipart upload (model, language and WAV parts) as well as rejection, redirect, malformed, oversized and retry answers.
 
-`DoubaoAuth.h` is a thin C++ adapter for `client-core::doubao_auth` through `msime_client_doubao_auth_headers`. It requires the host-api include path and library. Both the Rust credential probe and native Windows recording use this same authentication policy: an absent or empty mode means `api_key`, and only an explicit `legacy` uses the App ID + access token headers (it requires an App ID). Returned header text contains credentials and must never be logged. Pass an absolute `MSIME_HOST_LIBRARY` when configuring this project to enable the synthetic C++/Rust ABI test `shared-doubao-auth`.
+`DoubaoAuth.h` is a thin C++ adapter for `client-providers::credential::doubao_auth` through `msime_client_doubao_auth_headers`. It requires the host-api include path and library. Both the Rust credential probe and native Windows recording use this same authentication policy: an absent or empty mode means `api_key`, and only an explicit `legacy` uses the App ID + access token headers (it requires an App ID). Returned header text contains credentials and must never be logged. Pass an absolute `MSIME_HOST_LIBRARY` when configuring this project to enable the synthetic C++/Rust ABI test `shared-doubao-auth`.
 
 ## On-device recognition (LocalAsr)
 
 `LocalAsr.h` (target `msime-voice-local-asr`) recognizes on this machine through the sherpa-onnx C API. The runtime is pinned per platform by `resources/voice-runtime.lock.json` and fetched with `scripts/fetch_voice_runtime.py --platform <platform>` into `target/voice-runtime/<platform>/`. It is not linked: the library is loaded with `dlopen`/`LoadLibrary` on first use, so a package without it still starts and `sherpa_runtime_available()` answers false. The library is looked for in `set_sherpa_library_path()`, then `MSIME_SHERPA_ONNX_LIBRARY`, then beside the executable, then in a macOS bundle's `Contents/Frameworks` (other Unix hosts: `../lib/msime/` and `../lib/` relative to the executable), then by bare name. The first load attempt decides for the life of the process. Only the C header is vendored, in `third_party/sherpa-onnx/` with its Apache-2.0 license.
 
-A model is a directory holding the files of one entry of `resources/local-asr-models.json` plus `msime-model.json`, a verbatim copy of that entry. The installer (`client-core::voice::local_models`, exposed as `msime_client_voice_local_model_install`) writes the manifest last, so a directory without it is never treated as a model. Nothing in this module downloads anything.
+A model is a directory holding the files of one entry of `resources/local-asr-models.json` plus `msime-model.json`, a verbatim copy of that entry. The installer (`client-providers::voice::local_models`, exposed as `msime_client_voice_local_model_install`) writes the manifest last, so a directory without it is never treated as a model. Nothing in this module downloads anything.
 
-- Streaming models (`online_transducer`) decode as audio arrives. Whole-utterance models (`offline_sense_voice`, `offline_funasr_nano`) are fed through Silero VAD and decode each finished speech segment. Both report partial text before `finish()`.
+- Streaming models (`online_transducer`) decode as audio arrives. Whole-utterance models (`offline_transducer`, `offline_sense_voice`, `offline_funasr_nano`) are fed through Silero VAD and decode each finished speech segment; the offline transducer uses modified beam search with 16 paths and gets its hotwords per segment stream. Both report partial text before `finish()`. `LocalAsrSession::speech_detected()` 报告 VAD 此刻是否在说话：整段模型只在一段说完后才出文字，宿主判断用户是否说完应看它，而不是看文字多久没变（流式模型没有 VAD，始终为 false）。
+- 清单的 `model_type`（流式 X-ASR 为 `zipformer2`，离线 transducer 为 `transducer`）原样交给 sherpa-onnx，省掉它为读 encoder 元数据多建的一次推理会话；没有这个字段的旧安装照常工作。
+- 最终文本里的汉字数字由宿主经 `msime_client_voice_normalize_numbers`（`client-providers::voice::numbers`）按清单的 `kind` 改写，只作用于不自带 ITN 的 transducer；不在这个模块里做，iOS 与 HarmonyOS 的识别器是各自的移植，三端共用 Rust 这一份。
 - `hotwords` are used natively when the manifest says `"hotwords": "native"` and the model has what it needs (the transducer needs `bpe_vocab` and a `modeling_unit`). For `"pinyin"` models the recognizer ignores them and the host corrects the final text with `msime_client_voice_hotword_correct`. Hosts get the words from `msime_client_voice_hotwords`, which reads the user's own pinyin dictionary entries.
 - A loaded model is kept for the next dictation. Hosts call `release_idle_local_models()` from a timer, since a model holds hundreds of megabytes to over a gigabyte.
 - `recognize_local_asr()` in `VoiceProviders.h` recognizes an installed model directory here and rejects any other path. Windows calls it in-process in `msime-client-server`.
@@ -66,3 +68,9 @@ cmake -S shared/voice -B build/shared-voice -DBUILD_TESTING=ON \
 cmake --build build/shared-voice
 ctest --test-dir build/shared-voice -R shared-voice-local --output-on-failure
 ```
+
+### 准确率评测
+
+`scripts/voice_eval.py` 用 `msime-voice-local` 跑公开测试集（FLEURS 普通话、ASCEND 中英混说），按混合错误率打分（汉字按字、英文按词，不计标点和大小写），用法见脚本开头。换模型、改 beam 或热词分数前后各跑一次，结果与 `resources/eval/voice-baseline.json` 比较。`scripts/test-voice-eval.py` 钉住打分规则。
+
+配置了测试模型时，再给 `-DMSIME_LOCAL_ASR_TEST_WAV=<16 kHz 单声道 16 位 PCM 录音>` 会多注册一个 `shared-voice-local-asr-model`：直接经会话 API 识别这段录音，并检查 VAD 的说话状态。

@@ -1,0 +1,41 @@
+# Agent Note: Android 剪贴板全文导出
+
+Status: implemented
+
+## Problem
+
+#8223 的历史记录只能逐条粘贴，长文本在键盘卡片上读不全，也无法一次在外部阅读全部历史。
+
+## Decision
+
+共享 client-core 生成 UTF-8 文本快照，经现有 mobile clipboard action 暴露全文和条数；原始文字与换行不截断，按历史现有顺序编号并保留置顶标记。Android 在键盘设置的剪贴板分类配置本机目录，在历史页及键盘面板右上方提供导出。导出时重新检查实时隐私开关，关闭或空历史不创建文件；所有存储操作在工作线程运行。
+
+Android 29 及以上默认通过 MediaStore.Downloads 创建独立待发布文件，完成后解除 pending；Android 28 首次用 SAF 授权文件夹，选择器初始定位 Download。自选 SAF 目录持久授权，不进同步与备份；撤权或删除时明确报错，不自动改存其他位置。复用诊断目录授权与空文档写入保护，两个功能选中同一目录时更改其中一个不能撤销另一个的授权。文件名使用时间与 UUID，缓存临时文件在完成后删除。默认目录依据 [Android 共享存储文档](https://developer.android.com/training/data-storage/shared/media) 的 Downloads 所有权模型，不额外申请整个存储权限。Android 9 从键盘首次导出且未授权时打开历史页，用户在那里点击导出并授权；先在设置里选过目录的用户仍直接导出。
+
+## Historical audit
+
+- [诊断目录](../../implemented/feature/2026-10-15-android-diagnostics-export-directory.md)：部分重叠，抽取共用授权与写入机制，保留诊断入口和行为。
+- [目标保护](../../implemented/bug-fix/2026-10-09-android-backup-destination-safety.md)：复用非空目标拒绝写入，SAF 失败不删除提供方文档。
+- [Windows 历史](../../implemented/feature/2026-10-11-windows-settings-clipboard.md)：平台不同，不改变桌面历史格式。
+
+## Alternatives considered
+
+- JSON 能无损机器读取元数据，但需求是直接阅读长文本；采用保留原始文字的 TXT，文件分隔标记只服务阅读，不作为导入格式。
+- 全版本统一 SAF 可以少一条存储分支，但新版 Android 禁止授权 Download 根目录，无法实现默认一键保存；默认目录用 MediaStore，自选位置用 SAF。
+- Android 9 申请整个共享存储写权限可直接写 Download，但权限范围大于导出所需；首次通过系统选择器授权，之后直接写入。
+
+- 在外部可打开的历史页参数里携带自动导出指令：可以少点一次，但其他应用也可构造相同 Intent，不能把打开页面当成导出同意；导出始终由可见按钮触发。
+
+## Verification
+
+Rust 用例覆盖 Unicode、长文本、顺序和空快照；两项 mobile clipboard host-api 单测、相关 client-core / host-api 全目标 clippy 和格式检查通过。原生 full APK 已编译、签名并检查 16KB 原生库对齐。
+
+API 28、35 的四个共享客户端 crate 设备单测均通过。导出两阶段在两版本均通过：默认 Download 或首次 SAF 授权、持久授权与强停重启、设置/历史页/真实键盘三个入口、5000 字 Unicode/emoji/CRLF/尾部空格、原顺序与置顶标记、取消、共享诊断授权、撤权、非空文档保护、写流失败、隐私关闭、空记录、目录删除和恢复默认。
+
+API 35 默认 smoke 与诊断套件、API 28 `--core --diagnostics` 均分段跑完、无跳过，末尾剪贴板保存生命周期通过。前段的聊天导航、上标与偏好标点旧入口断言失败保留；修正后相关用例逐项重跑通过，最新聊天导航在 API 28、35 都复核通过。完整 `MSIME_VERIFY_ALL=1` quick 通过，资源紧张时用 `PYTHON_CPU_COUNT=2`、`CARGO_BUILD_JOBS=2`、`MSIME_BUILD_JOBS=2` 顺序验收；此前缺盘失败记录不计通过。实际完成 Windows 404 项 i686 语法检查、165 项宿主测试、x64 原生链接与 Windows GNU 桌面检查、Rust/Android/WebAssembly 目标、Android 宿主 Java、macOS 原生宿主、Apple 桥接与 x64/i686 管道配置。Linux 因缺少 Docker、HarmonyOS 原生打包因缺少暂存环境、macOS Tauri 桌面因缺少其资源包被脚本跳过，不计为构建通过。
+
+完整验收同时修正聊天导航用例的操作前提：从 AI 二级页返回会保留首页滚动位置，试用按钮可能被紧凑标题栏覆盖；无障碍树仍报告可见。用例先有界滚回顶部、等位置稳定，再点击并保留输入焦点断言。AI 设置行也检查底部导航栏遮挡，避免“可见”但落在社区标签上的坐标点击。清缓存和直接注入坐标均未解决遮挡，未采用全局点击机制改动。另将上标快捷键与偏好标点测试更新为从 `#+=` 进入跟随标点设置的符号页，避免在新默认数字九宫格的字面侧栏寻找旧键面；上标、普通 0、下标及偏好延迟应用与恢复断言保留。
+
+## Consequences
+
+全文导出减少逐条粘贴，默认 Download 不新增存储权限；自选文件夹可持续使用，但 Android 9 首次仍需要系统授权。SAF 写入失败可能留下半成品，提示用户手动删除；MediaStore 未完成项保持 pending，交给系统过期清理。快照包含用户内容，只由显式导出触发，不写日志。模拟器验证不代表全部厂商文件提供方。

@@ -35,6 +35,8 @@ export const appThemeCatalog: () => string;
 export const resolveAppTheme: (request: string) => string;
 /** Staged engine resources in; `{profile,sourceCommit}` from the packaged dictionary manifest out. */
 export const dictionaryManifest: (resources: string) => string;
+/** 九键双拼方案的表、问题和每个数字键的键面；请求为 `{profile, table?}`。 */
+export const nineKeyShuangpinLayout: (request: string) => string;
 /** JSON resource request; returns a structured response containing contentType and byte values. */
 export const skinResource: (request: string) => string;
 /** JSON stylesheet request; returns a nullable stylesheet in the structured response. */
@@ -161,9 +163,11 @@ export const googleLoopback: (request: string) => string;
 export const tencentTranslationHttpRequest: (request: string) => string;
 export const niuTransTranslationHttpRequest: (request: string) => string;
 export const customTranslationHttpRequest: (request: string) => string;
+export const aiTranslationHttpRequest: (request: string) => string;
 export const parseTencentTranslationResponse: (body: string, expected: number) => string;
 export const parseNiuTransTranslationResponse: (body: string) => string;
 export const parseCustomTranslationResponse: (body: string) => string;
+export const parseAiTranslationResponse: (body: string) => string;
 export const translationQuery: (handle: number) => string;
 export const onlineQuery: (handle: number) => string;
 export const cloudRequestUrl: (query: string) => string;
@@ -177,7 +181,7 @@ export const applyOnlineCandidates: (
   candidates: string,
   source: number,
 ) => string;
-/** `msime_client_resolve_online_candidates`：AI 回答为空、失败或被拒时调用（source 只认 1），AI 座位上的占位行换成「—」。应答 `{ok, value: {applied, view}}`。 */
+/** `msime_client_resolve_online_candidates`：AI 回答为空、失败或被拒时调用（source 只认 1）。共享内核已经不放 AI 占位行，这个调用答 applied:false、不改候选列表；调用和接口留着不变。应答 `{ok, value: {applied, view}}`。 */
 export const resolveOnlineCandidates: (handle: number, query: string, source: number) => string;
 export const personalDictionarySync: (options: string) => string;
 /**
@@ -189,7 +193,7 @@ export const personalDictionarySync: (options: string) => string;
  */
 export const personalDictionaryRequest: (request: string) => string;
 /**
- * `{options,action}` against the named dictionaries under `<preferences_directory>/DictionaryCollections`: `action.operation` is `load`, `create`, `rename`, `delete`, `set_enabled`, `add_words`, `remove_words`, `import`, `install_community`, `queue_words` or `flush`. Answers `{ok,value}` with the collections view, or `{ok:false,error}` with a stable code. Synchronous; the keyboard uses it only for the small `flush` after each personal-dictionary drain.
+ * `{options,action}` against the named dictionaries under `<preferences_directory>/DictionaryCollections`: `action.operation` is `load`, `create`, `rename`, `delete`, `set_enabled`, `add_words`, `remove_words`, `import`, `install_community`, `queue_words`, `flush` or `third_party_matches`. Answers `{ok,value}` with the collections view, or `{ok:false,error}` with a stable code. Synchronous; the keyboard uses it only for the small `flush` after each personal-dictionary drain.
  */
 export const dictionaryCollections: (request: string) => string;
 /** The same request on a worker thread, for the settings page: an import parses up to 16 MiB and every operation rewrites files under a lock. */
@@ -277,6 +281,8 @@ export const voiceApply: (handle: number, generation: number, text: string) => s
 /** The user's own pinyin words as recognizer hotwords. Reads the dictionary store on a native worker thread. */
 export const voiceHotwords: (request: string) => Promise<string>;
 export const voiceHotwordCorrect: (request: string) => string;
+/** `{text, kind}` -> `{text}`：本地模型最终文本里的汉字数字改写成数字，只改写不自带 ITN 的 kind，其他原样返回。 */
+export const voiceNormalizeNumbers: (request: string) => string;
 export const voiceLocalModels: (request: string) => string;
 /** Downloads and installs one catalog model on a native worker thread; `progress` receives each `{id,stage,downloaded,total}` document on the JS thread. */
 export const voiceLocalModelInstall: (

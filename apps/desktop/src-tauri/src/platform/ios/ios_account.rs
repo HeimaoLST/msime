@@ -26,22 +26,19 @@ use std::collections::HashMap;
 #[cfg(target_os = "ios")]
 use serde_json::Value;
 
-#[cfg(any(target_os = "ios", test))]
-mod account_preferences;
-
 #[cfg(target_os = "ios")]
 use crate::platform::community_resources::CommunityResourceState;
 #[cfg(target_os = "ios")]
 use crate::platform::mobile::mobile_community::MobileCommunityState;
 #[cfg(target_os = "ios")]
-use msime_client_core::account::{
-    merge_account_preferences, AccountChatMessage, AccountError, AccountPreferences,
-    AccountSessionStorage, BackendAccountClient, BackendAccountSession, SavedAccountSession,
-};
-#[cfg(target_os = "ios")]
 use msime_client_core::cloud::dictionary::DictionaryKind;
 #[cfg(target_os = "ios")]
 use msime_client_core::preferences::PreferencesStore;
+#[cfg(target_os = "ios")]
+use msime_client_services::account::{
+    merge_account_preferences, AccountChatMessage, AccountError, AccountPreferences,
+    AccountSessionStorage, BackendAccountClient, BackendAccountSession, SavedAccountSession,
+};
 #[cfg(target_os = "ios")]
 use msime_tauri_mobile_platform::{IosKeyboardPreferences, MobilePlatform};
 #[cfg(target_os = "ios")]
@@ -715,7 +712,7 @@ pub async fn account_preferences_upload(
             .load_keyboard_preferences()
             .map_err(|_| AccountError::Storage)?;
         let local = store.load().map_err(|_| AccountError::Storage)?;
-        let mut values = account_preferences::local_account_preferences(
+        let mut values = msime_client_services::account::ios_settings::local_account_preferences(
             &native,
             &local.preferences,
             local.preferences.custom_theme.keyboard.as_ref(),
@@ -758,7 +755,9 @@ pub async fn account_preferences_apply(
     );
     tauri::async_runtime::spawn_blocking(move || {
         let (_, _, generation) = session.credentials_with_generation(None, Some(&user_id))?;
-        let plan = account_preferences::IosPreferencePlan::from_cloud(&preferences)?;
+        let plan = msime_client_services::account::ios_settings::IosPreferencePlan::from_cloud(
+            &preferences,
+        )?;
         let local = store.load().map_err(|_| AccountError::Storage)?;
         let previous_native = platform
             .load_keyboard_preferences()
@@ -936,7 +935,7 @@ pub async fn mobile_keyboard_feedback_preview(
 #[cfg(test)]
 mod tests {
     use super::{ChatModelsResponse, ChatResponse, PreferenceSchemaResponse};
-    use msime_client_core::account::{
+    use msime_client_services::account::{
         AccountChatModel, AccountChatModels, AccountPreferenceField, AccountPreferenceSchema,
     };
     use serde_json::json;

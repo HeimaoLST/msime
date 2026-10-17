@@ -1,9 +1,7 @@
-export type ImportSummary = {
-  applied: number;
-  failed?: number;
-  truncated?: boolean;
-  swapped?: boolean;
-  first_failures?: { line: number; issue: string }[];
+import type { DictionaryImportResult } from "./dictionary-contracts";
+
+export type ImportSummary = Omit<DictionaryImportResult, "failed"> & {
+  failed?: DictionaryImportResult["failed"];
 };
 
 /** 导入完成的提示。`source` 是放在最前面的一句来源说明，例如细胞词库的「已读取搜狗细胞词库「…」的 n 个词条。」。 */
@@ -23,6 +21,10 @@ export function describeImportResult(kind: string, result: ImportSummary, source
   if (result.swapped) parts.push("该文件的两列与所选格式相反，已按文件本身的顺序读取。");
   return parts.join("");
 }
+
+/** 细胞词库导入成功后接在提示末尾的一句：导入的词只给用户自己在本机用，社区发布会拦下它们（`thirdPartyMatches`）。原因见 `.agents/notes/implemented/feature/2026-10-17-scel-community-publish-guard.md`。 */
+export const SCEL_PERSONAL_USE_NOTICE =
+  "搜狗细胞词库的整理成果属于原作者，导入的词只供你在本机使用，不能发布到社区。";
 
 /** 细胞词库导入提示的来源句。 */
 export function scelImportSource(name: string, entries: number): string {

@@ -24,15 +24,17 @@ public enum PageId {
         "描述一句话生成", "配色", "按键音效", "按键动画", "生成皮肤"),
     KEYBOARD_OPTIONS("KeyboardOptionsPage", "键盘", HostDeepLink.TAB_SETTINGS,
         "布局", "英文自动大写", "中文键盘", "中英键轮换其他语言", "交换语言键与数字键", "九键左侧符号", "九键数字键盘左侧符号", "双拼键位提示", "键盘高度", "数字行", "横屏分离式键盘",
-        "浮动键盘", "物理键盘时候选栏跟随光标", "键盘底栏", "底部留白", "按键反馈", "按键音", "按键振动", "按键弹出预览", "按键动画", "手势",
-        "滑动输入符号", "滑动方向", "下滑", "上滑", "九键滑动输入数字", "九键滑动距离", "滑行输入", "空格键滑动移动光标", "长按空格语音输入", "键盘工具栏", "显示方式", "表情", "常用语",
-        "皮肤", "剪贴板", "输入方式", "文本编辑", "按键间距", "行间距", "剪贴板排列", "单列", "双列", "工具栏显示最近复制", "最近复制"),
+        "浮动键盘", "物理键盘时候选栏跟随光标", "键盘底栏", "底部留白", "底部留白高度", "符号分类顺序", "按键反馈", "按键音", "按键振动", "按键弹出预览", "按键动画", "手势",
+        "滑动输入符号", "滑动方向", "下滑", "上滑", "九键滑动输入数字", "九键滑动距离", "滑行输入", "空格键滑动移动光标", "长按空格语音输入", "按钮顺序", "键盘工具栏", "显示方式", "表情", "常用语",
+        "皮肤", "剪贴板", "输入方式", "文本编辑", "按键间距", "行间距", "剪贴板排列", "单列", "双列", "导出文件夹", "导出剪贴板", "工具栏显示最近复制", "最近复制"),
+    TOOLBAR_EDITOR("ToolbarEditorPage", "编辑工具栏", HostDeepLink.TAB_SETTINGS, "编辑工具栏"),
+    CHAT("ChatFragment", "AI 对话", HostDeepLink.TAB_SETTINGS),
     AI_SETTINGS("AiSettingsPage", "AI 润色与回复", HostDeepLink.TAB_SETTINGS,
-        "启用 AI 入口", "端点 URL", "模型", "凭据", "润色提示词", "社区回复模板", "浏览更多回复模板"),
+        "启用 AI 入口", "端点 URL", "模型", "凭据", "润色提示词", "AI 对话", "社区回复模板", "浏览更多回复模板"),
     TYPING("TypingPage", "输入", HostDeepLink.TAB_SETTINGS,
         "语言与方案", "普通话", "粤语", "英语", "日语", "韩语", "越南语", "藏语", "添加语言", "中文", "中文字符集", "简体", "繁体", "中英文之间加空格",
         "拼音纠错", "模糊音", "只出单字", "云候选", "辅助码", "启用辅助码", "辅助码方案", "辅助码模式", "在候选栏中显示双拼辅助码", "在候选栏中显示全拼辅助码", "翻译", "候选词翻译",
-        "离线英文释义", "翻译目标语言", "五笔"),
+        "离线英文释义", "翻译目标语言", "五笔", "退格键回退已选候选词"),
     TRANSLATION_SERVICE("TranslationServicePage", "翻译服务", HostDeepLink.TAB_SETTINGS,
         "不使用", "水杉账号", "小牛翻译", "腾讯云机器翻译", "自定义", "DeepLX", "DeepL", "接口地址", "API Key", "App ID",
         "SecretId", "SecretKey", "地域", "测试连接"),
@@ -81,10 +83,12 @@ public enum PageId {
         "导出备份", "从备份恢复", "导入数据", "导出数据", "本地备份", "换手机"),
     DEVICES("DevicesPage", "我的设备", HostDeepLink.TAB_ACCOUNT,
         "设备"),
+    QQ_LINKS("QqLinksPage", "绑定 QQ 群助手", HostDeepLink.TAB_ACCOUNT,
+        "QQ", "绑定码", "解绑", "/stats", "群助手"),
     PRIVACY("PrivacyPage", "隐私", HostDeepLink.TAB_ACCOUNT,
         "本地优先", "联网功能", "本机数据", "剪贴板历史", "匿名使用统计", "用水杉账号翻译候选", "隐私模式",
         "隐私政策"),
-    /** 一类社区作品的完整列表，参数 `kind` 选类型（见 {@link CommunityFragment#ARG_KIND}）；从各功能页的「浏览更多…」进来，本身不进设置搜索，搜索里出现的是那几个功能页。 */
+    /** 一类社区作品的完整列表，参数 `kind` 选类型（见 {@link CommunityFragment#ARG_KIND}）；从各功能页的「浏览更多…」进来，本身不进设置搜索，搜索里出现的是那几个功能页。皮肤和词库不压栈，{@link SettingsNavigator} 把它们切到社区 tab 的对应分类。 */
     COMMUNITY("CommunityFragment", "社区", HostDeepLink.TAB_SETTINGS);
 
     private static final String PACKAGE = "app.msime.android.home.";

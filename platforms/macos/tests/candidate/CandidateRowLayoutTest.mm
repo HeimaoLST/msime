@@ -3,8 +3,11 @@
 //
 // It stands apart from shortcut-test, which imports the same controller, so a failure elsewhere in that suite cannot hide the layout assertions.
 #import "../../src/input/InputController.mm"
+#import <ImageIO/ImageIO.h>
 
 #include <cassert>
+#include <filesystem>
+#include <fstream>
 
 @interface RowLayoutClient : NSObject <MSIMETextClient>
 @property(nonatomic) NSRect caret;
@@ -43,6 +46,472 @@ static MSIMECandidateButton *CandidateButton(NSView *content, NSInteger tag)
     for (NSView *view in content.subviews)
         if ([view isKindOfClass:MSIMECandidateButton.class] && view.tag == tag) return (MSIMECandidateButton *)view;
     return nil;
+}
+
+static void Spin(NSTimeInterval seconds)
+{
+    [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:seconds]];
+}
+
+// 图层在窗口根图层坐标系里的纵坐标，带上它此刻的模型变换。
+static CGFloat RootY(CALayer *layer)
+{
+    CALayer *root = layer;
+    while (root.superlayer) root = root.superlayer;
+    return [layer convertRect:layer.bounds toLayer:root].origin.y;
+}
+
+// 把 transform 临时设成图层的模型变换，返回图层在屏幕方向上被抬起多少点（负数是向下）。up 是根图层坐标系里屏幕向上的方向（+1 或 -1）。
+static CGFloat ScreenLift(CALayer *layer, CATransform3D transform, CGFloat up)
+{
+    const CGFloat rest = RootY(layer);
+    const CATransform3D saved = layer.transform;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    layer.transform = transform;
+    const CGFloat moved = RootY(layer);
+    layer.transform = saved;
+    [CATransaction commit];
+    return (moved - rest) * up;
+}
+
+static NSDictionary *MotionView(NSString *editing, NSUInteger count, NSUInteger highlighted)
+{
+    NSMutableArray *candidates = [NSMutableArray array];
+    for (NSUInteger slot = 0; slot < count; ++slot)
+        [candidates addObject:@{@"text": [NSString stringWithFormat:@"候选%lu", (unsigned long)slot], @"highlighted": @(slot == highlighted)}];
+    return @{@"focused": @YES, @"editing_text": editing, @"page": @0, @"page_count": @1, @"candidates": candidates};
+}
+
+// 产品路径（InputController）在皮肤包写了动效时的行为：每次排版都换一个新的内容视图，显示和装饰在同一轮事件里发生，候选行这时还没有自己的图层。
+static void TestDeclaredMotion(RowLayoutClient *client)
+{
+    char temporary[] = "/tmp/msime-candidate-motion-XXXXXX";
+    assert(mkdtemp(temporary));
+    const std::filesystem::path root(temporary);
+    std::filesystem::create_directory(root / "declared-motion");
+    {
+        std::ofstream manifest(root / "declared-motion" / "skin.toml");
+        manifest << R"toml(schema_version = 2
+id = "declared-motion"
+name = "Declared Motion"
+version = "1"
+base = "system"
+[supports]
+layouts = ["horizontal", "vertical"]
+themes = ["light", "dark"]
+[candidate_window]
+min_width_dip = 240
+[animation]
+enter = "fade_scale"
+exit = "fade"
+selection = "spring"
+duration_ms = 400
+stagger_ms = 20
+)toml";
+        assert(manifest.good());
+    }
+    NSString *suite = [@"app.msime.test.motion." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    [defaults setObject:@"custom" forKey:@"MSIMEClientGlobalTheme"];
+    [defaults setObject:@"declared-motion" forKey:@"MSIMEClientCustomCandidateSkin"];
+    MSIMEAppearancePreferences *appearance =
+        [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults skinsRoot:[NSURL fileURLWithPath:@(root.c_str()) isDirectory:YES]];
+    appearance.vertical = YES;
+    const auto declared = [appearance candidateWindowSkinForDark:NO].animation;
+    assert(declared.enter == msime::mac::SkinAnimationPreset::fade_scale && declared.selection == msime::mac::SkinAnimationPreset::spring &&
+           declared.durationMs == 400.0 && declared.staggerMs == 20.0);
+    MSIMEInputController *controller = [[MSIMEInputController alloc] init];
+    [controller setValue:appearance forKey:@"appearance"];
+    [controller setValue:client forKey:@"activeClient"];
+    MSIMECandidateMotion *motion = [MSIMECandidateMotion new];
+    // 不依赖这台机器的「减弱动态效果」。
+    motion.reduceMotion = NO;
+    [controller setValue:motion forKey:@"candidateMotion"];
+
+    // 进场：卡片和每一行都在动，错峰总延迟封顶 80ms，行从下方 3 点升起。
+    [controller setValue:MotionView(@"ce", 9, 0) forKey:@"view"];
+    [controller renderCandidates];
+    NSPanel *panel = [controller valueForKey:@"panel"];
+    NSView *content = panel.contentView;
+    assert(panel.isVisible && panel.alphaValue == 1.0);
+    assert([content.layer animationForKey:@"msime-candidate-enter-opacity"] != nil);
+    CFTimeInterval firstBegin = 0, lastBegin = 0;
+    for (NSInteger tag = 0; tag < 9; ++tag) {
+        CALayer *rowLayer = CandidateButton(content, tag).layer;
+        CAAnimationGroup *reveal = (id)[rowLayer animationForKey:@"msime-candidate-row-reveal"];
+        assert(rowLayer.superlayer == content.layer && reveal != nil);
+        const CFTimeInterval begin = [rowLayer convertTime:reveal.beginTime toLayer:nil];
+        if (tag == 0) firstBegin = begin;
+        lastBegin = begin;
+    }
+    assert(lastBegin - firstBegin > 0.0 && lastBegin - firstBegin <= 0.08 + 1e-6);
+    CALayer *row0 = CandidateButton(content, 0).layer;
+    CALayer *row1 = CandidateButton(content, 1).layer;
+    assert(NSMinY(CandidateButton(content, 0).frame) > NSMinY(CandidateButton(content, 1).frame));
+    const CGFloat up = RootY(row0) > RootY(row1) ? 1.0 : -1.0;
+    CAAnimationGroup *reveal = (id)[row1 animationForKey:@"msime-candidate-row-reveal"];
+    CABasicAnimation *lift = (id)reveal.animations[1];
+    assert(std::abs(ScreenLift(row1, [lift.fromValue CATransform3DValue], up) + 3.0) < 0.01);
+
+    // 进场途中换高亮（整页重建）：高亮同步换好，新高亮行的底色交给选中装饰，新内容视图接着同一条进场时间线。
+    [controller setValue:MotionView(@"ce", 9, 2) forKey:@"view"];
+    [controller renderCandidates];
+    content = panel.contentView;
+    MSIMECandidateButton *selected = CandidateButton(content, 2);
+    assert(selected.candidateHighlighted && !CandidateButton(content, 0).candidateHighlighted);
+    assert(motion.selectionLayer != nil && motion.selectionLayer.superlayer == content.layer && selected.selectionFillDetached);
+    assert([motion.selectionLayer animationForKey:@"msime-candidate-selection"] != nil);
+    assert([selected.layer animationForKey:@"msime-candidate-selection"] == nil);
+    assert([CandidateButton(content, 8).layer animationForKey:@"msime-candidate-row-reveal"] != nil);
+    Spin(0.45);
+    assert(motion.selectionLayer == nil && !CandidateButton(panel.contentView, 2).selectionFillDetached);
+
+    // 打字让 Engine 把高亮放回第一格：那不是选中，不装饰。
+    [controller setValue:MotionView(@"ces", 9, 0) forKey:@"view"];
+    [controller renderCandidates];
+    assert(motion.selectionLayer == nil);
+    // 同一个输入串里再移一格才装饰。
+    [controller setValue:MotionView(@"ces", 9, 1) forKey:@"view"];
+    [controller renderCandidates];
+    assert(motion.selectionLayer != nil && CandidateButton(panel.contentView, 1).selectionFillDetached);
+
+    // 进场途中换成行数更多的一页：后来的行也播完错峰，不被只按第一页算的结束时间提前撤掉。第一页一行时进场 400ms 结束，九行的页要到 480ms。
+    [controller hideCandidatePanel:"empty"];
+    assert(!panel.isVisible);
+    Spin(0.6);
+    const CFTimeInterval shown = CACurrentMediaTime();
+    [controller setValue:MotionView(@"ce", 1, 0) forKey:@"view"];
+    [controller renderCandidates];
+    assert([panel.contentView.layer animationForKey:@"msime-candidate-enter-opacity"] != nil);
+    [controller setValue:MotionView(@"ceshi", 9, 0) forKey:@"view"];
+    [controller renderCandidates];
+    Spin(0.44 - (CACurrentMediaTime() - shown));
+    if (CACurrentMediaTime() - shown < 0.475)
+        assert([CandidateButton(panel.contentView, 8).layer animationForKey:@"msime-candidate-row-reveal"] != nil);
+    Spin(0.2);
+    assert([panel.contentView.layer animationForKey:@"msime-candidate-enter-opacity"] == nil);
+
+    // 卡片的 slide_up 从下方升起，退场向下沉。
+    [controller hideCandidatePanel:"focus_out"];
+    Spin(0.6);
+    msime::mac::SkinAnimation slideUp = declared;
+    slideUp.enter = msime::mac::SkinAnimationPreset::slide_up;
+    [motion showPanel:panel animation:slideUp rows:@[]];
+    CABasicAnimation *rise = (id)[panel.contentView.layer animationForKey:@"msime-candidate-enter-transform"];
+    assert(rise != nil && ScreenLift(panel.contentView.layer, [rise.fromValue CATransform3DValue], up) < -1.0);
+
+    // 减弱动态效果打开时什么都不播。
+    motion.reduceMotion = YES;
+    [motion stop];
+    [panel orderOut:nil];
+    Spin(0.6);
+    [controller setValue:MotionView(@"ce", 9, 0) forKey:@"view"];
+    [controller renderCandidates];
+    assert(panel.isVisible && [panel.contentView.layer animationForKey:@"msime-candidate-enter-opacity"] == nil);
+    [controller setValue:MotionView(@"ce", 9, 1) forKey:@"view"];
+    [controller renderCandidates];
+    assert(motion.selectionLayer == nil);
+    [controller hideCandidatePanel:"empty"];
+    assert(!panel.isVisible && !motion.exiting);
+    [motion stop];
+    MSIMERemoveTestPreferenceSuite(defaults, suite);
+    std::filesystem::remove_all(root);
+}
+
+// 写一张 width×height、frames 帧、每帧 delay 秒、无限循环的 APNG，各帧颜色不同。
+static void WriteApng(const std::filesystem::path &path, size_t width, size_t height, size_t frames, double delay)
+{
+    CGImageDestinationRef destination =
+        CGImageDestinationCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:@(path.c_str())], CFSTR("public.png"), frames, nullptr);
+    assert(destination != nullptr);
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    for (size_t index = 0; index < frames; ++index)
+    {
+        CGContextRef context = CGBitmapContextCreate(nullptr, width, height, 8, 0, space, kCGImageAlphaPremultipliedLast);
+        CGContextSetRGBFillColor(context, index % 2, 0.4, (index + 1) % 2, 1.0);
+        CGContextFillRect(context, CGRectMake(0, 0, width, height));
+        CGImageRef image = CGBitmapContextCreateImage(context);
+        CGImageDestinationAddImage(destination, image, (__bridge CFDictionaryRef) @{
+            (__bridge NSString *)kCGImagePropertyPNGDictionary : @{(__bridge NSString *)kCGImagePropertyAPNGDelayTime : @(delay)}
+        });
+        CGImageRelease(image);
+        CGContextRelease(context);
+    }
+    CGColorSpaceRelease(space);
+    assert(CGImageDestinationFinalize(destination));
+    CFRelease(destination);
+}
+
+static MSIMECandidateDecorationView *DecorationView(NSView *content)
+{
+    for (NSView *view in content.subviews)
+        if ([view isKindOfClass:MSIMECandidateDecorationView.class]) return (MSIMECandidateDecorationView *)view;
+    return nil;
+}
+
+// 产品路径的装饰图待机动效和 APNG 帧动画：每次排版都换新的内容视图和装饰视图，动画跟着挂到新视图上，从同一时刻起算，所以打字时装饰图不会每个键都跳回原位；旧视图上的动画撤掉；收起和减弱动态效果时不动。
+static void TestDecorationMotion(RowLayoutClient *client)
+{
+    char temporary[] = "/tmp/msime-decoration-motion-XXXXXX";
+    assert(mkdtemp(temporary));
+    const std::filesystem::path root(temporary);
+    std::filesystem::create_directory(root / "whale");
+    WriteApng(root / "whale" / "whale.png", 60, 80, 6, 0.12);
+    {
+        std::ofstream manifest(root / "whale" / "skin.toml");
+        manifest << R"toml(schema_version = 2
+id = "whale"
+name = "Whale"
+version = "1"
+base = "system"
+[supports]
+layouts = ["horizontal", "vertical"]
+themes = ["light", "dark"]
+[candidate_window]
+min_width_dip = 240
+[candidate_window.decoration]
+image = "whale.png"
+top_inset_dip = 48
+width_dip = 60
+motion = "sway"
+motion_period_ms = 2400
+)toml";
+        assert(manifest.good());
+    }
+    NSString *suite = [@"app.msime.test.decoration." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    [defaults setObject:@"custom" forKey:@"MSIMEClientGlobalTheme"];
+    [defaults setObject:@"whale" forKey:@"MSIMEClientCustomCandidateSkin"];
+    MSIMEAppearancePreferences *appearance =
+        [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults skinsRoot:[NSURL fileURLWithPath:@(root.c_str()) isDirectory:YES]];
+    appearance.vertical = YES;
+    const auto skin = [appearance candidateWindowSkinForDark:NO];
+    assert(skin.decorationMotion == msime::mac::DecorationMotion::sway && skin.decorationMotionPeriodMs == 2400.0);
+    MSIMEInputController *controller = [[MSIMEInputController alloc] init];
+    [controller setValue:appearance forKey:@"appearance"];
+    [controller setValue:client forKey:@"activeClient"];
+    MSIMECandidateMotion *motion = [MSIMECandidateMotion new];
+    motion.reduceMotion = NO;
+    [controller setValue:motion forKey:@"candidateMotion"];
+
+    [controller setValue:MotionView(@"ce", 5, 0) forKey:@"view"];
+    [controller renderCandidates];
+    NSPanel *panel = [controller valueForKey:@"panel"];
+    MSIMECandidateDecorationView *first = DecorationView(panel.contentView);
+    assert(panel.isVisible && first != nil && motion.animatedDecoration == first && first.frames.images.count == 6);
+    CAKeyframeAnimation *sway = (id)[first.layer animationForKey:@"msime-decoration-motion"];
+    CAKeyframeAnimation *frames = (id)[first.layer animationForKey:@"msime-decoration-frames"];
+    assert(sway != nil && std::abs(sway.duration - 2.4) < 1e-6 && sway.repeatCount == HUGE_VALF);
+    assert(frames != nil && frames.values.count == 6 && std::abs(frames.duration - 0.72) < 0.01);
+    // 摇摆以底边中点为轴：最大角度时底边中点不动，顶边横移不超过留出的余量。
+    const CATransform3D tilted = [sway.values[1] CATransform3DValue];
+    const CGRect bounds = first.layer.bounds;
+    const CGPoint anchor = CGPointMake(CGRectGetMinX(bounds) + first.layer.anchorPoint.x * CGRectGetWidth(bounds),
+                                       CGRectGetMinY(bounds) + first.layer.anchorPoint.y * CGRectGetHeight(bounds));
+    const CGPoint bottom = CGPointApplyAffineTransform(CGPointMake(CGRectGetMidX(bounds) - anchor.x, CGRectGetMinY(bounds) - anchor.y),
+                                                       CATransform3DGetAffineTransform(tilted));
+    assert(std::abs(bottom.x - (CGRectGetMidX(bounds) - anchor.x)) < 0.01 && std::abs(bottom.y - (CGRectGetMinY(bounds) - anchor.y)) < 0.01);
+    const CGPoint top = CGPointApplyAffineTransform(CGPointMake(CGRectGetMidX(bounds) - anchor.x, CGRectGetMaxY(bounds) - anchor.y),
+                                                    CATransform3DGetAffineTransform(tilted));
+    const CGFloat shift = std::abs(top.x - (CGRectGetMidX(bounds) - anchor.x));
+    assert(shift > 1.0 && shift <= msime::mac::kDecorationMotionMargin + 0.01);
+    // 装饰图四周留着余量，最大摇摆时也不越过窗口左右边和顶边。
+    assert(NSMinX(first.frame) >= msime::mac::kDecorationMotionMargin - 0.01 &&
+           NSMaxX(first.frame) <= NSWidth(panel.contentView.bounds) - msime::mac::kDecorationMotionMargin + 0.01 &&
+           NSMaxY(first.frame) <= NSHeight(panel.contentView.bounds) - msime::mac::kDecorationMotionMargin + 0.01);
+    const CFTimeInterval begin = [first.layer convertTime:sway.beginTime toLayer:nil];
+    assert(std::abs(begin - motion.decorationAnchor) < 1e-3);
+
+    // 打字：整页重排换了新的装饰视图，动画挂到新视图上、从同一时刻起算，旧视图上的撤掉。
+    Spin(0.2);
+    [controller setValue:MotionView(@"ces", 5, 0) forKey:@"view"];
+    [controller renderCandidates];
+    MSIMECandidateDecorationView *second = DecorationView(panel.contentView);
+    assert(second != nil && second != first && motion.animatedDecoration == second);
+    assert([first.layer animationForKey:@"msime-decoration-motion"] == nil);
+    CAKeyframeAnimation *continued = (id)[second.layer animationForKey:@"msime-decoration-motion"];
+    CAKeyframeAnimation *continuedFrames = (id)[second.layer animationForKey:@"msime-decoration-frames"];
+    assert(std::abs([second.layer convertTime:continued.beginTime toLayer:nil] - begin) < 1e-3);
+    assert(std::abs([second.layer convertTime:continuedFrames.beginTime toLayer:nil] - begin) < 1e-3);
+
+    // 收起后不动。
+    [controller hideCandidatePanel:"empty"];
+    assert(!panel.isVisible && motion.animatedDecoration == nil && [second.layer animationForKey:@"msime-decoration-motion"] == nil);
+
+    // 减弱动态效果时不动，APNG 停在第一帧。
+    motion.reduceMotion = YES;
+    Spin(0.5);
+    [controller setValue:MotionView(@"ce", 5, 0) forKey:@"view"];
+    [controller renderCandidates];
+    MSIMECandidateDecorationView *still = DecorationView(panel.contentView);
+    assert(panel.isVisible && still != nil && motion.animatedDecoration == nil && still.layer.animationKeys.count == 0 &&
+           still.layer.contents == still.frames.images.firstObject);
+    [controller hideCandidatePanel:"focus_out"];
+    [motion stop];
+    MSIMERemoveTestPreferenceSuite(defaults, suite);
+    std::filesystem::remove_all(root);
+}
+
+// 读音单独占释义下面的一行。横排时格宽取候选、释义、读音三行里最宽的一行，长音标不再跟在释义后面把这一格撑到下一格的释义边上；同一行的各格一样高，释义都在同一高度；这一页没有读音、或者「显示读音」关着时高度和从前一样。
+static void TestPronunciationLine(MSIMEInputController *controller, NSWindow *panel, MSIMEAppearancePreferences *appearance)
+{
+    appearance.vertical = NO;
+    appearance.candidateTranslations = YES;
+    NSString *ipa = @"/.ænɪˈmeɪʃən prəʊˈtægənɪst/";
+    NSDictionary *view = @{@"focused": @YES, @"editing_text": @"donghuazhuti", @"page": @0, @"page_count": @1,
+                           @"candidates": @[@{@"text": @"动画主体", @"translation": @"Animation protagonist", @"highlighted": @YES},
+                                            @{@"text": @"东华主题", @"translation": @"Donghua theme"}]};
+    [controller setValue:nil forKey:@"pronunciationTargets"];
+    [controller setValue:[@{@"Animation protagonist": ipa} mutableCopy] forKey:@"englishPronunciations"];
+    [controller setValue:view forKey:@"view"];
+    [controller renderCandidates];
+    MSIMECandidateButton *plain = CandidateButton(panel.contentView, 0);
+    assert(plain && plain.pronunciation.length == 0);
+    const CGFloat plainHeight = NSHeight(plain.frame);
+    const CGFloat glossLine = plain.itemLayout.translation.height;
+    const CGFloat plainCard = NSHeight(panel.frame);
+
+    // 打开读音：读音在释义下面单独一行，释义行的位置不变。
+    [controller setValue:@[@"en"] forKey:@"pronunciationTargets"];
+    [controller renderCandidates];
+    MSIMECandidateButton *read = CandidateButton(panel.contentView, 0);
+    MSIMECandidateButton *neighbour = CandidateButton(panel.contentView, 1);
+    assert(read && neighbour && [read.pronunciation isEqual:ipa] && neighbour.pronunciation.length == 0);
+    NSFont *glossFont = read.translationFont;
+    const CGFloat glossWidth = MSIMECandidateSingleLineWidth(@"Animation protagonist", glossFont);
+    const CGFloat ipaWidth = MSIMECandidateSingleLineWidth(ipa, glossFont);
+    const msime::mac::CandidateRunBox &run = read.itemLayout.translation;
+    assert(run.below && fabs(run.y - plain.itemLayout.translation.y) < 0.5);
+    assert(run.height > glossLine * 1.5 && run.height < glossLine * 2.5);
+    // 每一行都放得下，不折行：格子按较宽的那一行量，不按「释义  读音」连在一起的宽度。
+    assert(run.width >= glossWidth && run.width >= ipaWidth);
+    assert(fabs(run.width - MAX(glossWidth, ipaWidth)) < 1.0);
+    const CGFloat joined = MSIMECandidateSingleLineWidth([NSString stringWithFormat:@"Animation protagonist  %@", ipa], glossFont);
+    assert(NSWidth(read.frame) < read.contentLeft + joined);
+    // 画出来的释义和读音都在自己的格子里，两格不重叠。
+    assert(read.contentLeft + run.x + run.width <= NSWidth(read.frame) + 0.5);
+    assert(NSMaxX(read.frame) <= NSMinX(neighbour.frame) + 0.5);
+    assert(neighbour.contentLeft + neighbour.itemLayout.translation.x + neighbour.itemLayout.translation.width <= NSWidth(neighbour.frame) + 0.5);
+    // 有读音的这一页多出一行高，同一行的格子一样高、释义在同一高度，选中底色盖住整格连同读音那一行。
+    assert(NSHeight(read.frame) > plainHeight + glossLine * 0.5 && NSHeight(panel.frame) > plainCard + glossLine * 0.5);
+    assert(fabs(NSHeight(read.frame) - NSHeight(neighbour.frame)) < 0.5 && fabs(NSMinY(read.frame) - NSMinY(neighbour.frame)) < 0.5);
+    assert(fabs(neighbour.itemLayout.translation.y - run.y) < 0.5);
+    assert(NSHeight(read.frame) >= run.y + run.height - 0.5);
+    NSBitmapImageRep *bitmap = [read bitmapImageRepForCachingDisplayInRect:read.bounds];
+    [read cacheDisplayInRect:read.bounds toBitmapImageRep:bitmap];
+
+    // 这一页没有读音时高度不变。
+    NSMutableDictionary *unread = [view mutableCopy];
+    unread[@"candidates"] = @[@{@"text": @"东华主题", @"translation": @"Donghua theme", @"highlighted": @YES}, @{@"text": @"冬化", @"translation": @"winterize"}];
+    [controller setValue:[unread copy] forKey:@"view"];
+    [controller renderCandidates];
+    assert(fabs(NSHeight(CandidateButton(panel.contentView, 0).frame) - plainHeight) < 0.5);
+    // 「显示读音」关掉：没有第三行，回到原来的高度。
+    [controller setValue:view forKey:@"view"];
+    [controller setValue:nil forKey:@"pronunciationTargets"];
+    [controller renderCandidates];
+    assert(CandidateButton(panel.contentView, 0).pronunciation.length == 0);
+    assert(fabs(NSHeight(CandidateButton(panel.contentView, 0).frame) - plainHeight) < 0.5 && fabs(NSHeight(panel.frame) - plainCard) < 0.5);
+
+    // 只有释义变了、格子没变时按钮原地重画，读音跟着新释义换，不留上一条释义的读音。
+    [controller setValue:@[@"en"] forKey:@"pronunciationTargets"];
+    [controller setValue:[@{@"ab": @"/ab/", @"ba": @"/ba/"} mutableCopy] forKey:@"englishPronunciations"];
+    NSDictionary *(^swapView)(NSString *) = ^NSDictionary *(NSString *gloss) {
+        return @{@"session": @1, @"generation": @3, @"focused": @YES, @"editing_text": @"d", @"page": @0, @"page_count": @1,
+                 @"candidates": @[@{@"id": @{@"session": @1, @"generation": @3, @"index": @0}, @"text": @"的", @"translation": gloss, @"highlighted": @YES}]};
+    };
+    [controller setValue:swapView(@"ab") forKey:@"view"];
+    [controller renderCandidates];
+    MSIMECandidateButton *before = CandidateButton(panel.contentView, 0);
+    assert([before.pronunciation isEqual:@"/ab/"]);
+    [controller setValue:swapView(@"ba") forKey:@"view"];
+    [controller renderCandidates];
+    MSIMECandidateButton *after = CandidateButton(panel.contentView, 0);
+    assert(after == before && [after.translation isEqual:@"ba"] && [after.pronunciation isEqual:@"/ba/"]);
+
+    // 竖排：释义仍在候选同一行，读音在释义下面，行高容得下两行。
+    appearance.vertical = YES;
+    [controller setValue:view forKey:@"view"];
+    [controller setValue:[@{@"Animation protagonist": ipa} mutableCopy] forKey:@"englishPronunciations"];
+    [controller renderCandidates];
+    MSIMECandidateButton *vertical = CandidateButton(panel.contentView, 0);
+    assert([vertical.pronunciation isEqual:ipa] && !vertical.itemLayout.translation.below);
+    assert(vertical.itemLayout.translation.height > glossLine * 1.5 && NSHeight(vertical.frame) >= vertical.itemLayout.height - 0.5);
+    assert(vertical.itemLayout.translation.width >= ipaWidth);
+    [controller setValue:nil forKey:@"pronunciationTargets"];
+    appearance.vertical = NO;
+}
+
+// 前景按它的不透明度叠到不透明的底色上后，和底色的 WCAG 对比度。
+static double CandidateContrast(NSColor *foreground, NSColor *fill)
+{
+    NSColor *fore = [foreground colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    NSColor *back = [fill colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    auto linear = [](double c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); };
+    auto luminance = [&](double r, double g, double b) { return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b); };
+    const double a = fore.alphaComponent;
+    const double over = luminance(fore.redComponent * a + back.redComponent * (1 - a), fore.greenComponent * a + back.greenComponent * (1 - a),
+                                  fore.blueComponent * a + back.blueComponent * (1 - a));
+    const double under = luminance(back.redComponent, back.greenComponent, back.blueComponent);
+    return (MAX(over, under) + 0.05) / (MIN(over, under) + 0.05);
+}
+
+// 皮肤的选中底色不透明、释义色和它同一色系时，选中行的释义和读音换成按底色挑出的颜色，和底色至少 3:1；底色半透明时仍是皮肤的释义色。
+static void TestSelectedGlossColour(RowLayoutClient *client)
+{
+    char temporary[] = "/tmp/msime-selected-gloss-XXXXXX";
+    assert(mkdtemp(temporary));
+    const std::filesystem::path root(temporary);
+    struct Palette { const char *id, *selected, *translation; bool opaque; };
+    for (const Palette &palette : {Palette{"blue-on-blue", "#4D6BFE", "#2F5BD3", true}, Palette{"slate", "#23262F", "#6B7180", true},
+                                   Palette{"translucent", "#2F5BD329", "#2F5BD3", false}}) {
+        std::filesystem::create_directories(root / palette.id);
+        {
+            std::ofstream manifest(root / palette.id / "skin.toml");
+            manifest << "schema_version = 2\nid = \"" << palette.id << "\"\nname = \"Selected Gloss\"\nversion = \"1\"\nbase = \"system\"\n"
+                     << "[supports]\nlayouts = [\"horizontal\", \"vertical\"]\nthemes = [\"light\", \"dark\"]\n[candidate_window]\nmin_width_dip = 0\n";
+            for (const char *mode : {"light", "dark"})
+                manifest << "[candidate." << mode << "]\nselected = \"" << palette.selected << "\"\ntranslation = \"" << palette.translation << "\"\n";
+            assert(manifest.good());
+        }
+        NSString *suite = [@"app.msime.test.selected-gloss." stringByAppendingString:NSUUID.UUID.UUIDString];
+        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+        [defaults setObject:@"custom" forKey:@"MSIMEClientGlobalTheme"];
+        [defaults setObject:@(palette.id) forKey:@"MSIMEClientCustomCandidateSkin"];
+        MSIMEAppearancePreferences *appearance =
+            [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults skinsRoot:[NSURL fileURLWithPath:@(root.c_str()) isDirectory:YES]];
+        appearance.vertical = NO;
+        appearance.candidateTranslations = YES;
+        MSIMEInputController *controller = [[MSIMEInputController alloc] init];
+        RowLayoutPanel *panel = [[RowLayoutPanel alloc] initWithContentRect:NSZeroRect styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+                                                                    backing:NSBackingStoreBuffered defer:NO];
+        [controller setValue:appearance forKey:@"appearance"];
+        [controller setValue:client forKey:@"activeClient"];
+        [controller setValue:panel forKey:@"panel"];
+        [controller setValue:@[@"en"] forKey:@"pronunciationTargets"];
+        [controller setValue:[@{@"to": @"/tuː/"} mutableCopy] forKey:@"englishPronunciations"];
+        [controller setValue:@{@"focused": @YES, @"editing_text": @"dao", @"page": @0, @"page_count": @1,
+                               @"candidates": @[@{@"text": @"到", @"translation": @"to", @"highlighted": @YES}, @{@"text": @"道", @"translation": @"to"}]}
+                      forKey:@"view"];
+        [controller renderCandidates];
+        MSIMECandidateButton *selected = CandidateButton(panel.contentView, 0);
+        MSIMECandidateButton *other = CandidateButton(panel.contentView, 1);
+        assert(selected.candidateHighlighted && !other.candidateHighlighted && [selected.pronunciation isEqual:@"/tuː/"]);
+        const auto tokens = [appearance candidateWindowSkinForDark:NO].tokens;
+        assert(tokens.translation && tokens.selectedTranslation);
+        assert([other.translationColor isEqual:SkinColor(*tokens.translation)]);
+        if (palette.opaque) {
+            assert(selected.fillColor.alphaComponent >= 0.85 && CandidateContrast(selected.translationColor, selected.fillColor) >= 3.0);
+            assert(![selected.translationColor isEqual:SkinColor(*tokens.translation)]);
+        } else {
+            assert([selected.translationColor isEqual:SkinColor(*tokens.translation)]);
+        }
+        NSBitmapImageRep *bitmap = [selected bitmapImageRepForCachingDisplayInRect:selected.bounds];
+        [selected cacheDisplayInRect:selected.bounds toBitmapImageRep:bitmap];
+        MSIMERemoveTestPreferenceSuite(defaults, suite);
+    }
+    std::filesystem::remove_all(root);
 }
 
 int main(void)
@@ -352,7 +821,7 @@ int main(void)
         bitmap = [wideScripted bitmapImageRepForCachingDisplayInRect:wideScripted.bounds];
         [wideScripted cacheDisplayInRect:wideScripted.bounds toBitmapImageRep:bitmap];
 
-        // 读屏：高亮的那一行报告自己被选中，别的行和翻页按钮都不报告；每画一页就请求朗读高亮的那一行。AI 座位上的占位行读成它的意思，不读省略号或破折号。
+        // 读屏：高亮的那一行报告自己被选中，别的行和翻页按钮都不报告；每画一页就请求朗读高亮的那一行。AI 占位行（来源 12，共享内核已经不再产出）读成它的意思，不读省略号或破折号。
         appearance.vertical = NO;
         NSDictionary *accessibleBase = @{@"focused": @YES, @"editing_text": @"ceshi", @"page": @0, @"page_count": @2};
         NSArray<NSDictionary *> *(^accessibleRows)(NSUInteger, NSString *) = ^NSArray<NSDictionary *> *(NSUInteger highlighted, NSString *placeholder) {
@@ -384,10 +853,11 @@ int main(void)
         assert([[controller valueForKey:@"announcedCandidate"] isEqual:@"3  AI 候选等待中"]);
         renderAccessible(2, @"—");
         assert([[controller valueForKey:@"announcedCandidate"] isEqual:@"3  AI 候选没有结果"]);
-        // 原生控制器立即显示与隐藏；皮肤不能让候选窗淡入或缩放。
+        // 没有画皮肤包时原生控制器立即显示与隐藏：没有进场、选中装饰和退场。皮肤包写了动效时的行为由 candidate-panel 测试覆盖。
         assert(panel.alphaValue == 1.0);
         assert(panel.animationBehavior == NSWindowAnimationBehaviorNone);
         assert(CATransform3DIsIdentity(panel.contentView.layer.transform));
+        assert([panel.contentView.layer animationForKey:@"msime-candidate-enter-opacity"] == nil);
         for (NSView *row in panel.contentView.subviews)
             assert([row.layer animationForKey:@"msime-candidate-selection"] == nil);
         [controller hideCandidatePanel:"empty"];
@@ -473,6 +943,10 @@ int main(void)
         appearance.showsCandidatePageNumber = YES;
         assert([controller renderExpandedCandidates]);
         assert([CandidateButton(panel.contentView, -3).identifier isEqual:@"candidate-collapse"]);
+        TestPronunciationLine(controller, panel, appearance);
+        TestSelectedGlossColour(client);
+        TestDeclaredMotion(client);
+        TestDecorationMotion(client);
         MSIMERemoveTestPreferenceSuite(defaults, suite);
     }
     return 0;

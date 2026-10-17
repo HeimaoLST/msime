@@ -235,7 +235,7 @@ pub unsafe extern "C" fn msime_client_ensure_anonymous_account(
         if !directory.is_absolute() {
             return Err("account directory must be absolute".into());
         }
-        msime_client_core::account::ensure_anonymous_account(directory)
+        msime_client_services::account::ensure_anonymous_account(directory)
             .map(|()| Value::Bool(true))
             .map_err(|e| e.to_string())
     })
@@ -244,12 +244,17 @@ pub unsafe extern "C" fn msime_client_ensure_anonymous_account(
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AccountAccessTokenRequest {
-    directory: String,
+    /// 与 `session_store` 恰好给一个。
+    #[serde(default)]
+    directory: Option<String>,
+    /// `msime_client_session_store_register` 给的 id：登录会话和匿名会话都在宿主注入的存储里。
+    #[serde(default)]
+    session_store: Option<u64>,
     #[serde(default)]
     rejected_token: Option<String>,
 }
 
-/// 输入法进程取账号服务的访问令牌（[`msime_client_core::account::shared_access_token`]）：设置应用登录的账号优先，没有登录时用本机匿名账号。`request` 是 UTF-8 JSON `{"directory": "<绝对路径>", "rejected_token": "<可选，服务端刚以 401 拒绝的令牌>"}`，`directory` 是设置应用和输入法共用的账号目录，Windows 上是 `%LOCALAPPDATA%\<本版本的用户目录>\account`，与 [`msime_client_ensure_anonymous_account`] 的目录相同。成功时 value 是 `{"access_token", "user_id", "anonymous"}`，失败时 error 是账号错误码（例如没有任何会话时的 `account_unauthorized`）。响应里有凭据：不要写进日志，用完交给 `msime_client_string_free`。刷新令牌时会阻塞网络，调用方放在输入线程以外。
+/// 输入法进程取账号服务的访问令牌（[`msime_client_services::account::shared_access_token`]）：设置应用登录的账号优先，没有登录时用本机匿名账号。`request` 是 UTF-8 JSON `{"directory": "<绝对路径>", "rejected_token": "<可选，服务端刚以 401 拒绝的令牌>"}`，`directory` 是设置应用和输入法共用的账号目录，Windows 上是 `%LOCALAPPDATA%\<本版本的用户目录>\account`，与 [`msime_client_ensure_anonymous_account`] 的目录相同。成功时 value 是 `{"access_token", "user_id", "anonymous"}`，失败时 error 是账号错误码（例如没有任何会话时的 `account_unauthorized`）。响应里有凭据：不要写进日志，用完交给 `msime_client_string_free`。刷新令牌时会阻塞网络，调用方放在输入线程以外。
 /// # Safety
 /// `request` 指向 `length` 个可读的 UTF-8 字节，空指针被拒绝。
 #[no_mangle]
@@ -265,16 +270,34 @@ pub unsafe extern "C" fn msime_client_account_access_token(
         let bytes = unsafe { std::slice::from_raw_parts(request, length) };
         let request: AccountAccessTokenRequest =
             serde_json::from_slice(bytes).map_err(|_| "account_invalid")?;
-        let directory = std::path::Path::new(&request.directory);
-        if !directory.is_absolute() {
-            return Err("account_invalid".into());
-        }
-        msime_client_core::account::shared_access_token(
-            directory,
-            request.rejected_token.as_deref(),
+        let rejected = request.rejected_token.as_deref();
+        let token = match super::session_store::session_source(
+            request.directory.as_deref(),
+            false,
+            request.session_store,
         )
-        .map_err(|error| error.code().to_owned())
-        .and_then(|token| serde_json::to_value(token).map_err(|_| "account_unavailable".into()))
+        .ok_or("account_invalid")?
+        {
+            super::session_store::Source::Directory(directory) => {
+                let directory = std::path::Path::new(directory);
+                if !directory.is_absolute() {
+                    return Err("account_invalid".into());
+                }
+                msime_client_services::account::shared_access_token(directory, rejected)
+            }
+            // 登录的优先，没有时用匿名的，与按目录时相同。
+            super::session_store::Source::Store(entry) => {
+                msime_client_services::account::shared_access_token_in(
+                    &entry.account,
+                    &entry.anonymous,
+                    rejected,
+                    None,
+                )
+            }
+        };
+        token
+            .map_err(|error| error.code().to_owned())
+            .and_then(|token| serde_json::to_value(token).map_err(|_| "account_unavailable".into()))
     })
 }
 
@@ -317,29 +340,30 @@ pub unsafe extern "C" fn msime_client_mobile_voice_configuration(
         }
         let store = msime_client_core::preferences::PreferencesStore::new(directory);
         let snapshot = store.load().map_err(|_| "preferences unavailable")?;
-        let provider = msime_client_core::voice::provider::mobile_voice_provider_configuration(
-            &snapshot.preferences,
-        )
-        .map(|value| {
-            json!({
-                "provider": value.provider,
-                "requestFormat": value.request_format,
-                "endpoint": value.endpoint,
-                "model": value.model,
-                "token": value.token,
-                "headers": value
-                    .headers
-                    .iter()
-                    .map(|header| json!({"name": header.name, "value": header.value}))
-                    .collect::<Vec<_>>(),
-                "enableItn": value.enable_itn,
-                "enablePunctuation": value.enable_punctuation,
-                "enableDdc": value.enable_ddc,
-                "boostingTableId": value.boosting_table_id,
-                "modelPath": value.model_path,
-            })
-        });
-        let polish = msime_client_core::voice::provider::mobile_voice_polish_configuration(
+        let provider =
+            msime_client_providers::voice::provider::mobile_voice_provider_configuration(
+                &snapshot.preferences,
+            )
+            .map(|value| {
+                json!({
+                    "provider": value.provider,
+                    "requestFormat": value.request_format,
+                    "endpoint": value.endpoint,
+                    "model": value.model,
+                    "token": value.token,
+                    "headers": value
+                        .headers
+                        .iter()
+                        .map(|header| json!({"name": header.name, "value": header.value}))
+                        .collect::<Vec<_>>(),
+                    "enableItn": value.enable_itn,
+                    "enablePunctuation": value.enable_punctuation,
+                    "enableDdc": value.enable_ddc,
+                    "boostingTableId": value.boosting_table_id,
+                    "modelPath": value.model_path,
+                })
+            });
+        let polish = msime_client_providers::voice::provider::mobile_voice_polish_configuration(
             &snapshot.preferences,
         )
         .map(|value| {
@@ -381,8 +405,8 @@ pub(crate) fn compiled_platform() -> HostPlatform {
 pub extern "C" fn msime_client_theme_catalog() -> *mut c_char {
     response(|| {
         Ok(serde_json::json!({
-            "themes": msime_client_core::skin::theme::catalog_for(compiled_platform()),
-            "default": msime_client_core::skin::theme::GlobalTheme::default(),
+            "themes": msime_client_services::skin::theme::catalog_for(compiled_platform()),
+            "default": msime_client_services::skin::theme::GlobalTheme::default(),
         }))
     })
 }
@@ -393,7 +417,7 @@ const MAX_THEME_REQUEST_BYTES: usize = 1 << 20;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResolveThemeRequest {
-    global_theme: msime_client_core::skin::theme::GlobalTheme,
+    global_theme: msime_client_services::skin::theme::GlobalTheme,
     #[serde(default)]
     custom_theme: msime_client_core::preferences::CustomTheme,
     dark: bool,
@@ -406,11 +430,11 @@ struct ResolveThemeRequest {
 fn requested_season(
     month: Option<u8>,
     invalid: &str,
-) -> Result<msime_client_core::skin::season::Season, String> {
+) -> Result<msime_client_services::skin::season::Season, String> {
     match month {
-        Some(month) => msime_client_core::skin::season::season_for_month(month)
+        Some(month) => msime_client_services::skin::season::season_for_month(month)
             .ok_or_else(|| invalid.to_owned()),
-        None => Ok(msime_client_core::skin::season::current_utc_season()),
+        None => Ok(msime_client_services::skin::season::current_utc_season()),
     }
 }
 
@@ -452,21 +476,21 @@ pub unsafe extern "C" fn msime_client_resolve_theme(
         let wanted = request
             .custom_theme
             .candidate_skin_for(request.dark)
-            .filter(|_| theme == msime_client_core::skin::theme::GlobalTheme::Custom);
+            .filter(|_| theme == msime_client_services::skin::theme::GlobalTheme::Custom);
         let entry = request
             .package
-            .map(msime_client_core::skin::theme::ThemePackage::from_host_catalog_entry)
+            .map(msime_client_services::skin::theme::ThemePackage::from_host_catalog_entry)
             .transpose()?;
         let package = match (wanted, request.skins_directory, entry) {
             (Some(id), Some(directory), _) => {
-                msime_client_core::skin::catalog::load_package(&directory, id)
+                msime_client_services::skin::catalog::load_package(&directory, id)
                     .ok()
-                    .map(|summary| msime_client_core::skin::theme::ThemePackage::from(&summary))
+                    .map(|summary| msime_client_services::skin::theme::ThemePackage::from(&summary))
             }
             (Some(_), None, entry) => entry,
             _ => None,
         };
-        let resolved = msime_client_core::skin::theme::resolve(
+        let resolved = msime_client_services::skin::theme::resolve(
             theme,
             &request.custom_theme,
             request.dark,
@@ -484,8 +508,8 @@ pub unsafe extern "C" fn msime_client_resolve_theme(
 pub extern "C" fn msime_client_app_theme_catalog() -> *mut c_char {
     response(|| {
         Ok(json!({
-            "app_themes": msime_client_core::skin::app_theme::catalog(),
-            "default": msime_client_core::skin::app_theme::AppTheme::default(),
+            "app_themes": msime_client_services::skin::app_theme::catalog(),
+            "default": msime_client_services::skin::app_theme::AppTheme::default(),
         }))
     })
 }
@@ -496,7 +520,7 @@ const MAX_APP_THEME_REQUEST_BYTES: usize = 4096;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResolveAppThemeRequest {
-    app_theme: msime_client_core::skin::app_theme::AppTheme,
+    app_theme: msime_client_services::skin::app_theme::AppTheme,
     #[serde(default)]
     month: Option<u8>,
     dark: bool,
@@ -520,7 +544,7 @@ pub unsafe extern "C" fn msime_client_resolve_app_theme(
         let request: ResolveAppThemeRequest =
             serde_json::from_slice(bytes).map_err(|_| "invalid app theme request")?;
         let season = requested_season(request.month, "invalid app theme request")?;
-        let resolved = msime_client_core::skin::app_theme::resolve_app_theme(
+        let resolved = msime_client_services::skin::app_theme::resolve_app_theme(
             request.app_theme,
             season,
             request.dark,
@@ -778,7 +802,7 @@ pub unsafe extern "C" fn msime_client_typing_statistics(
     struct Request {
         directory: String,
         action: StatisticsAction,
-        /// 设置页要的是状态：load、set_enabled、set_retention 和 reset 回答 `{statistics, availability, lastWrittenMs}`（client-core 的 `TypingStatisticsStatus`），而不只是统计本身。
+        /// 设置页要的是状态：load、set_enabled、set_retention 和 reset 回答 `{statistics, availability, lastWrittenMs}`（client-services 的 `TypingStatisticsStatus`），而不只是统计本身。
         #[serde(default)]
         status: bool,
     }
@@ -829,6 +853,23 @@ pub unsafe extern "C" fn msime_client_typing_statistics(
             id: String,
         },
         Reset,
+        /// 「上传到云端」的本机状态：开关和上次上传的时间。
+        UploadStatus,
+        /// 打开或关闭「上传到云端」。只改本机状态，不联网：关闭时宿主自己再发 `DELETE /v1/users/me/typing-statistics`。
+        SetUploadEnabled {
+            enabled: bool,
+        },
+        /// 自己发 HTTP 的宿主准备一次上传：交回要发的请求，或者不发的原因。`day` 是宿主的本地日期，`platform` 是服务端认的平台 id。
+        UploadRequest {
+            day: String,
+            platform: String,
+            #[serde(default)]
+            force: bool,
+        },
+        /// 上一步交回的请求发成功了（服务端回 204），记下时间；`device` 是那个请求里的设备标识。
+        UploadSucceeded {
+            device: String,
+        },
     }
     response(|| {
         if request.is_null() || length > 65_536 {
@@ -860,7 +901,7 @@ pub unsafe extern "C" fn msime_client_typing_statistics(
             );
         }
         // 统计本身，或者设置页要的状态。
-        let answer = |statistics: msime_client_core::typing_statistics::TypingStatistics| {
+        let answer = |statistics: msime_client_services::typing_statistics::TypingStatistics| {
             if status {
                 serde_json::to_value(
                     store
@@ -889,7 +930,7 @@ pub unsafe extern "C" fn msime_client_typing_statistics(
                     .record(&text, source, &day, hour)
                     .map_err(|error| error.to_string())?;
                 let milestone = before.and_then(|before| {
-                    msime_client_core::plugins::achievement_milestone(
+                    msime_client_services::plugins::achievement_milestone(
                         before,
                         before.saturating_add(recorded),
                     )
@@ -909,7 +950,7 @@ pub unsafe extern "C" fn msime_client_typing_statistics(
                 store
                     .summary(
                         &day,
-                        &msime_client_core::typing_statistics::SummaryInputs { user_words },
+                        &msime_client_services::typing_statistics::SummaryInputs { user_words },
                     )
                     .map_err(|error| error.to_string())?,
             )
@@ -932,7 +973,7 @@ pub unsafe extern "C" fn msime_client_typing_statistics(
             StatisticsAction::SetRetention { retention, day } => answer(
                 store
                     .set_retention(
-                        msime_client_core::typing_statistics::StatisticsRetention::parse(
+                        msime_client_services::typing_statistics::StatisticsRetention::parse(
                             &retention,
                         ),
                         &day,
@@ -940,8 +981,75 @@ pub unsafe extern "C" fn msime_client_typing_statistics(
                     .map_err(|error| error.to_string())?,
             ),
             StatisticsAction::Reset => answer(store.reset().map_err(|error| error.to_string())?),
+            StatisticsAction::UploadStatus => {
+                upload_status(&store.upload_state().map_err(|error| error.to_string())?)
+            }
+            StatisticsAction::SetUploadEnabled { enabled } => upload_status(
+                &store
+                    .set_upload_enabled(enabled)
+                    .map_err(|error| error.to_string())?,
+            ),
+            StatisticsAction::UploadRequest {
+                day,
+                platform,
+                force,
+            } => upload_request(
+                store
+                    .prepare_upload(&day, &platform, unix_ms(), force)
+                    .map_err(|error| error.to_string())?,
+            ),
+            StatisticsAction::UploadSucceeded { device } => upload_status(
+                &store
+                    .record_upload(&device, unix_ms())
+                    .map_err(|error| error.to_string())?,
+            ),
         }
     })
+}
+
+/// 「上传到云端」的本机状态：`{enabled, lastUploadMs}`，与设置页读的形状相同（client-services 的 `UploadStatus`）。
+fn upload_status(
+    state: &msime_client_services::typing_statistics::upload::UploadState,
+) -> Result<Value, String> {
+    serde_json::to_value(
+        msime_client_services::typing_statistics::upload::UploadStatus::from(state),
+    )
+    .map_err(|_| "typing statistics response failed".to_owned())
+}
+
+/// `upload_request` 的回答：要发时是 `{method, path, device, body}`，`body` 是请求体对象，宿主序列化后以 `application/json` 发出；不发时是 `{skip}`，取 `disabled`（没有打开上传）、`not_due`（离上次上传不到十分钟）或 `nothing`（最近没有可传的日子）。
+fn upload_request(
+    prepared: Result<
+        msime_client_services::typing_statistics::upload::TypingStatisticsUpload,
+        msime_client_services::typing_statistics::upload::UploadOutcome,
+    >,
+) -> Result<Value, String> {
+    use msime_client_services::typing_statistics::upload::UploadOutcome;
+    match prepared {
+        Ok(payload) => Ok(json!({
+            "method": "PUT",
+            "path": "/v1/users/me/typing-statistics",
+            "device": payload.device,
+            "body": serde_json::to_value(&payload)
+                .map_err(|_| "typing statistics response failed".to_owned())?,
+        })),
+        Err(outcome) => Ok(json!({
+            "skip": match outcome {
+                UploadOutcome::Disabled => "disabled",
+                UploadOutcome::NotDue => "not_due",
+                UploadOutcome::Nothing | UploadOutcome::Uploaded(_) => "nothing",
+            }
+        })),
+    }
+}
+
+/// 现在的 Unix 毫秒，记上传时间和算十分钟的间隔用。
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 /// Read the typing-statistics master switch without accepting committed text.
@@ -993,7 +1101,7 @@ pub unsafe extern "C" fn msime_client_skin_catalog(
         if !std::path::Path::new(directory).is_absolute() {
             return Err("skin directory must be absolute".into());
         }
-        serde_json::to_value(msime_client_core::skin::catalog::scan(directory))
+        serde_json::to_value(msime_client_services::skin::catalog::scan(directory))
             .map_err(|e| e.to_string())
     })
 }
@@ -1049,7 +1157,7 @@ pub unsafe extern "C" fn msime_client_skin_package(
             return Err("skin directory must be absolute".into());
         }
         let package =
-            msime_client_core::skin::catalog::load_package(&request.directory, &request.id)?;
+            msime_client_services::skin::catalog::load_package(&request.directory, &request.id)?;
         serde_json::to_value(package).map_err(|e| e.to_string())
     })
 }
@@ -1104,7 +1212,7 @@ pub unsafe extern "C" fn msime_client_skin_resource(
         if !Path::new(&request.directory).is_absolute() {
             return Err("skin directory must be absolute".into());
         }
-        let resource = msime_client_core::skin::catalog::read_resource(
+        let resource = msime_client_services::skin::catalog::read_resource(
             &request.directory,
             &request.id,
             &request.relative,
@@ -1145,7 +1253,7 @@ pub unsafe extern "C" fn msime_client_skin_toolbar_stylesheet(
         if !Path::new(&request.directory).is_absolute() {
             return Err("skin directory must be absolute".into());
         }
-        let stylesheet = msime_client_core::skin::catalog::read_toolbar_stylesheet(
+        let stylesheet = msime_client_services::skin::catalog::read_toolbar_stylesheet(
             &request.directory,
             &request.id,
         )
@@ -1180,7 +1288,7 @@ pub unsafe extern "C" fn msime_client_skin_import(
         {
             return Err("skin paths must be absolute".into());
         }
-        let id = msime_client_core::skin::folder_import::import(
+        let id = msime_client_services::skin::folder_import::import(
             Path::new(&request.source),
             Path::new(&request.directory),
         )
@@ -1192,7 +1300,7 @@ pub unsafe extern "C" fn msime_client_skin_import(
 #[derive(Debug, Deserialize)]
 struct CustomSkinLibraryRequest {
     directory: String,
-    action: Option<msime_client_core::skin::custom_library::CustomSkinLibraryAction>,
+    action: Option<msime_client_services::skin::custom_library::CustomSkinLibraryAction>,
 }
 
 /// Read or change the named custom touch-keyboard designs.
@@ -1228,7 +1336,7 @@ pub unsafe extern "C" fn msime_client_custom_skin_library(
         if !Path::new(&request.directory).is_absolute() {
             return Err("community_storage".into());
         }
-        let store = msime_client_core::skin::custom_library::CustomSkinLibraryStore::new(
+        let store = msime_client_services::skin::custom_library::CustomSkinLibraryStore::new(
             &request.directory,
         );
         let items = match request.action {
@@ -1244,9 +1352,9 @@ pub unsafe extern "C" fn msime_client_custom_skin_library(
 /// forwarded the `Display` text instead would put an English sentence written
 /// for a log into a Chinese dialog.
 fn custom_skin_library_code(
-    error: msime_client_core::skin::custom_library::CustomSkinLibraryError,
-) -> String {
-    use msime_client_core::skin::custom_library::CustomSkinLibraryError as Failure;
+    error: msime_client_services::skin::custom_library::CustomSkinLibraryError,
+) -> &'static str {
+    use msime_client_services::skin::custom_library::CustomSkinLibraryError as Failure;
     match error {
         Failure::Full => "community_skin_library_full",
         Failure::InvalidName => "community_skin_invalid_name",
@@ -1255,7 +1363,6 @@ fn custom_skin_library_code(
         Failure::Json(_) | Failure::Invalid => "community_skin_library_format",
         Failure::Io(_) => "community_storage",
     }
-    .to_owned()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1268,8 +1375,8 @@ struct CommunitySkinInstallRequest {
 
 #[derive(Debug, Serialize)]
 struct CommunitySkinInstallResponse {
-    skin: msime_client_core::skin::custom_library::SavedTouchKeyboardSkin,
-    trial: msime_client_core::skin::keyboard_trial::KeyboardSkinTrial,
+    skin: msime_client_services::skin::custom_library::SavedTouchKeyboardSkin,
+    trial: msime_client_services::skin::keyboard_trial::KeyboardSkinTrial,
 }
 
 /// Put a downloaded community design on the keyboard and into the library.
@@ -1305,28 +1412,43 @@ pub unsafe extern "C" fn msime_client_community_skin_install(
         }
         let id = msime_client_core::uuid::Uuid::parse_str(&request.id)
             .map_err(|_| "community_invalid")?;
-        let library = msime_client_core::skin::custom_library::CustomSkinLibraryStore::new(
-            &request.directory,
-        );
-        let trials = msime_client_core::skin::keyboard_trial::KeyboardSkinTrialStore::new(
-            &request.directory,
-            std::sync::Arc::new(msime_client_core::preferences::PreferencesStore::new(
-                &request.directory,
-            )),
-        );
-        let (trial, _) = trials
-            .begin(&request.name, request.design.clone())
-            .map_err(keyboard_skin_trial_code)?;
-        let skin = match library.import_download(id, &request.name, request.design) {
-            Ok(skin) => skin,
-            Err(error) => {
-                let _ = trials.finish(trial.id, false);
-                return Err(custom_skin_library_code(error));
-            }
-        };
-        serde_json::to_value(CommunitySkinInstallResponse { skin, trial })
-            .map_err(|_| "community_storage".into())
+        install_downloaded_keyboard_skin(
+            Path::new(&request.directory),
+            id,
+            &request.name,
+            request.design,
+        )
+        .map_err(Into::into)
     })
+}
+
+/// 把下载好的社区键盘皮肤装上：先开始试用、再导入皮肤库，导入失败就结束试用、不保留，返回 `{skin, trial}`。`directory` 是状态根目录的绝对路径。`msime_client_community_skin_install` 和 `msime_client_community` 的 `keyboard_skin_install` 共用它；错误是 `keyboard_skin_trial_code` 和 `custom_skin_library_code` 的码。
+pub(super) fn install_downloaded_keyboard_skin(
+    directory: &Path,
+    id: msime_client_core::uuid::Uuid,
+    name: &str,
+    design: msime_client_core::preferences::TouchKeyboardSkinDesign,
+) -> Result<Value, &'static str> {
+    let library =
+        msime_client_services::skin::custom_library::CustomSkinLibraryStore::new(directory);
+    let trials = msime_client_services::skin::keyboard_trial::KeyboardSkinTrialStore::new(
+        directory,
+        std::sync::Arc::new(msime_client_core::preferences::PreferencesStore::new(
+            directory,
+        )),
+    );
+    let (trial, _) = trials
+        .begin(name, design.clone())
+        .map_err(keyboard_skin_trial_code)?;
+    let skin = match library.import_download(id, name, design) {
+        Ok(skin) => skin,
+        Err(error) => {
+            let _ = trials.finish(trial.id, false);
+            return Err(custom_skin_library_code(error));
+        }
+    };
+    serde_json::to_value(CommunitySkinInstallResponse { skin, trial })
+        .map_err(|_| "community_storage")
 }
 
 #[derive(Debug, Deserialize)]
@@ -1367,7 +1489,7 @@ pub unsafe extern "C" fn msime_client_keyboard_skin_trial(
         if !Path::new(&request.directory).is_absolute() {
             return Err("community_storage".into());
         }
-        let trials = msime_client_core::skin::keyboard_trial::KeyboardSkinTrialStore::new(
+        let trials = msime_client_services::skin::keyboard_trial::KeyboardSkinTrialStore::new(
             &request.directory,
             std::sync::Arc::new(msime_client_core::preferences::PreferencesStore::new(
                 &request.directory,
@@ -1389,14 +1511,13 @@ pub unsafe extern "C" fn msime_client_keyboard_skin_trial(
 }
 
 fn keyboard_skin_trial_code(
-    error: msime_client_core::skin::keyboard_trial::KeyboardSkinTrialError,
-) -> String {
-    use msime_client_core::skin::keyboard_trial::KeyboardSkinTrialError as Failure;
+    error: msime_client_services::skin::keyboard_trial::KeyboardSkinTrialError,
+) -> &'static str {
+    use msime_client_services::skin::keyboard_trial::KeyboardSkinTrialError as Failure;
     match error {
         Failure::Io(_) | Failure::Preferences(_) => "community_storage",
         Failure::Json(_) | Failure::Invalid => "community_trial_format",
     }
-    .to_owned()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1404,7 +1525,7 @@ fn keyboard_skin_trial_code(
 enum CommunityResourceLibraryAction {
     Load,
     SaveReply {
-        item: Box<msime_client_core::community::resource::CommunityResource>,
+        item: Box<msime_client_services::community::resource::CommunityResource>,
     },
     Remove {
         id: String,
@@ -1448,7 +1569,7 @@ pub unsafe extern "C" fn msime_client_community_resource_library(
             return Err("community_storage".into());
         }
         let store =
-            msime_client_core::community::resource_library::CommunityResourceLibraryStore::new(
+            msime_client_services::community::resource_library::CommunityResourceLibraryStore::new(
                 &request.file,
             );
         match request.action {
@@ -1468,9 +1589,9 @@ pub unsafe extern "C" fn msime_client_community_resource_library(
 }
 
 fn resource_library_code(
-    error: msime_client_core::community::resource_library::CommunityResourceLibraryError,
+    error: msime_client_services::community::resource_library::CommunityResourceLibraryError,
 ) -> String {
-    use msime_client_core::community::resource_library::CommunityResourceLibraryError as Failure;
+    use msime_client_services::community::resource_library::CommunityResourceLibraryError as Failure;
     match error {
         Failure::Io(_) => "community_storage",
         Failure::Json(_) | Failure::Invalid => "community_resource_library_format",
@@ -1489,7 +1610,7 @@ enum AiSkinPlanRequest {
         text: String,
     },
     Artwork {
-        artwork: msime_client_core::skin::ai::AiSkinArtwork,
+        artwork: msime_client_services::skin::ai::AiSkinArtwork,
     },
 }
 
@@ -1542,7 +1663,7 @@ pub unsafe extern "C" fn msime_client_ai_skin_plan(
                         "messages": [
                             {
                                 "role": "system",
-                                "content": msime_client_core::skin::ai::AI_SKIN_SYSTEM_PROMPT,
+                                "content": msime_client_services::skin::ai::AI_SKIN_SYSTEM_PROMPT,
                             },
                             {"role": "user", "content": prompt},
                         ],
@@ -1553,12 +1674,12 @@ pub unsafe extern "C" fn msime_client_ai_skin_plan(
                 }))
             }
             AiSkinPlanRequest::Parse { text } => {
-                let plans = msime_client_core::skin::ai::plan_ai_skins(&text)
+                let plans = msime_client_services::skin::ai::plan_ai_skins(&text)
                     .map_err(|_| "ai_skin_response")?;
                 serde_json::to_value(plans).map_err(|_| "ai_skin_response".into())
             }
             AiSkinPlanRequest::Artwork { artwork } => {
-                msime_client_core::skin::ai::validate_ai_skin_artwork(&artwork)
+                msime_client_services::skin::ai::validate_ai_skin_artwork(&artwork)
                     .map_err(|_| "ai_skin_response")?;
                 Ok(json!({"valid": true}))
             }
@@ -1683,6 +1804,7 @@ struct MobileClipboardRequest {
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum MobileClipboardAction {
     Load,
+    ExportText,
     Capture { text: String },
     SetPinned { text: String, pinned: bool },
     Remove { text: String },
@@ -1713,6 +1835,12 @@ pub unsafe extern "C" fn msime_client_mobile_clipboard_history(
         let path = root.join("MSIME").join("clipboard_history.json");
         let mut history = msime_client_core::clipboard::ClipboardHistoryStore::open(path);
         match request.action {
+            MobileClipboardAction::ExportText => {
+                history
+                    .load()
+                    .map_err(|_| "mobile clipboard history unavailable")?;
+                Ok(json!({"text": history.export_text(), "count": history.entries().len()}))
+            }
             MobileClipboardAction::Load => {
                 history
                     .load()
@@ -1973,7 +2101,7 @@ pub unsafe extern "C" fn msime_client_account_cloud_clipboard(
     request: *const u8,
     length: usize,
 ) -> *mut c_char {
-    use msime_client_core::account::{
+    use msime_client_services::account::{
         AccountSessionFileLayout, BackendAccountClient, BackendAccountSession,
         FileAccountSessionStorage,
     };
@@ -1985,23 +2113,43 @@ pub unsafe extern "C" fn msime_client_account_cloud_clipboard(
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct CloudRequest {
-            directory: String,
+            #[serde(default)]
+            directory: Option<String>,
+            #[serde(default)]
+            session_store: Option<u64>,
             action: Value,
         }
         // SAFETY: guaranteed by the documented caller contract.
         let bytes = unsafe { std::slice::from_raw_parts(request, length) };
         let request: CloudRequest = serde_json::from_slice(bytes).map_err(|_| INVALID)?;
-        let directory = std::path::Path::new(&request.directory);
-        if !directory.is_absolute() || request.directory.len() > 16384 {
-            return Err(INVALID.into());
+        let source = super::session_store::session_source(
+            request.directory.as_deref(),
+            false,
+            request.session_store,
+        )
+        .ok_or(INVALID)?;
+        if let super::session_store::Source::Directory(directory) = &source {
+            if !std::path::Path::new(directory).is_absolute() || directory.len() > 16384 {
+                return Err(INVALID.into());
+            }
         }
-        crate::cloud_clipboard::validate_request(&request.action).map_err(|_| INVALID)?;
-        let client = BackendAccountClient::new().map_err(|error| error.code().to_owned())?;
-        let session = BackendAccountSession::new(
-            client,
-            FileAccountSessionStorage::new(directory, AccountSessionFileLayout::Native),
-        );
-        crate::cloud_clipboard::account_request(&session, &request.action).map_err(str::to_owned)
+        crate::cloud_clipboard::validate_account_request(&request.action).map_err(|_| INVALID)?;
+        match source {
+            super::session_store::Source::Directory(directory) => {
+                let client =
+                    BackendAccountClient::new().map_err(|error| error.code().to_owned())?;
+                let session = BackendAccountSession::new(
+                    client,
+                    FileAccountSessionStorage::new(directory, AccountSessionFileLayout::Native),
+                );
+                crate::cloud_clipboard::account_request(&session, &request.action)
+            }
+            // 注入的存储用注册时建好的会话对象，不每次新建。
+            super::session_store::Source::Store(entry) => {
+                crate::cloud_clipboard::account_request(&entry.account, &request.action)
+            }
+        }
+        .map_err(str::to_owned)
     })
 }
 
@@ -2044,7 +2192,7 @@ pub unsafe extern "C" fn msime_client_relay_cloud_clipboard(
         let device_name = request
             .device_name
             .filter(|name| !name.trim().is_empty() && is_bounded_text(name, 256))
-            .unwrap_or_else(msime_client_core::account::cloud_clipboard_device_name);
+            .unwrap_or_else(msime_client_services::account::cloud_clipboard_device_name);
         crate::cloud_clipboard::relay_request(
             config,
             std::path::Path::new(&request.directory),
@@ -2083,7 +2231,7 @@ pub unsafe extern "C" fn msime_client_relay_cloud_clipboard_exchange(
         let request: ExchangeRequest = serde_json::from_slice(bytes).map_err(|_| INVALID)?;
         // 地址和令牌按偏好里的同一套规则校验：不是 HTTPS（或本机回环的 HTTP）就不发。
         let config =
-            msime_client_core::clipboard_relay::RelayConfig::new(&request.url, &request.token)
+            msime_client_services::clipboard_relay::RelayConfig::new(&request.url, &request.token)
                 .map_err(|error| error.code().to_owned())?;
         crate::cloud_clipboard::relay_exchange(
             config,
@@ -2277,10 +2425,7 @@ pub unsafe extern "C" fn msime_client_save_preferences(
 
 /// Read or update 背单词 wordbooks and review progress.
 ///
-/// A shim: the request is parsed into the shared action type and the answer is the shared status,
-/// serialised. Every rule — what an action does, how the queue is built, what counts as today —
-/// belongs to `msime_client_core::vocabulary::session`, so this host and the Tauri command layer
-/// cannot drift from each other.
+/// 只做转接：请求解析成共享的动作类型，应答是序列化后的共享状态。每条规则（动作做什么、复习队列怎么排、哪天算今天）都在 `msime_client_services::vocabulary::session`，所以这里和 Tauri 命令层不会各说各的。
 /// # Safety
 /// `request` points to `length` readable JSON bytes. Null is rejected.
 #[no_mangle]
@@ -2288,7 +2433,7 @@ pub unsafe extern "C" fn msime_client_vocabulary_review(
     request: *const u8,
     length: usize,
 ) -> *mut c_char {
-    use msime_client_core::vocabulary::session;
+    use msime_client_services::vocabulary::session;
 
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]

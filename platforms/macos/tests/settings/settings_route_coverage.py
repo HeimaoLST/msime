@@ -20,10 +20,10 @@ from pathlib import Path
 # like from the outside.
 NOT_ROUTED = {
     "home": "where the settings window already opens; a route to it would name the default",
-    "more": "a mobile-only index reached from the keyboard home page; desktop hosts hide it",
     "try-keyboard": "a touch-only subpage opened from the status card on the 设置 root page; desktop hosts hide it",
     "usage-reporting": "a subpage opened from the row under the usage reporting switch on 关于; nothing outside the settings window points at it",
     "privacy": "触屏宿主从「我的」页内部打开的子页；桌面在「关于」里提供隐私设置，宿主不直接路由到它",
+    "mcp": "「维护与诊断」里「连接 AI 助手」那一行打开的子页；菜单和托盘都没有指向它的入口，宿主不直接路由到它",
 }
 
 

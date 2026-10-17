@@ -273,14 +273,13 @@ if ! rg -q 'MSIME_FIRST_CANDIDATE = 104, MSIME_LAST_CANDIDATE = 105' \
   echo "Android Home/End must map to the shared first/last candidate commands" >&2
   exit 1
 fi
-# 「候选栏预编辑」 governs the spelling only. The chosen part of a phrase is held out of the
-# document at this host's request, so it must keep being drawn whatever the setting says - that is
-# the same half-state scripts/test-phrase-preedit-hosts.py guards from the other side.
+# 拼写写进输入框后候选栏不再画它，这只管拼写：已选的那一段按这个宿主的请求留在文档之外，无论如何都要画在候选栏上，否则就是 scripts/test-phrase-preedit-hosts.py 从另一边防的那种半截状态。这个行为是固定的，不再读共享偏好 `candidate_preedit_style`，也不能再从别处把开关接回来。
 if ! rg -q 'CandidatePreeditStylePolicy\.composedText' \
     "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
   || rg -q 'CandidatePreeditStylePolicy[^;]*phrase_prefix' \
-    "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java"; then
-  echo "Android candidate preedit style must gate the spelling, never the phrase prefix" >&2
+    "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || rg -q '"candidate_preedit_style"' "$repo_root/platforms/android/java"; then
+  echo "Android candidate preedit style must gate the spelling, never the phrase prefix, and must not read candidate_preedit_style" >&2
   exit 1
 fi
 # The polish presets carry their own prompt-injection wording and already exist in four places in
@@ -511,6 +510,12 @@ if rg -n 'KOREAN_SCHEME' <(sed -n '/void scheduleCandidateGlosses()/,/^    }$/p;
   echo "Android must gloss Korean Hanja rows and draw their 훈음 on its own reserved row" >&2
   exit 1
 fi
+# 手机上只显示一种候选翻译：键盘不读第二种语言偏好，目标语言只从主目标语言算出，否则请求第二种语言、候选栏多预留一行释义。
+if rg -n 'translation_secondary_language' "$repo_root/platforms/android/java" \
+  || ! rg -qF 'return CandidateTranslationPolicy.targets(primary);' "$account_service"; then
+  echo "Android touch keyboards must request and reserve only the primary translation language" >&2
+  exit 1
+fi
 if ! rg -q '<asr_text>' \
     "$repo_root/platforms/android/java/app/msime/android/voice/VoicePolishPolicy.java"; then
   echo "Android polish must wrap the transcript in the boundary the presets name" >&2
@@ -555,17 +560,8 @@ if ! rg -q 'if \(length > 1024 \* 1024\)' \
   echo "Android Doubao decoding must bound the Java frame before copying" >&2
   exit 1
 fi
-# Opaque local speech handles are native pointers. Java rejects non-positive values, and JNI keeps
-# the same boundary so a direct native call cannot turn a negative sentinel into an invalid dereference.
-if ! rg -q 'if \(handle <= 0\) return nullptr;' \
-    "$repo_root/platforms/android/native/client_jni.cpp" \
-  || ! rg -q 'if \(handle > 0\) delete speech\(handle\);' \
-    "$repo_root/platforms/android/native/client_jni.cpp" \
-  || ! rg -q 'NativeHandlePolicy\.requirePositive\(handle\)' \
-    "$repo_root/platforms/android/java/app/msime/android/core/NativeClient.java"; then
-  echo "Android local speech handles must reject non-positive values before JNI pointer use" >&2
-  exit 1
-fi
+# 语音句柄的创建、查找与撤销由 LocalSpeechHandleDeviceSmoke 经真实 JNI 验证。
+# 不再用指针转换和符号比较的源码形状充当有效性检查。
 # The Engine decides what a punctuation key produces, so the Chinese/English state has to reach it.
 # A toggle that only changed this keyboard's key faces would show one mark and commit the other.
 if ! rg -q 'setChinesePunctuationRaw' \
@@ -703,6 +699,19 @@ if ! rg -q 'forgetCurrentClip\(\);' <<< "$search_body" \
   || ! rg -q 'clipboardAction\(header, "搜索", s::openClipboardSearch\)' \
     "$repo_root/platforms/android/java/app/msime/android/core/ImePanels.java"; then
   echo "Android clipboard search must open the app's CLIPBOARD_SEARCH page from the panel header after forgetting the current clip, never a query field in the input method (#5973)" >&2
+  exit 1
+fi
+# 分享只把用户长按选中的一条记录交给系统选择器；输入法服务启动 chooser 必须带新任务标志，不能把历史列表或内部标识一起发出去。
+share_body=$(rg -A 24 'void shareClipboardText\(' \
+  "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" || true)
+if ! rg -q 'ClipboardSharePolicy\.canShare\(text\)' <<< "$share_body" \
+  || ! rg -q 'Intent\.ACTION_SEND' <<< "$share_body" \
+  || ! rg -q 'Intent\.EXTRA_TEXT' <<< "$share_body" \
+  || ! rg -q 'Intent\.FLAG_ACTIVITY_NEW_TASK' <<< "$share_body" \
+  || ! rg -q 'Intent\.createChooser\(send, ClipboardSharePolicy\.CHOOSER_TITLE\)' <<< "$share_body" \
+  || ! rg -q 'clipboardItemAction\(row, ClipboardSharePolicy\.ACTION' \
+      "$repo_root/platforms/android/java/app/msime/android/core/ImePanels.java"; then
+  echo "Android clipboard sharing must use a single selected entry through the system text chooser (#8517)" >&2
   exit 1
 fi
 if rg -q 'void manageClipboardItem|new PopupMenu\(this, anchor\)' \
@@ -848,6 +857,11 @@ startup_body=$(sed -n '/private void scheduleEngineStartup(String options, long 
 if ! rg -q 'private volatile long engineStartGeneration;' "$account_service" \
   || [[ "$(printf '%s\n' "$startup_body" | rg -c 'if \(generation != engineStartGeneration\) return;')" -lt 3 ]]; then
   echo "Android engine startup must abandon stale generations before and after background work (#7728)" >&2
+  exit 1
+fi
+# 引擎启动是后台工作，不能把内部的「准备中」画成状态行；状态行出现会临时增加候选头高度，首帧九键随后又跳回去（#8473）。
+if rg -n 'message = "共享运行时准备中"' "$account_service"; then
+  echo "Android engine startup must not expose its transient preparation state in the keyboard" >&2
   exit 1
 fi
 # 候选条的配色和字号同理（#5933）：副本是出厂的薄荷设计，按它重算会让每个新输入框的候选条先铺一层薄荷底、字号回到出厂的 18/15，实时偏好到了才换回来。只有实时偏好重算候选条外观，冷启动的第一帧按皮肤片段算，片段里要记着候选条用到的字段；按片段着色之前要先读本地设置，否则应用主题种子按默认值缓存。
@@ -1129,11 +1143,11 @@ if rg -q 'button\.setTextColor\(accent\)' \
   echo "Android layout bar buttons must take actionForeground, not the accent they sit on" >&2
   exit 1
 fi
-# `deleteSurroundingText` 只删选区以外的字：选中开头的「你好」按删除毫无反应，选中中间的文字会删掉选区前一个字。键盘上的删除键都要经 `deleteCodePointBeforeCursor`，由它先删选区；笔画布局曾经绕过它直接调 InputConnection。
+# `deleteSurroundingText` 只删选区以外的字：选中开头的「你好」按删除毫无反应，选中中间的文字会删掉选区前一个字。键盘上的删除键都要经 `deleteCodePointBeforeCursor`，由它先删选区；笔画布局曾经绕过它直接调 InputConnection。只允许该入口和它使用的断开保护层调用码位删除，布局不能绕过入口。
 if ! rg -q 'if \(deleteSelection\(\)\) return;' \
     "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
   || rg -l '\.deleteSurroundingTextInCodePoints\(' "$repo_root/platforms/android/java" \
-    | rg -v '/core/MSIMEInputService\.java$' >/dev/null; then
+    | rg -v '/core/(MSIMEInputService|InputConnectionGuard)\.java$' >/dev/null; then
   echo "Android delete keys must go through deleteCodePointBeforeCursor, which deletes a selection first" >&2
   exit 1
 fi

@@ -24,7 +24,7 @@ import java.util.Locale;
 /**
  * 词库详情：启用开关、搜索词条、词条列表（词、带撇号的拼音、权重）、添加词条和导出。
  *
- * <p>参数是 {@link #ARG_ID}（集合 id，内置拼音词库是 {@link DictionaryCollectionsStore#BUILTIN_PINYIN}）和 {@link #ARG_NAME}（标题）。内置词库常开，开关置灰；它的新词经个人词库队列写入，因为键盘活着时直接编辑会返回 busy，键盘下次启动时应用。命名词库的启用、停用和加词由 client-core 分批送进同一个队列。
+ * <p>参数是 {@link #ARG_ID}（集合 id，内置拼音词库是 {@link DictionaryCollectionsStore#BUILTIN_PINYIN}）和 {@link #ARG_NAME}（标题）。内置词库常开，开关置灰；它的新词经个人词库队列写入，因为键盘活着时直接编辑会返回 busy，键盘下次启动时应用。命名词库的启用、停用和加词由 client-services 分批送进同一个队列。
  *
  * <p>集合接口没有列出单个集合词条的操作，所以命名词库只显示条数，搜索和导出只对内置词库提供。
  */
@@ -126,7 +126,9 @@ public final class LexiconDetailPage extends ReloadingDetailPage {
 
         GroupCard header = GroupCard.add(sectionColumn(target, "管理"), null);
         String count = current.count() < 0 ? null : NumberPolicy.groupedCount(current.count());
-        GroupCard.Row toggle = header.toggle("启用此词库", builtin ? (count == null ? "内置词库始终启用" : count + " · 内置词库始终启用") : count,
+        String collectionDescription = collection == null ? null
+            : count + DictionaryCollectionsStore.pendingDescription(collection.pending());
+        GroupCard.Row toggle = header.toggle("启用此词库", builtin ? (count == null ? "内置词库始终启用" : count + " · 内置词库始终启用") : collectionDescription,
             builtin || collection.enabled(), this::setEnabled);
         if (builtin) toggle.setEnabled(false);
 

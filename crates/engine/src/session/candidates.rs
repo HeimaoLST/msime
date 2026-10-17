@@ -76,7 +76,12 @@ impl InputSession {
             clone_candidate_rows(&self.prefix_candidates, &mut decoded);
         } else {
             clone_candidate_rows(self.engine.candidates(), &mut decoded);
-            self.reserve_ai_seat(&mut decoded);
+            if self.quick_phrase_candidates {
+                self.queries.append_quick_phrase_candidates(
+                    self.engine.request().raw_input.as_str(),
+                    &mut decoded,
+                );
+            }
         }
         self.personal_reranked = false;
         // 日文整段转换只算一次：个人上下文重排生效时下面要混排两张表。
@@ -142,6 +147,9 @@ impl InputSession {
         self.insert_cached_plugin_rows();
         // After the positions, so the synthetic row is never moved.
         self.add_local_fallback_candidate();
+        if self.local_mode == LocalInputMode::Url {
+            self.add_url_completions();
+        }
         result.diagnostic
     }
 
@@ -332,7 +340,7 @@ impl InputSession {
             return Cow::Borrowed(&request.raw_input);
         }
         let context: Cow<'_, str> = if request.normalized_input.is_empty() {
-            Cow::Owned(self.pinyin_segmentation())
+            self.pinyin_segmentation()
         } else {
             Cow::Borrowed(&request.normalized_input)
         };
@@ -579,6 +587,30 @@ impl InputSession {
         );
         self.insert_inline_date_time(&mut mixed);
         self.apply_candidate_positions(&mut mixed);
+        // 云候选异步到达；先在它的固定席位放一个云图标，回包时原位替换，避免本地候选整体后移。
+        if self.cloud_candidates_enabled
+            && self
+                .online_query()
+                .is_some_and(|query| query.cloud_eligible)
+            && !mixed.iter().any(|item| {
+                matches!(
+                    item.source,
+                    CandidateSource::CloudSuggestion | CandidateSource::CloudPending
+                )
+            })
+        {
+            let position = 1.min(mixed.len());
+            mixed.insert(
+                position,
+                WordItem::new(
+                    self.engine.request().raw_input.as_str(),
+                    "☁",
+                    0,
+                    CandidateSource::CloudPending,
+                    "",
+                ),
+            );
+        }
         // 放在固定位置之后：单字母输入时固定位置会补回列表里没有的词。
         if self.single_character_only && scheme.filters_to_single_characters() {
             mixed.retain(|item| !is_han_phrase(&item.word));
@@ -587,6 +619,8 @@ impl InputSession {
         if self.local_mode == LocalInputMode::None {
             keep_expressive_rows_off_the_lead(&mut mixed);
         }
+        // 放在最后：网址补全不参与固定位置，也不被挪开。
+        self.insert_url_scheme_completions(&mut mixed);
         mixed
     }
 

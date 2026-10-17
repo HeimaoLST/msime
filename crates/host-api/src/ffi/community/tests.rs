@@ -223,3 +223,111 @@ fn signed_out_calls_that_need_the_account_stop_before_the_network() {
     // 没有下载，皮肤根目录没被建出来。
     assert!(!root.skins().exists());
 }
+
+#[test]
+fn keyboard_skins_check_requests_and_the_account_before_the_network() {
+    let root = Root::new();
+    let unauthorized = failure("community_unauthorized");
+    let design =
+        serde_json::to_value(msime_client_core::preferences::TouchKeyboardSkinDesign::default())
+            .unwrap();
+    for action in [
+        json!({ "operation": "keyboard_skin_list", "offset": 0, "search": "", "mine": true }),
+        json!({ "operation": "keyboard_skin_download", "id": ITEM }),
+        json!({ "operation": "keyboard_skin_install", "id": ITEM, "name": "合成皮肤" }),
+        json!({ "operation": "keyboard_skin_rate", "id": ITEM, "stars": 5 }),
+        json!({ "operation": "keyboard_skin_publish", "id": ITEM, "name": "合成皮肤", "description": "合成说明", "design": design, "category": "nature" }),
+        json!({ "operation": "keyboard_skin_set_category", "id": ITEM, "category": "cute" }),
+        json!({ "operation": "keyboard_skin_unpublish", "id": ITEM }),
+    ] {
+        assert_eq!(root.call(action.clone()), unauthorized, "{action}");
+    }
+    let invalid = failure("community_invalid");
+    for action in [
+        json!({ "operation": "keyboard_skin_detail", "id": "not-a-uuid" }),
+        json!({ "operation": "keyboard_skin_rate", "id": ITEM, "stars": 6 }),
+        json!({ "operation": "keyboard_skin_list", "offset": 0, "search": "", "extra": 1 }),
+        json!({ "operation": "keyboard_skin_set_category", "id": ITEM, "category": 3 }),
+    ] {
+        assert_eq!(root.call(action.clone()), invalid, "{action}");
+    }
+    // 装皮肤要 state_root。
+    assert_eq!(
+        call(
+            json!({ "directory": root.account(), "action": { "operation": "keyboard_skin_install", "id": ITEM, "name": "合成皮肤" } })
+        ),
+        invalid
+    );
+}
+
+#[test]
+fn signed_out_keyboard_skin_downloads_and_reports_read_the_anonymous_session() {
+    let root = Root::new();
+    // 账号目录里只有一份解不开的匿名会话：要是只看登录会话，这三项会以 community_unauthorized 结束；它们读了同一目录的匿名会话，在发请求之前就以 community_storage 结束。
+    write_private_file(&root.account(), "anonymous-session.json", b"not a session");
+    for action in [
+        json!({ "operation": "keyboard_skin_download", "id": ITEM }),
+        json!({ "operation": "keyboard_skin_install", "id": ITEM, "name": "合成皮肤" }),
+        json!({ "operation": "report", "kind": "skins", "id": ITEM, "reason": "其他" }),
+    ] {
+        assert_eq!(
+            root.call(action.clone()),
+            failure("community_storage"),
+            "{action}"
+        );
+    }
+    // 只认登录账号的操作不看匿名会话。
+    assert_eq!(
+        root.call(json!({ "operation": "keyboard_skin_rate", "id": ITEM, "stars": 5 })),
+        failure("community_unauthorized")
+    );
+}
+
+/// 按会话文件的要求写一个只有属主可读写的文件，目录也收紧到 0700。
+fn write_private_file(directory: &Path, name: &str, bytes: &[u8]) {
+    std::fs::create_dir_all(directory).unwrap();
+    let path = directory.join(name);
+    std::fs::write(&path, bytes).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+#[test]
+fn only_a_keyboard_skin_publish_may_exceed_four_mebibytes() {
+    let root = Root::new();
+    // 用 JSON 末尾的空白把请求撑大，内容本身合法。
+    let padded = |action: Value, total: usize| {
+        let mut bytes = json!({ "directory": root.account(), "action": action }).to_string();
+        bytes.push_str(&" ".repeat(total - bytes.len()));
+        // SAFETY: 缓冲区在调用期间有效，返回的字符串在下面释放。
+        unsafe {
+            let raw = msime_client_community(bytes.as_ptr(), bytes.len());
+            let text = CStr::from_ptr(raw).to_str().unwrap().to_owned();
+            msime_client_string_free(raw);
+            serde_json::from_str::<Value>(&text).unwrap()
+        }
+    };
+    let list = json!({ "operation": "keyboard_skin_list", "offset": 0, "search": "" });
+    let design =
+        serde_json::to_value(msime_client_core::preferences::TouchKeyboardSkinDesign::default())
+            .unwrap();
+    let publish = json!({ "operation": "keyboard_skin_publish", "id": ITEM, "name": "合成皮肤", "description": "合成说明", "design": design });
+    // 超过 4 MiB 的其他操作在发请求之前就以 community_invalid 结束。
+    assert_eq!(
+        padded(list, MAX_REQUEST_BYTES + 1),
+        failure("community_invalid")
+    );
+    // 发布可以到 9,000,000 字节：这里在取令牌时以未登录结束，不是因为太大被拒。
+    assert_eq!(
+        padded(publish.clone(), MAX_KEYBOARD_SKIN_PUBLISH_BYTES),
+        failure("community_unauthorized")
+    );
+    assert_eq!(
+        padded(publish, MAX_KEYBOARD_SKIN_PUBLISH_BYTES + 1),
+        failure("community_invalid")
+    );
+}

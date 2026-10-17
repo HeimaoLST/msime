@@ -2,6 +2,8 @@
 
 Status: implemented
 
+「对话页保留底部 Tab」已被 [触屏 AI 对话二级页不带底部标签栏](../feature/2026-10-17-mobile-chat-hides-tabs.md) 取代：对话改为二级页后，离开它走顶部返回，三端的对话页都收起标签栏。本篇关于 `adjustResize` 与输入法避让的设备证据仍成立。
+
 ## Problem
 
 [输入框让开底部导航](2026-10-13-android-chat-input-covered-by-tabs.md)通过隐藏导航修复遮挡，但用户打字期间无法切换 Tab，必须先关闭键盘。输入框可见和导航可点按都需要满足。
@@ -17,6 +19,8 @@ Status: implemented
 - **继续隐藏导航**：输入区获得最多空间，但直接导致本次不能切换 Tab 的问题。
 - **按 IME inset 额外抬升导航**：全屏未缩短窗口时可以让导航避开键盘，但 Android 12 真机的 `adjustResize` 已缩短根窗口，再平移会让导航错误地跑到顶部。设备截图确认后去掉额外平移。
 - **只恢复导航，输入区仍只让开 IME**：代码更少，但导航再次覆盖输入栏；输入区必须继续预留 Tab 高度。
+
+入口层级由[移动端 AI 对话二级页](../feature/2026-10-16-mobile-chat-secondary-page.md)调整，输入框避让、试用行为和会话边界继续保留。
 
 ## Consequences
 

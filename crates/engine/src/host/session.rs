@@ -149,11 +149,25 @@ pub struct Session {
 }
 
 impl Session {
-    /// 显示候选仍与引擎原始候选同座时直接取反查码；身份不一致时保持旧的按词查找语义。
-    pub(crate) fn candidate_wubi_code_for_display(&self, index: usize, word: &str) -> Option<&str> {
+    /// 显示候选仍与引擎原始候选同座时直接取反查码；身份变化时扫描已有候选缓存。
+    pub(crate) fn candidate_wubi_code_for_display_item(
+        &self,
+        index: usize,
+        item: &crate::types::WordItem,
+    ) -> Option<&str> {
         self.inner
-            .candidate_wubi_code_at_if_word(index, word)
-            .or_else(|| self.inner.candidate_wubi_code(word))
+            .candidate_wubi_code_at_if_item(index, item)
+            .or_else(|| self.inner.candidate_wubi_code_if_item(item))
+    }
+
+    /// 供已有宿主测试和按词入口使用的查码；不使用可能与显示列表错位的座位。
+    #[cfg(test)]
+    pub(crate) fn candidate_wubi_code_for_display(
+        &self,
+        _index: usize,
+        word: &str,
+    ) -> Option<&str> {
+        self.inner.candidate_wubi_code(word)
     }
 }
 
@@ -283,7 +297,7 @@ impl Session {
                     SchemeType::Quanpin | SchemeType::Shuangpin | SchemeType::Wubi
                 )
             {
-                let code = self.candidate_wubi_code_for_display(index, &candidate.word);
+                let code = self.candidate_wubi_code_for_display_item(index, &candidate);
                 if let Some(code) = code {
                     if !annotation.contains(code) {
                         if !annotation.is_empty() {
@@ -352,21 +366,8 @@ impl Session {
         Ok(())
     }
 
-    /// 宿主为这个会话打开或关掉 AI 候选（`crate::session::Session::set_ai_seat`）；返回开关是否变了。
-    pub fn set_ai_seat(&mut self, enabled: bool) -> bool {
-        self.inner.set_ai_seat(enabled)
-    }
-
-    /// AI 回答为空或失败（宿主来源 1）：当前查询的占位行换成「—」。返回显示的列表是否变了；过期查询和其他来源返回 false。
-    pub fn resolve_online_candidates(
-        &mut self,
-        query: &OnlineQuerySnapshot,
-        source: u8,
-    ) -> Result<bool> {
-        let Some((request, source)) = online_request(query, source) else {
-            return Ok(false);
-        };
-        Ok(self.inner.resolve_online_candidates(&request, source))
+    pub fn set_cloud_candidates_enabled(&mut self, enabled: bool) {
+        self.inner.set_cloud_candidates_enabled(enabled);
     }
 
     pub fn set_caret(&mut self, caret: Option<usize>) {
@@ -677,20 +678,13 @@ impl Session {
         Ok(())
     }
 
-    /// The letters as typed, learned as nothing. The engine's own raw commit learns the word itself in dedicated English, so that mode takes the preedit and cancels instead, stripping the trigger letter of a temporary mode the way `InputSession` does (bridge.cpp:1320-1331).
+    /// The letters as typed, learned as nothing. The engine's own raw commit learns the word itself in dedicated English, so that mode takes the preedit and cancels instead (bridge.cpp:1320-1331). 上屏的就是预编辑原文，本地模式的入口字母也在内，和 `InputSession` 一致。
     fn commit_raw_without_learning(&mut self) -> EngineResult {
         let before = self.inner.snapshot();
         if !before.dedicated_english {
             return result_for(self.inner.command(crate::types::Command::CommitRaw));
         }
-        let mut raw = before.preedit;
-        if matches!(
-            before.local_mode,
-            LocalInputMode::TemporaryEnglish | LocalInputMode::TemporaryJapanese
-        ) && !raw.is_empty()
-        {
-            raw.remove(0);
-        }
+        let raw = before.preedit;
         self.inner.command(crate::types::Command::Cancel);
         result_for(KeyResult::committed(raw))
     }
@@ -719,11 +713,13 @@ impl Session {
                 || (chinese_scheme && !complete_pure_pinyin));
         let mut result = self.inner.command(crate::types::Command::CommitRaw);
         if let Some(commit) = result.commit.as_deref().filter(|_| should_learn) {
-            if !commit.is_empty() {
+            // 进词库的词去掉临时模式的入口字母：回车上屏的原文带它，词库里不该有（#7616）。只有入口字母时正文为空，那就没有词可学（旧实现上屏空串，同样不学）。
+            let text = before.local_mode.without_entry_marker(commit);
+            if !text.is_empty() {
                 let word = if before.local_mode == LocalInputMode::TemporaryJapanese {
-                    temporary_japanese_word(commit)
+                    temporary_japanese_word(text)
                 } else {
-                    commit.to_owned()
+                    text.to_owned()
                 };
                 let paths = runtime_paths(&self.options);
                 // The commit already happened; a word that could not be learned is reported beside it rather than undoing it.

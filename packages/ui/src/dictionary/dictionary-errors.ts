@@ -1,5 +1,6 @@
 import { errorCode } from "../core/error-code";
-import type { LocalDictionaryKind } from "./dictionary-file";
+import { asciiLowercase } from "../core/text";
+import type { DictionaryEntry, LocalDictionaryKind } from "./dictionary-file";
 
 export function dictionaryErrorMessage(
   error: unknown,
@@ -60,9 +61,18 @@ function invalidDictionaryEntryMessage(kind?: string): string {
 
 export function dictionaryKeyMatches(kind: string, key: string, query: string): boolean {
   if (!query) return true;
-  const fold = (text: string) => text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
-  const code = (text: string) => (kind === "pinyin" ? fold(text).replace(/[' ]/g, "") : fold(text));
+  const code = (text: string) =>
+    kind === "pinyin" ? asciiLowercase(text).replace(/[' ]/g, "") : asciiLowercase(text);
   return code(kind === "pinyin" ? key : key.trim()).startsWith(code(query));
+}
+
+/** 兼容旧宿主未筛选的响应；词条查询不再误用编码前缀规则。 */
+export function dictionaryEntryMatches(entry: DictionaryEntry, query: string): boolean {
+  if (/[^\p{ASCII}]/u.test(query)) {
+    const word = query.trim();
+    return word.length > 0 && entry.value.includes(word);
+  }
+  return dictionaryKeyMatches(entry.kind, entry.key, query);
 }
 
 export function importFailureMessage(kind: string, error: unknown): string {

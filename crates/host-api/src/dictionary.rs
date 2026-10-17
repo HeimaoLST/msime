@@ -1,12 +1,12 @@
 //! Native management requests. The native caller owns and authorizes all paths.
 
 use super::{
-    edit_personal_dictionary, invalid_dictionary_entry, require_dictionary_kind, response,
-    DictionaryAccess, HostOptions, DICTIONARY_REQUEST_LIMIT,
+    edit_personal_dictionary, edit_personal_dictionary_with_access, invalid_dictionary_entry,
+    require_dictionary_kind, response, DictionaryAccess, HostOptions, DICTIONARY_REQUEST_LIMIT,
 };
-use msime_client_core::dictionary::import::{dictionary_row_matches, PageSelector};
-use msime_client_core::dictionary::is_han_character;
-use msime_client_core::dictionary::personal::{
+use msime_client_services::dictionary::import::{dictionary_row_matches, PageSelector};
+use msime_client_services::dictionary::is_han_character;
+use msime_client_services::dictionary::personal::{
     PersonalDictionaryError, PersonalDictionaryStore, PersonalWord, PersonalWordApplied,
     PersonalWordKind, PersonalWordRequestStatus,
 };
@@ -85,9 +85,13 @@ impl Entry {
         self
     }
 
-    /// Does this row belong on a page filtered by `kind` and code `prefix`?
+    /// 按种类筛选；非 ASCII 查询按词条包含匹配，其余保留编码前缀规则。
     fn matches(&self, kind: Option<Kind>, prefix: &str) -> bool {
         let same_kind = kind.map(|wanted| wanted == self.kind).unwrap_or(true);
+        if !prefix.is_ascii() {
+            let word = prefix.trim();
+            return same_kind && !word.is_empty() && self.value.contains(word);
+        }
         dictionary_row_matches(same_kind, (&self.kind).into(), &self.key, prefix)
     }
 }
@@ -156,7 +160,7 @@ enum Operation {
         /// is what older callers sent.
         #[serde(default)]
         kind: Option<Kind>,
-        /// Code prefix to search for, matched case-insensitively. Pinyin separators are ignored on both sides, so `nihao` and `nih` find `ni'hao`. With a kind, a prefix searches the working dictionary itself, bundled words included, as does the quick-phrase list with no prefix; every other page lists the user's own words only.
+        /// ASCII 查询按编码前缀匹配，忽略大小写与拼音分隔符；非 ASCII 查询按词条字面包含匹配。指定种类时非空查询包含内置行，快捷短语空查询也列出内置行；其他空查询只列个人词条。
         #[serde(default)]
         query: Option<String>,
         /// Keep the page to the user's own words even with a kind and a prefix. The mobile personal dictionary queue sets this: its edits cannot carry a bundled row, which may only be re-weighted or deleted in place.
@@ -303,6 +307,48 @@ fn parse_personal_dictionary_import(text: &str) -> Result<Vec<PersonalWord>, Str
     Ok(entries)
 }
 
+/// 一个要排进个人词库导入队列的词，按 `import_personal` 导入文件的规则规范化并检查；`kind` 是导入文件的写法（`pinyin`、`quickPhrase` 等），不合规时为 `None`。云同步合并时用它算出与队列里一致的身份。
+pub(crate) fn personal_import_word(
+    kind: &str,
+    key: &str,
+    value: &str,
+    weight: i64,
+) -> Option<PersonalWord> {
+    let kind: PersonalWordKind = serde_json::from_value(json!(kind)).ok()?;
+    let word = normalize_personal_word(PersonalWord {
+        kind,
+        key: key.to_owned(),
+        value: value.to_owned(),
+        weight,
+    })
+    .ok()?;
+    word.validate_new().ok()?;
+    Some(word)
+}
+
+/// 一个已经存着的词在个人词库里的身份（权重不参与）：编码按 Engine 对已存词的规则规范（`dictionary_validate_previous`，权重不设上限，英文学习抬过上限的词也认得），规范不了时用原样的写法。云同步合并时用它比较云端的词和本机导出的词，与 [`personal_import_word`] 排进队列的词的身份一致。种类不认识时为 `None`。
+pub(crate) fn personal_stored_identity(kind: &str, key: &str, value: &str) -> Option<String> {
+    let kind: PersonalWordKind = serde_json::from_value(json!(kind)).ok()?;
+    let word = PersonalWord {
+        kind,
+        key: key.to_owned(),
+        value: value.to_owned(),
+        weight: 1,
+    };
+    Some(
+        match msime_engine::host::dictionary_validate_previous(&personal_engine_entry(&word)) {
+            Ok(entry) => PersonalWord {
+                kind: personal_kind(entry.kind),
+                key: entry.key,
+                value: entry.value,
+                weight: 1,
+            }
+            .identity(),
+            Err(_) => word.identity(),
+        },
+    )
+}
+
 /// Native management requests return only redacted errors.
 /// # Safety
 /// `request` must point to `length` readable bytes. Null is rejected.
@@ -403,7 +449,7 @@ pub unsafe extern "C" fn msime_client_dictionary_validate(
             .map_err(|_| "invalid dictionary entry".to_owned())?;
         let normalized = Entry::try_from(normalized)?;
         if matches!(normalized.kind, Kind::QuickPhrase)
-            && !msime_client_core::dictionary::quick_phrase_code_is_well_formed(&normalized.key)
+            && !msime_client_services::dictionary::quick_phrase_code_is_well_formed(&normalized.key)
         {
             return Err(invalid_dictionary_entry(
                 "code contains characters this dictionary does not accept",
@@ -458,7 +504,7 @@ const SCEL_TEXT_REQUEST_LIMIT: usize = scel_base64_limit() + 4096;
 
 /// 细胞词库上限（`MAX_SCEL_BYTES`）经 base64 编码后的长度。
 const fn scel_base64_limit() -> usize {
-    msime_client_core::dictionary::scel::MAX_SCEL_BYTES.div_ceil(3) * 4
+    msime_client_services::dictionary::scel::MAX_SCEL_BYTES.div_ceil(3) * 4
 }
 
 /// 把一个搜狗细胞词库（`.scel`）转成标准 TSV 文本，不碰任何词库状态，也不需要宿主选项。
@@ -495,7 +541,7 @@ struct ScelTextRequest {
 /// [`msime_client_dictionary_scel_text`] 的 Rust 入口，Tauri 外壳直接调用；错误是同一组稳定错误码。
 pub fn scel_text_json(bytes_base64: &str) -> Result<serde_json::Value, &'static str> {
     use base64::Engine as _;
-    use msime_client_core::dictionary::scel::{self, ScelError};
+    use msime_client_services::dictionary::scel::{self, ScelError};
     if bytes_base64.len() > scel_base64_limit() {
         return Err("dictionary_too_large");
     }
@@ -615,7 +661,7 @@ fn queued_import(
             lines
         })
         .unwrap_or_default();
-    let mut report = report.unwrap_or(msime_client_core::dictionary::import::ImportReport {
+    let mut report = report.unwrap_or(msime_client_services::dictionary::import::ImportReport {
         entries: Vec::new(),
         failed: 0,
         first_failures: Vec::new(),
@@ -701,7 +747,7 @@ pub fn dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Value, String
             if prefix.len() > 256 {
                 return Err("invalid dictionary page".into());
             }
-            // A code within one dictionary is looked up in the dictionary itself, the way the reference's manager searches, so a bundled word can be found and re-weighted. Quick phrases are few enough to list whole. Without a code the page stays the user's own words: the bundled pinyin tables alone hold hundreds of thousands of rows.
+            // 非空查询在目标词库内筛选后分页，以便找到并调整内置行；快捷短语允许整表列出，其余空查询仅列个人词条。
             if let Some(kind) = kind.filter(|kind| {
                 !user_only && (*kind == Kind::QuickPhrase || names_a_code(*kind, &prefix))
             }) {
@@ -807,7 +853,7 @@ pub fn dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Value, String
                 return Err("dictionary import rejected".into());
             }
             let mut report =
-                report.unwrap_or(msime_client_core::dictionary::import::ImportReport {
+                report.unwrap_or(msime_client_services::dictionary::import::ImportReport {
                     entries: Vec::new(),
                     failed: 0,
                     first_failures: Vec::new(),
@@ -1246,14 +1292,14 @@ pub fn personal_dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Valu
     }
 }
 
-/// Does `prefix` hold anything to look a code up by? Whitespace, and a pinyin syllable separator, do not.
+/// 查询是否包含编码或词条内容；ASCII 空白与拼音音节分隔符不计入。
 fn names_a_code(kind: Kind, prefix: &str) -> bool {
     prefix
         .bytes()
         .any(|byte| !byte.is_ascii_whitespace() && (kind != Kind::Pinyin || byte != b'\''))
 }
 
-/// One page of the dictionary table of `kind` under code `prefix`, bundled rows included and each marked with where it comes from. The caller holds dictionary access.
+/// 按编码前缀或词条查询目标词库的一页，标明个人与内置来源；调用方持有词库访问锁。
 fn table_entries_page(
     options: &msime_engine::host::EngineOptions,
     kind: Kind,
@@ -1279,7 +1325,7 @@ fn table_entries_page(
     Ok((entries, page.has_more))
 }
 
-/// One page of the user's own words, optionally within one dictionary and under one code prefix. The caller holds dictionary access.
+/// 个人词条分页，支持种类、编码前缀或词条内容筛选；调用方持有词库访问锁。
 fn user_entries_page(
     options: &msime_engine::host::EngineOptions,
     offset: usize,
@@ -1352,9 +1398,7 @@ fn user_entries_page(
     Ok((entries, has_more))
 }
 
-/// Synchronize the queue with the Engine. The caller must invoke this
-/// only after its Engine session has been destroyed; the shared dictionary lock
-/// then prevents races with any other host.
+/// 分批把队列应用到 Engine。整批先申请独占维护租约；词库忙碌时不修改队列，调用方稍后重试。
 ///
 /// The request is the bare HostOptions a host passes to `msime_client_create`, as the C header documents and as both the Android and HarmonyOS hosts send it. Parsing it as an `{options, action}` envelope refused every call, which Android swallowed and HarmonyOS answered by rebuilding its session every two seconds.
 pub fn personal_dictionary_sync_json(bytes: &[u8]) -> Result<serde_json::Value, String> {
@@ -1379,6 +1423,13 @@ pub fn personal_dictionary_sync_json(bytes: &[u8]) -> Result<serde_json::Value, 
         .ok_or("personal dictionary shared directory unavailable")?;
     let store = PersonalDictionaryStore::new(Path::new(directory).join("PersonalDictionary"));
     let options = options.into_engine_options();
+    // 整个有界同步期间都持有维护租约。活动会话时保留 Pending，让调用方在会话销毁后重试。
+    let access = DictionaryAccess::try_maintenance(
+        Path::new(&options.user_data),
+        Path::new(&options.dictionaries),
+    )
+    .map_err(|_| "dictionary access unavailable")?
+    .ok_or("dictionary maintenance busy")?;
     // Read once per synchronization, and only when a collection addition is pending.
     let mut user_words: Option<std::collections::HashSet<String>> = None;
     store
@@ -1395,7 +1446,8 @@ pub fn personal_dictionary_sync_json(bytes: &[u8]) -> Result<serde_json::Value, 
                         }
                     }
                 }
-                edit_personal_dictionary(
+                edit_personal_dictionary_with_access(
+                    &access,
                     &options,
                     previous.as_ref(),
                     replacement.as_ref(),
@@ -1411,18 +1463,20 @@ pub fn personal_dictionary_sync_json(bytes: &[u8]) -> Result<serde_json::Value, 
                     request.kind.map(personal_to_kind),
                     &request.query,
                 )?;
-                Ok(msime_client_core::dictionary::personal::PersonalWordPage {
-                    entries: entries
-                        .into_iter()
-                        .map(|entry| PersonalWord {
-                            kind: personal_kind(entry.kind.into()),
-                            key: entry.key,
-                            value: entry.value,
-                            weight: entry.weight,
-                        })
-                        .collect(),
-                    has_more,
-                })
+                Ok(
+                    msime_client_services::dictionary::personal::PersonalWordPage {
+                        entries: entries
+                            .into_iter()
+                            .map(|entry| PersonalWord {
+                                kind: personal_kind(entry.kind.into()),
+                                key: entry.key,
+                                value: entry.value,
+                                weight: entry.weight,
+                            })
+                            .collect(),
+                        has_more,
+                    },
+                )
             },
         )
         .map_err(personal_dictionary_error)?;
@@ -1430,11 +1484,12 @@ pub fn personal_dictionary_sync_json(bytes: &[u8]) -> Result<serde_json::Value, 
     Ok(json!({
         "synchronized": true,
         "pending_count": state.pending_count(),
+        "failed_count": state.requests.iter().filter(|request| request.status == PersonalWordRequestStatus::Failed).count(),
         "snapshot_error": state.snapshot_error,
     }))
 }
 
-/// The request id prefix `msime_client_core::dictionary::collections` gives what it queues.
+/// `msime_client_services::dictionary::collections` 给它排队的请求所加的 id 前缀。
 const COLLECTION_REQUEST_PREFIX: &str = "collections-";
 
 /// Identities of the user's own rows (`user_inserted`), the ones a dictionary collection must neither overwrite nor later remove. A store the Engine cannot read answers empty, so the addition is written as it was before this check existed.
@@ -1625,7 +1680,7 @@ fn replacement_for_engine(entry: Entry) -> Result<Entry, String> {
     validate_entry(&entry)?;
     // `validate_entry` also checks the previous row, which may be a stored quick phrase whose code has a digit; new input follows the reference's letters-only rule.
     if matches!(entry.kind, Kind::QuickPhrase)
-        && !msime_client_core::dictionary::quick_phrase_code_is_well_formed(&entry.key)
+        && !msime_client_services::dictionary::quick_phrase_code_is_well_formed(&entry.key)
     {
         return Err(invalid_dictionary_entry(
             "code contains characters this dictionary does not accept",
@@ -1652,14 +1707,18 @@ fn validate_entry_up_to(entry: &Entry, max_weight: i64) -> Result<(), String> {
         Kind::English => 64,
     };
     let key_valid = match entry.kind {
-        Kind::Pinyin => msime_client_core::dictionary::pinyin_code_is_well_formed(&entry.key, true),
+        Kind::Pinyin => {
+            msime_client_services::dictionary::pinyin_code_is_well_formed(&entry.key, true)
+        }
         Kind::Wubi | Kind::Wubi98 => {
-            msime_client_core::dictionary::wubi_code_is_well_formed(&entry.key)
+            msime_client_services::dictionary::wubi_code_is_well_formed(&entry.key)
         }
         Kind::QuickPhrase => {
-            msime_client_core::dictionary::quick_phrase_transport_code_is_well_formed(&entry.key)
+            msime_client_services::dictionary::quick_phrase_transport_code_is_well_formed(
+                &entry.key,
+            )
         }
-        Kind::English => msime_client_core::dictionary::english_code_is_well_formed(&entry.key),
+        Kind::English => msime_client_services::dictionary::english_code_is_well_formed(&entry.key),
     };
     let allowed_controls: &[char] = if matches!(entry.kind, Kind::QuickPhrase) {
         &['\n', '\t']
@@ -1700,9 +1759,9 @@ fn full_pinyin_key(key: &str, value: &str) -> Option<String> {
     .filter(|normalized| !normalized.is_empty())
 }
 
-impl From<&Kind> for msime_client_core::dictionary::import::ImportKind {
+impl From<&Kind> for msime_client_services::dictionary::import::ImportKind {
     fn from(kind: &Kind) -> Self {
-        use msime_client_core::dictionary::import::ImportKind;
+        use msime_client_services::dictionary::import::ImportKind;
         match kind {
             Kind::Pinyin => ImportKind::Pinyin,
             Kind::Wubi => ImportKind::Wubi,
@@ -1716,7 +1775,7 @@ impl From<&Kind> for msime_client_core::dictionary::import::ImportKind {
 /// Entries ready for the Engine, plus what the shared parser skipped.
 type ParsedImport = (
     Vec<DictionaryEntry>,
-    msime_client_core::dictionary::import::ImportReport,
+    msime_client_services::dictionary::import::ImportReport,
 );
 
 /// Parse a submitted dictionary file through the shared parser. Unusable rows
@@ -1728,7 +1787,7 @@ fn parse_import(
     text: &str,
     engine_options: Option<&msime_engine::host::EngineOptions>,
 ) -> Result<ParsedImport, String> {
-    let mut report = msime_client_core::dictionary::import::parse(
+    let mut report = msime_client_services::dictionary::import::parse(
         kind.into(),
         format,
         text,
@@ -1742,9 +1801,9 @@ fn parse_import(
                 report.failed += 1;
                 if report.first_failures.len() < 5 {
                     report.first_failures.push(
-                        msime_client_core::dictionary::import::ImportFailure {
+                        msime_client_services::dictionary::import::ImportFailure {
                             line: entry.line,
-                            issue: msime_client_core::dictionary::import::ImportIssue::Pinyin,
+                            issue: msime_client_services::dictionary::import::ImportIssue::Pinyin,
                         },
                     );
                 }
@@ -1890,7 +1949,7 @@ fn scan_user_quick_phrases(
     Ok(())
 }
 
-/// One page of the user's quick phrases whose code starts with `code_prefix` (case-insensitive).
+/// 个人快捷短语分页：ASCII 按编码前缀忽略大小写查询，非 ASCII 按词条内容查询。
 pub fn user_quick_phrases(
     options: &DictionaryOptions,
     code_prefix: &str,
@@ -2087,7 +2146,7 @@ fn word_from_entry(kind: WordKind, entry: Entry) -> Word {
     }
 }
 
-/// One page of a typing dictionary under `code_prefix`: the user's own words, or with `include_bundled` and a code to look up, every row the dictionary has under it.
+/// 按编码前缀或词条内容查询输入词库的一页；默认只列个人词条，`include_bundled` 与非空查询会包含内置行。
 pub fn dictionary_words(
     options: &DictionaryOptions,
     kind: WordKind,

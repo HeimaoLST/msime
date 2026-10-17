@@ -17,7 +17,11 @@ import {
   type LocalDictionaryFormat,
   type LocalDictionaryKind,
 } from "../dictionary/dictionary-file";
-import { describeImportResult, scelImportSource } from "../dictionary/dictionary-messages";
+import {
+  describeImportResult,
+  SCEL_PERSONAL_USE_NOTICE,
+  scelImportSource,
+} from "../dictionary/dictionary-messages";
 import {
   MAX_DICTIONARY_EXPORT_BYTES,
   dictionaryExportName,
@@ -29,10 +33,14 @@ import {
 } from "../dictionary/dictionary-export";
 import {
   dictionaryErrorMessage,
-  dictionaryKeyMatches,
+  dictionaryEntryMatches,
   importFailureMessage,
 } from "../dictionary/dictionary-errors";
-import type { DictionaryClient, DictionaryFailure, DictionaryImportResult } from "../index";
+import type {
+  DictionaryClient,
+  DictionaryFailure,
+  DictionaryImportResult,
+} from "../dictionary/dictionary-contracts";
 import type { DictionaryPhraseForm } from "./dictionary-entries";
 import { useMountedRef } from "./use-mounted-ref";
 import { useAsyncGeneration } from "./use-async-generation";
@@ -132,7 +140,7 @@ export function useDictionaryManager({ client, confirm }: UseDictionaryManagerOp
       const page = await client.dictionary.list(offset, DICTIONARY_PAGE_SIZE, kind, query);
       if (!mounted.current || generation !== phraseRequestGeneration.current) return;
       const entries = page.entries.filter(
-        (entry) => entry.kind === kind && dictionaryKeyMatches(kind, entry.key, query),
+        (entry) => entry.kind === kind && dictionaryEntryMatches(entry, query),
       );
       setPhrases(entries);
       setDictionaryPendingCount(page.pending_count ?? 0);
@@ -299,7 +307,8 @@ export function useDictionaryManager({ client, confirm }: UseDictionaryManagerOp
         if (!isCurrent()) return;
         if (imported)
           setPhraseNotice(
-            describeImportResult(dictionaryKindLabel(dictionaryKind), imported, source),
+            describeImportResult(dictionaryKindLabel(dictionaryKind), imported, source) +
+              (scel ? SCEL_PERSONAL_USE_NOTICE : ""),
           );
       },
       (error) => importFailureMessage(dictionaryKindLabel(dictionaryKind), error),

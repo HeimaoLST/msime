@@ -27,7 +27,7 @@ use crate::pinyin::glide::{GlideKeyboard, GlidePoint};
 use crate::types::{
     CandidateEdge, CandidateSource, Command, CommandTableEntry, CommandTranslationQuery, KeyResult,
     LocalInputMode, MentionEntry, OnlineQuery, PluginCommand, PluginCommandQuery, QuickPhraseEntry,
-    SchemeType,
+    SchemeType, WordItem,
 };
 
 use crate::types::FirstPageRows;
@@ -356,11 +356,14 @@ impl Session {
         self.input.set_helpcode_enabled(enabled);
     }
 
-    /// Flipping it resets the composition.
+    /// 只有模式改变时才取消组字；重复设置保留当前输入。
     pub fn set_dedicated_english(&mut self, enabled: bool) {
+        if self.input.dedicated_english == enabled {
+            return;
+        }
         self.nine_key.command(Command::Cancel);
         self.input.set_dedicated_english_mode(enabled);
-        // The grid's digits mean letters in English and syllables outside it, so whichever of the two switches moves last has to tell it.
+        // 九键在英文里用数字拼单词，在中文里拼音节，模式或网格改变时都要同步。
         self.nine_key
             .set_english_only(self.key_grid == Some(KeyGrid::NineKey) && enabled);
     }
@@ -416,6 +419,11 @@ impl Session {
         self.nine_key.set_personal_context_enabled(enabled);
     }
 
+    /// 让宿主把云候选的固定席位交给当前会话；关闭时立即去掉尚未回答的占位行。
+    pub fn set_cloud_candidates_enabled(&mut self, enabled: bool) {
+        self.input.set_cloud_candidates_enabled(enabled);
+    }
+
     /// The committed text the neural sentence models condition on, updated without rebuilding the session. Only the last 64 characters matter.
     pub fn set_rescoring_context(&mut self, context: &str) {
         self.input.set_rescoring_context(context);
@@ -438,7 +446,7 @@ impl Session {
         self.input.expand_initial_candidates()
     }
 
-    /// Composition caret for prefix decoding (overlays.md §7.6); `None` returns to the end. A no-op while nine-key digits are active.
+    /// 设置前缀解码的组字光标（overlays.md §7.6）；位置限制在可编辑范围，不能越过本地模式的入口标记。`None` 回到末尾，九键组码时无操作。
     pub fn set_caret(&mut self, caret: Option<usize>) {
         if self.nine_key.active() {
             return;
@@ -507,8 +515,11 @@ impl Session {
             candidate_answers_key: candidates
                 .iter()
                 .map(|item| {
-                    // AI 占位行不回答按键：重排模型不能把它提到前面。
-                    item.source != CandidateSource::AiPending
+                    // AI 占位行和网址补全不回答按键：重排模型不能把它们提到前面。
+                    !matches!(
+                        item.source,
+                        CandidateSource::AiPending | CandidateSource::CloudPending
+                    ) && !input.is_url_completion(item)
                         && input.selection_completes_composition(item)
                 })
                 .collect(),
@@ -535,13 +546,24 @@ impl Session {
     }
 
     /// 显示候选与原始候选同座且词面一致时复用已缓存的反查码；候选身份错位时返回 `None`，由宿主回退到按词入口。
-    pub(crate) fn candidate_wubi_code_at_if_word(&self, index: usize, word: &str) -> Option<&str> {
+    pub(crate) fn candidate_wubi_code_at_if_item(
+        &self,
+        index: usize,
+        item: &WordItem,
+    ) -> Option<&str> {
         if self.nine_key.active() {
             return None;
         }
         self.input
             .engine
-            .candidate_wubi_code_at_if_word(index, word)
+            .candidate_wubi_code_at_if_item(index, item)
+    }
+
+    pub(crate) fn candidate_wubi_code_if_item(&self, item: &WordItem) -> Option<&str> {
+        if self.nine_key.active() {
+            return None;
+        }
+        self.input.engine.candidate_wubi_code_if_item(item)
     }
 
     /// Byte offsets into `editing_text` for pinyin-unit editing; empty when idle, in local modes, for non-pinyin schemes and during nine-key input. Read-only.
@@ -620,23 +642,6 @@ impl Session {
     /// Remove one online provider's rows from cached and visible candidates.
     pub fn clear_online_candidates(&mut self, source: CandidateSource) {
         self.input.clear_online_candidates(source);
-    }
-
-    /// 宿主为这个会话打开或关掉 AI 候选；打开时可以问 AI 的组字先在 AI 座位上放占位行（`CandidateSource::AiPending`），回答到达时由第一条 AI 候选替换，前后的候选都不挪位（#6888）。返回开关是否变了。
-    pub fn set_ai_seat(&mut self, enabled: bool) -> bool {
-        self.input.set_ai_seat(enabled)
-    }
-
-    /// AI 回答为空或失败：当前查询的占位行换成「—」，留到组字变化为止。返回显示的列表是否变了；过期查询、云候选和九宫格组字都返回 false。
-    pub fn resolve_online_candidates(
-        &mut self,
-        query: &OnlineQuery,
-        source: CandidateSource,
-    ) -> bool {
-        if self.nine_key.active() {
-            return false;
-        }
-        self.input.resolve_online_candidates(query, source)
     }
 
     pub fn apply_online_candidate(

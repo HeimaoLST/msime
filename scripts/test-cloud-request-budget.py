@@ -61,8 +61,8 @@ MOBILE_CONSTANTS = [
 # worker fetches over WinHTTP and gives resolve, connect, send and receive 2000 ms each.
 REFERENCE = {"CONNECT": 2000, "REQUEST": 2000}
 
-# The AI candidate has its own budget. client-core's AI descriptor carries the reference's 2500 ms connect and 8000 ms total, and Windows AiAssistant waits 650 ms of idle input before asking (the cloud candidate waits 500 ms). The Linux hosts do not read the descriptor: the online provider fetches with its own Python constants and both engines hold their own idle timers, so those literals are pinned here against the descriptor.
-AI_DESCRIPTOR = ROOT / "crates/client-core/src/ai.rs"
+# AI 候选有自己的时间预算。client-providers 的 AI 描述符沿用参考实现的 2500 ms 连接和 8000 ms 总时长，Windows 的 `AiAssistant` 在输入空闲 650 ms 后才发请求（云候选等 500 ms）。Linux 宿主不读这个描述符：在线提供方用它自己的 Python 常量发请求，两个引擎也各自持有空闲计时器，所以这里把那些字面量对照描述符固定下来。
+AI_DESCRIPTOR = ROOT / "crates/client-providers/src/ai.rs"
 LINUX_PROVIDER = ROOT / "platforms/linux/scripts/msime-linux-online-provider"
 LINUX_TRANSPORT = ROOT / "crates/input-runtime/src/providers.rs"
 LINUX_IBUS = ROOT / "platforms/linux/src/core/ClientEngine.cpp"
@@ -78,7 +78,7 @@ def linux_ai_budget(failures: list[str]) -> bool:
     descriptor = AI_DESCRIPTOR.read_text(encoding="utf-8")
     match = re.search(r'"timeout_ms":(\d+),"connect_timeout_ms":(\d+)', descriptor)
     if not match:
-        failures.append("client-core's AI descriptor no longer declares timeout_ms and connect_timeout_ms")
+        failures.append("client-providers' AI descriptor no longer declares timeout_ms and connect_timeout_ms")
         return True
     total_ms, connect_ms = int(match.group(1)), int(match.group(2))
 
@@ -87,20 +87,20 @@ def linux_ai_budget(failures: list[str]) -> bool:
         found = re.search(rf"^{name} = ([0-9.]+)$", provider, re.M)
         if not found or round(float(found.group(1)) * 1000) != expected_ms:
             failures.append(
-                f"the Linux online provider's {name} is {found.group(1) if found else None} s, and client-core's AI descriptor asks for {expected_ms} ms"
+                f"the Linux online provider's {name} is {found.group(1) if found else None} s, and client-providers' AI descriptor asks for {expected_ms} ms"
             )
-    anonymous = re.search(r"^ANONYMOUS_ACCOUNT_TIMEOUT = ([0-9.]+)$", provider, re.M)
-    if not anonymous:
-        failures.append("the Linux online provider no longer declares an anonymous account timeout")
-    # worker 会拒绝超过上限的期限；上限低于调用方预算会让每个请求在发出前静默失败（ai_polish_test 曾以 8 秒请求撞上 7 秒上限）。
-    if "HTTP_WORKER_MAX_TIMEOUT = max(AI_REQUEST_TIMEOUT, ANONYMOUS_ACCOUNT_TIMEOUT)" not in provider:
-        failures.append("the Linux HTTP worker max timeout no longer covers both AI and anonymous account budgets")
+    # worker 会拒绝超过上限的期限；上限低于调用方预算会让每个请求在发出前静默失败（ai_polish_test 曾以 8 秒请求撞上 7 秒上限）。账号注册与刷新已经由 Rust host-api 负责，不再占用 Python worker 的预算。
+    if "HTTP_WORKER_MAX_TIMEOUT = AI_REQUEST_TIMEOUT" not in provider:
+        failures.append("the Linux HTTP worker max timeout no longer follows the AI request budget")
     if "not 0 < timeout <= HTTP_WORKER_MAX_TIMEOUT" not in provider:
         failures.append("the Linux HTTP worker no longer validates requests against its declared max timeout")
-    auth_timeouts = re.findall(
-        r'ANONYMOUS_ACCOUNT_ORIGIN \+ "/v1/auth/(?:refresh|challenges|login)",\s*([A-Z_]+)', provider)
-    if auth_timeouts != ["ANONYMOUS_ACCOUNT_TIMEOUT"] * 3:
-        failures.append("the Linux anonymous account requests do not all use ANONYMOUS_ACCOUNT_TIMEOUT")
+    if any(symbol not in provider for symbol in (
+            "msime_client_ensure_anonymous_account",
+            "msime_client_account_access_token",
+            "msime_client_account_gloss")):
+        failures.append("the Linux online provider no longer routes account registration, tokens and translation through host-api")
+    if "/v1/auth/" in provider or "anonymous-account.json" in provider or "anonymous-session.json" in provider:
+        failures.append("the Linux online provider still duplicates Rust account authentication or storage")
     if not re.search(r"fetch\(config\[\"endpoint\"\], AI_REQUEST_TIMEOUT,[^)]*connect_timeout=AI_CONNECT_TIMEOUT\)", provider):
         failures.append("the Linux AI candidate request does not use AI_REQUEST_TIMEOUT and AI_CONNECT_TIMEOUT")
 
@@ -199,7 +199,7 @@ def main() -> int:
     )
     if linux_ai:
         print(
-            f"linux AI candidate budget: idle {AI_IDLE_DELAY_MS} ms (cloud {CLOUD_IDLE_DELAY_MS} ms), matching client-core's AI descriptor"
+            f"linux AI candidate budget: idle {AI_IDLE_DELAY_MS} ms (cloud {CLOUD_IDLE_DELAY_MS} ms), matching client-providers' AI descriptor"
         )
     return 0
 

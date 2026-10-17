@@ -20,12 +20,14 @@ pub enum CandidateSource {
     Fallback = 9,
     /// A lattice path the keyboard (speed) sentence model picked.
     NeuralKeyboard = 11,
-    /// AI 候选的占位行（#6888）：会话开着 AI、当前组字可以问 AI 时，先占住 AI 候选的座位，回答到了由第一条 AI 候选替换；回答为空或失败时文字换成「—」，留到组字变化为止。它不能上屏、不学习、不计入统计，宿主把它画成暗色。
+    /// AI 候选的占位行（#6888），已退役：共享内核不再产生它，AI 回答到达时第一条直接插在第一页最后一格（`.agents/notes/implemented/feature/2026-10-16-ai-candidate-last-slot.md`）。值保留不复用；引擎和宿主对它的处理（不能上屏、不学习、不计入统计、画成暗色）照旧，旧版本留下的行仍按这些规则处理。
     AiPending = 12,
     /// 日文混输（实验选项，默认关）混进全拼、双拼候选的那一行：整段输入按罗马字转换出的最佳日文。它不属于下面任何一个谓词，所以选中时整段上屏并结束组字（与混输英文同一条路），不调词频、不记整句、不进个人上下文，也不能置顶、固定或删除；宿主不对它做简繁转换。
     MixedJapanese = 13,
     /// 脚本插件在自己的 `/` 指令里给出的行，只在桌面产生（宿主经 `Session::apply_plugin_command_rows` 写进来）。它不属于下面任何一个谓词：选中时整段上屏并结束组字，不调词频、不记整句、不进个人上下文，不能置顶、固定或删除；runtime 不把它的上屏喂进 AI 上文，宿主不为它请求释义或翻译，上屏也不转全角。
     Plugin = 14,
+    /// 云候选尚在请求中；它占据云候选的固定位置，回答到达时由第一条云候选替换。值追加在已有 ABI 之后，不能复用旧值。
+    CloudPending = 15,
 }
 
 impl CandidateSource {
@@ -45,6 +47,7 @@ impl CandidateSource {
             12 => Self::AiPending,
             13 => Self::MixedJapanese,
             14 => Self::Plugin,
+            15 => Self::CloudPending,
             _ => return None,
         })
     }
@@ -53,14 +56,18 @@ impl CandidateSource {
         matches!(self, Self::CloudSuggestion | Self::AiSuggestion)
     }
 
-    /// 坐 AI 座位的行：AI 候选和它的占位行。
+    pub fn is_cloud_pending(self) -> bool {
+        self == Self::CloudPending
+    }
+
+    /// AI 行：AI 候选和已退役的占位行。
     pub fn holds_ai_seat(self) -> bool {
         matches!(self, Self::AiSuggestion | Self::AiPending)
     }
 
-    /// 由在线座位规则摆放的行：云候选、AI 候选和 AI 占位行。
+    /// 由在线座位规则摆放的行：云候选、AI 候选和已退役的 AI 占位行。
     pub fn takes_online_seat(self) -> bool {
-        self.is_online() || self == Self::AiPending
+        self.is_online() || matches!(self, Self::AiPending | Self::CloudPending)
     }
 
     pub fn is_generated_or_fallback(self) -> bool {
@@ -590,7 +597,7 @@ impl Default for SchemeSet {
     }
 }
 
-/// Double-pinyin keyboard profile. The ordinal is the host ABI value (`EngineOptions::shuangpin_profile`).
+/// 双拼键位方案，序号是宿主 ABI 值（`EngineOptions::shuangpin_profile`），新增方案只追加。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
 pub enum ShuangpinProfileKind {
@@ -601,6 +608,7 @@ pub enum ShuangpinProfileKind {
     Microsoft = 3,
     /// 用户自定义的键位，表在 [`ShuangpinCustomTable`] 里（`EngineOptions::shuangpin_custom_profile`、`SessionOptions::shuangpin_custom_profile`），没有内置的表。
     Custom = 4,
+    SmartAbc = 5,
 }
 
 impl ShuangpinProfileKind {
@@ -611,6 +619,7 @@ impl ShuangpinProfileKind {
             2 => Self::Shoudao,
             3 => Self::Microsoft,
             4 => Self::Custom,
+            5 => Self::SmartAbc,
             _ => return None,
         })
     }
@@ -623,6 +632,7 @@ impl ShuangpinProfileKind {
             "shoudao" => Self::Shoudao,
             "microsoft" => Self::Microsoft,
             "custom" => Self::Custom,
+            "smart_abc" => Self::SmartAbc,
             _ => return None,
         })
     }
@@ -634,6 +644,7 @@ impl ShuangpinProfileKind {
             Self::Shoudao => "shoudao",
             Self::Microsoft => "microsoft",
             Self::Custom => "custom",
+            Self::SmartAbc => "smart_abc",
         }
     }
 }
@@ -1153,6 +1164,14 @@ impl LocalInputMode {
     /// Whether the mode's rows are text the engine generated rather than words the user spelled. Their commits are never learned and never counted as typing.
     pub fn generates_text(self) -> bool {
         matches!(self, Self::Expression | Self::Command | Self::Mention)
+    }
+
+    /// 去掉临时模式预编辑开头的入口字母（`Y`、`R`）。它是模式标记、不是用户打的字，所以进词库的词不能带它；回车原样上屏时它算文本（#7616），那一处不走这里。
+    pub fn without_entry_marker(self, text: &str) -> &str {
+        match self {
+            Self::TemporaryEnglish | Self::TemporaryJapanese => text.get(1..).unwrap_or_default(),
+            _ => text,
+        }
     }
 
     /// 候选注释由 Engine 自己给出、不补辅助码的模式：V、`/`、`@` 的行不是按拼音拼出来的，辅助码说明不了它们；拆字的行注释的是字的读音，用户正是不会读这个字才来查，辅助码夹在读音里只会添乱。和 `generates_text` 分开，是因为拆字上屏的字是用户挑出来的，照常计入打字统计。

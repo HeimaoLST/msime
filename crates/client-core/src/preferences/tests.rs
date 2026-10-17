@@ -4,6 +4,42 @@
 
 use super::*;
 
+#[test]
+fn backspace_selection_preference_keeps_legacy_default_and_persists_disabled() {
+    let defaults = Preferences::default();
+    assert!(defaults.backspace_reverts_selection);
+    let legacy = serde_json::to_value(&defaults).unwrap();
+    assert!(legacy.get("backspace_reverts_selection").is_none());
+    assert!(
+        serde_json::from_value::<Preferences>(legacy.clone())
+            .unwrap()
+            .backspace_reverts_selection
+    );
+    let mut malformed = legacy;
+    malformed["backspace_reverts_selection"] = "false".into();
+    assert!(serde_json::from_value::<Preferences>(malformed).is_err());
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let disabled = Preferences {
+        backspace_reverts_selection: false,
+        ..defaults
+    };
+    let saved = store.save(0, disabled).unwrap();
+    assert!(!saved.preferences.backspace_reverts_selection);
+    assert!(
+        !store
+            .load()
+            .unwrap()
+            .preferences
+            .backspace_reverts_selection
+    );
+    assert_eq!(
+        serde_json::to_value(&saved.preferences).unwrap()["backspace_reverts_selection"],
+        false
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn stale_sweep_does_not_follow_a_replaced_directory() {
@@ -45,7 +81,10 @@ fn recovery_backup_does_not_follow_a_symlinked_directory() {
     let store = PreferencesStore::new(&directory);
 
     assert!(store
-        .write_backup(b"synthetic damaged preferences")
+        .write_backup(
+            b"synthetic damaged preferences",
+            time::OffsetDateTime::now_utc(),
+        )
         .is_err());
     assert!(outside.path().read_dir().unwrap().next().is_none());
 }
@@ -182,41 +221,6 @@ fn voice_commit_mode_defaults_for_legacy_documents() {
         .remove("commit_mode");
     let restored: Preferences = serde_json::from_value(value).unwrap();
     assert_eq!(restored.voice_input.commit_mode, "tsf");
-}
-
-#[test]
-fn the_retired_everyapi_asr_model_falls_back_to_the_current_default_on_load() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = PreferencesStore::new(directory.path());
-    let load_with = |provider: &str, model: &str| {
-        let snapshot = store.load().unwrap();
-        let mut preferences = snapshot.preferences;
-        preferences.voice_input.asr_provider = provider.into();
-        preferences.voice_input.asr_model = model.into();
-        store.save(snapshot.revision, preferences).unwrap();
-        store.load().unwrap().preferences.voice_input.asr_model
-    };
-    // EveryAPI never served this model; an empty field lets the resolver use the current default.
-    assert_eq!(load_with("everyapi", "openai/whisper-large-v3-turbo"), "");
-    assert_eq!(load_with("everyapi", " openai/whisper-large-v3-turbo "), "");
-    let resolved = crate::voice::provider::mobile_voice_provider_configuration(&{
-        let mut preferences = store.load().unwrap().preferences;
-        preferences.voice_input.asr_token = "fixture-token".into();
-        preferences.voice_input.asr_endpoint.clear();
-        preferences
-    })
-    .unwrap();
-    assert_eq!(resolved.model, "volc.seedasr.sauc.duration");
-    // A model the user chose, or the same name under another provider, is left alone.
-    assert_eq!(
-        load_with("everyapi", "volc.seedasr.sauc.duration"),
-        "volc.seedasr.sauc.duration"
-    );
-    assert_eq!(load_with("everyapi", "custom-model"), "custom-model");
-    assert_eq!(
-        load_with("groq", "openai/whisper-large-v3-turbo"),
-        "openai/whisper-large-v3-turbo"
-    );
 }
 
 #[test]
@@ -1204,13 +1208,19 @@ fn plugin_preferences_are_off_by_default_and_absent_from_older_documents() {
     let defaults = PluginPreferences::default();
     assert!(!defaults.key_sound.enabled);
     assert_eq!(defaults.key_sound.mode, KeySoundMode::Keys);
-    assert_eq!(defaults.key_sound.pack, crate::plugins::DEFAULT_SOUND_PACK);
-    assert_eq!(defaults.melody.pack, crate::plugins::DEFAULT_MELODY_PACK);
+    assert_eq!(
+        defaults.key_sound.pack,
+        crate::preferences::DEFAULT_SOUND_PACK
+    );
+    assert_eq!(
+        defaults.melody.pack,
+        crate::preferences::DEFAULT_MELODY_PACK
+    );
     assert!(
         !defaults.commit_sound.enabled && !defaults.music.enabled && !defaults.achievements.enabled
     );
     assert!(defaults.music.pack.is_empty() && defaults.command_tables.is_empty());
-    assert_eq!(defaults.effect_style, crate::plugins::EffectStyle::Off);
+    assert_eq!(defaults.effect_style, crate::preferences::EffectStyle::Off);
     assert_eq!(defaults.effect_intensity, 50);
     assert!(defaults.effect_pack.is_empty());
     assert!(defaults.phrase_tables.is_empty());
@@ -1259,7 +1269,7 @@ fn plugin_preferences_are_off_by_default_and_absent_from_older_documents() {
             },
             achievements: AchievementPreferences { enabled: true },
             command_tables: vec!["sig".into(), "work.notes".into()],
-            effect_style: crate::plugins::EffectStyle::PowerMode,
+            effect_style: crate::preferences::EffectStyle::PowerMode,
             effect_intensity: 100,
             effect_pack: "neon".into(),
             combo_counter: true,
@@ -1692,7 +1702,7 @@ fn appearance_preferences_absent_defaults_and_roundtrip() {
     assert!(loaded.preferences.show_candidate_expand_button);
     // 缺这两项的旧文档按类型默认值读，保持跟随系统；触屏构建的新安装才用薄荷晨光（#2178），所以这里不能直接比 `Preferences::default()`。
     let mut expected = PreferencesSnapshot::default();
-    expected.preferences.global_theme = crate::skin::theme::GlobalTheme::default();
+    expected.preferences.global_theme = crate::theme::GlobalTheme::default();
     expected.preferences.custom_theme = CustomTheme::default();
     assert_eq!(loaded, expected);
     assert_eq!(
@@ -1819,7 +1829,7 @@ fn screen_keyboard_theme_roundtrips_independently() {
 
 #[test]
 fn global_theme_ids_round_trip_and_reject_unknown_ids() {
-    use crate::skin::theme::GlobalTheme;
+    use crate::theme::GlobalTheme;
     let dir = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(dir.path());
     // 新安装在所有构建上都跟随系统。
@@ -1872,7 +1882,7 @@ fn custom_theme_round_trips_every_part() {
         Vec::<&String>::new()
     );
     let custom_theme = CustomTheme {
-        base: crate::skin::theme::GlobalTheme::Paper,
+        base: crate::theme::GlobalTheme::Paper,
         candidate_skin: Some("sakura.v2".into()),
         candidate_skin_dark: Some("night-sakura".into()),
         candidate_colors: CustomCandidateColors {
@@ -1894,7 +1904,7 @@ fn custom_theme_round_trips_every_part() {
         .save(
             0,
             Preferences {
-                global_theme: crate::skin::theme::GlobalTheme::Custom,
+                global_theme: crate::theme::GlobalTheme::Custom,
                 custom_theme: custom_theme.clone(),
                 ..Preferences::default()
             },
@@ -1928,8 +1938,8 @@ fn custom_theme_round_trips_every_part() {
 
     // `native` 只在部分宿主上提供，不能当自定义主题的底。
     for base in [
-        crate::skin::theme::GlobalTheme::Custom,
-        crate::skin::theme::GlobalTheme::Native,
+        crate::theme::GlobalTheme::Custom,
+        crate::theme::GlobalTheme::Native,
     ] {
         let mut preferences = saved.preferences.clone();
         preferences.custom_theme.base = base;
@@ -1981,7 +1991,7 @@ fn custom_theme_keyboard_matches_apple_fields_and_bounds() {
         photo_position: Some(1.0),
     };
     let preferences = Preferences {
-        global_theme: crate::skin::theme::GlobalTheme::Custom,
+        global_theme: crate::theme::GlobalTheme::Custom,
         custom_theme: CustomTheme {
             keyboard: Some(design.clone()),
             ..CustomTheme::default()
@@ -2315,11 +2325,49 @@ fn second_third_candidate_defaults_off_and_stays_out_of_default_documents() {
 }
 
 #[test]
+fn wubi_candidate_selection_defaults_roundtrip_and_rejects_invalid_keys() {
+    let root = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(root.path());
+    let defaults = Preferences::default();
+    assert!(serde_json::to_value(&defaults)
+        .unwrap()
+        .get("wubi_candidate_selection")
+        .is_none());
+    let mut settings: WubiCandidateSelectionPreferences =
+        serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
+    assert_eq!(settings.slot(b';'), Some(1));
+    assert_eq!(settings.slot(b'\''), Some(2));
+    settings.second_key = "/".into();
+    settings.third_key = "?".into();
+    let mut preferences = Preferences {
+        wubi_candidate_selection: settings,
+        ..defaults
+    };
+    let saved = store.save(0, preferences.clone()).unwrap();
+    assert_eq!(store.load().unwrap(), saved);
+    assert_eq!(
+        saved.preferences.wubi_candidate_selection.slot(b'/'),
+        Some(1)
+    );
+    for invalid in ["", "a", "2", " ", "\n", "；", ";'", "?"] {
+        preferences.wubi_candidate_selection.second_key = invalid.into();
+        assert!(matches!(
+            preferences.validate(),
+            Err(PreferencesError::InvalidWubiCandidateSelection)
+        ));
+        assert!(store.save(saved.revision, preferences.clone()).is_err());
+        assert_eq!(store.load().unwrap(), saved);
+    }
+}
+
+#[test]
 fn navigation_accepts_windows_candidate_arrow_alias() {
     let value = serde_json::json!({"minus_equal": true, "comma_period": true, "brackets": false, "tab": true, "page_up_down": true, "mouse_wheel": true, "candidate_arrow_navigation": false});
     let parsed: NavigationPreferences = serde_json::from_value(value).unwrap();
     assert!(!parsed.arrows);
     assert!(parsed.mouse_wheel);
+    // 新加的左右键开关在旧文档里没有这个键，缺省必须关闭。
+    assert!(!parsed.left_right);
 }
 
 #[test]
@@ -2351,6 +2399,7 @@ fn navigation_defaults_and_independent_flags_roundtrip() {
             page_up_down: false,
             mouse_wheel: false,
             arrows: false,
+            left_right: true,
         },
         ..Preferences::default()
     };
@@ -3112,9 +3161,9 @@ fn touch_keyboard_spacing_uses_apple_defaults_bounds_and_legacy_roundtrip() {
         loaded.preferences.touch_twenty_six_key_number_layout,
         TwentySixKeyNumberLayout::Row
     );
-    // 旧文档没有这个键：双拼键位提示照旧显示。
-    assert!(loaded.preferences.touch_shuangpin_key_hints);
-    assert!(Preferences::default().touch_shuangpin_key_hints);
+    // 旧文档没有这个键：新默认关闭双拼键位提示。
+    assert!(!loaded.preferences.touch_shuangpin_key_hints);
+    assert!(!Preferences::default().touch_shuangpin_key_hints);
     assert_eq!(fs::read(store.path()).unwrap(), bytes);
 
     let saved = store
@@ -3375,6 +3424,7 @@ fn shuangpin_profiles_preserve_legacy_files_and_reject_unknown_values() {
         ShuangpinProfile::Xiaohe,
         ShuangpinProfile::Ziranma,
         ShuangpinProfile::Shoudao,
+        ShuangpinProfile::SmartAbc,
         ShuangpinProfile::Microsoft,
     ] {
         let saved = store
@@ -3627,33 +3677,6 @@ fn ai_assistant_rejects_unknown_provider_and_invalid_candidate_limit() {
 }
 
 #[test]
-fn default_ai_assistant_requests_carry_the_builtin_associative_prompt() {
-    // The stored slot stays empty on purpose: blank means "use the built-in prompt" at request time, here and in the Linux provider's copy of the same text.
-    let mut ai = Preferences::default().ai_assistant;
-    assert!(ai.prompt_custom_1.is_empty());
-    ai.enabled = true;
-    ai.endpoint = "https://synthetic.invalid/chat".into();
-    ai.model = "synthetic-model".into();
-    ai.tokens.insert(
-        "https://synthetic.invalid:443".into(),
-        "synthetic-token".into(),
-    );
-    let request = crate::ai::AiSuggestionRequest {
-        segmented_pinyin: vec!["shu".into(), "ru".into()],
-        context: String::new(),
-        candidate_limit: ai.candidate_limit,
-    };
-    let descriptor = crate::ai::chat_completion_http_request(&ai, &request)
-        .unwrap()
-        .unwrap();
-    let system = &descriptor["body"]["messages"][0];
-    assert_eq!(system["role"], "system");
-    assert_eq!(system["content"], crate::ai::DEFAULT_CANDIDATE_PROMPT);
-    assert!(crate::ai::DEFAULT_CANDIDATE_PROMPT.contains("JSON"));
-    assert!(crate::ai::DEFAULT_CANDIDATE_PROMPT.contains("\"candidates\""));
-}
-
-#[test]
 fn candidate_font_size_bounds_are_strict() {
     let dir = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(dir.path());
@@ -3699,7 +3722,7 @@ fn candidate_font_size_bounds_are_strict() {
     // 新安装在所有构建上都跟随系统，自定义主题为空。
     assert_eq!(
         initial.preferences.global_theme,
-        crate::skin::theme::GlobalTheme::System
+        crate::theme::GlobalTheme::System
     );
     assert_eq!(initial.preferences.custom_theme, CustomTheme::default());
     assert_eq!(initial.preferences.theme, ThemeMode::System);
@@ -4088,7 +4111,8 @@ fn smart_punctuation_sub_switches_survive_a_save() {
 
     // A document that predates them reads them as their defaults, which is what the family's
     // parent says: the two halves of 智能标点 follow it, and the space rewrite does not.
-    let following_parent = !cfg!(any(windows, target_os = "macos"));
+    let following_parent = Preferences::default().smart_punctuation;
+    assert!(following_parent);
     let defaults = serde_json::to_value(Preferences::default()).unwrap();
     assert_eq!(
         defaults["smart_punctuation_space_convert"],
@@ -4180,21 +4204,17 @@ fn caps_lock_ascii_punctuation_defaults_off_and_survives_a_save() {
     assert_eq!(store.load().unwrap(), saved);
 }
 
-// The source ships every smart-punctuation switch disabled, and the running host reads this document rather than the installed template. A fresh Windows or macOS profile must therefore start with the family off, macOS following the desktop product it ports; Linux, Android, iOS and HarmonyOS keep what they have shipped. A stored value is never reinterpreted either way.
+// 智能标点在所有平台上默认开：新文档、缺键的文档都按开读入，数字后的 `.` 直接出英文。空格转换不跟着开，它改写的是用户已经看着落下去的字符，又没有反悔手势。文档里明写的值照样保留。
 #[test]
-fn smart_punctuation_first_run_follows_the_source_on_desktop_ports() {
-    let expected = !cfg!(any(windows, target_os = "macos"));
+fn smart_punctuation_defaults_on_everywhere() {
     let defaults = Preferences::default();
-    assert_eq!(defaults.smart_punctuation, expected);
-    assert_eq!(defaults.smart_punctuation_repeat, expected);
-    // The two halves of 智能标点 follow it. The reference has no such halves - one switch there
-    // means "ASCII after a letter or a digit", which is the sentence this page shows under the
-    // parent - so with them off the parent was on out of the box and did nothing.
-    assert_eq!(defaults.smart_punctuation_direct_digit, expected);
-    assert_eq!(defaults.smart_punctuation_direct_letter, expected);
-    // Space-after-punctuation is not one of those halves: it rewrites a character the user already
-    // saw land, and the reference has no equivalent at all, so it stays off until asked for.
+    assert!(defaults.smart_punctuation);
+    assert!(defaults.smart_punctuation_repeat);
+    assert!(defaults.smart_punctuation_direct_digit);
+    assert!(defaults.smart_punctuation_direct_letter);
     assert!(!defaults.smart_punctuation_space_convert);
+    // 新文档从一开始就带着迁移标记，所以之后关掉的值不会被当成旧默认改回去。
+    assert!(defaults.smart_punctuation_migrated);
 
     let dir = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(dir.path());
@@ -4204,17 +4224,172 @@ fn smart_punctuation_first_run_follows_the_source_on_desktop_ports() {
     preferences.remove("smart_punctuation_repeat").unwrap();
     fs::write(store.path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
     let loaded = store.load().unwrap().preferences;
-    assert_eq!(loaded.smart_punctuation, expected);
-    assert_eq!(loaded.smart_punctuation_repeat, expected);
+    assert!(loaded.smart_punctuation);
+    assert!(loaded.smart_punctuation_repeat);
 
     // A document that states the opposite keeps stating it.
     let mut stored = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
-    stored["preferences"]["smart_punctuation"] = (!expected).into();
-    stored["preferences"]["smart_punctuation_repeat"] = (!expected).into();
+    stored["preferences"]["smart_punctuation"] = false.into();
+    stored["preferences"]["smart_punctuation_repeat"] = false.into();
     fs::write(store.path(), serde_json::to_vec(&stored).unwrap()).unwrap();
     let loaded = store.load().unwrap().preferences;
-    assert_eq!(loaded.smart_punctuation, !expected);
-    assert_eq!(loaded.smart_punctuation_repeat, !expected);
+    assert!(!loaded.smart_punctuation);
+    assert!(!loaded.smart_punctuation_repeat);
+}
+
+/// 默认改变之前写下的文档：智能标点这一族存着 `false`，没有迁移标记。
+fn smart_punctuation_legacy_document() -> serde_json::Value {
+    let mut legacy = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+    let preferences = legacy["preferences"].as_object_mut().unwrap();
+    for key in [
+        "smart_punctuation",
+        "smart_punctuation_repeat",
+        "smart_punctuation_direct_digit",
+        "smart_punctuation_direct_letter",
+        "smart_punctuation_space_convert",
+    ] {
+        preferences.insert(key.into(), false.into());
+    }
+    assert_eq!(
+        preferences.remove("smart_punctuation_migrated"),
+        Some(true.into())
+    );
+    legacy
+}
+
+// 迁移本身与平台无关地验证：以前默认关的平台把四个开关打开，空格转换不动；其余平台旧文档里的 `false` 是用户自己关的，原样保留。两种都标上标记，第二次不再改。
+#[test]
+fn smart_punctuation_settle_flips_only_where_the_old_default_was_off() {
+    let legacy: Preferences =
+        serde_json::from_value(smart_punctuation_legacy_document()["preferences"].clone()).unwrap();
+    assert!(!legacy.smart_punctuation_migrated);
+
+    let mut desktop = legacy.clone();
+    desktop.settle_smart_punctuation_default(true);
+    assert!(desktop.smart_punctuation);
+    assert!(desktop.smart_punctuation_repeat);
+    assert!(desktop.smart_punctuation_direct_digit);
+    assert!(desktop.smart_punctuation_direct_letter);
+    assert!(!desktop.smart_punctuation_space_convert);
+    assert!(desktop.smart_punctuation_migrated);
+    // 用户之后关掉，再走一遍迁移也不会打开。
+    desktop.smart_punctuation = false;
+    desktop.settle_smart_punctuation_default(true);
+    assert!(!desktop.smart_punctuation);
+
+    let mut other = legacy;
+    other.settle_smart_punctuation_default(false);
+    assert!(!other.smart_punctuation);
+    assert!(!other.smart_punctuation_repeat);
+    assert!(!other.smart_punctuation_direct_digit);
+    assert!(!other.smart_punctuation_direct_letter);
+    assert!(other.smart_punctuation_migrated);
+}
+
+// 经过存储的完整路径：旧文档读入时迁移（macOS、Windows 打开，其余平台不动），文件在下一次真正的保存之前保持原样；用户随后关掉智能标点，保存下来的文档带着标记，再读还是关。
+#[test]
+fn smart_punctuation_migration_runs_once_and_a_later_off_sticks() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let mut legacy = smart_punctuation_legacy_document();
+    legacy["revision"] = 3.into();
+    let bytes = serde_json::to_vec(&legacy).unwrap();
+    fs::write(store.path(), &bytes).unwrap();
+
+    let flipped = SMART_PUNCTUATION_WAS_OFF_BY_DEFAULT;
+    let loaded = store.load().unwrap();
+    assert_eq!(loaded.revision, 3);
+    assert_eq!(loaded.preferences.smart_punctuation, flipped);
+    assert_eq!(loaded.preferences.smart_punctuation_repeat, flipped);
+    assert_eq!(loaded.preferences.smart_punctuation_direct_digit, flipped);
+    assert_eq!(loaded.preferences.smart_punctuation_direct_letter, flipped);
+    assert!(!loaded.preferences.smart_punctuation_space_convert);
+    assert!(loaded.preferences.smart_punctuation_migrated);
+    // 只读不写：两次读得到同样的结果，文件没有变。
+    assert_eq!(store.load().unwrap(), loaded);
+    assert_eq!(fs::read(store.path()).unwrap(), bytes);
+
+    // 写入方的偏好里没有标记（比如照旧形状拼出来的 JSON），保存时也带上，否则下一次读会把刚关掉的又打开。
+    let mut off = serde_json::to_value(&loaded.preferences).unwrap();
+    off["smart_punctuation"] = false.into();
+    // Android 等平台的旧值本来就是关；同时改变子开关，确保走真实保存而非无变化快速返回。
+    off["smart_punctuation_repeat"] = (!flipped).into();
+    off.as_object_mut()
+        .unwrap()
+        .remove("smart_punctuation_migrated")
+        .unwrap();
+    let off: Preferences = serde_json::from_value(off).unwrap();
+    assert!(!off.smart_punctuation_migrated);
+    let saved = store.save(3, off).unwrap();
+    assert!(saved.preferences.smart_punctuation_migrated);
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(
+        on_disk["preferences"]["smart_punctuation_migrated"],
+        serde_json::Value::Bool(true)
+    );
+    let reloaded = store.load().unwrap();
+    assert_eq!(reloaded, saved);
+    assert!(!reloaded.preferences.smart_punctuation);
+    assert_eq!(reloaded.preferences.smart_punctuation_repeat, !flipped);
+    assert_eq!(reloaded.preferences.smart_punctuation_direct_digit, flipped);
+
+    // 恢复默认设置回到默认开，标记仍在。
+    let restored = store.restore_defaults(saved.revision).unwrap();
+    assert!(restored.preferences.smart_punctuation);
+    assert!(restored.preferences.smart_punctuation_migrated);
+}
+
+// 新装：第一份文档带着标记，用户关掉之后不会因为「没有标记」被当成旧文档打开。
+#[test]
+fn smart_punctuation_turned_off_on_a_fresh_profile_stays_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let first = store.write_first_document().unwrap();
+    assert!(first.preferences.smart_punctuation);
+    assert!(first.preferences.smart_punctuation_migrated);
+    let saved = store
+        .save(
+            first.revision,
+            Preferences {
+                smart_punctuation: false,
+                smart_punctuation_repeat: false,
+                ..first.preferences
+            },
+        )
+        .unwrap();
+    let reloaded = store.load().unwrap();
+    assert_eq!(reloaded, saved);
+    assert!(!reloaded.preferences.smart_punctuation);
+    assert!(!reloaded.preferences.smart_punctuation_repeat);
+}
+
+// 修复损坏文档时，没有标记的旧文档照样迁移一次；带着标记的文档里关掉的值原样保留。
+#[test]
+fn smart_punctuation_recovery_migrates_only_a_legacy_document() {
+    let flipped = SMART_PUNCTUATION_WAS_OFF_BY_DEFAULT;
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let mut legacy = smart_punctuation_legacy_document();
+    legacy["preferences"]["learning"] = serde_json::json!("yes");
+    fs::write(store.path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert!(store.load().is_err());
+    let (snapshot, _, salvaged) = expect_recovered(store.recover().unwrap());
+    assert!(salvaged);
+    assert_eq!(snapshot.preferences.smart_punctuation, flipped);
+    assert_eq!(
+        snapshot.preferences.smart_punctuation_direct_letter,
+        flipped
+    );
+    assert!(snapshot.preferences.smart_punctuation_migrated);
+    assert_eq!(store.load().unwrap(), snapshot);
+
+    let mut current = serde_json::to_value(PreferencesSnapshot::default()).unwrap();
+    current["preferences"]["smart_punctuation"] = false.into();
+    current["preferences"]["learning"] = serde_json::json!("yes");
+    fs::write(store.path(), serde_json::to_vec(&current).unwrap()).unwrap();
+    let (snapshot, _, _) = expect_recovered(store.recover().unwrap());
+    assert!(!snapshot.preferences.smart_punctuation);
 }
 
 // The source ships muting, DDC and text polishing on; `config.default.toml` says so for Windows, and macOS follows the desktop product it ports. Each is a plain voice switch, so no platform reason keeps them off there. The other hosts keep what they have shipped, and a stored value is never reinterpreted.
@@ -4740,23 +4915,30 @@ fn recover_is_not_needed_for_valid_missing_or_repaired_documents() {
 fn recover_suffixes_a_backup_name_that_is_taken() {
     let directory = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(directory.path());
-    // Two backups within the same second share a stamp; retry the rare pair that straddles a second.
-    let collided = (0..5).any(|_| {
-        let first = store.write_backup(b"first").unwrap();
-        let second = store.write_backup(b"second").unwrap();
-        assert_eq!(fs::read(&first).unwrap(), b"first");
-        assert_eq!(fs::read(&second).unwrap(), b"second");
-        let first = first.file_name().unwrap().to_str().unwrap().to_owned();
-        second.file_name().unwrap().to_str().unwrap() == format!("{first}-1")
-    });
-    assert!(collided);
+    // 固定备份时间，确保重名分支不依赖设备能否在一秒内完成两次同步写入。
+    let stamp = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+    let first = store.write_backup(b"first", stamp).unwrap();
+    let second = store.write_backup(b"second", stamp).unwrap();
+    let third = store.write_backup(b"third", stamp).unwrap();
+    assert_eq!(fs::read(&first).unwrap(), b"first");
+    assert_eq!(fs::read(&second).unwrap(), b"second");
+    assert_eq!(fs::read(&third).unwrap(), b"third");
+    let first = first.file_name().unwrap().to_str().unwrap();
+    assert_eq!(
+        second.file_name().unwrap().to_str().unwrap(),
+        format!("{first}-1")
+    );
+    assert_eq!(
+        third.file_name().unwrap().to_str().unwrap(),
+        format!("{first}-2")
+    );
 
-    // A whole recovery whose stamp is taken keeps both backups.
+    // 完整恢复保留既有备份和本次损坏内容。
     let path = directory.path().join("preferences.json");
     fs::write(&path, b"damaged").unwrap();
     let (_, backup, _) = expect_recovered(store.recover().unwrap());
     assert_eq!(fs::read(backup).unwrap(), b"damaged");
-    assert!(corrupt_backups(directory.path()).len() >= 3);
+    assert_eq!(corrupt_backups(directory.path()).len(), 4);
 }
 
 #[cfg(unix)]
@@ -4829,6 +5011,44 @@ fn touch_toolbar_keeps_the_original_buttons_by_default_and_round_trips_partial_d
 }
 
 #[test]
+fn harmony_toolbar_defaults_to_every_tool_shown_and_stays_out_of_default_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(dir.path());
+    let defaults = HarmonyToolbarPreferences::default();
+    // 默认就是没有这组设置时的鸿蒙键盘：五个工具全在，整行照常显示。
+    assert!(defaults.emoji && defaults.phrase && defaults.clipboard);
+    assert!(defaults.skin && defaults.scheme && !defaults.hidden);
+    let document = serde_json::to_value(Preferences::default()).unwrap();
+    assert!(document.get("harmony_toolbar").is_none());
+
+    // 只写了几项的对象，其余按默认读。
+    let partial: HarmonyToolbarPreferences =
+        serde_json::from_value(serde_json::json!({"clipboard": false, "hidden": true})).unwrap();
+    assert!(!partial.clipboard && partial.hidden);
+    assert!(partial.emoji && partial.phrase && partial.skin && partial.scheme);
+
+    let edited = Preferences {
+        harmony_toolbar: HarmonyToolbarPreferences {
+            phrase: false,
+            hidden: true,
+            ..HarmonyToolbarPreferences::default()
+        },
+        ..Preferences::default()
+    };
+    assert_eq!(
+        serde_json::to_value(&edited).unwrap()["harmony_toolbar"],
+        serde_json::json!({
+            "emoji": true, "phrase": false, "clipboard": true,
+            "skin": true, "scheme": true, "hidden": true
+        })
+    );
+    let saved = store.save(0, edited).unwrap();
+    assert_eq!(store.load().unwrap(), saved);
+    assert!(!saved.preferences.harmony_toolbar.phrase);
+    assert!(saved.preferences.harmony_toolbar.hidden);
+}
+
+#[test]
 fn saving_unchanged_preferences_keeps_the_revision_and_the_file() {
     let directory = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(directory.path());
@@ -4871,7 +5091,7 @@ fn mint_morning_is_the_community_design_and_a_valid_custom_theme() {
         assert_eq!(&written[key], value, "{key}");
     }
     let preferences = Preferences {
-        global_theme: crate::skin::theme::GlobalTheme::Custom,
+        global_theme: crate::theme::GlobalTheme::Custom,
         custom_theme: CustomTheme {
             keyboard: Some(design),
             ..CustomTheme::default()
@@ -4882,7 +5102,7 @@ fn mint_morning_is_the_community_design_and_a_valid_custom_theme() {
     // 薄荷晨光不再是触屏构建的默认值：新安装在桌面和触屏构建（Android、iOS、鸿蒙）上都跟随系统，自定义主题为空。client-core 的单测也在 Android 模拟器上整套运行（`platforms/android/tests/device/run-core-test.sh`），两种构建都要守住这一点。
     assert_eq!(
         Preferences::default().global_theme,
-        crate::skin::theme::GlobalTheme::System
+        crate::theme::GlobalTheme::System
     );
     assert_eq!(Preferences::default().custom_theme, CustomTheme::default());
 }
@@ -5703,4 +5923,18 @@ fn an_unknown_key_goes_back_only_into_a_written_section() {
     let mut preferences = serde_json::json!({"section": {}});
     restore_unknown_fields(&mut preferences, &unknown);
     assert_eq!(preferences["section"]["from_a_newer_build"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn finished_scope_releases_inherited_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(root.path());
+    let held = store.lock().unwrap();
+    let inherited = crate::file_lock::testing::duplicate(&held);
+    crate::file_lock::testing::assert_finished_scope_releases_lock(
+        held,
+        inherited,
+        &root.path().join("preferences.lock"),
+    );
 }

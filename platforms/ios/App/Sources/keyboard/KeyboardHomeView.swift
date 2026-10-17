@@ -35,7 +35,7 @@ struct SettingsView: View {
         ForEach(Array(groups.enumerated()), id: \.offset) { _, group in
           DesignCard(radius: MetasequoiaTheme.cardRadius) {
             ForEach(group) { page in
-              SettingsCardRow(page: page, value: value(for: page), isLast: page == group.last)
+              SettingsCardRow(page: page, value: value(for: page), isLast: page == group.last, selection: $router.settingsPage)
             }
           }
         }
@@ -50,9 +50,10 @@ struct SettingsView: View {
     }
     .navigationTitle("设置")
     .navigationBarTitleDisplayMode(.large)
+    // 不按当前选中的标签页过滤：切走时读到 nil 会把推入的页面弹掉，切回来再重新推入，页面里更深一层的导航就丢了。
     .navigationDestination(item: $router.settingsPage) { $0.destination }
     .onAppear { refresh() }
-    .onChange(of: scenePhase) { if $0 == .active { refresh(); Task { await loadNotices() } } }
+    .onChange(of: scenePhase) { _, phase in if phase == .active { refresh(); Task { await loadNotices() } } }
     .task { await loadNotices() }
     .tint(MetasequoiaTheme.accent)
   }
@@ -83,7 +84,7 @@ struct SettingsView: View {
     default: chinesePunctuation = preferences?["chinese_punctuation"] as? Bool ?? true
     }
     let learning = InputHabitPreference.settings(in: preferences).learning
-    let keys = scheme == .nineKey || scheme == .japaneseNineKey ? "9 键" : scheme == .fourteenKey ? "14 键" : "26 键"
+    let keys = scheme.isMandarinNineKey || scheme == .japaneseNineKey ? "9 键" : scheme == .fourteenKey ? "14 键" : "26 键"
     let height = KeyboardLayoutPreference.sharedHeightAdjustment(preferences?["touch_keyboard_height_adjustment"])
       ?? KeyboardLayoutPreference.heightAdjustment
     let language = VoicePolishSettings(preferences).language

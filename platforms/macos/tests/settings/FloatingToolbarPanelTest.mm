@@ -17,6 +17,7 @@
 @property(nonatomic) NSUInteger settingsRequests;
 @property(nonatomic) NSUInteger updateRequests;
 @property(nonatomic) NSUInteger websiteRequests;
+@property(nonatomic) NSUInteger promotionRequests;
 @property(nonatomic) NSUInteger hideRequests;
 @property(nonatomic) NSUInteger inputSchemeMenuRequests;
 @end
@@ -34,6 +35,7 @@
 - (void)floatingToolbarDidRequestOpenSettings:(MSIMEFloatingToolbarPanel *)toolbar { (void)toolbar; ++_settingsRequests; }
 - (void)floatingToolbarDidRequestCheckForUpdates:(MSIMEFloatingToolbarPanel *)toolbar { (void)toolbar; ++_updateRequests; }
 - (void)floatingToolbarDidRequestOpenWebsite:(MSIMEFloatingToolbarPanel *)toolbar { (void)toolbar; ++_websiteRequests; }
+- (void)floatingToolbarDidRequestPromotion:(MSIMEFloatingToolbarPanel *)toolbar { (void)toolbar; ++_promotionRequests; }
 - (void)floatingToolbarDidRequestHide:(MSIMEFloatingToolbarPanel *)toolbar { (void)toolbar; ++_hideRequests; }
 - (NSMenu *)floatingToolbarInputSchemeMenu:(MSIMEFloatingToolbarPanel *)toolbar {
     (void)toolbar;
@@ -105,12 +107,13 @@ int main() {
         assert(panel.appearance == nil);
         [panel applyThemePreferences:@{@"theme": @"light", @"toolbar_theme": @"follow"}];
         assert([panel.appearance.name isEqualToString:NSAppearanceNameAqua]);
+        // macOS 的工具栏只看颜色模式：工具栏单独的明暗设置和其他界面的都不读，固定明暗的主题由 InputController 钉住 `theme`。
         [panel applyThemePreferences:@{@"theme": @"light", @"toolbar_theme": @"dark"}];
+        assert([panel.appearance.name isEqualToString:NSAppearanceNameAqua]);
+        [panel applyThemePreferences:@{@"theme": @"dark", @"toolbar_theme": @"light", @"candidate_theme": @"light", @"settings_theme": @"light"}];
         assert([panel.appearance.name isEqualToString:NSAppearanceNameDarkAqua]);
-        [panel applyThemePreferences:@{@"theme": @"dark", @"toolbar_theme": @"light", @"candidate_theme": @"dark", @"settings_theme": @"dark"}];
-        assert([panel.appearance.name isEqualToString:NSAppearanceNameAqua]);
         [panel applyThemePreferences:@{@"theme": @"system", @"toolbar_theme": @"light"}];
-        assert([panel.appearance.name isEqualToString:NSAppearanceNameAqua]);
+        assert(panel.appearance == nil);
         [panel applyThemePreferences:@{@"theme": @"system", @"toolbar_theme": @"follow"}];
         assert(panel.appearance == nil);
         assert([panel.frameAutosaveName isEqualToString:@"MetasequoiaFloatingToolbarFrame"]);
@@ -140,7 +143,7 @@ int main() {
         [panel applyLightSkin:light darkSkin:dark];
         for (NSString *mode in @[@"light", @"dark"]) {
             const auto expected = [mode isEqual:@"dark"] ? dark : light;
-            [panel applyThemePreferences:@{@"toolbar_theme": mode}];
+            [panel applyThemePreferences:@{@"theme": mode}];
             // Legacy notifications and size updates must not replace host-supplied colors.
             [NSNotificationCenter.defaultCenter postNotificationName:MetasequoiaCandidateSkinDidChangeNotification object:nil];
             [panel applySizingPreferences:@{}];
@@ -164,7 +167,7 @@ int main() {
         toolbarLight.hover = {0.0, 0.0, 0.0, 0.06};
         toolbarDark.hover = {1.0, 1.0, 1.0, 0.10};
         [panel applyLightToolbarSkin:toolbarLight darkSkin:toolbarDark];
-        [panel applyThemePreferences:@{@"toolbar_theme": @"dark"}];
+        [panel applyThemePreferences:@{@"theme": @"dark"}];
         assert([[[panel valueForKey:@"chrome"] valueForKey:@"fillColor"] isEqual:MetasequoiaColorFromRgba(toolbarDark.surface)]);
 
         NSButton *inputMode = FindButton(panel.contentView, @"MetasequoiaFloatingToolbarInputMode");
@@ -230,10 +233,10 @@ int main() {
         [inputMode mouseEntered:entered];
         [panel orderOut:nil];
         assert(![[inputMode valueForKey:@"hovered"] boolValue]);
-        [panel applyThemePreferences:@{@"toolbar_theme": @"dark"}];
+        [panel applyThemePreferences:@{@"theme": @"dark"}];
         assert([[inputMode valueForKey:@"hoverFillColor"] isEqual:MetasequoiaColorFromRgba(toolbarDark.hover)]);
         assert([[divider valueForKey:@"fillColor"] isEqual:MetasequoiaColorFromRgba(toolbarDark.border)]);
-        [panel applyThemePreferences:@{@"toolbar_theme": @"light"}];
+        [panel applyThemePreferences:@{@"theme": @"light"}];
         assert([[inputMode valueForKey:@"hoverFillColor"] isEqual:MetasequoiaColorFromRgba(toolbarLight.hover)]);
         assert([[divider valueForKey:@"fillColor"] isEqual:MetasequoiaColorFromRgba(toolbarLight.border)]);
         // The toolbar palette's radius drives the chrome at the current scale, and a package divider colour replaces the outline on the divider only.
@@ -245,11 +248,11 @@ int main() {
             roundedDark.radius = 16.0f;
             roundedDark.divider = msime::mac::Rgba{0.9f, 0.1f, 0.1f, 1.0f};
             [panel applyLightToolbarSkin:roundedLight darkSkin:roundedDark];
-            [panel applyThemePreferences:@{@"toolbar_theme": @"dark"}];
+            [panel applyThemePreferences:@{@"theme": @"dark"}];
             assert([[panel valueForKey:@"chrome"] layer].cornerRadius == 16.0);
             assert([[divider valueForKey:@"fillColor"] isEqual:MetasequoiaColorFromRgba(*roundedDark.divider)]);
             assert([[[panel valueForKey:@"chrome"] valueForKey:@"strokeColor"] isEqual:MetasequoiaColorFromRgba(roundedDark.border)]);
-            [panel applyThemePreferences:@{@"toolbar_theme": @"light"}];
+            [panel applyThemePreferences:@{@"theme": @"light"}];
             assert([[panel valueForKey:@"chrome"] layer].cornerRadius == 4.0);
             assert([[divider valueForKey:@"fillColor"] isEqual:MetasequoiaColorFromRgba(roundedLight.border)]);
             [panel applySizingPreferences:@{@"floating_toolbar": @{@"scale_percent": @150, @"font_size": @24}}];
@@ -262,7 +265,7 @@ int main() {
             msime::mac::SkinTokens card = light;
             card.radius = 28.0f;
             [candidateOnly applyLightSkin:card darkSkin:card];
-            [candidateOnly applyThemePreferences:@{@"toolbar_theme": @"light"}];
+            [candidateOnly applyThemePreferences:@{@"theme": @"light"}];
             assert([[candidateOnly valueForKey:@"chrome"] layer].cornerRadius == 10.0);
         }
         for (NSNumber *scale in @[@75, @100, @125, @150]) {
@@ -516,28 +519,30 @@ int main() {
         // The gear opens settings on click; the utility menu is only its right-click menu.
         SendButton(settings);
         assert(delegate.settingsRequests == 1);
-        assert(settings.menu.numberOfItems == 10 && [settings.menu itemAtIndex:1].action == @selector(openSettings:));
+        assert(settings.menu.numberOfItems == 11 && [settings.menu itemAtIndex:1].action == @selector(openSettings:));
         assert([settings.accessibilityLabel isEqualToString:@"打开水杉输入法设置"]);
-        for (NSString *selectorName in @[@"openCharacterPalette:", @"openSettings:", @"checkForUpdates:",
+        for (NSString *selectorName in @[@"openCharacterPalette:", @"openSettings:", @"checkForUpdates:", @"insertPromotion:",
                                          @"openWebsite:", @"dismissFloatingToolbar:"]) {
             [NSApp sendAction:NSSelectorFromString(selectorName) to:panel from:nil];
         }
         assert(delegate.inputModeToggles == 1 && delegate.punctuationToggles == 1 &&
                delegate.fullWidthToggles == 1 && delegate.traditionalToggles == 1 &&
                delegate.characterPaletteRequests == 1 && delegate.settingsRequests == 2 &&
+               delegate.promotionRequests == 1 &&
                delegate.updateRequests == 1 && delegate.websiteRequests == 1 && delegate.hideRequests == 1);
 
         NSMenu *menu = CreateMSIMEFloatingToolbarUtilityMenu(panel);
         [menu update];
-        assert(menu.numberOfItems == 10);
+        assert(menu.numberOfItems == 11);
         assert([menu itemAtIndex:0].action == @selector(openCharacterPalette:) &&
                [menu itemAtIndex:1].action == @selector(openSettings:) &&
                [menu itemAtIndex:2].action == @selector(checkForUpdates:) &&
-               [menu itemAtIndex:4].action == @selector(openWebsite:) &&
-               [menu itemAtIndex:5].action == @selector(openHelp:) &&
-               [menu itemAtIndex:6].action == @selector(openAbout:) &&
-               [menu itemAtIndex:7].action == @selector(openFeedback:) &&
-               [menu itemAtIndex:9].action == @selector(dismissFloatingToolbar:));
+               [menu itemAtIndex:4].action == @selector(insertPromotion:) &&
+               [menu itemAtIndex:5].action == @selector(openWebsite:) &&
+               [menu itemAtIndex:6].action == @selector(openHelp:) &&
+               [menu itemAtIndex:7].action == @selector(openAbout:) &&
+               [menu itemAtIndex:8].action == @selector(openFeedback:) &&
+               [menu itemAtIndex:10].action == @selector(dismissFloatingToolbar:));
         for (NSMenuItem *item in menu.itemArray) {
             if (!item.isSeparatorItem) assert(item.enabled && item.target == panel);
         }

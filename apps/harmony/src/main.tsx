@@ -31,6 +31,8 @@ import {
   settingsThemePreferences,
   useSettingsTheme,
   type AccountClient,
+  type AccountQqLink,
+  type QqLinksClient,
   type AccountPreferences,
   type AiSkinClient,
   type AiSkinProposal,
@@ -47,12 +49,14 @@ import {
   type CloudDictionaryAction,
   type CloudDictionaryPanelClient,
   type SettingsClient,
+  type NineKeyShuangpinLayout,
   type Snapshot,
   type PreferencesRecovery,
   type UpdateCheckRequest,
   type UpdateCheckResult,
   type StatisticsRetention,
   type TypingStatisticsClient,
+  type TypingStatisticsUploadClient,
   type VocabularyReviewClient,
   type VocabularyReviewStatus,
   type TypingStatisticsStatus,
@@ -116,6 +120,8 @@ interface NativeBridge {
   dictionaryManifest(): string;
   appVersion(): string;
   dictionary(action: string): string;
+  /** 只计算九键双拼键位和错误，不读写偏好。 */
+  nineKeyShuangpinLayout(request: string): string;
   cloudDictionaryDownload(entry: string): string;
   typingStatistics(action: string): string;
   /**
@@ -558,9 +564,15 @@ function splashSeen(native: NativeBridge): boolean {
 }
 
 /**
- * 键盘直接打开的页面：功能面板的「词库」「反馈」「关于」和皮肤选择器的「更多皮肤」。与 `EntryAbility` 从 Want 中接受的列表（`SettingsPageLink.PAGES`）相同，scripts/test-harmony-settings-links.py 核对两份一致；其他值都不是本页承诺过的链接，而改为打开「输入」（未知页面 id 就会解析到它）比停在原处更让人摸不着头脑。
+ * 键盘直接打开的页面：功能面板的「词库」「反馈」「关于」、皮肤选择器的「更多皮肤」，以及长按工具栏按钮打开的「屏幕键盘」（工具栏的显示方式和工具开关在这一页）。与 `EntryAbility` 从 Want 中接受的列表（`SettingsPageLink.PAGES`）相同，scripts/test-harmony-settings-links.py 核对两份一致；其他值都不是本页承诺过的链接，而改为打开「输入」（未知页面 id 就会解析到它）比停在原处更让人摸不着头脑。
  */
-const LINKED_PAGES: readonly string[] = ["dictionary", "feedback", "about", "skin"];
+const LINKED_PAGES: readonly string[] = [
+  "dictionary",
+  "feedback",
+  "about",
+  "skin",
+  "screen-keyboard",
+];
 
 function linkedPage(value: unknown): string | undefined {
   return typeof value === "string" && LINKED_PAGES.includes(value) ? value : undefined;
@@ -587,7 +599,7 @@ globalThis.msimeHarmonyOpenPage = (page: string) => {
   else queuedLinkedPage = linked;
 };
 
-/** Google 登录等浏览器跳回最多 300 秒（client-core 的 `GOOGLE_SIGN_IN_TIMEOUT`），之后还要用授权码换 token；默认的 30 秒会在用户还在浏览器里时就报超时。取消由页面的「取消」经 google_cancel 完成，不靠这个超时。 */
+/** Google 登录等浏览器跳回最多 300 秒（client-services 的 `GOOGLE_SIGN_IN_TIMEOUT`），之后还要用授权码换 token；默认的 30 秒会在用户还在浏览器里时就报超时。取消由页面的「取消」经 google_cancel 完成，不靠这个超时。 */
 const GOOGLE_SIGN_IN_TIMEOUT_MS = 6 * 60 * 1000;
 
 function accountClient(native: NativeBridge): AccountClient {
@@ -677,7 +689,7 @@ function accountClient(native: NativeBridge): AccountClient {
           identities: { provider: string }[];
         }>({ operation: "rename", display_name: displayName }),
       ),
-    // 头像的 `data:` 地址：宿主按 client-core 的头像规则从会话用户的地址下载并校验，没有头像或取不到时为 null，页面显示名字首字。
+    // 头像的 `data:` 地址：宿主按 client-services 的头像规则从会话用户的地址下载并校验，没有头像或取不到时为 null，页面显示名字首字。
     avatar: async () =>
       (await request<{ data_url: string | null }>({ operation: "avatar" })).data_url ?? null,
     logout: async (all) => {
@@ -690,6 +702,39 @@ function accountClient(native: NativeBridge): AccountClient {
       await request({ operation: "clear_expired" });
     },
     settingsSync: settingsSyncClient(native),
+    qqLinks: qqLinksClient(native),
+  };
+}
+
+/**
+ * 「绑定 QQ 群助手」：群友在 QQ 群里 @机器人 发 /bind 拿到 8 位绑定码，在账号页输入。请求由宿主的账号桥接带登录账号发出，回答是服务端的 snake_case，这里换成页面的写法，与桌面的 `qqLinks` 相同。
+ */
+function qqLinksClient(native: NativeBridge): QqLinksClient {
+  type QqLinkDto = { id: string; created_at: string };
+  const qqLink = (link: QqLinkDto): AccountQqLink => ({ id: link.id, createdAt: link.created_at });
+  const request = <T,>(action: Record<string, unknown>): Promise<T> =>
+    bridgeRequest(native, "account", JSON.stringify(action)).then(unwrap<T>);
+  return {
+    list: async () =>
+      (await request<{ links: QqLinkDto[] }>({ operation: "qq_links" })).links.map(qqLink),
+    redeem: async (code) => qqLink(await request<QqLinkDto>({ operation: "qq_link_redeem", code })),
+    remove: async (id) => {
+      await request({ operation: "qq_link_delete", id });
+    },
+  };
+}
+
+/**
+ * 打字统计「上传到云端」。构建请求、十分钟的节流和状态文件都在宿主的 Rust 统计存储里，宿主还负责带登录账号发出请求；页面只开关和触发，与桌面的 `typingStatisticsUpload` 相同。
+ */
+function typingStatisticsUploadClient(native: NativeBridge): TypingStatisticsUploadClient {
+  type UploadStatus = Awaited<ReturnType<TypingStatisticsUploadClient["status"]>>;
+  const request = async (action: Record<string, unknown>): Promise<UploadStatus> =>
+    unwrap<UploadStatus>(await bridgeRequest(native, "typing_upload", JSON.stringify(action)));
+  return {
+    status: () => request({ operation: "status" }),
+    setEnabled: (enabled) => request({ operation: "set_enabled", enabled }),
+    sync: () => request({ operation: "sync" }),
   };
 }
 
@@ -892,11 +937,11 @@ function aiSkinClient(native: NativeBridge): AiSkinClient {
 }
 
 /**
- * The on-device model store: the catalog models the `local` provider can run, downloaded into the app's own files directory.
+ * 本机模型库：目录中 `local` 提供方能运行的模型，下载到应用自己的文件目录里。
  *
- * Every operation is an asynchronous bridge request, because an install blocks for the whole download on a native worker and a bridge method returning a Promise never settles here. Progress arrives on its own global as the `{id,stage,downloaded,total}` document client-core reports. The host drops the catalog's desktop-only models, and it has already turned the core's error text into the codes the page has sentences for.
+ * 每个操作都是异步桥接请求，因为安装会在原生工作线程上阻塞整个下载过程，而返回 Promise 的桥接方法在这里永远不会兑现。进度经它自己的全局函数送达，内容是 client-providers 报告的 `{id,stage,downloaded,total}` 文档。宿主会去掉目录中仅限桌面端的模型，并且已经把核心的错误文本换成了页面有对应句子的错误码。
  *
- * An install is given hours rather than the ordinary 30 seconds: it is a download of up to a few hundred megabytes on whatever network the phone has, and client-core reports a stalled connection itself. A deadline that fired first would report a failure for a download that then finishes.
+ * 安装给的时限是几个小时而不是普通的 30 秒：它要在手机当时所处的任意网络上下载最多几百 MB，而连接停滞由 client-providers 自己报告。先到的截止时间会给一个随后完成的下载报失败。
  */
 const voiceModelProgressListeners = new Set<(progress: LocalVoiceModelProgress) => void>();
 
@@ -911,7 +956,7 @@ globalThis.msimeHarmonyVoiceModelProgress = (document: string) => {
 };
 
 /**
- * Rejects the way the desktop shell's plugin commands reject: `{code, detail}`, where detail is the rule client-core reports for a refused pack or name, so `pluginErrorMessage` can say which file or entry to fix.
+ * 按桌面外壳插件命令的方式拒绝：`{code, detail}`，其中 detail 是 client-services 对被拒绝的包或名字报告的规则，好让 `pluginErrorMessage` 说出该改哪个文件或哪一项。
  */
 function unwrapPlugin<T>(raw: string): T {
   const reply = JSON.parse(raw) as Reply<T> & { detail?: string };
@@ -930,6 +975,10 @@ function pluginClient(native: NativeBridge): PluginClient {
     importPack: async (source) =>
       unwrapPlugin<PluginPackage | null>(
         await bridgeRequest(native, "plugin_import", JSON.stringify({ source }), 30 * 60 * 1000),
+      ),
+    importHelpcodeTable: async () =>
+      unwrapPlugin<PluginPackage | null>(
+        await bridgeRequest(native, "helpcode_import", "{}", 30 * 60 * 1000),
       ),
     remove: async (kind, id) => {
       call<null>({ operation: "remove", kind, id });
@@ -1145,6 +1194,7 @@ function makeClient(
     importBytes: (name, format, bytes_base64) =>
       collectionsReply({ operation: "import", name, kind: "pinyin", format, bytes_base64 }),
     installCommunity: (resource) => collectionsReply({ operation: "install_community", resource }),
+    thirdPartyMatches: (entries) => collectionsReply({ operation: "third_party_matches", entries }),
   };
   const userWordCount = (): number | undefined => {
     try {
@@ -1158,6 +1208,7 @@ function makeClient(
     }
   };
   const typingStatistics: TypingStatisticsClient = {
+    cloudUpload: typingStatisticsUploadClient(native),
     load: async () =>
       unwrap<TypingStatisticsStatus>(
         native.typingStatistics(JSON.stringify({ operation: "load" })),
@@ -1390,6 +1441,11 @@ function makeClient(
       },
     },
     dictionary,
+    nineKeyShuangpinLayout:
+      typeof native.nineKeyShuangpinLayout === "function"
+        ? async (request) =>
+            unwrap<NineKeyShuangpinLayout>(native.nineKeyShuangpinLayout(JSON.stringify(request)))
+        : undefined,
     dictionaryCollections,
     typingStatistics,
     vocabularyReview,
@@ -1599,6 +1655,18 @@ function HarmonySettings({
       ),
     [native],
   );
+  // 设置应用打开和回到前台时各补传一次打字统计；没打开上传、没登录或十分钟内传过时宿主什么也不发，失败也不打扰用户。
+  useEffect(() => {
+    const upload = client.typingStatistics?.cloudUpload;
+    if (!upload) return;
+    const sync = () => void upload.sync().catch(() => undefined);
+    sync();
+    const visible = () => {
+      if (document.visibilityState === "visible") sync();
+    };
+    document.addEventListener("visibilitychange", visible);
+    return () => document.removeEventListener("visibilitychange", visible);
+  }, [client]);
   const cloudClipboard = useMemo(
     () => cloudClipboardClient(native, () => setCloudClipboardOpen(false)),
     [native],

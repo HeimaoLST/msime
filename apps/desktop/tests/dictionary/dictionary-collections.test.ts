@@ -14,7 +14,7 @@ import {
   type DictionaryCollection,
 } from "../../../../packages/ui/src/dictionary/dictionary-collections";
 
-// 这些规则与 Android 的 `DictionaryCollectionsStore` 和 client-core 的集合校验一致，界面在提交前先挡住。
+// 这些规则与 Android 的 `DictionaryCollectionsStore` 和 client-services 的集合校验一致，界面在提交前先挡住。
 
 test("a collection name is 1–32 characters with no surrounding space or control characters", () => {
   expect(validCollectionName("工作")).toBe(true);
@@ -56,7 +56,7 @@ test("the import sources list only what client-core accepts, text first", () => 
     collectionImportSources(["txt", "standard", "windows", "hans", "rime"]).map((s) => s.format),
   ).toEqual(["txt", "rime", "hans"]);
   expect(collectionImportSources(["txt"]).map((s) => s.title)).toEqual(["导入文本文件"]);
-  // client-core 接受细胞词库时排在文本之后，与 Android 的来源对话框相同。
+  // client-services 接受细胞词库时排在文本之后，与 Android 的来源对话框相同。
   const withScel = collectionImportSources(["txt", "standard", "windows", "hans", "rime", "scel"]);
   expect(withScel.map((s) => s.format)).toEqual(["txt", "scel", "rime", "hans"]);
   expect(withScel[1]).toEqual({
@@ -105,5 +105,12 @@ test("a collection's subtitle carries its count, community origin and pending ch
   expect(collectionSubtitle(collection)).toBe("4,812 条 · 社区");
   expect(collectionSubtitle({ ...collection, source: { type: "user" }, pending: 128 })).toBe(
     "4,812 条 · 128 条待同步",
+  );
+  // 搜狗细胞词库导入的词库标明只在本机用；别的文本导入不标。
+  expect(collectionSubtitle({ ...collection, source: { type: "import", format: "scel" } })).toBe(
+    "4,812 条 · 搜狗细胞词库 · 仅本机",
+  );
+  expect(collectionSubtitle({ ...collection, source: { type: "import", format: "txt" } })).toBe(
+    "4,812 条",
   );
 });

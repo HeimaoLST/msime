@@ -59,6 +59,14 @@ impl InputSession {
         }
     }
 
+    // 本地模式的入口是不可编辑的标记；普通方案和网址模式从第一个字符开始编辑。
+    fn editing_begin(&self) -> usize {
+        usize::from(!matches!(
+            self.local_mode,
+            LocalInputMode::None | LocalInputMode::Url
+        ))
+    }
+
     pub(super) fn caret_position(&self) -> usize {
         let length = self.editing_text_len();
         self.caret.unwrap_or(length).min(length)
@@ -68,11 +76,7 @@ impl InputSession {
     pub(super) fn edit_at_caret(&mut self, command: Command) -> KeyResult {
         let text_len = self.editing_text_len();
         let mut caret = self.caret.unwrap_or(text_len).min(text_len);
-        // 本地模式的前缀字母是模式标记，不是可编辑的内容；网址模式没有前缀字母，整段都能编辑。
-        let begin = usize::from(!matches!(
-            self.local_mode,
-            LocalInputMode::None | LocalInputMode::Url
-        ));
+        let begin = self.editing_begin();
         match command {
             Command::MoveLeft => caret = caret.saturating_sub(1).max(begin),
             Command::MoveRight => caret = (caret + 1).min(text_len),
@@ -103,7 +107,7 @@ impl InputSession {
         KeyResult::handled()
     }
 
-    /// 从编辑文字里删掉 `removed` 后剩下 `text`。网址模式删空就退出；删掉的正是进入网址模式的那个键（`url_reverts`）时退回组字，否则与其他模式一样替换编辑文字。
+    /// 从编辑文字里删掉 `removed` 后剩下 `text`。网址模式删空就退出；删掉的是末尾那个、正是进入网址模式的键（`url_reverts`）时退回组字，否则与其他模式一样替换编辑文字。
     fn delete_editing_character(&mut self, text: String, caret: usize, removed: char) -> KeyResult {
         if self.local_mode == LocalInputMode::Url {
             // 网址删空后没有前缀字母可留，退出模式，否则会停在空的网址模式里吞掉后续按键。
@@ -111,7 +115,7 @@ impl InputSession {
                 self.reset_composition();
                 return KeyResult::handled();
             }
-            if self.url_reverts(&text, removed) {
+            if caret == text.len() && self.url_reverts(&text, removed) {
                 self.restore_composition_from_url(text);
                 return KeyResult::handled();
             }
@@ -132,8 +136,7 @@ impl InputSession {
                     accepted = value.is_ascii_hexdigit()
                         || (value == b'+' && caret == 1 && !text.contains('+'));
                 }
-                LocalInputMode::QuickPhrase => accepted = lower,
-                LocalInputMode::DateTime => accepted = false,
+                LocalInputMode::QuickPhrase | LocalInputMode::DateTime => accepted = lower,
                 // 笔画只接受笔画键；通配符不能插在最前面；已满 `MAX_STROKES` 笔时不再插入（否则截断会丢掉末尾那一笔）。组合中的其他字母被吞掉，与在末尾键入时一样。
                 LocalInputMode::None if self.stroke_rules_apply() => {
                     if !stroke::is_key(value)
@@ -151,7 +154,8 @@ impl InputSession {
                 LocalInputMode::None => {
                     let scheme = self.scheme();
                     accepted = lower
-                        || (upper && matches!(scheme, SchemeType::Quanpin | SchemeType::Shuangpin));
+                        || (upper && matches!(scheme, SchemeType::Quanpin | SchemeType::Shuangpin))
+                        || (value == b'-' && scheme == SchemeType::JapaneseRomaji);
                     if value == b';'
                         && scheme == SchemeType::Shuangpin
                         && self.profile.uses_semicolon_key()
@@ -170,14 +174,17 @@ impl InputSession {
                 LocalInputMode::SuperJianpin | LocalInputMode::TemporaryEnglish => {}
                 LocalInputMode::Expression => {
                     accepted = text.len() < GENERATED_MODE_INPUT_LIMIT
-                        && self
-                            .local_mode
-                            .spelling_symbols()
-                            .as_bytes()
-                            .contains(&value);
+                        && (self.expression_takes_unit_letter(value, caret)
+                            || (value == b'\'' && self.expression_takes_unit_separator(caret))
+                            || self
+                                .local_mode
+                                .spelling_symbols()
+                                .as_bytes()
+                                .contains(&value));
                 }
                 LocalInputMode::Command | LocalInputMode::Mention => {
-                    accepted = text.len() < GENERATED_MODE_INPUT_LIMIT && lower;
+                    accepted = text.len() < GENERATED_MODE_INPUT_LIMIT
+                        && (lower || (value == b'\'' && self.command_takes_word_separator(caret)));
                 }
                 // 与 `handle_local_character` 同一组规则：收字母，`'` 不能插在入口字母 `C` 之后（连续的 `'` 由下面的通用检查吞掉），`;` 只在微软双拼补完奇数长度的片段时收。
                 LocalInputMode::Chaizi => {
@@ -200,6 +207,22 @@ impl InputSession {
             }
         }
         if !accepted {
+            // 专用英文的字符入口统一消费非字母键，光标位置不能让数字变成选词键；显式标点另走标点入口。
+            if self.dedicated_english {
+                return KeyResult::handled();
+            }
+            if !matches!(
+                self.local_mode,
+                LocalInputMode::None
+                    | LocalInputMode::TemporaryEnglish
+                    | LocalInputMode::TemporaryJapanese
+                    | LocalInputMode::Url
+            ) {
+                // 普通快捷模式与末尾输入一致：先上屏原文，再交还拒绝键，避免被 runtime 当成选词。
+                let mut result = self.commit_raw();
+                result.handled = false;
+                return result;
+            }
             return KeyResult::unhandled();
         }
         let bytes = text.as_bytes();
@@ -293,7 +316,7 @@ impl InputSession {
         }
     }
 
-    /// Clamped to the editing text; recomputes the prefix candidates. Korean has no caret inside its open syllable and Zhuyin none inside its conversion, so the caret stays at the end.
+    /// 将光标限制在可编辑范围内并重算前缀候选；禁止内部光标的方案仍留在末尾。
     pub(super) fn set_caret(&mut self, caret: Option<usize>) {
         // 宿主直接放字母光标，就是回到拼音编辑。
         self.leave_conversion();
@@ -305,7 +328,8 @@ impl InputSession {
             return;
         }
         let length = self.editing_text_len();
-        self.caret = caret.map(|position| position.min(length));
+        let begin = self.editing_begin().min(length);
+        self.caret = caret.map(|position| position.clamp(begin, length));
         // Only the scheme composition decodes by caret; local and English lists do not depend on it.
         if !self.dedicated_english && self.local_mode == LocalInputMode::None {
             self.update_mixed_candidates();

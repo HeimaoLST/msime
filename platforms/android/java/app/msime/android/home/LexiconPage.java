@@ -40,7 +40,7 @@ import org.json.JSONObject;
  *
  * <p>导入、导出和刷新原先是大标题行右侧的三个胶囊，窄屏上把「词库」两个字挤成「词…」（#5682），现在和新建一起放在「已安装」下面那张卡片里，行间有分隔线；大标题和其他详情页一样只放标题。
  *
- * <p>命名词库的元数据和词条都经 {@link DictionaryCollectionsStore}；导入和导出走系统文件选择器（SAF），不申请存储权限。导入来源对话框只列 client-core 实际接受的格式。
+ * <p>命名词库的元数据和词条都经 {@link DictionaryCollectionsStore}；导入和导出走系统文件选择器（SAF），不申请存储权限。导入来源对话框只列 client-services 实际接受的格式。
  */
 public final class LexiconPage extends ReloadingDetailPage {
     @Override protected java.util.List<String> sectionTitles() {
@@ -105,7 +105,7 @@ public final class LexiconPage extends ReloadingDetailPage {
             ? InputFeatureToggle.LEARNING.enabledByDefault()
             : preferences.optBoolean(InputFeatureToggle.LEARNING.key(), InputFeatureToggle.LEARNING.enabledByDefault());
         DictionaryCollectionsStore.View value = view.ok() ? view.value()
-            : new DictionaryCollectionsStore.View(List.of(), List.of(), null);
+            : new DictionaryCollectionsStore.View(List.of(), List.of(), 0, null);
         return new Model(value, count.ok() ? count.value() : -1, learning, view.failure());
     }
 
@@ -135,6 +135,7 @@ public final class LexiconPage extends ReloadingDetailPage {
             ThemeColorPolicy.accent(context), () -> openDetail(DictionaryCollectionsStore.BUILTIN_PINYIN, "拼音词库")));
         for (DictionaryCollectionsStore.Collection collection : current.view().collections()) {
             String subtitle = NumberPolicy.groupedCount(collection.entryCount())
+                + DictionaryCollectionsStore.pendingDescription(collection.pending())
                 + ("community".equals(collection.sourceType()) ? " · 社区" : "");
             installed.addView(KeyboardSheets.badgeNavRow(context, TextPolicy.initial(collection.name(), "词"), collection.name(),
                 subtitle, collection.enabled() ? "已启用" : "已停用",
@@ -288,6 +289,10 @@ public final class LexiconPage extends ReloadingDetailPage {
         });
     }
 
+    /** 与共享设置页 `SCEL_PERSONAL_USE_NOTICE` 相同。 */
+    static final String SCEL_PERSONAL_USE_NOTICE =
+        "搜狗细胞词库的整理成果属于原作者，导入的词只供你在本机使用，不能发布到社区。";
+
     private static String importFrom(Context context, Uri uri, String chosen) {
         String displayName = displayName(context, uri);
         byte[] bytes;
@@ -303,13 +308,16 @@ public final class LexiconPage extends ReloadingDetailPage {
             DictionaryCollectionsStore.importFile(context, format, name, bytes);
         if (!result.ok()) return result.failure();
         DictionaryCollectionsStore.ImportReport report = result.value().importReport();
-        if (report == null) return "已导入「" + name + "」";
+        // 细胞词库导入后说明只供本机使用：第三方词库的整理成果属于原作者，社区发布会拦下这些词（.agents/notes/implemented/feature/2026-10-17-scel-community-publish-guard.md）。
+        String personalUse = "scel".equals(format) ? "。" + SCEL_PERSONAL_USE_NOTICE : "";
+        if (report == null) return "已导入「" + name + "」" + personalUse;
         StringBuilder message = new StringBuilder("已导入「").append(name).append("」，")
             .append(NumberPolicy.groupedCount(report.imported()));
         if (report.duplicates() > 0) message.append("，跳过重复 ").append(report.duplicates()).append(" 条");
         if (report.failed() > 0) message.append("，").append(report.failed()).append(" 行无法识别");
         if (report.truncated()) message.append("，词库已满");
-        return message.toString();
+        if (!report.applicationNotice().isEmpty()) message.append("；").append(report.applicationNotice());
+        return message.append(personalUse).toString();
     }
 
     /** 读完整个文件；超过导入上限时返回 null，不把超大文件整个读进内存。 */

@@ -54,11 +54,12 @@ def daemon_environment(root, addon):
 
 
 def check_ibus_frontend(bus, control):
-    """经过真实 IBus 兼容前端，覆盖有无客户端预编辑及上下文重建。"""
+    """经过真实 IBus 兼容前端，覆盖有无客户端预编辑、玲珑报告的 0x52 能力及上下文重建。"""
     service = "org.freedesktop.IBus"
     wait(lambda: bus.name_has_owner(service))
     frontend = dbus.Interface(bus.get_object(service, "/org/freedesktop/IBus"), service)
-    for capabilities in (1 | 8 | 16 | 32, 1 | 8 | 16, 8 | 16 | 32):
+    # Fcitx5 的 DebugInfo 按十六进制打印能力；玲珑报告的 cap:52 是 0x52，包含预编辑、格式化预编辑和周边文本。
+    for capabilities in (1 | 8 | 16 | 32, 1 | 8 | 16, 8 | 16 | 32, 0x52):
         path = frontend.CreateInputContext("msime-synthetic-ibus-editor")
         proxy = bus.get_object(service, path)
         context = dbus.Interface(proxy, "org.freedesktop.IBus.InputContext")
@@ -311,6 +312,20 @@ def main():
                     "Screen keyboard letter in English mode did not reach the editor as one stroke"
                 assert context.ProcessKeyEvent(0x20, 65, 4 | 8, False, 0), "Ctrl+Alt+Space could not restore Chinese"
                 context.ProcessKeyEvent(0x20, 65, 4 | 8, True, 0)
+                # 从共享设置热切换智能 ABC，经真实 Fcitx5 前端组词上屏，再恢复全拼。
+                options["preferences"].update(scheme="shuangpin", shuangpin_profile="smart_abc")
+                publish()
+                control.ReloadAddonConfig("msime")
+                for code, expected_text in (("nihk", "你好"), ("asgo", "中国"), ("vurufa", "输入法")):
+                    expected = commits + [expected_text]
+                    for character in code:
+                        assert context.ProcessKeyEvent(ord(character), 0, 0, False, 0), "智能 ABC 按键未被处理"
+                    assert context.ProcessKeyEvent(32, 0, 0, False, 0)
+                    wait(lambda: commits == expected)
+                options["preferences"].update(scheme="quanpin", shuangpin_profile="xiaohe")
+                publish()
+                control.ReloadAddonConfig("msime")
+                print("Fcitx5 智能 ABC 偏好热切换与组词上屏通过")
                 context.FocusOut()
                 context.DestroyIC()
                 if os.environ.get("MSIME_TEST_GTK") == "1":

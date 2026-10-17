@@ -13,8 +13,8 @@ use crate::words::{
     LookupRequest, LookupView, WordEditRequest, WordImportOutcome, WordImportRequest, WordListPage,
     WordListRequest,
 };
-use msime_client_core::dictionary::quiesce::QuiescedHosts;
 use msime_client_core::file_lock;
+use msime_client_services::dictionary::quiesce::QuiescedHosts;
 use msime_host_api::{DictionaryOptions, QuickPhrase, QuickPhraseEdit, WordEdit};
 use rmcp::handler::server::router::prompt::PromptRouter;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -23,7 +23,6 @@ use rmcp::model::{Implementation, ServerCapabilities, ServerConfig};
 use rmcp::schemars::JsonSchema;
 use rmcp::{prompt_handler, tool, tool_handler, tool_router, Json, ServerHandler};
 use serde::{Deserialize, Serialize};
-use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -321,7 +320,7 @@ impl MsimeServer {
 
     #[tool(
         name = "list_candidate_skins",
-        description = "List the candidate-window skins installed as folders in the input method's skin directory: id, schema version, name, version, layouts, colour modes, bounded animation presets and whether the desktop app has synced it to the user's cloud library. Folders that are not a usable skin are listed with the reason.",
+        description = "List the candidate-window skins installed as folders in the input method's skin directory: id, schema version, name, version, layouts, colour modes, bounded animation presets (with which of enter, exit and selection the manifest's [animation] table actually writes; the others are filled-in defaults that macOS does not play), for a skin with a decoration image its idle motion, motion period and frame count (more than 1 for an animated PNG) and whether the desktop app has synced it to the user's cloud library. Folders that are not a usable skin are listed with the reason.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn list_candidate_skins(&self) -> Result<Json<SkinList>, String> {
@@ -335,7 +334,7 @@ impl MsimeServer {
 
     #[tool(
         name = "create_candidate_skin",
-        description = "Install a candidate-window skin from a skin.toml and its images. Schema version 1 remains supported; version 2 additionally accepts [animation] with enter/exit/selection = none, fade, fade_scale, slide_up, spring or glow, duration_ms 40-600 and stagger_ms 0-80. The manifest is TOML: id (equal to package_id); name (at most 80 bytes); version; base, the look drawn under it: a built-in theme (system, shuishan, light, paper, night or ink) or an msime-windows built-in look (fluent, wechat, graphite, willow_green, autumn_osmanthus or microsoft), whose colours fill the ones the manifest leaves out; preview, the path of a PNG or JPEG shown in the skin list; optional author, description and [license] code, assets and source; [supports] layouts (horizontal, vertical) and themes (dark, light); [candidate_window] min_width_dip (0-1000), optional corner_radius_dip (0-32), optional [candidate_window.decoration] top_inset_dip, width_dip, image and align (left, center, right), optional [candidate_window.background] image, fit (cover, contain, stretch) and opacity (0-1); [candidate.dark] and [candidate.light] colours accent, selected, hover, surface, border, text, number and translation as #RRGGBB or #RRGGBBAA, plus show_selected_bar. images must hold exactly the images the manifest references. A stylesheet is not accepted, so the skin can be synced and shared. Refused when the skin exists, unless replace is true.",
+        description = "Install a candidate-window skin from a skin.toml and its images. Schema version 1 remains supported; version 2 additionally accepts [animation] with enter/exit/selection = none, fade, fade_scale, slide_up, spring or glow, duration_ms 40-600 and stagger_ms 0-80. Write each preset you want explicitly: macOS plays only the presets the [animation] table writes, while Windows and the web engine fill omitted ones with a default. The manifest is TOML: id (equal to package_id); name (at most 80 bytes); version; base, the look drawn under it: a built-in theme (system, shuishan, light, paper, night or ink) or an msime-windows built-in look (fluent, wechat, graphite, willow_green, autumn_osmanthus or microsoft), whose colours fill the ones the manifest leaves out; preview, the path of a PNG or JPEG shown in the skin list; optional author, description and [license] code, assets and source; [supports] layouts (horizontal, vertical) and themes (dark, light); [candidate_window] min_width_dip (0-1000), optional corner_radius_dip (0-32), optional [candidate_window.decoration] top_inset_dip, width_dip, image and align (left, center, right), and in schema version 2 motion (none, float, sway, breathe or bounce: a small idle movement of the whole decoration image while the candidate window is on screen) and motion_period_ms (1200-8000, default 3000); the decoration image may be an animated PNG (APNG, at most 120 frames, each frame counted as a whole image toward the pixel limit), which macOS plays with its own frame delays and loop count and other hosts draw as its first frame; both stop when the system asks to reduce motion. Optional [candidate_window.background] image, fit (cover, contain, stretch) and opacity (0-1); [candidate.dark] and [candidate.light] colours accent, selected, hover, surface, border, text, number and translation as #RRGGBB or #RRGGBBAA, plus show_selected_bar. images must hold exactly the images the manifest references. A stylesheet is not accepted, so the skin can be synced and shared. Refused when the skin exists, unless replace is true.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -630,20 +629,22 @@ impl MsimeServer {
     }
 }
 
-/// Space writes across processes as `claim_write` spaces them within one: each `msime-mcp call` is a process of its own, and a server may run beside it. The returned file holds the lock for the whole write, so two processes never overlap on a check-then-write edit either. Waits for a write another process is running, then refuses when that one began less than the interval ago.
-fn claim_shared_write(config: &Config) -> Result<File, String> {
+/// 跨进程串行写入，并限制两次写入开始的最短间隔；守卫覆盖整个写入，包括错误返回和展开。
+fn claim_shared_write(config: &Config) -> Result<file_lock::ScopedFileLock, String> {
     let state_dir = config.state_dir(&config.read_options()?)?;
-    let mut file = file_lock::open_private_lock_file(state_dir.join(WRITE_LOCK))
+    let file = file_lock::open_private_lock_file(state_dir.join(WRITE_LOCK))
         .map_err(|_| "cannot open the write lock in the state directory")?;
-    file_lock::exclusive(&file).map_err(|_| "cannot take the write lock")?;
-    let bytes = crate::bounded::read(&file, WRITE_LOCK_READ_LIMIT)
+    let held =
+        file_lock::ScopedFileLock::exclusive(file).map_err(|_| "cannot take the write lock")?;
+    let mut file = held.file();
+    let bytes = crate::bounded::read(file, WRITE_LOCK_READ_LIMIT)
         .map_err(|_| "cannot read the write lock")?;
     let text = std::str::from_utf8(&bytes).map_err(|_| "cannot read the write lock")?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "the system clock is before 1970")?
         .as_millis();
-    // A time ahead of the clock is a clock set back, not a recent write.
+    // 时间戳在当前时间之后表示时钟回拨，不算最近一次写入。
     if let Ok(previous) = text.trim().parse::<u128>() {
         if previous <= now && now - previous < WRITE_INTERVAL.as_millis() {
             return Err("writes are limited to one a second; try again shortly".into());
@@ -653,7 +654,7 @@ fn claim_shared_write(config: &Config) -> Result<File, String> {
         .and_then(|()| file.seek(SeekFrom::Start(0)))
         .and_then(|_| file.write_all(now.to_string().as_bytes()))
         .map_err(|_| "cannot record the write")?;
-    Ok(file)
+    Ok(held)
 }
 
 /// Clears the write-in-progress flag when the write it covers ends, however it ends.
@@ -701,6 +702,8 @@ async fn blocking<T: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(unix, not(target_os = "android")))]
+    use std::fs::File;
     use std::path::PathBuf;
 
     fn server(allow_write: bool) -> MsimeServer {
@@ -787,6 +790,30 @@ mod tests {
     }
 
     #[test]
+    fn skin_tools_describe_decoration_motion_and_animated_png() {
+        let description = |name: &str| {
+            server(true)
+                .tool_router
+                .list_all()
+                .into_iter()
+                .find(|tool| tool.name == name)
+                .and_then(|tool| tool.description)
+                .unwrap()
+                .to_string()
+        };
+        let create = description("create_candidate_skin");
+        for word in [
+            "motion (none, float, sway, breathe or bounce",
+            "motion_period_ms (1200-8000",
+            "animated PNG (APNG, at most 120 frames",
+        ] {
+            assert!(create.contains(word), "{word}");
+        }
+        assert!(description("list_candidate_skins")
+            .contains("idle motion, motion period and frame count"));
+    }
+
+    #[test]
     fn writes_are_spaced_out() {
         let server = server(true);
         drop(server.claim_write().unwrap());
@@ -823,6 +850,63 @@ mod tests {
             claim_shared_write(&config).unwrap_err(),
             "cannot read the write lock"
         );
+    }
+
+    #[cfg(all(unix, not(target_os = "android")))]
+    fn try_shared_write_test_lock(file: &File) -> bool {
+        match file.try_lock() {
+            Ok(()) => true,
+            Err(std::fs::TryLockError::WouldBlock) => false,
+            Err(error) => panic!("合成写锁取锁失败：{error}"),
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "android")))]
+    fn assert_shared_write_scope_releases_lock(unwind: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let options = directory.path().join("runtime-options.json");
+        std::fs::write(&options, b"{}").unwrap();
+        let config = Config {
+            options,
+            state_dir: Some(directory.path().to_owned()),
+            allow_write: true,
+            allow_dictionary_read: false,
+        };
+        let path = directory.path().join(WRITE_LOCK);
+        let held = claim_shared_write(&config).unwrap();
+        let inherited = held.file().try_clone().unwrap();
+        let contender = file_lock::open_private_lock_file(&path).unwrap();
+        assert!(!try_shared_write_test_lock(&contender));
+
+        let result = std::panic::catch_unwind(move || {
+            let _held = held;
+            if unwind {
+                panic!("合成的写入展开");
+            }
+        });
+        assert_eq!(result.is_err(), unwind);
+        assert!(
+            try_shared_write_test_lock(&contender),
+            "MCP 写入作用域结束后不能由旧描述符副本继续占锁"
+        );
+        drop(inherited);
+        let next = file_lock::open_private_lock_file(&path).unwrap();
+        assert!(!try_shared_write_test_lock(&next));
+        contender.unlock().unwrap();
+        assert!(try_shared_write_test_lock(&next));
+        next.unlock().unwrap();
+    }
+
+    #[cfg(all(unix, not(target_os = "android")))]
+    #[test]
+    fn a_finished_shared_write_scope_releases_an_inherited_lock() {
+        assert_shared_write_scope_releases_lock(false);
+    }
+
+    #[cfg(all(unix, not(target_os = "android")))]
+    #[test]
+    fn an_unwinding_shared_write_scope_releases_an_inherited_lock() {
+        assert_shared_write_scope_releases_lock(true);
     }
 
     #[tokio::test]

@@ -1,5 +1,10 @@
 import { mobilePrimaryPageIds, type MobilePrimaryPageId } from "./settings-navigation-helpers";
-import { pages, settingsNavGroups, type SettingsPageId } from "./settings-page-registry";
+import {
+  desktopMergedPages,
+  pages,
+  settingsNavGroups,
+  type SettingsPageId,
+} from "./settings-page-registry";
 import { mobileGroupTitle } from "./mobile-tab-helpers";
 
 export interface SettingsPageProjectionOptions {
@@ -16,8 +21,14 @@ export interface SettingsPageProjectionOptions {
   hasPlugins: boolean;
   /** 「手写输入」页：手写识别器只认汉字，不提供手写的版本（`EditionInfo.handwriting` 为 false）没有这一页。 */
   hasHandwriting: boolean;
+  /** 「手写输入」并进「屏幕键盘」页，那一页改叫「屏幕键盘与手写」。macOS、Linux、Windows 和 HarmonyOS 2-in-1 上手写页只有一个打开按钮或一段说明，单占一个侧栏入口不值得，Windows 原生设置窗口的 `SettingsNavigation.h` 也同样并成一页；触屏宿主的手写页另有内容，不并。本版本不提供手写时没有可并的页。 */
+  handwritingOnScreenKeyboardPage?: boolean;
+  /** 「连接 AI 助手」子页：宿主能报告本机 MCP 服务的状态（`mcpServerStatus`，三个桌面宿主）。 */
+  hasMcp: boolean;
   mobileHiddenPageIds: readonly SettingsPageId[];
   mobilePageTitle: (id: SettingsPageId, title: string) => string;
+  /** 桌面宿主按平台改写页名（`desktopPageTitle`）；缺省时用注册表里的名字。 */
+  desktopPageTitle?: (id: SettingsPageId, title: string) => string;
 }
 
 export interface SettingsPageItem {
@@ -37,7 +48,20 @@ export interface SettingsPageProjections {
   sidebarGroups: SettingsPageGroup[];
   mobilePrimaryPages: SettingsPageItem[];
   mobileSecondaryGroups: SettingsPageGroup[];
+  /** 已经并进别的页面的页 id 指向现在承载它的页。旧路由（例如 `settings:handwriting`）和记住的页面经它打开合并后的页，而不是落到默认页。 */
+  pageAliases: Partial<Record<SettingsPageId, SettingsPageId>>;
+  /** 「手写输入」这次确实并进了「屏幕键盘」页：页面据此在屏幕键盘页里画手写的分组。 */
+  handwritingOnScreenKeyboardPage: boolean;
 }
+
+/** 合并后「屏幕键盘」页的标题。 */
+export const screenKeyboardAndHandwritingTitle = "屏幕键盘与手写";
+
+// 模块级常量，每次渲染拿到同一个对象，依赖它的 effect 不会白白重跑。
+const handwritingAliases: Partial<Record<SettingsPageId, SettingsPageId>> = {
+  handwriting: "screen-keyboard",
+};
+const noPageAliases: Partial<Record<SettingsPageId, SettingsPageId>> = {};
 
 /** Projects the current registry into the host-aware page lists used by the settings shell. */
 export function settingsPageProjections({
@@ -52,9 +76,13 @@ export function settingsPageProjections({
   showDeveloperPage,
   hasPlugins,
   hasHandwriting,
+  handwritingOnScreenKeyboardPage: combineHandwriting = false,
+  hasMcp,
   mobileHiddenPageIds,
   mobilePageTitle,
+  desktopPageTitle = (_id, title) => title,
 }: SettingsPageProjectionOptions): SettingsPageProjections {
+  const handwritingOnScreenKeyboardPage = combineHandwriting && hasHandwriting && !mobilePlatform;
   const availablePages = pages
     .filter(
       (item) =>
@@ -63,30 +91,38 @@ export function settingsPageProjections({
         (item.id !== "vocabulary" || hasVocabularyReview) &&
         (item.id !== "account" || hasAccount) &&
         (item.id !== "chat" || hasChat) &&
-        // 触屏宿主没有「社区」页：社区内容列在皮肤、词库、AI 辅助这些功能页里，完整图库是那些页面上的子视图。
-        (item.id !== "community" || (hasCommunity && !mobilePlatform)) &&
+        // 有社区服务的宿主才有「社区」页。触屏宿主上它是底部「社区」标签的根页（皮肤与词库两类图库）；桌面上它不在侧栏里，只从「我的内容」各行进入。
+        (item.id !== "community" || hasCommunity) &&
         (item.id !== "floating-toolbar" || showFloatingToolbar) &&
         (item.id !== "developer" || showDeveloperPage) &&
         (item.id !== "plugins" || hasPlugins) &&
-        (item.id !== "handwriting" || hasHandwriting) &&
-        (item.id !== "more" || mobilePlatform) &&
+        (item.id !== "handwriting" || (hasHandwriting && !handwritingOnScreenKeyboardPage)) &&
+        (item.id !== "mcp" || hasMcp) &&
         // 「隐私」页是触屏「我的」里那一行打开的；桌面的隐私设置在「关于」里。
         (item.id !== "privacy" || mobilePlatform) &&
-        // 有对话的触屏宿主在「对话」标签里试键盘，独立的试用页只留给没有对话的宿主。
+        // 触屏宿主从「AI 辅助」进入二级对话，独立试用页只留给没有对话客户端的宿主。
         (item.id !== "try-keyboard" || (mobilePlatform && hasHomePage && !hasChat)),
     )
     .map((item) => ({
       ...item,
-      title: mobilePlatform ? mobilePageTitle(item.id, item.title) : item.title,
+      title: mobilePlatform
+        ? mobilePageTitle(item.id, item.title)
+        : handwritingOnScreenKeyboardPage && item.id === "screen-keyboard"
+          ? screenKeyboardAndHandwritingTitle
+          : desktopPageTitle(item.id, item.title),
     }));
 
+  // 触屏的「设置」列表（和 iPad 侧栏）不列底部标签页自己的根页：社区、统计、我的已经各占一格。桌面和 2in1 的侧栏不经过这条过滤。
   const mobileListedPage = (id: SettingsPageId): boolean =>
     ((id !== "about" && id !== "feedback") || !hasAccount) &&
     !mobilePrimaryPageIds.includes(id as MobilePrimaryPageId) &&
     !mobileHiddenPageIds.includes(id);
 
+  // 桌面侧栏不列出并进别的页的页面（`desktopMergedPages`）；它们仍在 `availablePages` 里，路由打开时显示承载页。
   const sidebarPages = availablePages.filter(
-    (item) => item.id !== "more" && !(mobilePlatform && mobileHiddenPageIds.includes(item.id)),
+    (item) =>
+      !(mobilePlatform && mobileHiddenPageIds.includes(item.id)) &&
+      (mobilePlatform || desktopMergedPages[item.id] === undefined),
   );
   const byId = new Map(sidebarPages.map((item) => [item.id, item]));
   const groups = settingsNavGroups
@@ -117,5 +153,14 @@ export function settingsPageProjections({
     }))
     .filter((group) => group.pages.length > 0);
 
-  return { availablePages, sidebarGroups, mobilePrimaryPages, mobileSecondaryGroups };
+  const pageAliases = handwritingOnScreenKeyboardPage ? handwritingAliases : noPageAliases;
+
+  return {
+    availablePages,
+    sidebarGroups,
+    mobilePrimaryPages,
+    mobileSecondaryGroups,
+    pageAliases,
+    handwritingOnScreenKeyboardPage,
+  };
 }

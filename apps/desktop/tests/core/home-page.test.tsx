@@ -215,12 +215,12 @@ test("root rows open their pages", () => {
   ]);
 });
 
-test("a shell that passes no root pages still reaches every page through 全部设置", () => {
-  const onOpenPage = vi.fn();
-  render(<HomePage preferences={preferences} onOpenPage={onOpenPage} touchLayout />);
+// 「全部设置」与「设置」根页重复，已去掉：没有给出根页面的外壳只显示搜索和状态卡片，不再有指向那份列表的行。
+test("a shell that passes no root pages has no 全部设置 row", () => {
+  render(<HomePage preferences={preferences} onOpenPage={vi.fn()} touchLayout />);
 
-  fireEvent.click(screen.getByRole("button", { name: "全部设置" }));
-  expect(onOpenPage).toHaveBeenCalledWith("more");
+  expect(screen.queryByRole("button", { name: "全部设置" })).toBeNull();
+  expect(statusCard()).toBeTruthy();
 });
 
 // ---- 搜索 ----
@@ -404,6 +404,7 @@ test("试用键盘 goes to the chat when the host has one, also when its keyboar
   });
   fireEvent.click(within(statusCard()).getByRole("button", { name: "试用键盘" }));
   await waitFor(() => expect(onOpenChat).toHaveBeenCalledTimes(2));
+  expect(onOpenChat.mock.calls).toEqual([[], []]);
   expect(onOpenPage).not.toHaveBeenCalled();
 });
 
@@ -516,6 +517,43 @@ test("opening a root row from the shell lands on that page", async () => {
 
 // ---- 桌面首页：保持不变 ----
 
+test.each(
+  ["missing", "success", "rejected"].flatMap((outcome) =>
+    [false, true].map((chat) => ({ outcome, chat })),
+  ),
+)("桌面键盘入口保留 $outcome 时的回退，聊天能力 $chat", async ({ outcome, chat }) => {
+  const onOpenPage = vi.fn();
+  const onOpenChat = chat ? vi.fn() : undefined;
+  const receivers: unknown[] = [];
+  const actions =
+    outcome === "missing"
+      ? undefined
+      : {
+          openKeyboard() {
+            receivers.push(this);
+            return outcome === "success"
+              ? Promise.resolve()
+              : Promise.reject(new Error("合成窗口错误"));
+          },
+        };
+  render(
+    <HomePage
+      preferences={initial.preferences}
+      actions={actions}
+      onOpenPage={onOpenPage}
+      onOpenChat={onOpenChat}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: /我的键盘/ }));
+  await act(async () => {});
+
+  if (outcome !== "missing") expect(receivers).toEqual([actions]);
+  expect(onOpenPage.mock.calls).toEqual(
+    outcome !== "success" && !chat ? [["screen-keyboard"]] : [],
+  );
+  if (onOpenChat) expect(onOpenChat.mock.calls).toEqual(outcome === "success" ? [] : [[]]);
+});
+
 test("renders the keyboard home surface with the current skin and scheme", () => {
   render(<HomePage preferences={initial.preferences} onOpenPage={vi.fn()} />);
 
@@ -524,9 +562,9 @@ test("renders the keyboard home surface with the current skin and scheme", () =>
   expect(screen.getByText("夜青 · 小鹤双拼")).toBeTruthy();
   expect(screen.getByRole("img", { name: "屏幕键盘完整布局预览" })).toBeTruthy();
   expect(screen.getByText("高情商回复")).toBeTruthy();
-  // 磁贴与主题页同名；「全部设置」的副标题按导航分组概括。
+  // 磁贴与主题页同名。桌面有侧栏，首页不再放指向「全部设置」列表的卡片。
   expect(screen.getByRole("button", { name: /^主题/ })).toBeTruthy();
-  expect(screen.getByText("打字、外观、语音与词库")).toBeTruthy();
+  expect(screen.queryByText("全部设置")).toBeNull();
   // 桌面首页没有「设置」根页的那些界面。
   expect(screen.queryByRole("searchbox")).toBeNull();
   expect(screen.queryByRole("group", { name: "水杉输入法状态" })).toBeNull();
@@ -551,17 +589,9 @@ test("routes home shortcuts to the shared settings pages", () => {
   fireEvent.click(screen.getByRole("button", { name: /^主题/ }));
   fireEvent.click(screen.getByRole("button", { name: /输入方案/ }));
   fireEvent.click(screen.getByRole("button", { name: /按键/ }));
-  // 这一行过去只跳到「外观」；现在它打开「全部设置」列表，所有没有独立标签页的页面都从那里进入。
-  fireEvent.click(screen.getByRole("button", { name: /全部设置/ }));
   fireEvent.click(screen.getByRole("button", { name: /高情商回复/ }));
 
-  expect(onOpenPage.mock.calls).toEqual([
-    ["skin"],
-    ["input"],
-    ["screen-keyboard"],
-    ["more"],
-    ["ai"],
-  ]);
+  expect(onOpenPage.mock.calls).toEqual([["skin"], ["input"], ["screen-keyboard"], ["ai"]]);
 });
 
 test("exposes Apple home shortcuts for dictionary, AI and system settings", () => {
@@ -687,3 +717,40 @@ test("the desktop home reply entry opens AI settings and leaves the touch scheme
   expect(screen.queryByRole("button", { name: "设为当前输入方案 高情商回复" })).toBeNull();
   expect(save).not.toHaveBeenCalled();
 });
+
+// 「我的键盘 · 当前外观」画的是宿主真正会用的键盘：各界面跟随颜色模式的宿主不读存下的屏幕键盘明暗，预览也不能照它画；明确不跟随的宿主照旧用它。
+test.each([
+  ["macos", undefined, "light"],
+  ["windows", undefined, "light"],
+  ["linux", undefined, "light"],
+  ["windows", false, "dark"],
+] as const)(
+  "the desktop home keyboard preview on %s (surface_themes_follow %s) is %s",
+  async (platform, surfaceThemesFollow, expected) => {
+    render(
+      <SettingsPage
+        client={{
+          load: async () => ({
+            ...initial,
+            preferences: { ...initial.preferences, theme: "light", screen_keyboard_theme: "dark" },
+          }),
+          save: vi.fn(),
+          host: testHost({
+            platform,
+            ...(surfaceThemesFollow === undefined
+              ? {}
+              : { surface_themes_follow: surfaceThemesFollow }),
+          }),
+          home: {
+            openKeyboard: vi.fn().mockResolvedValue(undefined),
+          },
+        }}
+      />,
+    );
+    const home = await screen.findByRole("region", { name: "首页" });
+    const preview = within(home).getByRole("img", { name: "屏幕键盘完整布局预览" });
+    expect(preview.closest("[data-preview-theme]")?.getAttribute("data-preview-theme")).toBe(
+      expected,
+    );
+  },
+);

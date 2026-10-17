@@ -1,6 +1,7 @@
 #include "AccountGlossPolicy.h"
 #include "CandidateTranslationPolicy.h"
 #include "TranslationWorker.h"
+#include "AiEndpointPolicy.h"
 #include "CandidateHttpPolicy.h"
 #include "JapaneseReader.h"
 #include "TranslationDisplay.h"
@@ -22,6 +23,10 @@
 #include <vector>
 
 namespace msime::windows {
+bool ai_translation_url_allowed(std::string_view url) {
+  return !ai_endpoint_protocol(url).empty();
+}
+
 namespace {
 constexpr auto kDebounce = std::chrono::milliseconds(500);
 constexpr size_t kMaximumQueryBytes = 65536;
@@ -29,11 +34,18 @@ constexpr size_t kMaximumResponseBytes = 1024 * 1024;
 constexpr long kCustomTranslationTimeoutMs = 2500;
 constexpr long kTencentTranslationTimeoutMs = 2000;
 constexpr long kNiuTransTranslationTimeoutMs = 2500;
+constexpr long kAiTranslationTimeoutMs = 8000;
 // 账号释义由服务端的模型回答，比机器翻译接口慢；macOS 等 30 秒，这里只有一个翻译线程，等太久会让后面的页都排着，所以取 10 秒。
 constexpr long kAccountTranslationTimeoutMs = 10000;
 constexpr auto kTranslationBatchBudget = std::chrono::seconds(6);
 constexpr auto kNegativeTranslationTtl = std::chrono::minutes(8);
 constexpr size_t kMaximumTranslationCacheEntries = 4096;
+
+enum class HttpEndpointPolicy {
+  HttpsOnly,
+  LoopbackHttp,
+  Ai,
+};
 
 struct HttpResponse {
   std::string body;
@@ -101,7 +113,8 @@ std::optional<nlohmann::json> query_document(const std::string &query) {
 
 std::optional<std::string> http_request(const nlohmann::json &descriptor,
                                         const std::function<bool()> &cancelled,
-                                        bool allow_http, long timeout_ms,
+                                        HttpEndpointPolicy policy,
+                                        long timeout_ms,
                                         long *status_out = nullptr) {
   if (status_out)
     *status_out = 0;
@@ -109,7 +122,10 @@ std::optional<std::string> http_request(const nlohmann::json &descriptor,
     if (!descriptor.is_object() || !descriptor.at("url").is_string())
       return std::nullopt;
     const auto url = descriptor.at("url").get<std::string>();
-    if (!valid_candidate_url(url, allow_http))
+    const bool ai_endpoint = policy == HttpEndpointPolicy::Ai;
+    if (ai_endpoint ? !ai_translation_url_allowed(url)
+                    : !valid_candidate_url(
+                          url, policy == HttpEndpointPolicy::LoopbackHttp))
       return std::nullopt;
     const auto headers = descriptor.value("headers", nlohmann::json::object());
     if (!headers.is_object())
@@ -138,7 +154,11 @@ std::optional<std::string> http_request(const nlohmann::json &descriptor,
     HttpResponse response{{}, cancelled};
     curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS_STR,
-                     allow_http ? "http,https" : "https");
+                     ai_endpoint || policy == HttpEndpointPolicy::LoopbackHttp
+                         ? "http,https"
+                         : "https");
+    if (ai_endpoint && ai_endpoint_connects_directly(url))
+      curl_easy_setopt(curl.get(), CURLOPT_NOPROXY, "*");
     curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT_MS, 2500L);
     curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT_MS, timeout_ms);
@@ -196,7 +216,8 @@ custom_translation(const nlohmann::json &config, const nlohmann::json &item,
   // The source Windows client permits an explicitly configured HTTP custom
   // translator (useful for a local service).  Keep cloud providers HTTPS-only.
   auto body =
-      http_request(*descriptor, cancelled, true, kCustomTranslationTimeoutMs);
+      http_request(*descriptor, cancelled, HttpEndpointPolicy::LoopbackHttp,
+                   kCustomTranslationTimeoutMs);
   if (!body || cancelled())
     return std::nullopt;
   auto parsed = host_value(msime_client_parse_custom_translation_response(
@@ -227,7 +248,8 @@ void append_tencent_group(const nlohmann::json &config,
   if (!descriptor || descriptor->is_null())
     return;
   auto body =
-      http_request(*descriptor, cancelled, false, kTencentTranslationTimeoutMs);
+      http_request(*descriptor, cancelled, HttpEndpointPolicy::HttpsOnly,
+                   kTencentTranslationTimeoutMs);
   if (!body || cancelled())
     return;
   auto parsed = host_value(msime_client_parse_tencent_translation_response(
@@ -269,11 +291,42 @@ void append_niutrans_item(const nlohmann::json &config,
       reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size()));
   if (!descriptor || descriptor->is_null() || cancelled())
     return;
-  auto body = http_request(*descriptor, cancelled, false,
+  auto body = http_request(*descriptor, cancelled, HttpEndpointPolicy::HttpsOnly,
                            kNiuTransTranslationTimeoutMs);
   if (!body || cancelled())
     return;
   auto parsed = host_value(msime_client_parse_niutrans_translation_response(
+      reinterpret_cast<const uint8_t *>(body->data()), body->size()));
+  if (!parsed || !parsed->is_string() || parsed->get<std::string>().empty())
+    return;
+  try {
+    auto output = nlohmann::json::parse(translations);
+    output.push_back({{"text", item.at("text")}, {"translation", *parsed}});
+    translations = output.dump();
+  } catch (...) {
+  }
+}
+
+void append_ai_item(const nlohmann::json &config, const nlohmann::json &item,
+                    std::string &translations,
+                    const std::function<bool()> &cancelled) {
+  if (cancelled() || !config.is_object() || !config.value("enabled", false))
+    return;
+  const auto request = nlohmann::json{
+      {"config", config},
+      {"input", { {"text", item.at("key")},
+                   {"source_language", item.at("source_language")},
+                   {"target_language", item.at("target_language")} }}};
+  const auto bytes = request.dump();
+  auto descriptor = host_value(msime_client_ai_translation_http_request(
+      reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size()));
+  if (!descriptor || descriptor->is_null() || cancelled())
+    return;
+  auto body = http_request(*descriptor, cancelled, HttpEndpointPolicy::Ai,
+                           kAiTranslationTimeoutMs);
+  if (!body || cancelled())
+    return;
+  auto parsed = host_value(msime_client_parse_ai_translation_response(
       reinterpret_cast<const uint8_t *>(body->data()), body->size()));
   if (!parsed || !parsed->is_string() || parsed->get<std::string>().empty())
     return;
@@ -453,7 +506,8 @@ std::optional<std::string> account_glosses(
         {"url", std::string(account_gloss_url)},
         {"headers", {{"Authorization", "Bearer " + token->token}, {"Content-Type", "application/json"}}},
         {"body", body}};
-    response = http_request(descriptor, stopping, false, kAccountTranslationTimeoutMs, &status);
+    response = http_request(descriptor, stopping, HttpEndpointPolicy::HttpsOnly,
+                            kAccountTranslationTimeoutMs, &status);
     // 服务端以 401 拒绝了这个令牌（过期、被吊销）：带上它再取一次，共享层会强制刷新，刷新不了时退回匿名账号。
     if (response || status != 401 || stopping())
       break;
@@ -557,7 +611,7 @@ void flatten_single_target(const std::string &query_bytes,
 }
 // 日文行的罗马字由本线程上的 IFELanguage 读出（JapaneseReader.h）：TranslationWorker::run 在工作线程的栈上持有一个读音器，经这个指针交给本线程上的读音查询，run 返回时它随栈析构关闭，COM 套间跟着线程。不在工作线程上（指针为空）时不读罗马字。这里不放 thread_local 的读音器对象本身：它的析构要等线程退出回调，那时持着加载器锁，不能 CoUninitialize；MinGW 构建的 thread_local 析构在 Wine 下还会跳到空地址崩溃（windows-translation-worker 测试）。
 thread_local JapaneseReader *active_japanese_reader = nullptr;
-// 这一页候选的读音和整句逐词拆解，和 macOS 的 synchronizePronunciation、synchronizeGlossBreakdowns 一样：读音只在打开「显示读音」时问，英文释义行（英文候选则是它自己）整行发给共享读音表，日文释义行的第一个词交给本机的微软日语输入法读成罗马字；拆解在查询带 gloss_breakdown 时问（候选翻译或离线英文释义打开、目标语言里有英文，和 macOS 的 currentGlossRequest 一样），2 到 32 个汉字的候选发给共享拆解表。两张表都装在资源目录旁边，没装时共享层回答空列表，不是错误。都在本线程上读本机文件，不联网。
+// 这一页候选的读音，和 macOS 的 synchronizePronunciation 一样：只在打开「显示读音」时问，英文释义行（英文候选则是它自己）整行发给共享读音表，日文释义行的第一个词交给本机的微软日语输入法读成罗马字。读音表装在资源目录旁边，没装时共享层回答空列表，不是错误。都在本线程上读本机文件，不联网。
 CandidateReadings candidate_readings(const std::string &query_bytes,
                                      const std::string &translations,
                                      const std::function<bool()> &cancelled) {
@@ -641,27 +695,6 @@ CandidateReadings candidate_readings(const std::string &query_bytes,
       reading.pronunciation = std::move(joined);
     }
   }
-  if (query->value("gloss_breakdown", false) && !cancelled()) {
-    auto sentences = nlohmann::json::array();
-    std::unordered_set<std::string> asked;
-    for (const auto &[text, translation] : page)
-      if (gloss_sentence_candidate(text) && asked.insert(text).second)
-        sentences.push_back(text);
-    if (!sentences.empty()) {
-      const auto request =
-          nlohmann::json{{"generation", generation}, {"texts", std::move(sentences)}}.dump();
-      if (const auto value = host_value(msime_client_gloss_breakdown_request(
-              reinterpret_cast<const uint8_t *>(request.data()), request.size(),
-              reinterpret_cast<const uint8_t *>(resource_path.data()), resource_path.size()));
-          value && value->is_object())
-        for (const auto &entry : value->value("breakdowns", nlohmann::json::array()))
-          if (entry.is_object() && entry.contains("text") && entry.at("text").is_string() &&
-              entry.contains("breakdown") && entry.at("breakdown").is_string() &&
-              !entry.at("breakdown").get<std::string>().empty())
-            readings[entry.at("text").get<std::string>()].breakdown =
-                entry.at("breakdown").get<std::string>();
-    }
-  }
   return readings;
 }
 } // namespace
@@ -680,13 +713,6 @@ TranslationWorker::TranslationWorker(Completed completed, Translator translator)
       if (result) {
         flatten_single_target(query, *result);
         result->readings = candidate_readings(query, result->translations, cancelled);
-      } else if (!cancelled()) {
-        // 这一页没有任何释义，整句候选仍可能有逐词拆解：只带读音和拆解回去，释义是空列表，SessionController 见到它就不交给会话。
-        auto readings = candidate_readings(query, "[]", cancelled);
-        const auto document = query_document(query);
-        if (!readings.empty() && document && !cancelled())
-          result = Result{lease, document->at("generation").get<uint64_t>(), "[]",
-                          std::move(readings)};
       }
       return result;
     };
@@ -778,6 +804,7 @@ TranslationWorker::translate(const FocusLease &lease, const std::string &query_b
       const auto custom =
           query.value("custom_translation", nlohmann::json(nullptr));
       const auto tencent = query.value("tencent_tmt", nlohmann::json(nullptr));
+      const auto ai = query.value("ai_assistant", nlohmann::json(nullptr));
       if (niutrans.is_object() && niutrans.value("enabled", false)) {
         append_niutrans_item(niutrans, item, translations, cancelled);
       } else if (custom.is_object() && custom.value("enabled", false)) {
@@ -788,6 +815,8 @@ TranslationWorker::translate(const FocusLease &lease, const std::string &query_b
       } else if (tencent.is_object() && tencent.value("enabled", false)) {
         append_tencent_group(tencent, std::vector<nlohmann::json>{item},
                              translations, cancelled);
+      } else if (ai.is_object() && ai.value("enabled", false)) {
+        append_ai_item(ai, item, translations, cancelled);
       }
       if (cancelled() || nlohmann::json::parse(translations).empty())
         return std::nullopt;
@@ -1052,9 +1081,14 @@ TranslationWorker::translate(const FocusLease &lease, const std::string &query_b
       provider_scope = "custom:" + custom.value("endpoint", std::string{});
     } else {
       const auto tencent = query.value("tencent_tmt", nlohmann::json(nullptr));
-      if (!tencent.is_object() || !tencent.value("enabled", false))
-        return local_result();
-      provider_scope = "tencent";
+      const auto ai = query.value("ai_assistant", nlohmann::json(nullptr));
+      if (ai.is_object() && ai.value("enabled", false))
+        provider_scope = "ai:" + ai.value("provider", std::string{});
+      else {
+        if (!tencent.is_object() || !tencent.value("enabled", false))
+          return local_result();
+        provider_scope = "tencent";
+      }
     }
     const auto target_language = query.at("target_language");
     const auto item_cache_id = [&](const nlohmann::json &item) {
@@ -1127,22 +1161,33 @@ TranslationWorker::translate(const FocusLease &lease, const std::string &query_b
       }
     } else {
       const auto tencent = query.value("tencent_tmt", nlohmann::json(nullptr));
-      if (!tencent.is_object() || !tencent.value("enabled", false))
+      const auto ai = query.value("ai_assistant", nlohmann::json(nullptr));
+      if ((!tencent.is_object() || !tencent.value("enabled", false)) &&
+          (!ai.is_object() || !ai.value("enabled", false)))
         return std::nullopt;
-      std::unordered_map<std::string, std::vector<nlohmann::json>> groups;
-      groups.reserve(pending.size());
-      for (const auto &item : pending)
-        groups[item.at("source_language").get<std::string>() + "\n" +
-               item.at("target_language").get<std::string>()]
-            .push_back(item);
-      for (const auto &[key, items] : groups) {
-        (void)key;
-        if (cancelled() ||
-            std::chrono::steady_clock::now() >= provider_deadline)
-          break;
-        for (const auto &item : items)
+      if (ai.is_object() && ai.value("enabled", false)) {
+        for (const auto &item : pending) {
+          if (cancelled() || std::chrono::steady_clock::now() >= provider_deadline)
+            break;
           attempted_cache_ids.insert(item_cache_id(item));
-        append_tencent_group(tencent, items, translations, cancelled);
+          append_ai_item(ai, item, translations, cancelled);
+        }
+      } else {
+        std::unordered_map<std::string, std::vector<nlohmann::json>> groups;
+        groups.reserve(pending.size());
+        for (const auto &item : pending)
+          groups[item.at("source_language").get<std::string>() + "\n" +
+                 item.at("target_language").get<std::string>()]
+              .push_back(item);
+        for (const auto &[key, items] : groups) {
+          (void)key;
+          if (cancelled() ||
+              std::chrono::steady_clock::now() >= provider_deadline)
+            break;
+          for (const auto &item : items)
+            attempted_cache_ids.insert(item_cache_id(item));
+          append_tencent_group(tencent, items, translations, cancelled);
+        }
       }
     }
     if (cancelled())

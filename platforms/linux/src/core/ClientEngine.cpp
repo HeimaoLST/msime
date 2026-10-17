@@ -24,6 +24,7 @@
 #include "ViewComposition.h"
 #include "ReplacedProgram.h"
 #include "SmartPunctuationSpace.h"
+#include "SmartPunctuationChoice.h"
 #include "SpellingSymbols.h"
 #include "PreparePaths.h"
 #include "LocalModeSwitches.h"
@@ -489,6 +490,40 @@ struct State {
   msime::linux_host::JapaneseConversion japanese_conversion;
   msime::linux_host::BackspaceHoldPolicy backspace_hold;
   std::string ai_context;
+  // surrounding text 不可用时，只用本会话由输入法自己上屏的末尾文本判断智能标点；任何交给应用的按键、光标移动或删除都会使它失效。
+  std::string smart_punctuation_shadow;
+  bool smart_punctuation_shadow_valid = false;
+  void remember_smart_punctuation_commit(const std::string &text) {
+    if (!focused || blocked || private_input) {
+      smart_punctuation_shadow.clear();
+      smart_punctuation_shadow_valid = false;
+      return;
+    }
+    smart_punctuation_shadow += text;
+    if (smart_punctuation_shadow.size() > 1024) {
+      size_t cut = smart_punctuation_shadow.size() - 1024;
+      while (cut < smart_punctuation_shadow.size() &&
+             (static_cast<unsigned char>(smart_punctuation_shadow[cut]) & 0xc0) == 0x80)
+        ++cut;
+      smart_punctuation_shadow.erase(0, cut);
+    }
+    smart_punctuation_shadow_valid = true;
+  }
+  void forget_smart_punctuation_shadow() {
+    smart_punctuation_shadow.clear();
+    smart_punctuation_shadow_valid = false;
+  }
+  void erase_smart_punctuation_shadow_last() {
+    if (!smart_punctuation_shadow_valid || smart_punctuation_shadow.empty()) {
+      forget_smart_punctuation_shadow();
+      return;
+    }
+    size_t last = smart_punctuation_shadow.size() - 1;
+    while (last > 0 &&
+           (static_cast<unsigned char>(smart_punctuation_shadow[last]) & 0xc0) == 0x80)
+      --last;
+    smart_punctuation_shadow.erase(last);
+  }
   void remember_commit(const std::string &text) {
     if (!focused || blocked || private_input) {
       ai_context.clear();
@@ -510,6 +545,7 @@ struct State {
   bool voice_hotkey_ralt = true;
   bool voice_hotkey_ctrl_win = false;
   bool voice_hotkey_rctrl_ralt = false;
+  // 空格锁定固定为开，不读存下的 `hotkey_hold_space_lock`：空格只在按住录音组合键期间才被拦下，平常打字不受影响，设置页也不再给这个开关（`voice_space_lock_switch`）。
   bool voice_hotkey_hold_space_lock = true;
   bool voice_hotkey_ctrl_f9 = true;
   // The lock state as the last key event reported it; IBus sends no event of its own when it changes.
@@ -657,6 +693,7 @@ struct State {
     applied_preferences_snapshot = nullptr;
     stop_clipboard_monitor();
     ai_context.clear();
+    forget_smart_punctuation_shadow();
     if (voice_active && !voice_provider_socket.empty())
       msime::host_api::discard_string(msime_client_voice_provider_cancel(
           reinterpret_cast<const uint8_t *>(voice_provider_socket.data()),
@@ -805,8 +842,6 @@ struct State {
     voice_hotkey_ralt = voice_preferences.value("hotkey_ralt", true);
     voice_hotkey_ctrl_win = voice_preferences.value("hotkey_ctrl_win", false);
     voice_hotkey_rctrl_ralt = voice_preferences.value("hotkey_rctrl_ralt", false);
-    voice_hotkey_hold_space_lock =
-        voice_preferences.value("hotkey_hold_space_lock", true);
     voice_hotkey_ctrl_f9 = voice_preferences.value("hotkey_ctrl_f9", true);
     const auto keybindings = preferences.value("keybindings", Json::object());
     mode_ctrl_space_enabled = keybindings.value("switch_language_ctrl_space", true);
@@ -1061,10 +1096,9 @@ struct State {
     wubi_auto_commit_unique = wubi_auto_commit_unique_override.value_or(
         preferences.value("wubi_auto_commit_unique", true));
     const auto voice = preferences.value("voice_input", Json::object());
-    // The voice overlay's mode from voice_theme by its own rule, its colours from the theme the candidate window resolves (as the floating toolbar takes them), so the bar matches the panel's theme; a fixed-appearance theme overrides the mode.
+    // 语音浮层的明暗跟随颜色模式（各界面一律跟随，存下的 voice_theme 不再读），颜色取候选窗解析出的主题（与悬浮工具栏取法相同），所以浮层与面板同一套主题；固定明暗的主题照样盖过它。
     const auto voice_theme = theme_in_mode(
-        display_preferences, !msime_voice_overlay_light_theme(preferences.value("voice_theme", "follow"),
-                                                              preferences.value("theme", "dark"), system_dark));
+        display_preferences, !msime_voice_overlay_light_theme("follow", preferences.value("theme", "dark"), system_dark));
     wave_overlay.light_theme = !voice_theme.dark;
     wave_overlay.palette = msime::linux_host::floating_surface_colors(voice_theme);
     voice_enabled = voice.value("enabled", true);
@@ -1072,7 +1106,6 @@ struct State {
     voice_hotkey_ralt = voice.value("hotkey_ralt", true);
     voice_hotkey_ctrl_win = voice.value("hotkey_ctrl_win", false);
     voice_hotkey_rctrl_ralt = voice.value("hotkey_rctrl_ralt", false);
-    voice_hotkey_hold_space_lock = voice.value("hotkey_hold_space_lock", true);
     voice_hotkey_ctrl_f9 = voice.value("hotkey_ctrl_f9", true);
     const auto keybindings = preferences.value("keybindings", Json::object());
     mode_ctrl_space_enabled = keybindings.value("switch_language_ctrl_space", true);
@@ -1430,6 +1463,7 @@ void commit_text(
     record_typing_statistics(engine, text,
                              source_override ? *source_override : typing_source(s));
   s.remember_commit(text);
+  s.remember_smart_punctuation_commit(text);
 }
 // 背景音乐只在本输入法获得焦点、没有录音时可以播放。这里只告诉生命周期核心本会话是否激活（msime_client_set_active），变了才说；核心记着哪个会话是音乐的所有者，再按字段属性决定：隐私字段（报成 SECURE）里不放，只带不做拼写检查的普通字段照常放。IBus 的两个输入上下文先进后出时，后获得焦点的那个成为所有者，先失焦的那个关不掉它的音乐。State::close 在会话销毁前告诉核心本会话停用。
 void sync_music(IBusEngine *engine) {
@@ -1798,6 +1832,12 @@ bool smart_punctuation_preceded_by_ascii_alphanumeric(const State &s) {
       }
     }
   }
+  if (!s.surrounding_valid) {
+    if (!s.smart_punctuation_shadow_valid || s.smart_punctuation_shadow.empty())
+      return false;
+    const auto last = static_cast<unsigned char>(s.smart_punctuation_shadow.back());
+    return smart_punctuation_keeps_ascii_after(s, last);
+  }
   const auto &surrounding = s.surrounding_text;
   // A commit replaces the selection, so inspect the character before its start.
   const auto cursor = surrounding_byte_offset(
@@ -1809,10 +1849,16 @@ bool smart_punctuation_preceded_by_ascii_alphanumeric(const State &s) {
   return smart_punctuation_keeps_ascii_after(s, value);
 }
 bool smart_punctuation_repeat_matches_document(const State &s) {
-  if (s.surrounding_cursor != s.surrounding_anchor)
+  if (s.surrounding_valid && s.surrounding_cursor != s.surrounding_anchor)
     return false;
   auto previous = msime::linux_host::ascii_mark_text(s.last_smart_punctuation,
                                                      s.fullwidth);
+  if (!s.surrounding_valid) {
+    return s.smart_punctuation_shadow_valid &&
+           s.smart_punctuation_shadow.size() >= previous.size() &&
+           s.smart_punctuation_shadow.compare(
+               s.smart_punctuation_shadow.size() - previous.size(), previous.size(), previous) == 0;
+  }
   const auto cursor = surrounding_byte_offset(s, s.surrounding_cursor);
   return cursor >= previous.size() &&
          s.surrounding_text.compare(cursor - previous.size(), previous.size(),
@@ -1877,6 +1923,7 @@ bool convert_smart_punctuation_space(IBusEngine *engine) {
       --last;
     s.ai_context.erase(last);
   }
+  s.erase_smart_punctuation_shadow_last();
   commit_text(engine, replacement);
   return true;
 }
@@ -2250,7 +2297,7 @@ bool online_request_is_stale(IBusEngine *engine, const std::string &encoded) {
     return false;
   }
 }
-// AI 座位上的占位行（Engine 候选来源 12）：这次组字不会向 AI 发问，或发问落空（失败、空回答、被拒）时换成「—」，留到组字变化为止，后面的候选不挪位（#6888）。座位已经换过或没开时 Host API 答 applied:false，什么都不画。
+// 这次组字不会向 AI 发问，或发问落空（失败、空回答、被拒）时告诉 Host API（#6888）。共享内核已经不放 AI 占位行，这个调用答 applied:false、不改候选列表；调用和接口留着不变；答 applied:false 时什么都不画。
 void resolve_ai_seat(IBusEngine *engine, const std::string &query) {
   auto &s = state(engine);
   if (!s.session || query.empty())
@@ -2264,7 +2311,7 @@ void resolve_ai_seat(IBusEngine *engine, const std::string &query) {
     render(engine, s.view);
   } catch (...) {}
 }
-// 不会向 AI 发问的状态（没有在线服务、私密输入框）下，把当前组字的 AI 座位直接换成「—」。
+// 不会向 AI 发问的状态（没有在线服务、私密输入框）下，直接告诉 Host API 当前组字没有 AI 回答。
 void resolve_ai_seat_without_provider(IBusEngine *engine) {
   auto &s = state(engine);
   if (!s.session || !s.focused || s.blocked || !s.input_enabled)
@@ -2293,9 +2340,9 @@ void online_dispatch(IBusEngine *engine, uint8_t only_source, bool ai_cache_only
         const auto desired = s.applied_preferences_snapshot.value("ai_assistant", Json::object());
         const auto current = query.value("ai_assistant", Json::object());
         bool matches = desired.value("enabled", false) && current.value("enabled", false);
-        // Engine preference application may be deferred until composition
-        // ends. Never launch another request with the superseded AI settings.
-        for (const auto *key : {"provider", "model", "endpoint", "candidate_limit",
+        // 引擎可能等组字结束才应用偏好，不能再用已被替换的 AI 设置发出请求。
+        // 不比较 candidate_limit：Linux 的候选数量由 host-api 固定（client-core 的 `HostPlatform::fixed_ai_candidate_limit`），查询里永远是固定值，而 desired 是文档里存的原值，存的不是 3 时两边永远不等，AI 请求就再也发不出去。推迟应用的偏好改动也改不了这个固定值，没有什么要防。
+        for (const auto *key : {"provider", "model", "endpoint",
                                 "prompt_id", "prompt_custom_1",
                                 "prompt_custom_2", "prompt_custom_3"}) {
           if (desired.contains(key) &&
@@ -2511,7 +2558,7 @@ void online_complete(GObject *source, GAsyncResult *result, gpointer) {
     online_schedule(engine);
     return;
   }
-  // 网络请求（不是只查缓存的探测）落空：除了留着下次重试，还要把 AI 座位上的占位行换成「—」。
+  // 网络请求（不是只查缓存的探测）落空：除了留着下次重试，还告诉 Host API 这次没有回答。
   const auto empty_ai = [&] {
     retry_empty_ai();
     if (request->source == 1 && !request->ai_cache_only)
@@ -3929,8 +3976,9 @@ void render(IBusEngine *engine, const Json &view) {
         gloss += " · " + translation;
     }
     std::string tail;
-    // Engine 候选来源 12 是 AI 座位上的占位行，下面画成次要色。
-    const bool ai_placeholder = candidate.value("source", 0) == 12;
+    // Engine 候选来源 12 是 AI 占位行，来源 15 是云候选占位行，下面都画成次要色。
+    const auto source = candidate.value("source", 0);
+    const bool online_placeholder = source == 12 || source == 15;
     switch (candidate.value("source", 0)) {
     case 2: tail += "  云"; break;
     case 3: tail += "  AI"; break;
@@ -3985,7 +4033,7 @@ void render(IBusEngine *engine, const Json &view) {
       ibus_text_append_attribute(text, IBUS_ATTR_TYPE_FOREGROUND,
                                  *row_text_color, 0, G_MAXUINT);
     // AI 占位行用序号的颜色（没有主题色时用灰色）画，追加在行颜色之后所以盖过它。
-    if (ai_placeholder)
+    if (online_placeholder)
       ibus_text_append_attribute(
           text, IBUS_ATTR_TYPE_FOREGROUND,
           state(engine).candidate_number_color.value_or(0x8a8a8a), 0, G_MAXUINT);
@@ -4649,6 +4697,8 @@ bool voice_hotkey(const State &s, guint key, guint modifiers) {
 void set_surrounding(IBusEngine *engine, IBusText *text, guint cursor, guint anchor) {
   // Keep platform context available without feeding it into Engine composition.
   auto &s = state(engine);
+  if (text)
+    s.forget_smart_punctuation_shadow();
   s.surrounding_valid = text != nullptr;
   s.surrounding_text = text && ibus_text_get_text(text) ? ibus_text_get_text(text) : "";
   s.surrounding_cursor = cursor;
@@ -4670,8 +4720,9 @@ msime::linux_host::PanelInputDelivery panel_input_deliver(
   if (!engine || !state(engine).focused) return PanelInputDelivery::NoFocus;
   if (state(engine).blocked) return PanelInputDelivery::Restricted;
   if (request.kind == PanelInputRequest::Kind::Text) {
-    // Committed directly rather than through commit_text: the panel records its own typing statistics, as it does for every other route.
+    // 面板自行记录打字统计，但文本仍要经过同一影子前文记录，以便 surrounding 不可用时智能标点保持一致。
     ibus_engine_commit_text(engine, ibus_text_new_from_string(request.text.c_str()));
+    if (!request.text.empty()) state(engine).remember_smart_punctuation_commit(request.text);
     return PanelInputDelivery::Delivered;
   }
   auto keyval = ibus_keyval_from_name(request.key.c_str());
@@ -4861,6 +4912,7 @@ void focus_out(IBusEngine *engine) {
     s.backspace_hold.reset();
     s.key_repeat.reset();
     s.ai_context.clear();
+    s.forget_smart_punctuation_shadow();
     s.invalidate_providers();
     s.surrounding_text.clear();
     s.surrounding_valid = false;
@@ -5526,8 +5578,9 @@ void property_activate(IBusEngine *engine, const gchar *name, guint value) {
     if (property_name.rfind("ShuangpinProfile/", 0) == 0) {
       if (value != PROP_STATE_CHECKED || menu_save_pending) return;
       const auto selected = property_name.substr(std::string("ShuangpinProfile/").size());
-      if (selected != "xiaohe" && selected != "ziranma" && selected != "shoudao" &&
-          selected != "microsoft")
+      if (std::none_of(msime::linux_host::kShuangpinProfileNames.begin(),
+                       msime::linux_host::kShuangpinProfileNames.end(),
+                       [&](const auto &profile) { return selected == profile.value; }))
         return;
       if (s.shuangpin_profile_override.value_or(
               configured.at("preferences").value("shuangpin_profile", "xiaohe")) == selected)
@@ -6003,6 +6056,7 @@ void reset(IBusEngine *engine) {
     state(engine).character_set_chord_held = false;
     state(engine).japanese_chord_held = false;
     state(engine).ai_context.clear();
+    state(engine).forget_smart_punctuation_shadow();
     state(engine).native_compose.reset();
     state(engine).backspace_hold.reset();
     if (state(engine).voice_active)
@@ -6264,6 +6318,15 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
   const bool shift_key = key == IBUS_Shift_L || key == IBUS_Shift_R;
   const bool ctrl_key = key == IBUS_Control_L || key == IBUS_Control_R;
   const bool release = (flags & IBUS_RELEASE_MASK) != 0;
+  if (!release &&
+      (key == IBUS_BackSpace || key == IBUS_Delete || key == IBUS_KP_Delete ||
+       key == IBUS_Left || key == IBUS_KP_Left || key == IBUS_Right ||
+       key == IBUS_KP_Right || key == IBUS_Up || key == IBUS_KP_Up ||
+       key == IBUS_Down || key == IBUS_KP_Down || key == IBUS_Home ||
+       key == IBUS_KP_Home || key == IBUS_End || key == IBUS_KP_End ||
+       key == IBUS_Page_Up || key == IBUS_KP_Page_Up || key == IBUS_Page_Down ||
+       key == IBUS_KP_Page_Down))
+    s.forget_smart_punctuation_shadow();
   // Pressing CapsLock reports the old lock state and releasing it the new one, so every event is checked.
   if (const bool caps_lock = (flags & IBUS_LOCK_MASK) != 0; caps_lock != s.caps_lock) {
     s.caps_lock = caps_lock;
@@ -6320,6 +6383,20 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
   if (key == IBUS_Control_R) s.right_ctrl_down = !release;
   if (key == IBUS_Control_L) s.left_ctrl_down = !release;
   if (ctrl_key) s.ctrl_down = s.right_ctrl_down || s.left_ctrl_down;
+  // Ctrl+Shift+P 插入固定的产品介绍，不改动用户常用语。
+  const bool promotion_shortcut = !release && (key == 'p' || key == 'P') &&
+      (flags & IBUS_CONTROL_MASK) != 0 && (flags & IBUS_SHIFT_MASK) != 0 &&
+      (flags & (IBUS_MOD1_MASK | IBUS_MOD4_MASK | IBUS_SUPER_MASK | IBUS_META_MASK | IBUS_HYPER_MASK)) == 0;
+  const guint promotion_stroke = keycode != 0 ? keycode : 0x80000000u | static_cast<guint>('p');
+  if (promotion_shortcut) {
+    s.host_shortcut_strokes.insert(promotion_stroke);
+    guarded(engine, "process_key", [&] {
+      if (s.session && !s.view.at("editing_text").get<std::string>().empty())
+        apply(engine, msime_client_command(s.session, MSIME_FINISH_COMPOSITION));
+      commit_text(engine, "水杉输入法\n一款博采众长的输入法，目前正在广纳言路，茁壮成长中\n官网：https://msime.app/\nGit 项目：https://github.com/metasequoiaime/msime", msime::linux_host::TypingSource::Local);
+    });
+    return TRUE;
+  }
 
   const guint chord_modifiers = flags &
       (IBUS_CONTROL_MASK | IBUS_MOD1_MASK | IBUS_MOD4_MASK | IBUS_SUPER_MASK |
@@ -7220,6 +7297,7 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
             --last;
           s.ai_context.erase(last);
         }
+        s.erase_smart_punctuation_shadow_last();
         commit_text(engine, replacement);
         s.last_smart_punctuation = 0;
         s.last_smart_punctuation_time = 0;
@@ -7541,6 +7619,8 @@ gboolean process_key(IBusEngine *engine, guint key, guint keycode, guint flags) 
       handled = fullwidth_idle_commit(fullwidth_value);
     }
   });
+  if (!handled && !release)
+    s.forget_smart_punctuation_shadow();
   return handled;
 }
 struct CandidateMenuHintNotice {
@@ -8005,7 +8085,8 @@ void save_menu_preference(IBusEngine *engine, MenuPreference preference, Json va
             snapshot["preferences"]["wubi_auto_commit_unique"] = request.value;
             break;
           case MenuPreference::SmartPunctuation:
-            snapshot["preferences"]["smart_punctuation"] = request.value;
+            // 连同数字后、字母后直出一起写，与设置页相同（SmartPunctuationChoice.h）。
+            msime::linux_host::apply_smart_punctuation_choice(snapshot["preferences"], request.value.get<bool>());
             break;
           case MenuPreference::SmartPunctuationRepeat:
             snapshot["preferences"]["smart_punctuation_repeat"] = request.value;

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$TargetVersion = '0.0.1',
+    [string]$TargetVersion = (Get-Content -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'version.txt') -TotalCount 1).Trim(),
     # This script lives in platforms/windows/installer; resolve the repository
     # root rather than treating platforms/windows as the repository.
     [string]$RepoRoot = (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))),
@@ -319,7 +319,7 @@ else {
 
 $targetAudios = Join-Path $targetAppData 'audios'
 Copy-DirectoryContents -Source $audioSource -Destination $targetAudios
-# The built-in sound packs, synthesized by scripts/generate_sound_packs.py. The Server names DataDir\sound-packs to client-core as the built-in pack root; installed packs live under DataDir\plugins, which is user state.
+# 内置音效包，由 `scripts/generate_sound_packs.py` 合成。Server 把 `DataDir\sound-packs` 作为内置包根目录告诉 client-services；已安装的包放在 `DataDir\plugins` 下，那是用户状态。
 $targetSoundPacks = Join-Path $targetAppData 'sound-packs'
 Reset-Directory -LiteralPath $targetSoundPacks
 Copy-DirectoryContents -Source (Join-Path $RepoRoot 'resources/sound-packs') -Destination $targetSoundPacks

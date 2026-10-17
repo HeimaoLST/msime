@@ -119,11 +119,9 @@ const MAX_CLIPBOARD_E2E_STEPS = 24;
 const MAX_QUICK_PHRASE_UTF16 = 199;
 
 /**
- * The chat bounds, which are the shared ones rather than a HarmonyOS reading of them.
+ * 对话的各项上限，用的是共享的那一套，而不是 HarmonyOS 自己对它们的解读。
  *
- * They match `BackendChatClient` on Apple and `client-core`'s account client byte for byte, because
- * the server enforces the same numbers and a client that is stricter turns a working conversation
- * into an unexplained refusal on one platform only.
+ * 它们与 Apple 上的 `BackendChatClient` 和 `client-services` 的账号客户端逐字节一致，因为服务端执行的是同样的数值，客户端如果更严格，就会把一段能正常进行的对话变成只在某一个平台上出现、又无从解释的拒绝。
  */
 const MAX_CHAT_MODELS = 33;
 const MAX_CHAT_MODEL_ID_BYTES = 200;
@@ -135,12 +133,20 @@ const MAX_CHAT_RESPONSE_BYTES = 16 * 1024;
 const CHAT_TIMEOUT_MS = 125 * 1000;
 const CHAT_ROLES = ["user", "assistant", "system"];
 
-/** The gallery's own bounds, matching `client-core`'s community skin service. */
+/** 皮肤广场自己的上限，与 `client-services` 的社区皮肤服务一致。 */
 const MAX_COMMUNITY_SEARCH = 128;
 
 // 应用内反馈（`POST /v1/feedback`），长度上限和字段名沿用 Android 的 `FeedbackApi`，服务端与之共用。
 const FEEDBACK_PATH = "/v1/feedback";
-/** Google 回跳地址的形状：只在 127.0.0.1 的非特权端口上，路径固定（client-core `google_loopback_target`）。端口范围的细节由后端和 `msime_client_google_loopback` 再查一次。 */
+/** 打字统计「上传到云端」：请求体由本机统计存储（Rust 的 `upload_request`）生成，这里只限大小，服务端另有每份 64 KiB 的上限。 */
+const TYPING_STATISTICS_PATH = "/v1/users/me/typing-statistics";
+const MAX_TYPING_UPLOAD_BYTES = 64 * 1024;
+/** 「绑定 QQ 群助手」：服务端的绑定编号是 1–19 位数字，一个账号最多 10 条，绑定码是 8 位数字。 */
+const QQ_LINKS_PATH = "/v1/users/me/qq-links";
+const QQ_LINK_ID = /^[1-9][0-9]{0,18}$/;
+const QQ_LINK_CODE = /^[0-9]{8}$/;
+const MAX_QQ_LINKS = 10;
+/** Google 回跳地址的形状：只在 127.0.0.1 的非特权端口上，路径固定（client-services `google_loopback_target`）。端口范围的细节由后端和 `msime_client_google_loopback` 再查一次。 */
 const GOOGLE_LOOPBACK_TARGET = /^http:\/\/127\.0\.0\.1:[1-9]\d{3,4}\/callback$/;
 const FEEDBACK_TYPES: readonly string[] = ["bug", "suggestion", "dictionary"];
 /** 字符数（按码点），与服务端的计数方式一致。 */
@@ -219,7 +225,7 @@ function validCommunityScope(value: unknown): value is string {
 }
 
 /**
- * The reasons a report offers, in dialog order, each the exact label sent to the server. The same fixed list as client-core's `CommunityReportReason`.
+ * 举报可选的理由，按对话框里的顺序，每一项都是发给服务端的确切标签。与 client-services 的 `CommunityReportReason` 是同一份固定列表。
  */
 export const COMMUNITY_REPORT_REASONS: readonly string[] = [
   "侵权/抄袭",
@@ -246,6 +252,23 @@ function detailId(path: string, prefix: string): string {
 }
 
 /** The service's error code, from `{"error":{"code":...}}`. */
+type QqLink = { id: string; created_at: string };
+
+/** 服务端回的一条 QQ 绑定：只取编号和绑定时间，其他字段不往页面传。 */
+function qqLink(value: unknown): QqLink | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const link = value as Action;
+  if (typeof link.id !== "string" || !QQ_LINK_ID.test(link.id)) return null;
+  if (
+    typeof link.created_at !== "string" ||
+    link.created_at.length > 64 ||
+    Number.isNaN(Date.parse(link.created_at))
+  ) {
+    return null;
+  }
+  return { id: link.id, created_at: link.created_at };
+}
+
 function errorCode(body: string): string | undefined {
   const parsed = parseJson(body);
   const value = parsed === null ? undefined : parsed.error;
@@ -1106,6 +1129,12 @@ export class AccountCloudBridge {
           return await this.communityResource(action);
         case "feedback":
           return await this.feedback(action);
+        case "qq_links":
+          return await this.qqLinks();
+        case "qq_link_redeem":
+          return await this.qqLinkRedeem(action);
+        case "qq_link_delete":
+          return await this.qqLinkDelete(action);
         default:
           return error("account_invalid");
       }
@@ -1341,7 +1370,7 @@ export class AccountCloudBridge {
     return this.signIn(action.challenge_id, action.credential);
   }
 
-  /** 用 Google 回跳带回的授权码登录；后端用 challenge 里保管的 PKCE 和 client secret 去换 token。授权码的规则与 client-core 的 `validate_google_login` 相同：可见 ASCII，最长 2048 字节。 */
+  /** 用 Google 回跳带回的授权码登录；后端用 challenge 里保管的 PKCE 和 client secret 去换 token。授权码的规则与 client-services 的 `validate_google_login` 相同：可见 ASCII，最长 2048 字节。 */
   private async googleLogin(action: Action): Promise<string> {
     if (
       !validString(action.challenge_id, 256) ||
@@ -1586,6 +1615,87 @@ export class AccountCloudBridge {
     if (result.response === undefined) return error(result.error ?? "account_unavailable");
     const status: number = result.response.status;
     return status >= 200 && status < 300 ? success({}) : error(mapStatus(status));
+  }
+
+  /**
+   * 「绑定 QQ 群助手」：列出本人的绑定，新的在前。回答只有编号和绑定时间，与桌面 `account_qq_links` 的形状相同。
+   */
+  private async qqLinks(): Promise<string> {
+    const result = await this.authenticatedJson("GET", QQ_LINKS_PATH);
+    if (result.value === undefined) return error(result.error ?? "account_unavailable");
+    const links: unknown = result.value.links;
+    if (!Array.isArray(links) || links.length > MAX_QQ_LINKS) return error("account_unavailable");
+    const parsed: QqLink[] = [];
+    for (const item of links) {
+      const link = qqLink(item);
+      if (link === null) return error("account_unavailable");
+      parsed.push(link);
+    }
+    return success({ links: parsed });
+  }
+
+  /**
+   * 用群友在 QQ 群里 @机器人 发 /bind 拿到的 8 位绑定码绑定。前后的空白和中间的空格、连字符先去掉，不是 8 位数字时不联网。码不存在、过期或用过是 `account_qq_link_code_not_found`，账号已经绑了 10 个群友是 `account_qq_link_limit`，与桌面的错误码相同，页面据此写说法。
+   */
+  private async qqLinkRedeem(action: Action): Promise<string> {
+    const code = typeof action.code === "string" ? action.code.replace(/[\s-]/g, "") : "";
+    if (!QQ_LINK_CODE.test(code)) return error("account_invalid");
+    const result = await this.authorizedResponse("POST", QQ_LINKS_PATH, { code });
+    if (result.response === undefined) return error(result.error ?? "account_unavailable");
+    const response: AccountTransportResponse = result.response;
+    const refusal = errorCode(response.body);
+    if (response.status === 404 && refusal === "qq_link_code_not_found") {
+      return error("account_qq_link_code_not_found");
+    }
+    if (response.status === 409 && refusal === "qq_link_limit") return error("account_qq_link_limit");
+    if (response.status < 200 || response.status >= 300) return error(mapStatus(response.status));
+    const link = qqLink(parseJson(response.body));
+    return link === null ? error("account_unavailable") : success(link);
+  }
+
+  /** 解除本人的一条绑定；别人的或不存在的是 `account_not_found`，与桌面相同。 */
+  private async qqLinkDelete(action: Action): Promise<string> {
+    if (typeof action.id !== "string" || !QQ_LINK_ID.test(action.id)) return error("account_invalid");
+    const result = await this.authorizedResponse("DELETE", `${QQ_LINKS_PATH}/${action.id}`);
+    if (result.response === undefined) return error(result.error ?? "account_unavailable");
+    const status: number = result.response.status;
+    if (status === 404) return error("account_not_found");
+    return status >= 200 && status < 300 ? success(null) : error(mapStatus(status));
+  }
+
+  /**
+   * 打字统计「上传到云端」：把本机统计存储交回的请求体发出去，服务端回 204 时成功。只用登录账号，不退回匿名账号：没登录时是 `account_unauthorized`。调用方（设置页的串行队列）在成功后告诉存储记下上传时间。
+   */
+  async typingStatisticsUpload(body: unknown): Promise<string> {
+    if (
+      body === null ||
+      typeof body !== "object" ||
+      Array.isArray(body) ||
+      utf8Length(JSON.stringify(body)) > MAX_TYPING_UPLOAD_BYTES
+    ) {
+      return error("account_invalid");
+    }
+    return await this.typingStatisticsRequest("PUT", body as Record<string, unknown>);
+  }
+
+  /** 关掉上传后删除云端的打字统计；没有数据时服务端也回 204。 */
+  async typingStatisticsDelete(): Promise<string> {
+    return await this.typingStatisticsRequest("DELETE");
+  }
+
+  private async typingStatisticsRequest(
+    method: string,
+    body?: Record<string, unknown>,
+  ): Promise<string> {
+    try {
+      const result = await this.authorizedResponse(method, TYPING_STATISTICS_PATH, body);
+      if (result.response === undefined) return error(result.error ?? "account_unavailable");
+      const status: number = result.response.status;
+      return status >= 200 && status < 300 ? success({}) : error(mapStatus(status));
+    } catch (cause) {
+      // 与 handle 相同：传输层抛出的不是 Error 时是断网一类的失败。
+      return error(cause instanceof Error ? cause.message : "account_network");
+    }
   }
 
   /**

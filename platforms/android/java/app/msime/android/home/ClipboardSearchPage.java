@@ -1,5 +1,7 @@
 package app.msime.android.home;
 
+import app.msime.android.ClipboardExport;
+
 import app.msime.android.LayoutPolicy;
 
 import app.msime.android.DimensionPolicy;
@@ -36,6 +38,7 @@ import org.json.JSONObject;
  * <p>一条记录：点按复制回系统剪贴板；行尾「编辑」打开 {@link ClipboardEditPage}，「删除」从共享存储里删掉这一条。键盘在别的应用的输入框里打开这一页时（{@link ClipboardEditPage#returnsToCaller}）复制之后回到那个应用，接着就能粘贴；从应用里打开、或键盘在水杉自己的输入框里打开时留在这一页。
  */
 public final class ClipboardSearchPage extends ReloadingDetailPage {
+    private final ClipboardExportActions clipboardExport = new ClipboardExportActions(this, this::reload);
     private enum State { LOADING, READY, OFF, FAILED }
 
     /** 一次读取的结果：剪贴板历史开关，开着时还有全部条目。 */
@@ -59,10 +62,17 @@ public final class ClipboardSearchPage extends ReloadingDetailPage {
 
     @Override public void onCreate(@Nullable Bundle saved) {
         super.onCreate(saved);
+        clipboardExport.restore(saved);
         query = new ViewModelProvider(this).get(Query.class);
     }
 
+    @Override public void onSaveInstanceState(Bundle saved) {
+        clipboardExport.save(saved);
+        super.onSaveInstanceState(saved);
+    }
+
     @Override protected void onContentReady() {
+        headerActions().addView(clipboardExport.button());
         LinearLayout target = contentColumn();
         if (target == null) return;
         Context context = target.getContext();
@@ -94,6 +104,7 @@ public final class ClipboardSearchPage extends ReloadingDetailPage {
 
     @Override protected void onContentDestroyed() {
         results = null;
+        clipboardExport.destroyed();
         // 视图没了，删除的回调就不会再交回来；不清掉的话这一页之后的操作全被挡住。
         busy = false;
     }

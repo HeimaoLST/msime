@@ -1,19 +1,16 @@
 package app.msime.android;
 
 import android.view.KeyEvent;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 /**
- * The key ids the shared statistics store accepts, and how this host's keys map onto them.
+ * 共享统计存储接受的键 id，以及本宿主的按键如何映射到它们。
  *
- * <p>The ids are W3C KeyboardEvent.code names plus the on-screen ids, copied verbatim from KEY_IDS in crates/client-core/src/typing_statistics.rs. The store rejects a whole batch that carries one id outside that list, so nothing here invents an id: a key that has no mapping returns {@code null} and is simply not counted.
+ * <p>这些 id 是 W3C KeyboardEvent.code 名加上屏幕键的 id，逐字抄自 crates/client-services/src/typing_statistics.rs 里的 KEY_IDS。只要一批里有一个 id 不在这个列表里，存储层就整批拒绝，所以这里不自造任何 id：没有映射的键返回 {@code null}，直接不计数。
  *
- * <p>Pure Java (the KeyEvent constants are compile-time ints) so the mapping can be checked on a host JVM.
+ * <p>纯 Java（KeyEvent 常量是编译期 int），所以映射可以在宿主机的 JVM 上检查。
  */
 public final class KeyPressIds {
     /** Exactly the store's whitelist, in its order. */
@@ -234,48 +231,11 @@ public final class KeyPressIds {
         };
     }
 
-    /**
-     * The soft 26-key keyboard the statistics page draws: the letter rows, then the case and delete keys around the last of them, then the bottom row. Mirrors the faces KeyboardPreview draws for the 26-key layout.
-     */
-    public static final List<List<String>> SOFT_ROWS = List.of(
-        List.of("KeyQ", "KeyW", "KeyE", "KeyR", "KeyT", "KeyY", "KeyU", "KeyI", "KeyO", "KeyP"),
-        List.of("KeyA", "KeyS", "KeyD", "KeyF", "KeyG", "KeyH", "KeyJ", "KeyK", "KeyL"),
-        List.of("ShiftLeft", "KeyZ", "KeyX", "KeyC", "KeyV", "KeyB", "KeyN", "KeyM", "Backspace"),
-        List.of("SoftSymbol", "SoftLayer", "Comma", "Space", "SoftLanguage", "Enter"));
-
-    /** The nine-key grid: three rows of three, then the punctuation column's key and 0 under them. */
-    public static final List<List<String>> NINE_ROWS = List.of(
-        List.of("Nine1", "Nine2", "Nine3"),
-        List.of("Nine4", "Nine5", "Nine6"),
-        List.of("Nine7", "Nine8", "Nine9"),
-        List.of("SoftPunctuation", "Nine0"));
-
     /** Whether any nine-key cell was pressed, which is when the page draws the grid at all. */
     public static boolean hasNineKey(Map<String, Long> counts) {
         for (Map.Entry<String, Long> entry : counts.entrySet()) {
             if (entry.getKey().startsWith("Nine") && entry.getValue() > 0) return true;
         }
         return false;
-    }
-
-    /**
-     * The pressed keys that have no drawn position, most pressed first, for the 其他键 list.
-     *
-     * @param nineGrid whether the nine-key grid is drawn, so its cells are not listed twice
-     */
-    public static List<String> others(Map<String, Long> counts, boolean nineGrid) {
-        int drawnCapacity = 0;
-        for (List<String> row : SOFT_ROWS) drawnCapacity += row.size();
-        if (nineGrid) for (List<String> row : NINE_ROWS) drawnCapacity += row.size();
-        Set<String> drawn = new LinkedHashSet<>(drawnCapacity);
-        for (List<String> row : SOFT_ROWS) drawn.addAll(row);
-        if (nineGrid) for (List<String> row : NINE_ROWS) drawn.addAll(row);
-        List<String> result = new ArrayList<>(counts.size());
-        for (Map.Entry<String, Long> entry : counts.entrySet()) {
-            if (entry.getValue() > 0 && !drawn.contains(entry.getKey())) result.add(entry.getKey());
-        }
-        result.sort(Comparator.comparingLong((String id) -> counts.get(id)).reversed()
-            .thenComparingInt(KEY_IDS::indexOf));
-        return List.copyOf(result);
     }
 }

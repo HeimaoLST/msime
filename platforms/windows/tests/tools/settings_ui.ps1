@@ -41,7 +41,7 @@ New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
 $outputPath = (Resolve-Path -LiteralPath $OutputDirectory).Path
 $state = Join-Path ([IO.Path]::GetTempPath()) ('msime-settings-ui-' + [Guid]::NewGuid())
 $oldState = $env:MSIME_CLIENT_STATE_DIR
-$pages = @('typing', 'expression', 'shortcuts', 'lexicon', 'themes', 'candidate', 'toolbar', 'osk', 'voice', 'hand', 'clip', 'stats', 'plugins', 'ai', 'account', 'dev', 'feedback', 'about')
+$pages = @('typing', 'expression', 'shortcuts', 'lexicon', 'themes', 'candidate', 'toolbar', 'osk', 'voice', 'clip', 'stats', 'plugins', 'ai', 'account', 'dev', 'about')
 $process = $null
 function Find-ById($parent, [string]$id) {
     $condition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, $id)
@@ -79,7 +79,13 @@ function Assert-SelectedAccent($element) {
     }
 }
 function Open-Page($window, [string]$page) {
-    $item = Find-ById $window $page
+    # 下拉框等弹出层刚关闭时，UIA 树要稍晚才把侧栏交回来；等待导航项而非固定延时。
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $item = Find-ById $window $page
+        if ($item) { break }
+        Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $deadline)
     if (-not $item) { throw "Missing native page: $page" }
     $item.GetCurrentPattern([System.Windows.Automation.ScrollItemPattern]::Pattern).ScrollIntoView()
     $item = Find-ById $window $page
@@ -93,24 +99,81 @@ function Open-Page($window, [string]$page) {
     if (-not $title) { throw "Page did not change to $page" }
     if (Find-ById $content 'settings-load-error') { throw 'Synthetic preferences were rejected by the real host' }
 }
-function Select-CandidateTab($window, [string]$tab) {
-    # 页面重绘和弹出层关闭后，UIA 树可能稍晚恢复；等待目标而非固定延时。
+function Wait-WubiControl($window, [string]$id) {
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
-        $button = Find-ById $window "candidate-tab-$tab"
-        if ($button -and $button.Current.IsEnabled) { break }
+        $content = Find-ById $window 'settings-content'
+        $control = if ($content) { Find-ById $content $id } else { $null }
+        if ($control -and $control.Current.IsEnabled) { return $control }
         Start-Sleep -Milliseconds 200
     } while ([DateTime]::UtcNow -lt $deadline)
-    if (-not $button -or -not $button.Current.IsEnabled) { throw "Missing or disabled candidate tab: $tab" }
-    $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    throw "Missing enabled Wubi control: $id"
+}
+function Assert-WubiCandidateSelection($window) {
+    $toggle = Wait-WubiControl $window 'wubi-candidate-selection'
+    $pattern = $toggle.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
+    if ($pattern.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::Off) { throw 'Wubi shortcuts must default to off' }
+    $pattern.Toggle()
+    $second = Wait-WubiControl $window 'wubi-second-candidate-key'
+    $third = Wait-WubiControl $window 'wubi-third-candidate-key'
+    $secondValue = $second.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+    $thirdValue = $third.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+    if ($secondValue.Current.Value -ne ';' -or $thirdValue.Current.Value -ne "'") { throw 'Wubi shortcut defaults are incorrect' }
+    $path = Join-Path $state 'preferences.json'
+    $beforeEdit = [IO.File]::ReadAllText($path)
+    # 交换键位的中间状态会重复；只有按保存时才能成对进入共享偏好库。
+    $secondValue.SetValue("'")
+    $thirdValue.SetValue(';')
+    if ([IO.File]::ReadAllText($path) -ne $beforeEdit) { throw 'Editing Wubi shortcuts saved an intermediate pair' }
+    $save = Wait-WubiControl $window 'wubi-save-candidate-keys'
+    $save.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
         Start-Sleep -Milliseconds 200
-        $button = Find-ById $window "candidate-tab-$tab"
-    } while ((-not $button -or $button.Current.ItemStatus -ne '已选择') -and [DateTime]::UtcNow -lt $deadline)
-    if (-not $button -or $button.Current.ItemStatus -ne '已选择') { throw "Candidate tab did not change: $tab" }
-    $label = @{layout = '候选项排列方式'; font = '主字体'; style = '不透明度'; preedit = '行内预编辑'}[$tab]
-    if (-not (Find-ByName (Find-ById $window 'settings-content') $label)) { throw "Candidate tab content is missing: $tab" }
+        $saved = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $keys = $saved.preferences.wubi_candidate_selection
+    } while (($keys.second_key -ne "'" -or $keys.third_key -ne ';') -and [DateTime]::UtcNow -lt $deadline)
+    if (-not $keys.enabled -or $keys.second_key -ne "'" -or $keys.third_key -ne ';') { throw 'Wubi shortcut pair was not saved together' }
+    Open-Page $window 'expression'
+    Open-Page $window 'typing'
+    $second = Wait-WubiControl $window 'wubi-second-candidate-key'
+    $third = Wait-WubiControl $window 'wubi-third-candidate-key'
+    if ($second.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -ne "'" -or
+        $third.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -ne ';') { throw 'Wubi shortcut controls did not reload saved keys' }
+    $toggle = Wait-WubiControl $window 'wubi-candidate-selection'
+    $toggle.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Toggle()
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 200
+        $saved = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $keys = $saved.preferences.wubi_candidate_selection
+    } while ($keys.enabled -and [DateTime]::UtcNow -lt $deadline)
+    if ($keys.enabled -or $keys.second_key -ne "'" -or $keys.third_key -ne ';') { throw 'Disabling Wubi shortcuts lost custom keys' }
+    Write-Host 'Wubi shortcut toggle, atomic swap, reload and retained keys passed'
+}
+function Set-CandidateMore($window, [bool]$expanded) {
+    # 候选窗口页是一列，进阶各行收在「更多选项」里。页面重绘后 UIA 树可能稍晚恢复；等待目标而非固定延时。
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $fold = Find-ById $window 'candidate-more'
+        if ($fold -and $fold.Current.IsEnabled) { break }
+        Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if (-not $fold) { throw 'Missing candidate 更多选项 fold' }
+    $pattern = $fold.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
+    $wanted = if ($expanded) { [System.Windows.Automation.ExpandCollapseState]::Expanded } else { [System.Windows.Automation.ExpandCollapseState]::Collapsed }
+    if ($pattern.Current.ExpandCollapseState -ne $wanted) {
+        if ($expanded) { $pattern.Expand() } else { $pattern.Collapse() }
+    }
+    # 主流程的行一直在；折叠区里的行只在展开时出现在 UIA 树里。
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 200
+        $content = Find-ById $window 'settings-content'
+        $inside = Find-ByName $content '行内预编辑'
+    } while (([bool]$inside -ne $expanded) -and [DateTime]::UtcNow -lt $deadline)
+    if ([bool]$inside -ne $expanded) { throw "Candidate 更多选项 did not change to expanded=$expanded" }
+    if (-not (Find-ByName $content '候选项排列方式')) { throw 'Candidate main rows are missing' }
 }
 function Select-ComboChoice($window, [string]$id, [string]$label) {
     $combo = Find-ById $window $id
@@ -125,6 +188,66 @@ function Select-ComboChoice($window, [string]$id, [string]$label) {
     if (-not $item) { throw "Missing combo option: $label" }
     $item.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
     $combo.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Collapse()
+}
+function Wait-RelayControl($window, [string]$id) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $control = Find-ById $window $id
+        if ($control -and $control.Current.IsEnabled) { return $control }
+        Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Missing enabled cloud clipboard control: $id"
+}
+function Assert-CloudClipboardRelaySettings($window) {
+    function Read-RelayPreference($document) {
+        $property = $document.preferences.PSObject.Properties['cloud_clipboard_relay']
+        if ($property) { return $property.Value }
+        return $null
+    }
+    $path = Join-Path $state 'preferences.json'
+    $beforeEdit = [IO.File]::ReadAllText($path)
+    $scroll = (Find-ById $window 'settings-content').GetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern)
+    if ($scroll.Current.VerticallyScrollable) { $scroll.SetScrollPercent(-1, 100) }
+    Select-ComboChoice $window 'cloud-clipboard-source' '自建中继'
+    $url = Wait-RelayControl $window 'cloud-clipboard-relay-url'
+    $token = Wait-RelayControl $window 'cloud-clipboard-relay-token'
+    if (-not $token.Current.IsPassword) { throw 'Relay token is not masked' }
+    $url.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('http://relay.example.test')
+    $token.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('synthetic-relay-token')
+    if ([IO.File]::ReadAllText($path) -ne $beforeEdit) { throw 'Relay draft was persisted before saving' }
+    (Wait-RelayControl $window 'cloud-clipboard-save-source').GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Wait-RelayControl $window 'settings-notice' | Out-Null
+    if ([IO.File]::ReadAllText($path) -ne $beforeEdit) { throw 'Invalid HTTP relay passed Rust preference validation' }
+    # 校验失败后窗口按共享设置的冲突处理重新读取，重新选择中继再填写合成配置；只使用本机拒绝连接的端口，不发送真实数据。
+    Select-ComboChoice $window 'cloud-clipboard-source' '自建中继'
+    $url = Wait-RelayControl $window 'cloud-clipboard-relay-url'
+    $token = Wait-RelayControl $window 'cloud-clipboard-relay-token'
+    $url.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('http://127.0.0.1:9/msime')
+    $token.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('synthetic-relay-token')
+    (Wait-RelayControl $window 'cloud-clipboard-save-source').GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 200
+        $saved = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $relay = Read-RelayPreference $saved
+    } while (($relay.url -ne 'http://127.0.0.1:9/msime' -or $relay.token -ne 'synthetic-relay-token') -and [DateTime]::UtcNow -lt $deadline)
+    if ($relay.url -ne 'http://127.0.0.1:9/msime' -or $relay.token -ne 'synthetic-relay-token') { throw 'Relay address and token were not saved together' }
+    Open-Page $window 'typing'
+    Open-Page $window 'clip'
+    $url = Wait-RelayControl $window 'cloud-clipboard-relay-url'
+    if ($url.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -ne 'http://127.0.0.1:9/msime') { throw 'Reload lost the relay configuration' }
+    $scroll = (Find-ById $window 'settings-content').GetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern)
+    if ($scroll.Current.VerticallyScrollable) { $scroll.SetScrollPercent(-1, 100) }
+    Select-ComboChoice $window 'cloud-clipboard-source' '水杉账号'
+    (Wait-RelayControl $window 'cloud-clipboard-save-source').GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 200
+        $saved = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $relay = Read-RelayPreference $saved
+    } while ($relay -and [DateTime]::UtcNow -lt $deadline)
+    if ($relay) { throw 'Switching to account retained relay credentials' }
+    Write-Host 'Cloud clipboard relay masking, draft, Rust validation, atomic save, reload and account switch passed'
 }
 function Save-Window($element, [string]$file) {
     $bounds = $element.Current.BoundingRectangle
@@ -154,7 +277,6 @@ try {
     if (-not $defaults.ok) { throw 'Default preferences could not be loaded' }
     foreach ($theme in @('light', 'dark')) {
         $preferences = $defaults.value
-        $preferences.settings_theme = $theme
         $preferences.theme = $theme
         $preferences.scheme = 'quanpin'
         $preferences.default_ime_mode = 'chinese'
@@ -205,15 +327,34 @@ try {
                     if ($textBounds.Width -lt 180 -or $textBounds.Right -gt $actionBounds.Left) { throw 'Clipboard actions crowded out the text preview' }
                     if ($actionBounds.Right -gt $content.Current.BoundingRectangle.Right) { throw 'Clipboard actions overflow the content column' }
                 }
+                if ($page -eq 'osk') {
+                    # 完整版提供手写：「手写输入」并进了这一页；「恢复默认」的说明只提这一页看得到的几项，不再提工具栏按钮。
+                    foreach ($name in @('打开手写识别板', '高度、间距和顶部语音入口回到默认')) {
+                        if (-not (Find-ByName $content $name)) { throw "Screen keyboard page is missing: $name" }
+                    }
+                }
+                if ($page -eq 'about') {
+                    # 反馈并进关于后仍须能生成报告；不能只删除旧导航的验收。
+                    foreach ($name in @('反馈类型', '反馈描述', '复制报告', '查看 Issues')) {
+                        if (-not (Find-ByName $content $name)) { throw "About page is missing merged feedback content: $name" }
+                    }
+                    if (Find-ById $window 'feedback') { throw 'Merged feedback page is still in the sidebar' }
+                }
+                if ($page -eq 'toolbar') {
+                    # 缩放和图标尺寸合成一个「工具栏大小」。
+                    if (-not (Find-ByName $content '工具栏大小')) { throw 'Toolbar size select is missing' }
+                    foreach ($name in @('工具栏缩放', '图标尺寸')) {
+                        if (Find-ByName $content $name) { throw "Toolbar page still offers $name apart" }
+                    }
+                }
                 Save-Window $window "$theme-$width-$page.png"
                 Write-Host "$theme $width $page rendered"
                 if ($page -eq 'candidate') {
-                    foreach ($tab in @('layout', 'font', 'style', 'preedit')) {
-                        Select-CandidateTab $window $tab
-                        Start-Sleep -Milliseconds 350
-                        Save-Window $window "$theme-$width-candidate-tab-$tab.png"
-                    }
-                    Select-CandidateTab $window 'layout'
+                    # 整页截过一张收起的，再展开「更多选项」截一张，然后收起，下一个宽度照样从收起开始。
+                    Set-CandidateMore $window $true
+                    Start-Sleep -Milliseconds 350
+                    Save-Window $window "$theme-$width-candidate-more.png"
+                    Set-CandidateMore $window $false
                 }
             }
         }
@@ -239,6 +380,7 @@ try {
             Start-Sleep -Milliseconds 500
             Save-Window $window "$theme-scheme-$scheme.png"
             Write-Host "$theme $scheme selected and saved"
+            if ($scheme -eq 'wubi') { Assert-WubiCandidateSelection $window }
             if ($scheme -ne 'quanpin') {
                 Open-Page $window 'toolbar'
                 $expected = if ($scheme -eq 'shuangpin') { '双' } else { '五' }
@@ -251,9 +393,9 @@ try {
                 Open-Page $window 'typing'
             }
         }
-        # 搜索必须打开所属页内标签，不能只打开候选窗口后留下不可见的目标。
+        # 搜索必须让目标可见：主字体在预设下本来收起，搜索落到它时要画出来；折叠区里的行要把「更多选项」展开。
         Open-Page $window 'candidate'
-        Select-CandidateTab $window 'layout'
+        Set-CandidateMore $window $false
         $search = Find-ById $window 'settings-search'
         if (-not $search) { throw 'Settings search is missing' }
         $condition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
@@ -266,13 +408,22 @@ try {
         $deadline = [DateTime]::UtcNow.AddSeconds(10)
         do {
             Start-Sleep -Milliseconds 200
-            $font = Find-ById $window 'candidate-tab-font'
-        } while ((-not $font -or $font.Current.ItemStatus -ne '已选择') -and [DateTime]::UtcNow -lt $deadline)
-        if (-not $font -or $font.Current.ItemStatus -ne '已选择') { throw 'Font search did not select the font tab' }
-        if (-not (Find-ByName (Find-ById $window 'settings-content') '主字体')) { throw 'Font search target is missing' }
+            $font = Find-ByName (Find-ById $window 'settings-content') '主字体'
+        } while (-not $font -and [DateTime]::UtcNow -lt $deadline)
+        if (-not $font) { throw 'Font search target is missing' }
         Start-Sleep -Milliseconds 350
         Save-Window $window "$theme-search-candidate-font.png"
-        # 与 macOS 一样，示例与预览明暗在切标签后保留，但不写入真实设置。
+        $input.SetFocus()
+        $input.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('行内预编辑')
+        [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            Start-Sleep -Milliseconds 200
+            $inline = Find-ByName (Find-ById $window 'settings-content') '行内预编辑'
+        } while (-not $inline -and [DateTime]::UtcNow -lt $deadline)
+        if (-not $inline) { throw 'Search did not open the 更多选项 fold holding its target' }
+        Set-CandidateMore $window $false
+        # 与 macOS 一样，示例与预览明暗在离开再回到本页后保留，但不写入真实设置。
         $preferencesBeforePreview = [IO.File]::ReadAllText((Join-Path $state 'preferences.json'))
         $sample = Find-ById $window 'candidate-preview-sample'
         if (-not $sample) { throw 'Candidate preview sample input is missing' }
@@ -286,12 +437,17 @@ try {
         if (-not $first -or $first.Current.Name -ne '杉树🌲' -or -not $third -or $third.Current.Name -ne '杉树🌲') { throw 'Candidate preview did not cycle the custom sample' }
         $appearance = if ($theme -eq 'light') { '预览深色' } else { '预览浅色' }
         Select-ComboChoice $window 'candidate-preview-appearance' $appearance
-        Select-CandidateTab $window 'layout'
-        $sample = Find-ById $window 'candidate-preview-sample'
-        if ($sample.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -ne '杉树🌲 Alpha') { throw 'Candidate tab switch lost the preview sample' }
+        Open-Page $window 'typing'
+        Open-Page $window 'candidate'
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            Start-Sleep -Milliseconds 200
+            $sample = Find-ById $window 'candidate-preview-sample'
+        } while (-not $sample -and [DateTime]::UtcNow -lt $deadline)
+        if (-not $sample -or $sample.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value -ne '杉树🌲 Alpha') { throw 'Leaving the candidate page lost the preview sample' }
         $combo = Find-ById $window 'candidate-preview-appearance'
         $selected = @($combo.GetCurrentPattern([System.Windows.Automation.SelectionPattern]::Pattern).Current.GetSelection())
-        if ($selected.Count -ne 1 -or $selected[0].Current.Name -ne $appearance) { throw 'Candidate tab switch lost the preview appearance' }
+        if ($selected.Count -ne 1 -or $selected[0].Current.Name -ne $appearance) { throw 'Leaving the candidate page lost the preview appearance' }
         Start-Sleep -Milliseconds 350
         Save-Window $window "$theme-candidate-custom-preview.png"
         $sample.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('   ')
@@ -359,6 +515,7 @@ try {
         if (-not $pinnedVisible -or -not $more -or -not $more.Current.IsEnabled) { throw 'Clipboard pin result did not finish rendering' }
         Start-Sleep -Milliseconds 200
         Save-Window $window "$theme-clipboard-pinned.png"
+        Assert-CloudClipboardRelaySettings $window
         $process.CloseMainWindow() | Out-Null
         if (-not $process.WaitForExit(10000)) { throw 'Settings window failed to close' }
         if ($process.ExitCode -ne 0) { throw "Settings exited with $($process.ExitCode)" }

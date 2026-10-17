@@ -404,6 +404,7 @@ fn translation_provider_rejects_controls_at_the_socket_boundary() {
                 translation_account: false,
                 custom_translation: None,
                 niutrans: None,
+                ai_assistant: None,
             })
             .is_none());
     }
@@ -446,6 +447,7 @@ fn translation_provider_rejects_controls_at_the_socket_boundary() {
         translation_account: false,
         custom_translation: None,
         niutrans: None,
+        ai_assistant: None,
     };
     for _ in (0..=0x1f).chain(0x7f..=0x9f) {
         assert!(provider.translate(query.clone()).is_none());
@@ -468,6 +470,7 @@ fn translation_query_carries_the_selected_service() {
         (TranslationService::Tencent, "tencent"),
         (TranslationService::NiuTrans, "niutrans"),
         (TranslationService::Custom, "custom"),
+        (TranslationService::Ai, "ai"),
     ] {
         let document = json!({"generation": 1, "candidates": ["中"], "provider": name});
         let query: TranslationQuery = serde_json::from_value(document).unwrap();
@@ -518,6 +521,7 @@ fn sentence_translation_is_single_item_and_bounded() {
         translation_account: false,
         custom_translation: None,
         niutrans: None,
+        ai_assistant: None,
     };
     assert!(provider.translate(too_long).is_none());
     let two_items = TranslationQuery {
@@ -529,6 +533,7 @@ fn sentence_translation_is_single_item_and_bounded() {
         translation_account: false,
         custom_translation: None,
         niutrans: None,
+        ai_assistant: None,
     };
     assert!(provider.translate(two_items).is_none());
 }
@@ -549,6 +554,7 @@ fn translation_switched_off_never_reaches_the_provider() {
         translation_account: false,
         custom_translation: None,
         niutrans: None,
+        ai_assistant: None,
     };
     assert_eq!(
         UnixSocketProvider::new(&socket).translate(query),
@@ -1088,6 +1094,140 @@ impl InputEngine for Fixture {
     }
 }
 
+fn wubi_shortcut_runtime(count: usize) -> Runtime<Fixture> {
+    let mut runtime = Runtime::new(
+        Fixture {
+            scheme: 2,
+            local_mode: "none".into(),
+            words: (0..count).map(|i| format!("合成候选{i}")).collect(),
+            ..Fixture::default()
+        },
+        3,
+    )
+    .unwrap();
+    runtime.focus(true).unwrap();
+    runtime.set_wubi_candidate_selection(
+        msime_client_core::preferences::WubiCandidateSelectionPreferences {
+            enabled: true,
+            ..Default::default()
+        },
+    );
+    if count > 0 {
+        runtime
+            .dispatch(Action::Character {
+                value: b'a',
+                shift: false,
+            })
+            .unwrap();
+    }
+    runtime
+}
+
+#[test]
+fn wubi_candidate_shortcuts_select_current_page_on_all_character_routes() {
+    for route in 0..3 {
+        for (key, slot) in [(b';', 1), (b'\'', 2)] {
+            let mut runtime = wubi_shortcut_runtime(6);
+            runtime.dispatch(Action::NextPage).unwrap();
+            let action = match route {
+                0 => Action::Character {
+                    value: key,
+                    shift: false,
+                },
+                1 => Action::Punctuation(key),
+                _ => Action::PunctuationAscii(key),
+            };
+            let transition = runtime.dispatch(action).unwrap();
+            assert_eq!(transition.commit, Some(format!("合成候选{}", 3 + slot)));
+            assert!(transition.view.editing_text.is_empty());
+            assert!(runtime.facts().selection.is_some());
+        }
+    }
+}
+
+#[test]
+fn wubi_candidate_shortcuts_follow_the_presented_order_and_visible_page_size() {
+    let mut runtime = wubi_shortcut_runtime(3);
+    runtime.cached.candidates.rotate_right(1);
+    runtime.engine_order = vec![2, 0, 1];
+    let result = runtime.dispatch(Action::Punctuation(b';')).unwrap();
+    assert_eq!(result.commit.as_deref(), Some("合成候选0"));
+    let mut runtime = wubi_shortcut_runtime(3);
+    runtime.page_size = 1;
+    let result = runtime.dispatch(Action::PunctuationAscii(b';')).unwrap();
+    assert!(result.commit.as_deref().unwrap().ends_with(';'));
+}
+
+#[test]
+fn wubi_candidate_shortcuts_keep_punctuation_when_disabled_or_target_is_missing() {
+    for count in [0, 1, 2, 3, 4] {
+        for key in *b";'" {
+            let mut enabled = wubi_shortcut_runtime(count);
+            let mut plain = wubi_shortcut_runtime(count);
+            plain.set_wubi_candidate_selection(Default::default());
+            if count > 3 {
+                enabled.dispatch(Action::NextPage).unwrap();
+                plain.dispatch(Action::NextPage).unwrap();
+            }
+            let slot = if key == b';' { 1 } else { 2 };
+            let on_page = if count > 3 { count - 3 } else { count };
+            if slot < on_page {
+                continue;
+            }
+            let original = plain.dispatch(Action::PunctuationAscii(key)).unwrap();
+            let actual = enabled.dispatch(Action::PunctuationAscii(key)).unwrap();
+            assert_eq!(actual.handled, original.handled);
+            assert_eq!(actual.commit, original.commit);
+            assert_eq!(actual.view.editing_text, original.view.editing_text);
+            if count == 0 {
+                assert!(!actual.handled);
+            } else {
+                assert!(actual
+                    .commit
+                    .as_deref()
+                    .is_some_and(|text| text.ends_with(char::from(key))));
+            }
+        }
+    }
+}
+
+#[test]
+fn wubi_candidate_shortcuts_respect_scheme_mode_focus_and_live_custom_keys() {
+    for excluded in 0..4 {
+        let mut runtime = wubi_shortcut_runtime(3);
+        match excluded {
+            0 => runtime.cached.scheme = 0,
+            1 => runtime.cached.dedicated_english = true,
+            2 => runtime.cached.local_mode = "url".into(),
+            _ => {
+                runtime.focus(false).unwrap();
+            }
+        }
+        let result = runtime.dispatch(Action::PunctuationAscii(b';')).unwrap();
+        assert_ne!(result.commit.as_deref(), Some("合成候选1"));
+    }
+    let mut runtime = wubi_shortcut_runtime(3);
+    runtime.set_wubi_candidate_selection(
+        msime_client_core::preferences::WubiCandidateSelectionPreferences {
+            enabled: true,
+            second_key: "/".into(),
+            third_key: "?".into(),
+        },
+    );
+    assert_eq!(runtime.wubi_candidate_selection().slot(b';'), None);
+    assert_eq!(
+        runtime
+            .dispatch(Action::Character {
+                value: b'?',
+                shift: true
+            })
+            .unwrap()
+            .commit
+            .as_deref(),
+        Some("合成候选2")
+    );
+}
+
 #[test]
 fn unique_complete_wubi_code_auto_commits_unless_a_phrase_is_being_built() {
     let create = |fixture| {
@@ -1416,7 +1556,7 @@ fn several_candidates_from_one_provider_take_their_seat_as_a_group() {
             .collect::<Vec<_>>(),
         vec!["本地", "云一", "云二", "AI"]
     );
-    // 有云候选时英文排在 AI 后面，第二条英文候选排在已入座的候选之后，不挤占任何位置。AI 的座位只坐第一条，第二条排在整个列表最后（#6888）。
+    // 有云候选时英文排在云候选后面，第二条英文候选排在已入座的候选之后，不挤占任何位置。第一条 AI 候选坐第一页最后一格，这一页排不满时紧跟在其余行之后，第二条排在整个列表最后（#6888）。
     assert_eq!(
         seated(
             &["AI 一", "AI 二", "英一", "英二", "云", "本地"],
@@ -1425,51 +1565,132 @@ fn several_candidates_from_one_provider_take_their_seat_as_a_group() {
         .into_iter()
         .map(|(text, _)| text)
         .collect::<Vec<_>>(),
-        vec!["本地", "云", "AI 一", "英一", "英二", "AI 二"]
+        vec!["本地", "云", "英一", "英二", "AI 一", "AI 二"]
     );
+}
 
-    // AI 占位行（来源 12）和 AI 候选坐同一个座位；回答到达后其余候选的位置一个都不变。
-    let texts = |rows: Vec<(String, String)>| -> Vec<String> {
-        rows.into_iter().map(|(text, _)| text).collect()
+/// #6888：第一条 AI 候选坐第一页最后一格（下标 `page_size - 1`），回答到达时这一页前面的格子一格都不动，原来在最后一格的候选挪到下一页；第一页排不满时紧跟在其余行之后，多出来的 AI 候选排在整个列表最后。每页只有一格时坐下标 1，不顶掉首选。
+#[test]
+fn the_first_ai_candidate_takes_the_last_slot_of_the_first_page() {
+    // （词，来源，固定位置）
+    let listed = |page_size: u8, rows: &[(&str, u8, u8)]| -> Vec<String> {
+        let mut runtime = Runtime::new(
+            Fixture {
+                scheme: 0,
+                local_mode: "none".into(),
+                words: rows.iter().map(|(word, _, _)| (*word).into()).collect(),
+                codes: (0..rows.len()).map(|n| format!("code-{n}")).collect(),
+                sources: rows.iter().map(|(_, source, _)| *source).collect(),
+                positions: rows.iter().map(|(_, _, position)| *position).collect(),
+                ..Fixture::default()
+            },
+            page_size,
+        )
+        .unwrap();
+        runtime.focus(true).unwrap();
+        type_key(&mut runtime);
+        runtime.cached.candidates.clone()
     };
-    let pending = texts(seated(
-        &["本地一", "本地二", "…", "本地三", "英一", "😀"],
-        vec![0, 0, 12, 0, 4, 6],
-    ));
-    assert_eq!(pending, ["本地一", "英一", "…", "😀", "本地二", "本地三"]);
-    let answered = texts(seated(
-        &[
-            "本地一",
-            "本地二",
-            "AI 一",
-            "本地三",
-            "英一",
-            "😀",
-            "AI 二",
-            "AI 三",
-        ],
-        vec![0, 0, 3, 0, 4, 6, 3, 3],
-    ));
+    // 回答到达之前的列表：同一个引擎答案去掉 AI 行。
+    let before = |page_size: u8, rows: &[(&str, u8, u8)]| {
+        let local: Vec<(&str, u8, u8)> = rows
+            .iter()
+            .copied()
+            .filter(|(_, source, _)| *source != 3)
+            .collect();
+        listed(page_size, &local)
+    };
+    let local = |words: &[&'static str]| -> Vec<(&'static str, u8, u8)> {
+        words.iter().map(|word| (*word, 0, 0)).collect()
+    };
+    let ai = |words: &[&'static str]| -> Vec<(&'static str, u8, u8)> {
+        words.iter().map(|word| (*word, 3, 0)).collect()
+    };
+
+    let mut rows = local(&[
+        "本一", "本二", "本三", "本四", "本五", "本六", "本七", "本八",
+    ]);
+    rows.extend(ai(&["智一", "智二", "智三"]));
+    let after = listed(5, &rows);
     assert_eq!(
-        answered,
+        after,
         [
-            "本地一",
-            "英一",
-            "AI 一",
-            "😀",
-            "本地二",
-            "本地三",
-            "AI 二",
-            "AI 三"
+            "本一", "本二", "本三", "本四", "智一", "本五", "本六", "本七", "本八", "智二", "智三"
         ]
     );
-    // 后到的云候选只让出它自己的一格，占位行仍紧跟在云候选后面。
+    assert_eq!(after[..4], before(5, &rows)[..4]);
+    // 每页九个（Windows、iOS、HarmonyOS 的上限）时坐下标 8；每页十个时第一页排不满，紧跟在本地候选之后。
+    assert_eq!(listed(9, &rows)[8], "智一");
+    assert_eq!(listed(10, &rows)[8..11], ["智一", "智二", "智三"]);
+    assert_eq!(listed(10, &rows)[..8], before(10, &rows)[..]);
+    // 每页一个：不顶掉首选，坐下标 1。
+    assert_eq!(listed(1, &rows)[..3], ["本一", "智一", "本二"]);
+
+    // 引擎把 AI 行排在别处时照样归位。
+    let scattered = [
+        ("本一", 0, 0),
+        ("智一", 3, 0),
+        ("本二", 0, 0),
+        ("本三", 0, 0),
+        ("本四", 0, 0),
+        ("本五", 0, 0),
+        ("本六", 0, 0),
+        ("智二", 3, 0),
+    ];
     assert_eq!(
-        texts(seated(
-            &["本地一", "云", "…", "本地二", "英一"],
-            vec![0, 2, 12, 0, 4]
-        )),
-        ["本地一", "云", "…", "英一", "本地二"]
+        listed(5, &scattered),
+        ["本一", "本二", "本三", "本四", "智一", "本五", "本六", "智二"]
+    );
+
+    // 有云候选时其余行照常按云候选的座位排，AI 行不进那张表，第一页前四格与回答到达之前相同。
+    let mixed = [
+        ("本一", 0, 0),
+        ("云", 2, 0),
+        ("本二", 0, 0),
+        ("英一", 4, 0),
+        ("😀", 6, 0),
+        ("本三", 0, 0),
+        ("本四", 0, 0),
+        ("本五", 0, 0),
+        ("智一", 3, 0),
+        ("智二", 3, 0),
+    ];
+    let after = listed(5, &mixed);
+    assert_eq!(
+        after,
+        [
+            "本一", "云", "英一", "😀", "智一", "本二", "本三", "本四", "本五", "智二"
+        ]
+    );
+    assert_eq!(after[..4], before(5, &mixed)[..4]);
+
+    // 固定位置的英文只在其余行里归位，第一条 AI 候选仍在第一页最后一格。
+    let fixed = |position: u8| {
+        [
+            ("本一", 0, 0),
+            ("云", 2, 0),
+            ("本二", 0, 0),
+            ("本三", 0, 0),
+            ("本四", 0, 0),
+            ("本五", 0, 0),
+            ("英", 4, position),
+            ("智", 3, 0),
+        ]
+    };
+    let after = listed(5, &fixed(2));
+    assert_eq!(
+        after,
+        ["本一", "英", "云", "本二", "智", "本三", "本四", "本五"]
+    );
+    assert_eq!(after[..4], before(5, &fixed(2))[..4]);
+    // 固定在第一页最后一格的英文和那里的本地候选一样，回答到达后让到下一页。
+    assert_eq!(
+        before(5, &fixed(5)),
+        ["本一", "云", "本二", "本三", "英", "本四", "本五"]
+    );
+    assert_eq!(
+        listed(5, &fixed(5)),
+        ["本一", "云", "本二", "本三", "智", "英", "本四", "本五"]
     );
 }
 
@@ -1567,15 +1788,15 @@ fn promoted_english_candidate_keeps_the_first_seat_with_cloud_and_ai() {
             &["GitHub", "个", "给", "云候选", "AI联想"],
             vec![4, 0, 0, 2, 3]
         ),
-        vec!["GitHub", "个", "云候选", "AI联想", "给"]
+        vec!["GitHub", "个", "云候选", "给", "AI联想"]
     );
-    // Only the Engine's first seat signals a promotion. An English candidate it placed after the leading Chinese one is seated behind cloud and AI as usual.
+    // Only the Engine's first seat signals a promotion. An English candidate it placed after the leading Chinese one is seated behind the cloud candidate as usual; the AI candidate takes the last slot of the first page, here right after the other rows (#6888).
     assert_eq!(
         seated(
             &["个", "GitHub", "给", "云候选", "AI联想"],
             vec![0, 4, 0, 2, 3]
         ),
-        vec!["个", "云候选", "AI联想", "GitHub", "给"]
+        vec!["个", "云候选", "GitHub", "给", "AI联想"]
     );
     // A promoted English word does not pull a second English candidate into the leading English seat; the rest wait behind the Chinese candidates.
     assert_eq!(
@@ -1587,7 +1808,7 @@ fn promoted_english_candidate_keeps_the_first_seat_with_cloud_and_ai() {
     );
 }
 
-// 日文混输行（来源 13）按英文的规矩坐：领先时保持首位（英文已领先时第二位），云候选、AI 候选到达不挪它；不领先时坐英文的优先座位，排在英文前面。
+// 日文混输行（来源 13）按英文的规矩坐：领先时保持首位（英文已领先时第二位），云候选、AI 候选到达不挪它；不领先时坐英文的优先座位，排在英文前面。AI 候选坐第一页最后一格，这里第一页排不满，紧跟在其余行之后（#6888）。
 #[test]
 fn mixed_japanese_rows_keep_their_seat_like_english() {
     let seated = |words: &[&str], sources: Vec<u8>| {
@@ -1617,7 +1838,7 @@ fn mixed_japanese_rows_keep_their_seat_like_english() {
             &["おはよう", "噢哈有", "哦", "云候选", "AI联想"],
             vec![13, 8, 0, 2, 3]
         ),
-        vec!["おはよう", "噢哈有", "云候选", "AI联想", "哦"]
+        vec!["おはよう", "噢哈有", "云候选", "哦", "AI联想"]
     );
     assert_eq!(
         seated(
@@ -1631,7 +1852,7 @@ fn mixed_japanese_rows_keep_their_seat_like_english() {
             &["开始", "開始", "kaishi", "开", "云候选", "AI联想"],
             vec![0, 13, 4, 0, 2, 3]
         ),
-        vec!["开始", "云候选", "AI联想", "開始", "kaishi", "开"]
+        vec!["开始", "云候选", "開始", "kaishi", "开", "AI联想"]
     );
 }
 
@@ -1747,13 +1968,13 @@ fn fixed_english_candidate_keeps_its_seat_when_online_candidates_arrive() {
     );
     assert_eq!(texts(&cloud_page), vec!["GitHub", "个", "云候选", "给"]);
 
-    // Still first once an AI candidate joins the cloud one.
+    // Still first once an AI candidate joins the cloud one; the AI candidate takes the last slot of the first page, here right after the other rows (#6888).
     let (_, page) = runtime(
         &["个", "GitHub", "给", "云候选", "AI联想"],
         vec![0, 4, 0, 2, 3],
         vec![0, 1, 0, 0, 0],
     );
-    assert_eq!(texts(&page), vec!["GitHub", "个", "云候选", "AI联想", "给"]);
+    assert_eq!(texts(&page), vec!["GitHub", "个", "云候选", "给", "AI联想"]);
 
     // Fixed to the third seat among local, AI and cloud candidates.
     let (_, page) = runtime(
@@ -1762,7 +1983,7 @@ fn fixed_english_candidate_keeps_its_seat_when_online_candidates_arrive() {
         vec![0, 3, 0, 0, 0],
     );
     assert_eq!(texts(&page)[2], "GitHub");
-    assert_eq!(texts(&page), vec!["个", "云候选", "GitHub", "AI联想", "给"]);
+    assert_eq!(texts(&page), vec!["个", "云候选", "GitHub", "给", "AI联想"]);
 
     // Picking the first seat commits the re-seated English word, not the Engine's first candidate.
     let done = cloud_only
@@ -2034,6 +2255,9 @@ impl InputEngine for PhraseEngine {
     }
     fn command(&mut self, command: Command) -> Result<EngineResult, RuntimeError> {
         match command {
+            // 与真引擎的字母光标一致：每次移一个字符，到两端就停住（这里没有本地模式的前缀字母）。
+            Command::MoveLeft => self.caret = self.caret.saturating_sub(1),
+            Command::MoveRight => self.caret = (self.caret + 1).min(self.reading.len()),
             Command::MoveHome => self.caret = 0,
             Command::MoveEnd => self.caret = self.reading.len(),
             Command::Backspace => {
@@ -2144,6 +2368,91 @@ fn phrase_runtime(reading: &str, consumes: Vec<usize>) -> Runtime<PhraseEngine> 
             .unwrap();
     }
     runtime
+}
+
+/// `navigation.left_right`：左右键先编辑输入串，光标已经停在要移动的那一端时，这一次按键才换成移动
+/// 候选高亮，与 ↑/↓ 走同一段代码。关着时两个键都还是普通光标命令。
+#[test]
+fn left_right_edits_the_input_string_before_it_moves_the_highlight() {
+    let highlighted = |view: &View| {
+        view.candidates
+            .iter()
+            .position(|candidate| candidate.highlighted)
+    };
+    let mut runtime = phrase_runtime("nihaoma", Vec::new());
+
+    // 关着时右键在输入串末尾什么也不做，高亮留在首选。
+    let closed = runtime
+        .dispatch(Action::Command(Command::MoveRight))
+        .unwrap()
+        .view;
+    assert_eq!(closed.caret_position, 7);
+    assert_eq!(highlighted(&closed), Some(0));
+
+    // 打开后同一个键移到下一个候选：光标已经没有可编辑的位置了。
+    runtime.set_left_right_navigation(true);
+    let next = runtime
+        .dispatch(Action::Command(Command::MoveRight))
+        .unwrap()
+        .view;
+    assert_eq!(highlighted(&next), Some(1));
+    assert_eq!(next.caret_position, 7);
+    assert_eq!(next.editing_text, "nihaoma");
+
+    // 左键还有可编辑的位置，仍然是编辑输入串，高亮不动。
+    let edited = runtime
+        .dispatch(Action::Command(Command::MoveLeft))
+        .unwrap()
+        .view;
+    assert_eq!(edited.caret_position, 6);
+    assert_eq!(highlighted(&edited), Some(1));
+
+    // 光标回到起点以后左键才移高亮。
+    runtime
+        .dispatch(Action::Command(Command::MoveHome))
+        .unwrap();
+    let previous = runtime
+        .dispatch(Action::Command(Command::MoveLeft))
+        .unwrap()
+        .view;
+    assert_eq!(highlighted(&previous), Some(0));
+    assert_eq!(previous.caret_position, 0);
+}
+
+#[test]
+fn taking_focus_discards_held_phrase_even_if_refresh_fails() {
+    let mut runtime = Runtime::new(
+        Fixture {
+            local_mode: "none".into(),
+            words: vec!["海滩".into()],
+            remaining_after_select: Some("paobu".into()),
+            ..Fixture::default()
+        },
+        5,
+    )
+    .unwrap();
+    runtime.set_phrase_preedit(true);
+    runtime.focus(true).unwrap();
+    for value in *b"haitanpaobu" {
+        runtime
+            .dispatch(Action::Character {
+                value,
+                shift: false,
+            })
+            .unwrap();
+    }
+    let selected = runtime.view().candidates[0].id;
+    let held = runtime.dispatch(Action::Select(selected)).unwrap();
+    assert_eq!(held.view.phrase_prefix, "海滩");
+    assert_eq!(runtime.phrase_selections.len(), 1);
+    runtime.engine.snapshot_fails = true;
+
+    assert!(runtime.focus(true).is_err());
+
+    assert!(runtime.phrase_prefix.is_empty());
+    assert!(runtime.phrase_selections.is_empty());
+    runtime.engine.snapshot_fails = false;
+    assert!(runtime.focus(true).unwrap().commit.is_none());
 }
 
 // A Ctrl+Backspace that empties the reading does not end the phrase: the chosen piece stays in the composition with its selection, as the reference's `keep_creating_word_after_empty_raw` keeps it (MSIME-Windows server/src/ipc/event_listener.cpp, pinned by `ShouldRetreatCreatingWordSelection(true, false, true, 0, 0, 1)` and `ShouldDropCreatingWordSegment(true, false, true, 0, 1)` in test_input_key_policy.cpp). Every follow-up key then acts on that phrase.
@@ -2288,6 +2597,143 @@ fn a_segment_backspace_with_nothing_before_the_caret_drops_the_selection() {
     runtime.dispatch(Action::Select(id)).unwrap();
     let edited = runtime.dispatch(Action::SegmentBackspace).unwrap();
     assert_eq!(edited.view.phrase_prefix, "海滩");
+}
+
+#[test]
+fn enabling_phrase_preedit_again_preserves_selection_retreat() {
+    let mut runtime = phrase_runtime("haitanp", vec![6]);
+    let id = runtime.view().candidates[0].id;
+    let held = runtime.dispatch(Action::Select(id)).unwrap();
+    assert_eq!(held.view.phrase_prefix, "海滩");
+    assert_eq!(held.view.editing_text, "p");
+
+    assert_eq!(runtime.set_phrase_preedit(true), None);
+    let back = runtime
+        .dispatch(Action::Command(Command::Backspace))
+        .unwrap();
+    assert_eq!(back.commit, None);
+    assert!(back.view.phrase_prefix.is_empty());
+    assert_eq!(back.view.editing_text, "haitan");
+}
+
+#[test]
+fn enabling_phrase_preedit_again_preserves_phrase_after_segment_backspace() {
+    let mut runtime = phrase_runtime("haitanpaobu", vec![6]);
+    let id = runtime.view().candidates[0].id;
+    runtime.dispatch(Action::Select(id)).unwrap();
+
+    assert_eq!(runtime.set_phrase_preedit(true), None);
+    let kept = runtime.dispatch(Action::SegmentBackspace).unwrap();
+    assert_eq!(kept.commit, None);
+    assert_eq!(kept.view.phrase_prefix, "海滩");
+    assert!(kept.view.editing_text.is_empty());
+
+    let back = runtime
+        .dispatch(Action::Command(Command::Backspace))
+        .unwrap();
+    assert_eq!(back.commit, None);
+    assert!(back.view.phrase_prefix.is_empty());
+    assert_eq!(back.view.editing_text, "haitan");
+}
+
+#[test]
+fn toggling_phrase_preedit_flushes_each_selection_only_once() {
+    let mut runtime = phrase_runtime("haitanp", vec![6]);
+    let id = runtime.view().candidates[0].id;
+    runtime.dispatch(Action::Select(id)).unwrap();
+
+    assert_eq!(runtime.set_phrase_preedit(false).as_deref(), Some("海滩"));
+    assert_eq!(runtime.set_phrase_preedit(false), None);
+    assert_eq!(runtime.set_phrase_preedit(true), None);
+    let back = runtime
+        .dispatch(Action::Command(Command::Backspace))
+        .unwrap();
+    assert_eq!(back.commit, None);
+    assert!(back.view.phrase_prefix.is_empty());
+    assert!(back.view.editing_text.is_empty());
+}
+
+#[test]
+fn backspace_can_keep_every_selected_piece_until_spelling_is_deleted() {
+    let mut runtime = phrase_runtime("woshi", vec![2]);
+    runtime.engine.words = vec!["我".into()];
+    runtime.refresh().unwrap();
+    runtime.set_backspace_reverts_selection(false);
+    let id = runtime.view().candidates[0].id;
+    runtime.dispatch(Action::Select(id)).unwrap();
+    for expected in ["sh", "s"] {
+        let edited = runtime
+            .dispatch(Action::Command(Command::Backspace))
+            .unwrap();
+        assert_eq!(edited.view.phrase_prefix, "我");
+        assert_eq!(edited.view.editing_text, expected);
+        assert_eq!(edited.commit, None);
+        assert_eq!(runtime.facts.retracted, None);
+    }
+    let ended = runtime
+        .dispatch(Action::Command(Command::Backspace))
+        .unwrap();
+    assert_eq!(ended.commit.as_deref(), Some("我"));
+    assert!(ended.handled);
+    assert!(ended.view.phrase_prefix.is_empty());
+    assert!(ended.view.editing_text.is_empty());
+    let next = runtime
+        .dispatch(Action::Command(Command::Backspace))
+        .unwrap();
+    assert_eq!(next.commit, None);
+    assert!(runtime.phrase_selections.is_empty());
+
+    let mut runtime = phrase_runtime("haitanpaobux", vec![6, 5]);
+    runtime.set_backspace_reverts_selection(false);
+    let id = runtime.view().candidates[0].id;
+    runtime.dispatch(Action::Select(id)).unwrap();
+    let id = runtime.view().candidates[1].id;
+    runtime.dispatch(Action::Select(id)).unwrap();
+    let ended = runtime
+        .dispatch(Action::Command(Command::Backspace))
+        .unwrap();
+    assert_eq!(ended.commit.as_deref(), Some("海滩跑步"));
+    assert!(ended.view.phrase_prefix.is_empty());
+}
+
+#[test]
+fn backspace_selection_preference_changes_live_without_losing_history() {
+    let mut runtime = phrase_runtime("haitanpa", vec![6]);
+    let id = runtime.view().candidates[0].id;
+    runtime.dispatch(Action::Select(id)).unwrap();
+    runtime.set_backspace_reverts_selection(false);
+    let edited = runtime
+        .dispatch(Action::Command(Command::Backspace))
+        .unwrap();
+    assert_eq!(edited.view.phrase_prefix, "海滩");
+    assert_eq!(edited.view.editing_text, "p");
+    runtime.set_backspace_reverts_selection(true);
+    let restored = runtime
+        .dispatch(Action::Command(Command::Backspace))
+        .unwrap();
+    assert!(restored.view.phrase_prefix.is_empty());
+    assert_eq!(restored.view.editing_text, "haitan");
+    assert_eq!(restored.commit, None);
+}
+
+#[test]
+fn disabling_selection_retreat_keeps_cancel_and_segment_delete_rules() {
+    for cancel in [false, true] {
+        let mut runtime = phrase_runtime("haitanpaobu", vec![6]);
+        runtime.set_backspace_reverts_selection(false);
+        let id = runtime.view().candidates[0].id;
+        runtime.dispatch(Action::Select(id)).unwrap();
+        let ended = if cancel {
+            runtime.dispatch(Action::Command(Command::Cancel)).unwrap()
+        } else {
+            runtime.dispatch(Action::SegmentBackspace).unwrap();
+            runtime.dispatch(Action::SegmentBackspace).unwrap()
+        };
+        assert!(ended.handled);
+        assert_eq!(ended.commit, None);
+        assert!(ended.view.phrase_prefix.is_empty());
+        assert!(ended.view.editing_text.is_empty());
+    }
 }
 
 fn type_key(runtime: &mut Runtime<Fixture>) -> Transition {
@@ -3285,6 +3731,41 @@ fn fourteen_key_commit_raw_finishes_from_the_highlighted_row() {
     assert!(raw.commit.is_none(), "{:?}", raw.commit);
 }
 
+#[test]
+fn fourteen_key_raw_commit_variants_use_the_real_highlighted_candidate() {
+    for command in [Command::CommitRaw, Command::CommitRawWithoutLearning] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime = ai_answer_runtime(directory.path(), 5);
+        runtime.set_key_grid(Some(KeyGrid::FourteenKey)).unwrap();
+        runtime.dispatch(Action::GridKey(b'n')).unwrap();
+        runtime.dispatch(Action::GridKey(b'i')).unwrap();
+        let highlighted = runtime.dispatch(Action::NextCandidate).unwrap().view;
+        let expected = highlighted.candidates[1].text.clone();
+        assert!(highlighted.candidates[1].highlighted);
+        assert_ne!(expected, highlighted.candidates[0].text);
+
+        let committed = runtime.dispatch(Action::Command(command)).unwrap();
+
+        assert_eq!(
+            committed.commit.as_deref(),
+            Some(expected.as_str()),
+            "{command:?}"
+        );
+        assert!(committed.view.editing_text.is_empty());
+        assert!(committed.view.candidates.is_empty());
+
+        // 九键数字与 14 键布局下的硬件字母仍按原文上屏。
+        runtime.set_key_grid(Some(KeyGrid::NineKey)).unwrap();
+        type_characters(&mut runtime, "64");
+        let digits = runtime.dispatch(Action::Command(command)).unwrap();
+        assert_eq!(digits.commit.as_deref(), Some("64"));
+        runtime.set_key_grid(Some(KeyGrid::FourteenKey)).unwrap();
+        type_characters(&mut runtime, "ni");
+        let letters = runtime.dispatch(Action::Command(command)).unwrap();
+        assert_eq!(letters.commit.as_deref(), Some("ni"));
+    }
+}
+
 /// 九键要求方案能打九键，14 键只给全拼；组字中不能换网格。
 #[test]
 fn key_grid_checks_the_scheme_and_the_composition() {
@@ -3448,6 +3929,107 @@ fn switching_the_language_drops_the_composition_being_spelled() {
     assert!(!spelled.is_empty());
     runtime.set_dedicated_english(true).unwrap();
     assert_eq!(runtime.view().editing_text, spelled);
+}
+
+#[test]
+fn repeated_dedicated_english_preserves_real_grid_candidates() {
+    for grid in [KeyGrid::NineKey, KeyGrid::FourteenKey] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut runtime = ai_answer_runtime(directory.path(), 5);
+        runtime.set_key_grid(Some(grid)).unwrap();
+        if grid == KeyGrid::FourteenKey {
+            runtime.dispatch(Action::GridKey(b'n')).unwrap();
+            runtime.dispatch(Action::GridKey(b'i')).unwrap();
+        } else {
+            type_characters(&mut runtime, "64");
+        }
+        let before = runtime.view();
+        assert!(!before.editing_text.is_empty());
+        assert!(!before.nine_key_spellings.is_empty());
+        let expected = before.candidates[0].text.clone();
+
+        runtime.set_dedicated_english(false).unwrap();
+
+        let after = runtime.view();
+        assert_eq!(after.editing_text, before.editing_text, "{grid:?}");
+        assert_eq!(after.nine_key_spellings, before.nine_key_spellings);
+        assert_eq!(texts(&after), texts(&before));
+        let picked = runtime
+            .dispatch(Action::Select(after.candidates[0].id))
+            .unwrap();
+        assert_eq!(picked.commit.as_deref(), Some(expected.as_str()));
+    }
+}
+
+#[test]
+fn dedicated_english_caret_does_not_turn_rejected_keys_into_candidate_picks() {
+    for value in *b"1! " {
+        let directory = tempfile::tempdir().unwrap();
+        let session =
+            msime_engine::host::Session::new(&real_engine_options(directory.path())).unwrap();
+        let mut runtime = Runtime::new(session, 5).unwrap();
+        runtime.focus(true).unwrap();
+        runtime.set_dedicated_english(true).unwrap();
+        type_characters(&mut runtime, "synthetic");
+        runtime
+            .dispatch(Action::Command(Command::MoveLeft))
+            .unwrap();
+        let before = runtime.view();
+        assert_eq!(before.caret_position, "synthetic".len() - 1);
+
+        let result = character(&mut runtime, value);
+
+        assert!(
+            result.handled && result.commit.is_none(),
+            "{value:?}: {result:?}"
+        );
+        assert_eq!(result.view.editing_text, before.editing_text);
+        assert_eq!(result.view.caret_position, before.caret_position);
+        assert_eq!(texts(&result.view), texts(&before));
+        assert_eq!(
+            runtime
+                .dispatch(Action::SelectHighlighted)
+                .unwrap()
+                .commit
+                .as_deref(),
+            Some("synthetic")
+        );
+    }
+}
+
+#[test]
+fn switching_language_clears_held_phrase_even_if_refresh_fails() {
+    let mut runtime = Runtime::new(
+        Fixture {
+            local_mode: "none".into(),
+            words: vec!["海滩".into()],
+            remaining_after_select: Some("paobu".into()),
+            ..Fixture::default()
+        },
+        5,
+    )
+    .unwrap();
+    runtime.set_phrase_preedit(true);
+    runtime.focus(true).unwrap();
+    for value in *b"haitanpaobu" {
+        runtime
+            .dispatch(Action::Character {
+                value,
+                shift: false,
+            })
+            .unwrap();
+    }
+    let selected = runtime.view().candidates[0].id;
+    let held = runtime.dispatch(Action::Select(selected)).unwrap();
+    assert_eq!(held.view.phrase_prefix, "海滩");
+    assert_eq!(runtime.phrase_selections.len(), 1);
+    runtime.engine.snapshot_fails = true;
+
+    assert!(runtime.set_dedicated_english(true).is_err());
+
+    assert!(runtime.engine.dedicated_english);
+    assert!(runtime.phrase_prefix.is_empty());
+    assert!(runtime.phrase_selections.is_empty());
 }
 
 #[test]
@@ -3959,6 +4541,7 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         plugin_commands: Vec::new(),
         mention_entries: Vec::new(),
         quick_phrase_table: Vec::new(),
+        quick_phrase_candidates: false,
         helpcode_table: None,
         sentence_association: msime_engine::host::SentenceAssociationOptions {
             word_lattice: true,
@@ -4007,6 +4590,88 @@ fn rejected_local_key_commits_the_prefix_and_passes_the_current_key_to_the_host(
         assert_eq!(
             transition.commit.as_deref(),
             Some((entry as char).to_string().as_str())
+        );
+        assert_eq!(transition.view.local_mode, "none");
+        assert!(transition.view.editing_text.is_empty());
+        assert!(transition.view.candidates.is_empty());
+    }
+}
+
+#[test]
+fn direct_local_caret_preserves_the_mode_through_runtime_edits() {
+    let directory = tempfile::tempdir().unwrap();
+    let session = msime_engine::host::Session::new(&real_engine_options(directory.path())).unwrap();
+    let mut runtime = Runtime::new(session, 5).unwrap();
+    runtime.focus(true).unwrap();
+    runtime
+        .dispatch(Action::Character {
+            value: b'U',
+            shift: true,
+        })
+        .unwrap();
+    type_characters(&mut runtime, "0041");
+    runtime.set_caret(Some(0)).unwrap();
+
+    let inserted = character(&mut runtime, b'+');
+
+    assert!(
+        inserted.handled && inserted.commit.is_none(),
+        "{inserted:?}"
+    );
+    assert_eq!(inserted.view.editing_text, "U+0041");
+    assert_eq!(inserted.view.caret_position, 2);
+    assert_eq!(texts(&inserted.view)[0], "A");
+    runtime.set_caret(Some(0)).unwrap();
+    let deleted = runtime
+        .dispatch(Action::Command(Command::DeleteForward))
+        .unwrap();
+    assert!(deleted.handled && deleted.commit.is_none());
+    assert_eq!(deleted.view.editing_text, "U0041");
+    assert_eq!(deleted.view.caret_position, 1);
+    assert_eq!(texts(&deleted.view)[0], "A");
+    let committed = runtime
+        .dispatch(Action::Command(Command::CommitRaw))
+        .unwrap();
+    assert_eq!(committed.commit.as_deref(), Some("U0041"));
+    assert!(committed.view.editing_text.is_empty());
+}
+
+#[test]
+fn caret_rejected_local_keys_keep_the_commit_and_pass_the_key_to_the_host() {
+    for (entry, spelling, rejected) in [(b'E', "ab", b'1'), (b'U', "0041", b'g')] {
+        let directory = tempfile::tempdir().unwrap();
+        let session =
+            msime_engine::host::Session::new(&real_engine_options(directory.path())).unwrap();
+        let mut runtime = Runtime::new(session, 5).unwrap();
+        runtime.focus(true).unwrap();
+        runtime
+            .dispatch(Action::Character {
+                value: entry,
+                shift: true,
+            })
+            .unwrap();
+        for value in spelling.bytes() {
+            runtime
+                .dispatch(Action::Character {
+                    value,
+                    shift: false,
+                })
+                .unwrap();
+        }
+        runtime
+            .dispatch(Action::Command(Command::MoveHome))
+            .unwrap();
+
+        let transition = runtime
+            .dispatch(Action::Character {
+                value: rejected,
+                shift: false,
+            })
+            .unwrap();
+        assert!(!transition.handled);
+        assert_eq!(
+            transition.commit,
+            Some(format!("{}{spelling}", entry as char))
         );
         assert_eq!(transition.view.local_mode, "none");
         assert!(transition.view.editing_text.is_empty());
@@ -5025,7 +5690,7 @@ fn slash_and_at_open_their_modes_only_with_nothing_composed() {
     for value in *b"ab" {
         character(&mut runtime, value);
     }
-    assert!(runtime.view().spelling_symbols.is_empty());
+    assert!(!runtime.view().spelling_symbols.contains('/'));
     let finished = runtime.dispatch(Action::Punctuation(b'/')).unwrap();
     let commit = finished.commit.unwrap();
     assert!(commit.ends_with('/'), "{commit:?}");
@@ -5804,7 +6469,8 @@ fn selecting_a_reseated_candidate_commits_that_candidate() {
             sources: vec![0, 0, 3],
             ..Fixture::default()
         },
-        9,
+        // 每页两个：AI 候选坐第一页最后一格，也就是引擎的第三个候选坐到第二格。
+        2,
     )
     .unwrap();
     runtime.focus(true).unwrap();
@@ -5813,7 +6479,7 @@ fn selecting_a_reseated_candidate_commits_that_candidate() {
         page.iter()
             .map(|candidate| candidate.text.as_str())
             .collect::<Vec<_>>(),
-        vec!["本地一", "AI", "本地二"]
+        vec!["本地一", "AI"]
     );
 
     let done = runtime.dispatch(Action::Select(page[1].id)).unwrap();
@@ -7621,7 +8287,7 @@ fn url_mode_opens_on_the_punctuation_route() {
     let directory = tempfile::tempdir().unwrap();
     let mut runtime = url_runtime(directory.path(), 0);
     type_characters(&mut runtime, "www");
-    assert_eq!(runtime.view().spelling_symbols, ".");
+    assert_eq!(runtime.view().spelling_symbols, ".@");
     let opened = runtime.dispatch(Action::Punctuation(b'.')).unwrap();
     assert!(opened.handled && opened.commit.is_none(), "{opened:?}");
     assert_eq!(opened.view.local_mode, "url");
@@ -7743,7 +8409,7 @@ fn url_backspace_past_the_trigger_returns_to_the_composition() {
     assert!(back.handled && back.commit.is_none());
     assert_eq!(back.view.local_mode, "none");
     assert_eq!(back.view.editing_text, "www");
-    assert_eq!(back.view.spelling_symbols, ".");
+    assert_eq!(back.view.spelling_symbols, ".@");
 }
 
 // 空格上屏网址本身，不在末尾带空格；Esc 丢弃网址不上屏，回到没有本地模式的状态。
@@ -7767,6 +8433,66 @@ fn url_space_commits_the_url_alone_and_escape_discards_it() {
     assert!(escape.commit.is_none(), "{escape:?}");
     assert_eq!(escape.view.local_mode, "none");
     assert!(escape.view.editing_text.is_empty());
+}
+
+// 邮箱后缀显示着时，数字仍是网址的一部分而不是选候选；空格上屏的是打的网址，点选后缀才上屏整个邮箱。
+#[test]
+fn url_email_suffixes_leave_digits_and_space_to_the_address() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut runtime = url_runtime(directory.path(), 0);
+    type_characters(&mut runtime, "abc");
+    assert_eq!(runtime.view().spelling_symbols, "@");
+    let at = runtime.dispatch(Action::Punctuation(b'@')).unwrap();
+    assert!(at.handled && at.commit.is_none(), "{at:?}");
+    assert_eq!(at.view.local_mode, "url");
+    assert_eq!(texts(&at.view)[..3], ["abc@", "abc@qq.com", "abc@163.com"]);
+    let digit = character(&mut runtime, b'1');
+    assert!(digit.handled && digit.commit.is_none(), "{digit:?}");
+    assert_eq!(
+        texts(&digit.view),
+        [
+            "abc@1",
+            "abc@163.com",
+            "abc@126.com",
+            "abc@139.com",
+            "abc@189.cn"
+        ]
+    );
+    let space = runtime.dispatch(Action::SelectHighlighted).unwrap();
+    assert_eq!(space.commit.as_deref(), Some("abc@1"));
+
+    type_characters(&mut runtime, "abc");
+    runtime.dispatch(Action::Punctuation(b'@')).unwrap();
+    let id = runtime.view().candidates[1].id;
+    let picked = runtime.dispatch(Action::Select(id)).unwrap();
+    assert_eq!(picked.commit.as_deref(), Some("abc@qq.com"));
+    assert_eq!(picked.view.local_mode, "none");
+}
+
+// 选中组字里的 `https://` 不上屏，以它进入网址模式；选中补全了顶级域名的行同样不上屏。
+#[test]
+fn url_completions_picked_through_the_runtime_keep_composing() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut runtime = url_runtime(directory.path(), 0);
+    type_characters(&mut runtime, "htt");
+    let view = runtime.view();
+    let at = texts(&view)
+        .iter()
+        .position(|text| text == "https://")
+        .unwrap();
+    let picked = runtime
+        .dispatch(Action::Select(view.candidates[at].id))
+        .unwrap();
+    assert!(picked.handled && picked.commit.is_none(), "{picked:?}");
+    assert_eq!(picked.view.local_mode, "url");
+    assert_eq!(picked.view.editing_text, "https://");
+    type_characters(&mut runtime, "example");
+    let id = runtime.view().candidates[1].id;
+    let tld = runtime.dispatch(Action::Select(id)).unwrap();
+    assert!(tld.handled && tld.commit.is_none(), "{tld:?}");
+    assert_eq!(tld.view.editing_text, "https://example.com");
+    let committed = runtime.dispatch(Action::SelectHighlighted).unwrap();
+    assert_eq!(committed.commit.as_deref(), Some("https://example.com"));
 }
 
 /// 整句改字：左右键在整句的汉字之间移动，选中的候选替换光标处那一段，确认后上屏改好的整句。
@@ -7848,8 +8574,8 @@ fn the_sentence_is_corrected_in_place_and_committed_whole() {
     assert_eq!(entered.diagnostic, None);
 }
 
-/// 读音 ni 有六个本地候选的真 Engine，开着 AI 座位。
-fn ai_seat_runtime(root: &std::path::Path) -> Runtime {
+/// 读音 ni 有六个本地候选的真 Engine，每页 `page_size` 个候选。
+fn ai_answer_runtime(root: &std::path::Path, page_size: u8) -> Runtime {
     let dictionaries = root.join("dictionaries");
     std::fs::create_dir_all(&dictionaries).unwrap();
     rusqlite::Connection::open(dictionaries.join(msime_engine::assets::MAIN_DICTIONARY))
@@ -7860,116 +8586,161 @@ fn ai_seat_runtime(root: &std::path::Path) -> Runtime {
              ('ni','n','倪',70),('ni','n','泥',60),('ni','n','尼',50);",
         )
         .unwrap();
-    let mut session = msime_engine::host::Session::new(&real_engine_options(root)).unwrap();
-    assert!(session.set_ai_seat(true));
-    let mut runtime = Runtime::new(session, 9).unwrap();
+    let session = msime_engine::host::Session::new(&real_engine_options(root)).unwrap();
+    let mut runtime = Runtime::new(session, page_size).unwrap();
     runtime.focus(true).unwrap();
     runtime
 }
 
-/// #6888：真 Engine 上的 AI 座位。占位行（来源 12）在回答到达前占住座位，数字键选它什么都不上屏，回答到达后同一页上别的候选一个都不挪位。
 #[test]
-fn the_ai_seat_holds_still_through_the_answer_and_its_digit_commits_nothing() {
+fn moving_the_caret_invalidates_candidates_from_the_previous_prefix() {
     let directory = tempfile::tempdir().unwrap();
-    let mut runtime = ai_seat_runtime(directory.path());
-    type_characters(&mut runtime, "ni");
-    let before = runtime.view();
-    let seat = before
-        .candidates
-        .iter()
-        .position(|candidate| candidate.source == 12)
-        .expect("an AI placeholder");
-    assert_eq!(before.candidates[seat].text, "…");
+    let mut runtime = ai_answer_runtime(directory.path(), 5);
+    rusqlite::Connection::open(
+        directory
+            .path()
+            .join("dictionaries")
+            .join(msime_engine::assets::MAIN_DICTIONARY),
+    )
+    .unwrap()
+    .execute_batch(
+        "CREATE TABLE tbl_1_h(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_1_h VALUES('hao','h','好',100);\
+         CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+         INSERT INTO tbl_2_n VALUES('ni''hao','nh','你好',1000);",
+    )
+    .unwrap();
 
-    let digit = runtime
-        .dispatch(Action::Character {
-            value: b'1' + u8::try_from(seat).unwrap(),
-            shift: false,
-        })
-        .unwrap();
-    assert!(digit.handled);
-    assert_eq!(digit.commit, None);
-    assert_eq!(digit.view.editing_text, "ni");
-
-    let mut query = runtime.online_query().unwrap().unwrap();
-    query.ai_assistant =
-        Some(serde_json::from_value(json!({"enabled": true, "candidate_limit": 3})).unwrap());
-    assert!(runtime
-        .apply_online_candidates(
-            &query,
-            &["合成一".into(), "合成二".into(), "合成三".into()],
-            1
-        )
-        .unwrap());
-    let after = runtime.view();
-    assert_eq!(after.candidates[seat].text, "合成一");
-    assert_eq!(after.candidates[seat].source, 3);
-    for (index, candidate) in before.candidates.iter().enumerate() {
-        if index != seat {
-            assert_eq!(after.candidates[index].text, candidate.text, "seat {index}");
+    for caret in [Some(2), None] {
+        type_characters(&mut runtime, "nihao");
+        if caret.is_none() {
+            runtime.set_caret(Some(2)).unwrap();
         }
+        let before = runtime.view();
+        assert_eq!(
+            before.candidates[0].text,
+            if caret.is_some() { "你好" } else { "你" }
+        );
+        let old = before.candidates[0].id;
+
+        runtime.set_caret(caret).unwrap();
+
+        let after = runtime.view();
+        assert_ne!(before.candidates[0].text, after.candidates[0].text);
+        let stale = runtime.dispatch(Action::Select(old));
+        assert!(
+            matches!(stale, Err(RuntimeError::StaleCandidate)),
+            "{stale:?}"
+        );
+        assert_eq!(runtime.view().editing_text, "nihao");
+        let selected = runtime
+            .dispatch(Action::Select(after.candidates[0].id))
+            .unwrap();
+        assert_eq!(
+            selected.commit.as_deref(),
+            Some(after.candidates[0].text.as_str())
+        );
+        assert_eq!(
+            selected.view.editing_text,
+            if caret.is_some() { "hao" } else { "" }
+        );
+        runtime.dispatch(Action::Command(Command::Cancel)).unwrap();
     }
 }
 
 #[test]
-fn a_failed_ai_answer_leaves_a_dash_in_the_seat_until_the_composition_changes() {
+fn moving_the_caret_does_not_change_engine_after_generation_exhaustion() {
     let directory = tempfile::tempdir().unwrap();
-    let mut runtime = ai_seat_runtime(directory.path());
+    let mut runtime = ai_answer_runtime(directory.path(), 5);
     type_characters(&mut runtime, "ni");
-    let query = runtime.online_query().unwrap().unwrap();
-    let texts = |runtime: &Runtime| -> Vec<String> {
-        runtime
-            .view()
-            .candidates
-            .into_iter()
-            .map(|candidate| candidate.text)
-            .collect()
-    };
-    let pending = texts(&runtime);
-    let generation = runtime.generation();
-    let translated = runtime.view().candidates[0].text.clone();
-    assert!(runtime.apply_translations(
-        generation,
-        [(translated.clone(), "synthetic-retained-gloss".into())]
-    ));
-    assert!(!runtime
-        .resolve_online_candidates_owned(query.clone(), 0)
-        .unwrap());
-    assert!(runtime
-        .resolve_online_candidates_owned(query.clone(), 1)
-        .unwrap());
-    assert!(runtime.generation() > generation);
-    let resolved = texts(&runtime);
-    let seat = pending.iter().position(|text| text == "…").unwrap();
-    assert_eq!(resolved[seat], "—");
-    assert_eq!(resolved.len(), pending.len());
-    assert_eq!(
-        runtime
-            .view()
-            .candidates
-            .iter()
-            .find(|candidate| candidate.text == translated)
-            .unwrap()
-            .translation
-            .as_deref(),
-        Some("synthetic-retained-gloss")
-    );
-    assert!(!runtime.apply_translations(generation, [(translated, "stale-gloss".into())]));
+    runtime.generation = u64::MAX;
+    let before = runtime.engine.snapshot().unwrap();
 
-    type_characters(&mut runtime, "h");
-    runtime
-        .dispatch(Action::Command(Command::Backspace))
-        .unwrap();
-    assert_eq!(texts(&runtime), pending);
-    assert!(runtime
-        .view()
-        .candidates
-        .iter()
-        .all(|candidate| candidate.translation.is_none()));
-    assert!(!runtime.resolve_online_candidates_owned(query, 1).unwrap());
+    assert!(matches!(
+        runtime.set_caret(Some(1)),
+        Err(RuntimeError::IdentityExhausted)
+    ));
+    assert_eq!(runtime.engine.snapshot().unwrap(), before);
+    assert_eq!(runtime.view().caret_position, 2);
 }
 
-/// #6888：重排模型不拿 AI 候选和它的占位行比较。在线座位总会把它们放回 AI 座位，若让它们参与，回答一到就可能抢走本来要提到首位的本地候选，本地候选的次序随之改变。
+fn apply_ai_answer(runtime: &mut Runtime, words: &[&str]) -> bool {
+    let mut query = runtime.online_query().unwrap().unwrap();
+    query.ai_assistant =
+        Some(serde_json::from_value(json!({"enabled": true, "candidate_limit": 3})).unwrap());
+    let words: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
+    runtime.apply_online_candidates(&query, &words, 1).unwrap()
+}
+
+/// #6888：真 Engine 上的 AI 回答。等回答时没有占位行，第一页全是本地候选；回答到达后第一条 AI 候选坐第一页最后一格，前面的候选一个都不挪，原来在最后一格的候选是第二页的第一个；翻页回来它还在那里，数字键按的就是画出来的那一格。
+#[test]
+fn the_ai_answer_takes_the_last_slot_of_the_first_page_without_moving_the_rest() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut runtime = ai_answer_runtime(directory.path(), 5);
+    type_characters(&mut runtime, "ni");
+    let before = runtime.view();
+    assert_eq!(texts(&before), ["你", "拟", "妮", "倪", "泥"]);
+    assert!(before
+        .candidates
+        .iter()
+        .all(|candidate| candidate.source != 3 && candidate.source != 12));
+
+    assert!(apply_ai_answer(
+        &mut runtime,
+        &["合成一", "合成二", "合成三"]
+    ));
+    let after = runtime.view();
+    assert_eq!(texts(&after), ["你", "拟", "妮", "倪", "合成一"]);
+    assert_eq!(after.candidates[4].source, 3);
+    let all: Vec<String> = runtime
+        .all_candidates()
+        .candidates
+        .into_iter()
+        .map(|candidate| candidate.text)
+        .collect();
+    assert_eq!(
+        all,
+        [
+            "你",
+            "拟",
+            "妮",
+            "倪",
+            "合成一",
+            "泥",
+            "尼",
+            "合成二",
+            "合成三"
+        ]
+    );
+
+    let second = runtime.dispatch(Action::NextPage).unwrap().view;
+    assert_eq!(texts(&second)[0], "泥");
+    let first = runtime.dispatch(Action::PreviousPage).unwrap().view;
+    assert_eq!(texts(&first), texts(&after));
+    let digit = character(&mut runtime, b'5');
+    assert_eq!(digit.commit.as_deref(), Some("合成一"));
+}
+
+/// 第一页排不满时 AI 候选紧跟在本地候选之后，什么都不挪；回答的词都已在列表里时列表不变。
+#[test]
+fn a_short_first_page_takes_the_ai_answer_after_its_last_row() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut runtime = ai_answer_runtime(directory.path(), 9);
+    type_characters(&mut runtime, "ni");
+    let before = texts(&runtime.view());
+    assert_eq!(before, ["你", "拟", "妮", "倪", "泥", "尼"]);
+
+    assert!(apply_ai_answer(&mut runtime, &["妮"]));
+    assert_eq!(texts(&runtime.view()), before);
+
+    assert!(apply_ai_answer(&mut runtime, &["合成一", "合成二"]));
+    assert_eq!(
+        texts(&runtime.view()),
+        ["你", "拟", "妮", "倪", "泥", "尼", "合成一", "合成二"]
+    );
+}
+
+/// #6888：重排模型不拿 AI 候选和已退役的占位行比较。在线座位总会把 AI 行放回第一页最后一格和列表末尾，若让它们参与，回答一到就可能抢走本来要提到首位的本地候选，本地候选的次序随之改变。
 #[test]
 fn the_reranker_never_weighs_ai_rows_or_their_placeholder() {
     use msime_engine::ordering::{rerank_pick, ParallelOrderRows};
@@ -8090,6 +8861,8 @@ mod online_slot_allocations;
 mod parallel_order_allocations;
 
 mod static_evidence;
+
+mod rerank_declined;
 
 mod online_slot_order_equivalence;
 

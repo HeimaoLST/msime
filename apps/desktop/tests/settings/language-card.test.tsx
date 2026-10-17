@@ -174,6 +174,24 @@ test("the 普通话 sheet offers 全拼 14 键 between 26 键 and 9 键 when the
   expect(languageRow("普通话").textContent).toContain("全拼 14 键");
 });
 
+test("the 普通话 sheet labels and selects 九键双拼 when the host has it", () => {
+  const preferences = renderCard(["quanpin"], undefined, [...available, "nine_key_shuangpin"]);
+
+  fireEvent.click(languageRow("普通话"));
+  expect(within(sheet()).getByRole("button", { name: "九键双拼" })).toBeTruthy();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "九键双拼" }));
+
+  expect(preferences()).toMatchObject({
+    scheme: "quanpin",
+    touch_keyboard_layout: "nine_key_shuangpin",
+    touch_keyboard_schemes: {
+      enabled: ["quanpin", "nine_key_shuangpin"],
+      selected: "nine_key_shuangpin",
+    },
+  });
+  expect(languageRow("普通话").textContent).toContain("九键双拼");
+});
+
 test("a 五笔 profile picked in its submenu sets the profile and switches to 五笔", () => {
   const preferences = renderCard(["quanpin"]);
 
@@ -293,7 +311,8 @@ test("the HarmonyOS phone 输入 page shows the design's groups and folds the re
   expect(within(page).getByRole("switch", { name: "显示英文释义" })).toBeTruthy();
   // 中英文设置和其余设置仍可在更多下找到；整句联想和翻页键在那里属于其他页面。
   const more = topGroups(page).at(-1) as HTMLElement;
-  expect(within(more).getByRole("switch", { name: "以词定字" })).toBeTruthy();
+  // 以词定字和它的键组合成了一个「关闭 / [ ] / - =」选择。
+  expect(within(more).getByText("以词定字")).toBeTruthy();
   expect(within(more).getByText("拼音方案调频")).toBeTruthy();
   expect(within(page).queryByRole("switch", { name: "本地整句联想" })).toBeNull();
   expect(within(page).queryByRole("radiogroup", { name: "中文输出" })).toBeNull();

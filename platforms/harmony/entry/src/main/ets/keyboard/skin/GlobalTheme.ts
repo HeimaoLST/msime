@@ -1,9 +1,9 @@
 /**
- * The shared global theme as this host reads it: the catalog the picker draws, the resolved answer every surface is coloured from, and the ArkUI tokens a `null` slot falls back to.
+ * 本宿主读到的共享全局主题：选择器画的目录、每个界面取色用的解析结果，以及 `null` 槽位回退到的 ArkUI token。
  *
- * The ids, titles and palettes all come from `msime_client_theme_catalog` and `msime_client_resolve_theme` (crates/client-core/src/skin/theme.rs). Nothing here keeps a copy of them. What this file does own is the Harmony native token table, because `system` and every `null` slot mean "draw the platform's own colours", and those are this host's to define.
+ * id、标题和调色板全部来自 `msime_client_theme_catalog` 和 `msime_client_resolve_theme`（crates/client-services/src/skin/theme.rs）。这里不保留它们的任何副本。这个文件真正拥有的是 Harmony 原生 token 表，因为 `system` 和每个 `null` 槽位的意思都是「画平台自己的颜色」，而这些颜色由本宿主来定义。
  *
- * The shared layer writes colours as `#RRGGBB` or `#RRGGBBAA` with the alpha last. ArkUI reads an eight-digit colour as `#AARRGGBB`, so every colour is converted once, when the answer is parsed, and nothing downstream sees the shared order.
+ * 共享层把颜色写成 `#RRGGBB` 或 `#RRGGBBAA`，alpha 在最后。ArkUI 把八位颜色读作 `#AARRGGBB`，所以每个颜色在解析结果时转换一次，下游看不到共享层的顺序。
  */
 import { CustomSkinDocument } from "./CustomKeyboardSkin";
 
@@ -245,6 +245,36 @@ export class GlobalTheme {
       return null;
     }
     return light.appearance;
+  }
+
+  /** 交给解析器的自定义主题：去掉存下的编号色和边框色。HarmonyOS 的编号色和边框色跟随主题和皮肤（`HostCapabilities` 的 `candidate_number_color`、`candidate_border_color` 为假），选了文字颜色时编号色由它推出，边框取主题的发丝线；其余槽位原样带上。只给解析请求用，不改偏好文档。 */
+  static hostDrawnCustomTheme(
+    custom: CustomThemeDocument | undefined,
+  ): CustomThemeDocument | undefined {
+    if (
+      custom === undefined ||
+      custom === null ||
+      custom.candidate_colors === undefined ||
+      custom.candidate_colors === null
+    ) {
+      return custom;
+    }
+    const colors: CustomCandidateColors = custom.candidate_colors;
+    const drawn: CustomCandidateColors = {
+      text: colors.text,
+      accent: colors.accent,
+      selected: colors.selected,
+      hover: colors.hover,
+      surface: colors.surface,
+    };
+    const theme: CustomThemeDocument = {
+      base: custom.base,
+      candidate_skin: custom.candidate_skin,
+      candidate_skin_dark: custom.candidate_skin_dark,
+      candidate_colors: drawn,
+      keyboard: custom.keyboard,
+    };
+    return theme;
   }
 
   /** A non-null appearance fixes the mode for every surface; otherwise the surface's own mode rule decides. */

@@ -47,6 +47,16 @@ const QUANPIN_NINE_KEY: SchemeDefinition = {
   glyph: "拼",
   badge: "9",
 };
+const NINE_KEY_SHUANGPIN: SchemeDefinition = {
+  id: "NINE_KEY_SHUANGPIN",
+  preferenceId: "nine_key_shuangpin",
+  engineScheme: "quanpin",
+  shuangpinProfile: null,
+  touchKeyboardLayout: "nine_key_shuangpin",
+  title: "九键双拼",
+  glyph: "双",
+  badge: "9",
+};
 const XIAOHE: SchemeDefinition = {
   id: "XIAOHE",
   preferenceId: "xiaohe",
@@ -214,11 +224,13 @@ export class KeyGrid {
   static readonly NONE: number = 0;
   static readonly NINE_KEY: number = 1;
   static readonly FOURTEEN_KEY: number = 2;
+  static readonly NINE_KEY_SHUANGPIN: number = 3;
 }
 
 export class KeyboardScheme {
   static readonly QUANPIN: SchemeDefinition = QUANPIN;
   static readonly QUANPIN_NINE_KEY: SchemeDefinition = QUANPIN_NINE_KEY;
+  static readonly NINE_KEY_SHUANGPIN: SchemeDefinition = NINE_KEY_SHUANGPIN;
   static readonly XIAOHE: SchemeDefinition = XIAOHE;
   static readonly ZIRANMA: SchemeDefinition = ZIRANMA;
   static readonly MICROSOFT: SchemeDefinition = MICROSOFT;
@@ -239,6 +251,7 @@ export class KeyboardScheme {
   static readonly SCHEMES: SchemeDefinition[] = [
     QUANPIN,
     QUANPIN_NINE_KEY,
+    NINE_KEY_SHUANGPIN,
     XIAOHE,
     ZIRANMA,
     MICROSOFT,
@@ -342,7 +355,8 @@ export class KeyboardScheme {
             candidate !== VIETNAMESE &&
             candidate !== TIBETAN &&
             candidate !== STROKE &&
-            candidate !== QUANPIN_FOURTEEN_KEY)) &&
+            candidate !== QUANPIN_FOURTEEN_KEY &&
+            candidate !== NINE_KEY_SHUANGPIN)) &&
         KeyboardScheme.offeredBy(candidate, edition),
     );
   }
@@ -491,6 +505,9 @@ export class KeyboardScheme {
     if (scheme === "quanpin" && touchLayout === "nine_key") {
       return QUANPIN_NINE_KEY;
     }
+    if (scheme === "quanpin" && touchLayout === "nine_key_shuangpin") {
+      return NINE_KEY_SHUANGPIN;
+    }
     if (scheme === "quanpin" && touchLayout === "fourteen_key") {
       return QUANPIN_FOURTEEN_KEY;
     }
@@ -596,9 +613,40 @@ export class KeyboardScheme {
     return nineKey && localMode === "none";
   }
 
+  /** `nine_key` 与九键双拼共用九宫格外框；后者只是引擎的组码方式不同。 */
+  static isNineKeyLayout(layout: string): boolean {
+    return layout === "nine_key" || layout === "nine_key_shuangpin";
+  }
+
   /** 是否画 14 键键面：布局是 14 键（视图已按形态和编辑框排除了 2in1、密码框和网址框），且英文和本地模式都没有接管按键。英文画 26 键 QWERTY，切回中文恢复 14 键，布局偏好不变。 */
   static usesFourteenKeyFace(fourteenKey: boolean, english: boolean, localMode: string): boolean {
     return fourteenKey && !english && localMode === "none";
+  }
+
+  /** 中文全拼的触屏字母页用分词替代 Shift，其他方案、英文和本地模式保留大小写。 */
+  static usesQuanpinSeparator(
+    scheme: SchemeDefinition,
+    touch: boolean,
+    english: boolean,
+    symbols: boolean,
+    localMode: string,
+  ): boolean {
+    return (
+      scheme.preferenceId === "quanpin" && touch && !english && !symbols && localMode === "none"
+    );
+  }
+
+  /**
+   * 触屏 26 键字母层使用 123 | 符 | 空格 | ， | 中/英 | 回车，长按逗号输入句号；14 键和大千注音保留独立逗号句号。只用于设计底行，九键、笔画、手写和假名网格沿用各自底行。
+   *
+   * @param rulesScheme 按键实际交给的方案（`SchemeCompositionPolicy.selectedRulesScheme`），英文和本地模式下不是注音
+   */
+  static designRowUsesCommaSecondaryPeriod(
+    rulesScheme: number,
+    fourteenKeyFace: boolean,
+    symbols: boolean,
+  ): boolean {
+    return !symbols && !fourteenKeyFace && rulesScheme !== SchemeTraits.ZHUYIN;
   }
 
   /**
@@ -612,6 +660,9 @@ export class KeyboardScheme {
     }
     if (layout === "nine_key") {
       return KeyGrid.NINE_KEY;
+    }
+    if (layout === "nine_key_shuangpin") {
+      return KeyGrid.NINE_KEY_SHUANGPIN;
     }
     return layout === "fourteen_key" && !desktop ? KeyGrid.FOURTEEN_KEY : KeyGrid.NONE;
   }

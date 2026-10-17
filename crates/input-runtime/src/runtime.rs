@@ -89,6 +89,9 @@ pub struct Runtime<E: InputEngine = Session> {
     ///
     /// `rerank`, `demote_runner_up_readings` and `normalize_online_slots` reorder the cached list, but the Engine knows nothing of that and selects by its own order. Every call that names a candidate to the Engine goes through [`Self::engine_index`]; without it, an AI candidate seated in slot 1 committed whatever the Engine held at 1.
     pub(crate) engine_order: Vec<usize>,
+    /// 在线候选座位整理的排列与固定英文临时缓冲，跨次刷新保留容量。
+    pub(crate) online_order_scratch: Vec<usize>,
+    pub(crate) online_fixed_english_scratch: Vec<usize>,
     pub(crate) snapshot_valid: bool,
     pub(crate) character_width: CharacterWidth,
     pub(crate) punctuation_marks: PunctuationMarks,
@@ -97,6 +100,8 @@ pub struct Runtime<E: InputEngine = Session> {
     ///
     /// *什么*算这种码由 Engine 判定（[`EngineSnapshot::wubi_unique_four_code`]）；提交它是宿主的事，因为提交要跨过平台自己的组字边界。只有用户要求时才关：关了以后词和其他候选一样留在候选列表里，由空格或数字键选走。
     pub(crate) wubi_auto_commit_unique: bool,
+    pub(crate) wubi_candidate_selection:
+        msime_client_core::preferences::WubiCandidateSelectionPreferences,
     /// Whether the host draws a half-composed phrase itself instead of having it committed.
     ///
     /// Picking a candidate that consumes only part of the input leaves the Engine composing the
@@ -109,6 +114,10 @@ pub struct Runtime<E: InputEngine = Session> {
     /// Off by default because a host that does not draw [`View::phrase_prefix`] would show nothing
     /// at all for that piece. Each host turns it on as it learns to draw it.
     pub(crate) phrase_preedit: bool,
+    /// 普通退格在拼写末尾是否回退已选词段；分段删除不受此开关影响。
+    pub(crate) backspace_reverts_selection: bool,
+    /// 左右方向键在光标已经停在输入串端点、编辑器动不了它时改成移动候选高亮（偏好 `navigation.left_right`）。和 `backspace_reverts_selection` 一样是宿主状态：判断在 runtime 里做，宿主只照常发光标命令。
+    pub(crate) left_right_navigation: bool,
     /// The piece already chosen for the phrase being composed, held back from the document.
     ///
     /// Non-empty while the Engine is still composing, and in one case after its reading is gone: a segment Backspace (Ctrl+Backspace) that empties a reading whose phrase still has a selection to take back leaves the phrase in the composition, as the reference's `keep_creating_word_after_empty_raw` does. A host must therefore count a non-empty [`View::phrase_prefix`] as a composition, alongside the reading and the candidates.
@@ -223,6 +232,12 @@ fn order_rows(snapshot: &EngineSnapshot) -> ParallelOrderRows<'_> {
 }
 
 impl Runtime<Session> {
+    /// 打开或关闭云候选固定席位；宿主偏好变化时立即刷新当前组字。
+    pub fn set_cloud_candidates_enabled(&mut self, enabled: bool) -> Result<(), RuntimeError> {
+        self.engine.set_cloud_candidates_enabled(enabled);
+        self.refresh()
+    }
+
     /// A live host mode changes neither composition nor candidate identity.
     pub fn set_chinese_punctuation_enabled(&mut self, enabled: bool) -> Result<(), RuntimeError> {
         self.engine
@@ -433,62 +448,6 @@ impl Runtime<Session> {
         self.apply_online_candidates_snapshot(query, candidates, source, cloud_candidates, limit)
     }
 
-    /// 宿主为这个会话打开或关掉 AI 候选。打开时可以问 AI 的组字先在 AI 座位上放一行占位（来源 12，`CandidateSource::AiPending`），回答到达时由第一条 AI 候选替换，前后的候选都不挪位（#6888）。组字中途改变时立刻换一代并刷新。
-    pub fn set_ai_seat(&mut self, enabled: bool) -> Result<(), RuntimeError> {
-        if !self.engine.set_ai_seat(enabled) || self.is_idle() {
-            return Ok(());
-        }
-        self.advance()?;
-        self.refresh()
-    }
-
-    /// AI 回答为空、失败，或 `apply_online_candidates` 没有采用它时由宿主调用：这次查询的占位行换成「—」，留到组字变化为止，后面的候选不挪位。只认 AI（来源 1）；过期查询、没开 AI 的会话和已经坐着 AI 候选的座位返回 `Ok(false)`，列表不变。
-    pub fn resolve_online_candidates_owned(
-        &mut self,
-        query: OnlineQuery,
-        source: u8,
-    ) -> Result<bool, RuntimeError> {
-        if source != 1 || !query.ai_eligible {
-            return Ok(false);
-        }
-        if self.generation == u64::MAX {
-            return Err(RuntimeError::IdentityExhausted);
-        }
-        let OnlineQuery {
-            scheme,
-            generation,
-            identity,
-            query_text,
-            cache_key,
-            pinyin_segments,
-            cloud_eligible,
-            ai_eligible,
-            session_id,
-            ..
-        } = query;
-        let query = OnlineQuerySnapshot {
-            available: true,
-            scheme,
-            generation,
-            identity,
-            query_text,
-            cache_key,
-            pinyin_segments,
-            cloud_eligible,
-            ai_eligible,
-            session_id,
-        };
-        let resolved = self
-            .engine
-            .resolve_online_candidates(&query, source)
-            .map_err(|error| RuntimeError::Engine(error.to_string()))?;
-        if resolved {
-            self.advance()?;
-            self.refresh_online_candidates()?;
-        }
-        Ok(resolved)
-    }
-
     /// Remove cached and visible rows for one online provider.
     pub fn clear_online_candidates(&mut self, source: u8) -> Result<(), RuntimeError> {
         if source > 1 {
@@ -601,6 +560,14 @@ impl<E: InputEngine> Runtime<E> {
     pub fn set_dedicated_english(&mut self, enabled: bool) -> Result<(), RuntimeError> {
         self.advance()?;
         self.engine.set_dedicated_english(enabled)?;
+        // 引擎在模式翻转时取消读音，runtime 暂存的词段和撤回记录也属于同一段组字。先清理再刷新，刷新失败也不能留下旧词段；重复设置同一模式则保留。
+        if self.cached.dedicated_english != enabled {
+            self.phrase_selections.clear();
+            if !self.phrase_prefix.is_empty() {
+                self.phrase_prefix.clear();
+                self.bump_composition_epoch();
+            }
+        }
         self.refresh()
     }
 
@@ -609,6 +576,106 @@ impl<E: InputEngine> Runtime<E> {
     /// 这是宿主状态而不是 Engine 状态：它决定本 runtime 要不要执行提交，所以组字中途改也安全，不需要重建 Engine。下一键生效，因此已经打进组字的四码不会因为把开关关掉而自己上屏。
     pub fn set_wubi_auto_commit_unique(&mut self, enabled: bool) {
         self.wubi_auto_commit_unique = enabled;
+    }
+
+    /// 只影响下一次退格，不清空已选词段或历史，也不重建 Engine。
+    pub fn set_backspace_reverts_selection(&mut self, enabled: bool) {
+        self.backspace_reverts_selection = enabled;
+    }
+
+    /// 左右键的候选回退（`navigation.left_right`）：只影响左右键这一次怎么解释，不动组字状态，也不重建 Engine。
+    pub fn set_left_right_navigation(&mut self, enabled: bool) {
+        self.left_right_navigation = enabled;
+    }
+
+    /// 选词字符是宿主编排状态，切换配置无需等待 Engine 重建。
+    pub fn set_wubi_candidate_selection(
+        &mut self,
+        settings: msime_client_core::preferences::WubiCandidateSelectionPreferences,
+    ) {
+        self.wubi_candidate_selection = settings;
+    }
+
+    pub fn wubi_candidate_selection(
+        &self,
+    ) -> &msime_client_core::preferences::WubiCandidateSelectionPreferences {
+        &self.wubi_candidate_selection
+    }
+
+    /// 将已解码的五笔选词字符转成当前页的候选动作，供统计与生命周期共用。
+    pub fn candidate_shortcut(&self, action: Action) -> Action {
+        if !self.focused {
+            return action;
+        }
+        self.wubi_candidate_shortcut(&action)
+            .map(Action::Select)
+            .unwrap_or(action)
+    }
+
+    fn wubi_candidate_shortcut(&self, action: &Action) -> Option<CandidateId> {
+        if !self.snapshot_valid
+            || self.cached.scheme != SchemeType::Wubi as u8
+            || self.cached.dedicated_english
+            || self.cached.local_mode != "none"
+            || self.cached.editing_text.is_empty()
+        {
+            return None;
+        }
+        let value = match action {
+            Action::Character { value, .. }
+            | Action::Punctuation(value)
+            | Action::PunctuationAscii(value) => *value,
+            _ => return None,
+        };
+        let slot = self.wubi_candidate_selection.slot(value)?;
+        let start = (self.highlighted / self.page_size) * self.page_size;
+        let index = start + slot;
+        (slot < self.page_size && index < self.visible_len()).then_some(CandidateId {
+            session: self.session,
+            generation: self.generation,
+            index,
+        })
+    }
+
+    /// 左右键的候选回退（`navigation.left_right`）：不带修饰键的左右键在宿主那里先是编辑输入串的光标命令，
+    /// 光标已经停在要移动的那一端、引擎动不了它的时候，这一次按键换成移动候选高亮，与 ↑/↓ 落在同一段代码上
+    /// （[`Action::PreviousCandidate`] / [`Action::NextCandidate`]）。
+    ///
+    /// 只在当前页有候选时接管，与 `candidate_shortcut` 同理：没有候选可移时左右键照旧交给引擎，
+    /// 于是仍被吞掉，不会作为应用的按键落进文档。
+    ///
+    /// 整句改字和已经打开的候选列表都不在这里接管。改字期间左右键移的是改字的光标，它不在输入串里
+    /// （`caret_position` 停在末尾），交给引擎才对；打开的列表（韩文汉字、注音）本来就有自己的左右键规则，
+    /// 各宿主也先一步把四个方向键都归给高亮。本地模式的光标起点在前缀字母之后，这里按 0 判左端：
+    /// 那一个位置上左右键仍然什么都不做。
+    fn caret_edge_candidate_shortcut(&self, action: Action) -> Action {
+        if !self.left_right_navigation
+            || !self.snapshot_valid
+            || self.visible_len() == 0
+            || self.cached.candidate_list_open
+            || !self.cached.conversion.is_empty()
+        {
+            return action;
+        }
+        let backwards = match action {
+            Action::Command(Command::MoveLeft | Command::ConversionLeft) => true,
+            Action::Command(Command::MoveRight | Command::ConversionRight) => false,
+            _ => return action,
+        };
+        let caret = self.cached.caret_position;
+        let at_edge = if backwards {
+            caret == 0
+        } else {
+            caret >= self.cached.editing_text.len()
+        };
+        if !at_edge {
+            return action;
+        }
+        if backwards {
+            Action::PreviousCandidate
+        } else {
+            Action::NextCandidate
+        }
     }
 
     pub fn wubi_auto_commit_unique(&self) -> bool {
@@ -692,13 +759,18 @@ impl<E: InputEngine> Runtime<E> {
             // presentation reorder actually needs it; engine_index falls back to the seat while
             // the list remains untouched.
             engine_order: Vec::new(),
+            online_order_scratch: Vec::new(),
+            online_fixed_english_scratch: Vec::new(),
             cached,
             snapshot_valid: true,
             character_width: CharacterWidth::Halfwidth,
             punctuation_marks: PunctuationMarks::default(),
             touch_keyboard_layout,
             wubi_auto_commit_unique: true,
+            wubi_candidate_selection: Default::default(),
             phrase_preedit: false,
+            backspace_reverts_selection: true,
+            left_right_navigation: false,
             phrase_prefix: String::new(),
             phrase_selections: Vec::new(),
             facts: DispatchFacts::default(),
@@ -714,12 +786,14 @@ impl<E: InputEngine> Runtime<E> {
         })
     }
 
-    /// Hold a half-composed phrase in the composition instead of committing its parts.
+    /// 将尚未完成的词段暂存在组字区，等整段完成后再上屏。
     ///
-    /// The host promises to draw [`View::phrase_prefix`] ahead of the editing text; see the field
-    /// for why this is the host's call. Turning it off while a phrase is held commits what is held,
-    /// because the alternative is dropping text the user already chose.
+    /// 宿主保证在编辑文字前绘制 [`View::phrase_prefix`]；由宿主决定的原因见该字段。
+    /// 重复设置同一状态保留组词与撤回历史；关闭时返回暂存文字，避免丢掉已选词段。
     pub fn set_phrase_preedit(&mut self, enabled: bool) -> Option<String> {
+        if self.phrase_preedit == enabled {
+            return None;
+        }
         self.phrase_preedit = enabled;
         if enabled || self.phrase_prefix.is_empty() {
             self.phrase_selections.clear();
@@ -818,9 +892,9 @@ impl<E: InputEngine> Runtime<E> {
         self.engine.set_rescoring_context("");
     }
 
-    /// Switch the Engine's digit interpretation only after the host finishes composition.
-    /// Move the caret used by Engine prefix decoding. `None` restores end-of-composition behavior.
+    /// 移动引擎前缀解码的光标；`None` 恢复到组字末尾。候选可能随前缀改变，旧候选 ID 必须失效。
     pub fn set_caret(&mut self, caret: Option<usize>) -> Result<(), RuntimeError> {
+        self.advance()?;
         self.engine.set_caret(caret);
         self.refresh()
             .map_err(|error| RuntimeError::Engine(error.to_string()))
@@ -1461,28 +1535,10 @@ impl<E: InputEngine> Runtime<E> {
         self.engine.set_rescoring_context(&self.ai_context);
     }
 
-    /// Take the last selection of a phrase-in-progress back, when the key asks for it.
-    ///
-    /// Two rules, both the reference's (`ShouldRetreatCreatingWordSelection` and
-    /// `ShouldDropCreatingWordSegment` in its `input_key_policy.h`), and both about the same
-    /// situation: the user has picked a candidate that covered part of the input, is looking at the
-    /// piece it produced, and wants it back.
-    ///
-    /// - Backspace with at most one character of reading left, the caret at its end: the key would
-    ///   otherwise delete that character and end the composition, taking the chosen piece with it.
-    ///   Instead the newest selection is undone - its reading comes back and the held phrase
-    ///   returns to what it was before it - so the user can pick again.
-    /// - Segment Backspace (Ctrl+Backspace) with nothing before the caret: the reading this key
-    ///   deletes by units has already been emptied, so it deletes the selection itself. Its reading
-    ///   is *not* restored: the user asked to remove the segment, not to edit its spelling.
-    ///
-    /// Returns `None` for every other key, which then runs as usual.
-    ///
-    /// The reference also requires a client that negotiated `CompositionRestore` and a host that is
-    /// not UILess, because its TSF side has to rebuild the composition from a reply it may not
-    /// understand. Here that condition is `phrase_preedit`: a host only turns it on once it draws
-    /// the held phrase from the view, and the view is how every host here learns the composition
-    /// changed.
+    /// 回退暂存词段：普通退格在拼写末尾剩零或一个字符时恢复最近一次选词；
+    /// `backspace_reverts_selection` 关闭时直接交给引擎删除拼写，删空后由现有收尾逻辑上屏已选文字。
+    /// 分段退格在光标前没有拼写时丢掉最近词段，不恢复读音，不受此开关影响。
+    /// 只有启用 `phrase_preedit`、宿主能显示暂存词段时才处理；其他动作照常交给引擎。
     fn retreat_phrase_selection(
         &mut self,
         action: &Action,
@@ -1494,7 +1550,10 @@ impl<E: InputEngine> Runtime<E> {
         let caret = self.cached.caret_position;
         let restore = match action {
             Action::Command(Command::Backspace) => {
-                if reading.chars().count() > 1 || caret != reading.len() {
+                if !self.backspace_reverts_selection
+                    || reading.chars().count() > 1
+                    || caret != reading.len()
+                {
                     return Ok(None);
                 }
                 true
@@ -1543,17 +1602,11 @@ impl<E: InputEngine> Runtime<E> {
         Ok(Some(self.transition(empty_result(true))))
     }
 
-    /// Keep a chosen piece of a phrase out of the document until the phrase is done.
-    ///
-    /// Three things can happen to what the Engine hands back:
-    ///
-    /// - it picked a candidate and is still composing the rest, so the piece is held;
-    /// - something ended the composition and committed, so the held pieces lead that commit - the
-    ///   reference does the same on Enter, which commits `word_for_creating_word` together with the
-    ///   remaining raw input;
-    /// - the reading is gone with nothing committed. A cancel means the user threw the whole thing away, so the held pieces go with it. A segment Backspace (`keep_empty`) that emptied the reading while a selection can still be taken back keeps the phrase in the composition, as the reference's `keep_creating_word_after_empty_raw` does: the next Backspace puts the last reading back and the next Ctrl+Backspace deletes the last chosen piece, both in [`Runtime::retreat_phrase_selection`]. Anything else commits what is held rather than dropping letters the user chose. A plain Backspace only empties the reading here with nothing to go back to - a selection that can be taken back takes that key first - and the reference ends the word in that case too.
-    ///
-    /// When the held phrase is all there is to send or throw away, the key acted on the composition, so it counts as handled: an Enter or Space the Engine does not want with an empty reading must not also reach the application.
+    /// 暂存只消耗部分拼写的选词结果，等整段组字完成后一次上屏。
+    /// 仍在组字时把刚选的词放进 `phrase_prefix`；有最终提交时把前缀接在它前面。
+    /// 拼写删空而没有提交时，取消丢掉前缀；分段编辑在仍有可回退历史时保留前缀；
+    /// 其余动作上屏前缀，避免丢掉已选文字。普通退格关闭回退时也走这条删空收尾路径。
+    /// 只剩暂存词段时，提交或丢弃它都算处理了按键，防止回车、空格再穿透到应用。
     fn hold_phrase_progress(
         &mut self,
         picked: bool,
@@ -1693,9 +1746,10 @@ impl<E: InputEngine> Runtime<E> {
     /// Engine already produces the fourth line, so there is nothing to rearrange and nothing to
     /// risk.
     ///
-    /// AI 的座位只坐一行：第一条 AI 候选，回答到达之前是它的占位行（`CandidateSource::AiPending`）。同一批里多出来的 AI 候选排在整个列表最后，回答到达时座位前后已经显示的候选都不挪位（#6888）。
+    /// AI 行不按上表的座位坐（#6888）。其余行先排好：有云候选时按上表分组，没有云候选时保持引擎的次序，和 AI 回答到达之前一模一样。第一条 AI 候选再插进第一页最后一格（下标 `page_size - 1`；每页只有一格时是下标 1，不顶掉首选；第一页排不满时紧跟在其余行之后），同一批多出来的排在整个列表最后。回答到达时第一页前 `page_size - 1` 格一格都不动，原来在最后一格的候选和它后面的行各往后挪一格。`page_size` 在组字中途不会变（`set_page_size` 只在空闲时生效），翻页、展开刷新时这里按同一个值重算，AI 行始终在第一页最后一格，数字键按的就是画出来的那一格。
     fn normalize_online_slots(&mut self) -> bool {
         const CLOUD: u8 = 2;
+        const CLOUD_PENDING: u8 = 15;
         const AI: u8 = 3;
         const ENGLISH: u8 = 4;
         const EMOJI: u8 = 6;
@@ -1723,6 +1777,8 @@ impl<E: InputEngine> Runtime<E> {
         {
             return false;
         }
+        let mut order_scratch = std::mem::take(&mut self.online_order_scratch);
+        let mut fixed_english_scratch = std::mem::take(&mut self.online_fixed_english_scratch);
 
         const LOCAL_GROUP: usize = 0;
         const CLOUD_GROUP: usize = 1;
@@ -1731,6 +1787,15 @@ impl<E: InputEngine> Runtime<E> {
         const ENGLISH_GROUP: usize = 4;
         const EMOJI_GROUP: usize = 5;
         const KAOMOJI_GROUP: usize = 6;
+        let group_of = |source: u8| match source {
+            CLOUD | CLOUD_PENDING => CLOUD_GROUP,
+            AI | AI_PENDING => AI_GROUP,
+            JAPANESE => JAPANESE_GROUP,
+            ENGLISH => ENGLISH_GROUP,
+            EMOJI => EMOJI_GROUP,
+            KAOMOJI => KAOMOJI_GROUP,
+            _ => LOCAL_GROUP,
+        };
         let mut counts = [0; 7];
         let mut fixed_english_count = 0;
         for (source, position) in snapshot
@@ -1738,140 +1803,154 @@ impl<E: InputEngine> Runtime<E> {
             .iter()
             .zip(&snapshot.candidate_positions)
         {
-            match *source {
-                CLOUD => counts[CLOUD_GROUP] += 1,
-                AI | AI_PENDING => counts[AI_GROUP] += 1,
-                JAPANESE => counts[JAPANESE_GROUP] += 1,
-                ENGLISH => {
-                    counts[ENGLISH_GROUP] += 1;
-                    fixed_english_count += usize::from(*position > 0);
-                }
-                EMOJI => counts[EMOJI_GROUP] += 1,
-                KAOMOJI => counts[KAOMOJI_GROUP] += 1,
-                _ => counts[LOCAL_GROUP] += 1,
-            }
+            counts[group_of(*source)] += 1;
+            fixed_english_count += usize::from(*source == ENGLISH && *position > 0);
         }
-        // 引擎把完全匹配或固定在首位的英文保留在首位；领先的日文混输行也不被在线行挤走。
-        let promoted_english = counts[LOCAL_GROUP] > 0 && snapshot.candidate_sources[0] == ENGLISH;
-        let promoted_japanese = counts[LOCAL_GROUP] > 0
-            && snapshot.candidate_sources[usize::from(promoted_english)] == JAPANESE;
         let has_cloud = counts[CLOUD_GROUP] > 0;
-        let mut reading = snapshot.reading.chars();
-        let single_kana = scheme_type(snapshot.scheme) == Some(SchemeType::JapaneseRomaji)
-            && matches!((reading.next(), reading.next()), (Some(kana), None) if ('\u{3041}'..='\u{3096}').contains(&kana));
-        let local_prefix = if single_kana { 2 } else { 1 };
+        let ai_count = counts[AI_GROUP];
+        let non_ai = count - ai_count;
+        // 第一条 AI 候选的座位：第一页最后一格，不占首位；第一页排不满时紧跟在其余行之后。
+        let ai_seat = self.page_size.saturating_sub(1).max(1).min(non_ai);
 
-        // 每组有优先段和剩余段，组内按引擎原顺序排列；AI 的剩余段放在整个列表末尾。
+        // 有云候选时其余行每组有优先段和剩余段，组内按引擎原顺序排列。
         let mut head_starts = [0; 7];
         let mut head_counts = [0; 7];
-        let mut next_seat = 0;
-        let mut head = |group: usize, limit: usize| {
-            head_starts[group] = next_seat;
-            head_counts[group] = counts[group].min(limit);
-            next_seat += head_counts[group];
-        };
-        if promoted_english {
-            head(ENGLISH_GROUP, 1);
-        }
-        if promoted_japanese {
-            head(JAPANESE_GROUP, 1);
-        }
-        head(LOCAL_GROUP, local_prefix);
-        head(CLOUD_GROUP, counts[CLOUD_GROUP]);
-        if has_cloud {
-            head(AI_GROUP, 1);
-        }
-        if !promoted_japanese {
-            head(JAPANESE_GROUP, 1);
-        }
-        if !promoted_english {
-            head(ENGLISH_GROUP, 1);
-        }
-        if !has_cloud {
-            head(AI_GROUP, 1);
-        }
-        head(EMOJI_GROUP, 1);
-        head(KAOMOJI_GROUP, 1);
         let mut tail_starts = [0; 7];
-        for group in [
-            LOCAL_GROUP,
-            ENGLISH_GROUP,
-            JAPANESE_GROUP,
-            EMOJI_GROUP,
-            KAOMOJI_GROUP,
-            AI_GROUP,
-        ] {
-            tail_starts[group] = next_seat;
-            next_seat += counts[group] - head_counts[group];
+        if has_cloud {
+            // 引擎把完全匹配或固定在首位的英文保留在首位；领先的日文混输行也不被在线行挤走。
+            let promoted_english =
+                counts[LOCAL_GROUP] > 0 && snapshot.candidate_sources[0] == ENGLISH;
+            let promoted_japanese = counts[LOCAL_GROUP] > 0
+                && snapshot.candidate_sources[usize::from(promoted_english)] == JAPANESE;
+            let mut reading = snapshot.reading.chars();
+            let single_kana = scheme_type(snapshot.scheme) == Some(SchemeType::JapaneseRomaji)
+                && matches!((reading.next(), reading.next()), (Some(kana), None) if ('\u{3041}'..='\u{3096}').contains(&kana));
+            let local_prefix = if single_kana { 2 } else { 1 };
+
+            let mut next_seat = 0;
+            let mut head = |group: usize, limit: usize| {
+                head_starts[group] = next_seat;
+                head_counts[group] = counts[group].min(limit);
+                next_seat += head_counts[group];
+            };
+            if promoted_english {
+                head(ENGLISH_GROUP, 1);
+            }
+            if promoted_japanese {
+                head(JAPANESE_GROUP, 1);
+            }
+            head(LOCAL_GROUP, local_prefix);
+            head(CLOUD_GROUP, counts[CLOUD_GROUP]);
+            if !promoted_japanese {
+                head(JAPANESE_GROUP, 1);
+            }
+            if !promoted_english {
+                head(ENGLISH_GROUP, 1);
+            }
+            head(EMOJI_GROUP, 1);
+            head(KAOMOJI_GROUP, 1);
+            for group in [
+                LOCAL_GROUP,
+                ENGLISH_GROUP,
+                JAPANESE_GROUP,
+                EMOJI_GROUP,
+                KAOMOJI_GROUP,
+            ] {
+                tail_starts[group] = next_seat;
+                next_seat += counts[group] - head_counts[group];
+            }
+            debug_assert_eq!(next_seat, non_ai);
         }
-        debug_assert_eq!(next_seat, count);
 
         // 第二次扫描直接计算每行的新座位；全部未变位时不建立索引表。
         let mut order = None;
         let mut seen = [0; 7];
-        let mut take_ordinal = |group: usize| {
+        let mut arranged_without_ai = 0;
+        for (index, source) in snapshot.candidate_sources.iter().enumerate() {
+            let group = group_of(*source);
             let ordinal = seen[group];
             seen[group] += 1;
-            (group, ordinal)
-        };
-        for (index, source) in snapshot.candidate_sources.iter().enumerate() {
-            let (group, ordinal) = match *source {
-                CLOUD => take_ordinal(CLOUD_GROUP),
-                AI | AI_PENDING => take_ordinal(AI_GROUP),
-                JAPANESE => take_ordinal(JAPANESE_GROUP),
-                ENGLISH => take_ordinal(ENGLISH_GROUP),
-                EMOJI => take_ordinal(EMOJI_GROUP),
-                KAOMOJI => take_ordinal(KAOMOJI_GROUP),
-                _ => take_ordinal(LOCAL_GROUP),
-            };
-            let seat = if ordinal < head_counts[group] {
-                head_starts[group] + ordinal
+            let seat = if group == AI_GROUP {
+                if ordinal == 0 {
+                    ai_seat
+                } else {
+                    non_ai + ordinal
+                }
             } else {
-                tail_starts[group] + ordinal - head_counts[group]
+                // 这一行在不含 AI 行的排列里的座位；第一条 AI 候选插进去后，它和它后面的行各往后挪一格。
+                let arranged = if !has_cloud {
+                    arranged_without_ai
+                } else if ordinal < head_counts[group] {
+                    head_starts[group] + ordinal
+                } else {
+                    tail_starts[group] + ordinal - head_counts[group]
+                };
+                arranged_without_ai += 1;
+                arranged + usize::from(ai_count > 0 && arranged >= ai_seat)
             };
             if seat != index && order.is_none() {
-                order = Some((0..count).collect::<Vec<usize>>());
+                let mut candidate_order = std::mem::take(&mut order_scratch);
+                candidate_order.clear();
+                candidate_order.extend(0..count);
+                order = Some(candidate_order);
             }
             if let Some(order) = &mut order {
                 order[seat] = index;
             }
         }
-        // 固定英文行在在线座位排好后归位，云或 AI 不能把它挤离指定座位（参考 server/src/ipc/candidate_selection_policy.h 的 NormalizeMixedCandidateOrder）。位置从 1 开始，超出末尾时夹到末尾；来源统计给出实际行数，空缓冲不申请存储。
-        if fixed_english_count > 0 {
-            let order = order.get_or_insert_with(|| (0..count).collect::<Vec<usize>>());
-            // 只压缩非 AI 尾部；空出的槽供固定英文插回，AI 尾部始终留在原处。
-            let prefix_len = count - counts[AI_GROUP].saturating_sub(1);
-            let mut fixed_english = Vec::with_capacity(fixed_english_count);
+        // 有云候选时固定英文行在在线座位排好后归位，云候选不能把它挤离指定座位（参考 server/src/ipc/candidate_selection_policy.h 的 NormalizeMixedCandidateOrder）。位置从 1 开始，超出末尾时夹到末尾；来源统计给出实际行数，空缓冲不申请存储。没有云候选时其余行保持引擎的次序，引擎已经按固定位置排好了它们。
+        if has_cloud && fixed_english_count > 0 {
+            let order = order.get_or_insert_with(|| {
+                let mut candidate_order = std::mem::take(&mut order_scratch);
+                candidate_order.clear();
+                candidate_order.extend(0..count);
+                candidate_order
+            });
+            // 固定英文只在其余行里归位：先把第一条 AI 候选移回其余行之后，归位完再放回它的座位；AI 的尾部始终留在原处。
+            if ai_count > 0 {
+                order[ai_seat..=non_ai].rotate_left(1);
+            }
+            fixed_english_scratch.clear();
+            fixed_english_scratch.reserve_exact(fixed_english_count);
             let mut write = 0;
-            for read in 0..prefix_len {
+            for read in 0..non_ai {
                 let index = order[read];
                 if snapshot.candidate_sources[index] == ENGLISH
                     && snapshot.candidate_positions[index] > 0
                 {
-                    fixed_english.push(index);
+                    fixed_english_scratch.push(index);
                 } else {
                     order[write] = index;
                     write += 1;
                 }
             }
-            fixed_english.sort_by_key(|index| snapshot.candidate_positions[*index]);
-            for index in fixed_english {
+            fixed_english_scratch.sort_by_key(|index| snapshot.candidate_positions[*index]);
+            for &index in &fixed_english_scratch {
                 let seat = usize::from(snapshot.candidate_positions[index] - 1).min(write);
                 order.copy_within(seat..write, seat + 1);
                 order[seat] = index;
                 write += 1;
             }
-            debug_assert_eq!(write, prefix_len);
+            debug_assert_eq!(write, non_ai);
+            if ai_count > 0 {
+                order[ai_seat..=non_ai].rotate_right(1);
+            }
         }
         let Some(order) = order else {
+            self.online_order_scratch = order_scratch;
+            self.online_fixed_english_scratch = fixed_english_scratch;
             return false;
         };
         // 排列必须包含全部候选，恒等排列不应用到候选数组。
         debug_assert_eq!(order.len(), count);
         if order.len() != count || order.iter().enumerate().all(|(seat, index)| seat == *index) {
+            self.online_order_scratch = order;
+            self.online_fixed_english_scratch = fixed_english_scratch;
             return false;
         }
         self.apply_candidate_order(&order);
+        self.online_order_scratch = order;
+        self.online_fixed_english_scratch = fixed_english_scratch;
         true
     }
 
@@ -2080,6 +2159,14 @@ impl<E: InputEngine> Runtime<E> {
         self.advance()?;
         // Invalidate the client before cancellation, including on engine failure.
         self.focused = false;
+        // 获得焦点只重置组字，不送出旧词段；先清掉暂存和撤回记录，取消或刷新失败也不能在下一次聚焦时补交。
+        if focused {
+            self.phrase_selections.clear();
+            if !self.phrase_prefix.is_empty() {
+                self.phrase_prefix.clear();
+                self.bump_composition_epoch();
+            }
+        }
         // A Korean syllable is text the user already wrote, not a reading still to be converted, so leaving the client commits it, as it does for every scheme that commits on blur; every other composition is cancelled. Attaching a client (`focused`) stays a pure reset: a syllable typed in the previous client must never be written into the new one.
         let commits_on_blur = !focused
             && scheme_type(self.cached.scheme).is_some_and(SchemeType::commits_on_blur)
@@ -2104,8 +2191,7 @@ impl<E: InputEngine> Runtime<E> {
         if let Some(error) = refresh_error {
             result.diagnostic = format!("Candidate refresh failed: {error}");
         }
-        // Leaving the client cancels the composition, but a phrase piece being held back is text
-        // the user chose and, before it was held back, would already be in the document. Send it.
+        // 失焦时送出用户已经选好的暂存段；获得焦点时旧词段已丢弃，不会产生提交。
         self.hold_phrase_progress(false, false, false, "", &mut result);
         self.focused = focused;
         // A different client is a different sentence, so context never leaks
@@ -2274,6 +2360,10 @@ impl<E: InputEngine> Runtime<E> {
         if !self.focused && !matches!(&action, Action::ResetCache) {
             return Ok(self.transition(empty_result(false)));
         }
+        // 只在当前页有目标候选时接管；否则继续原标点路径，不能像越界数字键那样吞掉。
+        let action = self.candidate_shortcut(action);
+        // 左右键先编辑输入串，光标已经停在这一端时这一次按键才是移动候选（偏好 `navigation.left_right`）。
+        let action = self.caret_edge_candidate_shortcut(action);
         if let Action::SelectAnyCandidate(id) = &action {
             if id.session != self.session
                 || id.generation != self.generation
@@ -2504,8 +2594,8 @@ impl<E: InputEngine> Runtime<E> {
             Action::Command(Command::ConversionLeft) if self.cached.conversion.is_empty() => self
                 .engine
                 .conversion_left_from(self.engine_index(self.highlighted)),
-            // 14 键的组码不是可上屏的字母，引擎把原样上屏当成结束组字、从它自己的首位取词；用户看到的首位可能是重排上来的另一行，所以与 `Finish` 一样从宿主高亮的那一行结束组字。
-            Action::Command(Command::CommitRaw)
+            // 14 键的组码不是可上屏的字母，两种原样提交都与 `Finish` 一样从宿主高亮行结束组字；它们在这里都不涉及英文原文学词。
+            Action::Command(Command::CommitRaw | Command::CommitRawWithoutLearning)
                 if self.cached.grid_composing
                     && self
                         .cached
