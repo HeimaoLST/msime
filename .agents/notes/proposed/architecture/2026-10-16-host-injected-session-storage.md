@@ -52,6 +52,12 @@ Status: proposed
 
 云词库分发器与 Windows 完整备份（`msime_client_cloud_dictionary`，完整备份依赖 engine，所以放在 host-api 而不是 issue 写的 client-services）、iOS 设置映射、`msime_client_account` 的新操作（translate、phrases、sessions、user data、feedback、诊断上传、chat）、社区键盘皮肤、AI 皮肤生成与任务轮询、多分类同步编排。它们都经同一套 `session_store` 字段选会话。
 
+### 当前落地切片（Linux）
+
+Linux 的在线 provider 已把匿名账号注册、令牌读取与翻译响应解析切到 `host-api`。Python 进程经 `ctypes` 调用 `msime_client_ensure_anonymous_account` 和 `msime_client_account_access_token`，因此身份文件、刷新锁、登录账号优先和令牌轮换只由 Rust 实现；翻译请求仍由 provider 的 HTTP worker 发出，但收到的响应经 `msime_client_account_gloss` 按 client-services 的逐项规则解析。provider 不再实现或调用 `/v1/auth/challenges`、`/v1/auth/login`、`/v1/auth/refresh`，也不再直接读写匿名账号文件。库路径优先取 `MSIME_HOST_LIBRARY`，安装包按 `<prefix>/lib/<client-directory>/libmsime_host_api*.so` 查找，便于各 Linux edition 共用同一套脚本。
+
+这一步保留了 provider 的 HTTP worker 和候选、AI、第三方翻译路径；它们没有账号会话语义，暂不随账号迁移。测试用假的 Rust bridge 检查 provider 只走 Rust 账号契约，Rust 本身的账号和 `account_gloss` 测试继续覆盖实际校验与存储规则。
+
 ### 新接口的错误形状与校验
 
 - 新增的账号操作（`chat`、`translate`、`phrases_*`、`sessions_list`、`session_revoke`、`data_*`、`feedback`、`diagnostics_*`）返回 client-services 的 `AccountFailure`：在 `AccountError` 之外带着 HTTP 状态码、服务端错误码和 `Retry-After` 的整数秒。`AccountError` 一个变体都不加，已有操作的错误码不变：它在 Tauri 的社区命令等处被穷举匹配，把 403 `recent_login_required` 从 `Forbidden` 里分出来会改掉现有 `delete` 返回的 `account_unauthorized`。新码 `account_recent_login_required`、`account_too_large`、`account_not_found`、`account_identity_changed` 和 C 响应里的 `retry_after_seconds` 只出现在新操作上。
