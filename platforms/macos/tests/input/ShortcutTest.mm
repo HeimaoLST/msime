@@ -59,7 +59,7 @@ static void CheckMenu(NSMenu *menu, id controller) {
         @"selectChineseMode:", @"selectEnglishMode:", @"toggleDedicatedEnglishMode:", @"",
         @"toggleTraditionalOutput:", @"toggleFullWidthInput:", @"toggleChinesePunctuation:", @"toggleCandidateTranslations:", @"",
         @"*", @"*", @"",
-        @"toggleFloatingToolbar:", @"showEmoji:", @"showCloudClipboard:", @"showScreenKeyboard:", @"showHandwriting:",
+        @"toggleFloatingToolbar:", @"showEmoji:", @"showCloudClipboard:", @"showCloudDictionary:", @"showScreenKeyboard:", @"showHandwriting:",
         @"showVoicePanel", @"", @"showAppearance:", @"showAbout:"
     ];
     assert(menu.numberOfItems == (NSInteger)actions.count && !menu.autoenablesItems);
@@ -2976,7 +2976,8 @@ static void TestPinyinArrowCandidateNavigation() {
         assert([controller handleEvent:ModeKey(key, 0, NO) client:client]);
         assert(session.lastCommand == expected && !client.committed);
     };
-    for (int scheme : {0, 1}) {
+    // 双拼的左右键按音节移动，单独由 TestSegmentEditingChords 覆盖；这里保留全拼的候选导航契约。
+    for (int scheme : {0}) {
         for (BOOL vertical : {NO, YES}) {
             prefs.vertical = vertical;
             for (BOOL expand : {NO, YES}) {
@@ -3319,9 +3320,12 @@ static void TestSegmentEditingChords(MSIMEAppearancePreferences *appearance) {
     ModeController *controller = [ModeController alloc];
     ShortcutSession *session = [ShortcutSession new];
     ShortcutClient *client = [ShortcutClient new];
+    TestCandidatePanel *panel = [TestCandidatePanel new];
+    panel.visible = YES;
     [controller setValue:appearance forKey:@"appearance"];
     [controller setValue:session forKey:@"session"];
     [controller setValue:client forKey:@"activeClient"];
+    [controller setValue:panel forKey:@"panel"];
     appearance.englishMode = NO;
     NSDictionary *composing = @{ @"focused": @YES, @"editing_text": @"nihao", @"caret_position": @5,
                                  @"candidates": @[@{@"text": @"你好"}] };
@@ -3335,6 +3339,16 @@ static void TestSegmentEditingChords(MSIMEAppearancePreferences *appearance) {
         assert([controller handleEvent:ModeKey(code, NSEventModifierFlagControl, NO) client:client]);
         assert(session.lastCommand == [entry[1] unsignedIntValue]);
         [controller setValue:composing forKey:@"view"];
+    }
+    // 双拼的普通左右键也按音节移动，避免候选栏打开后在音节内部误触发候选导航。
+    NSMutableDictionary *shuangpin = [composing mutableCopy];
+    shuangpin[@"scheme"] = @1;
+    for (NSArray *entry in @[@[@123, @(MSIME_MOVE_LEFT_SEGMENT)], @[@124, @(MSIME_MOVE_RIGHT_SEGMENT)]]) {
+        [controller setValue:shuangpin forKey:@"view"];
+        panel.visible = YES;
+        session.lastCommand = UINT32_MAX;
+        assert([controller handleEvent:ModeKey([entry[0] unsignedShortValue], 0, NO) client:client]);
+        assert(session.lastCommand == [entry[1] unsignedIntValue]);
     }
     // 没有整句改字的方案（五笔）里 Ctrl+左右照旧按分段移动。
     NSMutableDictionary *wubi = [composing mutableCopy];
@@ -6709,17 +6723,17 @@ static void TestInputMode(NSUserDefaults *defaults, MSIMEAppearancePreferences *
     CheckMenu(menu, controller);
     assert([menu itemAtIndex:0].state == NSControlStateValueOn);
     assert([menu itemAtIndex:1].state == NSControlStateValueOff);
-    assert(menu.numberOfItems == 21);
+    assert(menu.numberOfItems == 22);
     assert([[menu itemAtIndex:12].title isEqual:@"悬浮工具栏"]);
-    NSArray<NSString *> *toolTitles = @[@"水杉表情面板…", @"云剪贴板…", @"水杉屏幕键盘…", @"手写输入…", @"开始/结束语音输入"];
-    NSArray<NSString *> *toolActions = @[@"showEmoji:", @"showCloudClipboard:", @"showScreenKeyboard:", @"showHandwriting:", @"showVoicePanel"];
+    NSArray<NSString *> *toolTitles = @[@"水杉表情面板…", @"云剪贴板…", @"云词库…", @"水杉屏幕键盘…", @"手写输入…", @"开始/结束语音输入"];
+    NSArray<NSString *> *toolActions = @[@"showEmoji:", @"showCloudClipboard:", @"showCloudDictionary:", @"showScreenKeyboard:", @"showHandwriting:", @"showVoicePanel"];
     for (NSUInteger index = 0; index < toolTitles.count; ++index) {
         NSMenuItem *tool = [menu itemAtIndex:13 + index];
         assert([tool.title isEqual:toolTitles[index]] && tool.action == NSSelectorFromString(toolActions[index]));
     }
-    assert([menu itemAtIndex:18].separatorItem);
-    assert([[menu itemAtIndex:19].title isEqual:@"水杉输入法设置…"] && [menu itemAtIndex:19].action == @selector(showAppearance:));
-    assert([[menu itemAtIndex:20].title isEqual:@"关于水杉输入法…"] && [menu itemAtIndex:20].action == @selector(showAbout:));
+    assert([menu itemAtIndex:19].separatorItem);
+    assert([[menu itemAtIndex:20].title isEqual:@"水杉输入法设置…"] && [menu itemAtIndex:20].action == @selector(showAppearance:));
+    assert([[menu itemAtIndex:21].title isEqual:@"关于水杉输入法…"] && [menu itemAtIndex:21].action == @selector(showAbout:));
     // Simplified output is the off state of the one 繁体输出 toggle.
     const BOOL traditionalOutput = appearance.traditionalOutput;
     appearance.traditionalOutput = NO;

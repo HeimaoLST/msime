@@ -420,7 +420,11 @@ fn assert_dominated_rows_are_rejected_before_field_copies() {
     assert_session(&after, &before);
     eprintln!("完整热刷新申请：{old_count} → {new_count}");
     // 新路径同时复用首候选读音行、主读音列表、拼写匹配索引和左列选项缓冲。
-    assert_eq!(new_count + 1043, old_count, "重复前缀行不能先复制再丢弃");
+    assert_eq!(
+        new_count + 1046,
+        old_count,
+        "重复前缀行和读音字符串不能先复制再丢弃"
+    );
 }
 
 #[test]

@@ -147,7 +147,10 @@ test("lists with the exact offset, search and scope", async () => {
   render(<CommunityCandidateSkinsPage client={communityClient} />);
   await waitFor(() => expect(communityClient.list).toHaveBeenCalledWith(0, "", false, null));
   expect(screen.getByRole("heading", { name: "社区皮肤" })).not.toBeNull();
-  expect(screen.getByText("为输入候选窗口换一身新装，安装后在「我的皮肤」中启用")).not.toBeNull();
+  expect(screen.getByText("为输入候选窗口换一身新装，安装后在「本地皮肤」中启用")).not.toBeNull();
+  expect(
+    screen.getByText(/MCP 可以让 Claude、Codex 等 AI 助手在本机帮你制作候选窗口皮肤/),
+  ).not.toBeNull();
 
   fireEvent.change(screen.getByRole("textbox", { name: "搜索候选窗口皮肤" }), {
     target: { value: " 水墨 " },
@@ -982,9 +985,9 @@ test("明确点击才同步整库，进行中不重复提交并显示结果", as
   const sync = vi.fn().mockReturnValue(running.promise);
   communityPage(client({ sync }));
   await screen.findByRole("button", { name: "同步我的皮肤库" });
-  expect(
-    screen.getByText("手动同步会下载云端个人皮肤、上传本机皮肤，并同步已记录的删除。"),
-  ).not.toBeNull();
+  expect(screen.getByTitle("手动同步会下载云端个人皮肤、上传本机皮肤，并同步已记录的删除。")).toBe(
+    screen.getByRole("button", { name: "同步我的皮肤库" }),
+  );
   fireEvent.click(screen.getByRole("button", { name: "同步我的皮肤库" }));
   const busy = screen.getByRole("button", { name: "正在同步皮肤库…" });
   expect((busy as HTMLButtonElement).disabled).toBe(true);

@@ -1967,11 +1967,13 @@ fn observe_only_dispatches_neither_run_nor_replay_the_transform() {
     assert_eq!(picked["value"]["commit"], plain[0].as_str());
     assert!(take_log().is_empty());
 
-    // 没设这个位的派发照常对调。
-    let swapped = view_texts(&compose_nihao(fixture.handle));
-    assert_eq!(swapped[..2], [plain[1].clone(), plain[0].clone()]);
-    assert!(!take_log().is_empty());
-    // 设着这个位时旁路调用也不重放：云候选到达后首行回到引擎的首行。
+    // 固定的云占位席位不参与插件重排；旁路调用也不重放，云候选到达后首行仍是引擎首行。
+    for key in b"nihao" {
+        msime_client_set_lifecycle(fixture.handle, COMMIT_OBSERVE_ONLY);
+        letter(fixture.handle, *key);
+        msime_client_set_lifecycle(fixture.handle, 0);
+    }
+    take_log();
     msime_client_set_lifecycle(fixture.handle, COMMIT_OBSERVE_ONLY);
     let query = read(msime_client_online_query(fixture.handle))["value"].to_string();
     let candidates = serde_json::to_vec(&json!(["云候选"])).unwrap();

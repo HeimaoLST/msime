@@ -74,6 +74,10 @@ License: CC-BY-4.0 and LGPL-2.1+ and LGPL-3
 Comment:
  The license text of each dictionary travels beside it.
 
+Files: vendor/opencc/*
+Copyright: Carbo Kuo and the OpenCC contributors
+License: Apache-2.0
+
 Files: resources/licenses/OpenCC-Apache-2.0.txt
 Copyright: Carbo Kuo and the OpenCC contributors
 License: Apache-2.0

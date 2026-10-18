@@ -78,6 +78,8 @@ description: Use when a change is non-trivial by DSH standards (behavior, archit
 
 ## 2. 文件格式（检查脚本会核对）
 
+正文一律用简体中文撰写（代码、命令、专有名词除外），与触发任务的输入语言无关。
+
 前三行固定：
 
 ```markdown
@@ -92,7 +94,7 @@ Status: <状态>
 - `implemented`：`## Problem` → `## Decision`（现在时） → …自由节… → `## Alternatives considered` → `## Consequences`
 - `rejected`：冻结的 proposal 形态，结论在 `Status:` 行
 
-> 备选方案必填：只记录真实考虑过的对手方案，先写它最强的理由再否定。没有过的选项不要编。「不做 / 复用现状」仅当当时真的权衡过才写。脚本只检查有没有 `## Alternatives considered`。
+> 备选方案必填：只记录真实考虑过的对手方案，先写它最强的理由再否定。没有过的选项不要编。「不做 / 复用现状」仅当当时真的权衡过才写。脚本只检查有没有 `## Alternatives considered`。确实没有真实备选时，保留节标题、正文写「无」即可过检，不要为凑数编造。
 > `implemented` 的 `## Decision` 用现在时；门禁只拒提案标题（`## Proposal` / `## Plan` / `## Migration plan` / `## Acceptance criteria` 及其中文别名）。展开见 `references/note-format.md`。
 
 模板见 `templates/`。
@@ -156,13 +158,28 @@ npm run verify-agent-note-tree     # 目录合法性、分类、文件名、笔�
 npm run verify-agent-note-format   # 头块、状态、必备节、备选方案、implemented 禁用提案标题
 npm run verify-archived            # 归档封印：头部布局、manifest 哈希、只增不改（无 git 自动降级）
 npm run verify-notes               # 以上三线串跑（CI 用这个）
-npm run archive-agent-note <path> [--superseded-by <新笔记>]  # 一键归档；可选在新笔记插入互链 + 入站死链报告
+npm run archive-agent-note -- <path> [--superseded-by <新笔记>]  # 一键归档；可选在新笔记插入互链 + 入站死链报告
 npm run check-anchors              # 软报告：若代码里有 // Note: 锚点，做双向体检；不当 CI 门
 npm run init-board                 # 生成 ~69KB 轻量看板 board.html（日常开发推荐）
 npm run bundle-board               # 打包内嵌全量数据的自包含 demo.html
 ```
 
-每个脚本都是独立 tsx（`scripts/*.ts`），也可 `npx tsx scripts/xxx.ts` 直接跑在任何目录；参数与免疫规则见 `references/verification.md`。看板要自定义输出路径时用 `npx tsx scripts/build-board.ts --init <目标.html> "名字"` / `--bundle <notes目录> <输出.html> "名字"`。团队可直接抄本仓库的 `.github/workflows/verify-notes.yml`，把 `verify-notes` 接进 CI；并在 `CONTRIBUTING.md` / PR 模板加一句「重要改动必带一篇笔记」。
+脚本位于本 Skill 的 `scripts/`，从**宿主项目根目录**调用，默认检查当前目录下的 `.agents/notes/`。先根据已加载的 `SKILL.md` 路径确定 Skill 位置，不要假定宿主根目录存在 `scripts/`，也不要切换到 Skill 目录执行。安装不会自动配置宿主的 npm scripts。
+
+写完或改完任何笔记后必须运行验证：有 npm script 用 `npm run verify-notes`，没有就用下方 `npx tsx` 命令——不得以「未配置校验入口」为由跳过。
+
+项目级安装到 `.agents/skills/` 时，可直接执行：
+
+```sh
+npx tsx .agents/skills/write-notes-like-deepseek/scripts/verify-agent-note-tree.ts
+npx tsx .agents/skills/write-notes-like-deepseek/scripts/verify-agent-note-format.ts
+npx tsx .agents/skills/write-notes-like-deepseek/scripts/verify-archived-agent-notes.ts
+npx tsx .agents/skills/write-notes-like-deepseek/scripts/build-board.ts --init board.html "项目决策看板"
+```
+
+安装到 `.claude/skills/` 或全局目录时，用实际 Skill 路径替换上述前缀。看板打包参数为 `--bundle <notes目录> <输出.html> "名字"`；参数与免疫规则见 `references/verification.md`。
+
+团队可将本 Skill 的 `templates/verify-notes.yml` 复制到宿主仓库 `.github/workflows/verify-notes.yml`，调整为实际安装路径，并将项目级 Skill 文件一起提交；模板在 Skill 目录内不会执行。可在 `CONTRIBUTING.md` / PR 模板加一句「重要改动必带一篇笔记」。
 
 ## References
 

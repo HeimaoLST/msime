@@ -49,7 +49,7 @@ export function CommunityCandidateSkinsPage({
   localSkins?: () => Promise<SkinCatalog>;
   openSkinDirectory?: () => Promise<void>;
   readSkinImage?: SkinImageReader;
-  /** Returns to 我的皮肤 on 主题, where an installed package is enabled; the community page sits outside the settings form and never writes preferences itself. */
+  /** 回到主题页的本地皮肤标签启用已安装的皮肤，社区页面位于设置表单之外，不直接写偏好。 */
   onOpenSkinPage?: () => void;
   onLogin?: () => void;
 }) {
@@ -128,32 +128,43 @@ export function CommunityCandidateSkinsPage({
         onSearchChange={setSearch}
         onSearchSubmit={() => void requestList(search, false)}
         title="社区皮肤"
-        note="为输入候选窗口换一身新装，安装后在「我的皮肤」中启用"
-      >
+        note="为输入候选窗口换一身新装，安装后在「本地皮肤」中启用"
+      />
+      <CommunityNotice>
+        MCP 可以让 Claude、Codex 等 AI 助手在本机帮你制作候选窗口皮肤。先到「工具 → AI 助手」连接
+        MCP，打开「允许修改设置」，再告诉助手想要的颜色、风格和明暗模式；例如“帮我做一款深色的青绿色皮肤”。助手会生成并安装皮肤，登录后还会保存到你的皮肤库。回到这里点「发布皮肤」，就能把它分享给社区。
+      </CommunityNotice>
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <CommunityScopeButtons
+          className="flex gap-0.5 rounded-lg bg-subtle p-0.5 [&>button]:m-0 [&>button]:rounded-md [&>button]:border-0 [&>button]:bg-transparent [&>button]:px-3 [&>button]:py-1.5 [&>button]:font-medium [&>button]:whitespace-nowrap [&>button]:text-secondary [&>button[aria-pressed=true]]:bg-raised [&>button[aria-pressed=true]]:text-body [&>button[aria-pressed=true]]:shadow-card"
           ariaLabel="候选窗口皮肤范围"
           mineOnly={mineOnly}
           allLabel="全部"
           mineLabel="我的作品"
           onMineOnlyChange={changeMineOnly}
         />
-        {localSkins && (
-          <ActionButton
-            action={() => setPublishOpen(true)}
-            className="primary"
-            label="发布我的皮肤"
-          />
-        )}
-        <ActionButton
-          action={sync.run}
-          label={sync.busy ? "正在同步皮肤库…" : "同步我的皮肤库"}
-          disabled={sync.busy}
-          ariaBusy={sync.busy}
-        />
-      </CommunityGalleryHeader>
-      <p className="text-xs [color:var(--p-sub)]">
-        手动同步会下载云端个人皮肤、上传本机皮肤，并同步已记录的删除。
-      </p>
+        <div className="flex items-center gap-2 [&>button]:m-0 [&>button]:whitespace-nowrap">
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => void sync.run()}
+            disabled={sync.busy}
+            aria-busy={sync.busy}
+            aria-label={sync.busy ? "正在同步皮肤库…" : "同步我的皮肤库"}
+            title="手动同步会下载云端个人皮肤、上传本机皮肤，并同步已记录的删除。"
+          >
+            {sync.busy ? "正在同步…" : "同步皮肤库"}
+          </button>
+          {localSkins && (
+            <ActionButton
+              action={() => setPublishOpen(true)}
+              className="primary"
+              label="发布皮肤"
+              ariaLabel="发布我的皮肤"
+            />
+          )}
+        </div>
+      </div>
       <CommunityGalleryFeedback
         error={sync.error ? candidateSkinMessage(sync.error) : undefined}
         signInRequired={communityNeedsSignIn(sync.error)}

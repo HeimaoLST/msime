@@ -16,6 +16,8 @@ msime 默认的本地模型是 X-ASR zh-en 的 480 ms 流式导出。同一模�
 
 ## Decision
 
+iOS 未配置语音服务时默认选择本地识别，见 [iOS 本地识别默认值](2026-10-18-ios-local-voice-default.md)；这里的默认模型仍指模型目录中的选择。
+
 ### 模型与解码（`resources/local-asr-models.json`、`shared/voice/LocalAsr.cpp`）
 
 - 目录新增 `x-asr-zh-en-offline`（`offline_transducer`），作为可选模型，默认仍是流式。离线 transducer 与 SenseVoice 走同一条 Silero VAD 分段路径，`modified_beam_search`、`max_active_paths = 16`、`hotwords_score = 2.0`，热词随每段新建的流传入（`SherpaOnnxCreateOfflineStreamWithHotwords`）。
@@ -35,7 +37,7 @@ msime 默认的本地模型是 X-ASR zh-en 的 480 ms 流式导出。同一模�
 
 ### 按住空格说话（Android、HarmonyOS）
 
-长按空格（与拖动移光标同一套 450 ms 仲裁）开始的键区聆听是按住说话：松手结束并出结果，按住期间停顿不自动结束；手指上移超过键盘高度的 25% 进入取消区，显示「松开取消」，在那里松手或触摸被系统取消都丢弃这次录音。纯规则在 `VoiceHoldPolicy.java` 与 `SpaceVoiceGesture.ts`。iOS 键盘扩展不能录音，长按空格仍是打开语音面板、转交主应用，这是平台限制下与 Android、HarmonyOS 的有意差异。
+长按空格（与拖动移光标同一套 450 ms 仲裁）开始的键区聆听是按住说话：松手结束并出结果，按住期间停顿不自动结束；手指上移超过键盘高度的 25% 进入取消区，显示「松开取消」，在那里松手或触摸被系统取消都丢弃这次录音。纯规则在 `VoiceHoldPolicy.java` 与 `SpaceVoiceGesture.ts`。iOS 键盘扩展不能录音，长按空格转交主应用并由主应用自动开始录音；入口取舍见[直接开始语音笔记](../bug-fix/2026-10-18-ios-space-voice-direct-start.md)。
 
 ### 评测（`scripts/voice_eval.py`）
 

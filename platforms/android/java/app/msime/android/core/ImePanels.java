@@ -1169,6 +1169,8 @@ final class ImePanels {
         clipboardClearPending = false;
         clipboardActionText = null;
         clipboardSwipedText = null;
+        clipboardSelectionMode = false;
+        clipboardSelectedTexts.clear();
         endClipboardSegmentation();
         // 补读一次：键盘进程没在运行时复制的内容，监听收不到。
         s.captureClipboard(ClipboardCapturePolicy.Trigger.PANEL_OPENED, false);
@@ -1194,6 +1196,8 @@ final class ImePanels {
         clipboardClearPending = false;
         clipboardActionText = null;
         clipboardSwipedText = null;
+        clipboardSelectionMode = false;
+        clipboardSelectedTexts.clear();
         endClipboardSegmentation();
         renderClipboardHistory();
     }
@@ -1383,6 +1387,9 @@ final class ImePanels {
     private boolean clipboardClearPending;
     /** 长按打开了操作行的那一条（共享存储以文字标识条目）；没有时为 null。 */
     private String clipboardActionText;
+    /** 本机历史的多选状态；文字是共享存储识别条目的键。 */
+    private boolean clipboardSelectionMode;
+    private final java.util.Set<String> clipboardSelectedTexts = new java.util.LinkedHashSet<>();
 
     void renderClipboardHistory() {
         if (s.clipboardPanel == null || s.clipboardHistory == null) return;
@@ -1411,12 +1418,13 @@ final class ImePanels {
         LinearLayout header = LayoutPolicy.row(s);
         ViewPolicy.setCenteredVertically(header);
         boolean confirmingClear = !cloud && s.clipboardHistoryEnabled && clipboardClearPending;
+        boolean selecting = !cloud && s.clipboardHistoryEnabled && clipboardSelectionMode;
         // 等待确认清空时顶行整行给问句和两个按钮，分段先让出位置，窄屏上也放得下。
         if (cloudAllowed && !confirmingClear) {
             addClipboardTab(header, CloudClipboardPanelPolicy.TAB_LOCAL, CloudClipboardPanelPolicy.Tab.LOCAL);
             addClipboardTab(header, CloudClipboardPanelPolicy.TAB_CLOUD, CloudClipboardPanelPolicy.Tab.CLOUD);
         }
-        if (!confirmingClear) {
+        if (!confirmingClear && !selecting) {
             // 分段和「清空」之间原来是一块空白，现在居中写「已存条数/上限」（#5905），不另占地方；没有可数的内容时它是空的，布局和原来一样。
             Integer count = cloud
                 ? CloudClipboardPanelPolicy.cloudCount(s.cloudClipboardStatus, s.cloudClipboardItems.size())
@@ -1454,6 +1462,16 @@ final class ImePanels {
                 s.clearClipboardHistory();
             });
             confirm.setContentDescription("确认清空剪贴板历史");
+        } else if (selecting) {
+            TextView selected = ViewPolicy.centeredText(s,
+                clipboardSelectedTexts.size() + " 项已选择", 12);
+            header.addView(selected, LayoutPolicy.weightedMatchParentParams(1));
+            clipboardAction(header, "取消", this::exitClipboardSelection);
+            Button remove = clipboardAction(header, "删除", () -> {
+                s.removeClipboardItems(new java.util.ArrayList<>(clipboardSelectedTexts));
+                exitClipboardSelection();
+            });
+            ViewPolicy.setEnabled(remove, !clipboardSelectedTexts.isEmpty());
         } else if (s.clipboardHistoryEnabled) {
             // 「搜索」打开应用里可搜索的剪贴板历史页（#5973）：键盘里没有可输入的文本框，查询框放在应用里。没有可搜的记录（空或读不出）时不放。
             if (items != null && !items.isEmpty()) {
@@ -1462,6 +1480,13 @@ final class ImePanels {
                 Button export = clipboardAction(header, "导出", s::exportClipboardHistory);
                 export.setContentDescription("导出全部剪贴板历史");
             }
+            Button select = clipboardAction(header, "多选", () -> {
+                clipboardSelectionMode = true;
+                clipboardSelectedTexts.clear();
+                clipboardActionText = null;
+                clipboardSwipedText = null;
+                renderClipboardHistory();
+            });
             // 复制会自动记录，不再需要「保存当前」。
             clipboardAction(header, "清空", () -> {
                 clipboardClearPending = true;
@@ -1469,6 +1494,10 @@ final class ImePanels {
                 clipboardSwipedText = null;
                 renderClipboardHistory();
             });
+            if (s.hasClipboardUndo()) {
+                Button undo = clipboardAction(header, "撤销", s::undoClipboardItems);
+                undo.setContentDescription("撤销刚才删除的剪贴板记录");
+            }
         }
         s.clipboardPanel.addView(header, LayoutPolicy.matchWidthHeightPx(s.pixels(32)));
         if (cloud) {
@@ -1500,6 +1529,11 @@ final class ImePanels {
                 boolean swiped = item.text().equals(clipboardSwipedText);
                 swipedPresent |= swiped;
                 Button card = newClipboardCard(item.text(), meta, managed, () -> {
+                    if (clipboardSelectionMode) {
+                        if (!clipboardSelectedTexts.add(item.text())) clipboardSelectedTexts.remove(item.text());
+                        renderClipboardHistory();
+                        return;
+                    }
                     // 有一条左滑打开着时，点任何一张卡片只把它收回，不插入。
                     if (clipboardSwipedText != null) {
                         closeClipboardSwipe();
@@ -1508,6 +1542,11 @@ final class ImePanels {
                     s.insertClipboardText(item.text());
                 });
                 card.setContentDescription((item.pinned() ? "已置顶；" : "") + "点按插入剪贴板记录，左滑删除，长按管理");
+                if (clipboardSelectionMode) {
+                    card.setContentDescription((clipboardSelectedTexts.contains(item.text()) ? "已选择；" : "")
+                        + "点按选择剪贴板记录");
+                    ViewPolicy.setSelected(card, clipboardSelectedTexts.contains(item.text()));
+                }
                 card.setOnLongClickListener(ignored -> {
                     s.imeKeyFeedback.playFeedback(card);
                     clipboardActionText = item.text();
@@ -1531,6 +1570,12 @@ final class ImePanels {
         }
         s.imeStyler.applySkin();
         for (TextView note : notes) ViewPolicy.setTextColor(note, ImeStyler.fade(s.skin.keyForeground(), .6));
+    }
+
+    private void exitClipboardSelection() {
+        clipboardSelectionMode = false;
+        clipboardSelectedTexts.clear();
+        renderClipboardHistory();
     }
 
     /**
@@ -1630,6 +1675,9 @@ final class ImePanels {
     private TextView clipboardSegmentStatus;
     private Button clipboardSegmentSelectAll;
     private Button clipboardSegmentConfirm;
+    private Button clipboardSegmentShare;
+    private Button clipboardSegmentPhrase;
+    private Button clipboardSegmentCopy;
 
     /** 长按菜单里的「分词」：把这一条切成词片，面板换成点选界面（#5645）。 */
     private void startClipboardSegmentation(String text) {
@@ -1651,10 +1699,13 @@ final class ImePanels {
         clipboardSegmentStatus = null;
         clipboardSegmentSelectAll = null;
         clipboardSegmentConfirm = null;
+        clipboardSegmentShare = null;
+        clipboardSegmentPhrase = null;
+        clipboardSegmentCopy = null;
     }
 
     /**
-     * 分词界面：上面是按行折排的词片，点一下选中、再点取消；底部固定一行「取消 · 已选几个 · 全选 · 插入」。插入时按原文顺序拼接选中的词片（{@link ClipboardSegmentation#join}），上屏并关闭面板；原来那条历史不变。
+     * 分词界面：词片点选，底部状态与操作固定显示。分享、常用语、复制和插入都按原文顺序拼接选中的词片（{@link ClipboardSegmentation#join}）；复制回到键盘并提供最近复制，插入直接上屏。
      *
      * <p>词片放在面板里自己的滚动区，操作行在滚动区外、贴着面板底边：原先操作行是面板的第一行，跟着词片一起滚，长文字滚到末尾去「去尾」时「插入」「取消」已经滚出屏幕（#5645）。外层的剪贴板滚动视图开着 fillViewport，会把面板撑到正好一屏高；滚动区的高度基数给 1 px 而不是 0：外层第一次按不限高度测量时，高度为 0 的加权子视图会按全部词片的高度报上去，面板就比一屏高，操作行又被推到屏幕外。给了固定基数，面板先报一个很小的高度，外层再按一屏高精确测量，剩下的高度全部分给滚动区。面板于是不比一屏高，外层滚不动、也不拦截触摸，滑动交给词片的滚动区。
      */
@@ -1667,8 +1718,9 @@ final class ImePanels {
             content.addView(note, LayoutPolicy.matchWidthWrapParams());
             notes.add(note);
         }
-        WrapRowLayout words = new WrapRowLayout(s, s.pixels(6), s.pixels(6));
-        words.setContentDescription("分词结果，点按选择要插入的词");
+        ClipboardSegmentLayout words = new ClipboardSegmentLayout(s, s.pixels(6),
+            clipboardSegmentSelectionListener());
+        words.setContentDescription("分词结果，点按或从词片滑动连续选择，空白处滑动滚动");
         for (int index = 0; index < clipboardSegments.size(); index++) {
             ClipboardSegmentation.Segment segment = clipboardSegments.get(index);
             if (segment.separator()) continue;
@@ -1676,30 +1728,37 @@ final class ImePanels {
         }
         content.addView(words, LayoutPolicy.matchWidthWrapParams());
         ScrollView wordScroll = new ScrollView(s);
+        wordScroll.setContentDescription("分词滚动区域");
         wordScroll.addView(content, LayoutPolicy.scrollMatchWidthWrapParams());
         LinearLayout.LayoutParams scrollParams = LayoutPolicy.linearParamsPx(
             LinearLayout.LayoutParams.MATCH_PARENT, 1);
         scrollParams.weight = 1;
         s.clipboardPanel.addView(wordScroll, scrollParams);
-        LinearLayout bar = LayoutPolicy.row(s);
-        ViewPolicy.setCenteredVertically(bar);
-        clipboardAction(bar, "取消", () -> {
-            endClipboardSegmentation();
-            renderClipboardHistory();
-        }).setContentDescription("取消分词，回到剪贴板历史");
         clipboardSegmentStatus = ViewPolicy.textLabel(s, "", 13);
         KeyboardTypographyPolicy.setKeyTextSize(clipboardSegmentStatus, 13);
         ViewPolicy.setMaxLinesEllipsized(clipboardSegmentStatus, 1);
         LayoutPolicy.setHorizontalPaddingDp(clipboardSegmentStatus, s, 6);
-        bar.addView(clipboardSegmentStatus, LayoutPolicy.weightedZeroParams(1));
-        clipboardSegmentSelectAll = clipboardAction(bar, "全选", () -> {
+        s.clipboardPanel.addView(clipboardSegmentStatus, LayoutPolicy.matchWidthWrapParams());
+        LinearLayout bar = LayoutPolicy.row(s);
+        ViewPolicy.setCenteredVertically(bar);
+        clipboardSegmentAction(bar, "取消", "取消分词，回到剪贴板历史", () -> {
+            endClipboardSegmentation();
+            renderClipboardHistory();
+        });
+        clipboardSegmentShare = clipboardSegmentAction(bar, "分享", "分享选中的词",
+            () -> s.shareClipboardText(selectedClipboardSegments()));
+        clipboardSegmentPhrase = clipboardSegmentAction(bar, "常用语", "添加选中的词到常用语",
+            () -> addClipboardTextToPhrases(selectedClipboardSegments()));
+        clipboardSegmentCopy = clipboardSegmentAction(bar, "复制", "复制选中的词并返回键盘",
+            () -> s.copyClipboardSelection(selectedClipboardSegments()));
+        clipboardSegmentSelectAll = clipboardSegmentAction(bar, "全选", "全选或取消全部词片", () -> {
             boolean select = !allSegmentsSelected();
             for (int index = 0; index < clipboardSegmentSelected.length; index++)
                 clipboardSegmentSelected[index] = select;
             renderClipboardHistory();
         });
-        clipboardSegmentConfirm = clipboardAction(bar, "插入", () -> {
-            String text = ClipboardSegmentation.join(clipboardSegments, clipboardSegmentSelected);
+        clipboardSegmentConfirm = clipboardSegmentAction(bar, "插入", "插入选中的词", () -> {
+            String text = selectedClipboardSegments();
             endClipboardSegmentation();
             s.insertClipboardText(text);
         });
@@ -1710,6 +1769,32 @@ final class ImePanels {
         s.imeStyler.applySkin();
         for (TextView note : notes) ViewPolicy.setTextColor(note, ImeStyler.fade(s.skin.keyForeground(), .6));
         refreshClipboardSegmentControls();
+    }
+
+    private ClipboardSegmentLayout.SelectionListener clipboardSegmentSelectionListener() {
+        return new ClipboardSegmentLayout.SelectionListener() {
+            @Override public void changed(View child, boolean selected) {
+                if (clipboardSegmentSelected == null) return;
+                clipboardSegmentSelected[(Integer) child.getTag()] = selected;
+                setSegmentSelected((Button) child, selected);
+                s.imeStyler.styleButton((Button) child, KeyboardKeyRole.KEY, s.skin);
+            }
+            @Override public void refreshed() { refreshClipboardSegmentControls(); }
+        };
+    }
+
+    private String selectedClipboardSegments() {
+        return clipboardSegments == null ? ""
+            : ClipboardSegmentation.join(clipboardSegments, clipboardSegmentSelected);
+    }
+
+    /** 六个操作等分可用宽度，长文案放在无障碍说明里，避免窄屏挤掉后面的按钮。 */
+    private Button clipboardSegmentAction(LinearLayout bar, String label, String description, Runnable action) {
+        Button button = clipboardAction(bar, label, action);
+        compactReplyControl(button, s.pixels(2));
+        button.setLayoutParams(LayoutPolicy.weightedMatchParentParams(1));
+        button.setContentDescription(description);
+        return button;
     }
 
     private Button clipboardSegmentButton(String text, int index) {
@@ -1723,6 +1808,7 @@ final class ImePanels {
         ViewPolicy.clearStateListAnimator(button);
         // 不能直接用词片文字做描述：换肤遍历按描述前缀「候选 」「按键 」识别候选和按键。
         button.setContentDescription("词片 " + text);
+        button.setTag(index);
         setSegmentSelected(button, clipboardSegmentSelected[index]);
         bindFeedbackAction(button, () -> {
             if (clipboardSegmentSelected == null) return;
@@ -1755,6 +1841,9 @@ final class ImePanels {
         boolean all = chosen > 0 && allSegmentsSelected();
         clipboardSegmentSelectAll.setText(all ? "全不选" : "全选");
         ViewPolicy.setEnabledWithAlpha(clipboardSegmentConfirm, chosen > 0, .45f);
+        ViewPolicy.setEnabledWithAlpha(clipboardSegmentShare, chosen > 0, .45f);
+        ViewPolicy.setEnabledWithAlpha(clipboardSegmentPhrase, chosen > 0, .45f);
+        ViewPolicy.setEnabledWithAlpha(clipboardSegmentCopy, chosen > 0, .45f);
     }
 
     /** 操作行里的一个按钮：键帽样式，宽度按字数分，长的「发到云剪贴板」不会被挤成省略号。 */

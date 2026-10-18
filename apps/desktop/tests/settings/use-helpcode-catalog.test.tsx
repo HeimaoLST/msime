@@ -4,6 +4,7 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import {
   useCustomHelpcodeSchemas,
+  useHelpcodeCatalog,
   useHelpcodePacks,
   type CustomHelpcodeSchema,
   type HelpcodePackOption,
@@ -120,6 +121,27 @@ test("packs filter the catalog and refresh when the input page reopens", async (
   expect(result.current).toEqual([]);
   rerender({ open: true });
   await waitFor(() => expect(result.current).toEqual([{ id: "new", name: "示例new" }]));
+  expect(catalog).toHaveBeenCalledTimes(2);
+});
+
+test("the combined catalog refresh action reloads packs without leaving the input page", async () => {
+  const catalog = vi
+    .fn<PluginClient["catalog"]>()
+    .mockResolvedValueOnce(catalogResult("old"))
+    .mockResolvedValueOnce(catalogResult("new"));
+  const { result } = renderHook(() =>
+    useHelpcodeCatalog({ schemaReader: undefined, catalog, inputPageOpen: true }),
+  );
+
+  await waitFor(() =>
+    expect(result.current.helpcodePacks).toEqual([{ id: "old", name: "示例old" }]),
+  );
+
+  act(() => result.current.refreshHelpcodePacks());
+
+  await waitFor(() =>
+    expect(result.current.helpcodePacks).toEqual([{ id: "new", name: "示例new" }]),
+  );
   expect(catalog).toHaveBeenCalledTimes(2);
 });
 

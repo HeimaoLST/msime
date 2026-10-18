@@ -47,7 +47,7 @@ struct KeyboardToolbarSettingsView: View {
     ScrollView {
       VStack(spacing: 28) {
         preview
-        DesignGroup(title: "显示", footer: rowHidden ? "工具栏已隐藏，只显示候选栏。" : nil) {
+        DesignGroup(title: "显示", footer: rowHidden ? "工具栏内容已隐藏；iOS 保留顶栏高度，候选栏会在输入时使用这一行。" : nil) {
           DesignSelectRow(title: "显示方式", options: Self.displayModes,
                           selection: Binding(get: { hidden }, set: { enabled in
                             TouchToolbarLocalPreference.hidden = enabled
@@ -84,7 +84,7 @@ struct KeyboardToolbarSettingsView: View {
   private var preview: some View {
     let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
     let strip: KeyboardPreviewTopStrip = rowHidden
-      ? .hidden : .toolbar(Self.previewItems(toolbar, phrases: phrases, scheme: scheme))
+      ? .reserved : .toolbar(Self.previewItems(toolbar, phrases: phrases, scheme: scheme))
     return KeyboardSkinPreview(skin: skin, nineKey: false, topStrip: strip)
       .clipShape(shape)
       .overlay(shape.strokeBorder(MetasequoiaTheme.hair, lineWidth: 1))

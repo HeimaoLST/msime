@@ -879,6 +879,8 @@ pub enum SettingsCategory {
     Voice,
     /// AI 辅助, a page of the 工具 group and the parent of the AI conversation page.
     Ai,
+    /// AI 助手连接页，提供 MCP 的设置、皮肤、词库与诊断能力。
+    Mcp,
     Tools,
     /// 插件: sound packs, background music, command tables and the @ name list.
     Plugins,
@@ -909,6 +911,7 @@ impl SettingsCategory {
             SettingsCategory::Handwriting => "handwriting",
             SettingsCategory::Voice => "voice",
             SettingsCategory::Ai => "ai",
+            SettingsCategory::Mcp => "mcp",
             SettingsCategory::Tools => "tools",
             SettingsCategory::Plugins => "plugins",
             SettingsCategory::FloatingToolbar => "floating-toolbar",
@@ -936,6 +939,7 @@ impl SettingsCategory {
             "handwriting" => Ok(SettingsCategory::Handwriting),
             "voice" => Ok(SettingsCategory::Voice),
             "ai" => Ok(SettingsCategory::Ai),
+            "mcp" => Ok(SettingsCategory::Mcp),
             "tools" => Ok(SettingsCategory::Tools),
             "plugins" => Ok(SettingsCategory::Plugins),
             "floating-toolbar" => Ok(SettingsCategory::FloatingToolbar),
@@ -948,7 +952,7 @@ impl SettingsCategory {
         }
     }
 
-    pub const ALL: [SettingsCategory; 22] = [
+    pub const ALL: [SettingsCategory; 23] = [
         SettingsCategory::Account,
         SettingsCategory::Chat,
         SettingsCategory::Community,
@@ -964,6 +968,7 @@ impl SettingsCategory {
         SettingsCategory::Handwriting,
         SettingsCategory::Voice,
         SettingsCategory::Ai,
+        SettingsCategory::Mcp,
         SettingsCategory::Tools,
         SettingsCategory::Plugins,
         SettingsCategory::FloatingToolbar,

@@ -15,6 +15,7 @@ PRIVATE_LIB := $(CURDIR)/debian/msime/usr/lib/$(DEB_HOST_MULTIARCH)/msime-client
 
 export CARGO_HOME := $(CURDIR)/debian/cargo-home
 export CARGO_NET_OFFLINE := true
+export MSIME_OPENCC_SOURCE_DIR := $(CURDIR)/vendor/opencc
 # Release 配置默认不带调试信息，-dbgsym 包里 Rust 编译的三个程序就是空的；只带行号表，足够还原崩溃栈，编译开销也小。
 export CARGO_PROFILE_RELEASE_DEBUG := line-tables-only
 ifneq (,$(DEB_BUILD_OPTION_PARALLEL))

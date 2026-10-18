@@ -10,6 +10,33 @@ use msime_client_core::is_bounded_text;
 /// an arbitrarily large converted string.
 const MAX_TRADITIONAL_CONVERSION_BYTES: usize = 1 << 20;
 
+/// 规范化快捷符号列表，默认值与偏好校验都由 client-core 持有。
+/// # Safety
+/// `value` 指向 `length` 字节的 JSON `{symbols: string[]}`，最多 64 KiB；结果用 string_free 释放。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_touch_quick_symbols(
+    value: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        if value.is_null() || length > 64 * 1024 {
+            return Err("invalid_touch_symbols".into());
+        }
+        // 安全：调用方保证缓冲区可读，长度已检查。
+        let bytes = unsafe { std::slice::from_raw_parts(value, length) };
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Request {
+            symbols: Vec<String>,
+        }
+        let request: Request =
+            serde_json::from_slice(bytes).map_err(|_| "invalid_touch_symbols")?;
+        Ok(json!(
+            msime_client_core::preferences::normalize_touch_quick_symbols(&request.symbols)
+        ))
+    })
+}
+
 fn clipboard_history_limit(directory: &std::path::Path) -> usize {
     msime_client_core::preferences::PreferencesStore::new(directory)
         .load()
@@ -1813,10 +1840,26 @@ struct MobileClipboardRequest {
 enum MobileClipboardAction {
     Load,
     ExportText,
-    Capture { text: String },
-    SetPinned { text: String, pinned: bool },
-    Remove { text: String },
-    Replace { text: String, replacement: String },
+    Capture {
+        text: String,
+    },
+    SetPinned {
+        text: String,
+        pinned: bool,
+    },
+    Remove {
+        text: String,
+    },
+    RemoveMany {
+        texts: Vec<String>,
+    },
+    RestoreMany {
+        entries: Vec<msime_client_core::clipboard::ClipboardHistoryEntry>,
+    },
+    Replace {
+        text: String,
+        replacement: String,
+    },
     Clear,
 }
 
@@ -1903,6 +1946,34 @@ pub unsafe extern "C" fn msime_client_mobile_clipboard_history(
                     "limit": history.limit(),
                     "entries": history.entries()
                 }))
+            }
+            MobileClipboardAction::RemoveMany { texts } => {
+                if texts.is_empty()
+                    || texts.len() > msime_client_core::clipboard::MAX_ENTRIES
+                    || texts.iter().any(|text| {
+                        text.is_empty()
+                            || text.len() > msime_client_core::clipboard::MAX_MOBILE_TEXT_BYTES
+                    })
+                {
+                    return Err("invalid mobile clipboard entries".into());
+                }
+                let removed = history
+                    .remove_many(&texts)
+                    .map_err(|_| "mobile clipboard removal failed")?;
+                Ok(
+                    json!({"removed": removed, "limit": history.limit(), "entries": history.entries()}),
+                )
+            }
+            MobileClipboardAction::RestoreMany { entries } => {
+                if entries.len() > msime_client_core::clipboard::MAX_ENTRIES {
+                    return Err("invalid mobile clipboard entries".into());
+                }
+                history
+                    .restore_many(&entries)
+                    .map_err(|_| "mobile clipboard restore failed")?;
+                Ok(
+                    json!({"restored": true, "limit": history.limit(), "entries": history.entries()}),
+                )
             }
             MobileClipboardAction::Replace { text, replacement } => {
                 if text.is_empty()

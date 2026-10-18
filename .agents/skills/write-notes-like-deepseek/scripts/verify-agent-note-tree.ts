@@ -1,6 +1,6 @@
 /**
  * Verify tree: lifecycle/class/filename/INDEX and internal relative markdown links.
- * Run: npx tsx scripts/verify-agent-note-tree.ts
+ * Run: npx tsx <skill-dir>/scripts/verify-agent-note-tree.ts
  */
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
@@ -17,8 +17,13 @@ for (const note of notes) {
   let match: RegExpExecArray | null;
 
   while ((match = LINK_REGEX.exec(content)) !== null) {
-    const rawTarget = match[2]?.trim();
+    let rawTarget = match[2]?.trim();
     if (!rawTarget) continue;
+
+    // Support CommonMark angle bracket destinations: [text](<path>)
+    if (rawTarget.startsWith("<") && rawTarget.endsWith(">")) {
+      rawTarget = rawTarget.slice(1, -1).trim();
+    }
 
     // Ignore web links, intra-page anchors and ellipsis placeholders
     if (rawTarget.startsWith("http://") || rawTarget.startsWith("https://") || rawTarget.startsWith("#") || rawTarget.startsWith("mailto:") || rawTarget.includes("…")) {

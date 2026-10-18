@@ -24,21 +24,22 @@ struct Page {
 
 inline constexpr std::size_t page_group_count = 6;
 
-// 侧栏，顺序和分组与共享设置 UI 在桌面上的侧栏一致，即 `settingsNavGroups`（`packages/ui/src/settings/settings-page-registry.ts`）去掉 `desktopMergedPages` 里并进别的页的那些：打字、外观、更多输入方式、工具、账号、支持。「帮助与反馈」并进了「关于」，所以支持组没有 feedback，它的路由打开「关于」。打字排在外观之前，因为打字会反复调整，外观通常只设一次。分组标题在 `main.cpp` 里。「手写输入」没有单独的页面：Windows 的手写设置只有一个打开面板的按钮，与共享设置 UI 的 `settingsPageProjections`（`handwritingOnScreenKeyboardPage`）一样并进「屏幕键盘」页，那一页在提供手写的版本里叫「屏幕键盘与手写」。
-inline constexpr std::array<Page, 16> pages{{
+// 侧栏顺序与共享设置 UI 的 `settingsNavGroups` 一致：常用输入、其他输入方式、外观、工具、账号、支持。桌面不列 `desktopMergedPages` 的页面；手写并进屏幕键盘，提供手写的版本叫「键盘手写」。
+inline constexpr std::array<Page, 17> pages{{
     {"typing", 0, PageHost::Native, {}},
-    {"expression", 0, PageHost::Native, {}},
-    {"shortcuts", 0, PageHost::Native, {}},
     {"lexicon", 0, PageHost::Native, {}},
-    {"themes", 1, PageHost::Native, {}},
-    {"candidate", 1, PageHost::Native, {}},
-    {"toolbar", 1, PageHost::Native, {}},
-    {"osk", 2, PageHost::Native, {}},
-    {"voice", 2, PageHost::Native, {}},
+    {"shortcuts", 0, PageHost::Native, {}},
+    {"expression", 0, PageHost::Native, {}},
+    {"voice", 1, PageHost::Native, {}},
+    {"osk", 1, PageHost::Native, {}},
+    {"themes", 2, PageHost::Native, {}},
+    {"candidate", 2, PageHost::Native, {}},
+    {"toolbar", 2, PageHost::Native, {}},
     {"clip", 3, PageHost::Native, {}},
-    {"stats", 3, PageHost::Native, {}},
-    {"plugins", 3, PageHost::Native, {}},
     {"ai", 3, PageHost::Native, {}},
+    {"mcp", 3, PageHost::Native, {}},
+    {"plugins", 3, PageHost::Native, {}},
+    {"stats", 3, PageHost::Native, {}},
     {"account", 4, PageHost::Native, {}},
     {"dev", 5, PageHost::Native, {}},
     {"about", 5, PageHost::Native, {}},
@@ -66,7 +67,7 @@ struct RouteAlias {
 };
 
 // 共享路由词汇表（`client-core` 的 `host_surface::SettingsCategory`）认识的每个设置类别，映射到现在承载它的页面。每个 id 保持它在其他所有宿主上的含义：`appearance` 是候选窗口页，`skin` 是主题页。托盘会打开 `skin`、`dictionary` 和 `about`，其他桌面启动入口也用同样的名字。本窗口没有单独的社区页，社区皮肤是主题页的一个标签，所以 `community` 打开主题页；AI 对话是 AI 辅助的子页（Windows 不提供，见 README），`chat` 打开 AI 辅助。帮助与反馈和共享桌面侧栏一样并进了「关于」（`desktopMergedPages`），托盘和工具栏菜单的「帮助」「反馈」（`help`、`feedback`）都打开「关于」。
-inline constexpr std::array<RouteAlias, 22> route_aliases{{
+inline constexpr std::array<RouteAlias, 23> route_aliases{{
     {"account", "account"},
     {"chat", "ai"},
     {"community", "themes"},
@@ -82,6 +83,7 @@ inline constexpr std::array<RouteAlias, 22> route_aliases{{
     {"handwriting", "osk"},
     {"voice", "voice"},
     {"ai", "ai"},
+    {"mcp", "mcp"},
     {"tools", "clip"},
     {"plugins", "plugins"},
     {"floating-toolbar", "toolbar"},

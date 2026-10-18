@@ -21,6 +21,8 @@ final class KeyboardFormFactorTests: XCTestCase {
     XCTAssertEqual(phone.topRowGap, 4)
     XCTAssertEqual(tablet.topRowGap, 9)
     XCTAssertEqual(phone.keyHeight(landscape: false, handwriting: false), 52)
+    XCTAssertEqual(phone.keyHeight(landscape: false, handwriting: false, letterKeys: true), 44)
+    XCTAssertEqual(phone.keyHeight(landscape: true, handwriting: false, letterKeys: true), 34)
     XCTAssertEqual(phone.keyHeight(landscape: false, handwriting: true), 52)
     XCTAssertEqual(phone.keyHeight(landscape: true, handwriting: false), 34)
     XCTAssertEqual(phone.keyHeight(landscape: true, handwriting: true), 40)
@@ -32,6 +34,10 @@ final class KeyboardFormFactorTests: XCTestCase {
                    "a phone has no digit row")
     // 更宽的排间距加在键盘总高上，而不是从键高里扣。
     XCTAssertEqual(phone.keyboardHeight(topRow: 50, rowSpacing: 10, landscape: false, handwriting: false), 298)
+    // 26 键使用 44pt 键帽和 11pt 排间距时，用上下留白补回收紧键帽省下的高度。
+    XCTAssertEqual(phone.keyboardHeight(topRow: 50, rowSpacing: 11, landscape: false, handwriting: false, letterKeys: true), 289)
+    XCTAssertEqual(phone.keyboardHeight(topRow: 50, rowSpacing: 7, landscape: true, handwriting: false, letterKeys: true),
+                   phone.keyboardHeight(topRow: 50, rowSpacing: 7, landscape: true, handwriting: false))
     // 数字行是整整一排键，平板加一排的高度而不是压扁字母。
     let portrait = tablet.keyboardHeight(topRow: 50, rowSpacing: 7, landscape: false, handwriting: false)
     // 6 + 50 + 9 + 4 × 54 + 3 × 7 + 4，再加数字行这第五排 54pt 键及其 7pt 间距。
@@ -45,7 +51,7 @@ final class KeyboardFormFactorTests: XCTestCase {
     XCTAssertFalse(KeyboardFormFactor.phone.canShowFullKeys)
   }
 
-  /// 默认排间距下画出的布局：手机 52pt 键和 iPad 54pt 键（dc.html `keyH`），带或不带 iPad 数字行，四周的内边距，以及顶栏下方的间隙。
+  /// 默认排间距下画出的布局：手机 26 键为 44pt和 iPad 54pt 键（dc.html `keyH`），带或不带 iPad 数字行，四周的内边距，以及顶栏下方的间隙。
   @MainActor
   func testDesignKeyHeights() throws {
     enableAllInputSchemes()
@@ -81,12 +87,13 @@ final class KeyboardFormFactorTests: XCTestCase {
     }
     let phone = try layout(tablet: false, width: 393)
     XCTAssertEqual(phone.height, KeyboardViewController.defaultKeyboardHeight)
-    XCTAssertEqual(phone.key.height, 52, accuracy: 0.5)
-    XCTAssertEqual(phone.space.height, 52, accuracy: 0.5)
+    XCTAssertEqual(phone.space.minY - phone.key.maxY, 11, accuracy: 0.5)
+    XCTAssertEqual(phone.key.height, 44, accuracy: 0.5)
+    XCTAssertEqual(phone.space.height, 44, accuracy: 0.5)
     XCTAssertEqual(phone.strip.minY, 2, accuracy: 0.5)
     XCTAssertEqual(phone.strip.minX, 3, accuracy: 0.5)
     XCTAssertEqual(phone.strip.maxX, 393 - 3, accuracy: 0.5)
-    XCTAssertEqual(phone.space.maxY, phone.height - 4, accuracy: 0.5)
+    XCTAssertEqual(phone.space.maxY, phone.height - 14, accuracy: 0.5)
     let withRow = try layout(tablet: true, width: 820)
     XCTAssertEqual(withRow.key.height, 54, accuracy: 0.5)
     XCTAssertEqual(withRow.strip.minX, 8, accuracy: 0.5)
@@ -185,7 +192,9 @@ final class KeyboardFormFactorTests: XCTestCase {
         ? try key("nineKey1", in: controller)
         : try XCTUnwrap(descendants(controller.view).first { $0.accessibilityLabel == "字母 Q" })
       XCTAssertEqual(first.convert(first.bounds, to: controller.view).minY - strip.convert(strip.bounds, to: controller.view).maxY,
-                     KeyboardFormFactor.phone.topRowGap, accuracy: 0.5, "\(scheme)")
+                     KeyboardFormFactor.phone.topRowGap
+                       + (scheme == .quanpin ? KeyboardFormFactor.phoneLetterVerticalPadding : 0),
+                     accuracy: 0.5, "\(scheme)")
     }
   }
 

@@ -46,6 +46,7 @@ platforms/android/tests/device/settings/CloudClipboardKeystoreDeviceSmoke.java
 platforms/android/tests/device/settings/CloudClipboardDriverDeviceSmoke.java
 platforms/android/tests/device/settings/CloudClipboardRelayDeviceSmoke.java
 platforms/android/tests/device/settings/BackendAccountRefreshDeviceSmoke.java
+platforms/android/tests/device/settings/DeviceDataSummaryDeviceSmoke.java
 platforms/android/java/app/msime/android/AppVersionPolicy.java
 platforms/android/java/app/msime/android/BoundsPolicy.java
 platforms/android/java/app/msime/android/ColorPolicy.java
@@ -65,6 +66,10 @@ platforms/android/java/app/msime/android/account/AppleWebSignIn.java
 platforms/android/java/app/msime/android/account/BackendAccount.java
 platforms/android/java/app/msime/android/account/BackendAnonymousAccount.java
 platforms/android/java/app/msime/android/account/CloudApi.java
+platforms/android/java/app/msime/android/account/DeviceDataApi.java
+platforms/android/java/app/msime/android/account/SyncSwitch.java
+platforms/android/java/app/msime/android/RelativeTimePolicy.java
+platforms/android/java/app/msime/android/account/TypingUploadApi.java
 platforms/android/java/app/msime/android/account/CloudClipboardApi.java
 platforms/android/java/app/msime/android/account/CloudClipboardE2e.java
 platforms/android/java/app/msime/android/account/CloudClipboardKeystore.java
@@ -118,6 +123,9 @@ platforms/android/tests/device/keyboard/EmptyEditorBackspaceDeviceSmoke.java
 platforms/android/tests/device/clipboard/ClipboardEditPreparation.java
 platforms/android/tests/device/clipboard/PinyinClipboardEditPreparation.java
 platforms/android/tests/device/clipboard/ClipboardEditDeviceSmoke.java
+platforms/android/tests/device/clipboard/ClipboardShareSinkActivity.java
+platforms/android/tests/device/clipboard/ClipboardSegmentActionsDeviceSmoke.java
+platforms/android/tests/device/clipboard/ClipboardSegmentDragDeviceSmoke.java
 platforms/android/tests/device/keyboard/FeedbackInputStabilityDeviceSmoke.java
 platforms/android/tests/device/settings/DiagnosticsBundleDeviceSmoke.java
 platforms/android/tests/device/settings/DiagnosticsExportDirectoryDeviceSmoke.java
@@ -158,3 +166,5 @@ platforms/android/tests/device/keyboard/QuickDeletePreviewDeviceSmoke.java
 platforms/android/tests/device/keyboard/QuickDeleteEditorActivity.java
 platforms/android/tests/device/settings/DictionaryImportDeviceSmoke.java
 platforms/android/tests/device/keyboard/NumberLayerEntryDeviceSmoke.java
+platforms/android/tests/device/keyboard/RestartingEditorActivity.java
+platforms/android/tests/device/keyboard/NumberLayerRestartDeviceSmoke.java

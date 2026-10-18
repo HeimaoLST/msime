@@ -86,6 +86,16 @@ class OpenCCInputTests(unittest.TestCase):
                 live = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
                 self.assertIn("resources/licenses/OpenCC-Apache-2.0.txt", live)
 
+    def test_linux_source_packages_stage_opencc_for_offline_cargo(self):
+        source_tarballs = (fetch_opencc.ROOT / "platforms/linux/packaging/make-source-tarballs.sh").read_text()
+        rpm = (fetch_opencc.ROOT / "platforms/linux/packaging/rpm/msime.spec").read_text()
+        debian = (fetch_opencc.ROOT / "platforms/linux/packaging/debian/rules").read_text()
+        self.assertIn('mkdir -p "$vendor/frontend" "$vendor/voice-runtime" "$vendor/opencc"', source_tarballs)
+        self.assertIn('opencc_dir=$(python3 scripts/fetch_opencc.py)', source_tarballs)
+        self.assertIn('cp -a "$opencc_dir/." "$vendor/opencc/"', source_tarballs)
+        self.assertIn('MSIME_OPENCC_SOURCE_DIR="$PWD/vendor/opencc"', rpm)
+        self.assertIn('export MSIME_OPENCC_SOURCE_DIR := $(CURDIR)/vendor/opencc', debian)
+
     def test_lock_rejects_traversal_and_unpinned_revision(self):
         original = json.loads(fetch_opencc.LOCK.read_text())
         for commit, path in (("main", "sources/opencc/LICENSE"),

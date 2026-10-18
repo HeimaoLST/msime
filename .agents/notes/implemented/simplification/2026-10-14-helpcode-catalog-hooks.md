@@ -8,13 +8,14 @@ Status: implemented
 
 ## Decision
 
-两项 hook 移到 `settings/use-helpcode-catalog.ts` 并从公共入口导出，设置模型调用同一实现。原有异步代次和依赖保持一致：自定义表的 reader 更换时等待新回答，缺少 reader 或当前读取失败时清空；插件只在输入页打开时读取，离开时清空，再进入时刷新，且只投影 `kind="helpcode"` 的 id 和名称。旧宿主与旧页面请求的成功或失败均不能改写当前列表。
+两项基础 hook 移到 `settings/use-helpcode-catalog.ts` 并从公共入口导出；同文件再提供 `useHelpcodeCatalog`，把设置页需要的两类目录和导入后的刷新动作组合起来，设置模型只调用组合 hook。原有异步代次和依赖保持一致：自定义表的 reader 更换时等待新回答，缺少 reader 或当前读取失败时清空；插件只在输入页打开时读取，离开时清空，再进入时刷新，且只投影 `kind="helpcode"` 的 id 和名称。旧宿主与旧页面请求的成功或失败均不能改写当前列表。
 
 目录元数据类型从 `settings/helpcode-preferences.ts` 引入，与页面和候选预览共用[辅助码公共模型](2026-10-16-helpcode-preferences.md)，不依赖页面模块。
 
 ## Alternatives considered
 
-- 保留入口内的私有 hook：调用位置与逻辑相邻，已有设置整页测试。代价是它们不能单独复用，生命周期检查仍需定位入口源码。
+- 只保留入口内的私有 hook：调用位置与逻辑相邻，已有设置整页测试。代价是它们不能单独复用，生命周期检查仍需定位入口源码。
+- 只导出两项基础 hook，由入口自己拼装刷新计数：可以避免增加一个组合 API，但设置模型仍需知道两项目录的生命周期和刷新关联，导入后刷新容易在不同调用方漂移。
 - 抽成一个通用异步列表 hook：两个加载流程都能用同一 Promise 链，代码更少。代价是需要参数化 reader 更换时保留列表、离页清空和目录过滤这些不同策略；当前沿用两项明确的业务 hook，复用已有 `useAsyncGeneration`。
 
 ## Verification
@@ -23,7 +24,7 @@ Status: implemented
 
 ## Consequences
 
-hook 逻辑从设置入口移出，可由其他共享设置页面复用，入口文件只保留模型编排。代价是公共导出的 hook 需要继续遵守 `CustomHelpcodeSchema` 和 `PluginClient` 类型契约；实现保持原 Promise 链和 effect 依赖，对加载归属及保留旧列表的边界做行为检查。
+hook 逻辑从设置入口移出，可由其他共享设置页面复用，入口文件只保留模型编排；组合 hook 也把导入后的刷新动作固定在目录状态旁。代价是公共导出的 hook 需要继续遵守 `CustomHelpcodeSchema` 和 `PluginClient` 类型契约；实现保持原 Promise 链和 effect 依赖，对加载归属及保留旧列表的边界做行为检查。
 
 ## Existing notes audit
 

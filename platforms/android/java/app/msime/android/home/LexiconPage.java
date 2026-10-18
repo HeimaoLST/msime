@@ -12,6 +12,7 @@ import android.provider.OpenableColumns;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.TextView;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
@@ -36,9 +37,9 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 /**
- * 词库页：已安装（内置拼音词库加各个命名词库），管理组（新建、导入、导出、刷新），发现词库（社区里的前几个，末尾「浏览更多词库」进社区词库的完整列表），学习组「记忆新词」，以及只在 Tauri 合包里出现的「更多」组（背单词、云词库，P21）。
+ * 词库页：已安装（内置拼音词库加各个命名词库，操作收在标题右侧的管理菜单），发现词库（社区里的前几个，末尾「浏览更多词库」进社区词库的完整列表），学习组「记忆新词」，以及只在 Tauri 合包里出现的「更多」组（背单词、云词库，P21）。
  *
- * <p>导入、导出和刷新原先是大标题行右侧的三个胶囊，窄屏上把「词库」两个字挤成「词…」（#5682），现在和新建一起放在「已安装」下面那张卡片里，行间有分隔线；大标题和其他详情页一样只放标题。
+ * <p>新建、导入、导出和刷新是低频管理操作，放进「已安装」标题右侧的菜单，不在词库列表下面占四行高度；大标题和其他详情页一样只放标题。
  *
  * <p>命名词库的元数据和词条都经 {@link DictionaryCollectionsStore}；导入和导出走系统文件选择器（SAF），不申请存储权限。导入来源对话框只列 client-services 实际接受的格式。
  */
@@ -54,6 +55,8 @@ public final class LexiconPage extends ReloadingDetailPage {
     private record Model(DictionaryCollectionsStore.View view, long builtinCount, boolean learning, String failure) {}
 
     @Nullable private Model model;
+    @Nullable private JSONObject updateStatus;
+    private int updateGeneration;
     @Nullable private List<CommunityCatalog.Item> discover;
     @Nullable private String discoverFailure;
     /** 正在进行的导入所选的格式；文件名推不出格式时用它。 */
@@ -70,6 +73,7 @@ public final class LexiconPage extends ReloadingDetailPage {
     }
 
     @Override protected void onInitialReloadScheduled() {
+        updateDictionary("status", null);
         loadDiscover();
     }
 
@@ -78,6 +82,7 @@ public final class LexiconPage extends ReloadingDetailPage {
     }
 
     @Override protected void onContentDestroyed() {
+        updateGeneration++;
         installing.clear();
     }
 
@@ -93,6 +98,21 @@ public final class LexiconPage extends ReloadingDetailPage {
             model = result;
             render();
             if (flush) MsToast.show(requireContext(), result.failure().isEmpty() ? "已刷新" : result.failure());
+        });
+    }
+
+    private void updateDictionary(String command, Boolean enabled) {
+        final int generation = ++updateGeneration;
+        HostTask.run(this, context -> DictionaryUpdates.request(context, command, enabled), result -> {
+            if (generation != updateGeneration) return;
+            updateStatus = result;
+            if (model != null) render();
+            if (result != null && ("checking".equals(result.optString("phase")) || "downloading".equals(result.optString("phase")))) {
+                View view = getView();
+                if (view != null) view.postDelayed(() -> {
+                    if (getView() == view && generation == updateGeneration) updateDictionary("status", null);
+                }, 2000);
+            }
         });
     }
 
@@ -129,6 +149,7 @@ public final class LexiconPage extends ReloadingDetailPage {
         target.removeAllViews();
 
         GroupCard installed = GroupCard.add(sectionColumn(target, "已安装"), "已安装").withDividers(58);
+        installed.headerAction(manageButton(context));
         String builtinCount = current.builtinCount() < 0 ? null
             : NumberPolicy.groupedCount(current.builtinCount());
         installed.addView(KeyboardSheets.badgeNavRow(context, "汉", "拼音词库", builtinCount, "已启用",
@@ -145,15 +166,15 @@ public final class LexiconPage extends ReloadingDetailPage {
         installed.footer("点进词库可以启用、停用和编辑词条。已启用的词库会一起参与候选。");
         if (!current.failure().isEmpty()) installed.note(current.failure());
 
-        GroupCard manage = GroupCard.add(sectionColumn(target, "已安装"), null).withDividers(58);
-        manage.addView(KeyboardSheets.actionRow(context, "+", "新建词库", this::showCreateDialog,
-            28, 0, Ui.ROW_GAP));
-        manage.addView(KeyboardSheets.actionRow(context, "⇪", "导入词库", this::showImportSources,
-            28, 0, Ui.ROW_GAP));
-        manage.addView(KeyboardSheets.actionRow(context, "↦", "导出词库", this::startExport,
-            28, 0, Ui.ROW_GAP));
-        manage.addView(KeyboardSheets.actionRow(context, "↻", "刷新词库", () -> reload(true),
-            28, 0, Ui.ROW_GAP));
+        GroupCard updates = GroupCard.add(sectionColumn(target, "已安装"), "词库更新");
+        updates.toggle("自动更新词库", "每天检查兼容的词库版本", updateStatus == null || updateStatus.optBoolean("enabled", true),
+            enabled -> updateDictionary("configure", enabled));
+        updates.note(DictionaryUpdates.message(updateStatus));
+        boolean updating = updateStatus != null && ("checking".equals(updateStatus.optString("phase")) || "downloading".equals(updateStatus.optString("phase")));
+        updates.nav("检查词库更新", null, null, () -> updateDictionary("check", null)).setEnabled(!updating);
+        if (updateStatus != null && updateStatus.optBoolean("can_rollback")) {
+            updates.nav("恢复上一版词库", "恢复后关闭自动更新，下次启动生效", null, () -> updateDictionary("rollback", null)).setEnabled(!updating);
+        }
 
         GroupCard community = GroupCard.add(sectionColumn(target, "社区"), "发现词库").withDividers(58);
         List<CommunityCatalog.Item> items = discover;
@@ -167,6 +188,8 @@ public final class LexiconPage extends ReloadingDetailPage {
         // 这里只列前几个，完整列表（搜索、详情、举报）压在词库页上面，返回回到这里。
         community.nav("浏览更多词库", "搜索社区里的全部词库", null,
             () -> CommunityFragment.browse(context, CommunityRequest.Kind.DICTIONARY));
+        community.nav("提交缺失词条", "前往官网填写，审核后随公共词库更新；个人学习不会自动公开", null,
+            () -> AboutPage.openLink(context, "https://msime.app/words/"));
 
         GroupCard learning = GroupCard.add(sectionColumn(target, "学习"), "学习");
         InputFeatureToggle toggle = InputFeatureToggle.LEARNING;
@@ -179,7 +202,35 @@ public final class LexiconPage extends ReloadingDetailPage {
         }
     }
 
-    /** 第一次读就失败时页面上什么数据也没有；刷新入口在管理卡片里，这里单独留一张卡片给它，不让页面空着没法重试。 */
+    /** 已安装词库的低频管理动作：放在标题旁的菜单，避免四行操作卡片挤占列表空间。 */
+    private View manageButton(Context context) {
+        TextView button = HomeButtonPolicy.tonalButton(context, "管理", "词库管理", 500);
+        ViewPolicy.bindClick(button, () -> showManageMenu(button));
+        return button;
+    }
+
+    private void showManageMenu(View anchor) {
+        PopupMenu menu = new PopupMenu(requireContext(), anchor);
+        menu.getMenu().add("新建词库").setOnMenuItemClickListener(item -> {
+            showCreateDialog();
+            return true;
+        });
+        menu.getMenu().add("导入词库").setOnMenuItemClickListener(item -> {
+            showImportSources();
+            return true;
+        });
+        menu.getMenu().add("刷新词库").setOnMenuItemClickListener(item -> {
+            reload(true);
+            return true;
+        });
+        menu.getMenu().add("导出词库").setOnMenuItemClickListener(item -> {
+            startExport();
+            return true;
+        });
+        menu.show();
+    }
+
+    /** 第一次读就失败时页面上什么数据也没有；正常页面的刷新入口在管理菜单里，这里单独留一张卡片给它，不让页面空着没法重试。 */
     private void renderUnavailable() {
         LinearLayout target = contentColumn();
         if (target == null) return;

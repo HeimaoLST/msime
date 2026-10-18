@@ -4,9 +4,9 @@
 
 ## 页面
 
-侧栏的 16 个页面分成 6 组，依次是打字（输入方案、输入习惯、按键、词库）、外观（主题、候选窗口、悬浮工具栏）、更多输入方式（屏幕键盘与手写、语音输入）、工具（剪贴板、打字统计、插件、AI 辅助）、账号（账号与同步）、支持（维护与诊断、关于），每组以组名开头。分组与顺序和共享设置界面的桌面侧栏一致，即 `settingsNavGroups`（`packages/ui/src/settings/settings-page-registry.ts`）去掉 `desktopMergedPages` 并进「关于」的「帮助与反馈」，定义在 `SettingsNavigation.h`，由 `tests/ui/settings_navigation.cpp` 核对，并对照共享路由词表检查；组名和页名在 `main.cpp` 中。手写设置只有一个打开面板的按钮，与共享设置界面的 `handwritingOnScreenKeyboardPage` 一样并进屏幕键盘页，那一页在提供手写的版本里叫「屏幕键盘与手写」，在不提供手写的版本（日文、越南文、藏文）里仍叫「屏幕键盘」、不画手写那一组；`handwriting` 路由打开这一页，不提供手写的版本打开默认页。
+侧栏的 17 个页面分成 6 组，依次是打字（输入方案、输入习惯、按键、词库）、外观（主题、候选窗口、悬浮工具栏）、更多输入方式（屏幕键盘与手写、语音输入）、工具（剪贴板、AI 辅助、AI 助手、插件、打字统计）、账号（账号与同步）、支持（维护与诊断、关于），每组以组名开头。分组与顺序和共享设置界面的桌面侧栏一致，即 `settingsNavGroups`（`packages/ui/src/settings/settings-page-registry.ts`）去掉 `desktopMergedPages` 并进「关于」的「帮助与反馈」，定义在 `SettingsNavigation.h`，由 `tests/ui/settings_navigation.cpp` 核对，并对照共享路由词表检查；组名和页名在 `main.cpp` 中。手写设置只有一个打开面板的按钮，与共享设置界面的 `handwritingOnScreenKeyboardPage` 一样并进屏幕键盘页，那一页在提供手写的版本里叫「屏幕键盘与手写」，在不提供手写的版本（日文、越南文、藏文）里仍叫「屏幕键盘」、不画手写那一组；`handwriting` 路由打开这一页，不提供手写的版本打开默认页。
 
-- 全部 16 个页面都在本窗口中原生绘制，没有交给共享应用的设置页。
+- 全部 17 个页面都在本窗口中原生绘制，没有交给共享应用的设置页。
 - 账号与同步不跳共享应用：「账号与同步」页照共享账号页（`packages/ui/src/account/account-page.tsx`）的桌面那一支画出来，Windows 上没有 App 图标、「我的设计」和「关于」一组。没登录时是登录卡片：「使用 Google 登录」（服务端开着 Google 时；等待浏览器时按钮写「正在等待浏览器完成 Google 登录…」，下面是「取消 Google 登录」）、「邮箱登录」「手机号登录」；两个恢复动作只在出问题时出现，与共享页相同：没有可用的登录方式（读失败或一个都没开）时给「刷新登录方式」，读不出本机登录状态（`status` 失败）时给「清除失效登录状态」；选了邮箱或手机号后是号码输入框、「获取验证码」（发出后 60 秒内显示「N 秒后可重新发送」）、6 位验证码和「登录」（过期时写「验证码已过期，请重新获取」）、「取消」。登录后是资料卡片（头像、昵称和邮箱），点开「编辑资料」对话框：点头像用系统打开对话框选 1 MiB 以内的 PNG 或 JPEG 更换、「移除头像」（只对上传的头像）、社区昵称（首尾空白去掉、最多 64 个字符、不含控制字符）、账号 ID（点按复制，显示「已复制」）、邮箱、登录方式和加入日期，「保存修改」保存昵称；然后是「设置同步」卡片（刷新云端设置、上传本机设置、下载并应用云端设置，后两个先确认，只同步各平台共有的输入设置，应用后本窗口重读设置）、「云端」一组（云剪贴板，面板仍由 `MSIME.exe` 显示；云词库的入口只在「词库」页）、「我的内容」一组（我发布的 / 收藏的词库和回复模板，在本页打开社区词库与回复模板，见下）和「账号」一组（退出登录、退出所有设备、注销账号，后两个先确认）。所有操作经 `msime_client_account`，用共享应用和输入法读的同一份会话文件 `%LOCALAPPDATA%\<本版本的用户目录>\account\account-session.json`，旧版本放在 `%LOCALAPPDATA%\<本版本的 Tauri identifier>` 的会话第一次用到时搬过来；Google 登录由 Rust 监听回环端口并用系统浏览器打开授权页，离开页面或关闭窗口时结束等待。除读状态和取消 Google 登录外都在工作线程上进行，每次进入页面重新读状态。头像经 `avatar` 取成 data: 地址在本窗口解码，不加载远程图片。文案、昵称校验、错误码的说法、验证码和日期规则在 `AccountPageModel.h`，由 `tests/ui/account_page_model.cpp` 核对。 登录后在「设置同步」之后是「绑定 QQ 群助手」（共享页的 `qq-link-card.tsx`）：8 位绑定码（去掉空白和连字符后正好 8 位数字才能点「绑定」，回车也能绑定）、已有绑定的「绑定于 时间」和「解绑」，经 `msime_client_account` 的 `qq_links`、`qq_link_redeem`、`qq_link_delete`，绑定失败的说法在 `AccountPageModel.h` 的 `qq_link_message`。
 - 本窗口没有单独的社区页：社区皮肤是本窗口「主题」页的「社区皮肤」标签，社区插件是「插件」页的「社区插件」标签（见下），`community` 路由打开本窗口的「主题」页。社区的词库与回复模板也不跳共享应用：账号页「我的内容」的四行在「账号与同步」页里换上共享应用在 Windows 上的社区页（`packages/ui/src/community/community-resources.tsx` 的 `CommunityHomePage`，没有皮肤画廊时只有「词库」「回复模板」两个分类），停在那一行的分类和范围上（我发布的是「我的作品」，收藏的是「收藏」），顶上的「账号与同步」回到本页，离开本页时卸下。图库有搜索、「全部 / 收藏 / 我的作品」、卡片和「加载更多」；详情里词库是词条预览、「导入这版词库到本机」（按词条类型分组，以标准格式经 `msime_client_settings_dictionary` 导入本机词库，与共享应用的 `dictionary_request` 相同；Windows 没有命名词库）和「导入这版词库到云端」，回复模板是提示词预览（桌面没有「高情商回复」键盘，不能添加到键盘）；之后是收藏、评分、举报，作者「编辑并发布新版本」和「下架作品」。「发布作品」对话框照 `ResourceEditor`：名称、说明、权利确认（新版本不要），回复模板的提示词（最多 2000 字），词库的词条表单（类型、编码、词语、权重，最多 128 条，不能重复）。社区操作经 `msime_client_community`，都在工作线程上；文案和规则在 `CommunityPageModel.h`，由 `tests/ui/community_page_model.cpp` 核对。社区是作品库，不是设置。AI 对话是 AI 辅助的子页，Windows 的设置应用不提供它（宿主没有 `chat`，共享页因此不显示「AI 对话」一组），`chat` 路由打开「AI 辅助」。
 - 帮助与反馈并进「关于」：与共享桌面侧栏一样没有单独的「帮助与反馈」页，`help`、`feedback` 路由（托盘和工具栏菜单的「使用帮助」「问题反馈」）打开「关于」，「关于」在「版本与更新」之后、「许可与隐私」之前画帮助、问题报告和反馈渠道（`build_feedback_sections`，对应共享页的 `FeedbackSections`）。本窗口没有子页，共享页「帮助」子页的内容直接画在「关于」里，所以这一页比共享页长：它是共享「帮助」页（`packages/ui/src/settings/help-settings-page.tsx`）在 Windows 上的内容，文案取 `settings/platform-copy.ts` 的 Windows 分支，「完整文档」用默认浏览器打开 https://msime.app/docs/。
@@ -76,7 +76,7 @@
 
 ## 连接 AI 助手
 
-「维护与诊断」页的「连接 AI 助手」即共享设置页的同名区块：通过 `msime_client_mcp_status` 和 `msime_client_mcp_install` 显示与 `msime-client-settings.exe` 同目录的 `msime-mcp.exe`、可复制的 MCP 配置，并把它写入 Claude Desktop 或 Cursor 的配置文件。服务器指向的运行时选项取自 Server 注入的 `MSIME_CLIENT_HOST_OPTIONS`，直接启动时取 Server 状态目录（`resolve_state_directory()`，不是 `preferences_directory`）下的 `runtime-options.json`，也就是 Server 启动时读的那一份；两者都没有时说明输入法尚未初始化，不提供配置。写入逻辑与 Tauri 外壳共用 host-api 的 `mcp_clients`。
+「AI 助手」页的「连接 AI 助手」即共享设置页的同名区块：通过 `msime_client_mcp_status` 和 `msime_client_mcp_install` 显示与 `msime-client-settings.exe` 同目录的 `msime-mcp.exe`、可复制的 MCP 配置，并把它写入 Claude Desktop 或 Cursor 的配置文件。服务器指向的运行时选项取自 Server 注入的 `MSIME_CLIENT_HOST_OPTIONS`，直接启动时取 Server 状态目录（`resolve_state_directory()`，不是 `preferences_directory`）下的 `runtime-options.json`，也就是 Server 启动时读的那一份；两者都没有时说明输入法尚未初始化，不提供配置。写入逻辑与 Tauri 外壳共用 host-api 的 `mcp_clients`。
 
 ## 与共享应用的分工
 
@@ -96,7 +96,7 @@ Windows App SDK 版本由 `WindowsAppSDKVersion` 属性控制，默认值与项�
 
 ## 界面验收
 
-`CI (platforms)` 的 `Windows native settings` 编译并链接本工程与真实 host-api DLL，再运行 `tests/tools/settings_ui.ps1`。脚本使从真实 host-api DLL 取得完整默认偏好，用独立合成状态，通过 UI Automation 访问全部 16 页，在浅色、深色及 800／1000 宽窗口下保存截图，产物为 `windows-native-settings-screenshots`。本机也可对构建好的宿主运行：
+`CI (platforms)` 的 `Windows native settings` 编译并链接本工程与真实 host-api DLL，再运行 `tests/tools/settings_ui.ps1`。脚本使从真实 host-api DLL 取得完整默认偏好，用独立合成状态，通过 UI Automation 访问全部 17 页，在浅色、深色及 800／1000 宽窗口下保存截图，产物为 `windows-native-settings-screenshots`。本机也可对构建好的宿主运行：
 
 ```powershell
 powershell -NoProfile -File platforms/windows/tests/tools/settings_ui.ps1 `

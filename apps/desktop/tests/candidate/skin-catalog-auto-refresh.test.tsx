@@ -10,6 +10,7 @@ import {
   render,
   renderHook,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react";
 import {
@@ -19,12 +20,9 @@ import {
   type SkinCatalog,
   type Snapshot,
 } from "@msime/ui";
+import { offeredThemeCatalog } from "../../../../packages/ui/src/theme/global-theme";
 import { useSkinCatalog } from "../../../../packages/ui/src/skin/external-skins";
 import { notifySkinCatalogChanged } from "../../../../packages/ui/src/skin/skin-catalog-changes";
-import { offeredThemeCatalog } from "../../../../packages/ui/src/theme/global-theme";
-
-// 这里渲染的设置页不带宿主信息，轮播不列只在 iOS 提供的「原生」。
-const themeCatalog = offeredThemeCatalog(undefined);
 
 const renderSkinPreview = vi.hoisted(() => vi.fn());
 vi.mock("../../../../packages/ui/src/skin/skin-preview-render", () => ({
@@ -134,9 +132,14 @@ function communityClient(installed: () => void): CandidateSkinCommunityClient {
   };
 }
 
-test("installing from the community gallery lists the skin on 我的皮肤 without a manual refresh", async () => {
+test("installing from the community gallery lists the skin on 本地皮肤 without a manual refresh", async () => {
   let directory = catalog([]);
   const scan = vi.fn(async () => directory);
+  const detail = deferred<CommunityCandidateSkin>();
+  const community = communityClient(() => {
+    directory = catalog(["ink-wash"]);
+  });
+  community.detail = vi.fn(() => detail.promise);
   render(
     <SettingsPage
       initialPage="skin"
@@ -145,9 +148,7 @@ test("installing from the community gallery lists the skin on 我的皮肤 witho
         save: vi.fn(),
         host: testHost({ platform: "windows" }),
         scanSkinCatalog: scan,
-        communityCandidateSkins: communityClient(() => {
-          directory = catalog(["ink-wash"]);
-        }),
+        communityCandidateSkins: community,
       }}
     />,
   );
@@ -156,13 +157,21 @@ test("installing from the community gallery lists the skin on 我的皮肤 witho
   fireEvent.click(within(tabs).getByRole("tab", { name: "社区皮肤" }));
   fireEvent.click(await screen.findByRole("button", { name: "查看候选窗口皮肤 水墨" }));
   await screen.findByRole("heading", { name: "水墨" });
+  const install = screen.getByRole<HTMLButtonElement>("button", { name: "一键安装" });
+  expect(install.disabled).toBe(true);
+  fireEvent.click(install);
+  expect(community.install).not.toHaveBeenCalled();
+  await act(async () => detail.resolve(communitySkin));
+  await waitFor(() => expect(install.disabled).toBe(false));
   const scansBeforeInstall = scan.mock.calls.length;
-  fireEvent.click(screen.getByRole("button", { name: "一键安装" }));
+  fireEvent.click(install);
   expect(await screen.findByText("已安装到外部皮肤。")).toBeTruthy();
-  await settle();
   // 安装前图库查一次是否会覆盖同名皮肤；装入后的通知让隐藏着的主题页再扫一次。
-  expect(scan.mock.calls.length).toBe(scansBeforeInstall + 2);
-  fireEvent.click(within(tabs).getByRole("tab", { name: "我的皮肤" }));
+  await waitFor(() => expect(scan.mock.calls.length).toBe(scansBeforeInstall + 2));
+  fireEvent.click(screen.getByRole("button", { name: "去启用" }));
+  expect(within(tabs).getByRole("tab", { name: "本地皮肤" }).getAttribute("aria-selected")).toBe(
+    "true",
+  );
   expect(await screen.findByRole("article", { name: "本地 ink-wash" })).toBeTruthy();
   expect(screen.queryByText("没有发现外部皮肤。")).toBeNull();
 });
@@ -265,6 +274,7 @@ test("a rescan that adds a skin keeps the carousel on the card being viewed", as
       }}
     />,
   );
+  fireEvent.click(await screen.findByRole("tab", { name: "本地皮肤" }));
   await screen.findByRole("article", { name: "本地 sample" });
   const carousel = screen.getByRole("region", { name: "主题列表" });
   fireEvent.click(within(carousel).getByRole("button", { name: "查看本地 sample" }));
@@ -279,6 +289,6 @@ test("a rescan that adds a skin keeps the carousel on the card being viewed", as
   act(() => notifySkinCatalogChanged());
   await screen.findByRole("article", { name: "本地 added" });
   expect(current()).toBe("查看本地 sample");
-  const total = themeCatalog.length + 2;
+  const total = offeredThemeCatalog(undefined).length + 2;
   expect(within(carousel).getByText(`${total} / ${total}`)).toBeTruthy();
 });

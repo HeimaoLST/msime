@@ -6,8 +6,10 @@ enum KeyboardPreviewTopStrip: Equatable {
   case candidates
   /// 空闲时的工具栏：品牌圆片，依次是这些项目，最后是收起箭头。
   case toolbar([KeyboardPreviewToolbarItem])
-  /// 完全不画顶栏。
+  /// 完全不画顶栏，用于不需要保留键盘高度的预览。
   case hidden
+  /// 不画工具栏内容，但保留 iOS 键盘稳定高度所需的顶栏空间。
+  case reserved
 }
 
 /// 键盘预览里的一个工具栏按钮。图标与键盘自己的工具栏一致；字符类项目画单个字符而不是符号。
@@ -70,6 +72,7 @@ struct KeyboardSkinPreview: View {
     case .candidates: 260
     case .toolbar: 292
     case .hidden: 234
+    case .reserved: 292
     }
   }
 
@@ -98,6 +101,7 @@ struct KeyboardSkinPreview: View {
     case .candidates: candidateStrip
     case .toolbar(let items): toolbarStrip(items)
     case .hidden: EmptyView()
+    case .reserved: Color.clear.frame(height: 46)
     }
   }
 

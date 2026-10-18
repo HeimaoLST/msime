@@ -31,6 +31,7 @@ fn settings_deep_link_names_a_category() {
     for (argument, category) in [
         ("settings:expression", SettingsCategory::Expression),
         ("settings:developer", SettingsCategory::Developer),
+        ("settings:mcp", SettingsCategory::Mcp),
         ("settings:plugins", SettingsCategory::Plugins),
     ] {
         assert_eq!(

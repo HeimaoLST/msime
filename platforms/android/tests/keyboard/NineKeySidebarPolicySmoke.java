@@ -11,8 +11,9 @@ public final class NineKeySidebarPolicySmoke {
         layerChoice();
         rowHeight();
         parsing();
+        choices();
         localSetting();
-        System.out.println("Android nine-key sidebar: defaults, layer row heights, custom symbol parsing and the local setting passed");
+        System.out.println("Android nine-key sidebar: defaults, layer row heights, symbol choices, custom symbol parsing and the local setting passed");
     }
 
     /** 哪个键面用哪张表：数字键面换成算式符号那张，字母键面不变。 */
@@ -48,7 +49,7 @@ public final class NineKeySidebarPolicySmoke {
 
     private static void rowHeight() {
         int digitRows = NineKeySidebarPolicy.DIGIT_VISIBLE_ROWS;
-        check(NineKeySidebarPolicy.rowHeight(300, 14, 28, digitRows) == 75, "the digit rail shows all four default arithmetic operators");
+        check(NineKeySidebarPolicy.rowHeight(300, 14, 28, digitRows) == 60, "the digit rail shows five symbols before scrolling");
         check(NineKeySidebarPolicy.rowHeight(300, 2, 28, digitRows) == 150, "a short custom digit table fills the rail");
         check(NineKeySidebarPolicy.rowHeight(60, 14, 28, digitRows) == 30, "a compact digit rail respects the minimum height");
         check(NineKeySidebarPolicy.rowHeight(500, 9, 28) == 100, "five rows share a full rail");
@@ -79,6 +80,16 @@ public final class NineKeySidebarPolicySmoke {
             "an invalid stored table falls back to the defaults");
         check("a b".equals(NineKeySidebarPolicy.summary(List.of("a", "b"), 4)), "a short table is listed whole");
         check("a b 等 3 个".equals(NineKeySidebarPolicy.summary(List.of("a", "b", "c"), 2)), "a long table is summarised");
+    }
+
+    private static void choices() {
+        check(NineKeySidebarPolicy.addableSymbols(List.of("，", "……")).get(0).equals("。"),
+            "symbol choices keep their stable order and omit selected values");
+        check(NineKeySidebarPolicy.addableSymbols(NineKeySidebarPolicy.ADDABLE_SYMBOLS).isEmpty(),
+            "all fixed choices can be exhausted");
+        check(NineKeySidebarPolicy.ADDABLE_SYMBOLS.stream().allMatch(symbol ->
+            NineKeySidebarPolicy.parse(symbol) != null && NineKeySidebarPolicy.parse(symbol).size() == 1),
+            "every fixed choice is a valid single symbol");
     }
 
     private static void localSetting() {

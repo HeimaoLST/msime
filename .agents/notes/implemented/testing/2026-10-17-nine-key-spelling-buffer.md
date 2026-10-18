@@ -22,11 +22,11 @@ Status: implemented
 
 ## Verification
 
-旧实现上的 `refresh_reuses_spelling_vector_storage` 在固定合成输入 `64426` 的第二次刷新中指针不同而失败；新实现指针和容量均保持不变。冻结九键投影刷新在同一场景的分配对照由旧 1708、新 666 调整为复用主读音缓冲后少 2 次，回归断言同步更新。九键模块 140 项、完整引擎库 2260 项（40 项既有忽略）、golden 31 项和 runtime 318 项通过；Clippy、格式、`git diff --check` 与 `pnpm --config.verify-deps-before-run=false run verify-notes` 通过。
+旧实现上的 `refresh_reuses_spelling_vector_storage` 在固定合成输入 `64426` 的第二次刷新中指针不同而失败；新实现指针和容量均保持不变。冻结九键投影刷新在同一场景的分配对照由旧 1708、新 666 调整为复用主读音缓冲后少 2 次；本次读音字符串槽位再少 3 次，更新为旧 1708、新 662，回归断言同步更新。新增冻结对照覆盖九键、14 键和九键双拼的不同输入长度、空结果、非法输入、锁定长度和切分位置；字符串热查询从 16/21/4 次降为 0。九键模块 140 项、完整引擎库 2260 项（40 项既有忽略）、golden 31 项和 runtime 318 项通过；Clippy、格式、`git diff --check` 与 `pnpm --config.verify-deps-before-run=false run verify-notes` 通过。
 
 `TMPDIR=/Volumes/Workspace/tmp/msime CARGO_BUILD_JOBS=4 MSIME_BUILD_JOBS=4 bash scripts/verify-local.sh --quick` 通过：Rust workspace、Android target、WASM、Android Java、macOS、共享 Apple bridge 和 pipe-only 配置（按环境跳过）检查完成。
 
 ## Consequences
 
-九键热刷新保留读音字符串槽位，减少主读音列表的重复向量申请；空结果仍清空已有缓冲，不增加常驻状态。独立的 `spellings_for` 测试入口仍返回拥有型向量。这里声明的是 Rust 容器容量复用，不推导词典查询、RSS 或端到端设备延迟收益。
+九键热刷新保留读音字符串槽位，减少主读音列表的重复向量申请；暖查询继续在同一 `Vec<String>` 槽位内覆写文本，避免每条读音再次克隆。空结果仍清空已有缓冲，不增加常驻状态。独立的 `spellings_for` 测试入口仍返回拥有型向量。这里声明的是 Rust 容器容量复用，不推导词典查询、RSS 或端到端设备延迟收益。
 

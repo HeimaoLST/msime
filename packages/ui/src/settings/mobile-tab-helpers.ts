@@ -44,6 +44,7 @@ export function mobilePageTitle(id: string, title: string): string {
   if (id === "appearance") return "候选栏";
   if (id === "screen-keyboard") return "键盘";
   if (id === "developer") return "开发者选项";
+  if (id === "mcp") return "连接 AI 助手";
   if (id === "feedback") return "反馈";
   return title;
 }

@@ -81,6 +81,7 @@ struct MetasequoiaImeApp: App {
       Task.detached(priority: .utility) { UsageReporting.flush() }
       // 与 Android 的 `HomeActivity.onResume` 相同：回到前台时按节流决定要不要跑一轮云同步。
       CloudSync.shared.onActive()
+      Task.detached(priority: .utility) { _ = try? MetasequoiaInputSessionBridge.dictionaryUpdates("automatic") }
       // 打开了「上传到云端」时补传打字统计，十分钟内只真正发一次（节流在共享层）。
       Task.detached(priority: .utility) { await TypingUpload.shared.onActive() }
     }
@@ -310,7 +311,7 @@ private struct MainTabView: View {
     }
     .sheet(isPresented: $navigation.recordsVoice) {
       NavigationView {
-        ServiceSettingsView(kind: .voice)
+        ServiceSettingsView(kind: .voice, autoStartVoice: true)
           .toolbar {
             ToolbarItem(placement: .confirmationAction) { Button("完成") { navigation.recordsVoice = false } }
           }

@@ -34,14 +34,14 @@ import { settingsInputPreferences } from "./settings/settings-input-preferences"
 import { aiSettingsPreferences } from "./settings/ai-settings-preferences";
 import { diagnosticLogPreferences } from "./settings/diagnostic-log-preferences";
 import { clipboardHistoryEnabled } from "./settings/clipboard-history-preferences";
-import {
-  hostDrawnCustomTheme,
-  settingsThemePreferences,
-} from "./settings/settings-theme-preferences";
+import { useSettingsThemePreviews } from "./settings/use-settings-theme-previews";
 
-import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 export type {
   DictionaryEntry,
+  DictionaryLookupEntry,
+  DictionaryLookupKind,
+  ResourceDictionaryKind,
   DictionaryPageFormat,
   LocalDictionaryFormat,
   LocalDictionaryKind,
@@ -137,7 +137,7 @@ import { useWindowState } from "./settings/use-window-state";
 import { useAppVersion } from "./settings/use-app-version";
 import { supportDiagnostics } from "./settings/support-diagnostics";
 import { useMountedRef } from "./settings/use-mounted-ref";
-import { useCustomHelpcodeSchemas, useHelpcodePacks } from "./settings/use-helpcode-catalog";
+import { useHelpcodeCatalog } from "./settings/use-helpcode-catalog";
 export {
   useProviderCredentials,
   type ProviderCredentialBusy,
@@ -178,6 +178,12 @@ export {
   useSettingsNavigation,
   type SettingsNavigationOptions,
 } from "./settings/use-settings-navigation";
+export {
+  useSettingsThemePreviews,
+  type SettingsThemePreviews,
+  type SettingsThemePreviewSource,
+  type UseSettingsThemePreviewsOptions,
+} from "./settings/use-settings-theme-previews";
 export { useSettingsContentScrollReset } from "./settings/use-settings-content-scroll-reset";
 export { useUpdateCheck, type UseUpdateCheckOptions } from "./settings/use-update-check";
 export type {
@@ -376,7 +382,12 @@ export {
   type UseSettingsWindowInteractionsOptions,
 } from "./settings/use-settings-window-interactions";
 export { useAppVersion, type UseAppVersionOptions } from "./settings/use-app-version";
-export { useCustomHelpcodeSchemas, useHelpcodePacks } from "./settings/use-helpcode-catalog";
+export {
+  useCustomHelpcodeSchemas,
+  useHelpcodeCatalog,
+  useHelpcodePacks,
+  type UseHelpcodeCatalogOptions,
+} from "./settings/use-helpcode-catalog";
 export {
   supportDiagnostics,
   type SupportDiagnosticsHost,
@@ -389,14 +400,12 @@ export {
   type WindowResizeBounds,
   type WindowResizePoint,
 } from "./settings/window-resize";
-import { useCandidatePreviewTheme } from "./candidate/candidate-preview-theme";
 export {
   settingsCapabilities,
   type SettingsCapabilitiesInput,
 } from "./settings/settings-capabilities";
 import { useAiAssistant } from "./settings/use-ai-assistant";
 export { useAiAssistant, type UseAiAssistantOptions } from "./settings/use-ai-assistant";
-import { type GlobalTheme } from "./theme/global-theme";
 export {
   candidatePaletteStyle,
   customCandidateStyle,
@@ -469,6 +478,7 @@ import { InputSettingsPage } from "./settings/pages/input-page";
 import { ExpressionSettingsPage } from "./settings/pages/expression-page";
 import { DeveloperSettingsPage, McpSettingsPage } from "./settings/pages/developer-page";
 import { DictionarySettingsPage } from "./settings/pages/dictionary-page";
+import type { DictionaryTab } from "./settings/dictionary-tabs";
 import { AppearanceSettingsPage } from "./settings/pages/appearance-page";
 import { SkinSettingsPage } from "./settings/pages/skin-page";
 import { useCommunityGalleryNavigation } from "./settings/use-community-gallery-navigation";
@@ -918,6 +928,7 @@ export { themeModeOptions } from "./settings/theme-mode-options";
 export { candidateTabs, type CandidateTab } from "./settings/candidate-tabs";
 export { expressionTabs, type ExpressionTab } from "./settings/expression-tabs";
 export { inputTabs, type InputTab } from "./settings/input-tabs";
+export { dictionaryTabs, type DictionaryTab } from "./settings/dictionary-tabs";
 export {
   CandidateFollowCursorSection,
   type CandidateFollowCursorSectionProps,
@@ -2004,6 +2015,18 @@ type SettingsPageProps = {
 
 // The state, effects and handlers behind the settings window. The shell below and every page component read the same values - the pages through `SettingsFormContext` - so splitting the page into files changed where the markup lives, not what it closes over.
 function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps) {
+  useEffect(() => {
+    const automatic = () => {
+      void client.dictionary?.updates?.("automatic").catch(() => undefined);
+    };
+    automatic();
+    window.addEventListener("focus", automatic);
+    const timer = setInterval(automatic, 60 * 60 * 1000);
+    return () => {
+      window.removeEventListener("focus", automatic);
+      clearInterval(timer);
+    };
+  }, [client.dictionary?.updates]);
   const { confirm, confirmation } = useConfirm();
   const {
     host,
@@ -2135,6 +2158,10 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     requestedSettingsPage,
     setPage,
     page,
+    dictionaryTab,
+    setDictionaryTab,
+    aboutTab,
+    setAboutTab,
     accountLoginReturnPage,
     setAccountLoginReturnPage,
     mobileLastPageByTab,
@@ -2150,17 +2177,11 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     readAppVersion: client.readAppVersion,
     fallbackVersion: fallbackAppVersion,
   });
-  const customHelpcodeSchemas = useCustomHelpcodeSchemas(client.listHelpcodeSchemas);
-  const [helpcodeCatalogRevision, setHelpcodeCatalogRevision] = useState(0);
-  const refreshHelpcodePacks = useCallback(
-    () => setHelpcodeCatalogRevision((value) => value + 1),
-    [],
-  );
-  const helpcodePacks = useHelpcodePacks(
-    client.plugins?.catalog,
-    page === "input",
-    helpcodeCatalogRevision,
-  );
+  const { customHelpcodeSchemas, helpcodePacks, refreshHelpcodePacks } = useHelpcodeCatalog({
+    schemaReader: client.listHelpcodeSchemas,
+    catalog: client.plugins?.catalog,
+    inputPageOpen: page === "input",
+  });
   const {
     value: mobileKeyboardFeedback,
     busy: mobileKeyboardFeedbackBusy,
@@ -2203,9 +2224,6 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
   } = useDictionaryManager({ client, confirm });
   const mounted = useMountedRef();
   const windowMaximized = useWindowState({ client, setError });
-  const [skinPreviewThemes, setSkinPreviewThemes] = useState<
-    Partial<Record<GlobalTheme, "light" | "dark">>
-  >({});
   const [showTouchSkinEditor, setShowTouchSkinEditor] = useState(false);
   const {
     onPointerDown: beginTouchGeometryDrag,
@@ -2319,6 +2337,7 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     supported: updateCheckSupported,
   } = useUpdateCheck({
     checkUpdate: client.checkUpdate,
+    checkForApplicationUpdate: client.checkForApplicationUpdate,
     platform: client.host?.platform ?? null,
     edition: client.host?.edition?.id,
     arch: client.host?.arch,
@@ -2438,14 +2457,26 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
   });
   const providerPresetControls = createProviderPresetControl(client.openExternalUrl);
   const floatingToolbar = floatingToolbarPreferences(draft);
-  const { themeMode, settingsTheme, globalTheme, customColors, customTouchKeyboardSkin } =
-    settingsThemePreferences(draft, host?.platform, surfaceThemesFollow);
-  // 预览画的自定义主题只含宿主会读的槽位：桌面宿主不读编号色和边框色，存下的旧值不能在预览里画出来。只给预览用，不写回草稿。
-  const previewCustomTheme = hostDrawnCustomTheme(
-    draft?.custom_theme,
+  const {
+    themeMode,
+    settingsTheme,
+    globalTheme,
+    customColors,
+    customTouchKeyboardSkin,
+    skinPreviewThemes,
+    setSkinPreviewThemes,
+    candidatePreviewTheme,
+    toolbarPreviewTheme,
+    keyboardPreviewTheme,
+    previewCustomTheme,
+    customKeyboardSelected,
+  } = useSettingsThemePreviews({
+    draft,
+    platform: host?.platform,
+    surfaceThemesFollow,
     showCandidateNumberColor,
     showCandidateBorderColor,
-  );
+  });
   const dark = useSettingsTheme(themeMode, settingsTheme);
   // 两种 HarmonyOS 外观都用用户的应用主题（水杉四季或某个固定季节）着色；每种外观取哪些 token 由 `appThemeStyle` 决定。
   const resolvedAppTheme = useResolvedAppTheme(
@@ -2457,20 +2488,6 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     resolvedAppTheme,
     dark,
   );
-  const candidatePreviewTheme = useCandidatePreviewTheme(themeMode, draft?.candidate_theme);
-  // 各界面一律跟随颜色模式的宿主不读工具栏和屏幕键盘的单独明暗，预览也照颜色模式画。
-  const toolbarPreviewTheme = useCandidatePreviewTheme(
-    themeMode,
-    surfaceThemesFollow ? undefined : draft?.toolbar_theme,
-  );
-  const keyboardPreviewTheme = useCandidatePreviewTheme(
-    themeMode,
-    surfaceThemesFollow ? undefined : draft?.screen_keyboard_theme,
-  );
-  // A picker colour is part of the custom theme, so choosing one selects that theme; clearing one leaves the selection alone. Choosing one while another theme is selected customizes that theme: it becomes the custom theme's base, and a package, whose own base would replace it, is dropped.
-  // A custom theme without a keyboard design draws its base's keyboard, so the custom keyboard card is selected only when the theme carries one.
-  const customKeyboardSelected = globalTheme === "custom" && Boolean(draft?.custom_theme?.keyboard);
-  useEffect(() => setSkinPreviewThemes({}), [candidatePreviewTheme]);
   const {
     keySpacingTenths: touchKeySpacingTenths,
     rowSpacingTenths: touchRowSpacingTenths,
@@ -2529,7 +2546,7 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     hasMcp: Boolean(client.mcpServerStatus),
     mobileHiddenPageIds,
     mobilePageTitle,
-    desktopPageTitle: (id, title) => desktopPageTitle(id, title, client.host?.platform),
+    desktopPageTitle,
   });
   const {
     mobileActiveTab,
@@ -2543,7 +2560,7 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     mobileHiddenPageIds,
     availablePages,
     pageAliases,
-    page,
+    page: requestedSettingsPage,
     setPage,
     mobileLastPageByTab,
     route,
@@ -2691,6 +2708,11 @@ function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps)
     inputSourceStartup,
     dismissInputSourceStartup,
     page,
+    requestedSettingsPage,
+    dictionaryTab,
+    setDictionaryTab,
+    aboutTab,
+    setAboutTab,
     accountLoginReturnPage,
     settingsContentRef,
     communityDestination,
@@ -2915,6 +2937,8 @@ function SettingsShell(props: SettingsPageProps) {
     inputSourceStartup,
     dismissInputSourceStartup,
     page,
+    dictionaryTab,
+    setDictionaryTab,
     accountLoginReturnPage,
     settingsContentRef,
     communityDestination,
@@ -3015,17 +3039,23 @@ function SettingsShell(props: SettingsPageProps) {
   const recordCommunitySkin = (id: string) => {
     void client.typingStatistics?.recordSkin?.(id);
   };
-  const { skinTabs, phoneSkinCommunityShown, skinCommunityShown, pluginCommunityShown } =
-    useSettingsCommunityViews({
-      page,
-      mobile: mobilePlatform,
-      harmony: harmonyPlatform,
-      skinView,
-      pluginView,
-      hasCommunitySkins: Boolean(client.communitySkins),
-      hasCommunityCandidateSkins: Boolean(client.communityCandidateSkins),
-      hasCommunityPlugins: Boolean(client.communityPlugins),
-    });
+  const {
+    skinTabs,
+    desktopTabs: desktopSkinTabs,
+    phoneSkinCommunityShown,
+    skinCommunityShown,
+    pluginCommunityShown,
+  } = useSettingsCommunityViews({
+    page,
+    mobile: mobilePlatform,
+    harmony: harmonyPlatform,
+    skinView,
+    onSkinViewChange: setSkinView,
+    pluginView,
+    hasCommunitySkins: Boolean(client.communitySkins),
+    hasCommunityCandidateSkins: Boolean(client.communityCandidateSkins),
+    hasCommunityPlugins: Boolean(client.communityPlugins),
+  });
   const { onOpenPage } = createSettingsPageSelection({ selectPage });
   const statusActions = createSettingsStatusActions({
     recoverPreferences,
@@ -3128,20 +3158,9 @@ function SettingsShell(props: SettingsPageProps) {
               </div>
             )}
             {searchInSidebar && <label className={settings.sidebarSearch}>{navSearchField}</label>}
-            {shownSidebarGroups.map((group, index) => (
-              <div
-                key={group.pages[0].id}
-                className={settings.sidebarSection(index === 0)}
-                data-sidebar-section=""
-                role={group.title ? "group" : undefined}
-                aria-label={group.title}
-              >
-                {group.title && (
-                  <div className={settings.sidebarGroupTitle} aria-hidden="true">
-                    {group.title}
-                  </div>
-                )}
-                {group.pages.map((item) => (
+            <div className={settings.sidebarItems}>
+              {shownSidebarGroups.flatMap((group) =>
+                group.pages.map((item) => (
                   <NavItem
                     key={item.id}
                     label={item.title}
@@ -3150,15 +3169,15 @@ function SettingsShell(props: SettingsPageProps) {
                     controls="settings-content"
                     onSelect={() => selectPage(item.id)}
                   />
-                ))}
-              </div>
-            ))}
+                )),
+              )}
+            </div>
             {shownSidebarGroups.length === 0 && (
               <p className={settings.sidebarEmpty} role="status">
                 没有匹配的设置
               </p>
             )}
-            <p className={settings.previewLabel}>客户端预览版</p>
+            {!client.host && <p className={settings.previewLabel}>客户端预览版</p>}
           </nav>
           <main
             ref={settingsContentRef}
@@ -3311,13 +3330,18 @@ function SettingsShell(props: SettingsPageProps) {
                   onOpenCommunity={client.communityResources ? openCommunity : undefined}
                   communityHasSkins={Boolean(client.communitySkins)}
                   onOpenCloudDictionary={
-                    client.openCloudDictionary
+                    !mobilePlatform && client.cloudDictionary
                       ? () => {
-                          void client.openCloudDictionary!().catch(() =>
-                            setError("无法打开云词库，请重试。"),
-                          );
+                          selectPage("dictionary");
+                          setDictionaryTab("cloud");
                         }
-                      : undefined
+                      : client.openCloudDictionary && !macosPlatform
+                        ? () => {
+                            void client.openCloudDictionary!().catch(() =>
+                              setError("无法打开云词库，请重试。"),
+                            );
+                          }
+                        : undefined
                   }
                   // macOS opens the cloud clipboard only from the IME menu, which supplies the input session it pastes into.
                   onOpenCloudClipboard={
@@ -3468,30 +3492,7 @@ function SettingsShell(props: SettingsPageProps) {
                   openPanel={client.openVocabulary}
                 />
               )}
-              {page === "skin" && client.communityCandidateSkins && (
-                <div
-                  className={communityStyle.categoryTabsPair}
-                  role="tablist"
-                  aria-label="皮肤来源"
-                >
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={skinView === "mine"}
-                    onClick={() => setSkinView("mine")}
-                  >
-                    我的皮肤
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={skinView === "community"}
-                    onClick={() => setSkinView("community")}
-                  >
-                    社区皮肤
-                  </button>
-                </div>
-              )}
+              {page === "skin" && desktopSkinTabs.tabList}
               {page === "skin" && skinTabs.tabList}
               {phoneSkinCommunityShown && client.communitySkins && (
                 <div className="mt-6">
@@ -3514,19 +3515,22 @@ function SettingsShell(props: SettingsPageProps) {
                   )}
                 </div>
               )}
-              {skinCommunityShown && client.communityCandidateSkins && (
-                <div className="mt-4">
-                  <CommunityPage
-                    candidateSkins={client.communityCandidateSkins}
-                    localSkins={client.scanSkinCatalog}
-                    openSkinDirectory={client.openSkinDirectory}
-                    readSkinImage={client.readSkinImage}
-                    onOpenSkinPage={() => setSkinView("mine")}
-                    theme={keyboardPreviewTheme}
-                    onLogin={openAccountLogin}
-                  />
-                </div>
-              )}
+              {skinCommunityShown &&
+                client.communityCandidateSkins &&
+                desktopSkinTabs.panel(
+                  "community",
+                  <div className="mt-4">
+                    <CommunityPage
+                      candidateSkins={client.communityCandidateSkins}
+                      localSkins={client.scanSkinCatalog}
+                      openSkinDirectory={client.openSkinDirectory}
+                      readSkinImage={client.readSkinImage}
+                      onOpenSkinPage={() => setSkinView("mine")}
+                      theme={keyboardPreviewTheme}
+                      onLogin={openAccountLogin}
+                    />
+                  </div>,
+                )}
               {page === "plugins" && client.communityPlugins && (
                 <div
                   className={communityStyle.categoryTabsPair}
@@ -3563,7 +3567,11 @@ function SettingsShell(props: SettingsPageProps) {
               {draft && isSettingsFormPage(page) && (
                 <SettingsFormFrame showReload={false} busy={busy}>
                   <SettingsFormContext.Provider value={{ ...model, draft }}>
-                    <SkinSettingsPage hidden={skinCommunityShown} tabs={skinTabs} />
+                    <SkinSettingsPage
+                      hidden={skinCommunityShown}
+                      tabs={skinTabs}
+                      desktopTabs={desktopSkinTabs}
+                    />
                     <AppearanceSettingsPage />
                     <FloatingToolbarSettingsPage />
                     <InputSettingsPage />

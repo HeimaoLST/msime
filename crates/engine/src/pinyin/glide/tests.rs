@@ -326,9 +326,43 @@ fn ranking_scores_a_string_by_its_best_word_split() {
             keys.contains(&"xi'an".to_owned()) && keys.contains(&"xian".to_owned()),
             "{keys:?}"
         );
+        assert!(keys.windows(2).all(|pair| pair[0] < pair[1]), "{keys:?}");
         HashMap::from([("xi'an".to_owned(), 100_000), ("xi".to_owned(), 1_000_000)])
     });
     assert_eq!(ranked[0].letters, "xian");
+}
+
+#[test]
+fn ranking_a_decoded_stroke_keeps_dictionary_key_allocations_bounded() {
+    let hypotheses = decode_glide(
+        &keyboard(),
+        &stroke("zhonghuarenmingongheguowansui", 0.0, &[]),
+        16,
+    );
+    let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+        rank_by_dictionary(hypotheses, |_| HashMap::new())
+    });
+    assert!(
+        allocations <= 200,
+        "glide ranking allocations: {allocations}"
+    );
+}
+
+#[test]
+fn ranking_reuses_materialized_split_keys_for_scoring() {
+    let hypotheses = (0..16)
+        .map(|index| GlideHypothesis {
+            letters: "xian".into(),
+            cost: index as f32,
+        })
+        .collect();
+    let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+        rank_by_dictionary(hypotheses, |_| HashMap::new())
+    });
+    assert!(
+        allocations <= 110,
+        "glide ranking repeated split-key allocations: {allocations}"
+    );
 }
 
 #[test]

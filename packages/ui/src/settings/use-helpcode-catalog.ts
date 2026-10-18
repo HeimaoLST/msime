@@ -1,7 +1,13 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { CustomHelpcodeSchema, HelpcodePackOption } from "./helpcode-preferences";
 import type { PluginClient } from "./plugin-types";
 import { useAsyncGeneration } from "./use-async-generation";
+
+export interface UseHelpcodeCatalogOptions {
+  schemaReader: (() => Promise<CustomHelpcodeSchema[]>) | undefined;
+  catalog: PluginClient["catalog"] | undefined;
+  inputPageOpen: boolean;
+}
 
 /** 宿主资源目录里找到的自定义辅助码表；宿主不支持扫描或读取失败时为空。 */
 export function useCustomHelpcodeSchemas(
@@ -54,4 +60,24 @@ export function useHelpcodePacks(
       });
   }, [catalog, inputPageOpen, refreshRevision, generation]);
   return packs;
+}
+
+/** 组合设置页所需的自定义辅助码表、已安装辅助码插件和导入后的刷新动作。 */
+export function useHelpcodeCatalog({
+  schemaReader,
+  catalog,
+  inputPageOpen,
+}: UseHelpcodeCatalogOptions) {
+  const customHelpcodeSchemas = useCustomHelpcodeSchemas(schemaReader);
+  const [refreshRevision, setRefreshRevision] = useState(0);
+  const refreshHelpcodePacks = useCallback(() => {
+    setRefreshRevision((revision) => revision + 1);
+  }, []);
+  const helpcodePacks = useHelpcodePacks(catalog, inputPageOpen, refreshRevision);
+
+  return {
+    customHelpcodeSchemas,
+    helpcodePacks,
+    refreshHelpcodePacks,
+  };
 }

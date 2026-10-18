@@ -959,33 +959,34 @@ struct PageLabel {
   const wchar_t *summary;
 };
 
-// 「手写输入」并进了「屏幕键盘」页（见 `SettingsNavigation.h`），提供手写的版本里那一页叫「屏幕键盘与手写」，与共享设置 UI 的 `screenKeyboardAndHandwritingTitle` 相同。
-constexpr std::array<PageLabel, 16> page_labels{{
-    {"typing", L"输入方案", 0xE765, L"选择输入方式；专属选项随当前方案变化。"},
-    {"expression", L"输入习惯", 0xE8C1, L"调整标点、混输、输出和选词习惯。"},
-    {"shortcuts", L"按键", 0xEDA7, L"设置中英文切换、选词和翻页使用的按键。"},
-    {"lexicon", L"词库", 0xE82D, L"管理本机词库、个人词条和常用语。"},
-    {"themes", L"皮肤", 0xE790, L"选择候选窗口皮肤，搭配自己的字体和配色。"},
+// 「手写输入」并进了「屏幕键盘」页（见 `SettingsNavigation.h`），提供手写的版本里那一页叫「键盘手写」，与共享设置 UI 的 `screenKeyboardAndHandwritingTitle` 相同。
+constexpr std::array<PageLabel, 17> page_labels{{
+    {"typing", L"输入设置", 0xE765, L"选择输入方式；专属选项随当前方案变化。"},
+    {"expression", L"标点翻译", 0xE8C1, L"调整标点、混输、输出和选词习惯。"},
+    {"shortcuts", L"按键设置", 0xEDA7, L"设置中英文切换、选词和翻页使用的按键。"},
+    {"lexicon", L"词库管理", 0xE82D, L"管理本机词库、个人词条和常用语。"},
+    {"themes", L"主题外观", 0xE790, L"选择候选窗口皮肤，搭配自己的字体和配色。"},
     {"candidate", L"候选窗口", 0xE8FD, L"调整候选的排列、文字和显示位置。"},
-    {"toolbar", L"状态栏", 0xE7F4, L"选择悬浮工具栏显示的内容和交互方式。"},
-    {"osk", MSIME_EDITION_HANDWRITING ? L"屏幕键盘与手写" : L"屏幕键盘", 0xE92E,
+    {"toolbar", L"快捷工具", 0xE7F4, L"选择悬浮工具栏显示的内容和交互方式。"},
+    {"osk", MSIME_EDITION_HANDWRITING ? L"键盘手写" : L"屏幕键盘", 0xE92E,
      MSIME_EDITION_HANDWRITING ? L"设置屏幕键盘的布局、按键和外观，打开手写识别板。"
                                : L"设置屏幕键盘的布局、按键和外观。"},
     {"voice", L"语音输入", 0xE720, L"选择识别方式，配置语音转写和文本整理。"},
-    {"clip", L"剪贴板", 0xE77F, L"管理剪贴板记录和跨设备发送。"},
+    {"clip", L"剪贴管理", 0xE77F, L"管理剪贴板记录和跨设备发送。"},
     {"stats", L"打字统计", 0xE9D2, L"查看输入量、速度和使用趋势。"},
-    {"plugins", L"插件", 0xEA86, L"管理输入扩展，浏览和安装社区插件。"},
-    {"ai", L"AI 辅助", 0xE99A, L"配置候选补全、文本整理和服务连接。"},
-    {"account", L"账号", 0xE77B, L"登录并管理跨设备同步与云端内容。"},
-    {"dev", L"维护与诊断", 0xE90F, L"导入导出设置，检查本机状态和诊断信息。"},
-    {"about", L"关于", 0xE946, L"查看版本和更新，查阅使用帮助、反馈问题，以及许可信息。"},
+    {"plugins", L"扩展插件", 0xEA86, L"管理输入扩展，浏览和安装社区插件。"},
+    {"ai", L"智能辅助", 0xE99A, L"配置候选补全、文本整理和服务连接。"},
+    {"mcp", L"AI助手", 0xE99A, L"连接 AI 助手，管理设置、皮肤、词库和诊断。"},
+    {"account", L"账号管理", 0xE77B, L"登录并管理跨设备同步与云端内容。"},
+    {"dev", L"维护诊断", 0xE90F, L"导入导出设置，检查本机状态和诊断信息。"},
+    {"about", L"关于水杉", 0xE946, L"查看版本和更新，查阅使用帮助、反馈问题，以及许可信息。"},
 }};
 static_assert(page_labels.size() == nav::pages.size());
 static_assert(page_labels[0].id == nav::default_page);
 
 // 侧栏的分组标题，按 `SettingsNavigation.h` 里的 `group` 索引，措辞与共享设置 UI 的 `settingsNavGroups` 一致。
 constexpr std::array<const wchar_t *, nav::page_group_count> group_titles{
-    {L"打字", L"外观", L"更多输入方式", L"工具", L"账号", L"支持"}};
+    {L"打字", L"更多输入方式", L"外观", L"工具", L"账号", L"支持"}};
 
 // 未知 id 取默认页面的标签。
 const PageLabel &page_label(std::string_view id) {
@@ -2873,10 +2874,18 @@ struct MainWindow : WindowT<MainWindow> {
     build_shell(0.0);
     // 设置窗口打开时补传一次打字统计（没打开上传、没登录或离上次不到十分钟时不发请求）。
     sync_typing_upload();
+    dictionary_update_request(L"automatic");
+    dictionary_update_timer_ = DispatcherQueue().CreateTimer();
+    dictionary_update_timer_.Interval(std::chrono::seconds(2));
+    dictionary_update_timer_.Tick([this](auto const &, auto const &) {
+      if (!closed_ && current_page_ == "lexicon" && !dictionary_update_busy_) dictionary_update_request(L"status");
+    });
+    dictionary_update_timer_.Start();
     Activated({this, &MainWindow::on_activated});
     Closed([this](Inspectable const &, WindowEventArgs const &) {
       // A save refused while closing has no window left to report in; the stored settings stay as they were.
       closed_ = true;
+      if (dictionary_update_timer_) dictionary_update_timer_.Stop();
       flush_pending();
       // 本地模型的下载随窗口一起停下，下次安装时清掉没装完的临时文件。
       take_response(msime_client_voice_local_model_cancel(nullptr, 0));
@@ -3065,8 +3074,9 @@ private:
       flush_pending();
       return;
     }
-    // 与共享页一样，窗口获得焦点时重读打字统计。
+    // 与共享页一样，窗口获得焦点时重读打字统计并按日节流检查词库。
     poll_statistics();
+    dictionary_update_request(L"automatic");
     // Another window (the tray, the shared app, another device through sync) may have changed the settings or Windows may have switched between light and dark while this window was in the background.
     bool changed = false;
     PreferencesDocument fresh;
@@ -4730,6 +4740,8 @@ private:
       build_plugins_page(page);
     else if (id == "ai")
       build_ai_page(page);
+    else if (id == "mcp")
+      build_mcp_page(page);
     else if (id == "account")
       build_account_page(page);
     else if (id == "dev")
@@ -13161,8 +13173,70 @@ private:
     vocabulary_request(vocabulary_action(L"reset"));
   }
 
+  // 原生设置只显示共享状态，不复制版本判断、文件校验和自动检查的节流。
+  void dictionary_update_request(std::wstring const &command, std::optional<bool> enabled = std::nullopt) {
+    if (dictionary_update_busy_ || closed_) return;
+    const auto options = runtime_options_document();
+    if (!options) return;
+    JsonObject action;
+    action.SetNamedValue(L"operation", JsonValue::CreateStringValue(L"updates"));
+    action.SetNamedValue(L"command", JsonValue::CreateStringValue(command));
+    if (enabled) action.SetNamedValue(L"enabled", JsonValue::CreateBooleanValue(*enabled));
+    dictionary_update_busy_ = true;
+    run_host([options = *options, body = utf8(action.Stringify())] { return settings_dictionary_call(options, body); },
+      [this](Response const &response) {
+        dictionary_update_busy_ = false;
+        if (!response.ok) { dictionary_update_message_ = L"词库更新暂不可用，请稍后重试"; redraw_lexicon(); return; }
+        try {
+          const auto value = JsonObject::Parse(text(response.text)).GetNamedObject(L"value");
+          // 这里不展示字节进度；下载期间轮询不重建整页，避免打断词条编辑表单。
+          const bool same_display = dictionary_update_status_
+            && named_string(*dictionary_update_status_, L"phase") == named_string(value, L"phase")
+            && named_string(*dictionary_update_status_, L"version") == named_string(value, L"version")
+            && named_string(*dictionary_update_status_, L"error") == named_string(value, L"error")
+            && dictionary_update_status_->GetNamedBoolean(L"enabled", true) == value.GetNamedBoolean(L"enabled", true)
+            && dictionary_update_status_->GetNamedBoolean(L"pending_restart", false) == value.GetNamedBoolean(L"pending_restart", false)
+            && dictionary_update_status_->GetNamedBoolean(L"can_rollback", false) == value.GetNamedBoolean(L"can_rollback", false);
+          if (same_display && dictionary_update_message_.empty()) { dictionary_update_status_ = value; return; }
+          dictionary_update_status_ = value;
+          dictionary_update_message_.clear();
+          redraw_lexicon();
+        } catch (...) { dictionary_update_message_ = L"无法读取词库更新状态"; redraw_lexicon(); }
+      });
+  }
+
+  void build_dictionary_updates(StackPanel const &page) {
+    auto group = add_group(page, L"词库更新");
+    const bool automatic = !dictionary_update_status_ || dictionary_update_status_->GetNamedBoolean(L"enabled", true);
+    const auto phase = dictionary_update_status_ ? named_string(*dictionary_update_status_, L"phase") : L"";
+    const bool running = phase == L"checking" || phase == L"downloading";
+    add_row(group, 0xE895, L"自动更新词库", L"每天检查兼容版本，个人词条和学习记录保留。",
+      toggle_control(L"自动更新词库", automatic,
+        [this](bool value) { dictionary_update_request(L"configure", value); }, !dictionary_update_busy_, false));
+    std::wstring message = dictionary_update_message_;
+    if (dictionary_update_status_ && message.empty()) {
+      const auto &status = *dictionary_update_status_;
+      const auto status_phase = named_string(status, L"phase");
+      if (status_phase == L"checking") message = L"正在检查词库更新…";
+      else if (status_phase == L"downloading") message = L"正在下载词库…";
+      else if (status_phase == L"failed" || !named_string(status, L"error").empty()) message = L"更新失败，继续使用原词库";
+      else if (status.GetNamedBoolean(L"pending_restart", false)) message = L"词库已准备好，下次启动输入法时生效";
+      else message = L"词库版本：" + named_string(status, L"version");
+    }
+    add_row(group, 0xE72C, L"检查词库更新", message,
+      button_control(L"检查更新", [this] { dictionary_update_request(L"check"); }, !dictionary_update_busy_ && !running));
+    if (dictionary_update_status_ && dictionary_update_status_->GetNamedBoolean(L"can_rollback", false))
+      add_row(group, 0xE777, L"恢复上一版词库", L"恢复后关闭自动更新，下次启动生效。",
+        button_control(L"恢复", [this] { dictionary_update_request(L"rollback"); }, !dictionary_update_busy_ && !running));
+  }
+
   void build_lexicon_page(StackPanel const &page) {
-    // 本地词库管理: the same list, edit and delete as the shared page, through msime_client_settings_dictionary.
+    build_dictionary_updates(page);
+    auto contribution = add_group(page, L"完善公共词库");
+    add_row(contribution, 0xE8F2, L"提交缺失词条",
+            L"前往官网填写词语和读音，审核后随公共词库更新。个人学习的词不会自动公开。",
+            button_control(L"前往投稿", [this] { open_url(L"https://msime.app/words/"); }));
+    // 本地词库管理通过 msime_client_settings_dictionary 提供查询、编辑和删除。
     auto manage = add_group(page, L"本地词库管理");
     std::vector<Option> kinds;
     for (auto const &[id, label] : lexicon_kinds)
@@ -19511,10 +19585,15 @@ private:
             L"用导出的设置文件替换当前设置，立即生效。本机的服务配置与密钥、诊断日志、使用统计和剪贴板历史开关保持不变。",
             button_control(L"导入…", [this] { import_settings(); }, loaded_));
 
+  }
+
+  // ---- AI 助手 ----
+
+  void build_mcp_page(StackPanel const &page) {
     auto mcp = add_group(page, L"连接 AI 助手");
     record(L"连接 AI 助手", L"MCP msime-mcp Claude Desktop Cursor");
     if (!indexing_) {
-      // `add_group` 返回的就是卡片里的行面板，它已经带了卡片和 12 DIP 内边距：这里再套一张 `make_card` 和一份内边距，内容会比同页其他组的标签向右错开一整个缩进。直接放进行面板，和上面几组对齐。
+      // `add_group` 返回的就是卡片里的行面板，直接放进行面板与其他工具页对齐。
       StackPanel content;
       content.Spacing(10);
       content.Padding(Thickness{0, 4, 0, 4});
@@ -19848,9 +19927,9 @@ private:
     panel.Children().Append(block);
   }
 
-  // 「连接 AI 助手」: the msime-mcp entry an assistant runs, to copy or to write into Claude Desktop's or Cursor's configuration. The same section as the shared settings page, through msime_client_mcp_status and msime_client_mcp_install.
+  // 「连接 AI 助手」：展示助手运行的 `msime-mcp` 条目，可复制或写入 Claude Desktop、Cursor 的配置；通过 `msime_client_mcp_status` 和 `msime_client_mcp_install` 与共享设置页保持一致。
   void append_mcp_section(StackPanel const &panel) {
-    append_text(panel, L"连接后，直接告诉 AI 助手输入法哪里不对劲（比如卡顿、候选窗口不见了），它会打开诊断日志、请你把出问题的操作再做一遍，然后读日志帮你找原因。它也能读取快捷短语、设置、打字统计和已安装的候选窗口皮肤。通过 MCP（Model Context Protocol）在本机运行，不联网；除了开关诊断日志，默认不改动任何设置。");
+    append_text(panel, L"MCP（Model Context Protocol）让 AI 助手通过本机服务调用水杉输入法的功能，不联网。连接后，助手可以管理快捷短语和设置、制作候选窗口皮肤、读取打字统计和已安装皮肤；遇到卡顿或候选窗口问题时，也能读取诊断日志帮助排查。除开关诊断日志外，修改功能需要在下方明确开启对应权限。");
     const auto response =
         call_mcp(msime_client_mcp_status, mcp_request(runtime_options_path()));
     JsonObject status{nullptr};
@@ -19982,7 +20061,7 @@ private:
       mcp_result_ = mcp_failure(response_error(response), name);
     }
     mcp_busy_ = false;
-    if (!closed_ && current_page_ == "dev")
+    if (!closed_ && current_page_ == "mcp")
       render_page(true);
   }
 
@@ -20324,6 +20403,10 @@ private:
   Border preview_host_{nullptr};
   Border toolbar_preview_host_{nullptr};
   TextBlock toolbar_preview_size_{nullptr};
+  std::optional<JsonObject> dictionary_update_status_;
+  std::wstring dictionary_update_message_;
+  bool dictionary_update_busy_ = false;
+  Microsoft::UI::Dispatching::DispatcherQueueTimer dictionary_update_timer_{nullptr};
   Microsoft::UI::Dispatching::DispatcherQueueTimer save_timer_{nullptr};
   // A redraw held back until the click that activated the window has been delivered.
   bool pointer_down_ = false;

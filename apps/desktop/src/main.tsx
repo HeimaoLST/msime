@@ -1,14 +1,6 @@
 import { createVoiceRecognitionClient } from "./voice/voice-recognition-client";
 import { createTauriProgressClient } from "./core/tauri-progress-client";
-import {
-  StrictMode,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createMobileSettingsHistoryState } from "../../../packages/ui/src/settings/mobile-history-state";
 import { trackAsyncSubscription } from "../../../packages/ui/src/core/async-subscription";
@@ -23,10 +15,8 @@ import {
   CloudDictionaryCatalogPanel,
   CloudDictionaryFilesPanel,
   CloudDictionaryPanel,
-  EmojiPanel,
   VoicePanel,
   completeOnboardingPreferences,
-  usePreferencesSnapshot,
   useMobilePopState,
   subscribeToWindowEvent,
   SettingsPage,
@@ -35,7 +25,6 @@ import {
   LinuxSetupPage,
   MacosInstallPage,
   savedModelMirror,
-  useCandidatePreviewTheme,
   type AccountClient,
   type AccountProfile,
   type AccountQqLink,
@@ -100,12 +89,10 @@ import {
 import "@msime/ui/styles.css";
 import { subscribeWindowState } from "./input/window-state";
 import { discoverFontReader } from "./candidate/system-font-client";
-import {
-  DesktopKeyboard,
-  panelSurfaceTheme,
-  useHostPlatform,
-  usePanelHost,
-} from "./input/desktop-keyboard";
+import { DesktopKeyboard } from "./input/desktop-keyboard";
+import { useHostPlatform } from "./input/panel-host";
+import { DesktopPanelTheme } from "./input/desktop-panel-theme";
+import { DesktopEmojiPanel } from "./input/desktop-emoji-panel";
 import { DesktopHandwriting } from "./input/desktop-handwriting";
 import { DesktopCloudDictionary } from "./dictionary/desktop-cloud-dictionary";
 import { testDesktopApiCredential } from "./account/credential-test-client";
@@ -119,6 +106,12 @@ import {
 } from "./core/desktop-host-services";
 
 const dictionary: DictionaryClient = {
+  browse: (offset, limit, kind, query) =>
+    invoke("dictionary_request", {
+      action: { operation: "browse", offset, limit, kind, query },
+    }),
+  updates: (command, enabled) =>
+    invoke("dictionary_request", { action: { operation: "updates", command, enabled } }),
   list: (offset, limit, kind, query) =>
     invoke("dictionary_request", {
       action: { operation: "list", offset, limit, kind, query },
@@ -225,6 +218,10 @@ const typingStatisticsUpload: TypingStatisticsUploadClient = {
   status: () => invoke("typing_statistics_upload_status"),
   setEnabled: (enabled: boolean) => invoke("set_typing_statistics_upload", { enabled }),
   sync: () => invoke("upload_typing_statistics"),
+};
+const cloudDictionaryClient: CloudDictionaryPanelClient = {
+  close: () => invoke("close_panel", { label: "cloud-dictionary-panel" }),
+  request: (action: CloudDictionaryAction) => invoke("cloud_dictionary_request", { action }),
 };
 // 「绑定 QQ 群助手」：Rust 侧回的是服务端的 snake_case，这里换成页面的写法。
 type QqLinkDto = { id: string; created_at: string };
@@ -335,6 +332,7 @@ const client: SettingsClient = {
   openCloudClipboard: () => invoke("open_cloud_clipboard_panel"),
   cloudClipboardRequest: (action) => invoke("cloud_clipboard_request", { action }),
   openCloudDictionary: () => invoke("open_cloud_dictionary_panel"),
+  cloudDictionary: cloudDictionaryClient,
   restartInputMethod: () => invoke("restart_input_method"),
   installInputSource: () => invoke("install_input_source"),
   inputSourceStartup,
@@ -439,10 +437,7 @@ const panelClients: {
     copyText: (text) => invoke("copy_text", { text }),
     request: (action: CloudClipboardAction) => invoke("cloud_clipboard_request", { action }),
   },
-  cloudDictionary: {
-    close: () => invoke("close_panel", { label: "cloud-dictionary-panel" }),
-    request: (action: CloudDictionaryAction) => invoke("cloud_dictionary_request", { action }),
-  },
+  cloudDictionary: cloudDictionaryClient,
   emoji: {
     close: () => invoke("close_panel", { label: "emoji-panel" }),
     rememberInputTarget: () => invoke("remember_input_target"),
@@ -515,27 +510,6 @@ function DesktopHandwritingSurface({ theme }: { theme: "dark" | "light" }) {
   );
 }
 
-function DesktopPanelTheme({
-  preferences,
-  surface,
-  children,
-}: {
-  preferences: Pick<SettingsClient, "load" | "onPreferencesChanged" | "host">;
-  surface: "handwriting" | "voice" | "emoji";
-  children: (theme: "dark" | "light") => ReactNode;
-}) {
-  const snapshot = usePreferencesSnapshot(preferences);
-  const host = usePanelHost(preferences.host);
-  const surfaceTheme =
-    surface === "handwriting"
-      ? snapshot?.preferences.handwriting_theme
-      : surface === "voice"
-        ? snapshot?.preferences.voice_theme
-        : snapshot?.preferences.emoji_theme;
-  return children(
-    useCandidatePreviewTheme(snapshot?.preferences.theme, panelSurfaceTheme(host, surfaceTheme)),
-  );
-}
 // The host reports what it supports; outside Tauri (the browser preview) there is no host.
 async function discoverHostCapabilities(): Promise<HostCapabilities | null> {
   if (!isTauri()) return null;
@@ -709,6 +683,10 @@ function DesktopSettings() {
         host?.platform === "macos"
           ? await invoke<boolean>("first_install_window_pending").catch(() => false)
           : false;
+      const applicationUpdater =
+        host?.platform === "macos"
+          ? await invoke<boolean>("application_update_supported").catch(() => false)
+          : false;
       if (!active) return;
       if (linuxSetupStatus && !linuxSetupStatus.prepared) setLinuxSetup(linuxSetupStatus);
       setMacosInstall(macosInstallPending);
@@ -721,7 +699,30 @@ function DesktopSettings() {
         ? {
             ...client,
             host,
+            ...(applicationUpdater
+              ? {
+                  checkForApplicationUpdate: () => invoke<void>("application_update_check"),
+                }
+              : {}),
             dictionary: isMobileHost(host.platform) ? mobileDictionary : dictionary,
+            ...(!isMobileHost(host.platform) && client.cloudDictionary
+              ? {
+                  cloudDictionary: {
+                    ...client.cloudDictionary,
+                    ...cloudDictionaryCapabilities(host.platform, client.cloudDictionary.request),
+                    ...(host.platform === "macos"
+                      ? {
+                          snapshotNative: false,
+                          snapshotAppliesInPanel: true,
+                          chooseSnapshotRestore: undefined,
+                          saveExport: async (name: string, contents: string) => {
+                            await invoke<string>("save_export", { name, contents });
+                          },
+                        }
+                      : {}),
+                  },
+                }
+              : {}),
             // Windows 和 macOS 在各自的原生候选控制器里查离线释义，所以释义设置在两边都生效。读音也是这两个宿主画在释义后面（日文罗马音在 macOS 来自系统分词器，在 Windows 来自系统的微软日语输入法）；其他宿主不动这个值。
             candidatePronunciation: host.platform === "macos" || host.platform === "windows",
             candidateEnglishGloss:
@@ -1194,53 +1195,6 @@ function DesktopCloudDictionarySurface() {
   };
   return <DesktopCloudDictionary client={cloudDictionary} />;
 }
-function DesktopEmojiPanel({
-  theme,
-  initialPage = "home",
-  client: providedClient,
-  close,
-}: {
-  theme: "dark" | "light";
-  initialPage?: "home" | "clipboard";
-  client?: EmojiPanelClient;
-  close?: () => Promise<void>;
-}) {
-  const [emojiClient, setEmojiClient] = useState<EmojiPanelClient | null>(null);
-  const panelLabel = initialPage === "clipboard" ? "clipboard-panel" : "emoji-panel";
-  useEffect(() => {
-    let active = true;
-    const capability = isTauri()
-      ? invoke<boolean>("supports_clipboard_paste").catch(() => false)
-      : Promise.resolve(false);
-    void capability.then((supported) => {
-      if (!active) return;
-      const baseClient = providedClient ?? panelClients.emoji;
-      const closePanel = close ?? (() => invoke("close_panel", { label: panelLabel }));
-      setEmojiClient(
-        supported
-          ? {
-              ...baseClient,
-              close: closePanel,
-              clipboard: baseClient.clipboard
-                ? {
-                    ...baseClient.clipboard,
-                    paste: (text) => invoke<void>("paste_clipboard_text", { text }),
-                  }
-                : undefined,
-            }
-          : { ...baseClient, close: closePanel },
-      );
-    });
-    return () => {
-      active = false;
-    };
-  }, [close, panelLabel, providedClient]);
-  return emojiClient ? (
-    <EmojiPanel client={emojiClient} theme={theme} initialPage={initialPage} />
-  ) : (
-    <StatusMessage role="status">正在连接面板…</StatusMessage>
-  );
-}
 
 const content =
   panel === "keyboard" ? (
@@ -1259,11 +1213,13 @@ const content =
     <DesktopCloudDictionarySurface />
   ) : panel === "clipboard" ? (
     <DesktopPanelTheme preferences={client} surface="emoji">
-      {(theme) => <DesktopEmojiPanel theme={theme} initialPage="clipboard" />}
+      {(theme) => (
+        <DesktopEmojiPanel client={panelClients.emoji} theme={theme} initialPage="clipboard" />
+      )}
     </DesktopPanelTheme>
   ) : panel === "emoji" ? (
     <DesktopPanelTheme preferences={client} surface="emoji">
-      {(theme) => <DesktopEmojiPanel theme={theme} />}
+      {(theme) => <DesktopEmojiPanel client={panelClients.emoji} theme={theme} />}
     </DesktopPanelTheme>
   ) : panel === "vocabulary" ? (
     <VocabularyReviewPanel client={vocabularyReview} />

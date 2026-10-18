@@ -11,6 +11,7 @@
 #     frontend/frontend-npm-NOTICES.txt  collect-notices.py npm 的输出，构建时没有 node_modules 可走。
 #     voice-runtime/linux-x86_64/.archive/、voice-runtime/linux-aarch64/.archive/  按 resources/voice-runtime.lock.json 下载的原始归档。
 #     handwriting-model/、offline-glosses/、language-dictionaries/  各自 fetch 脚本按锁文件取回的文件。
+#     opencc/                    `scripts/fetch_opencc.py` 按 resources/opencc.lock.json 校验的编译输入。
 #   msime-VERSION-frontend.tar.xz  顶层目录 msime-VERSION-frontend/，只有上面 frontend/ 的内容（dist/ 与 frontend-npm-NOTICES.txt）。Gentoo 的 crate 逐个列在 SRC_URI 里、资源按锁文件地址下载，不需要整个 vendor 包，但 pnpm 依赖没法逐个列出，前端只能取这份构建好的。
 #
 # 数据一律经仓库自己的 fetch 脚本取得，构建时再用同一批脚本对着源码树里的锁文件跑一遍：文件已在锁定的摘要上就不联网，对不上就去下载，而构建农场没有网络，于是 vendor 包与源码不一致时构建直接失败。这样哈希只记在锁文件一处，规格文件和 debian/ 里都不另抄一份。语音运行库只留下原始归档，解出的库由构建时的那次 fetch 从归档重新解出。
@@ -49,7 +50,7 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 name="msime-$version"
 vendor="$stage/$name-vendor"
-mkdir -p "$vendor/frontend" "$vendor/voice-runtime"
+mkdir -p "$vendor/frontend" "$vendor/voice-runtime" "$vendor/opencc"
 # 两个 tarball 里的文件时间都取 HEAD 的提交时间，同一提交重复生成得到相同内容。
 epoch=$(git log -1 --format=%ct HEAD)
 
@@ -73,6 +74,8 @@ done
 python3 scripts/fetch_handwriting_model.py --out "$vendor/handwriting-model" >/dev/null
 python3 scripts/fetch_offline_glosses.py --out "$vendor/offline-glosses" >/dev/null
 python3 scripts/fetch_language_dictionaries.py --out "$vendor/language-dictionaries" >/dev/null
+opencc_dir=$(python3 scripts/fetch_opencc.py)
+cp -a "$opencc_dir/." "$vendor/opencc/"
 
 tar --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
   -C "$stage" -cf - "$name-vendor" | xz -T0 -9 > "$out/$name-vendor.tar.xz"

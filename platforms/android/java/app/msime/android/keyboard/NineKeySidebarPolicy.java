@@ -13,8 +13,8 @@ import java.util.Set;
 public final class NineKeySidebarPolicy {
     /** 符号栏一屏最多显示几个符号；符号不足这么多时按实际个数均分整栏高度。 */
     public static final int VISIBLE_ROWS = 5;
-    /** 数字键面默认一屏四项，完整展示四则运算；最小行高规则仍可减少可见项。 */
-    public static final int DIGIT_VISIBLE_ROWS = 4;
+    /** 数字键面一屏最多五项，和九键左侧符号栏一致；最小行高规则仍可减少可见项。 */
+    public static final int DIGIT_VISIBLE_ROWS = 5;
     /** 每个符号键至少多高（dp）：键盘高度调到最矮时一屏少放几个，不把键压得比字还矮。 */
     public static final int MIN_ROW_HEIGHT_DP = 28;
     /** 一张符号表最多几个符号。 */
@@ -30,6 +30,12 @@ public final class NineKeySidebarPolicy {
     /** 数字键面的默认符号：先是四则运算和算式里常用的半角符号，中文标点（含原来在右列的 ！）排在后面。 */
     public static final List<String> DEFAULT_DIGIT_SYMBOLS =
         List.of("+", "-", "*", "/", "=", "%", "(", ")", ":", "@", "，", "。", "？", "！");
+    /** 设置页可直接加入的常用符号；可选项优先于手写配置，避免用户记忆存储格式。 */
+    public static final List<String> ADDABLE_SYMBOLS = List.of(
+        "，", "。", "？", "！", "、", "；", "：", "…", "……", "—", "·",
+        "“", "”", "‘", "’", "（", "）", "《", "》", "【", "】", "～",
+        "+", "-", "*", "/", "=", "%", "(", ")", ":", "@", "#", "&",
+        "_", "|", "<", ">", "^", "￥", "★", "☆", "♡", "♥", "→", "←", "↑", "↓", ":-)");
 
     private NineKeySidebarPolicy() {}
 
@@ -123,5 +129,12 @@ public final class NineKeySidebarPolicy {
         if (symbols.size() <= limit) return String.join(" ", symbols);
         List<String> head = new ArrayList<>(symbols.subList(0, BoundsPolicy.nonNegative(limit)));
         return String.join(" ", head) + " 等 " + symbols.size() + " 个";
+    }
+
+    /** 返回尚未加入当前符号栏的可选项，保持选择面板的固定顺序。 */
+    public static List<String> addableSymbols(List<String> current) {
+        ArrayList<String> available = new ArrayList<>();
+        for (String symbol : ADDABLE_SYMBOLS) if (!current.contains(symbol)) available.add(symbol);
+        return List.copyOf(available);
     }
 }

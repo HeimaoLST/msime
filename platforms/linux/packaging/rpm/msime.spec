@@ -1,6 +1,6 @@
 # 水杉输入法 Linux 完整版的 RPM 规格文件，供 Fedora COPR 与 openSUSE OBS 从源码构建。
 #
-# 内容与 release-linux.yml 用 CPack 打出的 msime-linux RPM 相同（Fcitx5 插件、IBus engine、msime-linux-setup 等入口、MCP 服务和 Tauri 设置窗口），构建步骤照搬 platforms/linux/package-container.sh：Release 的 Host API、MCP 服务和设置窗口，再以 MSIME_ENABLE_PACKAGING=ON 配置 CMake，跑与门禁相同的 ctest。区别只在依赖来源：COPR（默认）和 OBS 构建时没有网络，所以 Cargo 依赖、设置窗口的前端和需要下载的数据都来自 Source1，即 make-source-tarballs.sh 随每个 linux-v 发布生成的 vendor 包。词库照旧不随包，由用户首次配置时 msime-linux-setup --download 取回。
+# 内容与 release-linux.yml 用 CPack 打出的 msime-linux RPM 相同（Fcitx5 插件、IBus engine、msime-linux-setup 等入口、MCP 服务和 Tauri 设置窗口），构建步骤照搬 platforms/linux/package-container.sh：Release 的 Host API、MCP 服务和设置窗口，再以 MSIME_ENABLE_PACKAGING=ON 配置 CMake，跑与门禁相同的 ctest。区别只在依赖来源：COPR（默认）和 OBS 构建时没有网络，所以 Cargo 依赖、设置窗口的前端、OpenCC 编译输入和需要下载的数据都来自 Source1，即 make-source-tarballs.sh 随每个 linux-v 发布生成的 vendor 包。词库照旧不随包，由用户首次配置时 msime-linux-setup --download 取回。
 #
 # Version 与 %%changelog 由 render-sources.py 按发布版本改写；仓库里的值只是上一次渲染的样子。
 #
@@ -119,7 +119,7 @@ find vendor/cargo -type f -name '*.rs' -perm /111 -exec chmod a-x {} +
 # openSUSE 的 rpm 不一定定义 set_build_flags，这时退回 optflags。
 %{?set_build_flags}
 export CFLAGS="${CFLAGS:-%{optflags}}" CXXFLAGS="${CXXFLAGS:-%{optflags}}"
-export CARGO_HOME="$PWD/.cargo-home" CARGO_NET_OFFLINE=true PYTHONDONTWRITEBYTECODE=1
+export CARGO_HOME="$PWD/.cargo-home" CARGO_NET_OFFLINE=true MSIME_OPENCC_SOURCE_DIR="$PWD/vendor/opencc" PYTHONDONTWRITEBYTECODE=1
 %if 0%{?suse_version}
 # Fedora 的 set_build_flags 会给 RUSTFLAGS 带上调试信息，openSUSE 不会；Release 配置默认又不带，find-debuginfo 就既不拆出调试信息也不剥离 Rust 编译的三个程序。只带行号表，与 debian/rules 相同。
 export CARGO_PROFILE_RELEASE_DEBUG=line-tables-only

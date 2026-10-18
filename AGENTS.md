@@ -41,11 +41,12 @@
 
 ## 决策笔记
 
-非平凡改动（改了行为、架构、跨文件契约、流程与工具链、测试策略、落盘/网络/配置格式，或其他维护者日后可能重访的决定）必须带一篇笔记，写入 `.agents/notes/`；方法、格式与判定标准见 `.agents/skills/write-notes-like-deepseek/SKILL.md`。
+非平凡改动必须带一篇笔记，写入 `.agents/notes/`；方法、格式与判定标准见 `.agents/skills/write-notes-like-deepseek/SKILL.md`。
 
+- 判定标准、目录结构（`{lifecycle}/{class}/yyyy-mm-dd-topic.md`）、文件格式以 SKILL.md 为准，本节只写仓库约定：笔记正文一律用简体中文；仓库 CI（`quality.yml`）跑同样的三条校验。
 - 动手前先检索旧笔记：有归属就地更新，不另起新篇；决定翻转才新建并互链。
 - 新想法先写 `proposed/`，落地随同代码改动转 `implemented/`；被否且值得记的进 `rejected/`。
-- 被放弃的方案先写它最强的理由，再解释为什么不用。
+- 被放弃的方案先写它最强的理由，再解释为什么不用；确实没有真实备选时，`## Alternatives considered` 保留标题、正文写「无」，不要编造。
 - 提交前跑 `pnpm run verify-notes`，红了先修再交。机械性小改（样式、格式化、打标、不改行为的补丁）不写笔记，直接提交。
 
 ## 发版

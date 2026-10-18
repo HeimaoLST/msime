@@ -123,7 +123,12 @@ pub fn parse(text: &str, max_bytes: usize) -> Result<WordbookImportReport, Wordb
         let trimmed = line.trim();
         !trimmed.is_empty() && !trimmed.starts_with('#')
     });
-    let delimiter = if first_data_line.is_some_and(|line| line.contains('\t')) {
+    let delimiter = if first_data_line.is_some_and(|line| {
+        line.contains('\t') && {
+            let csv = split_columns(Delimiter::Comma, line, false);
+            csv.unquoted_tab || csv.columns.len() == 1
+        }
+    }) {
         Delimiter::Tab
     } else {
         Delimiter::Comma
@@ -141,7 +146,7 @@ pub fn parse(text: &str, max_bytes: usize) -> Result<WordbookImportReport, Wordb
     for (index, line) in text.lines().enumerate() {
         let line = line.trim_end_matches('\r');
         if quoted_continuation {
-            quoted_continuation = split_columns(Delimiter::Comma, line, true).1;
+            quoted_continuation = split_columns(Delimiter::Comma, line, true).unclosed_quote;
             continue;
         }
         let trimmed = line.trim();
@@ -153,13 +158,13 @@ pub fn parse(text: &str, max_bytes: usize) -> Result<WordbookImportReport, Wordb
             break;
         }
         examined += 1;
-        let (columns, unclosed_quote) = split_columns(delimiter, line, false);
-        if unclosed_quote {
+        let parsed = split_columns(delimiter, line, false);
+        if parsed.unclosed_quote {
             record(&mut report, index + 1, WordbookImportIssue::ColumnCount);
             quoted_continuation = true;
             continue;
         }
-        match parse_row(columns) {
+        match parse_row(parsed.columns) {
             Ok(entry) => {
                 if seen.insert(entry.word.clone()) {
                     report.entries.push(entry);
@@ -229,30 +234,35 @@ fn parse_row(columns: Vec<String>) -> Result<WordbookEntry, WordbookImportIssue>
     Ok(entry)
 }
 
-/// Split one line into columns.
-///
-/// Comma-delimited files get RFC 4180 double quoting, because a gloss routinely contains a comma
-/// (`adj. 无处不在的, 普遍存在的`) and every tool that exports one quotes the field. Without it the
-/// commonest real file would parse as four columns and be rejected wholesale. A doubled quote
-/// inside a quoted field is one literal quote. Tab-delimited files need none of this: a gloss does
-/// not contain a tab, and the exporters that emit tabs do not quote.
-fn split_columns(delimiter: Delimiter, line: &str, mut quoted: bool) -> (Vec<String>, bool) {
+struct ParsedColumns {
+    columns: Vec<String>,
+    unclosed_quote: bool,
+    /// 格式探测只把引号外的制表符当作 TSV 分隔符。
+    unquoted_tab: bool,
+}
+
+/// 把一行拆成字段，并保留引号状态供格式探测和跨行记录判断共用。
+/// CSV 支持引号字段与双引号转义；TSV 直接按制表符分列。
+fn split_columns(delimiter: Delimiter, line: &str, mut quoted: bool) -> ParsedColumns {
     let separator = match delimiter {
         Delimiter::Tab => '\t',
         Delimiter::Comma => ',',
     };
     if delimiter == Delimiter::Tab {
-        return (
-            line.splitn(4, separator).map(str::to_owned).collect(),
-            false,
-        );
+        return ParsedColumns {
+            columns: line.splitn(4, separator).map(str::to_owned).collect(),
+            unclosed_quote: false,
+            unquoted_tab: line.contains('\t'),
+        };
     }
 
     let mut columns = Vec::with_capacity(4);
     let mut current = String::new();
     let mut field_started = quoted;
+    let mut unquoted_tab = false;
     let mut characters = line.chars().peekable();
     while let Some(character) = characters.next() {
+        unquoted_tab |= character == '\t' && !quoted;
         match character {
             '"' if quoted => {
                 if characters.peek() == Some(&'"') {
@@ -290,7 +300,11 @@ fn split_columns(delimiter: Delimiter, line: &str, mut quoted: bool) -> (Vec<Str
     if columns.len() < 4 {
         columns.push(current);
     }
-    (columns, quoted)
+    ParsedColumns {
+        columns,
+        unclosed_quote: quoted,
+        unquoted_tab,
+    }
 }
 
 #[cfg(test)]
@@ -394,6 +408,47 @@ mod tests {
         assert_eq!(report.entries.len(), 1);
         assert_eq!(report.entries[0].word, "ubiquitous");
         assert_eq!(report.failed, 0);
+    }
+
+    #[test]
+    fn quoted_tabs_do_not_turn_a_comma_file_into_a_tab_file() {
+        for (first, word, meaning) in [
+            ("apple,\"\t苹果\"", "apple", "苹果"),
+            ("\"apple\t\",苹果", "apple", "苹果"),
+            ("quote,\"say \"\"hi\"\"\t\"", "quote", "say \"hi\""),
+        ] {
+            let report = parse(&format!("{first}\nbanana,香蕉\n"), LIMIT).unwrap();
+            assert_eq!(report.failed, 0);
+            assert_eq!(report.entries.len(), 2);
+            assert_eq!(report.entries[0].word, word);
+            assert_eq!(report.entries[0].meaning, meaning);
+            assert_eq!(report.entries[1].word, "banana");
+        }
+    }
+
+    #[test]
+    fn unquoted_tabs_still_select_tsv_with_commas_and_quotes() {
+        for word in ["say\"hi", "word,part", "\"quote\"", "\"unclosed"] {
+            let report = parse(&format!("{word}\t释义,补充\nnext\t下一项\n"), LIMIT).unwrap();
+            assert_eq!(report.failed, 0);
+            assert_eq!(report.entries.len(), 2);
+            assert_eq!(report.entries[0].word, word);
+            assert_eq!(report.entries[0].meaning, "释义,补充");
+        }
+    }
+
+    #[test]
+    fn a_quoted_internal_tab_rejects_only_its_csv_row() {
+        let report = parse("broken,\"含\t制表符\"\nvalid,完整释义\n", LIMIT).unwrap();
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(report.entries[0].word, "valid");
+        assert_eq!(
+            report.first_failures,
+            vec![WordbookImportFailure {
+                line: 1,
+                issue: WordbookImportIssue::ControlCharacter,
+            }]
+        );
     }
 
     #[test]

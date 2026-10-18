@@ -70,6 +70,13 @@ CREATE TABLE tbl_1_g(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 INSERT INTO tbl_1_g VALUES('ge','g','个',500);\
 INSERT INTO tbl_1_g VALUES('ge','g','各',400);";
 
+const WUBI_BIANYI_FIXTURE: &str = "CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);\
+INSERT INTO wubi86 VALUES('bian','便',100);\
+CREATE TABLE tbl_1_b(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_b VALUES('bian','b','边',500);\
+CREATE TABLE tbl_2_b(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_2_b VALUES('bian''yi','by','编译',1000);";
+
 /// test_personal_context_input_session.cpp:136-149 with test_pick_pair_input_session.cpp:73-94's shan/shui rows.
 const CONTEXT_FIXTURE: &str = "CREATE TABLE tbl_1_n(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
 INSERT INTO tbl_1_n VALUES('ni','n','甲',100),('ni','n','乙',90),('ni','n','丙',80);\
@@ -2195,6 +2202,64 @@ fn quanpin_picks_beside_a_wubi_row_learn_a_pinyin_phrase() {
     );
 }
 
+#[test]
+fn composed_words_become_both_wubi_profiles_only_when_learning_is_enabled() {
+    for learning in [false, true] {
+        for scheme in [SchemeType::Quanpin, SchemeType::Wubi] {
+            let fixture = Fixture::new(
+                "CREATE TABLE tbl_1_j(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                INSERT INTO tbl_1_j VALUES('jia','j','甲',100);
+                CREATE TABLE tbl_1_y(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                INSERT INTO tbl_1_y VALUES('yi','y','乙',100);
+                CREATE TABLE tbl_2_j(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);
+                INSERT INTO wubi86 VALUES('abcd','甲',100),('efgh','乙',100);
+                CREATE TABLE wubi98(key TEXT,value TEXT,weight INTEGER);
+                INSERT INTO wubi98 VALUES('ijkl','甲',100),('mnop','乙',100);",
+            );
+            let mut session = fixture.session_with(|options| {
+                options.scheme = scheme;
+                options.wubi.mixed_pinyin = true;
+                options.learning = learning;
+            });
+            type_text(&mut session, "jiayi");
+            assert_eq!(
+                select_word(&mut session, "甲").commit.as_deref(),
+                Some("甲")
+            );
+            assert_eq!(
+                select_word(&mut session, "乙").commit.as_deref(),
+                Some("乙")
+            );
+            drop(session);
+            for (profile, code, table) in [
+                (crate::WubiProfileKind::Wubi86, "abef", "wubi86"),
+                (crate::WubiProfileKind::Wubi98, "ijmn", "wubi98"),
+            ] {
+                assert_eq!(
+                    count(
+                        &fixture.main_db(),
+                        &format!("SELECT count(*) FROM {table} WHERE value='甲乙'")
+                    ),
+                    i64::from(learning)
+                );
+                if learning {
+                    let mut next = fixture.session_with(|options| {
+                        options.scheme = SchemeType::Wubi;
+                        options.wubi.profile = profile;
+                        options.learning = false;
+                    });
+                    type_text(&mut next, code);
+                    assert_eq!(
+                        select_word(&mut next, "甲乙").commit.as_deref(),
+                        Some("甲乙")
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// A generated quanpin sentence selected beside a native wubi row is learned as a pinyin phrase (the per-row guards of `learn_sentence_candidate` and `follows_pinyin`); the wubi row itself writes nothing to the pinyin side.
 #[test]
 fn a_quanpin_sentence_beside_a_wubi_row_is_learned_and_the_wubi_row_is_not() {
@@ -2510,6 +2575,45 @@ fn the_rest_after_a_pinyin_pick_stays_pinyin() {
     assert_eq!(
         schemes(&session).first(),
         Some(&("人".to_owned(), SchemeType::Wubi))
+    );
+}
+
+#[test]
+fn bianyi_continues_after_the_bian_wubi_code() {
+    let fixture = Fixture::new(WUBI_BIANYI_FIXTURE);
+    let mut session = fixture.session_with(|options| {
+        options.scheme = SchemeType::Wubi;
+        options.wubi.mixed_pinyin = true;
+    });
+    type_text(&mut session, "bianyi");
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.preedit, "bianyi");
+    assert!(
+        snapshot.candidates.iter().any(|item| item.word == "编译"),
+        "{snapshot:?}"
+    );
+}
+
+/// 五笔整码也可能正好是两个完整音节；混拼续输下一个音节时，拼音候选的规范读音带有 `'` 分隔符，仍应允许继续输入。
+#[test]
+fn mixed_wubi_starts_a_new_pinyin_syllable_after_a_four_letter_code() {
+    let fixture = Fixture::new(
+        "CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);\
+INSERT INTO wubi86 VALUES('qigu','乐平',100);\
+CREATE TABLE tbl_2_q(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_2_q VALUES('qi''gu','qg','其故',100);\
+INSERT INTO tbl_2_q VALUES('qi''guai','qg','奇怪',1000);",
+    );
+    let mut session = fixture.session_with(|options| {
+        options.scheme = SchemeType::Wubi;
+        options.wubi.mixed_pinyin = true;
+    });
+    type_text(&mut session, "qiguai");
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.preedit, "qiguai");
+    assert!(
+        snapshot.candidates.iter().any(|item| item.word == "奇怪"),
+        "{snapshot:?}"
     );
 }
 
@@ -4675,6 +4779,48 @@ fn dedicated_english_offers_the_typed_word_when_unknown() {
 }
 
 #[test]
+fn dedicated_english_refresh_reuses_candidate_row_storage() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE).with_english(ENGLISH_FIXTURE);
+    let mut old_style = fixture.session();
+    old_style.set_dedicated_english(true);
+    type_text(&mut old_style, "HE");
+    let (_, old_allocations) = crate::ime::personal_rerank::allocations::count(|| {
+        let prefix =
+            crate::ime::queries::lowercase_prefix(&old_style.input.dedicated_english_preedit);
+        let mut candidates = old_style
+            .input
+            .queries
+            .english_dictionary()
+            .query_prefix(&prefix, crate::ime::queries::MODE_ENGLISH_LIMIT);
+        old_style.input.apply_candidate_positions(&mut candidates);
+        old_style.input.dedicated_english_candidates = candidates;
+    });
+
+    let mut session = fixture.session();
+    session.set_dedicated_english(true);
+    type_text(&mut session, "HE");
+    assert!(session.input.dedicated_english_candidates.len() >= 2);
+    let pointer = session.input.dedicated_english_candidates.as_ptr();
+    let capacity = session.input.dedicated_english_candidates.capacity();
+    let words = session.input.dedicated_english_candidates.clone();
+
+    let (_, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+        session.input.update_dedicated_english_candidates();
+    });
+
+    assert_eq!(session.input.dedicated_english_candidates, words);
+    assert_eq!(session.input.dedicated_english_candidates.as_ptr(), pointer);
+    assert_eq!(
+        session.input.dedicated_english_candidates.capacity(),
+        capacity
+    );
+    assert!(
+        allocations < old_allocations,
+        "专用英文热刷新分配 {allocations} 次，旧路径为 {old_allocations} 次"
+    );
+}
+
+#[test]
 fn dedicated_english_caret_rejects_nonletters_without_releasing_the_key() {
     let fixture = Fixture::new(QUANPIN_FIXTURE).with_english(ENGLISH_FIXTURE);
     let mut session = fixture.session();
@@ -5338,10 +5484,12 @@ fn generated_modes_session(fixture: &Fixture) -> Session {
         }];
         options.mention_entries = vec![
             crate::types::MentionEntry {
+                phone: String::new(),
                 text: "张三".to_owned(),
                 key: "zhang'san".to_owned(),
             },
             crate::types::MentionEntry {
+                phone: String::new(),
                 text: "深圳市".to_owned(),
                 key: "shen'zhen'shi".to_owned(),
             },
@@ -5779,6 +5927,7 @@ fn at_lists_the_mention_list_and_letters_filter_it() {
     // The list can be replaced while the mode is open.
     session.character(b'@', false);
     session.set_mention_entries(&[crate::types::MentionEntry {
+        phone: String::new(),
         text: "李四".to_owned(),
         key: "li'si".to_owned(),
     }]);
@@ -5839,6 +5988,7 @@ fn mention_place_annotation_uses_the_shown_row_when_a_list_name_does_not_match()
     let fixture = Fixture::new(QUANPIN_FIXTURE);
     let mut session = generated_modes_session(&fixture);
     session.set_mention_entries(&[crate::types::MentionEntry {
+        phone: String::new(),
         text: "深圳市".to_owned(),
         key: "other".to_owned(),
     }]);
@@ -5869,6 +6019,7 @@ fn generated_mode_commits_are_never_learned() {
             linear_step: 1,
         };
         options.mention_entries = vec![crate::types::MentionEntry {
+            phone: String::new(),
             text: "张三".to_owned(),
             key: "zhang'san".to_owned(),
         }];

@@ -1,6 +1,6 @@
 import { logo, settingsIcons } from "./app-resources";
 
-/** 共享设置外壳里的设置页，按导航顺序排列。 */
+/** 共享设置外壳里的设置页；导航顺序由 `settingsNavGroups` 定义。 */
 export const pages = [
   { id: "home", title: "首页", icon: logo },
   { id: "input", title: "输入", icon: settingsIcons.input },
@@ -97,10 +97,10 @@ export const pages = [
     title: "发送哪些内容",
     icon: settingsIcons.about,
   },
-  // 「维护与诊断」里「连接 AI 助手」那一行打开：本机 `msime-mcp` 服务的连接命令、配置和两个权限开关。整块原来直接摊在维护页上，是那一页最长的一块，收成一行后维护页只剩服务、日志、数据目录和卸载。
+  // 只在宿主提供 MCP 状态时显示；桌面和触屏宿主都作为独立设置页。
   {
     id: "mcp",
-    title: "连接 AI 助手",
+    title: "AI 助手",
     icon: settingsIcons.developer,
   },
   // 触屏宿主「我的 › 隐私」打开：数据怎么处理的几句话、匿名使用统计开关和完整隐私政策的链接。桌面的这些在「关于」里。
@@ -120,15 +120,15 @@ export const pages = [
 export type SettingsPageId = (typeof pages)[number]["id"];
 
 /**
- * 一级导航的分组：桌面侧栏、手机「设置」列表和旧的分组导出都从这里派生，页面顺序只有这一个来源。Windows 原生设置窗口的 `SettingsNavigation.h` 也要与它保持一致：和共享桌面侧栏一样，是这里去掉 `desktopMergedPages` 之后的页面。
+ * 一级导航的分组：桌面侧栏、手机「设置」列表和旧的分组导出都从这里派生，导航顺序只有这一个来源，`pages` 只登记页面。Windows 原生设置窗口的 `SettingsNavigation.h` 也要与它保持一致：和共享桌面侧栏一样，是这里去掉 `desktopMergedPages` 之后的页面。
  *
- * 「打字」排在「外观」之前：打字行为会反复调整，外观通常只调一次。
+ * 先排常用输入设置和其他输入方式，再排外观、工具、账号与支持；桌面只平铺页面，不显示分组标题。
  */
 export const settingsNavGroups = [
-  { title: "打字", ids: ["input", "expression", "shortcuts", "dictionary"] },
+  { title: "打字", ids: ["input", "dictionary", "shortcuts", "expression"] },
+  { title: "更多输入方式", ids: ["voice", "screen-keyboard", "handwriting"] },
   { title: "外观", ids: ["skin", "appearance", "floating-toolbar"] },
-  { title: "更多输入方式", ids: ["screen-keyboard", "voice", "handwriting"] },
-  { title: "工具", ids: ["tools", "typing-statistics", "plugins", "ai"] },
+  { title: "工具", ids: ["tools", "ai", "mcp", "plugins", "typing-statistics"] },
   { title: "账号", ids: ["account"] },
   { title: "支持", ids: ["developer", "feedback", "about"] },
 ] as const satisfies readonly { title: string; ids: readonly SettingsPageId[] }[];
@@ -141,7 +141,6 @@ export const subPageParents: Partial<Record<SettingsPageId, SettingsPageId>> = {
   "usage-reporting": "about",
   privacy: "account",
   "try-keyboard": "home",
-  mcp: "developer",
 };
 
 /**
@@ -158,12 +157,24 @@ export function desktopPage(id: SettingsPageId): SettingsPageId {
   return desktopMergedPages[id] ?? id;
 }
 
-/** 桌面宿主按平台改写的页名；触屏宿主的页名由 `mobilePageTitle` 改写。macOS 和 Linux 的账号页没有设置同步（设置同步只接在 Windows 和鸿蒙的账号会话上），叫「账号」。 */
-export function desktopPageTitle(
-  id: SettingsPageId,
-  title: string,
-  platform: string | undefined,
-): string {
-  if (id === "account" && (platform === "macos" || platform === "linux")) return "账号";
-  return title;
+/** 桌面菜单使用四字名称；触屏宿主继续由 `mobilePageTitle` 命名。 */
+const desktopPageTitles: Partial<Record<SettingsPageId, string>> = {
+  input: "输入设置",
+  dictionary: "词库管理",
+  shortcuts: "按键设置",
+  expression: "标点翻译",
+  skin: "主题外观",
+  "floating-toolbar": "快捷工具",
+  tools: "剪贴管理",
+  ai: "智能辅助",
+  mcp: "AI助手",
+  plugins: "扩展插件",
+  account: "账号管理",
+  developer: "维护诊断",
+  about: "关于水杉",
+};
+
+/** 桌面共用菜单名称；页面 id、宿主路由与触屏名称不随文案变化。 */
+export function desktopPageTitle(id: SettingsPageId, title: string): string {
+  return desktopPageTitles[id] ?? title;
 }

@@ -149,6 +149,12 @@ public final class MSIMEInputService extends InputMethodService {
     private HorizontalScrollView horizontalCandidateScroll;
     private ScrollView verticalCandidateScroll;
     private final java.util.List<Button> candidateButtons = new java.util.ArrayList<>();
+    /**
+     * 候选条上有手指按着，这一帧的候选内容推迟到松开之后再画。
+     *
+     * <p>候选条每次 render 都 `removeAllViews` 再逐个挂回去，候选对象本身是复用的，但摘下来的那一瞬间框架就把这次按压变成 CANCEL，点击不再发出，用户看到的是「候选偶尔点不上」。候选内容又几乎每帧都在变（组字的异步回包、译文角标），所以这个窗口并不罕见。松手时 {@link ImeCandidates} 在按钮的触摸监听里补一次 render，画面只晚这一下按压。
+     */
+    boolean candidateRenderDeferred;
     private final java.util.List<Button> englishSuggestionButtons = new java.util.ArrayList<>(32);
     LinearLayout expandedCandidates;
     ScrollView expandedCandidateScroll;
@@ -574,6 +580,9 @@ public final class MSIMEInputService extends InputMethodService {
     void copyDeviceInfo() {
         long generation = ++deviceInfoCopyGeneration;
         DeviceInfoCollector.Screen screen = DeviceInfoCollector.screen(moreButton);
+        // 复制完成后直接回到键盘，提示会在键盘内部显示，避免用户还要手动关闭工具面板。
+        closeMoreTools();
+        render();
         try {
             preferencesWorker.execute(() -> {
                 var entries = DeviceInfoCollector.collect(getApplicationContext(), screen);
@@ -1455,10 +1464,15 @@ public final class MSIMEInputService extends InputMethodService {
         resourcePacks = java.util.Set.of();
         letterCase.reset();
         clearEnglishSuggestions();
-        keyboardLayer = KeyboardLayout.Layer.LETTERS;
-        editorInputType = info == null ? 0 : info.inputType;
+        int nextInputType = info == null ? 0 : info.inputType;
+        String nextPackage = info == null || info.packageName == null ? "" : info.packageName;
+        // 同一编辑器重启连接时保留用户选择的数字层；换输入框或输入类型时重新按编辑器决定。
+        boolean keepKeyboardLayer = !newDocument && editorInputType == nextInputType
+            && currentEditorPackage.equals(nextPackage);
+        if (!keepKeyboardLayer) keyboardLayer = KeyboardLayout.Layer.LETTERS;
+        editorInputType = nextInputType;
         if (directNumberPad()) keyboardLayer = KeyboardLayout.Layer.SYMBOLS;
-        currentEditorPackage = info == null || info.packageName == null ? "" : info.packageName;
+        currentEditorPackage = nextPackage;
         allowLearning = info != null && EditorPolicy.allowLearning(info.imeOptions);
         refreshLocalSettings();
         preferencesNotice = "";
@@ -3018,6 +3032,7 @@ public final class MSIMEInputService extends InputMethodService {
 
     private Button makeEnglishSuggestionButton(int slot) {
         Button button = new KeyboardPressButton(this);
+        bindCandidateRenderRelease(button);
         ViewPolicy.setAllCapsFalse(button);
         button.setOnClickListener(ignored -> {
             imeKeyFeedback.playFeedback(button);
@@ -6993,6 +7008,47 @@ public final class MSIMEInputService extends InputMethodService {
         imePanels.renderClipboardHistory();
     }
 
+    /** 原子删除多选记录；排序、时间戳和固定规则仍由共享存储决定。 */
+    void removeClipboardItems(java.util.List<String> texts) {
+        if (clipboardHistory == null || texts == null || texts.isEmpty()) return;
+        try {
+            clipboardUndoTexts = clipboardHistory.removeMany(texts);
+            if (clipboardUndoTexts.isEmpty()) return;
+            if (clipboardUndoExpiry != null) main.removeCallbacks(clipboardUndoExpiry);
+            clipboardUndoExpiry = () -> {
+                clipboardUndoTexts = null;
+                if (imePanels.clipboardPanelOpen()) imePanels.renderClipboardHistory();
+            };
+            main.postDelayed(clipboardUndoExpiry, 5000L);
+            forgetCurrentClip();
+            notice("已删除 " + texts.size() + " 项，可在 5 秒内撤销");
+        } catch (IllegalStateException error) {
+            notice("无法修改剪贴板历史");
+        }
+        imePanels.renderClipboardHistory();
+    }
+
+    private java.util.List<ClipboardHistory.Item> clipboardUndoTexts;
+    private Runnable clipboardUndoExpiry;
+
+    boolean hasClipboardUndo() {
+        return clipboardUndoTexts != null && !clipboardUndoTexts.isEmpty();
+    }
+
+    void undoClipboardItems() {
+        if (!hasClipboardUndo() || clipboardHistory == null) return;
+        java.util.List<ClipboardHistory.Item> restore = clipboardUndoTexts;
+        clipboardUndoTexts = null;
+        if (clipboardUndoExpiry != null) main.removeCallbacks(clipboardUndoExpiry);
+        try {
+            clipboardHistory.restoreMany(restore);
+            notice("已撤销删除");
+        } catch (IllegalStateException error) {
+            notice("无法撤销剪贴板删除");
+        }
+        imePanels.renderClipboardHistory();
+    }
+
     /**
      * 长按操作行里的「编辑」（#5971）：打开应用里的编辑页，在那里改这一条的文字，确认后经共享存储的 `replace` 写回，条目留在原位。键盘里没有可输入的文本框，增删改放在应用里，和常用语（#5673）一样；面板里也不能弹对话框（#5605、#5653）。
      *
@@ -7047,7 +7103,25 @@ public final class MSIMEInputService extends InputMethodService {
         });
     }
 
-    /** 从键盘长按操作行分享用户明确选中的一条本机记录。 */
+    /** 分词复制只更新系统剪贴板，回到原键盘后沿用既有最近复制、隐私及历史开关。 */
+    void copyClipboardSelection(String text) {
+        if (text == null || text.isEmpty()) return;
+        ClipboardManager manager = getSystemService(ClipboardManager.class);
+        if (manager == null) {
+            notice("无法访问系统剪贴板");
+            return;
+        }
+        try {
+            manager.setPrimaryClip(ClipData.newPlainText("分词", text));
+            closeClipboardHistory();
+            offerRecentClip(true);
+            render();
+        } catch (RuntimeException error) {
+            notice("复制失败，请重试");
+        }
+    }
+
+    /** 从键盘分享用户明确选中的本机记录或分词内容。 */
     void shareClipboardText(String text) {
         if (!ClipboardSharePolicy.canShare(text)) {
             notice("这条记录没有可分享的文本");
@@ -7597,6 +7671,7 @@ public final class MSIMEInputService extends InputMethodService {
     private void updateCandidateButton(Button button, JSONObject candidate, int slot, int visibleSlot) {
         int source = InputViewValuePolicy.integer(candidate, "source", -1);
         String text = chineseOutput(InputViewValuePolicy.textOr(candidate, "text", ""), view);
+        String displayedText = ContactCandidatePolicy.displayText(source, text);
         boolean highlighted = InputViewValuePolicy.booleanValue(candidate, "highlighted", false);
         String typed = InputViewValuePolicy.textOr(view, "preedit", "");
         String annotation = candidateAnnotation(candidate, typed);
@@ -7608,7 +7683,7 @@ public final class MSIMEInputService extends InputMethodService {
         // 实体键盘打字（候选条模式）时例外：候选前面标上数字行选词用的 1–9，每页十个时第十个标 0（#5584、#6679）。
         String number = HardwareKeyboardModePolicy.candidatePrefix(hardwareKeyboardMode, numberRowSelection,
             dedicatedEnglish, visibleSlot);
-        button.setText(candidateLabel(number, text, annotation, highlighted));
+        button.setText(candidateLabel(number, displayedText, annotation, highlighted));
         int labelLines = candidateLabelLines(annotation);
         ViewPolicy.setFixedLines(button, labelLines);
         configureCandidateTextLayout(button, labelLines);
@@ -7618,7 +7693,8 @@ public final class MSIMEInputService extends InputMethodService {
         button.setAlpha(AiPendingCandidatePolicy.alpha(source));
         // render() attaches the button and applies the complete skin tree once below.
         // Avoid creating its candidate drawables before that pass.
-        String description = AiPendingCandidatePolicy.description(source, "候选 " + (visibleSlot + 1) + "：", text,
+        String description = AiPendingCandidatePolicy.description(source, "候选 " + (visibleSlot + 1) + "：",
+            ContactCandidatePolicy.description(source, text),
             candidateAccessibilitySuffix(candidate, typed));
         JSONObject id = candidate.optJSONObject("id");
         button.setContentDescription(id != null && candidateManagementEnabled()
@@ -9221,6 +9297,22 @@ public final class MSIMEInputService extends InputMethodService {
         }
     }
 
+    /** 从键盘功能面板直接打开官网；成功后收起输入法，回到系统浏览器。 */
+    void openWebsite() {
+        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse("https://msime.app/"))
+            .addCategory(Intent.CATEGORY_BROWSABLE)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            closeMoreTools();
+            startActivity(intent);
+            requestHideSelf(0);
+        } catch (ActivityNotFoundException unavailable) {
+            notice("没有可以打开官网的应用");
+        } catch (RuntimeException unavailable) {
+            notice("无法打开官网");
+        }
+    }
+
     // A disabled card swallows the press, and the 工具 section draws no state text, so without
     // this 剪贴板历史 and AI 润色 looked exactly like the cards that work and did nothing when
     // pressed. A screen reader was told "不可用"; nobody else was.
@@ -9648,6 +9740,15 @@ public final class MSIMEInputService extends InputMethodService {
             else ViewPolicy.setInvisible(verticalCandidateScroll);
         }
         LinearLayout activeCandidates = candidateHorizontal ? candidates : verticalCandidates;
+        // 手指按在某个候选上时不重画候选条，见 candidateRenderDeferred。这一帧剩下的东西（页码、展开键、
+        // 皮肤）也一起跳过；松手后补的那次 render 会把它们一起补上。
+        if (candidateTreeHeld(activeCandidates)
+                || candidateTreeHeld(expandedCandidates)
+                || candidateTreeHeld(imeNineKeyPanel.root())) {
+            candidateRenderDeferred = true;
+            return;
+        }
+        candidateRenderDeferred = false;
         candidates.removeAllViews();
         if (verticalCandidates != null) verticalCandidates.removeAllViews();
         if (expandCandidates != null) ViewPolicy.hide(expandCandidates);
@@ -9713,6 +9814,30 @@ public final class MSIMEInputService extends InputMethodService {
         imeToolbar.styleTopRow();
     }
 
+    /** 在候选条或展开面板里是否有一个视图正被手指按着。 */
+    private static boolean candidateTreeHeld(View view) {
+        if (view == null || view.getVisibility() != View.VISIBLE) return false;
+        if (view.isPressed()) return true;
+        if (!(view instanceof android.view.ViewGroup group)) return false;
+        for (int index = 0; index < group.getChildCount(); index++)
+            if (candidateTreeHeld(group.getChildAt(index))) return true;
+        return false;
+    }
+
+    /** 候选视图结束按压后补上被延后的那一帧；监听返回 false，不改变按钮自身的点击、长按和滚动语义。 */
+    void bindCandidateRenderRelease(View button) {
+        button.setOnTouchListener((view, event) -> {
+            int action = event.getActionMasked();
+            if ((action == android.view.MotionEvent.ACTION_UP
+                    || action == android.view.MotionEvent.ACTION_CANCEL)
+                    && candidateRenderDeferred) {
+                candidateRenderDeferred = false;
+                view.post(this::render);
+            }
+            return false;
+        });
+    }
+
     /**
      * A new Engine page must start at its first visible candidate. Keeping the old scroll offset
      * makes a page change look like a reordered or missing candidate list, especially when the
@@ -9754,6 +9879,7 @@ public final class MSIMEInputService extends InputMethodService {
             HandwritingRequestTracker.Token token = handwritingCandidateToken;
             Button choice = keyboardKey(chineseOutput(candidate, view),
                 "手写候选 " + (index + 1), () -> commitHandwritingCandidate(token, candidate));
+            bindCandidateRenderRelease(choice);
             KeyboardTypographyPolicy.setKeyTextSize(choice, candidateFontSize);
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 candidateHorizontal ? LinearLayout.LayoutParams.WRAP_CONTENT

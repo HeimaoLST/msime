@@ -27,7 +27,7 @@ use crate::local::emoji::{query_emoji_readings, query_kaomoji_readings, Expressi
 use crate::local::symbol_candidates::{query_symbol_readings, SymbolRow, MIXED_SYMBOL_LIMIT};
 use crate::nine_key_shuangpin::NineKeyShuangpin;
 use crate::paths::RuntimePaths;
-use crate::pinyin::segment::{cut_one_piece_min_segments, split_segments};
+use crate::pinyin::segment::{is_complete_pinyin_input, split_segments};
 use crate::pinyin::syllables::intact_pinyin_list;
 use crate::quanpin::QuanpinDictionary;
 use crate::session::{LocalClock, SessionSnapshot};
@@ -1191,9 +1191,9 @@ impl NineKeySession {
 
     fn refresh(&mut self) {
         self.candidates.clear();
-        self.spellings.clear();
         self.reading.clear();
         if !self.active() {
+            self.spellings.clear();
             // 筛选和撤销记录只属于这一次组字。
             self.sentence_seeds.clear();
             self.lock_undo.clear();
@@ -1203,6 +1203,7 @@ impl NineKeySession {
             return;
         }
         if self.english_only || !self.pinyin {
+            self.spellings.clear();
             // No syllables to offer and no pinyin to look up: the digits stand for letters only.
             self.candidates = self.english_candidates(false);
             return;
@@ -1224,6 +1225,7 @@ impl NineKeySession {
             |piece: &str| initial.is_none_or(|letter| piece.as_bytes().first() == Some(&letter));
         let dictionary_options = self.dictionary_options();
         let alternatives = if remaining.is_empty() {
+            self.spellings.clear();
             vec![Vec::new()]
         } else {
             let dictionary = self
@@ -2435,7 +2437,8 @@ fn splits_into_syllables_at(key: &str, boundaries: &[usize]) -> bool {
         let Some(piece) = key.get(start..end) else {
             return false;
         };
-        if !piece.is_empty() && cut_one_piece_min_segments(piece, true).is_empty() {
+        // 单片编码不接受撇号；完整性接口接受撇号分段，因此在这里保留旧限制。
+        if !piece.is_empty() && (piece.contains('\'') || !is_complete_pinyin_input(piece)) {
             return false;
         }
         start = end;
@@ -2938,24 +2941,40 @@ fn keyword_spells_digits(grid: KeyGrid, keyword: &str, digits: &str) -> bool {
 
 /// Every letter prefix of the leading digits, expanded while the count stays within `budget`.
 fn letter_prefixes(grid: KeyGrid, digits: &str, budget: usize) -> Vec<String> {
-    let mut prefixes = vec![String::new()];
+    let mut count = 1;
+    let mut depth = 0;
     for digit in digits.bytes() {
         let letters = grid.letters(digit);
-        if letters.is_empty() || prefixes.len() * letters.len() > budget {
+        let width = letters.chars().count();
+        if width == 0 || count > budget / width {
             break;
         }
-        prefixes = prefixes
-            .iter()
-            .flat_map(|prefix| {
-                letters
-                    .chars()
-                    .map(move |letter| format!("{prefix}{letter}"))
-            })
-            .collect();
+        count *= width;
+        depth += 1;
     }
-    if prefixes.len() == 1 && prefixes[0].is_empty() {
+    if depth == 0 {
         Vec::new()
     } else {
+        fn visit(grid: KeyGrid, digits: &[u8], prefix: &mut String, result: &mut Vec<String>) {
+            let Some((&digit, rest)) = digits.split_first() else {
+                result.push(prefix.clone());
+                return;
+            };
+            for letter in grid.letters(digit).chars() {
+                prefix.push(letter);
+                visit(grid, rest, prefix, result);
+                prefix.pop();
+            }
+        }
+
+        let mut prefixes = Vec::with_capacity(count);
+        let mut prefix = String::with_capacity(depth);
+        visit(
+            grid,
+            &digits.as_bytes()[..depth],
+            &mut prefix,
+            &mut prefixes,
+        );
         prefixes
     }
 }
@@ -3101,9 +3120,9 @@ impl SpellingTable {
         destination: &mut Vec<String>,
         matches: &mut Vec<usize>,
     ) {
-        destination.clear();
         matches.clear();
         if remaining.is_empty() {
+            destination.clear();
             return;
         }
         matches.extend(
@@ -3138,7 +3157,15 @@ impl SpellingTable {
                 .then_with(|| prior.syllable_score(b).total_cmp(&prior.syllable_score(a)))
                 .then_with(|| a.cmp(b))
         });
-        destination.extend(matches.iter().map(|&index| self.syllables[index].0.clone()));
+        destination.truncate(matches.len());
+        for (position, &index) in matches.iter().enumerate() {
+            if let Some(spelling) = destination.get_mut(position) {
+                spelling.clear();
+                spelling.push_str(&self.syllables[index].0);
+            } else {
+                destination.push(self.syllables[index].0.clone());
+            }
+        }
     }
 
     /// Syllable paths spelling `digits`, built from the end. A piece may end a path early only if it is a complete syllable; each offset keeps the 48 best by fewer syllables, complete last syllable, then lexicographic (NK:122-156). 不带频度，测试用。
@@ -3324,6 +3351,9 @@ mod seed_tail_tests;
 mod code_prefix_tests;
 
 #[cfg(test)]
+mod spelling_buffer_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::{CandidateSource, NineKeyShuangpinKind};
@@ -3458,6 +3488,16 @@ mod tests {
         assert_eq!(letter_prefixes("79", 64).len(), 16);
         assert!(letter_prefixes("1", 64).is_empty());
         assert!(letter_prefixes("", 64).is_empty());
+    }
+
+    #[test]
+    fn letter_prefixes_do_not_allocate_discarded_intermediate_levels() {
+        let (_, allocations) =
+            crate::ime::personal_rerank::allocations::count(|| letter_prefixes("64426", 64));
+        assert!(
+            allocations <= 30,
+            "letter prefix expansion allocated {allocations} buffers"
+        );
     }
 
     #[test]
@@ -4441,6 +4481,65 @@ mod tests {
         session.refresh();
         assert_eq!(session.spellings.as_ptr(), pointer);
         assert_eq!(session.spellings.capacity(), capacity);
+    }
+
+    #[test]
+    fn refresh_keeps_spelling_string_buffers() {
+        let fixture = fixture();
+        let mut session = open(&fixture.paths, false, EnglishInputOptions::default());
+        session.digits = "64".into();
+        session.refresh();
+        let expected = session.snapshot();
+        // 排名会移动行，给每个音节留下足够容量后，按指针集合检查复用。
+        let syllables = session.spellings.len() - session.key_choices("64").len();
+        assert!(syllables > 0);
+        for value in &mut session.spellings[..syllables] {
+            value.reserve(64);
+        }
+        let mut before: Vec<_> = session.spellings[..syllables]
+            .iter()
+            .map(|value| value.as_ptr())
+            .collect();
+        before.sort_unstable();
+        session.refresh();
+        assert_eq!(session.snapshot(), expected);
+        let mut after: Vec<_> = session.spellings[..syllables]
+            .iter()
+            .map(|value| value.as_ptr())
+            .collect();
+        after.sort_unstable();
+        assert_eq!(after, before, "刷新不应清空已有音节字符串");
+        assert!(session.spellings[..syllables]
+            .iter()
+            .all(|value| value.capacity() >= 64));
+    }
+
+    #[test]
+    fn refresh_discards_spellings_when_there_is_no_pinyin_target() {
+        let fixture = fixture();
+        let mut session = open(&fixture.paths, false, EnglishInputOptions::default());
+        session.digits = "64".into();
+        session.refresh();
+        assert!(!session.spellings.is_empty());
+        session.set_english_only(true);
+        assert!(session.spellings.is_empty());
+        session.set_english_only(false);
+        assert!(!session.spellings.is_empty());
+        session.pinyin = false;
+        session.refresh();
+        assert!(session.spellings.is_empty());
+        session.pinyin = true;
+        session.refresh();
+        assert!(!session.spellings.is_empty());
+        // 没有撤销选项的全锁定状态也不能带出上一次的读音。
+        session.locked = vec!["ni".to_owned()];
+        session.refresh();
+        assert!(session.spellings.is_empty());
+        session.locked.clear();
+        session.refresh();
+        assert!(!session.spellings.is_empty());
+        session.command(Command::Cancel);
+        assert!(session.spellings.is_empty());
     }
 
     #[test]
@@ -6613,6 +6712,104 @@ CREATE TABLE tbl_2_y(key TEXT,jp TEXT,value TEXT,weight INTEGER);INSERT INTO tbl
             allocations <= 1150,
             "symbols-only expressive path allocated an unused resource path: {allocations}"
         );
+    }
+
+    fn frozen_splits_into_syllables_at(key: &str, boundaries: &[usize]) -> bool {
+        let mut start = 0;
+        for &end in boundaries.iter().chain(std::iter::once(&key.len())) {
+            let Some(piece) = key.get(start..end) else {
+                return false;
+            };
+            if !piece.is_empty()
+                && crate::pinyin::segment::cut_one_piece_min_segments(piece, true).is_empty()
+            {
+                return false;
+            }
+            start = end;
+        }
+        true
+    }
+
+    #[test]
+    fn expressive_boundary_check_matches_owned_cuts() {
+        let mut inputs = vec![
+            String::new(),
+            "nihao".into(),
+            "meiguo".into(),
+            "xiangjiao".into(),
+            "xi'an".into(),
+            "ni''hao".into(),
+            "'ni".into(),
+            "ni'".into(),
+            "你好".into(),
+            "ni好".into(),
+            "NIHAO".into(),
+            "gamma".into(),
+            "ni".repeat(32),
+            "ni".repeat(33),
+            "ni".repeat(33) + "h",
+        ];
+        for syllable in intact_pinyin_list() {
+            for suffix in ["", "ni", "h", "'an", "好", "sahng", "zhonguo"] {
+                inputs.push(format!("{syllable}{suffix}"));
+            }
+        }
+        for key in inputs {
+            let mut boundaries = vec![
+                vec![],
+                vec![0],
+                vec![key.len()],
+                vec![0, key.len()],
+                vec![key.len(), key.len()],
+                vec![key.len() + 1],
+                vec![usize::MAX],
+                vec![key.len(), 0],
+            ];
+            boundaries.extend((0..=key.len()).map(|at| vec![at, at]));
+            for boundaries in boundaries {
+                assert_eq!(
+                    splits_into_syllables_at(&key, &boundaries),
+                    frozen_splits_into_syllables_at(&key, &boundaries),
+                    "编码 {key:?}，边界 {boundaries:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn expressive_boundary_check_does_not_materialize_syllables() {
+        use crate::ime::personal_rerank::allocations::count;
+        assert!(splits_into_syllables_at("nihao", &[]));
+        for (key, boundaries, expected_allocations) in [
+            ("nihao".to_owned(), vec![], 0),
+            ("meiguo".to_owned(), vec![3], 0),
+            ("xiangjiao".to_owned(), vec![2, 5], 0),
+            ("ni".repeat(32), vec![], 0),
+            ("ni".repeat(33), vec![], 1),
+        ] {
+            let (expected, old) = count(|| frozen_splits_into_syllables_at(&key, &boundaries));
+            let (actual, new) = count(|| splits_into_syllables_at(&key, &boundaries));
+            assert!(expected);
+            assert_eq!(actual, expected);
+            eprintln!("表情边界：{} 字节 {boundaries:?}，{old} → {new}", key.len());
+            assert_eq!(new, expected_allocations, "只应保留超长片段的 DP 表分配");
+            assert!(new < old);
+        }
+    }
+
+    #[test]
+    fn expressive_symbol_query_preserves_rows_without_cut_results() {
+        use crate::ime::personal_rerank::allocations::count;
+        let readings = vec!["zhengfu".to_owned()];
+        let boundaries = [5];
+        let current = |key: &str| splits_into_syllables_at(key, &boundaries);
+        let frozen = |key: &str| frozen_splits_into_syllables_at(key, &boundaries);
+        assert!(!query_symbol_readings(&readings, &current).is_empty());
+        let (expected, old) = count(|| query_symbol_readings(&readings, &frozen));
+        let (actual, new) = count(|| query_symbol_readings(&readings, &current));
+        assert_eq!(actual, expected);
+        eprintln!("符号查询：{old} → {new}");
+        assert!(new < old, "符号查询仍然物化了边界切分结果");
     }
 
     #[test]

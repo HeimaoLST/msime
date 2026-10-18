@@ -138,7 +138,7 @@ static inline NSString *MSIMEInputModeIDForSchemeIn(NSDictionary *info, NSString
     return MSIMEInputModeDeclaredIn(info, mode) ? mode : MSIMEChineseInputModeID;
 }
 
-// 菜单栏状态项显示这个模式时用的图标文件名，与系统输入法菜单里该模式的图标是同一张：取 bundle 里该模式的 tsInputModeMenuIconFileKey，取值路径与 MSIMEInputModeDeclaredIn 相同。本版本没有声明这个模式时（五笔版把五笔的图标放在 .Hans 上）取主模式 .Hans 的，再没有时取输入法本身的 tsInputMethodIconFileKey，最后是 MSIMEClientInputMethodMenuIcon.tiff。
+// 系统输入法菜单里这个模式使用的图标文件名：取 bundle 里该模式的 tsInputModeMenuIconFileKey，取值路径与 MSIMEInputModeDeclaredIn 相同。本版本没有声明这个模式时（五笔版把五笔的图标放在 .Hans 上）取主模式 .Hans 的，再没有时取输入法本身的 tsInputMethodIconFileKey，最后是 MSIMEClientInputMethodMenuIcon.tiff。菜单栏状态项固定使用产品 logo，不走这条模式图标路径。
 static inline NSString *MSIMEInputModeMenuIconFileIn(NSDictionary *info, NSString *identifier) {
     id component = info[@"ComponentInputModeDict"];
     id modes = [component isKindOfClass:NSDictionary.class] ? component[@"tsInputModeListKey"] : nil;

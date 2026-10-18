@@ -382,10 +382,8 @@ export function McpConnectSection({
     <GroupList title="连接 AI 助手">
       <SettingsManagerBlock role="group" aria-label="连接 AI 助手">
         <SettingsManagerNote>
-          连接后，把输入法的问题（卡顿、候选窗口不见了）直接告诉 AI
-          助手：它会打开诊断日志、请你重做一遍出问题的操作，再读日志找原因；也能读取快捷短语、设置、打字统计和已安装的候选窗口皮肤。通过
-          MCP
-          在本机运行，不联网。助手还能做什么由下面两个开关决定，默认都开；复制的命令、配置和一键写入都带上开着的权限。两个都关时只读，除了开关诊断日志不改动任何设置。
+          MCP（Model Context Protocol）让 AI
+          助手通过本机服务调用水杉输入法的功能，不联网。连接后，助手可以管理快捷短语和设置、制作候选窗口皮肤、读取打字统计和已安装皮肤；遇到卡顿或候选窗口问题时，也能读取诊断日志帮助排查。助手能否修改内容由下面两个开关决定，默认都开；复制的命令、配置和一键写入都带上开着的权限。两个都关时只读，除了开关诊断日志不改动任何设置。
         </SettingsManagerNote>
         {loadFailed && <ErrorAlert>无法读取 MCP 服务器的状态。</ErrorAlert>}
         {copyFailed && <ErrorAlert>复制失败，请重试。</ErrorAlert>}

@@ -30,3 +30,5 @@ iOS 长按：工具栏上全部按钮（含品牌键和收起键）各挂 0.5 �
 
 - Android：`check-host.sh` 通过；发布签名 APK 装在 API 28 模拟器上，关掉全部工具后空闲时没有工具栏行、按笔画键候选行照常出现，「编辑工具栏」预览显示全关说明；同一 APK 覆盖安装到 Pixel 3 XL。底栏打开剪贴板面板的情形在这台模拟器上看不到底栏，没有在设备上点过。
 - iOS：模拟器上 App 与键盘扩展编译通过；`NineKeyKeyboardTests` 新增全关时顶栏高度为 0、组字时候选行回来、打开常用语后这一行重新出现，以及 13 个按钮都挂 0.5 秒长按并取消触摸；`KeyboardAppLauncherTests` 固定链接格式。没有在真机或模拟器界面里实际长按。
+
+后续 iOS 键盘高度稳定性修复见 [iOS 隐藏工具栏时保持键盘高度稳定](../bug-fix/2026-10-17-ios-keyboard-height-stability.md)；Android 和 HarmonyOS 仍按本篇的整行收起规则运行。

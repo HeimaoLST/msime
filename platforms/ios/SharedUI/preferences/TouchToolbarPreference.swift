@@ -58,7 +58,7 @@ struct TouchToolbarPreference: Equatable {
   }
 }
 
-/// 共享的 `touch_toolbar` 装不下的工具栏设置，保存在本设备的 App Group 里，就像 Android 把它们存在本地设置里一样（`platform.android.toolbar_phrase`、`toolbar_scheme`、`toolbar_hidden`）：「常用语」和「输入方式」按钮，默认开启；以及「显示方式」，选「隐藏」时，没有正在输入的内容就收起整个工具栏。共享文档的校验器会丢弃它不认识的成员，所以这些设置不能放进 `touch_toolbar`；iOS 的设置同步不携带它们，所以不随账号同步；Android 的这三项会经 `android_local` 同步。
+/// 共享的 `touch_toolbar` 装不下的工具栏设置，保存在本设备的 App Group 里，就像 Android 把它们存在本地设置里一样（`platform.android.toolbar_phrase`、`toolbar_scheme`、`toolbar_hidden`）：「常用语」和「输入方式」按钮，默认开启；以及「显示方式」。选「隐藏」时不画工具栏内容；iOS 保留顶栏高度以避免组字时重排键盘，Android 仍会收起整行。共享文档的校验器会丢弃它不认识的成员，所以这些设置不能放进 `touch_toolbar`；iOS 的设置同步不携带它们，所以不随账号同步；Android 的这三项会经 `android_local` 同步。
 enum TouchToolbarLocalPreference {
   static var defaults: UserDefaults { InputSchemePreference.appGroupDefaults }
   static let phrasesKey = "keyboard.toolbar.phrases"

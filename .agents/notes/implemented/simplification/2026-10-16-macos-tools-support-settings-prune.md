@@ -2,6 +2,8 @@
 
 Status: implemented
 
+其中 MCP 承载位置的决定后来由 [MCP 独立设置页](../architecture/2026-10-18-mcp-independent-settings-page.md) 取代；本篇其余工具与支持页精简决定仍然有效。
+
 ## Problem
 
 macOS 设置里「工具」「账号」「支持」几组页面上的控件，很多不是用户真要做的决定：同一个入口出现两次（云词库、打开数据目录）、只有出错时才用得上的恢复按钮一直摆着（刷新登录方式、清除失效登录状态）、页面已经会自动做的事又给一个按钮（刷新统计、从系统剪贴板同步）、开发者用的块平铺在主页面上（MCP 连接、AI 润色测试）、一组里没有任何控件（macOS 的「云剪贴板」组），以及两项几乎看不出效果的微调（AI 候选数量、效果强度）。另有两处开了不起作用或说法不对：没选音乐包时打开「背景音乐」什么也不放（宿主要求开关打开并且选了包，`key_sound.rs` 的 `music: enabled && !pack.is_empty()`）；AI「自定义提示词」写着「额外的提示词」，实际会整个替换内置提示词，而内置提示词带着 JSON 输出约定（`ai.rs` 的 `DEFAULT_CANDIDATE_PROMPT`），写一句短指令就可能让联想不出结果。
@@ -25,8 +27,9 @@ macOS 设置里「工具」「账号」「支持」几组页面上的控件，�
 - 打字统计：桌面版撤掉「刷新统计」按钮，页面每 5 秒和窗口回到前台时自动重读；手机溢出菜单里的「刷新统计」保留（Android 设备冒烟 `TypingStatisticsDeviceSmoke` 还在按它）。macOS 不再给统计页的「打开数据目录」（`main.tsx` 不注入 `openDirectory`），它和「维护与诊断 › 在 Finder 中显示」打开的是同一个偏好目录；Linux、Windows 照旧。
 - 剪贴板：macOS 的「云剪贴板」组撤掉，那句「请从输入法菜单中的『云剪贴板…』打开」挪进一直显示的「剪贴板」组（`ClipboardHistorySection` 的 `note`）。「从系统剪贴板同步」按钮撤掉，改为保存的 `clipboard_history` 从关变成开的那一次自动调用一次 `sync`；进入页面或本来就开着时不同步。Windows 原生剪贴板页的同步按钮走同一个 `sync_clipboard_history`，不受影响。 状态由公共 `useClipboardHistory` 管理，读取与写入的页面归属分别保留，见[剪贴板历史状态抽取](2026-10-17-clipboard-history-state.md)。
 - 账号：桌面的「云端」组去掉「云词库」一行（入口留在「词库」页，不登录也看得到），只剩云剪贴板，macOS 上因此整组不出现；触屏宿主「我的」里的云词库不动。「刷新登录方式」只在没有可用的登录方式（读失败或一个都没开）时出现；「清除失效登录状态」只在读不出本机登录状态（`status()` 失败）时出现，清掉以后消失。登录说明在没有设置同步（`settingsSync`）的桌面上不再许诺「同步设置」。
-- 维护与诊断：macOS 的「重新注册当前输入源」和「安装或更新水杉输入源」合成一个「修复输入源」，先 `installInputSource` 再 `restartInputMethod`。安装一步改走和启动检查同一套版本比较的 `macos_input_source::repair`：没装时安装、随附的更新时替换，从不降级；与启动检查不同的是版本相同也重装一遍，因为 Info.plist 读得出版本不代表可执行文件、框架和签名完好（清理工具删掉了一部分、只拷了一半），原来的「安装 / 更新」会覆盖这样的 bundle，修复不能少了这一步；不是打包运行、没有随附输入源（`SourceUnavailable`）和 bundle 已留在原处只等登记（`RegistrationPending`）都不算失败。安装真的失败时照样重新登记已装的那份，登记完再报失败。原来「安装 / 更新」那条不比较版本的强制重装（`macos_input_source::install`）随之删掉，它没有别的调用方。启动时安装失败的提示改为指向「修复」。「连接 AI 助手」整块移到新的子页 `mcp`（`subPageParents.mcp = "developer"`，只在宿主报告 `mcpServerStatus` 时存在），维护页上只剩进入它的一行。
+- 维护与诊断：macOS 的「重新注册当前输入源」和「安装或更新水杉输入源」合成一个「修复输入源」，先 `installInputSource` 再 `restartInputMethod`。安装一步改走和启动检查同一套版本比较的 `macos_input_source::repair`：没装时安装、随附的更新时替换，从不降级；与启动检查不同的是版本相同也重装一遍，因为 Info.plist 读得出版本不代表可执行文件、框架和签名完好（清理工具删掉了一部分、只拷了一半），原来的「安装 / 更新」会覆盖这样的 bundle，修复不能少了这一步；不是打包运行、没有随附输入源（`SourceUnavailable`）和 bundle 已留在原处只等登记（`RegistrationPending`）都不算失败。安装真的失败时照样重新登记已装的那份，登记完再报失败。原来「安装 / 更新」那条不比较版本的强制重装（`macos_input_source::install`）随之删掉，它没有别的调用方。启动时安装失败的提示改为指向「修复」。「连接 AI 助手」整块移到新的子页 `mcp`（`subPageParents.mcp = "developer"`，只在宿主报告 `mcpServerStatus` 时存在），维护页上只剩进入它的一行。桌面共享页的二级入口现由[维护页顶部标签](../feature/2026-10-18-maintenance-assistant-tabs.md)取代；本篇的 MCP 服务能力边界和手机入口继续适用。
 - 帮助与反馈并进关于（桌面）：注册表新增 `desktopMergedPages = { feedback: "about" }`。`settingsNavGroups` 不变，触屏宿主、Windows 原生窗口的 `SettingsNavigation.h` 和 `main.tsx` 的 `onNativeSettingsPage` 都照旧认 `feedback` 和 `help`；桌面侧栏不列出被并进的页，`index.tsx` 把桌面上请求的 `feedback` 显示成 `about`，`help` 的上级随之点亮「关于」、返回按钮写「返回关于」。「关于」在桌面（含 HarmonyOS 2in1）上画 `FeedbackSections`（帮助入口、问题报告、反馈渠道），桌面上不再挂一份藏起来的反馈页；手机保留单独的反馈页和应用内表单。
+- 关于页顶部标签：共享桌面页使用「版本与更新」「帮助与反馈」「系统信息」「许可与隐私」，默认选版本；旧 `feedback` 路由（包括同窗口再次收到的路由）直接选帮助与反馈，从帮助返回保留该标签。同页导航也调用路由状态设置器以恢复子标签，同时避免重复添加历史记录。沿用 `useSettingsTabs` 保持面板挂载，切换不丢反馈草稿和更新结果，并把内容滚动回顶部。HarmonyOS 2in1 原来没有系统信息，因此只显示其余三个标签；手机保留直列与独立反馈页。
 - 页名：`desktopPageTitle` 让 macOS 的账号页叫「账号」（设置同步只接在 Windows 的账号会话上），其他桌面仍叫「账号与同步」；`settingsPageProjections` 的 `desktopPageTitle` 选项缺省时用注册表里的名字，触屏宿主仍由 `mobilePageTitle` 改写。页面留在侧栏。
 
 `settingsCapabilities` 里算出来却没人用的 `showDesktopMaintenanceShortcuts` 不动：它的使用方（快捷键页的维护快捷键一组）是 `252562694a` 有意删掉的，不是丢失，接回去不在这次的决定里。
@@ -71,6 +74,8 @@ macOS 的决定逐项搬到 Windows、Linux 和 HarmonyOS，判据是控件在�
 
 ## Alternatives considered
 
+- **关于页继续使用一列分组或折叠面板** — 全部信息可顺序浏览，也不用维护标签状态。改用顶部标签是因为合并反馈后内容过长，用户明确要求与词库页一致的顶部切换；只显示当前分类并保留挂载兼顾浏览和草稿状态。
+
 - **只藏起 AI 候选数量和效果强度这两行，宿主照旧读存下的值** — 改动最小，核查组也指出两个值继续生效「无害」（效果样式仍能关掉效果，数量已经限制在 1–10）。不用它，是因为 [撤掉数字键面设置](2026-10-11-remove-number-keypad-settings.md) 已经否决过这种做法：改过的人从此改不回来，同一个值在 macOS 上看不见却在起作用。
 - **在页面里按 `macosPlatform` 判断要不要画这两行** — 一行代码就够。不用它，是因为取值固定是宿主的事实，host-api 必须按同一个事实取值，否则设置页和宿主各说各的；能力字段让 host-api、设置页和测试读同一个 `HostPlatform` 方法。
 - **成就音效、升档音直接砍成 `false`** — 插件组核查认为它们是三层嵌套的小玩法。不用它，因为两者默认就是关，「固定成关」等于删掉功能：音效包里的成就采样和 `host.rs` 的里程碑计算都会变成死代码；真正的问题是依赖没有显示出来，所以收进「更多音效」并在统计关着时禁用。
@@ -104,3 +109,5 @@ macOS 的决定逐项搬到 Windows、Linux 和 HarmonyOS，判据是控件在�
 ### 审查后的验收约束
 
 Windows 的「帮助与反馈」并入「关于」、手写并入屏幕键盘后，原生侧栏共 16 页。真实宿主验收同步访问这 16 页，并检查「关于」仍有反馈类型、描述、复制报告与交流入口；`scripts/test-windows-settings-ui-pages.py` 在本地与 CI 上核对 PowerShell 验收清单和 `SettingsNavigation.h` 的页面顺序，防止只改导航却漏改设备验收。保留独立的清单核对，是为了在不能启动 WinUI 的开发机器上也能立即发现这类漂移；真实 Windows 验收仍负责确认控件实际呈现。
+
+macOS 云词库入口收窄到输入法菜单，设置进程已有面板的账号回退见[云词库回退](../bug-fix/2026-10-18-macos-cloud-dictionary-account-fallback.md)。
