@@ -5250,6 +5250,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     let letterRowsShown = !(showsSymbols || nineKeyFrame || writes || kana || dachen || fourteenKey)
     letterRowViews.forEach { $0.isHidden = !letterRowsShown }
     keyColumn.spacing = keyRowSpacing
+    applyPhoneLetterVerticalPadding()
     applyTabletLetterKeys()
     let fullKeys = formFactor.canShowFullKeys && KeyboardLayoutPreference.tabletFullKeys
     numberRowView?.isHidden = !fullKeys || showsSymbols || nineKeyFrame || writes || kana || dachen || fourteenKey
@@ -7029,11 +7030,22 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     formFactor == .phone && letterRowViews.first?.isHidden == false
   }
 
-  /// 手机竖屏 26 键把收紧键帽省下的高度分摊到三条排间距；横屏空间更紧，沿用存储行距。
+  /// 手机竖屏 26 键在存储行距之外增加 4pt 留白；横屏空间更紧，沿用存储行距。
   private var keyRowSpacing: CGFloat {
     let letterPadding: CGFloat = showsPhoneLetterRows && !isLandscape
       ? KeyboardFormFactor.phoneLetterRowPadding : 0
     return CGFloat(KeyboardLayoutPreference.rowSpacing) + letterPadding
+  }
+
+  /// 26 键收紧键帽后，把省下的高度放到键区上下，保持九键和英文键盘的外框一致。
+  private func applyPhoneLetterVerticalPadding() {
+    let inset: CGFloat = showsPhoneLetterRows && !isLandscape
+      ? KeyboardFormFactor.phoneLetterVerticalPadding : 0
+    let margins = UIEdgeInsets(top: inset, left: 0, bottom: inset, right: 0)
+    if keyColumn.layoutMargins != margins || keyColumn.isLayoutMarginsRelativeArrangement != (inset > 0) {
+      keyColumn.isLayoutMarginsRelativeArrangement = inset > 0
+      keyColumn.layoutMargins = margins
+    }
   }
 
   /// 用户调整之前的键盘高度：由内边距、当前尺寸的顶栏、顶栏下的间距和按存储行距排列的各排按键累加而成，所以顶栏变高（释义行、更大的候选字号）或行距变宽会加高键盘，而不是从按键里扣。
@@ -7138,13 +7150,18 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     view.addSubview(panel)
     NSLayoutConstraint.activate([
       panel.topAnchor.constraint(equalTo: topRow.bottomAnchor),
-      panel.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+      panel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -phoneLetterVerticalInset),
       panel.leadingAnchor.constraint(equalTo: root.leadingAnchor),
       panel.trailingAnchor.constraint(equalTo: root.trailingAnchor),
     ])
     setKeyRowsCovered(true)
     updateToolbarActiveState()
     UIAccessibility.post(notification: .layoutChanged, argument: panel)
+  }
+
+  /// 26 键收紧键帽后，键区面板也要停在实际按键的底边，不能盖住补偿留白。
+  private var phoneLetterVerticalInset: CGFloat {
+    showsPhoneLetterRows && !isLandscape ? KeyboardFormFactor.phoneLetterVerticalPadding : 0
   }
 
   /// 隐藏或恢复顶栏下面的所有行，以及它们旁边的单手模式侧栏。这些行保留布局，键盘高度不变；它们只是不再绘制、不再接收触摸。

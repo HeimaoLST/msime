@@ -7,8 +7,11 @@ enum KeyboardFormFactor: Equatable {
   case phone
   case tablet
 
-  /// 26 键手机竖屏为较矮的键帽额外留出的排间距，按四排键省下的总高度分摊到三条间隔。
-  static let phoneLetterRowPadding: CGFloat = 32 / 3
+  /// 26 键手机竖屏为较矮的键帽额外留出的排间距。
+  static let phoneLetterRowPadding: CGFloat = 4
+
+  /// 26 键手机竖屏为补回键盘总高而在键区上下增加的留白。
+  static let phoneLetterVerticalPadding: CGFloat = 10
 
   static func resolve(
     idiom: UIUserInterfaceIdiom, horizontalSizeClass: UIUserInterfaceSizeClass
@@ -57,8 +60,15 @@ enum KeyboardFormFactor: Equatable {
     let keyBlock = KeyboardHeightPercent.keyBlockHeight(
       keyHeight: keyHeight(landscape: landscape, handwriting: handwriting, letterKeys: letterKeys),
       rows: keyRows(numberRow: numberRow), rowSpacing: rowSpacing)
+    let standardRowSpacing = rowSpacing - (self == .phone && !landscape && letterKeys
+      ? Self.phoneLetterRowPadding : 0)
+    let standardBlock = KeyboardHeightPercent.keyBlockHeight(
+      keyHeight: keyHeight(landscape: landscape, handwriting: handwriting),
+      rows: keyRows(numberRow: numberRow), rowSpacing: standardRowSpacing)
+    // 26 键的键帽从 52pt 收紧到 44pt 后，用上下内边距补回这 20pt，切换布局时键盘外框不跳。
+    let letterHeightCompensation = self == .phone && letterKeys ? standardBlock - keyBlock : 0
     return padding.top + topRow + (topRow > 0 ? topRowGap : 0)
-      + keyBlock
+      + keyBlock + letterHeightCompensation
       + padding.bottom
   }
 

@@ -34,9 +34,8 @@ final class KeyboardFormFactorTests: XCTestCase {
                    "a phone has no digit row")
     // 更宽的排间距加在键盘总高上，而不是从键高里扣。
     XCTAssertEqual(phone.keyboardHeight(topRow: 50, rowSpacing: 10, landscape: false, handwriting: false), 298)
-    // 26 键使用 44pt 键帽，并把收紧键帽省下的高度分摊到三条排间距。
-    let letterSpacing = 7 + KeyboardFormFactor.phoneLetterRowPadding
-    XCTAssertEqual(phone.keyboardHeight(topRow: 50, rowSpacing: letterSpacing, landscape: false, handwriting: false, letterKeys: true), 289)
+    // 26 键使用 44pt 键帽和 11pt 排间距时，用上下留白补回收紧键帽省下的高度。
+    XCTAssertEqual(phone.keyboardHeight(topRow: 50, rowSpacing: 11, landscape: false, handwriting: false, letterKeys: true), 289)
     XCTAssertEqual(phone.keyboardHeight(topRow: 50, rowSpacing: 7, landscape: true, handwriting: false, letterKeys: true),
                    phone.keyboardHeight(topRow: 50, rowSpacing: 7, landscape: true, handwriting: false))
     // 数字行是整整一排键，平板加一排的高度而不是压扁字母。
@@ -88,14 +87,13 @@ final class KeyboardFormFactorTests: XCTestCase {
     }
     let phone = try layout(tablet: false, width: 393)
     XCTAssertEqual(phone.height, KeyboardViewController.defaultKeyboardHeight)
-    XCTAssertEqual(phone.space.minY - phone.key.maxY,
-                   7 + KeyboardFormFactor.phoneLetterRowPadding, accuracy: 0.5)
+    XCTAssertEqual(phone.space.minY - phone.key.maxY, 11, accuracy: 0.5)
     XCTAssertEqual(phone.key.height, 44, accuracy: 0.5)
     XCTAssertEqual(phone.space.height, 44, accuracy: 0.5)
     XCTAssertEqual(phone.strip.minY, 2, accuracy: 0.5)
     XCTAssertEqual(phone.strip.minX, 3, accuracy: 0.5)
     XCTAssertEqual(phone.strip.maxX, 393 - 3, accuracy: 0.5)
-    XCTAssertEqual(phone.space.maxY, phone.height - 4, accuracy: 0.5)
+    XCTAssertEqual(phone.space.maxY, phone.height - 14, accuracy: 0.5)
     let withRow = try layout(tablet: true, width: 820)
     XCTAssertEqual(withRow.key.height, 54, accuracy: 0.5)
     XCTAssertEqual(withRow.strip.minX, 8, accuracy: 0.5)
@@ -194,7 +192,9 @@ final class KeyboardFormFactorTests: XCTestCase {
         ? try key("nineKey1", in: controller)
         : try XCTUnwrap(descendants(controller.view).first { $0.accessibilityLabel == "字母 Q" })
       XCTAssertEqual(first.convert(first.bounds, to: controller.view).minY - strip.convert(strip.bounds, to: controller.view).maxY,
-                     KeyboardFormFactor.phone.topRowGap, accuracy: 0.5, "\(scheme)")
+                     KeyboardFormFactor.phone.topRowGap
+                       + (scheme == .quanpin ? KeyboardFormFactor.phoneLetterVerticalPadding : 0),
+                     accuracy: 0.5, "\(scheme)")
     }
   }
 

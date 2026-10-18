@@ -1522,11 +1522,6 @@ final class NineKeyKeyboardTests: XCTestCase {
     XCTAssertEqual(englishHeight, height, accuracy: 0.5)
     let letter = try XCTUnwrap(descendants(controller.view).first { $0.accessibilityLabel == "字母 Q" } as? UIButton)
     XCTAssertEqual(letter.bounds.height, 44, accuracy: 0.5)
-    let returnKey = try button("returnKey", in: controller)
-    let letterBlockHeight = 4 * 44 + 3 * (7 + KeyboardFormFactor.phoneLetterRowPadding)
-    XCTAssertEqual(returnKey.convert(returnKey.bounds, to: controller.view).maxY
-                     - letter.convert(letter.bounds, to: controller.view).minY,
-                   letterBlockHeight, accuracy: 0.5)
   }
 
   func testVisibleInputViewReflectsSoundPreference() throws {
