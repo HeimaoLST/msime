@@ -2,6 +2,8 @@ use super::*;
 use crate::ime::personal_rerank::allocations::count;
 use crate::quanpin::fixture::Fixture;
 
+// 用固定回写层隔离解析投影收益；真实生产回写与容量由 online_cache_update_tests 独立对照。
+
 // 固定 67f70bc3e690e2d57f4523f704d57a9cd214faea 的完整在线回写、首字母展开和解析方法，只改名、转接旧解析并移除注释。
 impl QuanpinDictionary {
     fn legacy_slot_insert_online_words(
@@ -236,8 +238,9 @@ fn online_updates_copy_only_the_hot_resolution_key() {
                 let (expected, old_count) = count(|| {
                     before.legacy_slot_insert_online_words(raw, segmentation, types, &words, source)
                 });
-                let (actual, new_count) =
-                    count(|| after.insert_online_words(raw, segmentation, types, &words, source));
+                let (actual, new_count) = count(|| {
+                    after.frozen_insert_online_words(raw, segmentation, types, &words, source)
+                });
                 assert_eq!(actual, expected);
                 assert!(actual);
                 assert_slot(&before, &after, raw, segmentation, types);
@@ -301,7 +304,7 @@ fn cold_online_updates_keep_the_original_allocation_and_capacity_policy() {
             )
         });
         let (actual, new_count) = count(|| {
-            after.insert_online_words(
+            after.frozen_insert_online_words(
                 raw,
                 segmentation,
                 types,
@@ -409,7 +412,7 @@ fn projection_keeps_collisions_fifo_rejected_batches_and_independent_outputs() {
                 &words,
                 CandidateSource::CloudSuggestion
             ),
-            after.insert_online_words(raw, raw, 0, &words, CandidateSource::CloudSuggestion)
+            after.frozen_insert_online_words(raw, raw, 0, &words, CandidateSource::CloudSuggestion)
         );
         assert_slot(&before, &after, raw, raw, 0);
     }
@@ -437,7 +440,7 @@ fn projection_keeps_collisions_fifo_rejected_batches_and_independent_outputs() {
             &words,
             CandidateSource::CloudSuggestion
         ),
-        after.insert_online_words(
+        after.frozen_insert_online_words(
             "nihao",
             "ni'hao",
             0,
@@ -465,7 +468,7 @@ fn projection_keeps_collisions_fifo_rejected_batches_and_independent_outputs() {
         ),
     ] {
         let expected = before.legacy_slot_insert_online_words(raw, "ni'hao", 0, &words, source);
-        let actual = after.insert_online_words(raw, "ni'hao", 0, &words, source);
+        let actual = after.frozen_insert_online_words(raw, "ni'hao", 0, &words, source);
         assert_eq!(actual, expected);
         assert!(!actual);
     }
@@ -498,7 +501,7 @@ fn hot_rejected_batches_skip_segments_without_changing_cached_answers() {
         let (expected, old_count) =
             count(|| before.legacy_slot_insert_online_words("nihao", "", 0, &words, source));
         let (actual, new_count) =
-            count(|| after.insert_online_words("nihao", "", 0, &words, source));
+            count(|| after.frozen_insert_online_words("nihao", "", 0, &words, source));
         assert_eq!(actual, expected);
         assert!(!actual);
         assert_eq!(new_count + copies - 1 + segment_copies, old_count);

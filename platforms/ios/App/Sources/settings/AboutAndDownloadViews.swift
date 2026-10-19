@@ -192,6 +192,10 @@ struct AboutView: View {
     let short = info["CFBundleShortVersionString"] as? String ?? "—"
     let build = info["CFBundleVersion"] as? String ?? "—"
     let system = UIDevice.current.userInterfaceIdiom == .pad ? "iPadOS" : "iOS"
+    // MSIMEReleaseDate 由构建时的 scripts/stamp-release-date.sh 写入；取不到日期时没有这个键，照旧只显示版本和构建号。
+    if let released = info["MSIMEReleaseDate"] as? String, !released.isEmpty {
+      return "版本 \(short)（\(released) 发布）· 构建 \(build) · \(system)"
+    }
     return "版本 \(short)（\(build)）· \(system)"
   }
 

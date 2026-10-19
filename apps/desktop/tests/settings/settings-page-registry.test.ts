@@ -42,10 +42,10 @@ test("注册表保留已有页面与稳定路由", () => {
 test("keeps navigation groups and nested route ownership aligned", () => {
   expect(settingsNavGroups).toEqual([
     { title: "打字", ids: ["input", "dictionary", "shortcuts", "expression"] },
-    { title: "更多输入方式", ids: ["voice", "screen-keyboard", "handwriting"] },
+    { title: "输入方式", ids: ["voice", "screen-keyboard", "handwriting"] },
     { title: "外观", ids: ["skin", "appearance", "floating-toolbar"] },
-    { title: "工具", ids: ["tools", "ai", "mcp", "plugins", "typing-statistics"] },
-    { title: "账号", ids: ["account"] },
+    { title: "工具", ids: ["tools", "ai", "mcp", "plugins"] },
+    { title: "数据", ids: ["typing-statistics", "account"] },
     { title: "支持", ids: ["developer", "feedback", "about"] },
   ]);
   expect(subPageParents).toEqual({
@@ -57,9 +57,10 @@ test("keeps navigation groups and nested route ownership aligned", () => {
     "try-keyboard": "home",
   });
   // 桌面上并进别的页、只留作路由别名的页面。
-  expect(desktopMergedPages).toEqual({ feedback: "about" });
+  expect(desktopMergedPages).toEqual({ feedback: "about", mcp: "ai" });
   expect(desktopPage("feedback")).toBe("about");
-  expect(desktopPage("mcp")).toBe("mcp");
+  // MCP 在桌面上是「AI」页的「连接助手」标签。
+  expect(desktopPage("mcp")).toBe("ai");
   expect(desktopPage("help")).toBe("help");
 });
 

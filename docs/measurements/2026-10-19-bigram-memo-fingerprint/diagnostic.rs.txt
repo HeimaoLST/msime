@@ -1,0 +1,105 @@
+use std::cell::Cell;
+use std::collections::{hash_map::Entry, HashMap};
+use std::hash::{BuildHasherDefault, Hash, Hasher};
+
+thread_local! {
+    static COMPARISONS: Cell<u64> = const { Cell::new(0) };
+    static FALSE_MATCHES: Cell<u64> = const { Cell::new(0) };
+}
+
+#[derive(Hash)]
+struct Key(u64);
+
+impl PartialEq for Key {
+    fn eq(&self, other: &Self) -> bool {
+        COMPARISONS.with(|count| count.set(count.get() + 1));
+        let equal = self.0 == other.0;
+        if !equal {
+            FALSE_MATCHES.with(|count| count.set(count.get() + 1));
+        }
+        equal
+    }
+}
+impl Eq for Key {}
+
+#[derive(Default)]
+struct DiagnosticHasher<const MIX: bool>(u64);
+
+impl<const MIX: bool> Hasher for DiagnosticHasher<MIX> {
+    fn finish(&self) -> u64 {
+        if MIX {
+            self.0.wrapping_mul(0x9e3779b97f4a7c15)
+        } else {
+            self.0
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.0 = bytes.iter().fold(self.0, |state, &byte| {
+            (state ^ u64::from(byte)).wrapping_mul(0x0100_0000_01B3)
+        });
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = value;
+    }
+}
+
+fn diagnose<const MIX: bool>(keys: &[u64]) -> (u64, u64, u64, u64, u64, usize) {
+    // 键和分值保持与真实缓存相同的布局；合成分值只检验键映射，不代表 n 元表分数。
+    let mut scores: HashMap<Key, f32, BuildHasherDefault<DiagnosticHasher<MIX>>> =
+        HashMap::default();
+    let (mut hits, mut misses, mut clears, mut digest) = (0, 0, 0, 0u64);
+    let mut maximum_capacity = 0;
+    COMPARISONS.with(|count| count.set(0));
+    FALSE_MATCHES.with(|count| count.set(0));
+    for &key in keys {
+        let expected = f32::from_bits(key as u32);
+        let full = scores.len() >= 32768;
+        let actual = match scores.entry(Key(key)) {
+            Entry::Occupied(entry) => {
+                hits += 1;
+                *entry.get()
+            }
+            Entry::Vacant(entry) if full => {
+                let key = entry.into_key();
+                scores.clear();
+                clears += 1;
+                misses += 1;
+                scores.insert(key, expected);
+                expected
+            }
+            Entry::Vacant(entry) => {
+                misses += 1;
+                entry.insert(expected);
+                expected
+            }
+        };
+        assert_eq!(actual.to_bits(), expected.to_bits());
+        digest = digest.rotate_left(1) ^ u64::from(actual.to_bits());
+        maximum_capacity = maximum_capacity.max(scores.capacity());
+    }
+    let comparisons = COMPARISONS.with(Cell::get);
+    let false_matches = FALSE_MATCHES.with(Cell::get);
+    assert_eq!(comparisons - false_matches, hits);
+    println!(
+        "{{\"mixed\":{MIX},\"calls\":{},\"hits\":{hits},\"misses\":{misses},\"clears\":{clears},\"comparisons\":{comparisons},\"false_matches\":{false_matches},\"digest\":{digest},\"maximum_capacity\":{maximum_capacity}}}",
+        keys.len(),
+    );
+    (hits, misses, clears, comparisons, digest, maximum_capacity)
+}
+
+fn main() {
+    let path = std::env::args_os().nth(1).expect("需提供公开评测的键流");
+    let bytes = std::fs::read(path).unwrap();
+    assert_eq!(bytes.len() % 8, 0);
+    let keys: Vec<u64> = bytes
+        .chunks_exact(8)
+        .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+        .collect();
+    let old = diagnose::<false>(&keys);
+    let candidate = diagnose::<true>(&keys);
+    assert_eq!((old.0, old.1, old.2, old.4, old.5), (candidate.0, candidate.1, candidate.2, candidate.4, candidate.5));
+    let passed = u128::from(candidate.3) * 10 <= u128::from(old.3) * 9;
+    println!("{{\"comparison_reduction_gate\":{passed}}}");
+}

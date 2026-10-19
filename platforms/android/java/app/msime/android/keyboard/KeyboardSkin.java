@@ -275,9 +275,9 @@ public final class KeyboardSkin {
     }
 
     /**
-     * The `msime_client_resolve_theme` request for one global theme in one host mode.
+     * 单种明暗下解析键盘配色的纯计算请求，不带皮肤目录，使用横排候选布局。
      *
-     * <p>Android reads no skin root and no published package catalog, so the request carries neither `skins_directory` nor `package`, and it asks for the horizontal strip. `custom_theme.keyboard` stays out: it can carry a half-megabyte photo, the shared resolver only flattens it to colours, and this host draws the design itself through {@link #resolved}.
+     * <p>候选包由 {@link CandidateSkinResolver} 在工作线程给这份请求加目录后解析。这里去掉可能含半兆照片的 `custom_theme.keyboard`，宿主通过 {@link #resolved} 自行绘制键盘设计。
      */
     public static String themeRequest(String globalTheme, JSONObject customTheme, boolean dark)
             throws JSONException {

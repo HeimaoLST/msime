@@ -114,6 +114,17 @@ SkinTokens NativeCandidateTokens(bool dark)
     return tokens;
 }
 
+void ApplyNativeGlassCandidateContrast(SkinTokens &tokens, bool dark)
+{
+    tokens.number = Rgb(dark ? 0xD1D1D6 : 0x202024);
+    tokens.selectedNumber = Rgb(0xFFFFFF);
+    if (dark)
+    {
+        tokens.selectedText = Rgb(0x102419);
+        tokens.selectedNumber = Rgb(0x1D3327);
+    }
+}
+
 void DeriveSelectedForegrounds(SkinTokens &tokens, bool text, bool number, bool translation)
 {
     if (text)
@@ -160,6 +171,18 @@ ResolvedSkin StyledCandidateSkin(ResolvedSkin skin, const CandidateWindowStyle &
     skin.decorationTopDip *= scale;
     skin.decorationWidthDip *= scale;
     skin.minWidthDip *= scale;
+    if (skin.canvas) {
+        skin.canvas->panelOpacity *= opacity;
+        auto insets = [scale](SkinInsets &box) { box.top *= scale; box.right *= scale; box.bottom *= scale; box.left *= scale; };
+        if (skin.canvas->content) insets(*skin.canvas->content);
+        insets(skin.canvas->outer);
+        if (skin.canvas->border) for (auto &width : skin.canvas->border->width) width *= scale;
+        if (skin.canvas->lineGap) *skin.canvas->lineGap *= scale;
+        for (auto &decoration : skin.canvas->decorations) {
+            decoration.width *= scale; decoration.height *= scale;
+            decoration.offsetX *= scale; decoration.offsetY *= scale;
+        }
+    }
     return skin;
 }
 

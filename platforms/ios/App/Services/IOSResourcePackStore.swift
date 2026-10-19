@@ -26,6 +26,7 @@ final class IOSResourcePackStore: ObservableObject {
   @Published private(set) var statuses: [String: Status] = [:]
   @Published var meteredRequest: String?
   @Published private(set) var loadFailed = false
+  private var downloads: [String: IOSResourcePackDownload] = [:]
   private var expensiveNetwork = false
   private let monitor = NWPathMonitor()
 
@@ -69,14 +70,16 @@ final class IOSResourcePackStore: ObservableObject {
   func start(_ id: String) {
     meteredRequest = nil
     guard !available(id), statuses[id]?.running != true else { return }
+    let download = IOSResourcePackDownload(id: id)
+    downloads[id] = download
     statuses[id] = Status(phase: "download")
     Task { [self] in
       let result = await Task.detached { [weak self] in
         Result { [weak self] in
-          try IOSResourcePacks.install(id) { [weak self] phase, done, total in
+          try download.install { [weak self] phase, done, total in
             let percentage = total == 0 ? 0 : Int(min(100, Double(done) / Double(total) * 100))
             Task { @MainActor in
-              guard let self, self.statuses[id]?.running == true else { return }
+              guard let self, self.downloads[id] === download else { return }
               if self.statuses[id]?.percent != percentage || self.statuses[id]?.phase != phase {
                 self.statuses[id] = Status(phase: phase, percent: percentage)
               }
@@ -84,6 +87,8 @@ final class IOSResourcePackStore: ObservableObject {
           }
         }
       }.value
+      guard downloads[id] === download else { return }
+      downloads[id] = nil
       switch result {
       case .success:
         statuses[id] = nil
@@ -96,5 +101,5 @@ final class IOSResourcePackStore: ObservableObject {
     }
   }
 
-  func cancel(_ id: String) { IOSResourcePacks.cancel(id) }
+  func cancel(_ id: String) { downloads[id]?.cancel() }
 }

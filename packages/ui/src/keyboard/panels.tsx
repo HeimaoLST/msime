@@ -1,159 +1,72 @@
-import { isComposingKeyEvent } from "../core/ime-key-event";
-import { focusAndRevealNearest } from "../core/focus-and-reveal-nearest";
+import { useKeyboardPanel } from "./use-keyboard-panel";
+import { useEmojiPanel, type EmojiPage } from "./use-emoji-panel";
+import { useCloudDictionaryFilesPanel } from "./use-cloud-dictionary-files-panel";
+import { useCloudCandidatesPanel } from "./use-cloud-candidates-panel";
+import { useCloudDictionaryCatalogPanel } from "./use-cloud-dictionary-catalog-panel";
+import { useCloudDictionaryApplyPanel } from "./use-cloud-dictionary-apply-panel";
+import { CloudDictionaryApplyContent } from "./cloud-dictionary-apply-content";
+import { useCloudDictionaryPanel } from "./use-cloud-dictionary-panel";
+import { useCloudClipboardPanel } from "./use-cloud-clipboard-panel";
+import { useVoicePanel } from "./use-voice-panel";
+import { CloudClipboardComposer } from "./cloud-clipboard-composer";
+import { CloudClipboardHistory } from "./cloud-clipboard-history";
+import { VoiceResults } from "./voice-results";
 import type {
-  KeyboardInputRequest,
-  InkStroke,
   PanelClient,
   VoicePanelClient,
-  CloudClipboardAction,
-  CloudClipboardItem,
-  CloudClipboardResponse,
   CloudClipboardPanelClient,
-  CloudDictionaryKind,
-  CloudCandidateKind,
   CloudRankingMode,
   CloudDictionaryFileFormat,
-  CloudDictionaryEntry,
-  CloudDictionaryCatalogEntry,
-  CloudCandidate,
-  CloudFixedPosition,
-  CloudDictionarySnapshotMetadata,
-  CloudDictionarySnapshotRequest,
   CloudDictionaryPanelClient,
   EmojiPanelClient,
 } from "./panel-client";
 import { FluentIcon } from "../core/fluent-icons";
 import { ControlledCheckbox } from "../core/controlled-checkbox";
-import { downloadBlob } from "../core/download-blob";
-import { trackAsyncSubscription } from "../core/async-subscription";
-import { subscribeToInterval } from "../core/use-interval";
-import { subscribeToElementResize } from "../core/element-resize";
-import {
-  subscribeToDocumentVisibilityChange,
-  subscribeToWindowBlur,
-  subscribeToWindowEvent,
-} from "../core/window-focus";
-import {
-  readOptionalJson,
-  readOptionalStorage,
-  writeOptionalJson,
-  writeOptionalStorage,
-} from "../core/optional-storage";
-import { useConfirm } from "../core/confirm";
 import { clamp } from "../core/number";
 import { touchKeyboardSpacing } from "../settings/touch-keyboard-spacing";
-import { utf8ByteLength } from "../core/text";
-import { readDictionaryFile } from "../dictionary/dictionary-file";
 import { DictionaryFormatOptions } from "../dictionary/dictionary-format-options";
-import { usePanelDrag } from "./use-panel-drag";
-import { usePanelAction } from "./use-panel-action";
-import { cloudDictionaryErrorMessage } from "./cloud-dictionary-errors";
-import { useEmojiNavigation } from "../emoji/use-emoji-navigation";
-import {
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type CSSProperties,
-  type PointerEvent,
-} from "react";
-import {
-  fallbackEmojiGroups,
-  fallbackKaomojiGroups,
-  fallbackSymbolGroups,
-  type EmojiCatalogGroup,
-  type EmojiCatalogItem,
-} from "../emoji/emoji-catalog";
+import { useHandwritingPanel } from "./use-handwriting-panel";
+import type { CSSProperties } from "react";
 import type { GlobalTheme } from "../theme/global-theme";
 import * as cloud from "./cloud-panel-style";
 import * as surface from "./panel-surface-style";
-import { normalizeHandwritingCandidates } from "./handwriting";
-import { validVoiceLanguage } from "./voice-panel";
-import { StatusMessage } from "../core/status-message";
 import { VoiceLanguageOptions } from "../voice/voice-language-options";
-import { useAsyncGeneration } from "../settings/use-async-generation";
-import { useMountedRef } from "../settings/use-mounted-ref";
-import { useLatestRef } from "../core/use-latest-ref";
-import { useTimedValue } from "../core/use-timed-value";
-import {
-  isImeCommitKey,
-  keyboardKeyWeight,
-  modifierPrefix,
-  type KeyboardKey,
-  type Modifier,
-} from "./keyboard-input";
+import { keyboardKeyWeight } from "./keyboard-input";
+import { KeyboardKeyButton } from "./keyboard-key-button";
 import { keyboardSkinStyles } from "./keyboard-skin-styles";
-import { keyboardDeliveryNotice, MACOS_KEYBOARD_GUIDANCE } from "./keyboard-delivery-notice";
-import { keyboardRows, nineKeyRows, nineKeyShuangpinRows } from "./panel-keyboard-layouts";
 import type { NineKeyShuangpinKeyFace } from "../settings/nine-key-shuangpin-profile";
 import { CloudDictionaryEntryForm } from "./cloud-dictionary-entry-form";
 import { CloudDictionaryEntryCard } from "./cloud-dictionary-entry-card";
-import { CloudDictionaryItem } from "./cloud-dictionary-item";
+import { CloudCandidateResults, CloudFixedPositions } from "./cloud-candidate-results";
 import { CloudPanelHeader } from "./cloud-panel-header";
 import { CloudDictionaryPagination } from "./cloud-dictionary-pagination";
 import { NativePanelHeader } from "./native-panel-header";
-import { PanelActivationButtons, type PanelActivationMode } from "./panel-activation-buttons";
+import { PanelActivationButtons } from "./panel-activation-buttons";
 import { CloudDictionaryKindTabs } from "./cloud-dictionary-kind-tabs";
 import { CloudDictionaryKindSelect } from "./cloud-dictionary-kind-select";
 import { CloudDictionarySelectField } from "./cloud-dictionary-select-field";
 import { CloudDictionaryQueryToolbar } from "./cloud-dictionary-query-toolbar";
 import { CloudPinyinSchemeOptions, CloudShuangpinProfileOptions } from "./cloud-scheme-options";
-import {
-  clipboardTooltip,
-  emojiDisplayName,
-  flattenGroups,
-  matchesEmojiItem,
-  matchingGroupItems,
-  symbolCategoryTitle,
-} from "./emoji-panel-helpers";
+import { symbolCategoryTitle } from "./emoji-panel-helpers";
+import type { EmojiCatalogItem } from "../emoji/emoji-catalog";
+import { panelField } from "./emoji-panel-style";
+import { EmojiClipboardEntries } from "./emoji-clipboard-entries";
+import { EmojiItemButton } from "./emoji-item-button";
+import { HandwritingResults } from "./handwriting-results";
+import { HandwritingInkEditor } from "./handwriting-ink-editor";
+import { HandwritingModelNotice } from "./handwriting-model-notice";
 
 export { emojiDisplayName } from "./emoji-panel-helpers";
-import {
-  appendPointerSamples,
-  MAX_HANDWRITING_STROKES,
-  type Point,
-  WINDOWS_HANDWRITING_STROKES,
-} from "./handwriting-input";
 import {
   CloudClipboardDeviceList,
   CloudClipboardPendingNotice,
   CloudClipboardWaitingDevices,
 } from "./cloud-clipboard-devices";
-import {
-  cloudClipboardErrorMessage,
-  cloudClipboardFailure,
-} from "../settings/cloud-clipboard-send";
-import {
-  candidateMutationCode,
-  cloudClipboardDeviceStatus,
-  cloudClipboardE2e,
-  cloudClipboardItems,
-  type CloudClipboardDeviceShape,
-  type CloudClipboardDeviceStatusShape,
-  type CloudClipboardE2eShape,
-  cloudDictionaryCatalogEntries,
-  cloudDictionaryEntries,
-  cloudResponseInteger,
-  cloudResponseRequest,
-  cloudResponseText,
-} from "./cloud-response";
 import type { TouchKeyboardSkinDesign } from "./touch-keyboard-skin-design";
-import {
-  resourcePackStatus,
-  useResourcePacks,
-  type ModelMirrorClient,
-  type ResourcePacks,
-} from "../settings/resource-packs";
-import {
-  formatModelBytes,
-  localModelProgressPercent,
-  validModelMirror,
-} from "../voice/local-model-helpers";
 
 export type {
   KeyboardInputRequest,
   InkPoint,
-  InkStroke,
   HandwritingRecognitionRequest,
   HandwritingRecognitionResult,
   PanelClient,
@@ -166,8 +79,8 @@ export type {
   CloudCandidateKind,
   CloudRankingMode,
   CloudDictionaryFileFormat,
-  CloudDictionaryAction,
   CloudDictionaryEntry,
+  CloudDictionaryAction,
   CloudDictionaryCatalogEntry,
   CloudCandidate,
   CloudFixedPosition,
@@ -177,6 +90,7 @@ export type {
   CloudDictionaryPanelClient,
   EmojiPanelClient,
 } from "./panel-client";
+export type { InkStroke } from "./panel-client";
 
 export function KeyboardPanel({
   client,
@@ -201,306 +115,23 @@ export function KeyboardPanel({
   skin?: GlobalTheme;
   customDesign?: TouchKeyboardSkinDesign;
 }) {
-  const [activeLayout, setActiveLayout] = useState<
-    "twenty_six_key" | "nine_key" | "nine_key_shuangpin"
-  >(() => {
-    const saved = readOptionalStorage("msime.keyboard.layout");
-    return saved === "nine_key" || saved === "twenty_six_key" || saved === "nine_key_shuangpin"
-      ? saved
-      : layout;
-  });
-  function switchLayout() {
-    const next =
-      activeLayout === "twenty_six_key"
-        ? layout === "nine_key_shuangpin"
-          ? "nine_key_shuangpin"
-          : "nine_key"
-        : "twenty_six_key";
-    setActiveLayout(next);
-    writeOptionalStorage("msime.keyboard.layout", next);
-  }
-  const previousHostLayout = useRef(layout);
-  useEffect(() => {
-    // Initial mounting (including StrictMode replay) must preserve the saved preference.
-    if (previousHostLayout.current === layout) return;
-    previousHostLayout.current = layout;
-    setActiveLayout(layout);
-  }, [layout]);
-  const sourceRows =
-    activeLayout === "nine_key_shuangpin"
-      ? nineKeyShuangpinRows(nineKeyShuangpinKeys ?? [])
-      : activeLayout === "nine_key"
-        ? nineKeyRows
-        : keyboardRows;
-  const rows =
-    platform === "macos"
-      ? sourceRows.map((row) => {
-          // PC 底行左侧 Ctrl/Win/Alt 改为 Control/Option/Command，右侧按相反方向镜像。
-          const ordered =
-            row[0]?.virtualKey === 0x11 && row[3]?.virtualKey === 0x20
-              ? [row[0], row[2], row[1], row[3], row[5], row[4], ...row.slice(6)]
-              : row;
-          return (
-            ordered
-              // macOS 没有这些 PC 专用键；保留有稳定 ANSI 映射的数字小键盘和导航键。
-              .filter((item) => ![0x2c, 0x91, 0x13, 0x2d, 0x5d].includes(item.virtualKey))
-              .map((item) => ({
-                ...item,
-                label:
-                  item.label === "Win"
-                    ? "Command"
-                    : item.label === "Alt"
-                      ? "Option"
-                      : item.label === "Num Lock"
-                        ? "Clear"
-                        : item.label,
-              }))
-          );
-        })
-      : sourceRows;
-  const [, setActiveModifiers] = useState<Set<Modifier>>(new Set());
-  const modifiersRef = useRef<Set<Modifier>>(new Set());
-  const [notice, setNotice] = useState(
-    platform === "macos" ? MACOS_KEYBOARD_GUIDANCE : "Touch keyboard",
-  );
-  const platformRef = useLatestRef(platform);
-  useEffect(() => {
-    if (platform === "macos")
-      setNotice((shown) => (shown === "Touch keyboard" ? MACOS_KEYBOARD_GUIDANCE : shown));
-  }, [platform]);
-  const [openingVoice, setOpeningVoice] = useState(false);
-  type QueuedKey = { request: KeyboardInputRequest; description: string };
-  const inputQueue = useRef<{
-    active: boolean;
-    running: boolean;
-    openingVoice: boolean;
-    pending: QueuedKey[];
-  }>({ active: true, running: false, openingVoice: false, pending: [] });
-  const keyRepeat = useRef<{ delay?: number; interval?: number }>({});
-  // Windows sends on release, like the shipped KeyboardPanel::OnMouseUp: the key pressed on pointerdown is remembered and only sent if the pointer is released over that same key, so sliding off a key cancels it and there is no held-key repeat.
-  const releaseKey = useRef<{ button: HTMLButtonElement; key: KeyboardKey } | null>(null);
-  const sendsOnRelease = platform === "windows";
-  const drag = usePanelDrag(client, () => setNotice("无法移动窗口，请重试。"));
-  function stopKeyRepeat() {
-    if (keyRepeat.current.delay !== undefined) window.clearTimeout(keyRepeat.current.delay);
-    if (keyRepeat.current.interval !== undefined) window.clearInterval(keyRepeat.current.interval);
-    keyRepeat.current = {};
-  }
-  useEffect(() => {
-    const queue = { active: true, running: false, openingVoice: false, pending: [] as QueuedKey[] };
-    setOpeningVoice(false);
-    inputQueue.current = queue;
-    modifiersRef.current = new Set();
-    setActiveModifiers(new Set());
-    if (client.rememberInputTarget)
-      void client.rememberInputTarget().catch((error: unknown) => {
-        if (queue.active) setNotice(keyboardDeliveryNotice(error, platformRef.current));
-      });
-    const stopBlur = subscribeToWindowBlur(stopKeyRepeat);
-    return () => {
-      stopBlur();
-      stopKeyRepeat();
-      queue.active = false;
-      queue.pending = [];
-    };
-  }, [client]);
-  function toggleModifier(keyToToggle: Modifier) {
-    const next = new Set(modifiersRef.current);
-    if (next.has(keyToToggle)) next.delete(keyToToggle);
-    else next.add(keyToToggle);
-    modifiersRef.current = next;
-    setActiveModifiers(next);
-    syncKeyboardFaces(next);
-  }
-  function syncKeyboardFaces(modifiers: Set<Modifier>) {
-    // React may batch the Shift click with the following key click in a
-    // synthetic test/event turn. Update the visible faces eagerly so the
-    // keyboard remains truthful between those two events.
-    if (typeof document === "undefined") return;
-    const buttons = document.querySelectorAll<HTMLButtonElement>(
-      "[data-keyboard-layout-grid] .keyboard-key",
-    );
-    rows.flat().forEach((item, index) => {
-      const button = buttons[index];
-      if (!button) return;
-      const letter = item.label.length === 1 && /[a-z]/i.test(item.label);
-      const shifted = modifiers.has("Shift") && item.label.length === 1;
-      const face = shifted
-        ? item.shifted || (letter ? item.label.toUpperCase() : item.label)
-        : item.label;
-      const label = button.querySelector<HTMLElement>("[data-key-label]");
-      if (label) label.textContent = face;
-      else button.textContent = face;
-      if (item.modifier)
-        button.setAttribute("aria-pressed", modifiers.has(item.modifier) ? "true" : "false");
-    });
-  }
-  async function drainKeys() {
-    const queue = inputQueue.current;
-    if (!queue.active || queue.running || !client.sendKey) return;
-    queue.running = true;
-    try {
-      while (queue.active && queue.pending.length) {
-        const next = queue.pending.shift()!;
-        setNotice(`正在发送：${next.description}`);
-        try {
-          // The Windows panel records the external foreground target on every
-          // click because the editor may change while the non-activating panel
-          // remains open. Keep that capture in the same serialized operation
-          // as the key so a later click cannot overwrite the target before an
-          // earlier key is delivered.
-          if (client.rememberInputTarget) await client.rememberInputTarget();
-          await client.sendKey(next.request);
-        } catch (error: unknown) {
-          // 发送可能已部分成功；不重放失败按键，清空队列并停止长按连发。
-          queue.pending = [];
-          stopKeyRepeat();
-          if (queue.active) setNotice(keyboardDeliveryNotice(error, platform));
-          return;
-        }
-        if (queue.active) setNotice(`已发送：${next.description}`);
-      }
-    } finally {
-      queue.running = false;
-    }
-  }
-  async function openVoiceKeyboard() {
-    const queue = inputQueue.current;
-    if (!queue.active || queue.openingVoice || !client.openVoice) return;
-    if (queue.running || queue.pending.length) {
-      setNotice("请等待按键发送完成后打开语音输入");
-      return;
-    }
-    queue.openingVoice = true;
-    setOpeningVoice(true);
-    setNotice("正在打开语音输入…");
-    try {
-      await client.openVoice();
-      if (queue.active) setNotice("已打开语音输入");
-    } catch {
-      if (queue.active) setNotice("无法打开语音输入，请重试");
-    } finally {
-      queue.openingVoice = false;
-      if (queue.active && inputQueue.current === queue) setOpeningVoice(false);
-    }
-  }
-  function closeKeyboard() {
-    const queue = inputQueue.current;
-    queue.active = false;
-    queue.pending = [];
-    stopKeyRepeat();
-    void client.close().catch(() => {
-      if (inputQueue.current === queue) {
-        queue.active = true;
-        setNotice("无法关闭键盘，请重试");
-      }
-    });
-  }
-  function pressKey(keyToPress: KeyboardKey) {
-    const queue = inputQueue.current;
-    if (!queue.active || queue.openingVoice) return;
-    if (keyToPress.modifier) {
-      toggleModifier(keyToPress.modifier);
-      return;
-    }
-    if (queue.pending.length >= 64) {
-      setNotice("按键正在发送，请稍候再继续输入");
-      return;
-    }
-    const activeModifiers = modifiersRef.current;
-    const shift = activeModifiers.has("Shift");
-    const caps = activeModifiers.has("Caps Lock");
-    const letter = keyToPress.label.length === 1 && /[a-z]/i.test(keyToPress.label);
-    // Caps Lock and Shift invert one another for letters, just like the
-    // Windows keyboard panel. Punctuation still follows Shift alone.
-    const withShift = letter ? caps !== shift : shift;
-    const modifiers = {
-      ctrl: activeModifiers.has("Ctrl"),
-      alt: activeModifiers.has("Alt"),
-      win: activeModifiers.has("Win"),
-    };
-    const includeStickyModifiers = !isImeCommitKey(keyToPress.virtualKey);
-    const prefix = modifierPrefix(activeModifiers);
-    const displayedLabel = withShift
-      ? keyToPress.shifted || (letter ? keyToPress.label.toUpperCase() : keyToPress.label)
-      : keyToPress.label;
-    const description = `${prefix}${prefix ? "+" : ""}${displayedLabel}`;
-    const request: KeyboardInputRequest = {
-      virtual_key: keyToPress.virtualKey,
-      shift: withShift && includeStickyModifiers,
-      modifiers,
-      include_sticky_modifiers: includeStickyModifiers,
-    };
-    setNotice(
-      client.sendKey ? `正在发送：${description}` : `已准备：${description}（等待宿主注入能力）`,
-    );
-    if (client.sendKey) {
-      // The native reference sends each complete SendInput sequence
-      // synchronously. Tauri commands are asynchronous, so preserve that
-      // ordering explicitly instead of allowing later taps to overtake an
-      // in-flight key or escape the bounded failure queue.
-      queue.pending.push({ request, description });
-      void drainKeys();
-    }
-    if (shift) {
-      const next = new Set(activeModifiers);
-      next.delete("Shift");
-      modifiersRef.current = next;
-      setActiveModifiers(next);
-      syncKeyboardFaces(next);
-    }
-  }
-  function endPointerKey(event: PointerEvent<HTMLButtonElement>) {
-    stopKeyRepeat();
-    const pressed = releaseKey.current;
-    releaseKey.current = null;
-    if (!sendsOnRelease || !pressed || pressed.button !== event.currentTarget) return;
-    if (!event.isPrimary || event.button !== 0) return;
-    pressKey(resolveRenderedKey(pressed.key, event.currentTarget.textContent ?? ""));
-  }
-  function cancelPointerKey() {
-    stopKeyRepeat();
-    releaseKey.current = null;
-  }
-  function beginPointerKey(event: PointerEvent<HTMLButtonElement>, keyToPress: KeyboardKey) {
-    releaseKey.current = null;
-    // Num Lock is a lock key in the Linux extended layout, so a held pointer
-    // must not toggle it repeatedly like an ordinary keypad key.
-    if (
-      !event.isPrimary ||
-      event.button !== 0 ||
-      keyToPress.modifier ||
-      keyToPress.virtualKey === 0x90 ||
-      openingVoice
-    )
-      return;
-    stopKeyRepeat();
-    if (sendsOnRelease) {
-      // Touch and pen capture the pointer implicitly, which would deliver the release to this key wherever it happens; release the capture so pointerup lands on the key actually under the pointer.
-      if (event.currentTarget.hasPointerCapture?.(event.pointerId))
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      releaseKey.current = { button: event.currentTarget, key: keyToPress };
-      return;
-    }
-    pressKey(resolveRenderedKey(keyToPress, event.currentTarget.textContent ?? ""));
-    keyRepeat.current.delay = window.setTimeout(() => {
-      pressKey(keyToPress);
-      keyRepeat.current.interval = window.setInterval(() => pressKey(keyToPress), 75);
-    }, 450);
-  }
-  function resolveRenderedKey(fallback: KeyboardKey, displayed: string) {
-    if (!modifiersRef.current.has("Shift")) return fallback;
-    const match = rows
-      .flat()
-      .find(
-        (item) =>
-          item.shifted === displayed ||
-          (item.shifted == null &&
-            item.label.length === 1 &&
-            item.label.toUpperCase() === displayed),
-      );
-    return match ?? fallback;
-  }
+  const {
+    activeLayout,
+    rows,
+    renderedModifiers,
+    notice,
+    openingVoice,
+    drag,
+    switchLayout,
+    pressKey,
+    resolveRenderedKey,
+    openVoiceKeyboard,
+    closeKeyboard,
+    beginPointerKey,
+    endPointerKey,
+    cancelPointerKey,
+    stopKeyRepeat,
+  } = useKeyboardPanel({ client, platform, layout, nineKeyShuangpinKeys });
   const { keySpacing: keyGap, rowSpacing: rowGap } = touchKeyboardSpacing(
     keySpacingTenths,
     rowSpacingTenths,
@@ -510,7 +141,6 @@ export function KeyboardPanel({
     "--keyboard-row-gap": `${rowGap}px`,
   } as CSSProperties;
   const skinStyle = keyboardSkinStyles(theme, skin, customDesign);
-  const renderedModifiers = modifiersRef.current;
   const keyMaterial = skin === "custom" ? (customDesign?.keyMaterial ?? "flat") : "flat";
   return (
     <main
@@ -549,125 +179,34 @@ export function KeyboardPanel({
         <div className={surface.keyboardLayout} data-keyboard-layout-grid="" style={keyboardStyle}>
           {rows.map((row, rowIndex) => (
             <div className={surface.keyboardRow} data-keyboard-row="" key={rowIndex}>
-              {row.map((keyToRender, keyIndex) => {
-                const letter = keyToRender.label.length === 1 && /[a-z]/i.test(keyToRender.label);
-                const shifted = renderedModifiers.has("Shift") && keyToRender.label.length === 1;
-                const label = shifted
-                  ? keyToRender.shifted ||
-                    (letter ? keyToRender.label.toUpperCase() : keyToRender.label)
-                  : keyToRender.label;
-                return (
-                  <button
-                    type="button"
-                    disabled={openingVoice}
-                    key={`${keyToRender.label}-${keyIndex}`}
-                    style={{
-                      flexGrow:
-                        activeLayout === "nine_key" || activeLayout === "nine_key_shuangpin"
-                          ? 1
-                          : keyboardKeyWeight(
-                              keyToRender.label,
-                              keyIndex,
-                              row.some((item) => item.virtualKey === 0x20),
-                            ),
-                    }}
-                    aria-pressed={
-                      keyToRender.modifier ? renderedModifiers.has(keyToRender.modifier) : undefined
-                    }
-                    data-key-material={keyMaterial}
-                    className={`keyboard-key ${surface.keyboardKey({
-                      material: keyMaterial,
-                      active: Boolean(
-                        keyToRender.modifier && renderedModifiers.has(keyToRender.modifier),
-                      ),
-                      wide: keyToRender.label.length > 1,
-                    })}`}
-                    onPointerDown={(event) => beginPointerKey(event, keyToRender)}
-                    onPointerUp={endPointerKey}
-                    onPointerCancel={cancelPointerKey}
-                    onPointerLeave={stopKeyRepeat}
-                    onClick={(event) => {
-                      // Pointer activation is delivered on pointerdown for immediate response and repeat, or on Windows on release over the same key. A detail-zero click comes from keyboard or assistive activation and still sends exactly one key.
-                      if (
-                        keyToRender.modifier ||
-                        keyToRender.virtualKey === 0x90 ||
-                        event.detail === 0
-                      )
-                        pressKey(
-                          resolveRenderedKey(keyToRender, event.currentTarget.textContent ?? ""),
-                        );
-                    }}
-                  >
-                    <span data-key-label="">{label}</span>
-                    {keyToRender.hint && (
-                      <span className={surface.keyboardKeyHint}>{keyToRender.hint}</span>
-                    )}
-                  </button>
-                );
-              })}
+              {row.map((keyToRender, keyIndex) => (
+                <KeyboardKeyButton
+                  key={`${keyToRender.label}-${keyIndex}`}
+                  keyToRender={keyToRender}
+                  modifiers={renderedModifiers}
+                  material={keyMaterial}
+                  disabled={openingVoice}
+                  flexGrow={
+                    activeLayout === "nine_key" || activeLayout === "nine_key_shuangpin"
+                      ? 1
+                      : keyboardKeyWeight(
+                          keyToRender.label,
+                          keyIndex,
+                          row.some((item) => item.virtualKey === 0x20),
+                        )
+                  }
+                  onPointerDown={beginPointerKey}
+                  onPointerUp={endPointerKey}
+                  onPointerCancel={cancelPointerKey}
+                  onPointerLeave={stopKeyRepeat}
+                  onActivate={(key, displayed) => pressKey(resolveRenderedKey(key, displayed))}
+                />
+              ))}
             </div>
           ))}
         </div>
       </div>
     </main>
-  );
-}
-
-function HandwritingCandidateButton({
-  candidate,
-  copy,
-  disabled,
-  onChoose,
-  onCopy,
-}: {
-  candidate: string;
-  copy: boolean;
-  disabled: boolean;
-  onChoose: () => void;
-  onCopy?: () => void;
-}) {
-  const button = useRef<HTMLButtonElement>(null);
-  const [width, setWidth] = useState(64);
-  useEffect(() => {
-    const element = button.current;
-    if (!element) return;
-    const resize = () => setWidth(element.getBoundingClientRect().width);
-    resize();
-    return subscribeToElementResize(element, resize) ?? subscribeToWindowEvent("resize", resize);
-  }, []);
-  // Use Unicode code points so supplementary Han does not count as two glyphs.
-  const length = Math.max(1, Array.from(candidate).length);
-  const fontSize = clamp(Math.min(width * 0.52, (width - 12) / length), 13, 34);
-  function copyShortcut(event: import("react").KeyboardEvent<HTMLButtonElement>) {
-    if (
-      !onCopy ||
-      disabled ||
-      event.defaultPrevented ||
-      isComposingKeyEvent(event) ||
-      !event.ctrlKey ||
-      event.metaKey ||
-      event.altKey ||
-      event.shiftKey ||
-      event.key.toLowerCase() !== "c"
-    )
-      return;
-    event.preventDefault();
-    if (!event.repeat) onCopy();
-  }
-  return (
-    <button
-      ref={button}
-      type="button"
-      className={surface.candidateSubmit}
-      style={{ fontSize }}
-      title={`${copy ? "复制" : "输入"}：${candidate}`}
-      aria-keyshortcuts={onCopy ? "Control+c" : undefined}
-      disabled={disabled}
-      onClick={onChoose}
-      onKeyDown={copyShortcut}
-    >
-      {candidate}
-    </button>
   );
 }
 
@@ -681,365 +220,34 @@ export function HandwritingPanel({
   /** The host platform. Only Windows recognises through a handwriting pack the user may be missing; elsewhere an empty result just means the strokes were not read. On Windows the stroke limit is also the shared contract's rather than the Linux provider's. */
   platform?: string;
 }) {
-  const maxStrokes = platform === "windows" ? WINDOWS_HANDWRITING_STROKES : MAX_HANDWRITING_STROKES;
-  // 手写模型按需下载：宿主列出手写模型时，第一次打开面板就开始下载，下载完成前不调用识别器，笔画保留，装好后自动识别当前笔画。宿主没列出它（随包带着，或 Windows Ink 有中文识别器）时不下载也不等待。
-  const packs = useResourcePacks(client.resourcePacks);
-  const handwritingPack = resourcePackStatus(packs, "handwriting");
-  // 只有确定缺少模型时才暂停识别；读不到列表时照常识别。已过期（文件字节与锁文件不一致）的资源包会由 ensure 重新下载，期间识别照常尝试，宿主可能还有别的模型可用。
-  const modelMissing = handwritingPack?.state === "missing";
-  const modelMissingRef = useLatestRef(modelMissing);
-  const waitingForModel = useRef(false);
-  const ensuredModel = useRef(false);
-  useEffect(() => {
-    if (ensuredModel.current || !handwritingPack) return;
-    ensuredModel.current = true;
-    packs.ensure("handwriting");
-  }, [handwritingPack, packs]);
-  const [activationMode, setActivationMode] = useState<PanelActivationMode>(() => {
-    return readOptionalStorage("msime.handwriting.activation") === "input" ? "input" : "copy";
-  });
-  const effectiveMode =
-    activationMode === "copy" && !client.copyHandwritingCandidate
-      ? "input"
-      : activationMode === "input" && !client.submitHandwritingCandidate
-        ? "copy"
-        : activationMode;
-  function selectActivation(mode: PanelActivationMode) {
-    if (!recognitionQueue.current.active || closingRef.current) return;
-    setActivationMode(mode);
-    writeOptionalStorage("msime.handwriting.activation", mode);
-  }
-  const [strokes, setStrokes] = useState<InkStroke[]>([]);
-  const [redoStrokes, setRedoStrokes] = useState<InkStroke[]>([]);
-  const [drawing, setDrawing] = useState<Point[]>([]);
-  const [candidates, setCandidates] = useState<string[]>([]);
-  const [notice, setNotice] = useState("请在左侧书写，松开鼠标后自动识别");
-  const drag = usePanelDrag(client, () => setNotice("无法移动窗口，请重试。"));
-  const recognitionRevision = useAsyncGeneration();
-  const [recognizing, setRecognizing] = useState(false);
-  const recognitionQueue = useRef<{
-    active: boolean;
-    running: boolean;
-    pending: { revision: number; strokes: InkStroke[] } | null;
-  }>({ active: true, running: false, pending: null });
-  const submissionRevision = useAsyncGeneration();
-  const closingRef = useRef(false);
-  const [closing, setClosing] = useState(false);
-  const submittingRef = useRef(false);
-  const [submitting, setSubmitting] = useState(false);
-  const activeStroke = useRef<{ pointerId: number; canvas: SVGSVGElement; points: Point[] } | null>(
-    null,
-  );
-  function releaseStroke() {
-    const active = activeStroke.current;
-    activeStroke.current = null;
-    if (active?.canvas.hasPointerCapture?.(active.pointerId))
-      active.canvas.releasePointerCapture(active.pointerId);
-  }
-  useEffect(() => {
-    const queue = {
-      active: true,
-      running: false,
-      pending: null,
-    } as typeof recognitionQueue.current;
-    recognitionQueue.current = queue;
-    setRecognizing(false);
-    closingRef.current = false;
-    setClosing(false);
-    submittingRef.current = false;
-    setSubmitting(false);
-    return () => {
-      queue.active = false;
-      queue.pending = null;
-      recognitionRevision.current++;
-      submissionRevision.current++;
-      submittingRef.current = false;
-      releaseStroke();
-    };
-  }, [client]);
-  async function closeHandwriting() {
-    const queue = recognitionQueue.current;
-    if (!queue.active || closingRef.current) return;
-    if (activeStroke.current) {
-      setNotice("请完成当前笔画后关闭手写识别板");
-      return;
-    }
-    closingRef.current = true;
-    setClosing(true);
-    try {
-      await client.close();
-      if (queue.active && recognitionQueue.current === queue) {
-        queue.active = false;
-        queue.pending = null;
-        recognitionRevision.current++;
-        submissionRevision.current++;
-        releaseStroke();
-      }
-    } catch {
-      if (queue.active && recognitionQueue.current === queue) {
-        setNotice("无法关闭手写识别板，请重试");
-      }
-    } finally {
-      if (queue.active && recognitionQueue.current === queue) {
-        closingRef.current = false;
-        setClosing(false);
-      }
-    }
-  }
-  function recognize(nextStrokes: InkStroke[]) {
-    if (!recognitionQueue.current.active || closingRef.current) return;
-    const revision = ++recognitionRevision.current;
-    setCandidates([]);
-    setNotice("正在识别…");
-    const recognizeInk = client.recognizeHandwriting;
-    if (!recognizeInk) {
-      setNotice("识别结果需由宿主提供");
-      return;
-    }
-    if (modelMissingRef.current) {
-      waitingForModel.current = true;
-      setNotice("手写模型下载完成后自动识别");
-      return;
-    }
-    const queue = recognitionQueue.current;
-    queue.pending = { revision, strokes: nextStrokes };
-    setRecognizing(true);
-    if (queue.running) return;
-    queue.running = true;
-    void (async () => {
-      try {
-        while (queue.active && queue === recognitionQueue.current && queue.pending) {
-          const request = queue.pending;
-          queue.pending = null;
-          if (request.revision !== recognitionRevision.current) continue;
-          try {
-            const result = await recognizeInk({ language: "zh-CN", strokes: request.strokes });
-            if (request.revision !== recognitionRevision.current) continue;
-            const nextCandidates = normalizeHandwritingCandidates(result.candidates);
-            setCandidates(nextCandidates);
-            setNotice(
-              nextCandidates.length
-                ? "选择候选可复制或输入"
-                : platform === "windows"
-                  ? "未识别到内容，请确认已安装中文手写包"
-                  : "未识别到内容，请重写",
-            );
-          } catch {
-            if (request.revision === recognitionRevision.current) {
-              setCandidates([]);
-              setNotice("手写识别失败，请确认手写模型或识别服务可用，然后重新识别");
-            }
-          }
-        }
-      } finally {
-        queue.running = false;
-        if (queue.active && queue === recognitionQueue.current) setRecognizing(false);
-      }
-    })();
-  }
-  function retryRecognition() {
-    if (!recognitionQueue.current.active || closingRef.current) return;
-    if (
-      !strokes.length ||
-      activeStroke.current ||
-      recognitionQueue.current.running ||
-      submittingRef.current
-    )
-      return;
-    recognize(strokes);
-  }
-  // 模型装好后，对等待中的当前笔画补一次识别；正在书写时交给笔画结束时的识别。
-  useEffect(() => {
-    if (modelMissing || !waitingForModel.current) return;
-    waitingForModel.current = false;
-    if (strokes.length && !activeStroke.current) recognize(strokes);
-  }, [modelMissing]);
-  function start(event: PointerEvent<SVGSVGElement>) {
-    if (
-      !recognitionQueue.current.active ||
-      closingRef.current ||
-      activeStroke.current ||
-      event.isPrimary === false ||
-      (event.button !== undefined && event.button !== 0)
-    )
-      return;
-    if (strokes.length >= maxStrokes) {
-      setNotice("笔画已达上限，请选择候选、撤销或重写");
-      return;
-    }
-    event.currentTarget.focus({ preventScroll: true });
-    recognitionRevision.current++;
-    setCandidates([]);
-    setNotice("书写中，松开后自动识别");
-    const points = appendPointerSamples([], event);
-    if (!points.length) return;
-    activeStroke.current = { pointerId: event.pointerId, canvas: event.currentTarget, points };
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    setDrawing(points);
-  }
-  function move(event: PointerEvent<SVGSVGElement>) {
-    const active = activeStroke.current;
-    if (!active || active.pointerId !== event.pointerId) return;
-    active.points = appendPointerSamples(active.points, event);
-    setDrawing(active.points);
-  }
-  function recognizeRemaining(nextStrokes: InkStroke[]) {
-    setCandidates([]);
-    if (!nextStrokes.length) setNotice("请在左侧书写，松开鼠标后自动识别");
-    else void recognize(nextStrokes);
-  }
-  function end(event: PointerEvent<SVGSVGElement>) {
-    const active = activeStroke.current;
-    if (!active || active.pointerId !== event.pointerId) return;
-    active.points = appendPointerSamples(active.points, event, true);
-    // Match the Windows handwriting panel: a click without movement is not an
-    // ink stroke and must not trigger a recognition request.
-    const nextStrokes =
-      active.points.length >= 2 ? [...strokes, { points: active.points }] : strokes;
-    releaseStroke();
-    setStrokes(nextStrokes);
-    if (active.points.length >= 2) setRedoStrokes([]);
-    setDrawing([]);
-    recognizeRemaining(nextStrokes);
-  }
-  function cancel(event: PointerEvent<SVGSVGElement>) {
-    if (!activeStroke.current || activeStroke.current.pointerId !== event.pointerId) return;
-    recognitionRevision.current++;
-    releaseStroke();
-    setDrawing([]);
-    recognizeRemaining(strokes);
-  }
-  function undo() {
-    if (!recognitionQueue.current.active || closingRef.current) return;
-    const wasDrawing = activeStroke.current !== null;
-    recognitionRevision.current++;
-    recognitionQueue.current.pending = null;
-    releaseStroke();
-    setDrawing([]);
-    if (wasDrawing) {
-      // Cancel only the unfinished stroke; completed ink stays available.
-      recognizeRemaining(strokes);
-      return;
-    }
-    if (!strokes.length) return;
-    setRedoStrokes((current) => [...current, strokes[strokes.length - 1]]);
-    const nextStrokes = strokes.slice(0, -1);
-    setStrokes(nextStrokes);
-    recognizeRemaining(nextStrokes);
-  }
-  function redo() {
-    if (!recognitionQueue.current.active || closingRef.current) return;
-    if (activeStroke.current || !redoStrokes.length || strokes.length >= maxStrokes) return;
-    recognitionRevision.current++;
-    const nextStrokes = [...strokes, redoStrokes[redoStrokes.length - 1]];
-    setRedoStrokes((current) => current.slice(0, -1));
-    setStrokes(nextStrokes);
-    recognizeRemaining(nextStrokes);
-  }
-  function clear() {
-    if (!recognitionQueue.current.active || closingRef.current) return;
-    recognitionRevision.current++;
-    recognitionQueue.current.pending = null;
-    releaseStroke();
-    setStrokes([]);
-    setRedoStrokes([]);
-    setDrawing([]);
-    setCandidates([]);
-    setNotice("请在左侧书写，松开鼠标后自动识别");
-  }
-  function editInk(event: import("react").KeyboardEvent<HTMLElement>) {
-    if (event.defaultPrevented || isComposingKeyEvent(event) || event.altKey) return;
-    const target = event.target as HTMLElement;
-    if (target.closest("input, textarea, select, [contenteditable=true]")) return;
-    const key = event.key.toLowerCase();
-    if ((event.ctrlKey || event.metaKey) && (key === "z" || key === "y")) {
-      event.preventDefault();
-      if (key === "y" || event.shiftKey) redo();
-      else undo();
-    } else if (event.key === "Escape" && activeStroke.current) {
-      event.preventDefault();
-      undo();
-    }
-  }
-  function navigateCandidates(event: import("react").KeyboardEvent<HTMLDivElement>) {
-    if (
-      event.defaultPrevented ||
-      isComposingKeyEvent(event) ||
-      event.ctrlKey ||
-      event.metaKey ||
-      event.altKey ||
-      event.shiftKey ||
-      closingRef.current ||
-      submittingRef.current
-    )
-      return;
-    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key))
-      return;
-    const buttons = Array.from(
-      event.currentTarget.querySelectorAll<HTMLButtonElement>(
-        ".handwriting-candidate-submit:not(:disabled)",
-      ),
-    );
-    const index = buttons.indexOf(event.target as HTMLButtonElement);
-    if (index < 0) return;
-    // The candidate grid has four columns; keep a partial final row reachable.
-    const next =
-      event.key === "Home"
-        ? 0
-        : event.key === "End"
-          ? buttons.length - 1
-          : index +
-            (event.key === "ArrowLeft"
-              ? -1
-              : event.key === "ArrowRight"
-                ? 1
-                : event.key === "ArrowUp"
-                  ? -4
-                  : 4);
-    event.preventDefault();
-    const target = buttons[clamp(next, 0, buttons.length - 1)];
-    focusAndRevealNearest(target);
-  }
-  async function chooseCandidate(candidate: string, copyOnly = false) {
-    if (
-      !recognitionQueue.current.active ||
-      closingRef.current ||
-      submittingRef.current ||
-      !candidates.includes(candidate)
-    )
-      return;
-    const action = copyOnly ? client.copyHandwritingCandidate : client.submitHandwritingCandidate;
-    if (!action) {
-      setNotice(`已选择：${candidate}（等待宿主提交能力）`);
-      return;
-    }
-    const revision = ++submissionRevision.current;
-    const inkRevision = recognitionRevision.current;
-    submittingRef.current = true;
-    setSubmitting(true);
-    setNotice(copyOnly ? "正在复制候选…" : "正在提交候选…");
-    try {
-      await action(candidate);
-      if (revision === submissionRevision.current && inkRevision === recognitionRevision.current) {
-        setNotice(copyOnly ? `已复制：${candidate}` : `已提交：${candidate}`);
-      }
-    } catch {
-      if (revision === submissionRevision.current && inkRevision === recognitionRevision.current) {
-        setNotice(
-          copyOnly
-            ? "复制失败，候选和笔画已保留，请重试"
-            : "提交失败，可复制候选后手动粘贴，或重试",
-        );
-      }
-    } finally {
-      if (revision === submissionRevision.current) {
-        submittingRef.current = false;
-        setSubmitting(false);
-      }
-    }
-  }
-
-  const renderStrokes = [...strokes, ...(drawing.length ? [{ points: drawing }] : [])];
+  const {
+    packs,
+    handwritingPack,
+    effectiveMode,
+    selectActivation,
+    strokes,
+    redoStrokes,
+    drawing,
+    candidates,
+    notice,
+    drag,
+    recognizing,
+    closing,
+    submitting,
+    renderStrokes,
+    closeHandwriting,
+    start,
+    move,
+    end,
+    cancel,
+    undo,
+    redo,
+    clear,
+    retryRecognition,
+    editInk,
+    navigateCandidates,
+    chooseCandidate,
+  } = useHandwritingPanel({ client, platform });
   return (
     <main
       className={surface.handwritingPanel}
@@ -1060,275 +268,39 @@ export function HandwritingPanel({
         onClose={() => void closeHandwriting()}
       />
       <div className={surface.handwritingBody}>
-        <section className={surface.inkSection}>
-          <svg
-            className={surface.inkCanvas}
-            data-drawing={drawing.length > 0}
-            tabIndex={0}
-            viewBox="0 0 420 420"
-            onPointerDown={start}
-            onPointerMove={move}
-            onPointerUp={end}
-            onPointerCancel={cancel}
-            onLostPointerCapture={cancel}
-            aria-label="手写画布"
-            aria-disabled={closing}
-          >
-            <g className={surface.inkGuides} aria-hidden="true">
-              <path d="M210 20V400 M20 210H400 M20 20L400 400 M400 20L20 400" />
-            </g>
-            {renderStrokes.map((stroke, index) =>
-              stroke.points.length === 1 ? (
-                <circle key={index} cx={stroke.points[0].x} cy={stroke.points[0].y} r={2} />
-              ) : (
-                <polyline
-                  key={index}
-                  points={stroke.points.map(({ x, y }) => `${x},${y}`).join(" ")}
-                />
-              ),
-            )}
-            {!renderStrokes.length && (
-              <text x="210" y="215" textAnchor="middle">
-                请在这里书写
-              </text>
-            )}
-          </svg>
-          <div className={surface.inkActions}>
-            <button
-              type="button"
-              className={surface.inkAction}
-              onClick={undo}
-              disabled={closing || (!strokes.length && !drawing.length)}
-              aria-keyshortcuts="Control+z Meta+z"
-            >
-              ↶ 撤销
-            </button>
-            <button
-              type="button"
-              className={surface.inkAction}
-              onClick={redo}
-              disabled={closing || !redoStrokes.length || drawing.length > 0}
-              aria-keyshortcuts="Control+Shift+z Meta+Shift+z Control+y"
-            >
-              ↷ 重做
-            </button>
-            <button
-              type="button"
-              className={surface.inkAction}
-              onClick={clear}
-              disabled={closing || (!strokes.length && !drawing.length && !redoStrokes.length)}
-            >
-              × 重写
-            </button>
-            {client.recognizeHandwriting && (
-              <button
-                type="button"
-                className={surface.inkAction}
-                onClick={retryRecognition}
-                disabled={
-                  closing || !strokes.length || drawing.length > 0 || recognizing || submitting
-                }
-              >
-                {recognizing ? "识别中…" : "重新识别"}
-              </button>
-            )}
-          </div>
-        </section>
-        <section className={surface.recognitionSection}>
-          <h2>识别结果</h2>
-          <div className={surface.handwritingActions} role="group" aria-label="点击手写候选的操作">
-            <span>点击候选：</span>
-            <PanelActivationButtons
-              mode={effectiveMode}
-              onModeChange={selectActivation}
-              disabled={closing || submitting}
-              copyDisabled={!client.copyHandwritingCandidate}
-              inputAvailable={Boolean(client.submitHandwritingCandidate)}
-            />
-          </div>
-          <div
-            className={surface.candidateGrid}
-            // Named so the grid can be reached as a unit: assistive technology announces the group,
-            // and a test has something to hold onto that is not a styling class.
-            role="group"
-            aria-label="识别候选"
-            onKeyDown={navigateCandidates}
-          >
-            {candidates.map((candidate) => (
-              <div className={surface.candidate} key={candidate}>
-                <HandwritingCandidateButton
-                  candidate={candidate}
-                  copy={effectiveMode === "copy"}
-                  disabled={closing || submitting}
-                  onChoose={() => void chooseCandidate(candidate, effectiveMode === "copy")}
-                  onCopy={
-                    client.copyHandwritingCandidate
-                      ? () => void chooseCandidate(candidate, true)
-                      : undefined
-                  }
-                />
-                {effectiveMode === "copy" && client.submitHandwritingCandidate ? (
-                  <button
-                    type="button"
-                    className={surface.candidateCopy}
-                    aria-label={`输入候选 ${candidate}`}
-                    disabled={closing || submitting}
-                    onClick={() => void chooseCandidate(candidate)}
-                  >
-                    输入
-                  </button>
-                ) : (
-                  effectiveMode === "input" &&
-                  client.copyHandwritingCandidate && (
-                    <button
-                      type="button"
-                      className={surface.candidateCopy}
-                      aria-label={`复制候选 ${candidate}`}
-                      disabled={closing || submitting}
-                      onClick={() => void chooseCandidate(candidate, true)}
-                    >
-                      复制
-                    </button>
-                  )
-                )}
-              </div>
-            ))}
-          </div>
-          {!candidates.length && (
-            <div className={surface.handwritingEmpty} aria-hidden="true">
-              <span>
-                <FluentIcon name="pen" size={26} />
-              </span>
-              <p>写下一个字，候选会出现在这里</p>
-              <small>每写完一笔，自动更新识别结果</small>
-            </div>
-          )}
-          {candidates.length > 0 && <div className="flex-1" />}
+        <HandwritingInkEditor
+          strokes={renderStrokes}
+          drawing={drawing.length > 0}
+          disabled={closing}
+          recognizing={recognizing}
+          canUndo={strokes.length > 0 || drawing.length > 0}
+          canRedo={redoStrokes.length > 0 && drawing.length === 0}
+          canClear={strokes.length > 0 || drawing.length > 0 || redoStrokes.length > 0}
+          canRecognize={strokes.length > 0 && drawing.length === 0 && !recognizing && !submitting}
+          onStart={start}
+          onMove={move}
+          onEnd={end}
+          onCancel={cancel}
+          onUndo={undo}
+          onRedo={redo}
+          onClear={clear}
+          onRecognize={client.recognizeHandwriting ? retryRecognition : undefined}
+        />
+        <HandwritingResults
+          candidates={candidates}
+          mode={effectiveMode}
+          copyAvailable={Boolean(client.copyHandwritingCandidate)}
+          inputAvailable={Boolean(client.submitHandwritingCandidate)}
+          disabled={closing || submitting}
+          notice={notice}
+          onModeChange={selectActivation}
+          onNavigate={navigateCandidates}
+          onChoose={chooseCandidate}
+        >
           {handwritingPack && <HandwritingModelNotice packs={packs} mirror={client.modelMirror} />}
-          <StatusMessage role="status">{notice}</StatusMessage>
-        </section>
+        </HandwritingResults>
       </div>
     </main>
-  );
-}
-
-/** 手写模型下载中的进度与取消、下载失败的原因与重试（宿主能读写镜像时还有设置下载镜像的入口），或取消后仍缺模型时的下载入口；模型已在、也没有下载时不渲染。 */
-function HandwritingModelNotice({
-  packs,
-  mirror,
-}: {
-  packs: ResourcePacks;
-  mirror?: ModelMirrorClient;
-}) {
-  const status = resourcePackStatus(packs, "handwriting");
-  const progress = packs.progress.handwriting;
-  const error = packs.errors.handwriting;
-  if (progress) {
-    return (
-      <p className={surface.handwritingActions} aria-live="polite">
-        <span>
-          正在下载手写模型（约 {formatModelBytes(status?.size ?? progress.total)}）…{" "}
-          {localModelProgressPercent(progress)}%
-        </span>
-        <button type="button" onClick={() => packs.cancel("handwriting")}>
-          取消
-        </button>
-      </p>
-    );
-  }
-  if (error) {
-    return (
-      <>
-        <p className={surface.handwritingActions} aria-live="polite">
-          <span>{error}</span>
-          <button type="button" onClick={() => packs.install("handwriting")}>
-            重试
-          </button>
-        </p>
-        {mirror && (
-          <HandwritingMirrorEditor mirror={mirror} onSaved={() => packs.install("handwriting")} />
-        )}
-      </>
-    );
-  }
-  if (status?.state === "missing") {
-    return (
-      <p className={surface.handwritingActions} aria-live="polite">
-        <span>手写识别需要先下载手写模型（约 {formatModelBytes(status.size)}）</span>
-        <button type="button" onClick={() => packs.install("handwriting")}>
-          下载
-        </button>
-      </p>
-    );
-  }
-  return null;
-}
-
-/** 手写模型下载失败后的镜像设置：先是一个「设置下载镜像」按钮，点开后读出已保存的镜像、就地编辑，「保存并重试」写入偏好后重新下载。 */
-function HandwritingMirrorEditor({
-  mirror,
-  onSaved,
-}: {
-  mirror: ModelMirrorClient;
-  onSaved: () => void;
-}) {
-  const [value, setValue] = useState<string>();
-  const [message, setMessage] = useState("");
-  const [saving, setSaving] = useState(false);
-  const mounted = useMountedRef();
-  async function open() {
-    try {
-      const saved = await mirror.load();
-      if (mounted.current) setValue(saved);
-    } catch {
-      if (mounted.current) setMessage("无法读取下载镜像，请重试。");
-    }
-  }
-  async function save() {
-    if (value === undefined || saving) return;
-    const next = value.trim();
-    if (!validModelMirror(next)) {
-      setMessage("下载镜像地址无效，必须以 https:// 开头。");
-      return;
-    }
-    setSaving(true);
-    setMessage("");
-    try {
-      await mirror.save(next);
-      if (!mounted.current) return;
-      onSaved();
-    } catch {
-      if (mounted.current) setMessage("无法保存下载镜像，请重试。");
-    } finally {
-      if (mounted.current) setSaving(false);
-    }
-  }
-  if (value === undefined) {
-    return (
-      <p className={surface.handwritingActions}>
-        {message && <span>{message}</span>}
-        <button type="button" onClick={() => void open()}>
-          设置下载镜像
-        </button>
-      </p>
-    );
-  }
-  return (
-    <p className={surface.handwritingActions}>
-      <input
-        aria-label="模型下载镜像"
-        placeholder="https://mirror.example.com"
-        maxLength={2048}
-        value={value}
-        aria-invalid={!validModelMirror(value.trim())}
-        disabled={saving}
-        onChange={(event) => setValue(event.target.value)}
-      />
-      <button type="button" disabled={saving} onClick={() => void save()}>
-        保存并重试
-      </button>
-      {message && <span>{message}</span>}
-    </p>
   );
 }
 
@@ -1339,256 +311,26 @@ export function VoicePanel({
   client: VoicePanelClient;
   theme?: "dark" | "light";
 }) {
-  const [inputLevel, setInputLevel] = useState<number | undefined>();
-  const [language, setLanguage] = useState("zh-CN");
-  const [text, setText] = useState("");
-  const exceedsSubmitLimit =
-    client.maxSubmitBytes !== undefined && utf8ByteLength(text) > client.maxSubmitBytes;
-  const textRevision = useAsyncGeneration();
-  function updateText(value: string) {
-    textRevision.current++;
-    setText(value);
-  }
-  const [submitting, setSubmitting] = useState(false);
-  const [copying, setCopying] = useState(false);
-  const submittingRef = useRef(false);
-  const submissionRevision = useAsyncGeneration();
-  const [busy, setBusy] = useState(false);
-  const busyRef = useRef(false);
-  const [stopping, setStopping] = useState(false);
-  const stoppingRef = useRef(false);
-  const recognitionRevision = useAsyncGeneration();
-  const [notice, setNotice] = useState("点击开始后由宿主录音并进行语音识别");
-  const drag = usePanelDrag(client, () => setNotice("无法移动窗口，请重试。"));
-  const voiceGeneration = useAsyncGeneration(client);
-
-  useEffect(() => {
-    const generation = voiceGeneration.current;
-    if (!client.loadVoiceLanguage) return;
-    void client
-      .loadVoiceLanguage()
-      .then((next) => {
-        if (generation === voiceGeneration.current && validVoiceLanguage(next)) setLanguage(next);
-      })
-      .catch(() => undefined);
-  }, [client, voiceGeneration]);
-
-  useEffect(() => {
-    const generation = voiceGeneration.current;
-    if (!client.rememberInputTarget) return;
-    void client.rememberInputTarget().catch(() => {
-      if (generation === voiceGeneration.current) setNotice("未能记录前台输入窗口");
-    });
-  }, [client, voiceGeneration]);
-
-  useEffect(() => {
-    submittingRef.current = false;
-    setSubmitting(false);
-    setCopying(false);
-    setBusy(false);
-    stoppingRef.current = false;
-    setStopping(false);
-    return () => {
-      submissionRevision.current++;
-      submittingRef.current = false;
-      recognitionRevision.current++;
-      const wasBusy = busyRef.current;
-      busyRef.current = false;
-      if (wasBusy && client.cancelVoice) void client.cancelVoice().catch(() => undefined);
-    };
-  }, [client]);
-
-  useEffect(() => {
-    if (!client.onVoiceUpdate) return;
-    const generation = voiceGeneration.current;
-    return trackAsyncSubscription(
-      client.onVoiceUpdate((update) => {
-        if (generation !== voiceGeneration.current || !busyRef.current) return;
-        if (update.level !== undefined) {
-          if (
-            !stoppingRef.current &&
-            Number.isFinite(update.level) &&
-            update.level >= 0 &&
-            update.level <= 1
-          ) {
-            setInputLevel(update.level);
-          }
-          return;
-        }
-        if (update.phase) {
-          const labels = {
-            recording: "正在录音…",
-            recognizing: "正在识别…",
-            polishing: "正在润色…",
-          };
-          setNotice(labels[update.phase]);
-          if (update.phase !== "recording") {
-            stoppingRef.current = true;
-            setStopping(true);
-          }
-          return;
-        }
-        updateText(update.text);
-        setNotice(
-          update.final
-            ? update.text
-              ? "识别完成，点击提交即可输入"
-              : "没有识别到内容"
-            : stoppingRef.current
-              ? "正在识别…"
-              : "正在录音并识别…",
-        );
-      }),
-      () => generation === voiceGeneration.current,
-    );
-  }, [client, voiceGeneration]);
-
-  async function recognize() {
-    if (busyRef.current || submittingRef.current) return;
-    if (!client.recognizeVoice) {
-      setNotice("当前宿主未提供语音识别能力");
-      return;
-    }
-    if (!validVoiceLanguage(language)) {
-      setNotice("请输入有效的识别语言码");
-      return;
-    }
-    const revision = ++recognitionRevision.current;
-    busyRef.current = true;
-    setBusy(true);
-    setInputLevel(undefined);
-    updateText("");
-    setNotice("正在录音并识别…");
-    try {
-      const result = await client.recognizeVoice(language);
-      if (revision !== recognitionRevision.current) return;
-      updateText(result.text);
-      setNotice(result.text ? "识别完成，点击提交即可输入" : "没有识别到内容");
-    } catch {
-      if (revision === recognitionRevision.current) setNotice("语音识别失败，请确认录音服务已启动");
-    } finally {
-      if (revision === recognitionRevision.current) {
-        busyRef.current = false;
-        setBusy(false);
-        stoppingRef.current = false;
-        setStopping(false);
-      }
-    }
-  }
-
-  async function submit(copyOnly = false) {
-    const send = copyOnly ? client.copyText : (client.sendVoiceText ?? client.sendText);
-    if (!text || !send || busyRef.current || submittingRef.current) return;
-    if (!copyOnly && exceedsSubmitLimit) {
-      setNotice("内容超过单次提交长度，请精简或复制结果后手动粘贴");
-      return;
-    }
-    const revision = ++submissionRevision.current;
-    const submittedTextRevision = textRevision.current;
-    submittingRef.current = true;
-    setSubmitting(true);
-    setCopying(copyOnly);
-    setNotice(copyOnly ? "正在复制…" : "正在提交…");
-    try {
-      await send(text);
-      if (revision !== submissionRevision.current) return;
-      if (submittedTextRevision !== textRevision.current) {
-        setNotice(
-          copyOnly ? "上一版内容已复制，当前内容已保留" : "上一版内容已提交，当前内容已保留",
-        );
-        return;
-      }
-      if (copyOnly) {
-        setNotice("识别结果已复制，文本已保留");
-      } else {
-        setNotice(client.submitNotice ?? `已提交：${text}`);
-        updateText("");
-      }
-    } catch {
-      if (revision === submissionRevision.current)
-        setNotice(copyOnly ? "复制失败，识别结果已保留" : "提交失败，前台输入窗口可能已关闭");
-    } finally {
-      if (revision === submissionRevision.current) {
-        submittingRef.current = false;
-        setSubmitting(false);
-        setCopying(false);
-      }
-    }
-  }
-
-  async function stop() {
-    if (!client.stopVoice) {
-      await cancel();
-      return;
-    }
-    if (!busyRef.current || stoppingRef.current) return;
-    const revision = recognitionRevision.current;
-    stoppingRef.current = true;
-    setStopping(true);
-    setNotice("正在完成识别…");
-    try {
-      await client.stopVoice();
-    } catch {
-      if (revision === recognitionRevision.current && busyRef.current) {
-        stoppingRef.current = false;
-        setStopping(false);
-        setNotice("停止录音失败，请重试或取消录音");
-      }
-    }
-  }
-
-  async function cancel() {
-    recognitionRevision.current++;
-    busyRef.current = false;
-    // Cancellation is immediate even if the provider acknowledgement is delayed.
-    setBusy(false);
-    stoppingRef.current = false;
-    setStopping(false);
-    setNotice("录音已停止");
-    try {
-      await client.cancelVoice?.();
-    } catch {
-      /* provider may already have stopped */
-    }
-  }
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.key !== "Escape" ||
-        event.isComposing ||
-        event.ctrlKey ||
-        event.altKey ||
-        event.metaKey ||
-        event.shiftKey ||
-        !busyRef.current ||
-        !client.cancelVoice
-      )
-        return;
-      event.preventDefault();
-      event.stopPropagation();
-      void cancel();
-    };
-    return subscribeToWindowEvent("keydown", onKeyDown);
-  }, [client]);
-
-  async function close() {
-    submissionRevision.current++;
-    recognitionRevision.current++;
-    const wasBusy = busyRef.current;
-    busyRef.current = false;
-    setBusy(false);
-    stoppingRef.current = false;
-    setStopping(false);
-    if (wasBusy && client.cancelVoice) {
-      try {
-        await client.cancelVoice();
-      } catch {
-        /* close even if provider is gone */
-      }
-    }
-    await client.close();
-  }
+  const {
+    inputLevel,
+    language,
+    setLanguage,
+    text,
+    exceedsSubmitLimit,
+    updateText,
+    submitting,
+    copying,
+    busy,
+    stopping,
+    notice,
+    drag,
+    recognize,
+    submit,
+    stop,
+    cancel,
+    close,
+    clear,
+  } = useVoicePanel(client);
 
   return (
     <main
@@ -1643,55 +385,18 @@ export function VoicePanel({
             取消录音
           </button>
         )}
-        <textarea
-          className={surface.voiceTextArea}
-          aria-label="识别结果"
-          aria-describedby={exceedsSubmitLimit ? "voice-result-limit" : undefined}
-          aria-invalid={exceedsSubmitLimit || undefined}
-          value={text}
-          maxLength={4096}
-          onChange={(event) => updateText(event.target.value)}
-          placeholder="识别结果会显示在这里"
-          rows={4}
+        <VoiceResults
+          text={text}
+          exceedsSubmitLimit={exceedsSubmitLimit}
+          inputAvailable={Boolean(client.sendVoiceText ?? client.sendText)}
+          copyAvailable={Boolean(client.copyText)}
+          busy={busy}
+          submitting={submitting}
+          copying={copying}
+          onTextChange={updateText}
+          onSubmit={submit}
+          onClear={clear}
         />
-        {exceedsSubmitLimit && (
-          <p id="voice-result-limit" className={surface.voiceNote} role="status">
-            内容超过单次提交长度，请精简或复制结果后手动粘贴。
-          </p>
-        )}
-        <button
-          type="button"
-          className={surface.voiceSubmit}
-          onClick={() => void submit()}
-          disabled={
-            !text ||
-            exceedsSubmitLimit ||
-            !(client.sendVoiceText ?? client.sendText) ||
-            busy ||
-            submitting
-          }
-        >
-          {submitting && !copying ? "正在提交…" : "提交到当前窗口"}
-        </button>
-        {client.copyText && (
-          <button
-            type="button"
-            onClick={() => void submit(true)}
-            disabled={!text || busy || submitting}
-          >
-            {copying ? "正在复制…" : "复制结果"}
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={() => {
-            updateText("");
-            setNotice("识别结果已清空");
-          }}
-          disabled={!text || busy}
-        >
-          清空结果
-        </button>
         {busy && client.cancelVoice && <p className={surface.voiceNote}>按 Esc 取消录音</p>}
         <p className={surface.voiceNote} role="status">
           {notice}
@@ -1701,288 +406,36 @@ export function VoicePanel({
   );
 }
 
-/** 云剪贴板面板里等待用户确认的操作：关闭、重置或移除一台设备，三者都会清掉云端条目。 */
-type CloudClipboardConfirmation =
-  | { kind: "disable" }
-  | { kind: "reset" }
-  | { kind: "remove"; device: CloudClipboardDeviceShape };
-
-function cloudClipboardConfirmationText(confirmation: CloudClipboardConfirmation): {
-  label: string;
-  message: string;
-  action: string;
-} {
-  switch (confirmation.kind) {
-    case "disable":
-      return {
-        label: "关闭云剪贴板",
-        message:
-          "关闭云剪贴板会删除云端历史和全部设备登记；重新开启后，其他设备都需要重新允许。是否继续？",
-        action: "确认关闭并删除历史",
-      };
-    case "reset":
-      return {
-        label: "重置云剪贴板",
-        message:
-          "重置后，云端的全部条目会被清空，本设备换用一把新密钥；其他所有设备都需要在本设备上重新允许，才能继续使用云剪贴板。是否继续？",
-        action: "确认重置",
-      };
-    case "remove":
-      return {
-        label: "移除设备",
-        message: `移除「${confirmation.device.name || "未命名设备"}」后，云端的全部条目会被清空并换用新密钥；其他所有设备（包括仍在使用的）都需要在本设备上重新允许。是否继续？`,
-        action: "确认移除",
-      };
-  }
-}
-
 export function CloudClipboardPanel({ client }: { client: CloudClipboardPanelClient }) {
-  const [inputAvailable, setInputAvailable] = useState(
-    Boolean(client.sendText && !client.canSendText),
-  );
-  const [confirmation, setConfirmation] = useState<CloudClipboardConfirmation | null>(null);
-  const [loaded, setLoaded] = useState(false);
-  const [search, setSearch] = useState("");
-  const [items, setItems] = useState<CloudClipboardItem[]>([]);
-  const [draft, setDraft] = useState("");
-  const [enabled, setEnabled] = useState(true);
-  const [e2e, setE2e] = useState<CloudClipboardE2eShape | null>(null);
-  const [devices, setDevices] = useState<CloudClipboardDeviceStatusShape | null>(null);
-  const [showDevices, setShowDevices] = useState(false);
-  const [notice, setNotice] = useState("只上传你明确选择的内容");
   const {
+    confirmation,
+    setConfirmation,
+    loaded,
+    search,
+    setSearch,
+    items,
+    draft,
+    updateDraft,
+    enabled,
+    e2e,
+    devices,
+    showDevices,
+    notice,
     busy,
-    busyRef,
-    revisionRef: refreshRevision,
-    run,
-    invalidate,
-  } = usePanelAction(setNotice);
-  const draftRevision = useAsyncGeneration();
-  const searchRef = useLatestRef(search);
-  const showDevicesRef = useLatestRef(showDevices);
-  const cloudGeneration = useAsyncGeneration(client);
-
-  async function load(revision: number, nextSearch: string) {
-    let result;
-    try {
-      result = await client.request({ operation: "list", search: nextSearch });
-    } catch (error) {
-      if (revision === refreshRevision.current) {
-        setItems([]);
-        setLoaded(false);
-        setE2e(null);
-        setDevices(null);
-        setConfirmation(null);
-      }
-      throw error;
-    }
-    if (revision !== refreshRevision.current) return;
-    const nextE2e = cloudClipboardE2e(result);
-    setItems(cloudClipboardItems(result));
-    setE2e(nextE2e);
-    setLoaded(true);
-    if (typeof result.enabled === "boolean") setEnabled(result.enabled);
-    setNotice("云剪贴板已刷新");
-    // 有设备在等本机允许，或用户打开了设备列表时，再取一次设备状态；取不到不影响条目。
-    if (nextE2e?.status === "ready" && (nextE2e.pending_devices > 0 || showDevicesRef.current)) {
-      try {
-        const status = cloudClipboardDeviceStatus(await client.request({ operation: "devices" }));
-        if (revision === refreshRevision.current) setDevices(status);
-      } catch {
-        if (revision === refreshRevision.current) setDevices(null);
-      }
-    } else {
-      setDevices(null);
-    }
-  }
-
-  function refresh(nextSearch = searchRef.current) {
-    return run(async (revision) => {
-      try {
-        await load(revision, nextSearch);
-      } catch (error) {
-        // 错误码各有说明（例如自建中继拒绝了令牌、本设备待批准），认不出的仍说服务访问不了。
-        if (revision === refreshRevision.current)
-          setNotice(cloudClipboardErrorMessage(error, "无法访问云剪贴板服务"));
-      }
-    }, "无法访问云剪贴板服务");
-  }
-
-  useEffect(() => {
-    const generation = cloudGeneration.current;
-    busyRef.current = false;
-    setItems([]);
-    setLoaded(false);
-    setE2e(null);
-    setDevices(null);
-    setInputAvailable(Boolean(client.sendText && !client.canSendText));
-    if (client.canSendText)
-      void client
-        .canSendText()
-        .then((available) => {
-          if (generation === cloudGeneration.current)
-            setInputAvailable(available && Boolean(client.sendText));
-        })
-        .catch(() => {
-          if (generation === cloudGeneration.current) setNotice("未能记录前台输入窗口");
-        });
-    if (client.rememberInputTarget)
-      void client.rememberInputTarget().catch(() => {
-        if (generation === cloudGeneration.current) setNotice("未能记录前台输入窗口");
-      });
-    void refresh(searchRef.current);
-    return () => {
-      invalidate();
-    };
-  }, [client, cloudGeneration, invalidate]);
-
-  /** 发出一个可能失败的动作，失败时按错误码给出说明；成功后刷新条目，再显示 `success`。 */
-  function act(
-    action: CloudClipboardAction,
-    success: string,
-    failure: string,
-    after?: (result: CloudClipboardResponse) => void,
-  ) {
-    return run(async (revision) => {
-      let result: CloudClipboardResponse;
-      try {
-        result = await client.request(action);
-      } catch (error) {
-        if (revision !== refreshRevision.current) return;
-        const message = cloudClipboardErrorMessage(error, failure);
-        // 本设备其实还在等待允许，或者云剪贴板已被关闭：刷新一次，让面板换成对应的样子。
-        if (cloudClipboardFailure(error) !== "unavailable") {
-          try {
-            await load(revision, searchRef.current);
-          } catch {
-            // 刷新失败时 load 已清空列表，这里只保留动作本身的失败说明。
-          }
-        }
-        if (revision === refreshRevision.current) setNotice(message);
-        return;
-      }
-      if (revision !== refreshRevision.current) return;
-      after?.(result);
-      try {
-        await load(revision, searchRef.current);
-      } catch {
-        if (revision === refreshRevision.current)
-          setNotice(`${success}，但历史刷新失败，请点击刷新`);
-        return;
-      }
-      if (revision === refreshRevision.current) setNotice(success);
-    }, failure);
-  }
-
-  function add() {
-    if (!enabled || draft.trim().length === 0 || draft.length > 4000) {
-      if (draft.trim().length === 0) setNotice("请输入要上传的文本");
-      else if (draft.length > 4000) setNotice("上传内容不能超过 4000 个 UTF-16 单元");
-      return;
-    }
-    const uploadedRevision = draftRevision.current;
-    return act(
-      { operation: "add", text: draft },
-      "已上传",
-      "上传失败，请确认账号 provider 已连接",
-      () => {
-        if (uploadedRevision === draftRevision.current) setDraft("");
-      },
-    );
-  }
-
-  function remove(id: string) {
-    return act({ operation: "delete", id }, "已删除", "删除失败");
-  }
-
-  function deviceAction(action: CloudClipboardAction, success: string, failure: string) {
-    return act(action, success, failure, (result) => {
-      const status = cloudClipboardDeviceStatus(result);
-      if (status) setDevices(status);
-    });
-  }
-
-  function toggle(confirmed = false) {
-    if (enabled && !confirmed) {
-      setConfirmation({ kind: "disable" });
-      return;
-    }
-    setConfirmation(null);
-    const next = !enabled;
-    return run(async (revision) => {
-      const result = await client.request({ operation: "set_enabled", enabled: next });
-      if (revision !== refreshRevision.current) return;
-      const effective = typeof result.enabled === "boolean" ? result.enabled : next;
-      setEnabled(effective);
-      if (!effective) {
-        setItems([]);
-        setE2e(null);
-        setDevices(null);
-      } else {
-        // 刚开启时本机要先登记，可能直接可用，也可能要等另一台设备允许。
-        try {
-          await load(revision, searchRef.current);
-        } catch {
-          // 刷新失败只影响列表，开关本身已经生效。
-        }
-      }
-      if (revision === refreshRevision.current)
-        setNotice(effective ? "云剪贴板已开启" : "云剪贴板已关闭");
-    }, "更新云剪贴板设置失败");
-  }
-
-  function confirm() {
-    const current = confirmation;
-    if (!current) return;
-    if (current.kind === "disable") return toggle(true);
-    setConfirmation(null);
-    if (current.kind === "reset")
-      return deviceAction(
-        { operation: "reset" },
-        "云剪贴板已重置，其他设备需要重新允许",
-        "重置云剪贴板失败",
-      );
-    return deviceAction(
-      { operation: "remove", device_id: current.device.device_id },
-      "已移除设备，其他设备需要重新允许",
-      "移除设备失败",
-    );
-  }
-
-  function toggleDevices() {
-    const next = !showDevices;
-    setShowDevices(next);
-    if (!next) return;
-    return run(async (revision) => {
-      const status = cloudClipboardDeviceStatus(await client.request({ operation: "devices" }));
-      if (revision !== refreshRevision.current) return;
-      setDevices(status);
-      setNotice("设备列表已刷新");
-    }, "无法读取设备列表");
-  }
-
-  function choose(item: CloudClipboardItem, copyOnly = false) {
-    copyOnly = copyOnly || !inputAvailable;
-    const send = copyOnly ? client.copyText : client.sendText;
-    if (!send) {
-      setNotice("当前宿主未提供此操作");
-      return;
-    }
-    return run(
-      async (revision) => {
-        await send(item.text);
-        if (revision === refreshRevision.current)
-          setNotice(copyOnly ? "已复制到本机剪贴板" : `已输入：${item.text}`);
-      },
-      copyOnly ? "复制失败，请重试" : "提交失败，可复制后手动粘贴",
-    );
-  }
-
-  const pending = e2e?.status === "pending";
-  const ready = e2e?.status === "ready";
-  const waiting = devices?.devices.filter((device) => !device.approved && !device.current) ?? null;
-  const waitingCount = waiting ? waiting.length : (e2e?.pending_devices ?? 0);
-  const confirmText = confirmation && cloudClipboardConfirmationText(confirmation);
+    refresh,
+    add,
+    remove,
+    deviceAction,
+    toggle,
+    confirm,
+    toggleDevices,
+    choose,
+    pending,
+    ready,
+    waiting,
+    waitingCount,
+    confirmText,
+  } = useCloudClipboardPanel(client);
 
   return (
     <main className={`native-panel ${cloud.clipboardPanel}`} aria-label="云剪贴板">
@@ -2096,68 +549,26 @@ export function CloudClipboardPanel({ client }: { client: CloudClipboardPanelCli
                 刷新
               </button>
             </div>
-            <div className={cloud.clipboardAddRow}>
-              <textarea
-                className={cloud.clipboardTextArea}
-                aria-label="待上传文本"
-                value={draft}
-                onChange={(event) => {
-                  draftRevision.current++;
-                  setDraft(event.target.value);
-                }}
-                placeholder="输入要上传的文本"
-                rows={3}
-              />
-              <small className={cloud.clipboardCount(draft.length > 4000)}>
-                {draft.length} / 4000
-              </small>
-              <button
-                type="button"
-                className={cloud.clipboardSubmit}
-                onClick={() => void add()}
-                disabled={!enabled || draft.trim().length === 0 || draft.length > 4000 || busy}
-              >
-                上传明确选择的文本
-              </button>
-            </div>
+            <CloudClipboardComposer
+              draft={draft}
+              enabled={enabled}
+              busy={busy}
+              onDraftChange={updateDraft}
+              onUpload={add}
+            />
             {e2e && e2e.undecryptable > 0 && (
               <p className={cloud.clipboardNote} role="note">
                 有 {e2e.undecryptable}{" "}
                 条云端记录无法在本设备解密，已略去。它们可能是用另一把密钥写入的。
               </p>
             )}
-            <div className={cloud.clipboardList} aria-label="云端历史">
-              {items.length ? (
-                items.map((item) => (
-                  <article className={cloud.clipboardItem} key={item.id}>
-                    <button type="button" disabled={busy} onClick={() => void choose(item)}>
-                      {item.text}
-                    </button>
-                    {client.copyText && (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        aria-label="复制此条云端记录"
-                        onClick={() => void choose(item, true)}
-                      >
-                        复制
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className={cloud.clipboardDelete}
-                      aria-label={`删除 ${item.text}`}
-                      onClick={() => void remove(item.id)}
-                      disabled={busy}
-                    >
-                      删除
-                    </button>
-                  </article>
-                ))
-              ) : (
-                <p className={cloud.clipboardNote}>暂无云端历史</p>
-              )}
-            </div>
+            <CloudClipboardHistory
+              items={items}
+              busy={busy}
+              copyAvailable={!!client.copyText}
+              onChoose={choose}
+              onRemove={remove}
+            />
           </>
         )}
         <p className={cloud.clipboardNote} role="status">
@@ -2175,182 +586,28 @@ export function CloudDictionaryPanel({
   client: CloudDictionaryPanelClient;
   embedded?: boolean;
 }) {
-  const { confirm, confirmation } = useConfirm();
-  const [kind, setKind] = useState<CloudDictionaryKind>("pinyin");
-  const [search, setSearch] = useState("");
-  const [offset, setOffset] = useState(0);
-  const [entries, setEntries] = useState<CloudDictionaryEntry[]>([]);
-  const [hasMore, setHasMore] = useState(false);
-  const [loadError, setLoadError] = useState(false);
-  const [form, setForm] = useState<{
-    entry: CloudDictionaryEntry | null;
-    code: string;
-    word: string;
-    weight: number;
-  } | null>(null);
-  const [notice, setNotice] = useState("管理当前账号的云端词条");
-  const { busy, busyRef, run, invalidate, isCurrent } = usePanelAction(
-    setNotice,
-    cloudDictionaryErrorMessage,
-  );
-  const searchRef = useLatestRef(search);
-
-  async function load(
-    revision: number,
-    nextOffset: number,
-    nextSearch: string,
-    nextKind: CloudDictionaryKind,
-  ) {
-    let result;
-    try {
-      result = await client.request({
-        operation: "list",
-        kind: nextKind,
-        offset: nextOffset,
-        search: nextSearch,
-      });
-    } catch (error) {
-      if (isCurrent(revision)) {
-        setEntries([]);
-        setHasMore(false);
-        setForm(null);
-      }
-      throw error;
-    }
-    if (!isCurrent(revision)) return;
-    setEntries(cloudDictionaryEntries<CloudDictionaryEntry>(result));
-    setOffset(cloudResponseInteger(result.offset) ? result.offset : nextOffset);
-    setHasMore(result.has_more === true);
-  }
-
-  function refresh(nextOffset = 0, nextSearch = searchRef.current, nextKind = kind) {
-    return run(async (revision) => {
-      try {
-        await load(revision, nextOffset, nextSearch, nextKind);
-        if (isCurrent(revision)) {
-          setLoadError(false);
-          setNotice("云词库已刷新");
-        }
-      } catch (error) {
-        if (isCurrent(revision)) {
-          setLoadError(true);
-          setNotice(cloudDictionaryErrorMessage(error, "无法加载云词库，请检查网络后重试。"));
-        }
-      }
-    }, "无法加载云词库，请检查网络后重试。");
-  }
-
-  useEffect(() => {
-    invalidate();
-    setEntries([]);
-    setOffset(0);
-    setHasMore(false);
-    setForm(null);
-    const timer = window.setTimeout(() => void refresh(0), embedded ? 280 : 0);
-    return () => {
-      window.clearTimeout(timer);
-      invalidate();
-    };
-  }, [client, invalidate, embedded, embedded ? kind : null, embedded ? search : null]);
-
-  function beginAdd() {
-    if (!busyRef.current) setForm({ entry: null, code: "", word: "", weight: 100000 });
-  }
-  function beginEdit(entry: CloudDictionaryEntry) {
-    if (!busyRef.current)
-      setForm({ entry, code: entry.code, word: entry.word, weight: entry.weight });
-  }
-
-  async function reloadAfterMutation(revision: number, success: string) {
-    if (!isCurrent(revision)) return;
-    try {
-      await load(revision, 0, searchRef.current, kind);
-      if (isCurrent(revision)) setNotice(success);
-    } catch {
-      if (isCurrent(revision)) {
-        setEntries([]);
-        setOffset(0);
-        setHasMore(false);
-        setNotice(`${success}，但列表刷新失败，请重新查询`);
-      }
-    }
-  }
-
-  function save() {
-    if (busyRef.current) return;
-    if (!form || !form.code.trim() || !form.word.trim()) {
-      setNotice("编码和词条不能为空");
-      return;
-    }
-    return run(async (revision) => {
-      const code = form.code.trim();
-      const word = form.word;
-      if (form.entry) {
-        await client.request({
-          operation: "update",
-          kind,
-          id: form.entry.id,
-          code,
-          word,
-          weight: form.weight,
-          revision: form.entry.revision,
-        });
-      } else {
-        await client.request({ operation: "add", kind, code, word, weight: form.weight });
-      }
-      if (!isCurrent(revision)) return;
-      setForm(null);
-      await reloadAfterMutation(revision, "云词条已保存");
-    }, "云词条保存失败，请刷新后重试");
-  }
-
-  function remove(entry: CloudDictionaryEntry) {
-    return run(async (revision) => {
-      await client.request({ operation: "delete", kind, id: entry.id, revision: entry.revision });
-      if (!isCurrent(revision)) return;
-      setForm((current) => (current?.entry?.id === entry.id ? null : current));
-      await reloadAfterMutation(revision, "云词条已删除");
-    }, "云词条删除失败，请刷新后重试");
-  }
-
-  async function confirmRemove(entry: CloudDictionaryEntry) {
-    if (busyRef.current) return;
-    const confirmed = await confirm({
-      title: "删除云词条",
-      message: `“${entry.word}”只会从云端删除，本机词库不会改变。`,
-      confirmLabel: "删除",
-      danger: true,
-    });
-    // Re-checked after the answer: the dialog is not instant, and another action may have started
-    // while it was open.
-    if (!confirmed || busyRef.current) return;
-    void remove(entry);
-  }
-
-  async function downloadToLocal(entry: CloudDictionaryEntry) {
-    if (busyRef.current || !client.downloadToLocal) return;
-    const confirmed = await confirm({
-      title: "加入本机词典",
-      message: `云词条“${entry.word}”会被加入本机个人词典。`,
-      confirmLabel: "加入",
-    });
-    if (!confirmed || busyRef.current || !client.downloadToLocal) return;
-    const download = client.downloadToLocal;
-    return run(async (revision) => {
-      await download(entry);
-      if (isCurrent(revision)) setNotice("云词条已加入本机词典队列");
-    }, "加入本机词典失败，请重试");
-  }
-
-  function changeKind(next: CloudDictionaryKind) {
-    if (busyRef.current || next === kind) return;
-    setKind(next);
-    setForm(null);
-    setOffset(0);
-    setEntries([]);
-    setHasMore(false);
-    if (!embedded) void refresh(0, searchRef.current, next);
-  }
+  const {
+    confirmation,
+    kind,
+    search,
+    setSearch,
+    offset,
+    entries,
+    hasMore,
+    loadError,
+    form,
+    notice,
+    busy,
+    refresh,
+    beginAdd,
+    beginEdit,
+    save,
+    confirmRemove,
+    downloadToLocal,
+    changeKind,
+    changeForm,
+    cancelForm,
+  } = useCloudDictionaryPanel(client, embedded);
   return (
     <main className={`native-panel ${cloud.dictionaryPanel}`} aria-label="云词库">
       {confirmation}
@@ -2404,9 +661,9 @@ export function CloudDictionaryPanel({
           <CloudDictionaryEntryForm
             value={form}
             busy={busy}
-            onChange={(patch) => setForm((current) => (current ? { ...current, ...patch } : null))}
+            onChange={changeForm}
             onSave={() => void save()}
-            onCancel={() => setForm(null)}
+            onCancel={cancelForm}
           />
         )}
         {entries.length > 0 && (
@@ -2450,256 +707,27 @@ export function CloudDictionaryPanel({
 
 /** File transfer lives on its own page so the dictionary list stays focused on entries. */
 export function CloudDictionaryFilesPanel({ client }: { client: CloudDictionaryPanelClient }) {
-  const { confirm, confirmation } = useConfirm();
-  const [kind, setKind] = useState<CloudDictionaryKind>("pinyin");
-  const [format, setFormat] = useState<CloudDictionaryFileFormat>("standard");
-  const [file, setFile] = useState<{ name: string; text: string; bytes: number } | null>(null);
-  const [notice, setNotice] = useState("选择 TSV 文件后确认上传；导出不会改变云端内容");
   const {
+    confirmation,
+    kind,
+    format,
+    file,
+    setFile,
+    notice,
     busy,
-    busyRef,
-    revisionRef: requestRevision,
-    run,
-    invalidate,
-  } = usePanelAction(setNotice, cloudDictionaryErrorMessage);
-  const [snapshotBusy, setSnapshotBusy] = useState(false);
-  const [restorePreview, setRestorePreview] = useState<{
-    text: string;
-    snapshot: CloudDictionarySnapshotMetadata;
-    expectedRevision: number;
-  } | null>(null);
-  const mounted = useMountedRef();
-  const lifecycleRevision = useAsyncGeneration(client);
-
-  useEffect(() => {
-    invalidate();
-    setSnapshotBusy(false);
-    setRestorePreview(null);
-    return () => {
-      invalidate();
-      if (client.snapshotNative) void client.request({ operation: "snapshot_restore_cancel" });
-    };
-  }, [client, invalidate]);
-
-  function changeKind(next: CloudDictionaryKind) {
-    if (busyRef.current || next === kind) return;
-    setKind(next);
-    setFile(null);
-    if (next !== "pinyin" && format === "hans") setFormat("standard");
-  }
-
-  function chooseFile(selected: File) {
-    if (busyRef.current) return;
-    if (selected.size === 0 || selected.size > 65536) {
-      setFile(null);
-      setNotice("导入文件必须大于 0 且不超过 64 KiB");
-      return;
-    }
-    void run(async (revision) => {
-      let text: string;
-      try {
-        // The same reader the local dictionary import uses. `File.text()` decodes as UTF-8 and
-        // nothing else, which is wrong twice over for dictionary files: a UTF-16 one came out as
-        // NULs and was refused, and a GB18030 one - which Windows tools still write - decoded to
-        // replacement characters with no NUL anywhere, so it passed the check below and uploaded
-        // a cloud dictionary of `\ufffd`. Reading it here the way the other panel does means one
-        // file behaves the same in both.
-        text = await readDictionaryFile(selected, 65536);
-      } catch {
-        throw new Error("invalid file");
-      }
-      if (revision !== requestRevision.current) return;
-      if (!text || text.includes("\u0000")) throw new Error("invalid file");
-      setFile({ name: selected.name || "dictionary.tsv", text, bytes: selected.size });
-      setNotice("文件已读取；确认后才会写入云端");
-    }, "无法读取文件，请确认是大小不超过 64 KiB 的文本词库");
-  }
-
-  async function importFile() {
-    const prepared = file;
-    if (!prepared || busyRef.current) return;
-    const formatName =
-      format === "hans" ? "汉字自动注音" : format === "windows" ? "Windows TSV" : "标准 TSV";
-    const kindName =
-      kind === "pinyin"
-        ? "拼音"
-        : kind === "wubi"
-          ? "86 五笔"
-          : kind === "wubi98"
-            ? "98 五笔"
-            : kind === "quick"
-              ? "快捷短语"
-              : "英文";
-    const confirmed = await confirm({
-      title: "导入词库",
-      message: `按“${formatName}”导入${kindName}词库。`,
-      confirmLabel: "导入",
-    });
-    if (!confirmed || busyRef.current) return;
-    void run(async (revision) => {
-      await client.request({ operation: "import", kind, format, text: prepared.text });
-      if (revision !== requestRevision.current) return;
-      setFile(null);
-      setNotice("云词库已导入；如需影响本机输入，请另行应用到本机");
-    }, "导入失败，请检查 TSV 文件格式");
-  }
-
-  function exportDictionary() {
-    if (format === "hans") return;
-    void run(async (revision) => {
-      const result = await client.request({ operation: "export", kind, format });
-      if (revision !== requestRevision.current) return;
-      if (client.exportNative) {
-        setNotice(result.saved === true ? "云词库已导出" : "已取消导出");
-        return;
-      }
-      const text = cloudResponseText(result);
-      if (typeof text !== "string") throw new Error("provider returned no file");
-      const filename = result.filename || `msime-${kind}-dictionary.tsv`;
-      if (client.saveExport) await client.saveExport(filename, text);
-      else downloadBlob(new Blob([text], { type: "text/plain;charset=utf-8" }), filename);
-      if (revision !== requestRevision.current) return;
-      setNotice("云词库已导出");
-    }, "导出失败，请检查网络和登录状态后重试");
-  }
-
-  async function exportSnapshot() {
-    if (!mounted.current) return;
-    const lifecycle = lifecycleRevision.current;
-    setSnapshotBusy(true);
-    try {
-      const result = await client.request({ operation: "snapshot_export" });
-      if (!mounted.current || lifecycle !== lifecycleRevision.current) return;
-      if (client.snapshotNative && typeof result.saved === "boolean") {
-        setNotice(result.saved ? "完整云词库快照已导出" : "已取消导出");
-        return;
-      }
-      const text = cloudResponseText(result);
-      if (typeof text !== "string" || !text) throw new Error("provider returned no snapshot");
-      const filename = result.filename || "msime-dictionary-snapshot.ndjson";
-      if (client.saveExport) await client.saveExport(filename, text);
-      else downloadBlob(new Blob([text], { type: "application/x-ndjson;charset=utf-8" }), filename);
-      if (!mounted.current || lifecycle !== lifecycleRevision.current) return;
-      setNotice("完整云词库快照已导出");
-    } catch {
-      if (mounted.current && lifecycle === lifecycleRevision.current)
-        setNotice("导出完整云词库快照失败");
-    } finally {
-      if (mounted.current && lifecycle === lifecycleRevision.current) setSnapshotBusy(false);
-    }
-  }
-
-  async function chooseRestoreSnapshot(selected: File) {
-    if (!mounted.current) return;
-    const lifecycle = lifecycleRevision.current;
-    if (selected.size === 0 || selected.size > 512 * 1024 * 1024) {
-      setNotice("快照文件必须大于 0 且不超过 512 MiB");
-      return;
-    }
-    setSnapshotBusy(true);
-    try {
-      const text = client.snapshotNative ? "" : await selected.text();
-      const result = await client.request({ operation: "snapshot_restore_preview", text });
-      if (!mounted.current || lifecycle !== lifecycleRevision.current) return;
-      if (!result.snapshot || typeof result.expectedRevision !== "number")
-        throw new Error("invalid snapshot preview");
-      if (client.snapshotNative && typeof result.previewToken !== "string")
-        throw new Error("invalid native snapshot preview");
-      const preparedText = client.snapshotNative ? result.previewToken! : text;
-      setRestorePreview({
-        text: preparedText,
-        snapshot: result.snapshot,
-        expectedRevision: result.expectedRevision,
-      });
-      setNotice("快照已校验，请确认后替换云端词库");
-    } catch {
-      if (mounted.current && lifecycle === lifecycleRevision.current)
-        setNotice("无法校验快照，云端词库未改变");
-    } finally {
-      if (mounted.current && lifecycle === lifecycleRevision.current) setSnapshotBusy(false);
-    }
-  }
-
-  async function chooseNativeRestoreSnapshot() {
-    if (!client.chooseSnapshotRestore || !mounted.current) return;
-    const lifecycle = lifecycleRevision.current;
-    setRestorePreview(null);
-    setSnapshotBusy(true);
-    try {
-      const result = await client.chooseSnapshotRestore();
-      if (!mounted.current || lifecycle !== lifecycleRevision.current) return;
-      if (result.saved === false) {
-        setNotice("已取消选择快照");
-        return;
-      }
-      if (
-        !result.snapshot ||
-        typeof result.expectedRevision !== "number" ||
-        typeof result.previewToken !== "string"
-      )
-        throw new Error("invalid native snapshot preview");
-      setRestorePreview({
-        text: result.previewToken,
-        snapshot: result.snapshot,
-        expectedRevision: result.expectedRevision,
-      });
-      setNotice("快照已校验，请确认后替换云端词库");
-    } catch {
-      if (mounted.current && lifecycle === lifecycleRevision.current)
-        setNotice("无法校验快照，云端词库未改变");
-    } finally {
-      if (mounted.current && lifecycle === lifecycleRevision.current) setSnapshotBusy(false);
-    }
-  }
-
-  async function abandonRestoreSnapshot() {
-    if (!mounted.current) return;
-    const lifecycle = lifecycleRevision.current;
-    setRestorePreview(null);
-    if (client.snapshotNative) {
-      setSnapshotBusy(true);
-      try {
-        await client.request({ operation: "snapshot_restore_cancel" });
-      } finally {
-        if (mounted.current && lifecycle === lifecycleRevision.current) setSnapshotBusy(false);
-      }
-    }
-  }
-
-  async function restoreSnapshot() {
-    if (!mounted.current) return;
-    const lifecycle = lifecycleRevision.current;
-    const prepared = restorePreview;
-    if (!prepared) return;
-    const confirmed = await confirm({
-      title: "替换云端词库",
-      message: "此快照会替换全部云端词库和排序记录。",
-      confirmLabel: "替换",
-      danger: true,
-    });
-    if (!confirmed || !mounted.current || lifecycle !== lifecycleRevision.current) return;
-    setSnapshotBusy(true);
-    try {
-      const result = await client.request(
-        client.snapshotNative
-          ? { operation: "snapshot_restore_native", token: prepared.text }
-          : {
-              operation: "snapshot_restore",
-              text: prepared.text,
-              expected_sha256: prepared.snapshot.sha256,
-              revision: prepared.expectedRevision,
-            },
-      );
-      if (!mounted.current || lifecycle !== lifecycleRevision.current) return;
-      setRestorePreview(null);
-      setNotice(`云端词库已恢复到新版本 ${result.revision ?? ""}`.trim());
-    } catch {
-      if (mounted.current && lifecycle === lifecycleRevision.current)
-        setNotice("恢复失败，可能是云端版本已变化；云端词库未改变");
-    } finally {
-      if (mounted.current && lifecycle === lifecycleRevision.current) setSnapshotBusy(false);
-    }
-  }
+    snapshotBusy,
+    restorePreview,
+    changeKind,
+    setFormat,
+    chooseFile,
+    importFile,
+    exportDictionary,
+    exportSnapshot,
+    chooseNativeRestoreSnapshot,
+    chooseRestoreSnapshot,
+    abandonRestoreSnapshot,
+    restoreSnapshot,
+  } = useCloudDictionaryFilesPanel(client);
 
   return (
     <main className={`native-panel ${cloud.dictionaryPanel}`} aria-label="云词库文件">
@@ -2850,146 +878,22 @@ export function CloudDictionaryFilesPanel({ client }: { client: CloudDictionaryP
   );
 }
 
-const PANEL_SNAPSHOT_RETRY_NOTICE =
-  "快照已入列，这次没能马上应用；请保持这个面板打开，稍后会自动重试";
-
-/** 由面板自己处理队列的宿主（`snapshotAppliesInPanel`）按请求状态给出的提示。结束的结果在下一次轮询时被取走、处理结果一节随之消失，所以提示自己说清结局，不指向那一节。 */
-function panelSnapshotNotice(status: CloudDictionarySnapshotRequest["status"] | undefined): string {
-  switch (status) {
-    case "applied":
-      return "云端快照已应用到本机";
-    case "queued":
-    case "preparing":
-      return PANEL_SNAPSHOT_RETRY_NOTICE;
-    case "conflict":
-      return "快照因冲突作废，本机词库未改变";
-    case "cancelled":
-      return "已取消待应用快照";
-    default:
-      return "快照没有应用";
-  }
-}
-
-/** Apply the complete cloud snapshot through the platform's idle-boundary queue. */
+/** 通过宿主队列应用完整云词库快照。 */
 export function CloudDictionaryApplyPanel({ client }: { client: CloudDictionaryPanelClient }) {
-  const { confirm, confirmation } = useConfirm();
-  const [localVersion, setLocalVersion] = useState<string | null>(null);
-  const [request, setRequest] = useState<CloudDictionarySnapshotRequest | null>(null);
-  const [preview, setPreview] = useState<CloudDictionarySnapshotMetadata | null>(null);
-  const [previewToken, setPreviewToken] = useState<string | null>(null);
-  const [notice, setNotice] = useState("先获取本机词库版本，再下载并预览云端快照");
   const {
+    confirmation,
+    localVersion,
+    request,
+    preview,
+    previewToken,
+    notice,
     busy,
-    busyRef,
-    revisionRef: statusRevision,
-    run: runAction,
-    invalidate,
-    isCurrent,
-  } = usePanelAction(setNotice, cloudDictionaryErrorMessage);
-  const lifecycleRevision = useAsyncGeneration(client);
-
-  async function refreshStatus() {
-    if (busyRef.current) return;
-    const lifecycle = lifecycleRevision.current;
-    const revision = ++statusRevision.current;
-    try {
-      const result = await client.request({ operation: "snapshot_status" });
-      if (lifecycle !== lifecycleRevision.current || !isCurrent(revision)) return;
-      setLocalVersion(typeof result.localVersion === "string" ? result.localVersion : null);
-      const current = cloudResponseRequest<CloudDictionarySnapshotRequest>(result);
-      setRequest(current);
-      // 面板重试成功或作废以后，换掉「请保持面板打开」那句，否则结果被取走后它一直留在那里。
-      if (client.snapshotAppliesInPanel && current) {
-        const notice = panelSnapshotNotice(current.status);
-        setNotice((shown) => (shown === PANEL_SNAPSHOT_RETRY_NOTICE ? notice : shown));
-      }
-    } catch {
-      if (lifecycle === lifecycleRevision.current && isCurrent(revision))
-        setNotice("无法读取本机词库状态，请确认键盘已启用");
-    }
-  }
-
-  function run(action: (revision: number, lifecycle: number) => Promise<void>, failure: string) {
-    const lifecycle = lifecycleRevision.current;
-    return runAction((revision) => action(revision, lifecycle), failure);
-  }
-
-  function download() {
-    if (!localVersion) {
-      setNotice("尚未获取本机词库版本，请先打开水杉键盘");
-      return;
-    }
-    void run(async (revision, lifecycle) => {
-      const result = await client.request({ operation: "snapshot_preview" });
-      if (lifecycle !== lifecycleRevision.current || !isCurrent(revision)) return;
-      if (!result.snapshot || typeof result.previewToken !== "string")
-        throw new Error("invalid preview");
-      setPreview(result.snapshot);
-      setPreviewToken(result.previewToken);
-      setNotice("云端快照已校验，请确认后替换本机词库");
-    }, "下载云词库快照失败");
-  }
-
-  async function enqueue() {
-    const token = previewToken;
-    if (!token || !preview || busyRef.current) return;
-    const lifecycle = lifecycleRevision.current;
-    const confirmed = await confirm({
-      title: "替换本机词库",
-      message: client.snapshotAppliesInPanel
-        ? "这份云端快照会替换本机个人词库和学习记录。替换马上进行，期间输入会暂停；请保持这个面板打开，直到状态显示已应用。"
-        : "这份云端快照会替换本机个人词库和学习记录，输入法将在下一次空闲边界应用。",
-      confirmLabel: "替换",
-      danger: true,
-    });
-    if (!confirmed || busyRef.current || lifecycle !== lifecycleRevision.current) return;
-    void run(async (revision, currentLifecycle) => {
-      const result = await client.request({ operation: "snapshot_enqueue", token });
-      if (currentLifecycle !== lifecycleRevision.current || !isCurrent(revision)) return;
-      setPreview(null);
-      setPreviewToken(null);
-      const queued = cloudResponseRequest<CloudDictionarySnapshotRequest>(result);
-      setRequest(queued);
-      setNotice(
-        client.snapshotAppliesInPanel
-          ? panelSnapshotNotice(queued?.status)
-          : "快照已入列，将在输入法空闲时应用",
-      );
-    }, "快照入列失败，本机词库未改变");
-  }
-
-  async function cancel() {
-    if (busyRef.current) return;
-    const lifecycle = lifecycleRevision.current;
-    const confirmed = await confirm({
-      title: "取消待应用快照",
-      message: "待应用的云词库快照会被撤销。",
-      confirmLabel: "取消快照",
-      cancelLabel: "保留",
-    });
-    if (!confirmed || busyRef.current || lifecycle !== lifecycleRevision.current) return;
-    void run(async (revision, currentLifecycle) => {
-      const result = await client.request({ operation: "snapshot_cancel" });
-      if (currentLifecycle !== lifecycleRevision.current || !isCurrent(revision)) return;
-      setRequest(cloudResponseRequest<CloudDictionarySnapshotRequest>(result));
-      setNotice("已取消待应用快照");
-    }, "取消快照失败");
-  }
-
-  useEffect(() => {
-    invalidate();
-    setPreview(null);
-    setPreviewToken(null);
-    void refreshStatus();
-    const stopPoll = subscribeToInterval(() => {
-      void refreshStatus();
-    }, 2000);
-    return () => {
-      invalidate();
-      stopPoll();
-    };
-  }, [client, invalidate]);
-
+    refreshStatus,
+    download,
+    enqueue,
+    cancel,
+    discardPreview,
+  } = useCloudDictionaryApplyPanel(client);
   return (
     <main className={`native-panel ${cloud.dictionaryPanel}`} aria-label="应用云词库">
       {confirmation}
@@ -3000,89 +904,19 @@ export function CloudDictionaryApplyPanel({ client }: { client: CloudDictionaryP
         onClose={() => void client.close()}
       />
       <div className={cloud.dictionaryBody}>
-        <section className={cloud.dictionarySection} aria-label="准备本机词库">
-          <h2>准备本机词库</h2>
-          <p className={cloud.dictionaryNote}>
-            请启用水杉键盘并打开一次，让宿主提供当前本机词库版本。测试区或编辑器内容不会上传。
-          </p>
-          <div className={cloud.dictionarySnapshotFact}>
-            {localVersion ? (
-              <>
-                <strong>已获取本机词库版本</strong>
-                <small>{localVersion}</small>
-              </>
-            ) : (
-              <strong>尚未获取本机词库版本</strong>
-            )}
-          </div>
-          <button
-            className={cloud.dictionaryButton}
-            type="button"
-            onClick={download}
-            disabled={
-              busy ||
-              !localVersion ||
-              request?.status === "queued" ||
-              request?.status === "preparing"
-            }
-          >
-            下载云词库并预览
-          </button>
-          <button
-            type="button"
-            className="secondary"
-            onClick={() => void refreshStatus()}
-            disabled={busy}
-          >
-            刷新状态
-          </button>
-        </section>
-        {preview && (
-          <section className={cloud.dictionarySection} aria-label="确认应用">
-            <h2>确认应用</h2>
-            <p className={cloud.dictionaryNote}>
-              云端 revision {preview.cloudRevision} · {preview.records} 条记录 · {preview.bytes}{" "}
-              字节
-            </p>
-            <p className={cloud.dictionaryNote}>
-              词条 {preview.entries} · 覆盖 {preview.overlays} · 固定 {preview.positions} · 选择{" "}
-              {preview.selections}
-            </p>
-            <button type="button" onClick={enqueue} disabled={busy || !previewToken}>
-              替换本机词库
-            </button>
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => {
-                setPreview(null);
-                setPreviewToken(null);
-              }}
-              disabled={busy}
-            >
-              丢弃预览
-            </button>
-          </section>
-        )}
-        {request && (
-          <section className={cloud.dictionarySection} aria-label="处理结果">
-            <h2>处理结果</h2>
-            <p className={cloud.dictionaryNote}>
-              状态：{request.status} · 云端 revision {request.cloudRevision}
-            </p>
-            {client.snapshotAppliesInPanel &&
-              (request.status === "queued" || request.status === "preparing") && (
-                <p className={cloud.dictionaryNote}>
-                  快照只在这个面板开着时应用，关掉面板会停在待应用；之后输入改变了本机词库，这份快照会因冲突作废。
-                </p>
-              )}
-            {(request.status === "queued" || request.status === "preparing") && (
-              <button type="button" className="secondary" onClick={cancel} disabled={busy}>
-                取消待应用快照
-              </button>
-            )}
-          </section>
-        )}
+        <CloudDictionaryApplyContent
+          localVersion={localVersion}
+          request={request}
+          preview={preview}
+          canApply={Boolean(previewToken)}
+          busy={busy}
+          appliesInPanel={Boolean(client.snapshotAppliesInPanel)}
+          onDownload={download}
+          onRefresh={refreshStatus}
+          onEnqueue={enqueue}
+          onDiscardPreview={discardPreview}
+          onCancel={cancel}
+        />
         <p className={cloud.dictionaryNote} role="status">
           {notice}
         </p>
@@ -3092,185 +926,32 @@ export function CloudDictionaryApplyPanel({ client }: { client: CloudDictionaryP
 }
 
 export function CloudDictionaryCatalogPanel({ client }: { client: CloudDictionaryPanelClient }) {
-  const { confirm, confirmation } = useConfirm();
-  const [kind, setKind] = useState<CloudDictionaryKind>("pinyin");
-  const [code, setCode] = useState("");
-  const [scheme, setScheme] = useState("pinyin");
-  const [profile, setProfile] = useState("xiaohe");
-  const [confirmed, setConfirmed] = useState<{
-    code: string;
-    scheme: string;
-    profile: string;
-  } | null>(null);
-  const [entries, setEntries] = useState<CloudDictionaryCatalogEntry[]>([]);
-  const [offset, setOffset] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
-  const [revision, setRevision] = useState(0);
-  const [normalized, setNormalized] = useState("");
-  const [form, setForm] = useState<{
-    entry: CloudDictionaryCatalogEntry;
-    replacement: boolean;
-    code: string;
-    word: string;
-    weight: number;
-  } | null>(null);
-  const [notice, setNotice] = useState("查询基础词库与当前账号的完整目录");
-  const { busy, busyRef, run, invalidate, isCurrent } = usePanelAction(
-    setNotice,
-    cloudDictionaryErrorMessage,
-  );
-
-  useEffect(() => {
-    invalidate();
-    setEntries([]);
-    setForm(null);
-    setConfirmed(null);
-    setHasMore(false);
-    setOffset(0);
-    setRevision(0);
-    setNormalized("");
-    return () => {
-      invalidate();
-    };
-  }, [client, invalidate]);
-
-  async function load(
-    current: number,
-    nextOffset: number,
-    query: { code: string; scheme: string; profile: string },
-  ) {
-    let result;
-    try {
-      result = await client.request({
-        operation: "catalog",
-        kind,
-        code: query.code,
-        offset: nextOffset,
-        scheme: query.scheme,
-        profile: query.profile,
-      });
-    } catch (error) {
-      if (isCurrent(current)) {
-        setEntries([]);
-        setForm(null);
-        setConfirmed(null);
-        setHasMore(false);
-        setOffset(0);
-        setRevision(0);
-        setNormalized("");
-      }
-      throw error;
-    }
-    if (!isCurrent(current)) return;
-    setEntries(cloudDictionaryCatalogEntries<CloudDictionaryCatalogEntry>(result));
-    setOffset(cloudResponseInteger(result.offset) ? result.offset : nextOffset);
-    setHasMore(result.has_more === true);
-    setRevision(cloudResponseInteger(result.revision) ? result.revision : 0);
-    setNormalized(typeof result.normalized === "string" ? result.normalized : query.code);
-    setConfirmed(query);
-  }
-
-  function queryCatalog(
-    nextOffset = 0,
-    queryOverride?: { code: string; scheme: string; profile: string },
-  ) {
-    const query = queryOverride ?? { code: code.trim(), scheme, profile };
-    if (kind !== "quick" && !query.code) {
-      setNotice("请输入查询编码");
-      return;
-    }
-    return run(async (current) => {
-      await load(current, nextOffset, query);
-      if (isCurrent(current)) setNotice("完整目录已刷新");
-    }, "无法访问完整云词库目录，请确认账号已登录");
-  }
-
-  function beginEdit(entry: CloudDictionaryCatalogEntry) {
-    if (!busyRef.current)
-      setForm({
-        entry,
-        replacement: true,
-        code: entry.code,
-        word: entry.word,
-        weight: entry.weight,
-      });
-  }
-
-  async function reload(current: number, message: string) {
-    if (!confirmed) return;
-    try {
-      await load(current, 0, confirmed);
-      if (isCurrent(current)) setNotice(message);
-    } catch {
-      if (isCurrent(current)) setNotice(`${message}，但目录刷新失败，请重新查询`);
-    }
-  }
-
-  function save() {
-    if (!form) return;
-    if (!form.code.trim() || !form.word.trim()) {
-      setNotice("编码和词条不能为空");
-      return;
-    }
-    return run(async (current) => {
-      await client.request({
-        operation: "edit_catalog",
-        kind,
-        code: form.entry.code,
-        word: form.entry.word,
-        revision,
-        replacement: form.replacement
-          ? { code: form.code.trim(), word: form.word, weight: form.weight }
-          : null,
-      });
-      if (!isCurrent(current)) return;
-      setForm(null);
-      await reload(current, "完整目录已保存");
-    }, "目录保存失败，请刷新后重试");
-  }
-
-  function remove(entry: CloudDictionaryCatalogEntry) {
-    return run(async (current) => {
-      await client.request({
-        operation: "edit_catalog",
-        kind,
-        code: entry.code,
-        word: entry.word,
-        revision,
-        replacement: null,
-      });
-      if (!isCurrent(current)) return;
-      setForm((currentForm) =>
-        currentForm?.entry.code === entry.code && currentForm.entry.word === entry.word
-          ? null
-          : currentForm,
-      );
-      await reload(current, "目录词条已删除");
-    }, "目录删除失败，请刷新后重试");
-  }
-
-  async function confirmRemove(entry: CloudDictionaryCatalogEntry) {
-    if (busyRef.current) return;
-    const confirmed = await confirm({
-      title: "删除目录词条",
-      message: `完整目录词条“${entry.word}”只会从云端删除，本机词库不会改变。`,
-      confirmLabel: "删除",
-      danger: true,
-    });
-    if (!confirmed || busyRef.current) return;
-    void remove(entry);
-  }
-
-  function changeKind(next: CloudDictionaryKind) {
-    if (busyRef.current || next === kind) return;
-    setKind(next);
-    setEntries([]);
-    setConfirmed(null);
-    setForm(null);
-    setOffset(0);
-    setHasMore(false);
-  }
-
+  const {
+    confirmation,
+    kind,
+    code,
+    setCode,
+    scheme,
+    setScheme,
+    profile,
+    setProfile,
+    confirmed,
+    entries,
+    offset,
+    hasMore,
+    revision,
+    normalized,
+    form,
+    notice,
+    busy,
+    queryCatalog,
+    beginEdit,
+    save,
+    confirmRemove,
+    changeKind,
+    changeForm,
+    cancelForm,
+  } = useCloudDictionaryCatalogPanel(client);
   return (
     <main className={`native-panel ${cloud.dictionaryPanel}`} aria-label="完整云词库目录">
       {confirmation}
@@ -3355,9 +1036,9 @@ export function CloudDictionaryCatalogPanel({ client }: { client: CloudDictionar
           <CloudDictionaryEntryForm
             value={form}
             busy={busy}
-            onChange={(patch) => setForm((current) => (current ? { ...current, ...patch } : null))}
+            onChange={changeForm}
             onSave={() => void save()}
-            onCancel={() => setForm(null)}
+            onCancel={cancelForm}
           />
         )}
         {confirmed && (
@@ -3386,225 +1067,40 @@ const cloudRankingModes: [CloudRankingMode, string][] = [
 ];
 
 export function CloudCandidatesPanel({ client }: { client: CloudDictionaryPanelClient }) {
-  const { confirm, confirmation } = useConfirm();
-  const [kind, setKind] = useState<CloudDictionaryKind>("pinyin");
-  const [text, setText] = useState("");
-  const [scheme, setScheme] = useState("pinyin");
-  const [profile, setProfile] = useState("xiaohe");
-  const [jianpin, setJianpin] = useState(false);
-  const [mode, setMode] = useState<CloudRankingMode>("pin");
-  const [step, setStep] = useState(1);
-  const [trigger, setTrigger] = useState(1);
-  const [forceTop, setForceTop] = useState(false);
-  const [position, setPosition] = useState(1);
-  const [query, setQuery] = useState<{
-    text: string;
-    kind: CloudCandidateKind;
-    scheme: string;
-    profile: string;
-    limit: number;
-  } | null>(null);
-  const [candidates, setCandidates] = useState<CloudCandidate[]>([]);
-  const [positions, setPositions] = useState<CloudFixedPosition[]>([]);
-  const [context, setContext] = useState("");
-  const [revision, setRevision] = useState(0);
-  const [notice, setNotice] = useState("仅在点击查询时发送编码；修改只保存到当前账号");
-  const { busy, busyRef, run, invalidate, isCurrent } = usePanelAction(
-    setNotice,
-    cloudDictionaryErrorMessage,
-  );
-  const textRef = useLatestRef(text);
-
-  useEffect(() => {
-    invalidate();
-    setCandidates([]);
-    setPositions([]);
-    setQuery(null);
-    setContext("");
-    setRevision(0);
-    return () => {
-      invalidate();
-    };
-  }, [client, invalidate]);
-
-  async function load(
-    current: number,
-    nextQuery: {
-      text: string;
-      kind: CloudCandidateKind;
-      scheme: string;
-      profile: string;
-      limit: number;
-    },
-  ) {
-    let result;
-    try {
-      result = await client.request({ operation: "candidates", ...nextQuery });
-    } catch (error) {
-      if (isCurrent(current)) {
-        setCandidates([]);
-        setPositions([]);
-        setQuery(null);
-        setContext("");
-        setRevision(0);
-      }
-      throw error;
-    }
-    if (!isCurrent(current)) return;
-    const nextCandidates = Array.isArray(result.candidates)
-      ? result.candidates.filter(
-          (candidate) =>
-            candidate && typeof candidate.code === "string" && typeof candidate.word === "string",
-        )
-      : [];
-    // Publish the candidate page as soon as it arrives. Loading fixed
-    // positions is a secondary request and must not delay the visible result
-    // (or make a fast query appear to have timed out on touch hosts).
-    setCandidates(nextCandidates);
-    setContext(typeof result.context === "string" ? result.context : "");
-    setRevision(cloudResponseInteger(result.revision) ? result.revision : 0);
-    setPositions([]);
-    setQuery(nextQuery);
-    if (nextQuery.kind !== "quick" && typeof result.context === "string" && result.context) {
-      const fixed = await client.request({
-        operation: "fixed_positions",
-        context: result.context,
-        offset: 0,
-      });
-      if (!isCurrent(current)) return;
-      const nextPositions = Array.isArray(fixed.positions)
-        ? fixed.positions.filter(
-            (item) => item && typeof item.code === "string" && typeof item.word === "string",
-          )
-        : [];
-      setPositions(nextPositions);
-    }
-  }
-
-  function queryCandidates() {
-    const value = textRef.current.trim();
-    if (!value) {
-      setNotice("请输入编码");
-      return;
-    }
-    const nextQuery = {
-      text: value,
-      kind: jianpin && kind === "pinyin" ? ("jianpin" as const) : kind,
-      scheme,
-      profile,
-      limit: 100,
-    };
-    return run(async (current) => {
-      await load(current, nextQuery);
-      if (isCurrent(current)) setNotice("云端候选已刷新");
-    }, "无法查询云端候选，请确认账号已登录");
-  }
-
-  async function reload(current: number, message: string) {
-    if (!query) return;
-    try {
-      await load(current, query);
-      if (isCurrent(current)) setNotice(message);
-    } catch {
-      if (isCurrent(current)) setNotice(`${message}，但候选刷新失败，请重新查询`);
-    }
-  }
-
-  async function rank(candidate: CloudCandidate) {
-    if (!query) return;
-    if (!(await confirm({ title: "调整排序", message: "调整此云端候选的排序。" }))) return;
-    return run(async (current) => {
-      const result = await client.request({
-        operation: "rank",
-        ...query,
-        code: candidateMutationCode(candidate),
-        word: candidate.word,
-        revision,
-        mode,
-        linear_step: step,
-        trigger_count: trigger,
-        force_top: forceTop,
-      });
-      await reload(
-        current,
-        result.changed === true
-          ? "云端排序已更新"
-          : `已记录本次选择，本次未调整排序；累计 ${result.selection_count ?? 0} 次`,
-      );
-    }, "云端调频失败，请刷新后重试");
-  }
-
-  async function remove(candidate: CloudCandidate) {
-    if (!query || (kind !== "english" && Array.from(candidate.word).length <= 1)) return;
-    const confirmed = await confirm({
-      title: "删除云端候选",
-      message: `“${candidate.word}”会从云端候选中删除。`,
-      confirmLabel: "删除",
-      danger: true,
-    });
-    if (!confirmed) return;
-    return run(async (current) => {
-      await client.request({
-        operation: "remove_candidate",
-        ...query,
-        code: candidateMutationCode(candidate),
-        word: candidate.word,
-        revision,
-      });
-      await reload(current, "云端候选已删除");
-    }, "删除云端候选失败，请刷新后重试");
-  }
-
-  async function setFixed(candidate: CloudCandidate, nextPosition: number | null) {
-    if (!query || !context) return;
-    const confirmed = await confirm(
-      nextPosition === null
-        ? { title: "取消固定位置", message: `“${candidate.word}”将不再固定在某一位。` }
-        : { title: "固定位置", message: `“${candidate.word}”将固定到第 ${nextPosition} 位。` },
-    );
-    if (!confirmed) return;
-    return run(async (current) => {
-      await client.request({
-        operation: "set_fixed_position",
-        context,
-        code: candidateMutationCode(candidate),
-        word: candidate.word,
-        position: nextPosition,
-        revision,
-      });
-      await reload(current, nextPosition === null ? "固定位置已取消" : "固定位置已更新");
-    }, "固定位置更新失败，请刷新后重试");
-  }
-
-  async function unfix(item: CloudFixedPosition) {
-    if (!query) return;
-    const confirmed = await confirm({
-      title: "取消固定位置",
-      message: `“${item.word}”将不再固定在某一位。`,
-    });
-    if (!confirmed) return;
-    return run(async (current) => {
-      await client.request({
-        operation: "set_fixed_position",
-        context: item.context,
-        code: item.code,
-        word: item.word,
-        position: null,
-        revision,
-      });
-      await reload(current, "固定位置已取消");
-    }, "固定位置更新失败，请刷新后重试");
-  }
-
-  function changeKind(next: CloudDictionaryKind) {
-    if (busyRef.current || next === kind) return;
-    setKind(next);
-    setJianpin(false);
-    setCandidates([]);
-    setPositions([]);
-    setQuery(null);
-    setContext("");
-  }
+  const {
+    confirmation,
+    kind,
+    text,
+    setText,
+    scheme,
+    setScheme,
+    profile,
+    setProfile,
+    jianpin,
+    setJianpin,
+    mode,
+    setMode,
+    step,
+    setStep,
+    trigger,
+    setTrigger,
+    forceTop,
+    setForceTop,
+    position,
+    setPosition,
+    query,
+    candidates,
+    positions,
+    revision,
+    notice,
+    busy,
+    queryCandidates,
+    rank,
+    remove,
+    setFixed,
+    unfix,
+    changeKind,
+  } = useCloudCandidatesPanel(client);
 
   return (
     <main className={`native-panel ${cloud.dictionaryPanel}`} aria-label="云端候选排序">
@@ -3723,97 +1219,19 @@ export function CloudCandidatesPanel({ client }: { client: CloudDictionaryPanelC
           排序、固定位置和删除只保存到当前账号；本机键盘需要后续同步才会采用云端状态。
         </p>
         {query && (
-          <div className={cloud.dictionaryList} aria-label="云端候选结果">
-            <p>
-              查询编码：{query.text} · 云端版本 {revision}
-            </p>
-            {candidates.length ? (
-              candidates.map((candidate, index) => (
-                <CloudDictionaryItem
-                  key={`${candidateMutationCode(candidate)}:${candidate.word}`}
-                  ariaLabel={`调频候选 ${candidate.word}`}
-                  busy={busy}
-                  disabled={kind === "quick"}
-                  onClick={() => void rank(candidate)}
-                  actions={
-                    kind !== "quick" && (
-                      <>
-                        <button
-                          type="button"
-                          className="secondary"
-                          onClick={() => void rank(candidate)}
-                          disabled={busy}
-                        >
-                          调频
-                        </button>
-                        <button
-                          type="button"
-                          className="secondary"
-                          onClick={() => void setFixed(candidate, position)}
-                          disabled={busy}
-                        >
-                          固定
-                        </button>
-                        <button
-                          type="button"
-                          className="secondary"
-                          onClick={() => void remove(candidate)}
-                          disabled={
-                            busy || (kind !== "english" && Array.from(candidate.word).length <= 1)
-                          }
-                        >
-                          删除
-                        </button>
-                      </>
-                    )
-                  }
-                >
-                  <strong>
-                    {index + 1}. <span className="wrap-anywhere">{candidate.word}</span>
-                  </strong>
-                  <small>
-                    {candidate.code} · 权重 {candidate.weight}
-                  </small>
-                </CloudDictionaryItem>
-              ))
-            ) : (
-              <p className={cloud.dictionaryEmpty}>没有匹配的候选</p>
-            )}
-          </div>
+          <CloudCandidateResults
+            kind={kind}
+            queryText={query.text}
+            revision={revision}
+            candidates={candidates}
+            busy={busy}
+            position={position}
+            onRank={rank}
+            onSetFixed={setFixed}
+            onRemove={remove}
+          />
         )}
-        {query && candidates.length > 0 && (
-          <p className={cloud.dictionaryMobileHint}>
-            点按候选可调频；窄屏下的固定和删除操作会分组显示。
-          </p>
-        )}
-        {positions.length > 0 && (
-          <div className={cloud.dictionaryList} aria-label="固定位置">
-            <p>此查询的固定位置</p>
-            {positions.map((item) => (
-              <article
-                className={cloud.dictionaryItem}
-                key={`${item.context}:${item.code}:${item.word}`}
-              >
-                <div className={`${cloud.dictionaryItemMain} ${cloud.dictionaryItemStatic}`}>
-                  <strong>
-                    第 {item.position} 位 · {item.word}
-                  </strong>
-                  <small>{item.code}</small>
-                </div>
-                <div className={cloud.dictionaryItemActions}>
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => void unfix(item)}
-                    disabled={busy}
-                  >
-                    取消固定
-                  </button>
-                </div>
-              </article>
-            ))}
-          </div>
-        )}
+        <CloudFixedPositions items={positions} busy={busy} onUnfix={unfix} />
         <p className={cloud.dictionaryNote} role="status">
           {notice}
         </p>
@@ -3821,8 +1239,6 @@ export function CloudCandidatesPanel({ client }: { client: CloudDictionaryPanelC
     </main>
   );
 }
-
-type EmojiPage = "home" | "emoji" | "sticker" | "gif" | "kaomoji" | "symbols" | "clipboard";
 
 const emojiPages: { id: EmojiPage; label: string; icon: string }[] = [
   { id: "home", label: "最近使用", icon: "◷" },
@@ -3844,9 +1260,6 @@ const emojiPages: { id: EmojiPage; label: string; icon: string }[] = [
  */
 const panelDim = "text-[#b8b8c0] group-data-[panel-theme=light]:text-[#656a73]";
 const panelDivider = "border-white/[0.09] group-data-[panel-theme=light]:border-[#d9dce3]";
-/** A raised field: the search box, a clipboard row, the delete button beside one. */
-const panelField =
-  "border border-[#3a3a44] bg-[#2b2b33] text-[#f5f5f7] group-data-[panel-theme=light]:border-[#c8ccd5] group-data-[panel-theme=light]:bg-white group-data-[panel-theme=light]:text-[#202124]";
 /** What a hoverable control settles on: a lift in the background and full-strength text. */
 const panelRaise =
   "hover:bg-[#303038] hover:text-[#f5f5f7] group-data-[panel-theme=light]:hover:bg-[#eceef3] group-data-[panel-theme=light]:hover:text-[#202124]";
@@ -3872,22 +1285,6 @@ const panelChip = (chosen: boolean) =>
       : `border-transparent bg-transparent ${panelDim} ${panelRaise} focus-visible:bg-[#303038] focus-visible:text-[#f5f5f7] group-data-[panel-theme=light]:focus-visible:bg-[#eceef3] group-data-[panel-theme=light]:focus-visible:text-[#202124]`
   }`;
 const panelEmpty = `m-0 flex min-h-[220px] items-center justify-center text-center text-sm ${surface.panelMuted}`;
-/*
- * A tile. Grid tiles are uniform squares; flow tiles hold kaomoji and captioned symbols, so they size
- * to their content and wrap their text instead. The `:nth-child(n)` the stylesheet used on the group
- * was only there to win a specificity fight with the grid rule -- a fight utilities do not have.
- */
-const panelTile = (flow: boolean, compact = false) =>
-  `flex min-w-0 items-center justify-center overflow-hidden rounded-[9px] border border-transparent bg-transparent text-center font-emoji-text leading-[1.2] wrap-anywhere ${surface.panelText} hover:border-[#555560] hover:bg-[#303038] focus-visible:border-[#555560] focus-visible:bg-[#303038] group-data-[panel-theme=light]:hover:border-[#c8ccd5] group-data-[panel-theme=light]:hover:bg-[#eceef3] group-data-[panel-theme=light]:focus-visible:border-[#c8ccd5] group-data-[panel-theme=light]:focus-visible:bg-[#eceef3] disabled:cursor-wait disabled:opacity-55 ${
-    flow
-      ? "max-w-full flex-[0_1_auto] min-h-12 px-3 py-2.5 text-xl whitespace-pre-wrap"
-      : compact
-        ? "h-10 min-h-10 p-1 text-xl"
-        : "min-h-[66px] p-1.5 text-[29px]"
-  }`;
-const clipboardRow = `w-full flex-1 min-w-0 overflow-hidden rounded-lg px-3.5 py-3 text-left font-[inherit] text-ellipsis whitespace-nowrap ${panelField} hover:border-[#5fbf84] hover:bg-[#303038] focus-visible:border-[#5fbf84] focus-visible:bg-[#303038] group-data-[panel-theme=light]:hover:border-[#2c7a4b] group-data-[panel-theme=light]:hover:bg-[#eceef3] group-data-[panel-theme=light]:focus-visible:border-[#2c7a4b] group-data-[panel-theme=light]:focus-visible:bg-[#eceef3]`;
-const clipboardSideButton = `shrink-0 grow-0 basis-auto rounded-lg p-2 font-[inherit] ${panelField} hover:border-[#5fbf84] focus-visible:border-[#5fbf84] group-data-[panel-theme=light]:hover:border-[#2c7a4b] group-data-[panel-theme=light]:focus-visible:border-[#2c7a4b]`;
-
 export function EmojiPanel({
   client,
   theme = "dark",
@@ -3897,516 +1294,52 @@ export function EmojiPanel({
   theme?: "dark" | "light";
   initialPage?: "home" | "clipboard";
 }) {
-  const [page, setPage] = useState<EmojiPage>(initialPage);
-  const [itemPage, setItemPage] = useState(0);
-  const itemsPerPage = 48;
-  const [query, setQuery] = useState("");
-  const [categories, setCategories] = useState({ emoji: "all", symbols: "all" });
-  const [recent, setRecent] = useState<EmojiCatalogItem[]>(() => {
-    const value = readOptionalJson("msime.emoji.recent");
-    return Array.isArray(value)
-      ? (value
-          .filter(
-            (item) => item && typeof item.text === "string" && typeof item.keywords === "string",
-          )
-          .slice(0, 28) as EmojiCatalogItem[])
-      : [];
-  });
-  const [symbolRecent, setSymbolRecent] = useState<EmojiCatalogItem[]>(() => {
-    const value = readOptionalJson("msime.symbols.recent");
-    return Array.isArray(value)
-      ? value
-          .filter(
-            (item) => item && typeof item.text === "string" && typeof item.keywords === "string",
-          )
-          .slice(0, 28)
-      : [];
-  });
-  useEffect(() => {
-    writeOptionalJson("msime.symbols.recent", symbolRecent);
-  }, [symbolRecent]);
-  const [clipboard, setClipboard] = useState<string[]>([]);
   const {
-    busy: clipboardBusy,
-    busyRef: clipboardMutation,
-    revisionRef: operationRevision,
-    run: runOperation,
-    invalidate,
-  } = usePanelAction(setNotice);
-  const [clipboardLoadFailed, setClipboardLoadFailed] = useState(false);
-  const [clipboardRefresh, setClipboardRefresh] = useState(0);
-  const [activationMode, setActivationMode] = useState<PanelActivationMode>("copy");
-  const [clipboardEnabled, setClipboardEnabled] = useState<boolean | null>(null);
-  const clipboardGeneration = useAsyncGeneration();
-  const deletedRowFocus = useRef<{ element: HTMLElement; index: number; query: string } | null>(
-    null,
-  );
-  const [notice, setNoticeText] = useTimedValue("");
-  const [catalog, setCatalog] = useState({
-    emoji: fallbackEmojiGroups,
-    kaomoji: fallbackKaomojiGroups,
-    symbols: fallbackSymbolGroups,
-  });
-  const [catalogUnavailable, setCatalogUnavailable] = useState<("emoji" | "kaomoji" | "symbols")[]>(
-    [],
-  );
-  const [catalogLoading, setCatalogLoading] = useState(false);
-  const [catalogRetry, setCatalogRetry] = useState(0);
-  const catalogGeneration = useAsyncGeneration(client, catalogRetry);
-  const clipboardLifecycle = useAsyncGeneration(client, page, clipboardRefresh);
-
-  function setNotice(message: string, temporary = false) {
-    setNoticeText(message, temporary ? 1600 : undefined);
-  }
-
-  useEffect(() => {
-    clipboardMutation.current = false;
-    deletedRowFocus.current = null;
-    setNotice("");
-    return invalidate;
-  }, [client, invalidate]);
-
-  useEffect(() => {
-    writeOptionalJson("msime.emoji.recent", recent.slice(0, 28));
-  }, [recent]);
-
-  useEffect(() => {
-    if (!client.rememberInputTarget) return;
-    void client.rememberInputTarget().catch(() => setNotice("未能记录前台输入窗口"));
-  }, [client]);
-
-  useEffect(() => {
-    setCatalog({
-      emoji: fallbackEmojiGroups,
-      kaomoji: fallbackKaomojiGroups,
-      symbols: fallbackSymbolGroups,
-    });
-    setCatalogUnavailable([]);
-  }, [client]);
-
-  useEffect(() => {
-    if (!client.loadCatalog) {
-      setCatalogLoading(false);
-      return;
-    }
-    const generation = catalogGeneration.current;
-    setCatalogLoading(true);
-    void Promise.resolve()
-      .then(() => client.loadCatalog!())
-      .then((next) => {
-        if (generation !== catalogGeneration.current) return;
-        const unavailable = next.unavailable ?? [];
-        setCatalog((current) => ({
-          emoji: unavailable.includes("emoji") ? current.emoji : next.emoji,
-          kaomoji: unavailable.includes("kaomoji") ? current.kaomoji : next.kaomoji,
-          symbols: unavailable.includes("symbols") ? current.symbols : next.symbols,
-        }));
-        setCatalogUnavailable(unavailable);
-      })
-      .catch(() => {
-        if (generation === catalogGeneration.current)
-          setCatalogUnavailable(["emoji", "kaomoji", "symbols"]);
-      })
-      .finally(() => {
-        if (generation === catalogGeneration.current) setCatalogLoading(false);
-      });
-  }, [client, catalogRetry, catalogGeneration]);
-
-  useEffect(() => {
-    if (!client.clipboard?.list) {
-      setClipboardLoadFailed(false);
-      return;
-    }
-    const generation = clipboardLifecycle.current;
-    const isCurrent = () => generation === clipboardLifecycle.current;
-    let stopPoll: (() => void) | undefined;
-    let stopVisibility: (() => void) | undefined;
-    let inFlight = 0;
-    let refreshPending = false;
-    const refresh = () => {
-      if (!isCurrent()) return;
-      if (inFlight !== 0) {
-        refreshPending = true;
-        // A newer notification invalidates the current snapshot, but only
-        // one follow-up read is needed even when many notifications arrive.
-        ++clipboardGeneration.current;
-        return;
-      }
-      inFlight++;
-      const request = ++clipboardGeneration.current;
-      void Promise.resolve()
-        .then(() =>
-          Promise.all([
-            client.clipboard!.list!(),
-            client.clipboard?.isEnabled?.() ?? Promise.resolve(true),
-          ]),
-        )
-        .then(([value, enabled]) => {
-          if (isCurrent() && request === clipboardGeneration.current) {
-            setClipboard(enabled ? value : []);
-            setClipboardEnabled(enabled);
-            setClipboardLoadFailed(false);
-          }
-        })
-        .catch(() => {
-          if (isCurrent() && request === clipboardGeneration.current) {
-            setClipboard([]);
-            setClipboardEnabled(null);
-            setClipboardLoadFailed(true);
-          }
-        })
-        .finally(() => {
-          inFlight--;
-          if (isCurrent() && refreshPending) {
-            refreshPending = false;
-            refresh();
-          }
-        });
-    };
-    const pollVisible = () => {
-      if (
-        isCurrent() &&
-        document.visibilityState === "visible" &&
-        !clipboardMutation.current &&
-        inFlight === 0
-      )
-        refresh();
-    };
-    const start = async () => {
-      let stop: (() => void) | undefined;
-      try {
-        stop = await client.clipboard?.onChanged?.(refresh);
-      } catch {
-        /* 宿主通知注册失败时继续轮询。 */
-      }
-      if (!isCurrent()) return stop;
-      // Close the gap between the initial snapshot and subscription setup.
-      refresh();
-      if (stop && stopPoll !== undefined) {
-        stopPoll();
-        stopPoll = undefined;
-        stopVisibility?.();
-      }
-      return stop;
-    };
-    // Listing must not wait for a slow or stalled notification registration.
-    // Use Windows' 400 ms interval until the host subscription is ready.
-    refresh();
-    if (page === "clipboard") {
-      stopPoll = subscribeToInterval(pollVisible, 400);
-      stopVisibility = subscribeToDocumentVisibilityChange(pollVisible);
-    }
-    const disposeSubscription = trackAsyncSubscription(start(), isCurrent);
-    return () => {
-      refreshPending = false;
-      ++clipboardGeneration.current;
-      stopPoll?.();
-      stopVisibility?.();
-      disposeSubscription();
-    };
-  }, [client, page, clipboardLifecycle, clipboardRefresh]);
-
-  type DisplayGroup = EmojiCatalogGroup & { moreTarget?: EmojiPage; flow?: boolean };
-  const groups =
-    page === "emoji" ? catalog.emoji : page === "kaomoji" ? catalog.kaomoji : catalog.symbols;
-  const categoryPage = page === "emoji" || page === "symbols" ? page : null;
-  // 插件组的分类键带上包 id：同名的内置分类或别的包不会和它合并。
-  const categoryKey = (group: EmojiCatalogGroup) =>
-    group.pack !== undefined
-      ? JSON.stringify(["pack", group.pack])
-      : page === "symbols" && group.parent
-        ? `parent:${group.parent}`
-        : `group:${group.title}`;
-  const categoryTabs: { id: string; title: string; icon: string }[] = [];
-  for (const group of groups) {
-    const id = categoryKey(group);
-    if (!categoryTabs.some((tab) => tab.id === id)) {
-      categoryTabs.push({
-        id,
-        title: page === "symbols" ? group.parent || group.title : group.title,
-        icon: group.icon,
-      });
-    }
-  }
-  const selectedCategory = categoryPage ? categories[categoryPage] : "all";
-  const activeCategory =
-    selectedCategory === "recent" || categoryTabs.some((tab) => tab.id === selectedCategory)
-      ? selectedCategory
-      : "all";
-  const recentGroup: EmojiCatalogGroup = { title: "最近使用", icon: "◷", items: recent };
-  const selectedGroups =
-    categoryPage && (page === "emoji" || !query)
-      ? activeCategory === "recent"
-        ? [recentGroup]
-        : activeCategory === "all"
-          ? groups
-          : groups.filter((group) => categoryKey(group) === activeCategory)
-      : groups;
-  const filteredGroups: DisplayGroup[] = selectedGroups
-    .map((group) => ({
-      ...group,
-      flow: page === "kaomoji",
-      items: matchingGroupItems(
-        page === "symbols" && !group.pack
-          ? {
-              ...group,
-              keywords: [
-                group.keywords,
-                symbolCategoryTitle(group.title),
-                symbolCategoryTitle(group.parent ?? ""),
-              ].join(" "),
-            }
-          : group,
-        query,
-      ),
-    }))
-    .filter((group) => group.items.length);
-  const symbolPreview = query
-    ? catalog.symbols.flatMap((group) => matchingGroupItems(group, query)).slice(0, 18)
-    : catalog.symbols
-        .flatMap((group) => group.items.map((item, index) => ({ item, index })))
-        .sort((left, right) => left.index - right.index)
-        .slice(0, 18)
-        .map(({ item }) => item);
-  const homeGroups: DisplayGroup[] = [
-    { ...recentGroup, items: recent.filter((item) => matchesEmojiItem(item, query)) },
-    {
-      title: "Emoji",
-      icon: catalog.emoji[0]?.icon ?? "😀",
-      moreTarget: "emoji",
-      items: flattenGroups(catalog.emoji)
-        .filter((item) => matchesEmojiItem(item, query))
-        .slice(0, 18),
-    },
-    {
-      title: "Kaomoji",
-      icon: catalog.kaomoji[0]?.icon ?? "ヾ",
-      moreTarget: "kaomoji",
-      flow: true,
-      items: catalog.kaomoji.flatMap((group) => matchingGroupItems(group, query)).slice(0, 15),
-    },
-    {
-      title: "Symbols",
-      icon: catalog.symbols[0]?.icon ?? "★",
-      moreTarget: "symbols",
-      items: symbolPreview,
-    },
-  ];
-
-  function selectCategory(next: string) {
-    if (!categoryPage) return;
-    setCategories((current) => ({ ...current, [categoryPage]: next }));
-    setItemPage(0);
-  }
-
-  const visibleClipboard = clipboard.filter((item) =>
-    item.toLocaleLowerCase().includes(query.toLocaleLowerCase()),
-  );
-  const canCopy = Boolean(client.copyText ?? client.clipboard?.copy);
-  const effectiveMode = !client.sendText ? "copy" : !canCopy ? "input" : activationMode;
-
-  function copy(text: string, isClipboardItem = false, keywords = text) {
-    const input = !isClipboardItem && effectiveMode === "input";
-    const action = input
-      ? client.sendText
-      : isClipboardItem
-        ? (client.clipboard?.copy ?? client.copyText)
-        : (client.copyText ?? client.clipboard?.copy);
-    if (!action) {
-      setNotice("当前宿主未提供此操作");
-      return;
-    }
-    const revision = ++operationRevision.current;
-    void action(text)
-      .then(() => {
-        if (revision !== operationRevision.current) return;
-        setNotice(
-          input ? "已输入到原应用" : isClipboardItem ? "已复制到剪贴板" : `已复制：${text}`,
-          true,
-        );
-        if (page === "symbols")
-          setSymbolRecent((current) =>
-            [{ text, keywords }, ...current.filter((item) => item.text !== text)].slice(0, 28),
-          );
-        if (!isClipboardItem)
-          setRecent((current) =>
-            [{ text, keywords }, ...current.filter((item) => item.text !== text)].slice(0, 28),
-          );
-      })
-      .catch(() => {
-        if (revision === operationRevision.current)
-          setNotice(input ? "输入失败，可切换复制后手动粘贴" : "无法访问剪贴板");
-      });
-  }
-
-  function changeClipboard(
-    action: () => Promise<string[] | void>,
-    fallback: () => string[],
-    message: string,
-  ) {
-    return runOperation(async (revision) => {
-      ++clipboardGeneration.current;
-      const result = await action();
-      if (revision !== operationRevision.current) return;
-      const request = ++clipboardGeneration.current;
-      try {
-        const [next, enabled] = await Promise.all([
-          client.clipboard?.list ? client.clipboard.list() : Promise.resolve(result ?? fallback()),
-          client.clipboard?.isEnabled?.() ?? Promise.resolve(true),
-        ]);
-        if (revision !== operationRevision.current) return;
-        if (request === clipboardGeneration.current) {
-          setClipboard(enabled ? next : []);
-          setClipboardEnabled(enabled);
-          setClipboardLoadFailed(false);
-        }
-        setNotice(message, true);
-      } catch {
-        if (revision === operationRevision.current)
-          setNotice(`${message}，但列表刷新失败，请重新打开剪贴板页`);
-      }
-    }, "无法更新剪贴板历史");
-  }
-
-  function enableClipboard() {
-    if (client.clipboard?.enable)
-      return changeClipboard(client.clipboard.enable, () => [], "剪贴板历史已开启");
-  }
-
-  function syncClipboard() {
-    if (client.clipboard?.sync)
-      return changeClipboard(client.clipboard.sync, () => clipboard, "剪贴板已同步");
-  }
-
-  function pasteClipboard(text: string) {
-    const paste = client.clipboard?.paste;
-    if (!paste) return;
-    return runOperation(async (revision) => {
-      await paste(text);
-      if (revision === operationRevision.current) setNotice("已粘贴到原应用", true);
-    }, "无法粘贴，请使用复制后手动粘贴");
-  }
-
-  function removeClipboard(text: string) {
-    if (!client.clipboard?.remove || clipboardMutation.current) return;
-    const panel = navigation.ref.current;
-    const focused = panel?.ownerDocument.activeElement;
-    const rows = Array.from(panel?.querySelectorAll<HTMLElement>("[data-clipboard-row]") ?? []);
-    const index = rows.findIndex((row) => focused != null && row.contains(focused));
-    if (focused instanceof HTMLElement && index >= 0)
-      deletedRowFocus.current = { element: focused, index, query };
-    return changeClipboard(
-      () => client.clipboard!.remove!(text),
-      () => clipboard.filter((item) => item !== text),
-      "记录已删除",
-    );
-  }
-
-  function clipboardItemKey(event: import("react").KeyboardEvent<HTMLButtonElement>, text: string) {
-    if (
-      event.defaultPrevented ||
-      isComposingKeyEvent(event) ||
-      event.altKey ||
-      event.metaKey ||
-      event.shiftKey ||
-      clipboardMutation.current
-    )
-      return;
-    const copyKey = event.ctrlKey && event.key.toLowerCase() === "c" && canCopy;
-    const deleteKey = !event.ctrlKey && event.key === "Delete" && !!client.clipboard?.remove;
-    if (!copyKey && !deleteKey) return;
-    event.preventDefault();
-    if (event.repeat) return;
-    if (deleteKey) void removeClipboard(text);
-    else void copy(text, true);
-  }
-  function clearClipboard() {
-    if (client.clipboard?.clear)
-      return changeClipboard(client.clipboard.clear, () => [], "剪贴板历史已清空");
-  }
-
-  function selectPage(next: EmojiPage) {
-    if (next === "symbols") setActivationMode("input");
-    setPage(next);
-    setItemPage(0);
-    setQuery("");
-    setNotice(
-      next === "clipboard" || effectiveMode === "copy"
-        ? "点击项目即可复制"
-        : "点击项目即可输入到原应用",
-    );
-  }
-
-  const isDetail = page !== "home";
-  const sourceGroups =
-    page === "home" ? homeGroups.filter((group) => group.items.length) : filteredGroups;
-  const seenDisplayItems = new Set<string>();
-  const displayGroups = sourceGroups
-    .map((group) => ({
-      ...group,
-      items: group.items
-        .filter((item) => {
-          if (seenDisplayItems.has(item.text)) return false;
-          seenDisplayItems.add(item.text);
-          return true;
-        })
-        .slice(itemPage * itemsPerPage, (itemPage + 1) * itemsPerPage),
-    }))
-    .filter((group) => group.items.length);
-  const itemPageCount = Math.max(
-    1,
-    Math.max(
-      ...(page === "home" ? homeGroups : filteredGroups).map((group) =>
-        Math.ceil(group.items.length / itemsPerPage),
-      ),
-      1,
-    ),
-  );
-  function clearRecent() {
-    if (clipboardMutation.current) return;
-    setRecent([]);
-    setNotice("最近使用已清除", true);
-  }
-  function closeEmoji() {
-    return runOperation(async () => {
-      await client.close();
-    }, "无法关闭面板，请重试");
-  }
-  const navigation = useEmojiNavigation(
-    () => {
-      if (page !== "home") {
-        selectPage("home");
-        navigation.ref.current
-          ?.querySelector<HTMLInputElement>("input[data-panel-search]")
-          ?.focus();
-      } else {
-        void closeEmoji();
-      }
-    },
-    JSON.stringify([page, query, activeCategory]),
-  );
-  useLayoutEffect(() => {
-    const pending = deletedRowFocus.current;
-    if (!pending) return;
-    if (page !== "clipboard" || query !== pending.query) {
-      deletedRowFocus.current = null;
-      return;
-    }
-    if (clipboardBusy) return;
-    deletedRowFocus.current = null;
-    const panel = navigation.ref.current;
-    if (!panel || pending.element.isConnected) return;
-    const focused = panel.ownerDocument.activeElement;
-    if (focused && focused !== panel.ownerDocument.body && focused !== pending.element) return;
-    const items = Array.from(
-      panel.querySelectorAll<HTMLButtonElement>("[data-clipboard-item]:not(:disabled)"),
-    );
-    const target =
-      items[Math.min(pending.index, items.length - 1)] ??
-      panel.querySelector<HTMLInputElement>("input[data-panel-search]");
-    target?.focus({ preventScroll: true });
-    target?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [clipboard, clipboardBusy, page, query]);
+    page,
+    itemPage,
+    query,
+    recent,
+    symbolRecent,
+    clipboard,
+    clipboardBusy,
+    clipboardLoadFailed,
+    clipboardEnabled,
+    notice,
+    catalogUnavailable,
+    catalogLoading,
+    categoryPage,
+    categoryTabs,
+    activeCategory,
+    filteredGroups,
+    visibleClipboard,
+    canCopy,
+    effectiveMode,
+    isDetail,
+    displayGroups,
+    itemPageCount,
+    navigation,
+    selectPage,
+    selectCategory,
+    copy,
+    clipboardItemKey,
+    enableClipboard,
+    syncClipboard,
+    pasteClipboard,
+    removeClipboard,
+    clearClipboard,
+    clearRecent,
+    closeEmoji,
+    updateQuery,
+    retryCatalog,
+    selectActivation,
+    clearSymbolRecent,
+    selectSymbolCategory,
+    refreshClipboard,
+    showMore,
+    previousItemPage,
+    nextItemPage,
+  } = useEmojiPanel(client, initialPage);
+  const selectCatalogItem = (item: EmojiCatalogItem) => copy(item.text, false, item.keywords);
   return (
     <main
       {...navigation}
@@ -4432,11 +1365,7 @@ export function EmojiPanel({
           aria-label="搜索"
           aria-keyshortcuts="Control+f"
           value={query}
-          onChange={(event) => {
-            setQuery(event.target.value);
-            setItemPage(0);
-            setNotice("");
-          }}
+          onChange={(event) => updateQuery(event.target.value)}
           placeholder={
             page === "clipboard"
               ? "搜索剪贴板"
@@ -4511,10 +1440,7 @@ export function EmojiPanel({
               type="button"
               className={`${panelAction} ml-auto`}
               disabled={catalogLoading || clipboardBusy}
-              onClick={() => {
-                setCatalogLoading(true);
-                setCatalogRetry((value) => value + 1);
-              }}
+              onClick={retryCatalog}
             >
               {catalogLoading ? "正在加载…" : "重新加载"}
             </button>
@@ -4536,10 +1462,7 @@ export function EmojiPanel({
               disabled={clipboardBusy}
               inputAvailable
               inputLabel="输入到原应用"
-              onModeChange={(mode) => {
-                setActivationMode(mode);
-                setNotice(mode === "copy" ? "点击项目即可复制" : "点击项目即可输入到原应用");
-              }}
+              onModeChange={selectActivation}
               buttonClassName={(selected) =>
                 `rounded-md border px-[9px] py-[5px] font-[inherit] disabled:cursor-wait disabled:opacity-55 ${
                   selected
@@ -4598,7 +1521,7 @@ export function EmojiPanel({
                 <button
                   type="button"
                   className={`${panelAction} ml-auto`}
-                  onClick={() => setSymbolRecent([])}
+                  onClick={clearSymbolRecent}
                 >
                   清除符号记录
                 </button>
@@ -4607,15 +1530,13 @@ export function EmojiPanel({
             <div className="mt-1 flex gap-1 overflow-x-auto">
               {symbolRecent.length ? (
                 symbolRecent.map((item) => (
-                  <button
-                    type="button"
+                  <EmojiItemButton
                     key={item.text}
-                    className={`${panelTile(false, true)} shrink-0 min-w-10`}
-                    title={emojiDisplayName(item.keywords, item.text)}
-                    onClick={() => copy(item.text, false, item.keywords)}
-                  >
-                    {item.text}
-                  </button>
+                    item={item}
+                    compact
+                    className="shrink-0 min-w-10"
+                    onSelect={selectCatalogItem}
+                  />
                 ))
               ) : (
                 <p className={`my-1 text-xs ${panelDim}`}>使用过的符号会显示在这里</p>
@@ -4633,10 +1554,7 @@ export function EmojiPanel({
                   key={tab.id}
                   className={`${panelChip(activeCategory === tab.id)} mb-1 w-full text-left`}
                   aria-pressed={activeCategory === tab.id}
-                  onClick={() => {
-                    setQuery("");
-                    selectCategory(tab.id);
-                  }}
+                  onClick={() => selectSymbolCategory(tab.id)}
                 >
                   {tab.id.startsWith("pack") ? tab.title : symbolCategoryTitle(tab.title)}
                 </button>
@@ -4653,16 +1571,13 @@ export function EmojiPanel({
                   </h2>
                   <div className="grid grid-cols-[repeat(auto-fill,minmax(36px,1fr))] gap-1">
                     {group.items.map((item, index) => (
-                      <button
-                        type="button"
+                      <EmojiItemButton
                         key={`${index}-${item.text}`}
-                        className={panelTile(false, true)}
-                        data-emoji-navigation-item
-                        title={emojiDisplayName(item.keywords, item.text)}
-                        onClick={() => copy(item.text, false, item.keywords)}
-                      >
-                        {item.text}
-                      </button>
+                        item={item}
+                        compact
+                        navigable
+                        onSelect={selectCatalogItem}
+                      />
                     ))}
                   </div>
                 </div>
@@ -4685,9 +1600,7 @@ export function EmojiPanel({
                   type="button"
                   className={panelAction}
                   disabled={clipboardBusy}
-                  onClick={() => {
-                    if (!clipboardMutation.current) setClipboardRefresh((value) => value + 1);
-                  }}
+                  onClick={refreshClipboard}
                 >
                   刷新列表
                 </button>
@@ -4734,51 +1647,15 @@ export function EmojiPanel({
               )}
             </div>
           ) : visibleClipboard.length ? (
-            <div className="flex flex-col gap-[7px]">
-              {visibleClipboard.map((item) => (
-                <div className="flex items-stretch gap-1.5" data-clipboard-row="" key={item}>
-                  <button
-                    type="button"
-                    className={clipboardRow}
-                    data-clipboard-item=""
-                    data-emoji-navigation-item
-                    aria-keyshortcuts={
-                      [canCopy ? "Control+c" : "", client.clipboard?.remove ? "Delete" : ""]
-                        .filter(Boolean)
-                        .join(" ") || undefined
-                    }
-                    onKeyDown={(event) => clipboardItemKey(event, item)}
-                    disabled={clipboardBusy}
-                    title={clipboardTooltip(item)}
-                    onClick={() => void copy(item, true)}
-                  >
-                    {item.replace(/[\r\n\t]/g, " ")}
-                  </button>
-                  {client.clipboard?.paste && (
-                    <button
-                      type="button"
-                      className={clipboardSideButton}
-                      disabled={clipboardBusy}
-                      aria-label="粘贴此条记录到原应用"
-                      onClick={() => void pasteClipboard(item)}
-                    >
-                      粘贴
-                    </button>
-                  )}
-                  {client.clipboard?.remove && (
-                    <button
-                      type="button"
-                      className={clipboardSideButton}
-                      disabled={clipboardBusy}
-                      aria-label="删除此条记录"
-                      onClick={() => void removeClipboard(item)}
-                    >
-                      删除
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
+            <EmojiClipboardEntries
+              items={visibleClipboard}
+              busy={clipboardBusy}
+              canCopy={canCopy}
+              onCopy={(text) => void copy(text, true)}
+              onItemKeyDown={clipboardItemKey}
+              onPaste={client.clipboard?.paste ? pasteClipboard : undefined}
+              onRemove={client.clipboard?.remove ? removeClipboard : undefined}
+            />
           ) : (
             <p className={panelEmpty} role="status">
               {query ? "没有匹配的剪贴板记录" : "暂无剪贴板记录"}
@@ -4828,10 +1705,7 @@ export function EmojiPanel({
                   <button
                     type="button"
                     className={`${panelAction} ml-auto`}
-                    onClick={() => {
-                      setCategories((current) => ({ ...current, emoji: "all", symbols: "all" }));
-                      selectPage(group.moreTarget!);
-                    }}
+                    onClick={() => showMore(group.moreTarget!)}
                   >
                     更多
                   </button>
@@ -4845,17 +1719,14 @@ export function EmojiPanel({
                 }
               >
                 {group.items.map((item, index) => (
-                  <button
-                    type="button"
-                    className={panelTile(group.flow === true)}
-                    data-emoji-navigation-item
+                  <EmojiItemButton
+                    item={item}
+                    flow={group.flow === true}
+                    navigable
                     disabled={clipboardBusy}
                     key={`${index}-${item.text}`}
-                    title={emojiDisplayName(item.keywords, item.text)}
-                    onClick={() => void copy(item.text, false, item.keywords)}
-                  >
-                    {item.text}
-                  </button>
+                    onSelect={selectCatalogItem}
+                  />
                 ))}
               </div>
             </div>
@@ -4880,7 +1751,7 @@ export function EmojiPanel({
                 type="button"
                 className={panelAction}
                 disabled={itemPage === 0}
-                onClick={() => setItemPage((value) => Math.max(0, value - 1))}
+                onClick={previousItemPage}
               >
                 上一页
               </button>
@@ -4891,7 +1762,7 @@ export function EmojiPanel({
                 type="button"
                 disabled={itemPage + 1 >= itemPageCount}
                 className={panelAction}
-                onClick={() => setItemPage((value) => Math.min(itemPageCount - 1, value + 1))}
+                onClick={nextItemPage}
               >
                 下一页
               </button>

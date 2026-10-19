@@ -2938,13 +2938,13 @@ static void TestGlossSenseTraditionalOutput(MSIMEAppearancePreferences *appearan
 @end
 
 static MSIMECandidateButton *ExpandedGridSubview(NSPanel *panel, NSInteger tag) {
-    for (NSView *view in panel.contentView.subviews)
+    for (NSView *view in MSIMECandidateControlsView(panel.contentView).subviews)
         if ([view isKindOfClass:MSIMECandidateButton.class] && view.tag == tag) return (MSIMECandidateButton *)view;
     return nil;
 }
 
 static NSUInteger ExpandedGridHighlightedTag(NSPanel *panel) {
-    for (NSView *view in panel.contentView.subviews)
+    for (NSView *view in MSIMECandidateControlsView(panel.contentView).subviews)
         if ([view isKindOfClass:MSIMECandidateButton.class] && view.tag >= 0 && ((MSIMECandidateButton *)view).candidateHighlighted)
             return (NSUInteger)view.tag;
     return NSNotFound;
@@ -5899,7 +5899,7 @@ static void TestRealSessionComposition() {
     NSString *hanReading = currentView()[@"candidates"][0][@"annotation"];
     assert([hanReading isKindOfClass:NSString.class] && hanReading.length);
     MSIMECandidateButton *hanRow = nil;
-    for (NSView *view in panel.contentView.subviews)
+    for (NSView *view in MSIMECandidateControlsView(panel.contentView).subviews)
         if ([view isKindOfClass:MSIMECandidateButton.class] && view.tag == 0) hanRow = (MSIMECandidateButton *)view;
     assert(hanRow && [hanRow.title isEqual:@"1  韓"] && hanRow.annotation.length == 0 && hanRow.itemLayout.annotation.width == 0);
     assert([hanRow.glossReading isEqual:hanReading] && hanRow.translation.length == 0 && hanRow.itemLayout.translation.width > 0);
@@ -6693,6 +6693,61 @@ static void TestControlOptionSpace() {
     MSIMERestoreVoiceHoldKeys(standardDefaults, previousHoldKeys);
 }
 
+// 从控制器的偏好与修饰键事件入口验证 HUD，不能只检查孤立面板里有玻璃。
+static void TestGlassInputModeHUD(BOOL visual) {
+    NSString *suite = [@"msime.glass-hud." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *appearance = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    ModeController *controller = [ModeController alloc];
+    ShortcutClient *client = [ShortcutClient new];
+    client.caret = NSMakeRect(700, 500, 2, 24);
+    MSIMEFloatingToolbarPanel *toolbar = [MSIMEFloatingToolbarPanel new];
+    [toolbar setFrameAutosaveName:@""];
+    [controller setValue:appearance forKey:@"appearance"];
+    [controller setValue:client forKey:@"activeClient"];
+    [controller setValue:toolbar forKey:@"toolbar"];
+    [controller applySharedToolbarPreferences:@{@"global_theme":@"system", @"input_mode_hud":@YES, @"theme":@"system"}];
+    MSIMEInputModeHUDPanel *hud = MSIMEInputModeHUDPanel.sharedPanel;
+    assert(toolbar.liquidGlassEnabled && hud.liquidGlassEnabled);
+    [appearance applySharedInputPreferences:@{@"keybindings":@{@"switch_language_shift":@YES}}];
+    appearance.englishMode = NO;
+    for (NSNumber *english in @[@YES, @NO]) {
+        const unsigned short key = english.boolValue ? 56 : 60;
+        const double pressedAt = english.boolValue ? 1.0 : 2.0;
+        assert(![controller handleEvent:TapEvent(NSEventTypeFlagsChanged, key, NSEventModifierFlagShift, pressedAt) client:client]);
+        assert([controller handleEvent:TapEvent(NSEventTypeFlagsChanged, key, 0, pressedAt + 0.1) client:client]);
+        assert(appearance.englishMode == english.boolValue);
+        assert(hud.visible && [hud.displayedText isEqual:english.boolValue ? @"英" : @"中"]);
+        NSTextField *label = [hud valueForKey:@"label"];
+        if (@available(macOS 26.0, *)) {
+            if (!NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceTransparency) {
+                NSGlassEffectView *glass = [hud valueForKey:@"glassBackground"];
+                assert(glass && [label isDescendantOf:glass.contentView]);
+            }
+        }
+        if (visual) {
+            printf("HUD visual window=%ld mode=%s\n", (long)hud.windowNumber, english.boolValue ? "english" : "chinese");
+            fflush(stdout);
+            NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:3];
+            while (deadline.timeIntervalSinceNow > 0) {
+                [hud showEnglishInputMode:english.boolValue nearCaretRect:client.caret];
+                [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+            }
+        }
+    }
+    [controller applySharedToolbarPreferences:@{@"input_mode_hud":@NO}];
+    [hud orderOut:nil];
+    assert(![controller handleEvent:TapEvent(NSEventTypeFlagsChanged, 56, NSEventModifierFlagShift, 3.0) client:client]);
+    assert([controller handleEvent:TapEvent(NSEventTypeFlagsChanged, 56, 0, 3.1) client:client]);
+    assert(appearance.englishMode && !hud.visible);
+    [controller applySharedToolbarPreferences:@{@"global_theme":@"paper"}];
+    assert(!toolbar.liquidGlassEnabled && !hud.liquidGlassEnabled);
+    assert([hud valueForKey:@"glassBackground"] == nil);
+    [hud orderOut:nil];
+    [controller setValue:nil forKey:@"activeClient"];
+    MSIMERemoveTestPreferenceSuite(defaults, suite);
+}
+
 static void TestInputMode(NSUserDefaults *defaults, MSIMEAppearancePreferences *appearance) {
     assert(!appearance.englishMode && appearance.inputModeShortcut);
     [appearance applySharedInputPreferences:@{@"keybindings":@{@"switch_language_shift":@NO}}];
@@ -6913,14 +6968,14 @@ static void TestInputMode(NSUserDefaults *defaults, MSIMEAppearancePreferences *
 
 // The rendered order is not the candidate order: a pinned candidate is drawn first whatever its index.
 static MSIMECandidateButton *CandidateButtonWithID(NSView *container, NSDictionary *identifier) {
-    for (NSView *child in container.subviews)
+    for (NSView *child in MSIMECandidateControlsView(container).subviews)
         if ([child isKindOfClass:MSIMECandidateButton.class] &&
             [((MSIMECandidateButton *)child).candidateID isEqual:identifier])
             return (MSIMECandidateButton *)child;
     return nil;
 }
 static MSIMECandidateButton *PageButton(NSView *content, NSInteger tag) {
-    for (NSView *view in content.subviews) {
+    for (NSView *view in MSIMECandidateControlsView(content).subviews) {
         if ([view isKindOfClass:MSIMECandidateButton.class] && view.tag == tag) return (id)view;
     }
     return nil;
@@ -7134,7 +7189,7 @@ background = "#F4F8FF"
         const CGFloat overhang = NSHeight(chrome.bounds) - 48 - NSMinY(decoration.frame);
         assert(overhang > 0 && NSMinX(decoration.frame) == overhang && decoration.frame.size.width == decoration.frame.size.height);
         // The translation colour is the package's on every row in the mode that declares one, except the highlighted row, which takes the one derived for the selected fill (SkinTokens::selectedTranslation); elsewhere the rows keep the number colour.
-        for (NSView *view in chrome.subviews) {
+        for (NSView *view in chrome.candidateContentView.subviews) {
             if (![view isKindOfClass:MSIMECandidateButton.class] || view.tag < 0) continue;
             MSIMECandidateButton *button = (id)view;
             if (dark)
@@ -7300,10 +7355,19 @@ static void TestSkinSlotsPerMode(MSIMEInputController *controller, HiddenCandida
 @end
 @interface CloudShortcutController : ModeController
 @property(nonatomic, strong) NSMutableArray<ControlledCloudRequest *> *requests;
+@property(nonatomic, copy) NSString *expectedCloudMethod;
 @end
 @implementation CloudShortcutController
 - (MSIMECloudCandidateRequest *)cloudRequestForURL:(NSURL *)url completion:(void (^)(NSData *))completion {
     assert([url.host isEqual:@"inputtools.google.com"]);
+    ControlledCloudRequest *request = [ControlledCloudRequest new];
+    request.reply = completion;
+    [self.requests addObject:request];
+    return request;
+}
+- (MSIMECloudCandidateRequest *)cloudRequestForDescriptor:(NSDictionary *)descriptor completion:(void (^)(NSData *))completion {
+    assert(([@[@"GET", @"POST"] containsObject:descriptor[@"method"]]));
+    if (self.expectedCloudMethod) assert([descriptor[@"method"] isEqual:self.expectedCloudMethod]);
     ControlledCloudRequest *request = [ControlledCloudRequest new];
     request.reply = completion;
     [self.requests addObject:request];
@@ -7314,9 +7378,13 @@ static void TestSkinSlotsPerMode(MSIMEInputController *controller, HiddenCandida
 
 static void TestCloudCandidateScheduling() {
     CloudShortcutController *controller = [CloudShortcutController alloc];
+    controller.expectedCloudMethod = @"POST";
     controller.requests = [NSMutableArray array];
     CloudShortcutSession *session = [CloudShortcutSession new];
     session.query = @{@"scheme":@0, @"generation":@1, @"identity":@"synthetic", @"query_text":@"nihao", @"cache_key":@"nihao", @"pinyin_segments":@[@"ni", @"hao"], @"cloud_eligible":@YES, @"ai_eligible":@NO, @"cloud_candidates":@YES, @"session_id":@1};
+    NSMutableDictionary *customQuery = [session.query mutableCopy];
+    customQuery[@"cloud_request"] = @{ @"url": @"https://cloud.example.invalid/api", @"method": @"POST" };
+    session.query = customQuery;
     ShortcutClient *client = [ShortcutClient new], *other = [ShortcutClient new];
     [controller setValue:session forKey:@"session"];
     [controller setValue:client forKey:@"activeClient"];
@@ -7502,7 +7570,7 @@ static void TestAiCandidateEngineDelivery() {
     assert(![session applyOnlineCandidates:@[oversized] source:1 query:query error:&error] && error);
     error = nil;
     NSMutableDictionary *largeQuery = [query mutableCopy];
-    largeQuery[@"synthetic"] = [@"x" stringByPaddingToLength:16385 withString:@"x" startingAtIndex:0];
+    largeQuery[@"synthetic"] = [@"x" stringByPaddingToLength:MSIME_ONLINE_QUERY_MAX_BYTES + 1 withString:@"x" startingAtIndex:0];
     assert(![session applyOnlineCandidates:@[@"合成"] source:1 query:largeQuery error:&error] && error);
     error = nil;
     applied = [session applyOnlineCandidates:@[] source:1 query:query error:&error];
@@ -10154,6 +10222,10 @@ int main(int argc, char **argv) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         // Each case drains its own pool. No run loop turns between cases, so under one outer pool every autoreleased preferences window lived to the end of main: about a hundred piled up, every later window paid for all of their notification observers and weak references, and the run grew quadratically until the sanitizer leg crossed its 240 s ceiling.
+        if (argc == 2 && std::string(argv[1]) == "--glass-visual") {
+            TestGlassInputModeHUD(YES);
+            return 0;
+        }
         if (argc == 2 && std::string(argv[1]) == "--key-focus-preferences") {
             TestKeyFocusRestoresPreferenceMonitoring();
             return 0;
@@ -10444,7 +10516,7 @@ int main(int argc, char **argv) {
         [controller setValue:@{@"candidates": @[@{@"text": @"合成候选布局测试文本", @"highlighted": @YES}]} forKey:@"view"];
         [controller renderCandidates];
         assert(layoutPanel.frame.size.width > shortWidth);
-        NSButton *rendered = (NSButton *)layoutPanel.contentView.subviews.firstObject;
+        NSButton *rendered = (NSButton *)MSIMECandidateControlsView(layoutPanel.contentView).subviews.firstObject;
         assert(rendered.font.pointSize == 18);
         assert(fabs(((MSIMECandidateButton *)rendered).numberFont.pointSize - 14.4) < 0.01);
         assert([rendered.toolTip isEqualToString:@"合成候选布局测试文本"]);
@@ -10489,15 +10561,17 @@ int main(int argc, char **argv) {
         next = (id)PageButton(layoutPanel.contentView, -2);
         // The arrows and 「1 / 3」 share the card's top row, right-aligned above the candidates.
         NSTextField *pageIndicator = nil;
-        for (NSView *child in layoutPanel.contentView.subviews)
+        for (NSView *child in MSIMECandidateControlsView(layoutPanel.contentView).subviews)
             if ([child.identifier isEqual:@"candidate-page-indicator"]) pageIndicator = (id)child;
         assert(pageIndicator && [pageIndicator.stringValue isEqual:@"1 / 3"]);
         assert([pageIndicator.accessibilityLabel isEqual:@"第 1 页，共 3 页"]);
         MSIMECandidateButton *pagedCandidate = PageButton(layoutPanel.contentView, 0);
         assert(NSMinY(previous.frame) >= NSMaxY(pagedCandidate.frame) && NSMinY(next.frame) == NSMinY(previous.frame));
         assert(NSMaxX(next.frame) <= layoutPanel.contentView.bounds.size.width && NSMaxX(pageIndicator.frame) <= NSMinX(previous.frame));
-        // 「1 / 3」 and ‹ › are the design's 13pt secondary run (dc.html L1324).
-        const auto pageTokens = [appearance resolvedSkinForDark:[[layoutPanel.contentView.effectiveAppearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]] isEqual:NSAppearanceNameDarkAqua]].tokens;
+        // 页码与箭头共用 13pt 次要色，玻璃模式使用同一份高对比覆盖。
+        auto pageTokens = [appearance resolvedSkinForDark:[[layoutPanel.contentView.effectiveAppearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]] isEqual:NSAppearanceNameDarkAqua]].tokens;
+        if (((MSIMECandidateChromeView *)layoutPanel.contentView).liquidGlassActive)
+            msime::mac::ApplyNativeGlassCandidateContrast(pageTokens, [[layoutPanel.contentView.effectiveAppearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]] isEqual:NSAppearanceNameDarkAqua]);
         assert(next.titleColor && [next.titleColor isEqual:SkinColor(pageTokens.number)]);
         assert([pageIndicator.textColor isEqual:SkinColor(pageTokens.number)] && pageIndicator.font.pointSize == 13);
         {
@@ -10517,7 +10591,7 @@ int main(int argc, char **argv) {
             appearance.showsCandidatePageNumber = NO;
             [controller renderCandidates];
             assert(!PageButton(layoutPanel.contentView, -1) && !PageButton(layoutPanel.contentView, -2));
-            for (NSView *child in layoutPanel.contentView.subviews) assert(![child.identifier isEqual:@"candidate-page-indicator"]);
+            for (NSView *child in MSIMECandidateControlsView(layoutPanel.contentView).subviews) assert(![child.identifier isEqual:@"candidate-page-indicator"]);
             assert(layoutPanel.frame.size.height == singlePageHeight);
             assert(!layoutPanel.hasPreviousPage && layoutPanel.hasNextPage);
             appearance.showsCandidatePageNumber = YES;
@@ -10666,7 +10740,7 @@ int main(int argc, char **argv) {
             appearance.vertical = vertical.boolValue;
             [controller setValue:fallbackView forKey:@"view"];
             [controller renderCandidates];
-            for (NSView *child in layoutPanel.contentView.subviews) {
+            for (NSView *child in MSIMECandidateControlsView(layoutPanel.contentView).subviews) {
                 if ([child.identifier isEqual:@"candidate-preedit"]) assert(child.frame.size.height >= fallbackHeight + 6);
                 if ([child isKindOfClass:MSIMECandidateButton.class]) assert(child.frame.size.height >= fallbackHeight + 12);
             }
@@ -10682,7 +10756,7 @@ int main(int argc, char **argv) {
             appearance.preeditFontSize = 32;
             [controller renderCandidates];
             NSTextField *preeditLabel = nil;
-            for (NSView *child in layoutPanel.contentView.subviews)
+            for (NSView *child in MSIMECandidateControlsView(layoutPanel.contentView).subviews)
                 if ([child.identifier isEqual:@"candidate-preedit"]) preeditLabel = (id)child;
             assert(preeditLabel && [preeditLabel.stringValue isEqual:@"ce'shi"] && preeditLabel.font.pointSize == 32);
             assert([preeditLabel isKindOfClass:MSIMECandidatePreeditField.class]);
@@ -10727,7 +10801,7 @@ int main(int argc, char **argv) {
                 MSIMECandidateButton *selectedButton = PageButton(chrome, 0);
                 MSIMECandidateButton *customButton = PageButton(chrome, 1);
                 preeditLabel = nil;
-                for (NSView *child in chrome.subviews)
+                for (NSView *child in chrome.candidateContentView.subviews)
                     if ([child.identifier isEqual:@"candidate-preedit"]) preeditLabel = (id)child;
                 assert(preeditLabel && [preeditLabel isKindOfClass:MSIMECandidatePreeditField.class]);
                 caretLabel = (id)preeditLabel;
@@ -10745,13 +10819,13 @@ int main(int argc, char **argv) {
                 [controller setValue:pageView forKey:@"view"];
                 [controller renderCandidates];
                 preeditLabel = nil;
-                for (NSView *child in layoutPanel.contentView.subviews)
+                for (NSView *child in MSIMECandidateControlsView(layoutPanel.contentView).subviews)
                     if ([child.identifier isEqual:@"candidate-preedit"]) preeditLabel = (id)child;
                 assert(preeditLabel && [preeditLabel isKindOfClass:MSIMECandidatePreeditField.class]);
                 caretLabel = (id)preeditLabel;
             }
             assert(NSContainsRect(layoutPanel.contentView.bounds, preeditLabel.frame));
-            for (NSView *child in layoutPanel.contentView.subviews)
+            for (NSView *child in MSIMECandidateControlsView(layoutPanel.contentView).subviews)
                 if ([child isKindOfClass:MSIMECandidateButton.class]) {
                     assert(!NSIntersectsRect(child.frame, preeditLabel.frame));
                     assert([((NSButton *)child).font.familyName isEqual:installedFamily]);
@@ -10760,7 +10834,7 @@ int main(int argc, char **argv) {
             appearance.showsCandidatePreedit = NO;
             [controller renderCandidates];
             assert(layoutPanel.frame.size.height < shownHeight);
-            for (NSView *child in layoutPanel.contentView.subviews) assert(![child.identifier isEqual:@"candidate-preedit"]);
+            for (NSView *child in MSIMECandidateControlsView(layoutPanel.contentView).subviews) assert(![child.identifier isEqual:@"candidate-preedit"]);
         }
         appearance.showsCandidatePreedit = YES;
         appearance.preeditFontSize = 16;
@@ -10801,7 +10875,7 @@ int main(int argc, char **argv) {
             [controller setValue:pageView forKey:@"view"];
             [controller renderCandidates];
             NSTextField *label = nil;
-            for (NSView *child in layoutPanel.contentView.subviews)
+            for (NSView *child in MSIMECandidateControlsView(layoutPanel.contentView).subviews)
                 if ([child.identifier isEqual:@"candidate-preedit"]) label = (id)child;
             if (display == NSNull.null) assert([label.stringValue isEqual:@"ceshi"]);
             else assert(label == nil);
@@ -11034,7 +11108,7 @@ int main(int argc, char **argv) {
             const NSUInteger listKeys = session.keys.count;
             // B 已经是控制器的视图、窗上还是 A（AppKit 先递来点击、后重画）：按钮还挂在窗上，靠的是它记着的旧一代身份。
             [controller setValue:[listB copy] forKey:@"view"];
-            assert(listAButton.superview == layoutPanel.contentView);
+            assert(listAButton.superview == MSIMECandidateControlsView(layoutPanel.contentView));
             [controller selectCandidate:listAButton];
             assert(session.selectCalls == listSelectCalls && session.keys.count == listKeys);
             // B 画出来之后：A 的按钮整个被换掉，点它同样什么也不选。
@@ -11076,8 +11150,8 @@ int main(int argc, char **argv) {
         [controller appearanceChanged:nil];
         assert(session.lastCommand == UINT32_MAX);
         assert(layoutPanel.frame.size.height < verticalHeight);
-        NSView *first = layoutPanel.contentView.subviews[0];
-        NSView *second = layoutPanel.contentView.subviews[1];
+        NSView *first = MSIMECandidateControlsView(layoutPanel.contentView).subviews[0];
+        NSView *second = MSIMECandidateControlsView(layoutPanel.contentView).subviews[1];
         assert(first.frame.origin.y == second.frame.origin.y);
         assert(NSMaxX(first.frame) == NSMinX(second.frame));
         CGFloat normalHeight = layoutPanel.frame.size.height;
@@ -11087,7 +11161,7 @@ int main(int argc, char **argv) {
         // 整体大小 multiplies the candidate fonts and the window's lengths together; 不透明度 fades the card and nothing on it, through the fill rather than the panel's alphaValue; 圆角大小 replaces the card radius at the window's scale and pulls the rows in with it.
         {
             MSIMECandidateButton *(^candidateRow)(BOOL) = ^MSIMECandidateButton *(BOOL highlighted) {
-                for (NSView *view in layoutPanel.contentView.subviews)
+                for (NSView *view in MSIMECandidateControlsView(layoutPanel.contentView).subviews)
                     if ([view isKindOfClass:MSIMECandidateButton.class] && view.tag >= 0 &&
                         (!highlighted || ((MSIMECandidateButton *)view).candidateHighlighted)) return (id)view;
                 return nil;
@@ -11160,7 +11234,8 @@ int main(int argc, char **argv) {
                     // Exercise the same callback AppKit uses for a system appearance change.
                     [chrome viewDidChangeEffectiveAppearance];
                     const BOOL dark = [theme isEqual:NSAppearanceNameDarkAqua];
-                    const auto tokens = [appearance resolvedSkinForDark:dark].tokens;
+                    auto tokens = [appearance resolvedSkinForDark:dark].tokens;
+                    if (chrome.liquidGlassActive) msime::mac::ApplyNativeGlassCandidateContrast(tokens, dark);
                     assert([chrome.fillColor isEqual:SkinColor(tokens.surface)]);
                     assert([chrome.strokeColor isEqual:SkinColor(tokens.border)]);
                     assert(chrome.cornerRadius == tokens.radius && chrome.lineWidth == tokens.borderWidth);
@@ -11181,7 +11256,7 @@ int main(int argc, char **argv) {
                     assert([unselected.translationColor isEqual:SkinColor(tokens.number)]);
                     if ([skinID isEqual:@"shuishan"] || [skinID isEqual:@"system"]) {
                         NSColor *gloss = [unselected.translationColor colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
-                        const unsigned expected = [skinID isEqual:@"shuishan"] ? 0x9FB5A3 : dark ? 0x98989D : 0x6E6E73;
+                        const unsigned expected = [skinID isEqual:@"shuishan"] ? 0x9FB5A3 : chrome.liquidGlassActive ? (dark ? 0xD1D1D6 : 0x202024) : (dark ? 0x98989D : 0x6E6E73);
                         assert(fabs(gloss.redComponent - ((expected >> 16) & 0xFF) / 255.0) < 0.002);
                         assert(fabs(gloss.greenComponent - ((expected >> 8) & 0xFF) / 255.0) < 0.002);
                         assert(fabs(gloss.blueComponent - (expected & 0xFF) / 255.0) < 0.002);
@@ -11197,7 +11272,7 @@ int main(int argc, char **argv) {
                     assert([unselected.translationColor isEqual:SkinColor(picked.number)]);
                     assert([selected.titleColor isEqual:SkinColor(picked.selectedText)]);
                     assert([chrome.fillColor isEqual:SkinColor(tokens.surface)]);
-                    for (NSView *child in chrome.subviews)
+                    for (NSView *child in chrome.candidateContentView.subviews)
                         if ([child.identifier isEqual:@"candidate-preedit"]) {
                             assert([((NSTextField *)child).textColor isEqual:SkinColor(picked.accent)]);
                             assert([((MSIMECandidatePreeditField *)child).caretColor isEqual:SkinColor(tokens.accent)]);
@@ -11842,6 +11917,7 @@ int main(int argc, char **argv) {
         assert([controller.menu itemAtIndex:4].state == NSControlStateValueOff);
         [controller apply:@{@"commit": @"汉语", @"commit_context": @{@"scheme": @0, @"local_mode": @"none", @"script_conversion": @YES}, @"view": @{@"editing_text": @"", @"candidates": @[]}}];
         assert([client.committed isEqual:@"汉语"]);
+        @autoreleasepool { TestGlassInputModeHUD(NO); }
         @autoreleasepool { TestInputMode(defaults, appearance); }
         @autoreleasepool { TestControlOptionSpace(); }
         @autoreleasepool { TestInputModePolicy(); }

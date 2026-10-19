@@ -797,6 +797,8 @@ fn custom_package_is_used_only_for_declared_modes_and_its_own_id() {
 fn package_colours_normalize_to_hex() {
     for (input, expected) in [
         ("#abc", Some("#AABBCC")),
+        ("#e8a4", Some("#EE88AA44")),
+        ("#abcd", Some("#AABBCCDD")),
         ("#a1b2c3", Some("#A1B2C3")),
         ("#a1b2c3d4", Some("#A1B2C3D4")),
         ("transparent", Some("#00000000")),
@@ -805,6 +807,7 @@ fn package_colours_normalize_to_hex() {
         ("rgba(0,0,0,1.5)", None),
         ("rgb(256,0,0)", None),
         ("#12345", None),
+        ("#1234567", None),
         ("#ggg", None),
         ("red", None),
         ("", None),
@@ -826,7 +829,20 @@ fn summary_packages_keep_only_declared_modes() {
         layouts: vec!["vertical".into()],
         themes: vec!["dark".into()],
         min_width_dip: 0.0,
+        canvas: false,
         corner_radius_dip: None,
+        border_width_dip: None,
+        item_corner_radius_dip: None,
+        shadow: None,
+        backdrop: None,
+        font_family: None,
+        page_arrows: None,
+        fit_content: None,
+        expand_panel: None,
+        expand_rows: None,
+        geometry: Default::default(),
+        horizontal: Default::default(),
+        vertical: Default::default(),
         decoration_top_dip: 0.0,
         decoration_width_dip: 0.0,
         decoration_image: None,
@@ -836,11 +852,19 @@ fn summary_packages_keep_only_declared_modes() {
         decoration_frames: 0,
         background: None,
         toolbar: Default::default(),
+        toolbar_icon_corner_radius_dip: None,
+        border_image: None,
+        content_insets_dip: None,
+        line_gap_dip: None,
+        outer_insets_dip: None,
+        decorations: Vec::new(),
         toolbar_stylesheet: None,
         preview: None,
         candidate: Default::default(),
+        panel_candidate: None,
         animation: SkinAnimation::disabled(),
         license: None,
+        notices: Vec::new(),
     };
     let package = ThemePackage::from(&summary);
     assert_eq!(package.base, GlobalTheme::Paper);
@@ -1125,6 +1149,7 @@ fn web_custom_theme_mirror_cases_match_resolve() {
         hover: value["hover"].as_str().map(Into::into),
         translation: value["translation"].as_str().map(Into::into),
         show_selected_bar: value["showSelectedBar"].as_bool(),
+        ..CandidatePalette::default()
     };
     let mut expected = Vec::new();
     for case in cases.as_array().expect("cases") {

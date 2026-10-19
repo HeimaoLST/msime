@@ -6,6 +6,7 @@
 # Usage: platforms/linux/package-container.sh [VERSION]
 #   VERSION defaults to platforms/linux/version.txt, the version release-linux.yml tags as linux-vVERSION. It becomes both the package version and the version the desktop binary reports, so the in-app update check compares like with like.
 #   MSIME_PACKAGE_DESKTOP=0 packages without the Tauri desktop binary (no settings window); the default requires it.
+#   MSIME_RELEASE_DATE=YYYY-MM-DD 是设置应用关于页显示的发布日期（apps/desktop/src-tauri/build.rs），缺省取 HEAD 的提交日期。
 #   CARGO_BUILD_JOBS and CMAKE_BUILD_PARALLEL_LEVEL are passed through when set, to bound memory on a shared Docker VM.
 #   MSIME_REQUIRE_LANGUAGE_DICTIONARIES=1 fails unless target/language-dictionaries holds every dictionary resources/language-dictionaries.lock.json pins, each with its licence; the default packages whatever is there.
 #   MSIME_REQUIRE_OFFICIAL_PLUGINS=1 fails unless target/plugin-packs holds the official plugin packs scripts/build-official-plugins.sh builds (release-linux.yml sets it); the default installs them into share/<client>/plugin-packs when they are there and packages without them otherwise.
@@ -31,6 +32,11 @@ version="${1:-$(tr -d '[:space:]' < platforms/linux/version.txt)}"
   exit 2
 }
 desktop="${MSIME_PACKAGE_DESKTOP:-1}"
+# 容器里的 git 读不了挂进去的检出（worktree 的 .git 指向宿主机路径，目录属主也与容器里的 root 不同），所以发布日期在宿主机上取好传进去。源码包解出的树没有 .git、自带 platforms/linux/release-date.txt，这时传空值，交给 build.rs 读那个文件。
+release_date="${MSIME_RELEASE_DATE:-}"
+if [ -z "$release_date" ] && [ ! -f platforms/linux/release-date.txt ]; then
+  release_date=$(git log -1 --format=%cs HEAD 2>/dev/null || true)
+fi
 editions="${MSIME_PACKAGE_EDITIONS:-$(python3 platforms/linux/scripts/edition_linux.py editions)}"
 known_editions=",$(python3 platforms/linux/scripts/edition_linux.py editions),"
 IFS=, read -r -a edition_list <<<"$editions"
@@ -80,6 +86,7 @@ docker run --rm --init \
   -e CARGO_HOME=/build/cargo-home \
   -e MSIME_PACKAGE_IMAGE="$package_image" \
   -e MSIME_VERSION="$version" \
+  -e MSIME_RELEASE_DATE="$release_date" \
   -e MSIME_PACKAGE_DESKTOP="$desktop" \
   -e MSIME_PACKAGE_FORMAT="$format" \
   -e MSIME_PACKAGE_EDITIONS="$editions" \

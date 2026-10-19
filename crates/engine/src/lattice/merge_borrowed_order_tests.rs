@@ -221,7 +221,18 @@ fn neural_merge_eliminates_path_copies_without_changing_candidates_or_typo() {
                                         && (mode == 1 || n < 2)
                                         && input.len() + n > SMALL_SENTENCE_MERGE,
                                 );
-                                assert_eq!(new_count + clone_count * keyboard_count + transferred_count + unused_dedup_count, old_count, "路径={n}/来源模式={mode}/重复={duplicates}/占位={filler_count}/缓存热={warm}");
+                                // 无来源已经省去集合时不重复归因；其它单路径另计一次集合申请。
+                                let paths = if mode == 0 && options.emit > 0 {
+                                    n.min(options.emit)
+                                } else {
+                                    n
+                                };
+                                let single_path_count = usize::from(
+                                    paths == 1
+                                        && input.len() + paths > SMALL_SENTENCE_MERGE
+                                        && unused_dedup_count == 0,
+                                );
+                                assert_eq!(new_count + clone_count * keyboard_count + transferred_count + unused_dedup_count + single_path_count, old_count, "路径={n}/来源模式={mode}/重复={duplicates}/占位={filler_count}/缓存热={warm}");
                             }
                         }
                     }

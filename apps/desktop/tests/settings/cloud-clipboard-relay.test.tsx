@@ -212,11 +212,17 @@ test("does not echo a saved relay token and keeps it when only the address chang
 
   const token = screen.getByLabelText("中继令牌") as HTMLInputElement;
   expect(token.value).toBe("");
-  fireEvent.change(screen.getByRole("textbox", { name: "中继地址" }), {
+  const address = screen.getByRole("textbox", { name: "中继地址" }) as HTMLInputElement;
+  // 草稿先挂载，加载请求的 finally 才解除禁用；等到用户实际可编辑时再输入。
+  await waitFor(() => {
+    expect(address.matches(":disabled")).toBe(false);
+    expect(address.value).toBe("https://relay.example.test/old");
+  });
+  fireEvent.change(address, {
     target: { value: "https://relay.example.test/new" },
   });
   const saveButton = screen.getByRole("button", { name: "保存中继设置" }) as HTMLButtonElement;
-  expect(saveButton.disabled).toBe(false);
+  await waitFor(() => expect(saveButton.matches(":disabled")).toBe(false));
   fireEvent.click(saveButton);
   saveSettingsNow();
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
@@ -266,10 +272,13 @@ test("saving a relay on the clipboard page checks the cloud clipboard again over
     />,
   );
   await settingsFormReady();
+  // 历史记录和中继配置分在「历史记录」「设置」两个标签里。
+  fireEvent.click(screen.getByRole("tab", { name: "历史记录" }));
   expect(await screen.findByText(CLOUD_CLIPBOARD_SIGNED_OUT)).toBeDefined();
   const send = await screen.findByRole("button", { name: "发到云剪贴板" });
   expect(send.hasAttribute("disabled")).toBe(true);
 
+  fireEvent.click(screen.getByRole("tab", { name: "设置" }));
   fireEvent.click(screen.getByRole("radio", { name: "自建中继" }));
   fireEvent.change(screen.getByRole("textbox", { name: "中继地址" }), {
     target: { value: "https://relay.example.test/msime" },
@@ -280,6 +289,7 @@ test("saving a relay on the clipboard page checks the cloud clipboard again over
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
 
   await waitFor(() => expect(cloudClipboardRequest).toHaveBeenCalledTimes(2));
+  fireEvent.click(screen.getByRole("tab", { name: "历史记录" }));
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "发到云剪贴板" }).hasAttribute("disabled")).toBe(
       false,

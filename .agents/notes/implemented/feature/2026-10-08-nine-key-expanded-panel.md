@@ -41,6 +41,7 @@ Status: implemented
   - iOS 普通候选网格同样由顶部箭头收起，不放底部「返回」和 ⌫：候选栏已保留收起入口，重复按钮会挤掉一行候选。滚动区直接延伸到面板底部；九键三栏的右侧功能键仍服务于拼音和笔画编辑。
 - Android 的拼音选择从横条改成侧栏里的竖列，和另外两端以及录屏一致；注音九键仍是候选行上的横条。Android 的「展开」按钮在九键组字只有一页候选时也显示，因为面板现在还是选拼音和筛选的入口。
 - 读音行显示 `nine_key_reading`（`ning'bai`）而不是数字。HarmonyOS 和 iOS 原来显示的是数字，这次补上了。
+- Android 的 `NineKeyPanelDeviceSmoke` 先通过真实语言键切回中文，再断言九键键面。方案偏好不能清除上一套英文纠错留下的全局输入模式；前置条件归用例自身建立，不能靠套件顺序碰巧停在中文。
 
 ## Alternatives considered
 
@@ -57,12 +58,13 @@ Status: implemented
 - **已知限制**：
   - 部分上屏之后不能再撤销剩下的锁定。
   - Android 在笔画字典缺失时，点第一笔会显示引擎的诊断并收起面板（iOS 在这种情况下直接不显示「笔画」切换）。三端都随包带着 `msime-stroke.db`，这条路径正常不会走到。
-  - 三端都没有在真机上用手指走过一遍；Android 的设备冒烟 `NineKeyPanelDeviceSmoke` 能编进测试包（见 [2026-10-08-compile-gates-for-device-suite-and-arkts.md](../testing/2026-10-08-compile-gates-for-device-suite-and-arkts.md)），但还没有在模拟器上跑过。
+  - 三端都没有在真机上用手指走过一遍；Android 设备冒烟已在独立 API 35 模拟器运行，结果见[展开候选宿主视图同步](../bug-fix/2026-10-15-android-expanded-candidate-view.md)。设备套件仍需各自建立输入模式，不能继承前一用例的全局状态。
 
 ## Verification
 
 - 引擎：`cargo test -p msime-engine --lib nine_key`，以及 `cargo test -p msime-engine --test golden`。
 - C ABI：`cargo test -p msime-host-api nine_key`（`nine_key_filters_cross_the_host_boundary`）。
 - Android：`bash platforms/android/check-host.sh`（`NineKeyPanelPolicySmoke`、`NineKeyLayoutSmoke`），以及 Gradle `compileFullReleaseJavaWithJavac lintFullRelease`。
+- Android 设备前置条件回归：独占 API 35 模拟器按默认冒烟的相邻顺序运行 `EnglishCorrectionDeviceSmoke`、`NineKeyPanelDeviceSmoke`、`QuanpinSeparatorDeviceSmoke` 和 `FourteenKeyDeviceSmoke`，均通过。九键用例在原有记忆范围通过真实语言键恢复中文；只改方案或改成另一种记忆范围都不能替代这个前置条件。测试 APK 编译、最终源码的 quick 门禁、`verify-notes` 和 `git diff --check` 通过。
 - iOS：`MSIMEClientTests` 全量（Keyboard 550、Service 69、Shared 55，全部通过；1 个原有的跳过），包括录屏流程、两种筛选和 `InputBridgeResponseTests` 的新字段解码。
 - HarmonyOS：`bash platforms/harmony/tests/run.sh`，以及 `hvigorw assembleHap`。

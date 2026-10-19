@@ -63,7 +63,7 @@ async function openAi(platform: string) {
   );
   await settingsFormReady();
   fireEvent.click(screen.getByRole("button", { name: /^(标点与翻译|标点翻译)$/ }));
-  fireEvent.click(screen.getByRole("button", { name: /^(AI 辅助|智能辅助)$/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^(AI|AI 辅助)$/ }));
 }
 
 test("Linux points AI credentials at the private provider config", async () => {
@@ -118,7 +118,7 @@ test("Linux writes the AI token to the provider file, bound to the current setti
   );
   await settingsFormReady();
   fireEvent.click(screen.getByRole("button", { name: /^(标点与翻译|标点翻译)$/ }));
-  fireEvent.click(screen.getByRole("button", { name: /^(AI 辅助|智能辅助)$/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^(AI|AI 辅助)$/ }));
   const group = screen.getByRole("group", { name: "AI 凭据" });
   expect(group.textContent).toContain("尚未保存");
   const save = screen.getByRole("button", { name: "保存凭据" }) as HTMLButtonElement;
@@ -171,7 +171,7 @@ test("Linux reports a provider file it cannot use", async () => {
   );
   await settingsFormReady();
   fireEvent.click(screen.getByRole("button", { name: /^(标点与翻译|标点翻译)$/ }));
-  fireEvent.click(screen.getByRole("button", { name: /^(AI 辅助|智能辅助)$/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^(AI|AI 辅助)$/ }));
   await screen.findByText(/现有 ai-provider.json 无效/);
   fireEvent.change(screen.getByLabelText("AI API Token"), { target: { value: "sk-live" } });
   fireEvent.click(screen.getByRole("button", { name: "保存凭据" }));
@@ -218,7 +218,7 @@ test("Linux lets the user reveal the AI token before saving it", async () => {
   );
   await settingsFormReady();
   fireEvent.click(screen.getByRole("button", { name: /^(标点与翻译|标点翻译)$/ }));
-  fireEvent.click(screen.getByRole("button", { name: /^(AI 辅助|智能辅助)$/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^(AI|AI 辅助)$/ }));
   await screen.findByRole("group", { name: "AI 凭据" });
 
   expectRevealToggle();
@@ -238,4 +238,60 @@ test("the AI token and its toggle stay disabled without an HTTPS endpoint", asyn
   expect(
     (screen.getByRole("button", { name: "显示AI API Token" }) as HTMLButtonElement).disabled,
   ).toBe(true);
+});
+
+test("自定义服务按地址、凭据、模型顺序配置，连续校验不会丢失焦点", async () => {
+  const fetchModels = vi.fn(async () => ["synthetic-model"]);
+  render(
+    <SettingsPage
+      initialPage="ai"
+      client={{
+        load: async () => snapshot,
+        save: vi.fn(),
+        host: testHost({ platform: "macos" }),
+        aiAssistant: { fetchModels, test: vi.fn() },
+      }}
+    />,
+  );
+  await settingsFormReady();
+  fireEvent.click(screen.getByRole("combobox", { name: "AI 服务提供商" }));
+  fireEvent.click(screen.getByRole("option", { name: "自定义" }));
+
+  const endpoint = screen.getByLabelText("AI 接口地址") as HTMLInputElement;
+  const token = screen.getByLabelText("AI API Token") as HTMLInputElement;
+  const model = screen.getByLabelText("AI 模型");
+  const fetch = screen.getByRole("button", { name: "获取模型列表" }) as HTMLButtonElement;
+  expect(endpoint.value).toBe("");
+  for (const control of [endpoint, token, model, fetch]) {
+    expect(control.closest("details")).toBeNull();
+  }
+  expect(endpoint.compareDocumentPosition(token) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(token.compareDocumentPosition(model) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(model.compareDocumentPosition(fetch) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(token.disabled).toBe(true);
+  expect(fetch.disabled).toBe(true);
+  expect(screen.getByText("请填写服务提供商给出的完整接口地址")).toBeTruthy();
+
+  endpoint.focus();
+  for (const [value, valid] of [
+    ["https://ai.example.test/v1/chat/completions", true],
+    ["not a url", false],
+    ["http://localhost:1234/v1/chat/completions", true],
+    ["", false],
+  ] as const) {
+    fireEvent.change(endpoint, { target: { value } });
+    expect(document.activeElement).toBe(endpoint);
+    expect(screen.getByLabelText("AI 接口地址")).toBe(endpoint);
+    expect(endpoint.getAttribute("aria-invalid")).toBe(value && !valid ? "true" : null);
+    expect(token.disabled).toBe(!valid);
+    expect(fetch.disabled).toBe(!valid);
+  }
+  fireEvent.change(endpoint, { target: { value: "https://ai.example.test/v1/chat/completions" } });
+  fireEvent.change(token, { target: { value: "synthetic-custom-token" } });
+  fireEvent.click(fetch);
+  await waitFor(() => expect(fetchModels).toHaveBeenCalledOnce());
+  await screen.findByText("已获取 1 个可用模型。");
+  expect((screen.getByLabelText("AI 模型") as HTMLSelectElement).value).toBe("synthetic-model");
+  expect(token.value).toBe("synthetic-custom-token");
+  expect(screen.getByLabelText("AI 联想自定义提示词").closest("details")!.open).toBe(false);
 });

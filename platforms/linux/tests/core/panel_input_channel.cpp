@@ -1,8 +1,10 @@
 #include "PanelInputChannel.h"
 
 #include <cassert>
+#include <csignal>
 #include <filesystem>
 #include <string>
+#include <sys/wait.h>
 #include <utility>
 #include <vector>
 
@@ -63,6 +65,111 @@ void rejects_socket_directories_below_a_symlink() {
   assert(!socket.open((linked / "nested" / "panel-input.sock").string()));
   assert(!std::filesystem::exists(outside / "nested"));
   std::filesystem::remove_all(root, error);
+}
+
+struct SocketFixture {
+  std::string directory;
+  std::string path;
+  sockaddr_un address{};
+
+  SocketFixture() {
+    char pattern[] = "/tmp/msime-panel-input-XXXXXX";
+    const char *created = ::mkdtemp(pattern);
+    assert(created);
+    directory = created;
+    path = directory + "/panel-input.sock";
+    address.sun_family = AF_UNIX;
+    std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
+  }
+
+  ~SocketFixture() { std::filesystem::remove_all(directory); }
+
+  int new_stream_socket() const {
+    const int client = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    assert(client >= 0);
+    return client;
+  }
+};
+
+void leaves_a_busy_listener_untouched_without_blocking() {
+  SocketFixture fixture;
+  msime::linux_host::PanelInputSocket listener;
+  assert(listener.open(fixture.path));
+  struct stat original {};
+  assert(::lstat(fixture.path.c_str(), &original) == 0);
+  std::vector<int> clients;
+  bool full = false;
+  for (int index = 0; index < 128; ++index) {
+    const int client = fixture.new_stream_socket();
+    if (::connect(client, reinterpret_cast<const sockaddr *>(&fixture.address), sizeof(fixture.address)) != 0) {
+      const int error = errno;
+      ::close(client);
+      assert(error == EAGAIN);
+      full = true;
+      break;
+    }
+    clients.push_back(client);
+  }
+  assert(full && !clients.empty());
+
+  // 子进程隔离旧实现的无限等待，用管道就绪判断完成，超时后回收再报告失败。
+  int completion[2];
+  assert(::pipe(completion) == 0);
+  const pid_t child = ::fork();
+  assert(child >= 0);
+  if (child == 0) {
+    ::close(completion[0]);
+    msime::linux_host::PanelInputSocket contender;
+    ::_exit(contender.open(fixture.path) ? 1 : 0);
+  }
+  ::close(completion[1]);
+  pollfd ready{completion[0], POLLIN | POLLHUP, 0};
+  int completed;
+  do {
+    completed = ::poll(&ready, 1, 2000);
+  } while (completed < 0 && errno == EINTR);
+  if (completed <= 0) ::kill(child, SIGKILL);
+  int status = 0;
+  assert(::waitpid(child, &status, 0) == child);
+  ::close(completion[0]);
+  for (const int client : clients) ::close(client);
+  assert(completed > 0 && "socket probe blocked on a full listener queue");
+  assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+  struct stat current {};
+  assert(::lstat(fixture.path.c_str(), &current) == 0);
+  assert(current.st_dev == original.st_dev && current.st_ino == original.st_ino);
+}
+
+void keeps_a_live_listener_and_reclaims_a_stale_socket() {
+  SocketFixture fixture;
+  {
+    msime::linux_host::PanelInputSocket listener;
+    assert(listener.open(fixture.path));
+    msime::linux_host::PanelInputSocket contender;
+    assert(!contender.open(fixture.path));
+  }
+  const int stale = fixture.new_stream_socket();
+  assert(::bind(stale, reinterpret_cast<const sockaddr *>(&fixture.address), sizeof(fixture.address)) == 0);
+  ::close(stale);
+  msime::linux_host::PanelInputSocket replacement;
+  assert(replacement.open(fixture.path));
+  assert(replacement.listening());
+}
+
+void preserves_a_socket_when_the_probe_has_a_protocol_error() {
+  SocketFixture fixture;
+  const int datagram = ::socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  assert(datagram >= 0);
+  assert(::bind(datagram, reinterpret_cast<const sockaddr *>(&fixture.address), sizeof(fixture.address)) == 0);
+  struct stat original {};
+  assert(::lstat(fixture.path.c_str(), &original) == 0);
+  msime::linux_host::PanelInputSocket contender;
+  const bool opened = contender.open(fixture.path);
+  ::close(datagram);
+  assert(!opened);
+  struct stat current {};
+  assert(::lstat(fixture.path.c_str(), &current) == 0);
+  assert(current.st_dev == original.st_dev && current.st_ino == original.st_ino);
 }
 
 struct Harness {
@@ -210,6 +317,9 @@ int main() {
   parses_the_three_requests();
   rejects_what_the_ime_route_does_not_carry();
   rejects_socket_directories_below_a_symlink();
+  leaves_a_busy_listener_untouched_without_blocking();
+  keeps_a_live_listener_and_reclaims_a_stale_socket();
+  preserves_a_socket_when_the_probe_has_a_protocol_error();
   delivers_at_once_to_a_focused_context();
   answers_the_generation_without_needing_focus();
   waits_for_a_focus_newer_than_the_panel();

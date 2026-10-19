@@ -418,3 +418,32 @@ fn request_ids_are_busy_until_finished_and_cancel_only_their_own() {
     requests.finish("synthetic-first");
     assert!(!requests.begin("synthetic-first").unwrap().is_cancelled());
 }
+
+#[test]
+fn a_cancel_that_arrives_before_begin_cancels_the_request() {
+    let requests = ChatStreamRequests::default();
+    // 宿主已经发起调用、Rust 还没登记时到的取消：当时没有在进行的，但这个 id 随后登记时已经取消。
+    assert_eq!(requests.cancel("synthetic-early"), Ok(false));
+    let early = requests.begin("synthetic-early").unwrap();
+    assert!(early.is_cancelled());
+    assert_eq!(early.check().unwrap_err().code(), "account_cancelled");
+    // 先到的取消只用一次，也不影响别的 id。
+    assert!(!requests.begin("synthetic-other").unwrap().is_cancelled());
+    requests.finish("synthetic-early");
+    assert!(!requests.begin("synthetic-early").unwrap().is_cancelled());
+}
+
+#[test]
+fn cancels_for_finished_requests_do_not_push_out_an_early_cancel() {
+    let requests = ChatStreamRequests::default();
+    // 一次真正先到的取消，它的请求还没登记。
+    assert_eq!(requests.cancel("synthetic-early"), Ok(false));
+    // 期间别的对话一个个结束，宿主在它们结束以后才发的取消（比如关页面时把记着的 id 全取消一遍）不该占掉先到的那一个的位置。
+    for index in 0..200 {
+        let id = format!("synthetic-late-{index}");
+        requests.begin(&id).unwrap();
+        requests.finish(&id);
+        assert_eq!(requests.cancel(&id), Ok(false));
+    }
+    assert!(requests.begin("synthetic-early").unwrap().is_cancelled());
+}

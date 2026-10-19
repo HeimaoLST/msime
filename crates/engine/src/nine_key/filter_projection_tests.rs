@@ -84,7 +84,7 @@ impl NineKeySession {
         let mut candidates = std::mem::take(&mut self.candidates);
         candidates.clear();
         let mut key = String::with_capacity(locked_key.len() + self.digits.len() * 4 + 1);
-        let mut leading: HashMap<String, RankKey> = HashMap::new();
+        let mut leading = LeadingMap::default();
         let prefer_exact = !self.splits.is_empty();
         let initials =
             self.locked.is_empty() && initial.is_none() && initials_apply(remaining.len(), splits);

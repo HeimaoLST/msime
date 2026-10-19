@@ -1,0 +1,1079 @@
+{
+  "decision": "rejected: three empty-page controls exceed the predeclared 1.05 ratio budget",
+  "baseline_commit": "43715313f397281bdc974e9c007b23b786920647",
+  "machine": "Mac13,1",
+  "rust": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "binary_sha256": {
+    "borrowed-graph-system-tests": "6e344b73c7f6ec51b51b1dac1b10d10035738dd0c4b4f6ed2abc0744aa6313e6",
+    "borrowed-graph-old-convert-eval": "aa34734bdc93ebd37d91efb7728494ce71d1df27a7d08d85a92e75ca3ebae921",
+    "borrowed-graph-old-rerank-latency": "a374aa296c611cbe532159ee9ab8669b4bdbb5631a753bc52d8ff13c0358b0ee"
+  },
+  "allocator": {
+    "timing": "System; global CountingAllocator registration removed only for the timing build",
+    "registration_restored_byte_equal_to_HEAD": true,
+    "restored_source_sha256": "4cbb8b21744f1d395a559957e5b21f98b01e988e16f73a3dce2a81d9a28a9552",
+    "nm_custom_allocator_symbols": 0,
+    "nm_registered_allocator_symbols": 0,
+    "nm_default_allocator_symbols": 2
+  },
+  "functional": {
+    "old_assertion_failures": 2,
+    "new_passed": 4,
+    "new_failed": 0,
+    "ignored": 1,
+    "graph_cases": 800,
+    "frozen_functions": [
+      "build_graph_borrowed",
+      "decode_graph",
+      "decode_graph_with_terminal"
+    ],
+    "final_snapshot_changes_after_green": "only representative allocation logging and comment removal; no production or assertion change"
+  },
+  "budget": {
+    "shapes": 54,
+    "target_shapes": 36,
+    "control_shapes": 18,
+    "pairs_per_shape": 21,
+    "order": "alternating old/new and new/old",
+    "scope": "complete build, lookup, span-key construction and graph destruction; prebuilt dictionary outside timing",
+    "calibration_faster_arm_seconds": 0.02,
+    "formal_sample_minimum_seconds_not_guaranteed": true,
+    "all_shapes_collected_before_assertion": true,
+    "target_ratio_less_than": 0.95,
+    "control_ratio_less_than": 1.05,
+    "external_build_policy": "invalidate full round; one identical retry"
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "valid_no_observed_build": false,
+      "test_exit": 101,
+      "shapes": [
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 1,
+          "profile": 0,
+          "median_new_old_ratio": 0.775978972,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 1,
+          "profile": 1,
+          "median_new_old_ratio": 0.902825415,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 1,
+          "profile": 3,
+          "median_new_old_ratio": 1.034449534,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 8,
+          "profile": 0,
+          "median_new_old_ratio": 0.376168364,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 8,
+          "profile": 1,
+          "median_new_old_ratio": 0.623908121,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 8,
+          "profile": 3,
+          "median_new_old_ratio": 1.090740295,
+          "budget": 1.05,
+          "below_budget": false
+        },
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 32,
+          "profile": 0,
+          "median_new_old_ratio": 0.14785259,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 32,
+          "profile": 1,
+          "median_new_old_ratio": 0.448778366,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 32,
+          "profile": 3,
+          "median_new_old_ratio": 1.08579241,
+          "budget": 1.05,
+          "below_budget": false
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 1,
+          "profile": 0,
+          "median_new_old_ratio": 0.646076359,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 1,
+          "profile": 1,
+          "median_new_old_ratio": 0.863257525,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 1,
+          "profile": 3,
+          "median_new_old_ratio": 1.097677003,
+          "budget": 1.05,
+          "below_budget": false
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 8,
+          "profile": 0,
+          "median_new_old_ratio": 0.275507595,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 8,
+          "profile": 1,
+          "median_new_old_ratio": 0.654461822,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 8,
+          "profile": 3,
+          "median_new_old_ratio": 0.948784454,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 32,
+          "profile": 0,
+          "median_new_old_ratio": 0.224231479,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 32,
+          "profile": 1,
+          "median_new_old_ratio": 0.461315118,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 32,
+          "profile": 3,
+          "median_new_old_ratio": 0.938951605,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 1,
+          "profile": 0,
+          "median_new_old_ratio": 0.771462832,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 1,
+          "profile": 1,
+          "median_new_old_ratio": 0.892799781,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 1,
+          "profile": 3,
+          "median_new_old_ratio": 1.013292648,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 8,
+          "profile": 0,
+          "median_new_old_ratio": 0.568498875,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 8,
+          "profile": 1,
+          "median_new_old_ratio": 0.63419024,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 8,
+          "profile": 3,
+          "median_new_old_ratio": 0.516994936,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 32,
+          "profile": 0,
+          "median_new_old_ratio": 0.201629057,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 32,
+          "profile": 1,
+          "median_new_old_ratio": 0.375353379,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 32,
+          "profile": 3,
+          "median_new_old_ratio": 0.993511539,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 1,
+          "profile": 0,
+          "median_new_old_ratio": 0.543225827,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 1,
+          "profile": 1,
+          "median_new_old_ratio": 1.58083345,
+          "budget": 0.95,
+          "below_budget": false
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 1,
+          "profile": 3,
+          "median_new_old_ratio": 1.036191137,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 8,
+          "profile": 0,
+          "median_new_old_ratio": 0.218152707,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 8,
+          "profile": 1,
+          "median_new_old_ratio": 0.631445862,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 8,
+          "profile": 3,
+          "median_new_old_ratio": 1.068011816,
+          "budget": 1.05,
+          "below_budget": false
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 32,
+          "profile": 0,
+          "median_new_old_ratio": 0.149560674,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 32,
+          "profile": 1,
+          "median_new_old_ratio": 0.435237219,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 32,
+          "profile": 3,
+          "median_new_old_ratio": 1.093442559,
+          "budget": 1.05,
+          "below_budget": false
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 1,
+          "profile": 0,
+          "median_new_old_ratio": 0.69936208,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 1,
+          "profile": 1,
+          "median_new_old_ratio": 0.849002574,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 1,
+          "profile": 3,
+          "median_new_old_ratio": 0.970012642,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 8,
+          "profile": 0,
+          "median_new_old_ratio": 0.353761683,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 8,
+          "profile": 1,
+          "median_new_old_ratio": 0.611781675,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 8,
+          "profile": 3,
+          "median_new_old_ratio": 0.958755966,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 32,
+          "profile": 0,
+          "median_new_old_ratio": 0.12262566,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 32,
+          "profile": 1,
+          "median_new_old_ratio": 0.444961801,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 32,
+          "profile": 3,
+          "median_new_old_ratio": 1.326402514,
+          "budget": 1.05,
+          "below_budget": false
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 1,
+          "profile": 0,
+          "median_new_old_ratio": 0.645170673,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 1,
+          "profile": 1,
+          "median_new_old_ratio": 0.827393616,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 1,
+          "profile": 3,
+          "median_new_old_ratio": 1.007107437,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 8,
+          "profile": 0,
+          "median_new_old_ratio": 0.3506332,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 8,
+          "profile": 1,
+          "median_new_old_ratio": 0.611188415,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 8,
+          "profile": 3,
+          "median_new_old_ratio": 1.010373482,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 32,
+          "profile": 0,
+          "median_new_old_ratio": 0.199426014,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 32,
+          "profile": 1,
+          "median_new_old_ratio": 0.390310138,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 32,
+          "profile": 3,
+          "median_new_old_ratio": 1.008316292,
+          "budget": 1.05,
+          "below_budget": true
+        }
+      ],
+      "pairs": 1134,
+      "observations": 156,
+      "build_observations": 120,
+      "max_build_processes": 22,
+      "load1_range": [
+        106.5361328125,
+        150.7216796875
+      ],
+      "log": "paired-round1.txt",
+      "monitor": "monitor-round1.json"
+    },
+    {
+      "round": 2,
+      "valid_no_observed_build": true,
+      "test_exit": 101,
+      "shapes": [
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 1,
+          "profile": 0,
+          "median_new_old_ratio": 0.776962746,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 1,
+          "profile": 1,
+          "median_new_old_ratio": 0.90867564,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 1,
+          "profile": 3,
+          "median_new_old_ratio": 1.021784522,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 8,
+          "profile": 0,
+          "median_new_old_ratio": 0.371428525,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 8,
+          "profile": 1,
+          "median_new_old_ratio": 0.599758158,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 8,
+          "profile": 3,
+          "median_new_old_ratio": 1.034292265,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 32,
+          "profile": 0,
+          "median_new_old_ratio": 0.207773434,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 32,
+          "profile": 1,
+          "median_new_old_ratio": 0.448690076,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 1,
+          "width": 32,
+          "profile": 3,
+          "median_new_old_ratio": 1.032301655,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 1,
+          "profile": 0,
+          "median_new_old_ratio": 0.769517538,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 1,
+          "profile": 1,
+          "median_new_old_ratio": 0.866020224,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 1,
+          "profile": 3,
+          "median_new_old_ratio": 0.944003468,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 8,
+          "profile": 0,
+          "median_new_old_ratio": 0.374865494,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 8,
+          "profile": 1,
+          "median_new_old_ratio": 0.64047506,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 8,
+          "profile": 3,
+          "median_new_old_ratio": 0.943514053,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 32,
+          "profile": 0,
+          "median_new_old_ratio": 0.226039656,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 32,
+          "profile": 1,
+          "median_new_old_ratio": 0.469814685,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 4,
+          "width": 32,
+          "profile": 3,
+          "median_new_old_ratio": 0.935238191,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 1,
+          "profile": 0,
+          "median_new_old_ratio": 0.777106065,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 1,
+          "profile": 1,
+          "median_new_old_ratio": 0.891910133,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 1,
+          "profile": 3,
+          "median_new_old_ratio": 0.999765926,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 8,
+          "profile": 0,
+          "median_new_old_ratio": 0.389386751,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 8,
+          "profile": 1,
+          "median_new_old_ratio": 0.665301462,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 8,
+          "profile": 3,
+          "median_new_old_ratio": 1.000328621,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 32,
+          "profile": 0,
+          "median_new_old_ratio": 0.209253178,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 32,
+          "profile": 1,
+          "median_new_old_ratio": 0.428256965,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": false,
+          "columns": 12,
+          "width": 32,
+          "profile": 3,
+          "median_new_old_ratio": 1.002060407,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 1,
+          "profile": 0,
+          "median_new_old_ratio": 0.796612741,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 1,
+          "profile": 1,
+          "median_new_old_ratio": 0.866415099,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 1,
+          "profile": 3,
+          "median_new_old_ratio": 1.08050726,
+          "budget": 1.05,
+          "below_budget": false
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 8,
+          "profile": 0,
+          "median_new_old_ratio": 0.36988087,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 8,
+          "profile": 1,
+          "median_new_old_ratio": 0.619121798,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 8,
+          "profile": 3,
+          "median_new_old_ratio": 1.062547827,
+          "budget": 1.05,
+          "below_budget": false
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 32,
+          "profile": 0,
+          "median_new_old_ratio": 0.20169463,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 32,
+          "profile": 1,
+          "median_new_old_ratio": 0.444716603,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 1,
+          "width": 32,
+          "profile": 3,
+          "median_new_old_ratio": 1.036009085,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 1,
+          "profile": 0,
+          "median_new_old_ratio": 0.69639158,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 1,
+          "profile": 1,
+          "median_new_old_ratio": 0.851234894,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 1,
+          "profile": 3,
+          "median_new_old_ratio": 0.987047145,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 8,
+          "profile": 0,
+          "median_new_old_ratio": 0.353625038,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 8,
+          "profile": 1,
+          "median_new_old_ratio": 0.610017798,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 8,
+          "profile": 3,
+          "median_new_old_ratio": 0.818260075,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 32,
+          "profile": 0,
+          "median_new_old_ratio": 0.172805156,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 32,
+          "profile": 1,
+          "median_new_old_ratio": 0.444585819,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 4,
+          "width": 32,
+          "profile": 3,
+          "median_new_old_ratio": 0.934435294,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 1,
+          "profile": 0,
+          "median_new_old_ratio": 0.537955073,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 1,
+          "profile": 1,
+          "median_new_old_ratio": 0.805103411,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 1,
+          "profile": 3,
+          "median_new_old_ratio": 1.050396612,
+          "budget": 1.05,
+          "below_budget": false
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 8,
+          "profile": 0,
+          "median_new_old_ratio": 0.259718013,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 8,
+          "profile": 1,
+          "median_new_old_ratio": 0.596796476,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 8,
+          "profile": 3,
+          "median_new_old_ratio": 1.009984717,
+          "budget": 1.05,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 32,
+          "profile": 0,
+          "median_new_old_ratio": 0.238891127,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 32,
+          "profile": 1,
+          "median_new_old_ratio": 0.309388124,
+          "budget": 0.95,
+          "below_budget": true
+        },
+        {
+          "repeated": true,
+          "columns": 12,
+          "width": 32,
+          "profile": 3,
+          "median_new_old_ratio": 0.716422144,
+          "budget": 1.05,
+          "below_budget": true
+        }
+      ],
+      "pairs": 1134,
+      "observations": 112,
+      "build_observations": 0,
+      "max_build_processes": 0,
+      "load1_range": [
+        40.67333984375,
+        93.5029296875
+      ],
+      "log": "paired-round2.txt",
+      "monitor": "monitor-round2.json"
+    }
+  ],
+  "not_run_after_rejection": [
+    "new full-resource quality comparison",
+    "full engine/golden/runtime suite",
+    "end-to-end ABBA",
+    "device verification"
+  ],
+  "limitations": [
+    "process observations once per second do not prove exclusive machine use or exclude short builds",
+    "high system load remains recorded; invalid round is not used for decision",
+    "local build timing cannot prove default Runtime p95 16ms"
+  ],
+  "files_sha256": {
+    "README.md": "d231d37fb9c16bfc96d1ce3743cc0b2897fc4b82d397284ec3f7f65641cf3852",
+    "build-system.py.txt": "7c0c1504b3cb1b886f6a923d97179c5dcd183046663289eeacb9d2cdbd22507b",
+    "candidate.patch.txt": "538dd36a9c9f441261ab28c821ee590bda7f5a0e49730741c0e5c374780323e7",
+    "green-initial-compile-error.txt": "153bb9286da8594955ecbc8c7ab9f5df0d97993398ab5c527aeed0e252654033",
+    "green.txt": "a798446f76466367bede9e4ce96f660e27d7de6423cada07ccbc1a7a85bb2b56",
+    "monitor-round1.json": "9169e9b61689f2cbde57e111db70338a3b81867188223742b3bb5c6108bf74e3",
+    "monitor-round2.json": "36c12bc4744eaa281a203ddf6a3235b167ed0c9071282728ae2a1b574eb28b1f",
+    "paired-round1.txt": "0d7dab3cf768200f8bd23be4ef981051106cbf4d97a08940f13c03008760cd69",
+    "paired-round2.txt": "e7f5a01d163e62359e252a05da1bea58c5909aabc9c4e4e19db3c8098511d531",
+    "red.txt": "77a8202c7f41bc484db7d195c9a495a12713fa4f86af1791986588362f7722f1",
+    "run.py.txt": "b7400fd5051247855e6bbf066f0e8e0671864657c5fffef510c8f57502a727f2"
+  },
+  "archive_normalization": "patch context trailing spaces and final empty log lines removed; sample values unchanged; git apply --check passed"
+}

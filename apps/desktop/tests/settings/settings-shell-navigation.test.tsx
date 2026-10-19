@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
+import { SettingsSidebar } from "../../../../packages/ui/src/settings/settings-sidebar";
 import { useSettingsShellNavigation } from "../../../../packages/ui/src/settings/use-settings-shell-navigation";
 import type {
   SettingsPageGroup,
@@ -75,6 +76,42 @@ test("侧栏搜索只保留标题命中的分组", () => {
   ]);
 });
 
+test("侧栏平铺所有页面，不再绘制分类标题和折叠按钮", () => {
+  const selectPage = vi.fn();
+  render(
+    <SettingsSidebar
+      presentation={{
+        macShell: true,
+        ipadShell: false,
+        ipadSidebarShown: false,
+        sidebarBrandShown: true,
+        searchInSidebar: false,
+      }}
+      preview={false}
+      shownSidebarGroups={groups}
+      navigationPage="input"
+      navSearchField={null}
+      windowDragHandlers={{
+        onDoubleClick: vi.fn(),
+        onPointerDown: vi.fn(),
+        onPointerMove: vi.fn(),
+        onPointerUp: vi.fn(),
+        onPointerCancel: vi.fn(),
+        onPointerLeave: vi.fn(),
+      }}
+      selectPage={selectPage}
+    />,
+  );
+  expect(screen.queryByRole("button", { name: "支持" })).toBeNull();
+  expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+    "输入",
+    "帮助与反馈",
+    "关于",
+  ]);
+  fireEvent.click(screen.getByRole("button", { name: "帮助与反馈" }));
+  expect(selectPage).toHaveBeenCalledWith("feedback");
+});
+
 test("搜索框回调使用外壳的查询 setter和页面选择器", () => {
   const { result, setNavQuery, selectPage } = renderNavigation({ navQuery: "输入" });
   render(result.current.navSearchField);
@@ -86,11 +123,11 @@ test("搜索框回调使用外壳的查询 setter和页面选择器", () => {
 });
 
 test.each([
-  ["AI", "ai", "智能辅助"],
-  ["工具栏", "floating-toolbar", "快捷工具"],
-  ["快捷键", "shortcuts", "按键设置"],
-  ["屏幕键盘", "screen-keyboard", "键盘手写"],
-  ["智能", "ai", "智能辅助"],
+  ["AI", "ai", "AI"],
+  ["工具栏", "floating-toolbar", "悬浮工具栏"],
+  ["快捷键", "shortcuts", "快捷键"],
+  ["屏幕键盘", "screen-keyboard", "键盘与手写"],
+  ["辅助", "ai", "AI"],
 ] as const)("菜单改名后仍能用 %s 搜索并按回车进入", (query, id, title) => {
   const sidebarGroups = [{ pages: [page(id, title)] }];
   const { result, selectPage } = renderNavigation({ navQuery: query, sidebarGroups });
@@ -98,4 +135,17 @@ test.each([
   render(result.current.navSearchField);
   fireEvent.keyDown(screen.getByRole("searchbox"), { key: "Enter" });
   expect(selectPage).toHaveBeenCalledWith(id);
+});
+
+test("桌面按助手搜索仍找到合并后的 AI 入口，无 MCP 能力时不匹配助手", () => {
+  const sidebarGroups = [{ pages: [page("ai", "AI")] }];
+  const availablePages = [page("ai", "AI"), page("mcp", "AI 助手")];
+  const { result } = renderNavigation({ navQuery: "助手", sidebarGroups, availablePages });
+  expect(result.current.shownSidebarGroups).toEqual(sidebarGroups);
+  const missing = renderNavigation({
+    navQuery: "助手",
+    sidebarGroups,
+    availablePages: [page("ai", "AI")],
+  });
+  expect(missing.result.current.shownSidebarGroups).toEqual([]);
 });

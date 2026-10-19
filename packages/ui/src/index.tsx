@@ -1,42 +1,3 @@
-import type { SettingsClient } from "./core/settings-client";
-import type { Preferences, Snapshot } from "./core/preferences-model";
-
-import { useConfirm } from "./core/confirm";
-import { NavItem } from "./core/platform-controls";
-import { appThemeStyle, seasonAttr } from "./core/app-theme-style";
-import { SetupWarningStrip } from "./keyboard/setup-status-card";
-import { KeyboardSwitchGuideHost } from "./keyboard/keyboard-switch-guide";
-import { TryKeyboardPage } from "./keyboard/try-keyboard-page";
-import { mobilePageTitle } from "./settings/mobile-tab-helpers";
-import { desktopDownloadUrl, fallbackAppVersion } from "./settings/app-resources";
-import { useSettingsWindowInteractions } from "./settings/use-settings-window-interactions";
-import { useSettingsNavigation } from "./settings/use-settings-navigation";
-import { useSettingsPageRouting } from "./settings/use-settings-page-routing";
-import { useSettingsShellState } from "./settings/use-settings-shell-state";
-import { useSettingsShellNavigation } from "./settings/use-settings-shell-navigation";
-import { useSettingsCommunityViews } from "./settings/use-settings-community-views";
-import { MobileSettingsTabs } from "./settings/mobile-settings-tabs";
-import { SettingsPageHeader } from "./settings/settings-page-header";
-import { settingsShellPlatformPresentation } from "./settings/settings-shell-platform-presentation";
-import { SettingsShellToasts } from "./settings/settings-shell-toasts";
-import { desktopPageTitle, pages, type SettingsPageId } from "./settings/settings-page-registry";
-import { settingsPageProjections } from "./settings/settings-page-projections";
-import {
-  mobileHiddenPageIds,
-  settingsPageModelVisibility,
-} from "./settings/settings-page-model-visibility";
-import {
-  canReloadSettingsPage,
-  canRestoreDefaultsOnPage,
-  isSettingsFormPage,
-} from "./settings/settings-page-visibility";
-import { settingsInputPreferences } from "./settings/settings-input-preferences";
-import { aiSettingsPreferences } from "./settings/ai-settings-preferences";
-import { diagnosticLogPreferences } from "./settings/diagnostic-log-preferences";
-import { clipboardHistoryEnabled } from "./settings/clipboard-history-preferences";
-import { useSettingsThemePreviews } from "./settings/use-settings-theme-previews";
-
-import { useEffect, useLayoutEffect, useState } from "react";
 export type {
   DictionaryEntry,
   DictionaryLookupEntry,
@@ -72,72 +33,38 @@ export {
   allTouchKeyboardSchemes,
   defaultTouchKeyboardSchemes,
 } from "./settings/touch-keyboard-scheme-helpers";
-import { settingsPlatformPresentation } from "./settings/settings-platform-presentation";
-import { settingsPageEnvironment } from "./settings/settings-page-environment";
+
 export {
   platformCopy,
   type PlatformCopyContext,
   type PlatformCopy,
 } from "./settings/platform-copy";
-import { schemeTitle } from "./settings/label-helpers";
+
 export { schemeTitle } from "./settings/label-helpers";
-import {
-  useHarmonySystemBars,
-  useResolvedAppTheme,
-  useSettingsTheme,
-} from "./settings/use-settings-theme";
+
 export { useSettingsTheme } from "./settings/use-settings-theme";
 export { updateCandidateColor, updateCustomKeyboard } from "./settings/theme-selection-updates";
-import { useTouchKeyboardGeometryDrag } from "./settings/use-touch-keyboard-geometry-drag";
-import { touchKeyboardGeometryPreferences } from "./settings/touch-keyboard-geometry-preferences";
+
 export { defaultTouchKeyboardGeometry } from "./settings/touch-keyboard-geometry-defaults";
 export { useTouchKeyboardGeometryDrag } from "./settings/use-touch-keyboard-geometry-drag";
-import { useMobileKeyboardFeedback } from "./settings/use-mobile-keyboard-feedback";
+
 export {
   useMobileKeyboardFeedback,
   type UseMobileKeyboardFeedbackOptions,
 } from "./settings/use-mobile-keyboard-feedback";
-import { useTranslationSettings } from "./settings/use-translation-settings";
+
 export {
   useTranslationSettings,
   type UseTranslationSettingsOptions,
 } from "./settings/use-translation-settings";
-import { useDictionaryManager } from "./settings/use-dictionary-manager";
+
 export {
   useDictionaryManager,
   type DictionaryManagerClient,
   type DictionaryConfirmOptions,
   type UseDictionaryManagerOptions,
 } from "./settings/use-dictionary-manager";
-import { SettingsFormFooter } from "./settings/settings-form-footer";
-import { SettingsPageStatus } from "./settings/settings-page-status";
-import { SettingsFormFrame } from "./settings/settings-form-frame";
-import { NoticeBanner } from "./settings/notice-banner";
-import { WindowTitlebar } from "./settings/window-titlebar";
-import { useProviderCredentials } from "./settings/use-provider-credentials";
-import { useFeedbackReport } from "./settings/use-feedback-report";
-import { useDataDirectory } from "./settings/use-data-directory";
-import { usePreferenceRecovery } from "./settings/use-preference-recovery";
-import { useSettingsPersistence } from "./settings/use-settings-persistence";
-import { useInputSourceUninstall } from "./settings/use-input-source-uninstall";
-import { useTouchKeyboardSettingsReset } from "./settings/use-touch-keyboard-settings-reset";
-import { useExternalUrl } from "./settings/use-external-url";
-import { useUpdateCheck } from "./settings/use-update-check";
-import { useOpenPanel } from "./settings/use-open-panel";
-import { useClipboardHistoryToggle } from "./settings/use-clipboard-history-toggle";
-import { useTouchKeyboardSchemeSelection } from "./settings/use-touch-keyboard-scheme-selection";
-import { useSettingsDestinationActions } from "./settings/use-settings-destination-actions";
-import {
-  communityGalleryPage,
-  useCommunityGallerySubview,
-} from "./settings/use-community-gallery-subview";
-import { CommunityGallerySubview } from "./settings/community-gallery-subview";
-import { useMacosSettings } from "./settings/use-macos-settings";
-import { useWindowState } from "./settings/use-window-state";
-import { useAppVersion } from "./settings/use-app-version";
-import { supportDiagnostics } from "./settings/support-diagnostics";
-import { useMountedRef } from "./settings/use-mounted-ref";
-import { useHelpcodeCatalog } from "./settings/use-helpcode-catalog";
+
 export {
   useProviderCredentials,
   type ProviderCredentialBusy,
@@ -383,6 +310,11 @@ export {
 } from "./settings/use-settings-window-interactions";
 export { useAppVersion, type UseAppVersionOptions } from "./settings/use-app-version";
 export {
+  formatAppVersion,
+  parseReleaseDate,
+  useAppReleaseDate,
+} from "./settings/use-app-release-date";
+export {
   useCustomHelpcodeSchemas,
   useHelpcodeCatalog,
   useHelpcodePacks,
@@ -394,7 +326,7 @@ export {
   type SupportDiagnosticsOptions,
 } from "./settings/support-diagnostics";
 export { useMountedRef } from "./settings/use-mounted-ref";
-import { createProviderPresetControl } from "./settings/provider-preset-control";
+
 export {
   windowResizeEdge,
   type WindowResizeBounds,
@@ -404,7 +336,7 @@ export {
   settingsCapabilities,
   type SettingsCapabilitiesInput,
 } from "./settings/settings-capabilities";
-import { useAiAssistant } from "./settings/use-ai-assistant";
+
 export { useAiAssistant, type UseAiAssistantOptions } from "./settings/use-ai-assistant";
 export {
   candidatePaletteStyle,
@@ -431,7 +363,7 @@ export {
   type ThemePreview,
   type ThemeSource,
 } from "./theme/global-theme";
-import { useVoiceInputSettings } from "./settings/use-voice-input-settings";
+
 export {
   useVoiceInputSettings,
   type UseVoiceInputSettingsOptions,
@@ -451,61 +383,7 @@ export type {
   SavedTouchKeyboardSkin,
   TouchKeyboardSkinDesign,
 } from "./keyboard/touch-keyboard-skin-design";
-import { TypingStatisticsPage } from "./settings/typing-statistics";
-import { VocabularyReviewPage } from "./settings/vocabulary-review";
-import * as settings from "./settings/settings-style";
-import { FluentIcon } from "./core/fluent-icons";
-import { AccountPage } from "./account/account-page";
-import type { AccountCommunityDestination } from "./account/account-model";
-import { ChatPage } from "./chat/chat-page";
-import { HomePage } from "./keyboard/home-page";
-import {
-  ScreenKeyboardLayoutContext,
-  screenKeyboardLayoutFor,
-} from "./keyboard/screen-keyboard-preview";
-import { useSettingsPlatform } from "./theme/settings-platform";
-import { SettingsFormContext } from "./settings/settings-form-context";
-import { createSettingsReloadAction } from "./settings/settings-reload-action";
-import { deepEqual } from "./core/deep-equal";
-import { createSettingsPageSelection } from "./settings/settings-page-selection";
-import { createSettingsDraftActions } from "./settings/settings-draft-actions";
-import { createSettingsStatusActions } from "./settings/settings-status-actions";
-import { createSettingsExternalActions } from "./settings/settings-external-actions";
-import { createSettingsNavigationActions } from "./settings/settings-navigation-actions";
-import { VoiceSettingsPage } from "./settings/pages/voice-page";
-import { AiSettingsPage } from "./settings/pages/ai-page";
-import { InputSettingsPage } from "./settings/pages/input-page";
-import { ExpressionSettingsPage } from "./settings/pages/expression-page";
-import { DeveloperSettingsPage, McpSettingsPage } from "./settings/pages/developer-page";
-import { DictionarySettingsPage } from "./settings/pages/dictionary-page";
-import type { DictionaryTab } from "./settings/dictionary-tabs";
-import { AppearanceSettingsPage } from "./settings/pages/appearance-page";
-import { SkinSettingsPage } from "./settings/pages/skin-page";
-import { useCommunityGalleryNavigation } from "./settings/use-community-gallery-navigation";
-import { FloatingToolbarSettingsPage } from "./settings/pages/floating-toolbar-page";
-import { ScreenKeyboardSettingsPage } from "./settings/pages/screen-keyboard-page";
-import { ShortcutSettingsPage } from "./settings/pages/shortcuts-page";
-import { ToolsSettingsPage } from "./settings/pages/tools-page";
-import { PluginsSettingsPage } from "./settings/pages/plugins-page";
 
-import { AboutSettingsPage } from "./settings/pages/about-page";
-import { UsageReportingSettingsPage } from "./settings/pages/usage-reporting-page";
-import { PrivacySettingsPage } from "./settings/pages/privacy-page";
-
-import { floatingToolbarPreferences } from "./settings/floating-toolbar-preferences";
-
-import { HelpSettingsPage } from "./settings/help-settings-page";
-import { HandwritingSettingsPage } from "./settings/pages/handwriting-page";
-import { FeedbackSettingsPage } from "./settings/pages/feedback-page";
-import { defaultTouchKeyboardSchemes } from "./settings/touch-keyboard-scheme-helpers";
-import { logo } from "./settings/settings-options";
-import { CommunitySkinsPage } from "./community/community-skins";
-import { communityDestinationView } from "./community/community-destination";
-import { createCommunityLocalDictionary } from "./community/community-resource-actions";
-import { CommunityResourcesPage } from "./community/community-resources";
-import { CommunityPluginsPage } from "./community/community-plugins";
-import * as communityStyle from "./community/community-style";
-import { CommunityPage } from "./community/community-page";
 export { useConfirm, type ConfirmRequest } from "./core/confirm";
 export type * from "./core/host-contracts";
 export { resolveSettingsTheme } from "./settings/theme-helpers";
@@ -544,6 +422,11 @@ export type {
   TypingStatisticsUploadStatus,
 } from "./settings/typing-statistics-model";
 export {
+  useTypingStatisticsUpload,
+  type UseTypingStatisticsUploadOptions,
+  type TypingStatisticsUploadState,
+} from "./settings/use-typing-statistics-upload";
+export {
   keyboardHeatmapLayout,
   keyboardHeatmapModel,
   keyHeatLevel,
@@ -577,6 +460,7 @@ export type {
   AccountChallenge,
   AccountClient,
   AccountCommunityDestination,
+  AccountDeletion,
   AccountPreferenceSchema,
   AccountPreferences,
   AccountPreferenceValue,
@@ -1795,8 +1679,7 @@ export {
   type CandidateAppearance,
   type CandidateOrientation,
 } from "./candidate/candidate-themes";
-import { describeInstallerTrust } from "./settings/update-manifest";
-import { editionUsesHelpcode } from "./settings/input-scheme-options";
+
 export {
   serializeWindowHostMessage,
   type WindowControl,
@@ -1816,10 +1699,36 @@ export {
   KeyboardPanel,
   VoicePanel,
 } from "./keyboard/panels";
+export { HandwritingModelNotice } from "./keyboard/handwriting-model-notice";
+export { HandwritingResults, type HandwritingResultsProps } from "./keyboard/handwriting-results";
+export { KeyboardKeyButton, type KeyboardKeyButtonProps } from "./keyboard/keyboard-key-button";
+export { EmojiItemButton, type EmojiItemButtonProps } from "./keyboard/emoji-item-button";
+export { VoiceResults, type VoiceResultsProps } from "./keyboard/voice-results";
+export {
+  EmojiClipboardEntries,
+  type EmojiClipboardEntriesProps,
+} from "./keyboard/emoji-clipboard-entries";
+export {
+  CloudClipboardComposer,
+  type CloudClipboardComposerProps,
+} from "./keyboard/cloud-clipboard-composer";
+export {
+  CloudClipboardHistory,
+  type CloudClipboardHistoryProps,
+} from "./keyboard/cloud-clipboard-history";
+export {
+  HandwritingInkEditor,
+  type HandwritingInkEditorProps,
+} from "./keyboard/handwriting-ink-editor";
+export {
+  HandwritingCandidateButton,
+  type HandwritingCandidateButtonProps,
+} from "./keyboard/handwriting-candidate-button";
 export type {
   CloudCandidate,
   CloudCandidateKind,
   CloudClipboardAction,
+  CloudClipboardItem,
   CloudClipboardPanelClient,
   CloudDictionaryAction,
   CloudDictionaryCatalogEntry,
@@ -1854,6 +1763,16 @@ export {
   CloudDictionaryItem,
   type CloudDictionaryItemProps,
 } from "./keyboard/cloud-dictionary-item";
+export {
+  CloudCandidateResults,
+  type CloudCandidateResultsProps,
+  CloudFixedPositions,
+  type CloudFixedPositionsProps,
+} from "./keyboard/cloud-candidate-results";
+export {
+  CloudDictionaryApplyContent,
+  type CloudDictionaryApplyContentProps,
+} from "./keyboard/cloud-dictionary-apply-content";
 export { CloudPanelHeader, type CloudPanelHeaderProps } from "./keyboard/cloud-panel-header";
 export {
   PanelActivationButtons,
@@ -2004,1649 +1923,87 @@ export {
   type AiEndpointProblem,
 } from "./settings/ai-endpoint-policy";
 
-type SettingsPageProps = {
-  client: SettingsClient;
-  /** The section the page opens on. Read once, at mount. */
-  initialPage?: string;
-  /** A section requested after mount; a new `nonce` navigates there and keeps the draft. */
-  route?: { page: string; nonce: number };
-  onReplayOnboarding?: () => void;
-};
+export type { SettingsPageModel } from "./settings/use-settings-page-model";
 
-// The state, effects and handlers behind the settings window. The shell below and every page component read the same values - the pages through `SettingsFormContext` - so splitting the page into files changed where the markup lives, not what it closes over.
-function useSettingsPageModel({ client, initialPage, route }: SettingsPageProps) {
-  useEffect(() => {
-    const automatic = () => {
-      void client.dictionary?.updates?.("automatic").catch(() => undefined);
-    };
-    automatic();
-    window.addEventListener("focus", automatic);
-    const timer = setInterval(automatic, 60 * 60 * 1000);
-    return () => {
-      window.removeEventListener("focus", automatic);
-      clearInterval(timer);
-    };
-  }, [client.dictionary?.updates]);
-  const { confirm, confirmation } = useConfirm();
-  const {
-    host,
-    linux: linuxPlatform,
-    android: androidPlatform,
-    ios: iosPlatform,
-    harmony: harmonyPlatform,
-    mobile: mobilePlatform,
-    windows: windowsPlatform,
-    macos: macosPlatform,
-    ...capabilities
-  } = settingsPageEnvironment(client);
-  // Which of the redesign's eight settings looks the root takes; see `theme/platform-tokens.ts`.
-  const settingsPlatform = useSettingsPlatform(host);
-  // HarmonyOS 2-in-1 是桌面窗口：侧栏从 输入 开始，启动时也打开 输入，所以即使宿主仍然提供 `home`（设置引导警示条会读取它），手机的 设置 根页面也不是它的页面。
-  const hasHomePage = Boolean(client.home) && settingsPlatform !== "hm2";
-  const {
-    nativeVoicePlatform,
-    showModeScope,
-    showModeSwitchShortcuts,
-    showPanelShortcuts,
-    showNumberRowSelection,
-    showRestartInputMethod,
-    showInstallInputSource,
-    showFloatingToolbar,
-    showToolbarAppearance,
-    showToolbarComponents,
-    showTouchKeyboardHeight,
-    showTouchKeyboardSpacing,
-    showCandidateFontControls,
-    showCandidatePreeditFont,
-    showCandidateEnglishFont,
-    showEnglishSuggestions,
-    showHelpcodeShiftEntry,
-    showShuangpinPreedit,
-    showShuangpinKeymapHint,
-    showCharacterWidth,
-    aiProviderCredentials,
-    showVoiceCommitMode,
-    showVoiceProviderSettings,
-    showVoiceStreamPreedit,
-    showVoiceSpaceLockSwitch,
-    showVoiceCueSwitches,
-    showVoiceCaptureBackends,
-    showCandidateRowColors,
-    showCandidateSelectionAppearance,
-    showCandidateBorderColor,
-    showCandidateNumberColor,
-    surfaceThemesFollow,
-    showCandidateFollowCursor,
-    showCandidateWindowScale,
-    showCandidateWindowOpacity,
-    showCandidateCornerRadius,
-    showCandidatePadding,
-    showInputModeHUD,
-    showInputModeStatusItem,
-    showVoiceCaptureDevices,
-    showFullwidthChord,
-    showTabPagePagingSwitches,
-    showMixedInputMinimumPrefix,
-    clientHostedPlatform,
-    desktopPanels,
-    showVoiceHotkeys,
-    showKeySound,
-    showMusic,
-    showPluginTriggers,
-    showTypingEffects,
-    showTypingEffectStyles,
-    showTypingEffectPacks,
-    showEffectIntensity,
-    showAiCandidateLimit,
-    typingEffectsFlashOnly,
-    showWordbookPacks,
-    showSymbolSetPacks,
-    showScriptPlugins,
-  } = capabilities;
-  const {
-    fullwidthChord,
-    releasesPageUrl: platformReleasesPageUrl,
-    licenseUrl: platformLicenseUrl,
-    issuesUrl: platformIssuesUrl,
-    captureBackendOptions,
-    helpIntro: platformHelpIntro,
-    quickStart: platformQuickStart,
-    networkDescription: platformNetworkDescription,
-    aboutDescription: platformAboutDescription,
-  } = settingsPlatformPresentation({
-    android: androidPlatform,
-    linux: linuxPlatform,
-    macos: macosPlatform,
-    harmony: harmonyPlatform,
-    ios: iosPlatform,
-    mobile: mobilePlatform,
-    windows: windowsPlatform,
-    clientHostedPlatform,
-  });
-  const [snapshot, setSnapshot] = useState<Snapshot>();
-  const [draft, setDraft] = useState<Preferences>();
-  const {
-    onAiChange,
-    onCandidateColorChange,
-    onCustomKeyboardChange,
-    onTranslationChange,
-    onUseCustomKeyboard,
-    onVoiceChange,
-  } = createSettingsDraftActions({ setDraft });
-  const [busy, setBusy] = useState(true);
-  const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
-  /** The backup the last repair wrote, while its notice is showing. */
-  const [recoveredBackup, setRecoveredBackup] = useState("");
-  const {
-    busy: uninstallBusy,
-    cancelUninstall,
-    confirmUninstall,
-    confirmation: uninstallConfirmation,
-    removeUserData: removeUserDataOnUninstall,
-    requestUninstall,
-    result: uninstallResult,
-    setRemoveUserData: setRemoveUserDataOnUninstall,
-  } = useInputSourceUninstall({ uninstallInputSource: client.uninstallInputSource });
-  const {
-    dismissInputSourceStartup,
-    inputSourceStartup,
-    onDeviceDownloadable,
-    shuangpinKeymap: macosShuangpinKeymap,
-  } = useMacosSettings({ client, macos: macosPlatform, setError });
-  const {
-    requestedSettingsPage,
-    setPage,
-    page,
-    dictionaryTab,
-    setDictionaryTab,
-    aboutTab,
-    setAboutTab,
-    accountLoginReturnPage,
-    setAccountLoginReturnPage,
-    mobileLastPageByTab,
-    settingsContentRef,
-    communityDestination,
-    setCommunityDestination,
-  } = useSettingsPageRouting({
-    initialPage,
-    mobilePlatform,
-    hasHomePage,
-  });
-  const currentAppVersion = useAppVersion({
-    readAppVersion: client.readAppVersion,
-    fallbackVersion: fallbackAppVersion,
-  });
-  const { customHelpcodeSchemas, helpcodePacks, refreshHelpcodePacks } = useHelpcodeCatalog({
-    schemaReader: client.listHelpcodeSchemas,
-    catalog: client.plugins?.catalog,
-    inputPageOpen: page === "input",
-  });
-  const {
-    value: mobileKeyboardFeedback,
-    busy: mobileKeyboardFeedbackBusy,
-    save: saveMobileKeyboardFeedback,
-    preview: previewMobileKeyboardHaptics,
-  } = useMobileKeyboardFeedback({
-    mobile: mobilePlatform,
-    client: client.mobileKeyboardFeedback,
-    onError: setError,
-  });
-  const {
-    phrases,
-    setPhrases,
-    phrasePage,
-    phraseBusy,
-    phraseError,
-    dictionaryPendingCount,
-    dictionaryFailures,
-    dictionarySnapshotError,
-    phraseNotice,
-    phraseSearch,
-    setPhraseSearch,
-    phraseForm,
-    setPhraseForm,
-    dictionaryKind,
-    setDictionaryKind,
-    dictionaryFormat,
-    setDictionaryFormat,
-    phraseListRef,
-    loadPhrases,
-    turnPhrasePage,
-    removePhrase,
-    savePhrase,
-    importPhrases,
-    retryDictionaryFailure,
-    dismissDictionaryFailure,
-    exportPhrases,
-    exportAllPhrases,
-    resetLearnedData,
-  } = useDictionaryManager({ client, confirm });
-  const mounted = useMountedRef();
-  const windowMaximized = useWindowState({ client, setError });
-  const [showTouchSkinEditor, setShowTouchSkinEditor] = useState(false);
-  const {
-    onPointerDown: beginTouchGeometryDrag,
-    onPointerMove: updateTouchGeometryDrag,
-    onPointerUp: endTouchGeometryDrag,
-  } = useTouchKeyboardGeometryDrag(draft, setDraft);
-  const {
-    providerCredentials,
-    aiCredentialGeneration,
-    aiCredentialGenerationRef,
-    aiCredentialInput,
-    setAiCredentialInput,
-    tencentCredentialInput,
-    setTencentCredentialInput,
-    updateTencentCredentialInput,
-    voiceCredentialInput,
-    setVoiceCredentialInput,
-    providerCredentialBusy,
-    providerCredentialMessages,
-    runProviderCredential,
-    runVoiceCredential,
-    credentialTestControl,
-  } = useProviderCredentials({ client });
-  const diagnosticsText = supportDiagnostics({
-    version: currentAppVersion,
-    host,
-    scheme: draft ? schemeTitle(draft.scheme) : undefined,
-    fallbackPlatform: androidPlatform ? "android" : iosPlatform ? "ios" : "desktop",
-    userAgent: typeof navigator === "undefined" ? undefined : navigator.userAgent,
-  });
-  const {
-    kind: feedbackKind,
-    setKind: setFeedbackKind,
-    detail: feedbackDetail,
-    setDetail: setFeedbackDetail,
-    report: feedbackReport,
-    reportCopied: feedbackReportCopied,
-    feedbackCopied,
-    copyReport: copyFeedbackReport,
-    submit: submitFeedback,
-    copyGroup: copyFeedbackGroup,
-  } = useFeedbackReport({
-    supportDiagnostics: diagnosticsText,
-    issuesUrl: platformIssuesUrl,
-    copyText: client.copyText,
-    openExternalUrl: client.openExternalUrl,
-  });
-  const {
-    dataDirectory,
-    busy: dataDirectoryBusy,
-    result: dataDirectoryResult,
-    choose: chooseDataDirectory,
-  } = useDataDirectory({
-    client: client.dataDirectory,
-    enabled: macosPlatform || linuxPlatform,
-    confirm,
-  });
+export { SettingsPage } from "./settings/settings-page";
+export { SettingsSidebar, type SettingsSidebarProps } from "./settings/settings-sidebar";
+export {
+  SettingsPreferencesForm,
+  type SettingsPreferencesFormProps,
+} from "./settings/settings-preferences-form";
 
-  const {
-    draftRef,
-    snapshotRef,
-    reload,
-    flush: retrySave,
-    saveState,
-    saveError,
-    loadFailed,
-  } = useSettingsPersistence({
-    client,
-    mobile: mobilePlatform,
-    mounted,
-    snapshot,
-    draft,
-    setSnapshot,
-    setDraft,
-    setBusy,
-    setError,
-    setNotice,
-    setRecoveredBackup,
-  });
+export {
+  SettingsAccountPage,
+  type SettingsAccountPageProps,
+} from "./settings/settings-account-page";
 
-  const { restoreDefaults, recoverPreferences } = usePreferenceRecovery({
-    client,
-    busy,
-    snapshotRef,
-    draftRef,
-    setSnapshot,
-    setDraft,
-    setBusy,
-    setError,
-    setNotice,
-    setRecoveredBackup,
-    confirm,
-  });
+export {
+  SettingsCommunityPage,
+  type SettingsCommunityPageProps,
+} from "./settings/settings-community-page";
 
-  const resetTouchKeyboardSettings = useTouchKeyboardSettingsReset({
-    draft,
-    setDraft,
-    setError,
-    setNotice,
-    confirm,
-  });
-  const openExternalUrl = useExternalUrl({
-    openExternalUrl: client.openExternalUrl,
-    setError,
-  });
-  const {
-    available: availableUpdate,
-    busy: updateBusy,
-    checkForUpdate,
-    status: updateStatus,
-    supported: updateCheckSupported,
-  } = useUpdateCheck({
-    checkUpdate: client.checkUpdate,
-    checkForApplicationUpdate: client.checkForApplicationUpdate,
-    platform: client.host?.platform ?? null,
-    edition: client.host?.edition?.id,
-    arch: client.host?.arch,
-    currentAppVersion,
-  });
+export {
+  SettingsSkinCommunitySection,
+  type SettingsSkinCommunitySectionProps,
+} from "./settings/settings-skin-community-section";
 
-  const openPanel = useOpenPanel({ setError });
+export {
+  SettingsPluginCommunitySection,
+  type SettingsPluginCommunitySectionProps,
+} from "./settings/settings-plugin-community-section";
 
-  // Only a failed save leaves changes unsaved for long; 重新读取 then asks before discarding them.
-  const dirty = !!draft && !!snapshot && !deepEqual(draft, snapshot.preferences);
-  const { ai, storedAiCredential } = aiSettingsPreferences(
-    draft?.ai_assistant,
-    providerCredentials,
-  );
-  const {
-    origin: aiOrigin,
-    token: aiToken,
-    models: aiModels,
-    modelsStatus: aiModelsStatus,
-    modelsBusy: aiModelsBusy,
-    testInput: aiTestInput,
-    setTestInput: setAiTestInput,
-    testOutput: aiTestOutput,
-    testStatus: aiTestStatus,
-    testBusy: aiTestBusy,
-    updateAi,
-    updateToken: updateAiToken,
-    fetchModels: fetchAiModels,
-    test: testAi,
-  } = useAiAssistant({
-    client: client.aiAssistant,
-    ai,
-    providerCredentialAvailable: aiProviderCredentials,
-    credentialGeneration: aiCredentialGeneration,
-    credentialGenerationRef: aiCredentialGenerationRef,
-    onChange: onAiChange,
-  });
-  const {
-    wordCharacter,
-    keybindings,
-    frequency,
-    mixedInput,
-    fuzzyPinyin,
-    localModes,
-    candidateEnglishGloss,
-    englishSuggestions,
-    inputModeHUD,
-  } = settingsInputPreferences(draft, client.host?.platform);
-  const touchKeyboardSchemes = draft?.touch_keyboard_schemes ?? {
-    enabled: defaultTouchKeyboardSchemes,
-  };
-  const {
-    selected: selectedTouchKeyboardScheme,
-    select: selectTouchKeyboardScheme,
-    selectHome: selectHomeScheme,
-    setEnabled: setTouchKeyboardSchemeEnabled,
-  } = useTouchKeyboardSchemeSelection({
-    draft,
-    setDraft,
-    handwritingScheme: client.host?.edition?.default_scheme,
-  });
-  // 每个平台都显示全部快捷模式的开关。macOS 以前以发布包只带 msime-pinyin.db 和 msime-english.db 为由隐藏 Emoji、颜文字和临时日语，但 msime-others.db 早已在 resources/desktop-dictionary.lock.json 里并随包发布，隐藏开关只是藏起了能用的功能；同样依赖 msime-english.db 的临时英文却一直显示，前后并不一致。
-  //
-  // 现在 macOS 发布包不再内置 msime-japanese.dat，改为按需下载（输入页「临时日语」开关下方提供下载）。缺资源的情况仍由运行时处理，而且比隐藏开关处理得更好：资源不在时运行时关闭对应模式（临时日语在日文词库下载前不可用），触发键照常输入大写字母而不是被吞掉。
-  const clipboardHistory = clipboardHistoryEnabled(iosPlatform, draft);
-  const toggleClipboardHistory = useClipboardHistoryToggle({
-    draft,
-    enabled: clipboardHistory,
-    clear: client.clipboard?.clear,
-    setDraft,
-    setError,
-  });
-  const diagnosticLog = diagnosticLogPreferences(draft);
-  const {
-    candidateTranslations,
-    candidateGlossLanguagesEnabled,
-    translationTargetLanguage,
-    translationSecondaryLanguage,
-    visibleTranslationLanguages,
-    visibleSecondaryLanguages,
-    customTranslation,
-    tencentTranslation,
-    niutrans,
-    translationProvider,
-    onDeviceMissingLanguages,
-    setTranslationProvider,
-  } = useTranslationSettings({
-    preferences: draft,
-    mobile: mobilePlatform,
-    macos: macosPlatform,
-    linux: linuxPlatform,
-    windows: windowsPlatform,
-    harmony: harmonyPlatform,
-    candidateEnglishGlossAvailable: Boolean(client.candidateEnglishGloss),
-    onDeviceDownloadable,
-    onChange: onTranslationChange,
-  });
-  const {
-    voiceInput,
-    systemVoice,
-    systemVoiceHostName,
-    localVoiceAvailable,
-    localVoice,
-    serviceVoice,
-    harmonyUnsupportedAsr,
-    doubaoAuthMode,
-    updateVoice,
-  } = useVoiceInputSettings({
-    preferences: draft?.voice_input,
-    macos: macosPlatform,
-    android: androidPlatform,
-    harmony: harmonyPlatform,
-    windows: windowsPlatform,
-    nativeVoicePlatform,
-    localModelsAvailable: client.localVoiceModels !== undefined,
-    onChange: onVoiceChange,
-  });
-  const providerPresetControls = createProviderPresetControl(client.openExternalUrl);
-  const floatingToolbar = floatingToolbarPreferences(draft);
-  const {
-    themeMode,
-    settingsTheme,
-    globalTheme,
-    customColors,
-    customTouchKeyboardSkin,
-    skinPreviewThemes,
-    setSkinPreviewThemes,
-    candidatePreviewTheme,
-    toolbarPreviewTheme,
-    keyboardPreviewTheme,
-    previewCustomTheme,
-    customKeyboardSelected,
-  } = useSettingsThemePreviews({
-    draft,
-    platform: host?.platform,
-    surfaceThemesFollow,
-    showCandidateNumberColor,
-    showCandidateBorderColor,
-  });
-  const dark = useSettingsTheme(themeMode, settingsTheme);
-  // 两种 HarmonyOS 外观都用用户的应用主题（水杉四季或某个固定季节）着色；每种外观取哪些 token 由 `appThemeStyle` 决定。
-  const resolvedAppTheme = useResolvedAppTheme(
-    harmonyPlatform || settingsPlatform === "hm2" ? client.appTheme : undefined,
-    dark,
-  );
-  useHarmonySystemBars(
-    settingsPlatform === "harmony" ? client.chrome : undefined,
-    resolvedAppTheme,
-    dark,
-  );
-  const {
-    keySpacingTenths: touchKeySpacingTenths,
-    rowSpacingTenths: touchRowSpacingTenths,
-    heightAdjustment: touchKeyboardHeightAdjustment,
-  } = touchKeyboardGeometryPreferences(draft);
-  const installerTrust = availableUpdate
-    ? describeInstallerTrust(
-        availableUpdate,
-        client.host?.platform ?? null,
-        client.host?.edition?.id,
-      )
-    : null;
-  const { showHelpcode, showDeveloperPage, untitledOnPhone } = settingsPageModelVisibility({
-    mobilePlatform,
-    settingsPlatform,
-    hasHost: Boolean(client.host),
-    linuxPlatform,
-    windowsPlatform,
-    macosPlatform,
-    showRestartInputMethod: Boolean(showRestartInputMethod),
-    hasMcpServerStatus: Boolean(client.mcpServerStatus),
-    showHelpcodeShiftEntry,
-    editionUsesHelpcode: editionUsesHelpcode(client.host?.edition),
-  });
-  const {
-    availablePages,
-    sidebarGroups,
-    mobilePrimaryPages,
-    mobileSecondaryGroups,
-    pageAliases,
-    handwritingOnScreenKeyboardPage,
-  } = settingsPageProjections({
-    mobilePlatform,
-    hasHomePage,
-    hasTypingStatistics: Boolean(client.typingStatistics),
-    hasVocabularyReview: Boolean(client.vocabularyReview),
-    hasAccount: Boolean(client.account || client.appIcon),
-    hasChat: Boolean(client.chat),
-    hasCommunity: Boolean(client.communitySkins || client.communityResources),
-    showFloatingToolbar,
-    showDeveloperPage,
-    // A host with a pack store, or one that plays or routes something the page switches.
-    hasPlugins:
-      !mobilePlatform &&
-      (Boolean(client.plugins) ||
-        Boolean(client.communityPlugins) ||
-        showKeySound ||
-        showMusic ||
-        showPluginTriggers ||
-        showTypingEffects),
-    // full 不带版本信息，手写一直都在。
-    hasHandwriting: client.host?.edition?.handwriting ?? true,
-    // 桌面上的手写页只有一个打开按钮（HarmonyOS 2-in-1 是一段说明），并进屏幕键盘页；Windows 的原生设置窗口也并成了一页（`SettingsNavigation.h`）。触屏宿主的手写页另有内容，投影本身就不并。
-    handwritingOnScreenKeyboardPage:
-      macosPlatform || linuxPlatform || windowsPlatform || harmonyPlatform,
-    hasMcp: Boolean(client.mcpServerStatus),
-    mobileHiddenPageIds,
-    mobilePageTitle,
-    desktopPageTitle,
-  });
-  const {
-    mobileActiveTab,
-    navigationPage,
-    selectPage,
-    selectMobileTab,
-    openAccountLogin,
-    finishAccountLogin,
-  } = useSettingsNavigation({
-    mobilePlatform,
-    mobileHiddenPageIds,
-    availablePages,
-    pageAliases,
-    page: requestedSettingsPage,
-    setPage,
-    mobileLastPageByTab,
-    route,
-    hasHomePage,
-    setCommunityDestination,
-    setAccountLoginReturnPage,
-    accountLoginReturnPage,
-  });
-  // 设计稿里从一个页面内部打开另一个页面的行，例如「词库」上的「背单词」。
-  const pageEntry = (id: SettingsPageId) => availablePages.find((item) => item.id === id);
-  const {
-    communityGallery,
-    openCommunityGallery: openCommunityGallerySubview,
-    closeCommunityGallery,
-  } = useCommunityGallerySubview({
-    mobile: mobilePlatform,
-    page,
-    selectPage,
-    hasSkins: Boolean(client.communitySkins),
-  });
-  const { communityTabs, openCommunityGallery } = useCommunityGalleryNavigation({
-    mobile: mobilePlatform,
-    hasCommunityPage: availablePages.some((item) => item.id === "community"),
-    hasSkins: Boolean(client.communitySkins),
-    hasResources: Boolean(client.communityResources),
-    selectPage,
-    openSubview: openCommunityGallerySubview,
-  });
-  const { openCommunity, openLocalDesigns } = useSettingsDestinationActions({
-    selectPage,
-    setShowTouchSkinEditor,
-    setCommunityDestination,
-    // 触屏宿主去社区的入口按类别去「社区」标签，或在功能页里打开完整图库（见上面的 `openCommunityGallery`）；桌面去「社区」页。
-    openCommunityGallery: mobilePlatform ? openCommunityGallery : undefined,
-  });
-  const {
-    category: initialCommunityCategory,
-    scope: initialCommunityScope,
-    initialMine: initialCommunityMine,
-  } = communityDestinationView(communityDestination);
-  return {
-    client,
-    confirmation,
-    confirm,
-    linuxPlatform,
-    androidPlatform,
-    iosPlatform,
-    harmonyPlatform,
-    mobilePlatform,
-    windowsPlatform,
-    macosPlatform,
-    settingsPlatform,
-    dark,
-    resolvedAppTheme,
-    nativeVoicePlatform,
-    host,
-    showModeScope,
-    showModeSwitchShortcuts,
-    showPanelShortcuts,
-    showNumberRowSelection,
-    showRestartInputMethod,
-    showInstallInputSource,
-    showFloatingToolbar,
-    showToolbarAppearance,
-    showToolbarComponents,
-    showTouchKeyboardHeight,
-    showTouchKeyboardSpacing,
-    showCandidateFontControls,
-    showCandidatePreeditFont,
-    showCandidateEnglishFont,
-    showEnglishSuggestions,
-    showHelpcodeShiftEntry,
-    showHelpcode,
-    customHelpcodeSchemas,
-    helpcodePacks,
-    refreshHelpcodePacks,
-    showShuangpinPreedit,
-    showCharacterWidth,
-    showVoiceCommitMode,
-    showVoiceProviderSettings,
-    showVoiceStreamPreedit,
-    showVoiceSpaceLockSwitch,
-    showVoiceCueSwitches,
-    showVoiceCaptureBackends,
-    showCandidateRowColors,
-    showCandidateSelectionAppearance,
-    showCandidateBorderColor,
-    showCandidateNumberColor,
-    surfaceThemesFollow,
-    showCandidateFollowCursor,
-    showCandidateWindowScale,
-    showCandidateWindowOpacity,
-    showCandidateCornerRadius,
-    showCandidatePadding,
-    showInputModeHUD,
-    showInputModeStatusItem,
-    showVoiceCaptureDevices,
-    showFullwidthChord,
-    showTabPagePagingSwitches,
-    showMixedInputMinimumPrefix,
-    fullwidthChord,
-    clientHostedPlatform,
-    platformLicenseUrl,
-    platformReleasesPageUrl,
-    desktopDownloadUrl,
-    platformIssuesUrl,
-    captureBackendOptions,
-    platformHelpIntro,
-    platformQuickStart,
-    platformNetworkDescription,
-    platformAboutDescription,
-    desktopPanels,
-    showVoiceHotkeys,
-    showKeySound,
-    showMusic,
-    showPluginTriggers,
-    showTypingEffects,
-    showTypingEffectStyles,
-    showTypingEffectPacks,
-    showEffectIntensity,
-    showAiCandidateLimit,
-    typingEffectsFlashOnly,
-    showWordbookPacks,
-    showSymbolSetPacks,
-    showScriptPlugins,
-    snapshot,
-    draft,
-    setDraft,
-    busy,
-    setError,
-    error,
-    notice,
-    recoveredBackup,
-    removeUserDataOnUninstall,
-    setRemoveUserDataOnUninstall,
-    uninstallConfirmation,
-    uninstallBusy,
-    uninstallResult,
-    requestUninstall,
-    confirmUninstall,
-    cancelUninstall,
-    dataDirectory,
-    dataDirectoryBusy,
-    dataDirectoryResult,
-    inputSourceStartup,
-    dismissInputSourceStartup,
-    page,
-    requestedSettingsPage,
-    dictionaryTab,
-    setDictionaryTab,
-    aboutTab,
-    setAboutTab,
-    accountLoginReturnPage,
-    settingsContentRef,
-    communityDestination,
-    updateStatus,
-    updateBusy,
-    updateCheckSupported,
-    availableUpdate,
-    currentAppVersion,
-    copyFeedbackGroup,
-    feedbackCopied,
-    feedbackKind,
-    setFeedbackKind,
-    feedbackDetail,
-    setFeedbackDetail,
-    copyFeedbackReport,
-    feedbackReportCopied,
-    mobileKeyboardFeedback,
-    mobileKeyboardFeedbackBusy,
-    macosShuangpinKeymap,
-    showShuangpinKeymapHint,
-    setPhrases,
-    phrases,
-    phrasePage,
-    phraseBusy,
-    phraseError,
-    dictionaryPendingCount,
-    dictionaryFailures,
-    dictionarySnapshotError,
-    phraseNotice,
-    phraseSearch,
-    setPhraseSearch,
-    setPhraseForm,
-    phraseForm,
-    dictionaryKind,
-    setDictionaryKind,
-    dictionaryFormat,
-    setDictionaryFormat,
-    phraseListRef,
-    windowMaximized,
-    skinPreviewThemes,
-    setSkinPreviewThemes,
-    showTouchSkinEditor,
-    setShowTouchSkinEditor,
-    aiModels,
-    aiModelsStatus,
-    aiModelsBusy,
-    aiTestInput,
-    setAiTestInput,
-    aiTestOutput,
-    aiTestStatus,
-    aiTestBusy,
-    providerCredentials,
-    aiCredentialInput,
-    setAiCredentialInput,
-    tencentCredentialInput,
-    setTencentCredentialInput,
-    updateTencentCredentialInput,
-    voiceCredentialInput,
-    setVoiceCredentialInput,
-    providerCredentialBusy,
-    providerCredentialMessages,
-    runVoiceCredential,
-    supportDiagnostics: diagnosticsText,
-    feedbackReport,
-    submitFeedback,
-    reload,
-    retrySave,
-    saveState,
-    saveError,
-    loadFailed,
-    saveMobileKeyboardFeedback,
-    chooseDataDirectory,
-    previewMobileKeyboardHaptics,
-    resetTouchKeyboardSettings,
-    beginTouchGeometryDrag,
-    updateTouchGeometryDrag,
-    endTouchGeometryDrag,
-    openExternalUrl,
-    openPanel,
-    checkForUpdate,
-    loadPhrases,
-    turnPhrasePage,
-    removePhrase,
-    savePhrase,
-    importPhrases,
-    retryDictionaryFailure,
-    dismissDictionaryFailure,
-    exportPhrases,
-    exportAllPhrases,
-    restoreDefaults,
-    recoverPreferences,
-    resetLearnedData,
-    dirty,
-    ai,
-    aiOrigin,
-    aiToken,
-    storedAiCredential,
-    updateAi,
-    updateAiToken,
-    fetchAiModels,
-    testAi,
-    wordCharacter,
-    keybindings,
-    frequency,
-    mixedInput,
-    fuzzyPinyin,
-    touchKeyboardSchemes,
-    selectedTouchKeyboardScheme,
-    selectTouchKeyboardScheme,
-    setTouchKeyboardSchemeEnabled,
-    selectHomeScheme,
-    localModes,
-    clipboardHistory,
-    toggleClipboardHistory,
-    diagnosticLog,
-    candidateTranslations,
-    candidateEnglishGloss,
-    englishSuggestions,
-    candidateGlossLanguagesEnabled,
-    translationTargetLanguage,
-    translationSecondaryLanguage,
-    visibleTranslationLanguages,
-    visibleSecondaryLanguages,
-    voiceInput,
-    systemVoice,
-    systemVoiceHostName,
-    localVoiceAvailable,
-    localVoice,
-    serviceVoice,
-    harmonyUnsupportedAsr,
-    doubaoAuthMode,
-    updateVoice,
-    customTranslation,
-    tencentTranslation,
-    niutrans,
-    translationProvider,
-    onDeviceMissingLanguages,
-    setTranslationProvider,
-    runProviderCredential,
-    credentialTestControl,
-    providerPresetControls,
-    inputModeHUD,
-    floatingToolbar,
-    themeMode,
-    settingsTheme,
-    candidatePreviewTheme,
-    toolbarPreviewTheme,
-    keyboardPreviewTheme,
-    globalTheme,
-    customColors,
-    previewCustomTheme,
-    customTouchKeyboardSkin,
-    onCandidateColorChange,
-    onCustomKeyboardChange,
-    onUseCustomKeyboard,
-    customKeyboardSelected,
-    touchKeySpacingTenths,
-    touchRowSpacingTenths,
-    touchKeyboardHeightAdjustment,
-    installerTrust,
-    availablePages,
-    handwritingOnScreenKeyboardPage,
-    sidebarGroups,
-    mobileActiveTab,
-    untitledOnPhone,
-    mobilePrimaryPages,
-    mobileSecondaryGroups,
-    navigationPage,
-    pageEntry,
-    selectPage,
-    selectMobileTab,
-    openAccountLogin,
-    finishAccountLogin,
-    openLocalDesigns,
-    openCommunity,
-    initialCommunityCategory,
-    initialCommunityScope,
-    initialCommunityMine,
-    communityGallery,
-    openCommunityGallery,
-    closeCommunityGallery,
-    communityTabs,
-  };
-}
+export {
+  SettingsFeaturePages,
+  type SettingsFeaturePagesProps,
+} from "./settings/settings-feature-pages";
 
-/** What `SettingsPage` computes for its shell and page components. */
-export type SettingsPageModel = ReturnType<typeof useSettingsPageModel>;
+export {
+  CandidateFontSettingsRows,
+  type CandidateFontSettingsRowsPreferences,
+  type CandidateFontSettingsRowsProps,
+} from "./settings/candidate-font-settings-rows";
 
-export function SettingsPage(props: SettingsPageProps) {
-  // 宿主自己的屏幕键盘布局：没写 `layout` 的键盘预览按它画，手机上不画桌面键盘。
-  return (
-    <ScreenKeyboardLayoutContext.Provider
-      value={screenKeyboardLayoutFor(props.client.host?.platform)}
-    >
-      <SettingsShell {...props} />
-    </ScreenKeyboardLayoutContext.Provider>
-  );
-}
+export { useVoicePanel, type VoicePanelState } from "./keyboard/use-voice-panel";
 
-function SettingsShell(props: SettingsPageProps) {
-  const { onReplayOnboarding } = props;
-  const model = useSettingsPageModel(props);
-  const {
-    client,
-    confirmation,
-    confirm,
-    androidPlatform,
-    iosPlatform,
-    harmonyPlatform,
-    mobilePlatform,
-    macosPlatform,
-    settingsPlatform,
-    dark,
-    resolvedAppTheme,
-    draft,
-    setDraft,
-    busy,
-    setError,
-    error,
-    notice,
-    recoveredBackup,
-    inputSourceStartup,
-    dismissInputSourceStartup,
-    page,
-    dictionaryTab,
-    setDictionaryTab,
-    accountLoginReturnPage,
-    settingsContentRef,
-    communityDestination,
-    windowMaximized,
-    reload,
-    retrySave,
-    saveState,
-    saveError,
-    loadFailed,
-    openExternalUrl,
-    platformIssuesUrl,
-    openPanel,
-    restoreDefaults,
-    recoverPreferences,
-    dirty,
-    keyboardPreviewTheme,
-    surfaceThemesFollow,
-    availablePages,
-    handwritingOnScreenKeyboardPage,
-    sidebarGroups,
-    mobileActiveTab,
-    untitledOnPhone,
-    mobilePrimaryPages,
-    mobileSecondaryGroups,
-    navigationPage,
-    selectPage,
-    selectMobileTab,
-    openAccountLogin,
-    finishAccountLogin,
-    openLocalDesigns,
-    openCommunity,
-    initialCommunityCategory,
-    initialCommunityScope,
-    initialCommunityMine,
-    communityGallery,
-    closeCommunityGallery,
-    communityTabs,
-    currentAppVersion,
-  } = model;
-  const {
-    pluginView,
-    setPluginView,
-    skinView,
-    setSkinView,
-    navQuery,
-    setNavQuery,
-    titleCollapsedOn,
-    setTitleCollapsedOn,
-    chatMounted,
-    chatFocusRequest,
-    setChatFocusRequest,
-    pageColumnRef,
-    launchPage,
-  } = useSettingsShellState(page);
-  const shellPresentation = settingsShellPlatformPresentation({
-    settingsPlatform,
-    mobilePlatform,
-    mobileActiveTab,
-    page,
-    hasWindowControl: Boolean(client.windowControl),
-    hasWindowDrag: Boolean(client.beginWindowDrag),
-    availablePages,
-    untitledOnPhone,
-  });
-  const {
-    harmonyLook,
-    harmonyThemePlatform,
-    harmonyPhone,
-    tabRootPage,
-    pushedPage,
-    contentFills,
-    macShell,
-    linuxShell,
-    ipadShell,
-    ipadSidebarShown,
-    titlebarShown,
-    pageTitle,
-    collapsingTitle,
-    searchInTitlebar,
-    searchInSidebar,
-    sidebarBrandShown,
-  } = shellPresentation;
-  // 从一个推入页面再推入的页面（反馈 到 帮助）会保留内容列的动画类，所以要重启动画，而不是让它停在已结束的状态。用重启动画而不是按页面给内容列设 key，能让表单页面像在其他宿主上一样保持挂载、保留状态。
-  useLayoutEffect(() => {
-    const column = pageColumnRef.current;
-    if (!pushedPage || !column || typeof column.getAnimations !== "function") return;
-    for (const animation of column.getAnimations()) {
-      animation.cancel();
-      animation.play();
-    }
-  }, [page, pushedPage]);
-  const reloadSettings = createSettingsReloadAction({ dirty, reload, confirm });
-  // 社区图库「添加」词库的去处：宿主有命名词库时装成一个独立的词库，否则导入本机词库。「社区」页和功能页里的图库共用。宿主能核对第三方词库时，发布词库前用它拦下来自搜狗细胞词库的词。
-  const communityLocalDictionary = createCommunityLocalDictionary(
-    client.dictionary,
-    client.dictionaryCollections,
-  );
-  const recordCommunitySkin = (id: string) => {
-    void client.typingStatistics?.recordSkin?.(id);
-  };
-  const {
-    skinTabs,
-    desktopTabs: desktopSkinTabs,
-    phoneSkinCommunityShown,
-    skinCommunityShown,
-    pluginCommunityShown,
-  } = useSettingsCommunityViews({
-    page,
-    mobile: mobilePlatform,
-    harmony: harmonyPlatform,
-    skinView,
-    onSkinViewChange: setSkinView,
-    pluginView,
-    hasCommunitySkins: Boolean(client.communitySkins),
-    hasCommunityCandidateSkins: Boolean(client.communityCandidateSkins),
-    hasCommunityPlugins: Boolean(client.communityPlugins),
-  });
-  const { onOpenPage } = createSettingsPageSelection({ selectPage });
-  const statusActions = createSettingsStatusActions({
-    recoverPreferences,
-    inputSourceStartup: client.inputSourceStartup,
-    dismissInputSourceStartup,
-  });
-  const externalActions = createSettingsExternalActions({
-    mobile: mobilePlatform,
-    canOpenExternalUrl: Boolean(client.openExternalUrl),
-    openExternalUrl,
-    issuesUrl: platformIssuesUrl,
-    openSystemKeyboardSettings: client.openSystemKeyboardSettings,
-  });
-  const { onOpenChat, onRestoreDefaults } = createSettingsNavigationActions({
-    selectPage,
-    chatAvailable: Boolean(client.chat),
-    openPanel,
-    openHandwriting: client.openHandwriting,
-    restoreDefaults,
-  });
-  const { onWindowPointerDownCapture, windowDragHandlers, keepPointer } =
-    useSettingsWindowInteractions({
-      windowControl: client.windowControl,
-      beginWindowDrag: client.beginWindowDrag,
-      resizeWindow: client.resizeWindow,
-      windowMaximized,
-      macShell,
-      onError: setError,
-    });
-  const { parentPage, goBack, shownSidebarGroups, navSearchField } = useSettingsShellNavigation({
-    page,
-    navigationPage,
-    launchPage,
-    availablePages,
-    sidebarGroups,
-    navQuery,
-    setNavQuery,
-    selectPage,
-  });
-  return (
-    <div
-      className={settings.shell}
-      data-settings-shell=""
-      // The platform's accent and the `--p-*` tokens the platform primitives read hang off this attribute.
-      data-platform={settingsPlatform}
-      // HarmonyOS 应用主题以内联方式在同一个元素上为 token 表重新着色，优先级高于 `[data-platform]` 规则；没有解析出主题时这里为空，沿用 token 表自己的颜色。
-      style={
-        harmonyThemePlatform
-          ? appThemeStyle(resolvedAppTheme, dark, harmonyThemePlatform)
-          : undefined
-      }
-      data-season={seasonAttr(resolvedAppTheme)}
-      // Marks the phone navigation. It no longer carries a palette: the `[data-platform]` rules in styles.css cover the phone hosts too.
-      data-mobile={mobilePlatform ? "" : undefined}
-      onPointerDownCapture={onWindowPointerDownCapture}
-    >
-      <SettingsShellToasts enabled={harmonyLook}>
-        {confirmation}
-        <KeyboardSwitchGuideHost setup={client.home?.setup} />
-        {titlebarShown && (
-          <WindowTitlebar
-            linux={linuxShell}
-            logo={logo}
-            pageTitle={pageTitle}
-            search={searchInTitlebar ? navSearchField : undefined}
-            maximized={windowMaximized}
-            windowControl={client.windowControl}
-            dragHandlers={windowDragHandlers}
-            keepPointer={keepPointer}
-          />
-        )}
-        <div className={settings.body} data-settings-body="">
-          {/* A bottom tab bar. `order-2` seats it below the content while the DOM keeps it ahead, so assistive technology and keyboard focus still reach the navigation first, and the bottom padding clears the gesture inset. Hidden above phone width, where the sidebar serves. */}
-          {mobilePlatform && !contentFills && (
-            <MobileSettingsTabs
-              tabs={mobilePrimaryPages}
-              activeTab={mobileActiveTab}
-              onSelect={selectMobileTab}
-              platform={settingsPlatform}
-            />
-          )}
-          <nav
-            className={`${settings.sidebar} ${ipadSidebarShown ? "" : "ipad:hidden"}`}
-            aria-label="设置分类"
-          >
-            {macShell && (
-              <div className={settings.macosDragRow} data-window-drag="" {...windowDragHandlers} />
-            )}
-            {ipadShell && <h2 className={settings.sidebarTitle}>设置</h2>}
-            {/* 品牌（图标加名称）放在侧栏顶部、搜索框之上，只在没有自绘标题栏的桌面窗口出现：macOS 排在红绿灯那一行下面，并和那一行一样可以拖动窗口；HarmonyOS 2in1 与没有窗口命令的桌面窗口直接起头。Windows 和 Linux 的标题栏已经写着品牌，手机和 iPad 的界面由系统和标签栏承担，都不再画一份。图标是装饰，名称就是文字本身。 */}
-            {sidebarBrandShown && (
-              <div
-                className={settings.sidebarHeader}
-                data-sidebar-brand=""
-                data-window-drag={macShell ? "" : undefined}
-                {...(macShell ? windowDragHandlers : {})}
-              >
-                <img src={logo} alt="" draggable={false} />
-                <span>水杉输入法</span>
-              </div>
-            )}
-            {searchInSidebar && <label className={settings.sidebarSearch}>{navSearchField}</label>}
-            <div className={settings.sidebarItems}>
-              {shownSidebarGroups.flatMap((group) =>
-                group.pages.map((item) => (
-                  <NavItem
-                    key={item.id}
-                    label={item.title}
-                    icon={<img className={settings.sidebarGlyph} src={item.icon} alt="" />}
-                    selected={navigationPage === item.id}
-                    controls="settings-content"
-                    onSelect={() => selectPage(item.id)}
-                  />
-                )),
-              )}
-            </div>
-            {shownSidebarGroups.length === 0 && (
-              <p className={settings.sidebarEmpty} role="status">
-                没有匹配的设置
-              </p>
-            )}
-            {!client.host && <p className={settings.previewLabel}>客户端预览版</p>}
-          </nav>
-          <main
-            ref={settingsContentRef}
-            id="settings-content"
-            className={`${settings.content} ${ipadSidebarShown ? "" : "ipad:col-span-2"} ${contentFills ? "flex flex-col" : ""}`}
-            aria-labelledby="page-title"
-            onScroll={
-              collapsingTitle
-                ? (event) => setTitleCollapsedOn(event.currentTarget.scrollTop > 28 ? page : null)
-                : undefined
-            }
-          >
-            {collapsingTitle && (
-              // The large title's compact stand-in once it scrolls away. The title is decorative: the `h1` below still names the page. The back button is not: the large header's own scrolls away with the title, and a pushed page that has been scrolled had no way back but the system gesture.
-              <div className={settings.collapsedTitle(titleCollapsedOn === page)}>
-                {pushedPage && titleCollapsedOn === page && (
-                  <button
-                    type="button"
-                    className={settings.collapsedBackButton}
-                    aria-label="返回"
-                    onClick={goBack}
-                  >
-                    <FluentIcon name="arrow_left" size={22} />
-                  </button>
-                )}
-                <span aria-hidden="true">{pageTitle}</span>
-              </div>
-            )}
-            {macShell && (
-              <header className={settings.macosToolbar} data-window-drag="" {...windowDragHandlers}>
-                <h1 id="page-title">{pageTitle}</h1>
-              </header>
-            )}
-            <div
-              ref={pageColumnRef}
-              className={`${settings.contentColumn} ${pushedPage ? "animate-ms-push-in motion-reduce:animate-none" : ""} ${contentFills ? "flex min-h-0 flex-1 flex-col" : ""}`}
-              // 统计 和 我的 使用更紧凑的标签页列表，样式表依据这个属性区分。社区虽是标签页的根页，内容是和皮肤页「社区」分类同样的图库而不是设置列表，保持图库原来的版式。
-              data-tab-page={
-                harmonyPhone && tabRootPage && page !== "home" && page !== "community"
-                  ? ""
-                  : undefined
-              }
-            >
-              {/* 三个标签页一打开都是已经表明自身的内容（标题行、资料卡、一排数字），源应用不在它们上面印页面标题。标题是隐藏而不是去掉：它为 `main` 提供名称。 */}
-              {parentPage && !harmonyPhone && (
-                <button
-                  type="button"
-                  className={settings.backLink}
-                  // Named for where it goes, so it is not a second button called just 反馈 next to the sidebar's.
-                  aria-label={`返回${parentPage.title}`}
-                  onClick={() => selectPage(parentPage.id)}
-                >
-                  <span aria-hidden="true">‹ </span>
-                  {parentPage.title}
-                </button>
-              )}
-              {!macShell && (
-                <SettingsPageHeader
-                  title={pageTitle}
-                  hiddenOnPhone={mobilePlatform && untitledOnPhone.includes(page)}
-                  onBack={pushedPage ? goBack : undefined}
-                  home={page === "home"}
-                />
-              )}
-              {/* 2-in-1 的根页面上没有设置引导卡片，所以输入法还需要添加或设为默认时，由 输入 和 关于 提示。 */}
-              {settingsPlatform === "hm2" &&
-                client.home &&
-                (page === "input" || page === "about") && (
-                  <SetupWarningStrip actions={client.home} />
-                )}
-              <SettingsPageStatus
-                error={error}
-                notice={notice}
-                busy={busy}
-                recoveredBackup={recoveredBackup}
-                canRecover={Boolean(client.recoverPreferences)}
-                onRecover={statusActions.onRecover}
-                openPreferencesDirectory={client.openPreferencesDirectory}
-                macos={macosPlatform}
-                onError={setError}
-                draft={draft}
-                inputSourceStartup={inputSourceStartup}
-                onOpenSettings={statusActions.onOpenSettings}
-                onDismiss={statusActions.onDismiss}
-                saveError={
-                  saveState === "failed" && draft && isSettingsFormPage(page) ? saveError : ""
-                }
-                onRetrySave={() => void retrySave()}
-              />
-              {client.notices && (
-                <NoticeBanner client={client.notices} openExternalUrl={openExternalUrl} />
-              )}
-              {client.home && draft && page === "home" && (
-                <HomePage
-                  preferences={draft}
-                  actions={client.home}
-                  onOpenPage={onOpenPage}
-                  onOpenChat={
-                    onOpenChat &&
-                    (() => {
-                      setChatFocusRequest((count) => count + 1);
-                      onOpenChat();
-                    })
-                  }
-                  touchLayout={mobilePlatform}
-                  ios={iosPlatform}
-                  keyboardSurfaceTheme={
-                    surfaceThemesFollow ? undefined : draft.screen_keyboard_theme
-                  }
-                  rootPages={mobileSecondaryGroups
-                    .flatMap((group) => group.pages)
-                    .map((item) => ({ id: item.id, title: item.title }))}
-                />
-              )}
-              {client.home && page === "try-keyboard" && (
-                <TryKeyboardPage
-                  actions={client.home}
-                  switchAway={!harmonyPlatform}
-                  chat={client.chat}
-                  onLogin={openAccountLogin}
-                  onOpenUrl={
-                    client.openExternalUrl
-                      ? (url: string) => {
-                          void openExternalUrl(url);
-                        }
-                      : undefined
-                  }
-                />
-              )}
-              {(client.account || client.appIcon) && page === "account" && (
-                <AccountPage
-                  client={client.account}
-                  appIcon={client.appIcon}
-                  platform={
-                    androidPlatform
-                      ? "android"
-                      : iosPlatform
-                        ? "ios"
-                        : harmonyPlatform
-                          ? "harmony"
-                          : undefined
-                  }
-                  mobile={mobilePlatform}
-                  onCancelLogin={accountLoginReturnPage ? finishAccountLogin : undefined}
-                  onLoginComplete={accountLoginReturnPage ? finishAccountLogin : undefined}
-                  onOpenLocalDesigns={
-                    client.customTouchKeyboardSkins ? openLocalDesigns : undefined
-                  }
-                  // Windows 的社区页只有词包与回复模板，没有皮肤画廊；它的候选窗口皮肤社区在主题页。
-                  onOpenCommunity={client.communityResources ? openCommunity : undefined}
-                  communityHasSkins={Boolean(client.communitySkins)}
-                  onOpenCloudDictionary={
-                    !mobilePlatform && client.cloudDictionary
-                      ? () => {
-                          selectPage("dictionary");
-                          setDictionaryTab("cloud");
-                        }
-                      : client.openCloudDictionary && !macosPlatform
-                        ? () => {
-                            void client.openCloudDictionary!().catch(() =>
-                              setError("无法打开云词库，请重试。"),
-                            );
-                          }
-                        : undefined
-                  }
-                  // macOS opens the cloud clipboard only from the IME menu, which supplies the input session it pastes into.
-                  onOpenCloudClipboard={
-                    client.openCloudClipboard && !macosPlatform
-                      ? () => {
-                          void client.openCloudClipboard!().catch(() =>
-                            setError("无法打开云剪贴板，请重试。"),
-                          );
-                        }
-                      : undefined
-                  }
-                  onOpenAbout={mobilePlatform ? () => selectPage("about") : undefined}
-                  onOpenFeedback={
-                    mobilePlatform && availablePages.some((item) => item.id === "feedback")
-                      ? () => selectPage("feedback")
-                      : undefined
-                  }
-                  onOpenDesktopDownload={
-                    mobilePlatform && client.openExternalUrl
-                      ? () => {
-                          void openExternalUrl(desktopDownloadUrl);
-                        }
-                      : undefined
-                  }
-                  onReplayOnboarding={mobilePlatform ? onReplayOnboarding : undefined}
-                  preferences={draft}
-                  onOpenPage={selectPage}
-                  appTheme={client.appTheme}
-                  onOpenUrl={
-                    client.openExternalUrl
-                      ? (url: string) => {
-                          void openExternalUrl(url);
-                        }
-                      : undefined
-                  }
-                  copyText={client.copyText}
-                  desktopDownloadUrl={desktopDownloadUrl}
-                  appVersion={currentAppVersion}
-                />
-              )}
-              {/* 触屏上 AI 对话从「AI 辅助」二级页进入：第一次打开后一直挂着，切换标签只是隐藏，对话记录和进行中的回复都不丢。 */}
-              {client.chat && (page === "chat" || (mobilePlatform && chatMounted)) && (
-                <div className={page === "chat" ? "contents" : undefined} hidden={page !== "chat"}>
-                  <ChatPage
-                    client={client.chat}
-                    touch={mobilePlatform}
-                    active={page === "chat"}
-                    focusRequest={chatFocusRequest}
-                    setup={client.home}
-                    onLogin={openAccountLogin}
-                  />
-                </div>
-              )}
-              {page === "community" && !mobilePlatform && (
-                <CommunityPage
-                  destinationKey={communityDestination}
-                  skins={client.communitySkins}
-                  resources={client.communityResources}
-                  theme={keyboardPreviewTheme}
-                  initialMine={initialCommunityMine}
-                  initialCategory={initialCommunityCategory}
-                  initialScope={initialCommunityScope}
-                  localDictionary={communityLocalDictionary}
-                  localSkinLibrary={client.customSkinLibrary}
-                  mobile={mobilePlatform}
-                  onLogin={openAccountLogin}
-                  preferences={draft}
-                  // 从皮肤库应用的皮肤和其他偏好修改一样：先进入草稿，再由表单的自动保存写入。
-                  onApplyPreferences={setDraft}
-                  onSkinApplied={recordCommunitySkin}
-                  look={harmonyPlatform && mobilePlatform ? "harmony" : undefined}
-                />
-              )}
-              {/* 触屏的「社区」标签根页：顶部「皮肤 / 词库」分类，每类是完整的社区图库（搜索、分类、详情、获取或添加、举报、发布都在里面），只挂载选中的那一类。和皮肤页的「社区」分类一样画在设置表单之外：图库自带搜索和发布表单，嵌在设置的 <form> 里会被 WebView 当成外层表单提交。详情的历史记录留在这一页，返回先关详情。 */}
-              {page === "community" && mobilePlatform && communityTabs.tabList}
-              {page === "community" && mobilePlatform && (
-                <div className={communityTabs.tabList ? "mt-6" : undefined}>
-                  {communityTabs.selected === "skin" &&
-                    client.communitySkins &&
-                    communityTabs.panel(
-                      "skin",
-                      <CommunitySkinsPage
-                        client={client.communitySkins}
-                        theme={keyboardPreviewTheme}
-                        localSkinLibrary={client.customSkinLibrary}
-                        mobile
-                        onLogin={openAccountLogin}
-                        look={harmonyPlatform ? "harmony" : undefined}
-                        preferences={draft}
-                        // 「使用」和皮肤页的网格一样先进入草稿，再由表单的自动保存写入。
-                        onApplyPreferences={setDraft}
-                        onSkinApplied={recordCommunitySkin}
-                        historyPage="community"
-                      />,
-                    )}
-                  {communityTabs.selected === "dictionary" &&
-                    client.communityResources &&
-                    communityTabs.panel(
-                      "dictionary",
-                      <CommunityResourcesPage
-                        client={client.communityResources}
-                        kind="dictionary"
-                        localDictionary={communityLocalDictionary}
-                        mobile
-                        look={harmonyPlatform ? "harmony" : undefined}
-                        historyPage="community"
-                      />,
-                    )}
-                </div>
-              )}
-              {/* 触屏宿主在功能页里打开的完整社区图库。画在设置表单之外：图库自带搜索和发布表单，嵌在设置的 <form> 里会被 WebView 当成外层表单提交。 */}
-              {communityGallery && page === communityGalleryPage(communityGallery.category) && (
-                <CommunityGallerySubview
-                  key={`${communityGallery.category}:${communityGallery.scope}:${communityGallery.initialMine}`}
-                  view={communityGallery}
-                  skins={client.communitySkins}
-                  resources={client.communityResources}
-                  theme={keyboardPreviewTheme}
-                  localDictionary={communityLocalDictionary}
-                  localSkinLibrary={client.customSkinLibrary}
-                  onLogin={openAccountLogin}
-                  preferences={draft}
-                  onApplyPreferences={setDraft}
-                  onSkinApplied={recordCommunitySkin}
-                  look={harmonyPlatform && mobilePlatform ? "harmony" : undefined}
-                  onClose={closeCommunityGallery}
-                />
-              )}
-              {client.typingStatistics && page === "typing-statistics" && (
-                <TypingStatisticsPage
-                  client={client.typingStatistics}
-                  mobile={mobilePlatform}
-                  platform={client.host?.platform}
-                  openSystemSettings={client.openSystemKeyboardSettings}
-                  look={
-                    settingsPlatform === "harmony"
-                      ? "harmony"
-                      : settingsPlatform === "hm2"
-                        ? "hm2"
-                        : undefined
-                  }
-                />
-              )}
-              {client.vocabularyReview && page === "vocabulary" && (
-                <VocabularyReviewPage
-                  client={client.vocabularyReview}
-                  mobile={mobilePlatform}
-                  openPanel={client.openVocabulary}
-                />
-              )}
-              {page === "skin" && desktopSkinTabs.tabList}
-              {page === "skin" && skinTabs.tabList}
-              {phoneSkinCommunityShown && client.communitySkins && (
-                <div className="mt-6">
-                  {skinTabs.panel(
-                    "community",
-                    <CommunitySkinsPage
-                      client={client.communitySkins}
-                      theme={keyboardPreviewTheme}
-                      localSkinLibrary={client.customSkinLibrary}
-                      mobile
-                      onLogin={openAccountLogin}
-                      look="harmony"
-                      preferences={draft}
-                      // 「使用」和网格里的卡片一样先进入草稿，再由表单的自动保存写入。
-                      onApplyPreferences={setDraft}
-                      onSkinApplied={recordCommunitySkin}
-                      // 详情的历史记录留在皮肤页上，返回先关详情、再离开这一页。
-                      historyPage="skin"
-                    />,
-                  )}
-                </div>
-              )}
-              {skinCommunityShown &&
-                client.communityCandidateSkins &&
-                desktopSkinTabs.panel(
-                  "community",
-                  <div className="mt-4">
-                    <CommunityPage
-                      candidateSkins={client.communityCandidateSkins}
-                      localSkins={client.scanSkinCatalog}
-                      openSkinDirectory={client.openSkinDirectory}
-                      readSkinImage={client.readSkinImage}
-                      onOpenSkinPage={() => setSkinView("mine")}
-                      theme={keyboardPreviewTheme}
-                      onLogin={openAccountLogin}
-                    />
-                  </div>,
-                )}
-              {page === "plugins" && client.communityPlugins && (
-                <div
-                  className={communityStyle.categoryTabsPair}
-                  role="tablist"
-                  aria-label="插件来源"
-                >
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={pluginView === "mine"}
-                    onClick={() => setPluginView("mine")}
-                  >
-                    我的插件
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={pluginView === "community"}
-                    onClick={() => setPluginView("community")}
-                  >
-                    社区插件
-                  </button>
-                </div>
-              )}
-              {client.communityPlugins && pluginCommunityShown && (
-                <div className="mt-4">
-                  <CommunityPluginsPage
-                    client={client.communityPlugins}
-                    localPlugins={client.plugins?.catalog}
-                    onLogin={openAccountLogin}
-                  />
-                </div>
-              )}
-              {draft && isSettingsFormPage(page) && (
-                <SettingsFormFrame showReload={false} busy={busy}>
-                  <SettingsFormContext.Provider value={{ ...model, draft }}>
-                    <SkinSettingsPage
-                      hidden={skinCommunityShown}
-                      tabs={skinTabs}
-                      desktopTabs={desktopSkinTabs}
-                    />
-                    <AppearanceSettingsPage />
-                    <FloatingToolbarSettingsPage />
-                    <InputSettingsPage />
-                    <ExpressionSettingsPage />
-                    <AiSettingsPage />
-                    <ShortcutSettingsPage />
-                    <DictionarySettingsPage />
-                    <ScreenKeyboardSettingsPage />
-                    <VoiceSettingsPage />
-                    {/* 手写并进屏幕键盘页时，那一页自己画手写的分组。 */}
-                    {!handwritingOnScreenKeyboardPage && <HandwritingSettingsPage />}
-                    <ToolsSettingsPage />
-                    <PluginsSettingsPage hidden={pluginCommunityShown} />
-                    <DeveloperSettingsPage />
-                    <McpSettingsPage />
-                    <FeedbackSettingsPage />
-                    <HelpSettingsPage
-                      busy={busy}
-                      hidden={page !== "help"}
-                      macos={macosPlatform}
-                      mobile={mobilePlatform}
-                      ios={iosPlatform}
-                      android={androidPlatform}
-                      platformHelpIntro={model.platformHelpIntro}
-                      platformQuickStart={model.platformQuickStart}
-                      platformNetworkDescription={model.platformNetworkDescription}
-                      onOpenDocumentation={externalActions.onOpenDocumentation}
-                      onOpenSystemKeyboardSettings={externalActions.onOpenSystemKeyboardSettings}
-                    />
-                    <AboutSettingsPage />
-                    <UsageReportingSettingsPage />
-                    {/* 只在打开着时渲染：它和「关于」用同一个统计开关，常驻的话桌面上会有两个。 */}
-                    {page === "privacy" && <PrivacySettingsPage />}
-                  </SettingsFormContext.Provider>
-                  <SettingsFormFooter
-                    draft={draft}
-                    busy={busy}
-                    // 保存失败由页面顶部的提示说明并重试（SettingsPageStatus），这一行不再重复同一个错误和按钮。
-                    saveState={saveState === "failed" ? "idle" : saveState}
-                    saveError={saveError}
-                    showRestoreDefaults={
-                      Boolean(client.loadDefaultPreferences) &&
-                      canRestoreDefaultsOnPage(page) &&
-                      // macOS 的屏幕键盘页（并进手写之后）只剩两个打开按钮，没有一项偏好，页脚的全局「恢复默认设置」在那里只会让人以为它恢复这一页。
-                      !(
-                        page === "screen-keyboard" &&
-                        !mobilePlatform &&
-                        !model.showTouchKeyboardHeight &&
-                        !model.showTouchKeyboardSpacing
-                      ) &&
-                      !skinCommunityShown &&
-                      !pluginCommunityShown
-                    }
-                    onRestoreDefaults={onRestoreDefaults}
-                    onRetry={() => void retrySave()}
-                    // Settings save themselves, so reading them again is only a way out of a failure: a save or load that failed, or an error the page is showing.
-                    onReload={
-                      canReloadSettingsPage(page) &&
-                      (saveState === "failed" || loadFailed || !!error)
-                        ? () => void reloadSettings()
-                        : undefined
-                    }
-                  />
-                </SettingsFormFrame>
-              )}
-              {/* With the form on screen 重新读取 sits in its action row once loading or saving failed; without it (a page with no form, or settings that failed to load) this is the only way back. */}
-              {canReloadSettingsPage(page) && !(draft && isSettingsFormPage(page)) && (
-                <button className="secondary" disabled={busy} onClick={() => void reloadSettings()}>
-                  重新读取
-                </button>
-              )}
-            </div>
-          </main>
-        </div>
-      </SettingsShellToasts>
-    </div>
-  );
-}
+export { useHandwritingPanel, type HandwritingPanelState } from "./keyboard/use-handwriting-panel";
+
+export {
+  useCloudClipboardPanel,
+  type CloudClipboardPanelState,
+} from "./keyboard/use-cloud-clipboard-panel";
+
+export {
+  useCloudDictionaryPanel,
+  type CloudDictionaryPanelState,
+} from "./keyboard/use-cloud-dictionary-panel";
+
+export {
+  useCloudDictionaryApplyPanel,
+  type CloudDictionaryApplyPanelState,
+} from "./keyboard/use-cloud-dictionary-apply-panel";
+
+export {
+  useCloudDictionaryCatalogPanel,
+  type CloudDictionaryCatalogPanelState,
+} from "./keyboard/use-cloud-dictionary-catalog-panel";
+
+export {
+  useCloudCandidatesPanel,
+  type CloudCandidatesPanelState,
+} from "./keyboard/use-cloud-candidates-panel";
+
+export {
+  useCloudDictionaryFilesPanel,
+  type CloudDictionaryFilesPanelState,
+} from "./keyboard/use-cloud-dictionary-files-panel";
+
+export { useEmojiPanel, type EmojiPanelState, type EmojiPage } from "./keyboard/use-emoji-panel";
+
+export { useKeyboardPanel, type KeyboardPanelState } from "./keyboard/use-keyboard-panel";
+
+export {
+  isKeyboardLetter,
+  keyboardKeyLabel,
+  type KeyboardKey,
+  type Modifier,
+} from "./keyboard/keyboard-input";

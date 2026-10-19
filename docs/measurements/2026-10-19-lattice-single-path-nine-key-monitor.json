@@ -1,0 +1,920 @@
+[
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 0.043,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 26.4365234375
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 1.085,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 25.3603515625
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 2.126,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 25.3603515625
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 3.161,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 25.3603515625
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 4.2,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 25.3603515625
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 5.245,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 25.3603515625
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 6.289,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 23.8095703125
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 7.333,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 23.8095703125
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 8.375,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 23.8095703125
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 9.425,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 23.8095703125
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 10.46,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 23.8095703125
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 11.498,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 23.02392578125
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 12.543,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 23.02392578125
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 13.586,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 23.02392578125
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 14.626,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 23.02392578125
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 15.669,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 23.02392578125
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 16.712,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 22.54150390625
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 17.76,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 22.54150390625
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 18.81,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 22.54150390625
+  },
+  {
+    "run": 0,
+    "version": "old",
+    "elapsed_seconds": 19.857,
+    "rustc": 0,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 22.54150390625
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 0.043,
+    "rustc": 0,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 22.54150390625
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 1.098,
+    "rustc": 2,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 22.017578125
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 2.141,
+    "rustc": 2,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 22.017578125
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 3.252,
+    "rustc": 7,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 22.017578125
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 4.311,
+    "rustc": 7,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 22.017578125
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 5.354,
+    "rustc": 4,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 22.01611328125
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 6.391,
+    "rustc": 2,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 22.01611328125
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 7.434,
+    "rustc": 2,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 22.01611328125
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 8.48,
+    "rustc": 2,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 22.01611328125
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 9.523,
+    "rustc": 3,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 22.01611328125
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 10.571,
+    "rustc": 3,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 21.0537109375
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 11.61,
+    "rustc": 3,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 21.0537109375
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 12.65,
+    "rustc": 3,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 21.0537109375
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 13.69,
+    "rustc": 4,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 21.0537109375
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 14.728,
+    "rustc": 1,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 21.0537109375
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 15.774,
+    "rustc": 1,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 20.00830078125
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 16.816,
+    "rustc": 1,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 20.00830078125
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 17.861,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 20.00830078125
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 18.906,
+    "rustc": 1,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 20.00830078125
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 19.95,
+    "rustc": 1,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 20.00830078125
+  },
+  {
+    "run": 1,
+    "version": "new",
+    "elapsed_seconds": 21.002,
+    "rustc": 1,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 19.44677734375
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 0.05,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 19.44677734375
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 1.11,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 19.44677734375
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 2.159,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 19.44677734375
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 3.218,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 20.37158203125
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 4.266,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 20.37158203125
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 5.326,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 20.37158203125
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 6.405,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 20.37158203125
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 7.46,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 2,
+    "load_1m": 20.37158203125
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 8.525,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 2,
+    "load_1m": 21.302734375
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 9.597,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 2,
+    "load_1m": 21.302734375
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 10.654,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 2,
+    "load_1m": 21.302734375
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 11.725,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 21.302734375
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 12.779,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 21.302734375
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 13.818,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 20.3173828125
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 14.855,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 20.3173828125
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 15.9,
+    "rustc": 0,
+    "cargo": 0,
+    "clang": 0,
+    "load_1m": 20.3173828125
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 16.945,
+    "rustc": 0,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 20.3173828125
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 17.982,
+    "rustc": 1,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 20.3173828125
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 19.028,
+    "rustc": 1,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 19.33056640625
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 20.072,
+    "rustc": 1,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 19.33056640625
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 21.109,
+    "rustc": 1,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 19.33056640625
+  },
+  {
+    "run": 2,
+    "version": "new",
+    "elapsed_seconds": 22.155,
+    "rustc": 1,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 19.33056640625
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 0.052,
+    "rustc": 1,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 19.3037109375
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 1.092,
+    "rustc": 1,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 19.3037109375
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 2.137,
+    "rustc": 1,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 19.3037109375
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 3.18,
+    "rustc": 1,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 19.3037109375
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 4.221,
+    "rustc": 1,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 19.3037109375
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 5.323,
+    "rustc": 11,
+    "cargo": 2,
+    "clang": 0,
+    "load_1m": 18.318359375
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 6.4,
+    "rustc": 9,
+    "cargo": 2,
+    "clang": 1,
+    "load_1m": 18.318359375
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 7.47,
+    "rustc": 10,
+    "cargo": 2,
+    "clang": 1,
+    "load_1m": 18.318359375
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 8.614,
+    "rustc": 10,
+    "cargo": 2,
+    "clang": 0,
+    "load_1m": 18.318359375
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 9.686,
+    "rustc": 10,
+    "cargo": 2,
+    "clang": 1,
+    "load_1m": 18.318359375
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 10.751,
+    "rustc": 9,
+    "cargo": 2,
+    "clang": 1,
+    "load_1m": 18.77294921875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 11.81,
+    "rustc": 6,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 18.77294921875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 12.872,
+    "rustc": 8,
+    "cargo": 1,
+    "clang": 2,
+    "load_1m": 18.77294921875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 13.93,
+    "rustc": 7,
+    "cargo": 1,
+    "clang": 4,
+    "load_1m": 18.77294921875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 14.978,
+    "rustc": 8,
+    "cargo": 1,
+    "clang": 5,
+    "load_1m": 18.77294921875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 16.061,
+    "rustc": 4,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 20.873046875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 17.129,
+    "rustc": 9,
+    "cargo": 1,
+    "clang": 2,
+    "load_1m": 20.873046875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 18.188,
+    "rustc": 9,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 20.873046875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 19.246,
+    "rustc": 10,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 20.873046875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 20.324,
+    "rustc": 9,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 22.564453125
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 21.373,
+    "rustc": 10,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 22.564453125
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 22.421,
+    "rustc": 10,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 22.564453125
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 23.506,
+    "rustc": 7,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 22.564453125
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 24.568,
+    "rustc": 10,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 22.564453125
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 25.632,
+    "rustc": 9,
+    "cargo": 1,
+    "clang": 1,
+    "load_1m": 24.92138671875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 26.7,
+    "rustc": 9,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 24.92138671875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 27.765,
+    "rustc": 8,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 24.92138671875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 28.836,
+    "rustc": 9,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 24.92138671875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 29.903,
+    "rustc": 7,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 24.92138671875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 30.967,
+    "rustc": 7,
+    "cargo": 1,
+    "clang": 0,
+    "load_1m": 27.16943359375
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 32.039,
+    "rustc": 10,
+    "cargo": 2,
+    "clang": 0,
+    "load_1m": 27.16943359375
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 33.11,
+    "rustc": 10,
+    "cargo": 2,
+    "clang": 0,
+    "load_1m": 27.16943359375
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 34.172,
+    "rustc": 10,
+    "cargo": 2,
+    "clang": 0,
+    "load_1m": 27.16943359375
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 35.226,
+    "rustc": 11,
+    "cargo": 2,
+    "clang": 0,
+    "load_1m": 30.83935546875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 36.285,
+    "rustc": 10,
+    "cargo": 2,
+    "clang": 0,
+    "load_1m": 30.83935546875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 37.335,
+    "rustc": 10,
+    "cargo": 2,
+    "clang": 0,
+    "load_1m": 30.83935546875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 38.391,
+    "rustc": 10,
+    "cargo": 2,
+    "clang": 0,
+    "load_1m": 30.83935546875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 39.441,
+    "rustc": 11,
+    "cargo": 2,
+    "clang": 0,
+    "load_1m": 30.83935546875
+  },
+  {
+    "run": 3,
+    "version": "old",
+    "elapsed_seconds": 40.801,
+    "rustc": 9,
+    "cargo": 2,
+    "clang": 0,
+    "load_1m": 34.69580078125
+  }
+]

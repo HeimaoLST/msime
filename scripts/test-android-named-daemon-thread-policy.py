@@ -9,7 +9,6 @@ ROOT = Path(__file__).resolve().parents[1]
 JAVA = ROOT / "platforms/android/java/app/msime/android"
 SITES = {
     JAVA / "AccountTaskExecutor.java": ("msime-account",),
-    JAVA / "account/SkinJobsApi.java": ("msime-ai-skin",),
     JAVA / "candidate/OnlineCandidateTransport.java": ("msime-cloud-deadline",),
     JAVA / "core/ImeDebugOverlay.java": ("msime-input-events",),
     JAVA / "core/ImeKeyFeedback.java": ("msime-key-sound",),
@@ -26,7 +25,6 @@ DIRECT_SITES = {
 }
 STARTED_SITES = {
     JAVA / "account/AccountIdentity.java": ("msime-anonymous-account",),
-    JAVA / "account/BackendAccount.java": ("msime-chat-cancel",),
     JAVA / "home/AuthRedirectActivity.java": ("msime-apple-sign-in",),
     JAVA / "home/LoginSheet.java": ("msime-login-sheet", "msime-email-code", "msime-email-login"),
     JAVA / "home/OnboardingActivity.java": ("msime-onboarding",),

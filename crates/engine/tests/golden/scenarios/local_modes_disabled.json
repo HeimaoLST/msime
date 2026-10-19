@@ -1,6 +1,6 @@
 {
  "name": "local_modes_disabled",
- "source": "tests/src/test_temporary_input_session.cpp:261-271; test_jianpin_input_session.cpp:197-203",
+ "source": "tests/src/test_temporary_input_session.cpp:261-271; test_jianpin_input_session.cpp:197-203; #8773 普通大写保留字面内容，仅小写片段参与中文转换",
  "covers": [
   "local modes"
  ],
@@ -32,5 +32,6 @@
    "arg": "J",
    "shift": true
   }
- ]
+ ],
+ "note": "Rust 行为修复 #8774：关闭的入口字母按普通大写开始拼音组字，不再透传；后续字母保留在同一组字中。历史 C++ 来源保留在 source。"
 }

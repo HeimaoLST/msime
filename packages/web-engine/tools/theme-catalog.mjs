@@ -84,13 +84,22 @@ function readWindowsLooks(root) {
   // `WINDOWS_LOOK_IDS` 里没有配色表的外观就是 `system` 本身（目前只有 `fluent`），清单 `base` 写它时什么也不补。
   const plain = lookIds.filter((id) => !looks.some((look) => look.id === id));
   for (const look of looks) if (!lookIds.includes(look.id)) fail(`${look.id} is in WINDOWS_LOOKS but not in WINDOWS_LOOK_IDS`);
-  return { looks, plain };
+  const canvas = source.match(/const CANVAS_LOOK: WindowsLook = WindowsLook \{[\s\S]*?dark: LookCandidate \{([^}]*)\},\s*light: LookCandidate \{([^}]*)\},/);
+  if (!canvas) fail(`${WINDOWS_LOOKS}: CANVAS_LOOK not found`);
+  const canvasLook = { dark: lookPalette("canvas", "dark", canvas[1]), light: lookPalette("canvas", "light", canvas[2]) };
+  for (const mode of ["dark", "light"]) {
+    const detail = source.match(new RegExp(`const CANVAS_DETAIL_${mode.toUpperCase()}: LookDetail = LookDetail \\{([\\s\\S]*?)\\n\\};`));
+    const translation = detail?.[1].match(/translation: Some\("(#[0-9A-F]+)"\)/)?.[1];
+    if (!COLOR.test(translation ?? "")) fail(`canvas.${mode}: translation is missing`);
+    canvasLook[mode].translation = translation;
+  }
+  return { looks, plain, canvasLook };
 }
 
 /** 生成的模块源码。输出只取决于两份来源文件，同一提交生成的内容逐字节相同。 */
 export function themeCatalogModule(root = repoRoot) {
   const themes = readThemes(root);
-  const { looks, plain } = readWindowsLooks(root);
+  const { looks, plain, canvasLook } = readWindowsLooks(root);
   for (const look of [...looks.map((look) => look.id), ...plain]) {
     if (themes.some((theme) => theme.id === look)) fail(`${look} is both a global theme and a Windows look`);
   }
@@ -98,6 +107,7 @@ export function themeCatalogModule(root = repoRoot) {
     `// 由 packages/web-engine/tools/theme-catalog.mjs 从 ${CATALOG} 和 ${WINDOWS_LOOKS} 生成，不要手改。`,
     `export const themes = ${JSON.stringify(themes)};`,
     `export const windowsLooks = ${JSON.stringify(looks)};`,
+    `export const canvasLook = ${JSON.stringify(canvasLook)};`,
     `export const plainWindowsLooks = ${JSON.stringify(plain)};`,
     "",
   ].join("\n");

@@ -1,10 +1,11 @@
+import { CandidateCanvasScene, CandidateCanvasResource, CandidateCanvasPolicy } from './candidate/CandidateCanvasPolicy';
 import { NativeCleanup } from './NativeCleanup';
 import inputMethodEngine from '@ohos.inputMethodEngine';
 import fs from '@ohos.file.fs';
 import util from '@ohos.util';
 import client from 'libmsimeclient.so';
-import { FileSessionStore } from '../account/HarmonyAccountTransport';
-import { storedSessionUserId } from '../account/AccountCloudBridge';
+import { statusUserId } from '../account/HarmonyAccountRequests';
+import { AccountSessionAdoption } from '../account/AccountSessionAdoption';
 import { utf8Length, utf8WriteComplete } from './Utf8';
 import { TextPolicy } from './TextPolicy';
 import { KeyboardLog, describeError } from './KeyboardLog';
@@ -89,7 +90,7 @@ import { CandidateNumberFontPolicy } from './candidate/CandidateNumberFontPolicy
 import { KeyboardMetrics } from './KeyboardMetrics';
 import { NativeReplyPolicy } from './NativeReplyPolicy';
 import { PrivacyGate, PrivacyRecord } from './PrivacyGate';
-import { OnlineCandidatePolicy, OnlineQuery } from './candidate/OnlineCandidatePolicy';
+import { OnlineCandidatePolicy, OnlineQuery, CloudHttpDescriptor } from './candidate/OnlineCandidatePolicy';
 import {
   TranslationPolicy, TranslationQuery, TranslationPlanItem, TranslationEntry,
   TranslationProviderConfig, TencentTranslationConfig, NiuTransTranslationConfig, AiTranslationConfig, TranslationCandidate
@@ -116,7 +117,7 @@ import {
 } from './input/AiPolishPolicy';
 import { VoiceRecognitionPolicy, VoiceTarget } from './input/VoiceRecognitionPolicy';
 import { HarmonyVoicePolisher } from './input/HarmonyVoicePolisher';
-import { AiEndpointPolicy } from './settings/AiEndpointPolicy';
+import { AiEndpoint } from './settings/AiEndpoint';
 import { SmartPunctuationSpacePolicy, SmartPunctuationSpaceSnapshot, SpaceConvertDecision }
   from './input/SmartPunctuationSpacePolicy';
 import { SmartPunctuationContext } from './input/SmartPunctuationContext';
@@ -979,6 +980,8 @@ export interface KeyboardPreferences {
   readonly candidateCornerRadiusUser: boolean;
   /** Image-only data URL drawn over the card surface, clipped to the card. */
   readonly candidateBackgroundImage: string | null;
+  /** 共享扫描器校验后的 canvas 快照；逐键只消费，不访问文件。 */
+  readonly candidateCanvas: CandidateCanvasScene | null;
   readonly candidateBackgroundFit: CandidateSkinFit;
   readonly candidateBackgroundOpacity: number;
   /** The bounded native motion presets from the selected candidate package. */
@@ -1068,6 +1071,19 @@ interface DictionaryAction {
 interface DictionaryRequest {
   options: PreparedOptions;
   action: DictionaryAction;
+}
+
+/** 词库更新状态与后台下载（`dictionary` 的 `updates`）交给 `client.dictionary` 的引擎选项，字段名与 Rust 的选项相同；ArkTS 不允许无类型的对象字面量，所以单独声明。没有语言词库目录时不带 `language_dictionaries`。 */
+interface DictionaryUpdateOptions {
+  api_version: number;
+  resources: string;
+  preferences_directory: string;
+  user_data: string;
+  cache: string;
+  dictionaries: string;
+  preferences: Record<string, Object>;
+  edition: string;
+  language_dictionaries?: string;
 }
 
 interface PersonalDictionarySyncValue {
@@ -1255,6 +1271,7 @@ export class KeyboardSession implements HardwareKeyTarget {
     candidateCornerRadiusVp: null,
     candidateCornerRadiusUser: false,
     candidateBackgroundImage: null,
+    candidateCanvas: null,
     candidateBackgroundFit: 'cover',
     candidateBackgroundOpacity: 1,
     candidateAnimation: { enter: 'none', exit: 'none', selection: 'none', durationMs: 0, staggerMs: 0 },
@@ -1440,12 +1457,53 @@ export class KeyboardSession implements HardwareKeyTarget {
     }
   }
 
-  /**
-   * Resolves the global theme for both modes and draws every surface's appearance from the answer.
-   *
-   * The resolve reads the skin root, so it runs when the preferences are read or the theme is chosen, never while drawing. Both modes are resolved up front because each surface keeps its own light/dark rule: the keyboard, the candidate window and the toolbar can sit in different modes at once, and a theme over `system` (a package, say) answers differently in each.
-   */
+  private canvasGeneration: number = 0;
+  private canvasPreferences: PreparedPreferences | null = null;
+
+  private readCandidateCanvas(packages: CandidateSkinPackage[], id: string | null, dark: boolean): CandidateCanvasScene | null {
+    const entry: CandidateSkinPackage | null = id === null ? null : CandidateSkinCatalogPolicy.package(packages, id);
+    if (entry === null || entry.canvas !== true || id === null) return null;
+    const paths: string[] = [];
+    if (entry.borderImage !== undefined && entry.borderImage !== null) {
+      paths.push(!dark && entry.borderImage.lightSource ? entry.borderImage.lightSource : entry.borderImage.source);
+    }
+    for (const decoration of entry.decorations ?? []) {
+      if (!paths.includes(decoration.image)) paths.push(decoration.image);
+    }
+    const resources: CandidateCanvasResource[] = [];
+    let remainingBytes: number = 16 * 1024 * 1024;
+    for (const relative of paths) {
+      try {
+        const request: SkinResourceRequest = {
+          directory: `${this.stateDirectory}/skins`, id: id, relative: relative, kind: 'image'
+        };
+        const reply: SkinResourceResponse = JSON.parse(client.skinResource(JSON.stringify(request))) as SkinResourceResponse;
+        if (reply.ok === true && reply.value !== undefined && reply.value !== null
+          && reply.value.bytes.length <= remainingBytes) {
+          remainingBytes -= reply.value.bytes.length;
+          resources.push({ relative: relative, contentType: reply.value.contentType, bytes: new Uint8Array(reply.value.bytes) });
+        }
+      } catch (_) {
+        // 单张资源失败由绘制层回退，不影响候选输入。
+      }
+    }
+    return {
+      key: `${++this.canvasGeneration}:${id}:${dark}`, dark: dark, canvas: true,
+      borderImage: entry.borderImage, decorations: entry.decorations, resources: resources,
+      contentInsetsDip: entry.contentInsetsDip, outerInsetsDip: entry.outerInsetsDip, lineGapDip: entry.lineGapDip,
+    };
+  }
+
+  /** 仅在视图确实绘制当前快照的面板后使用贴图配色，取色器仍由共享 Rust 叠加。 */
+  canvasCandidateColors(key: string): CandidateColors | null {
+    if (this.appearance.candidateCanvas?.key !== key || this.canvasPreferences === null) return null;
+    const resolved: ResolvedTheme | null = this.resolveTheme(this.canvasPreferences, this.appearance.candidateDark, true);
+    return resolved === null ? null : GlobalTheme.candidateColors(resolved.candidate, this.appearance.candidateDark);
+  }
+
+  /** 外观重载时统一解析明暗主题；各界面保留自己的模式规则，逐键绘制不读取皮肤目录。 */
   private applyAppearance(preferences: PreparedPreferences): void {
+    this.canvasPreferences = preferences;
     if (this.themeCatalog.length === 0) {
       this.themeCatalog = this.readThemeCatalog();
     }
@@ -1514,6 +1572,7 @@ export class KeyboardSession implements HardwareKeyTarget {
       candidateCornerRadiusVp: candidateRadius,
       candidateCornerRadiusUser: userRadiusValid,
       candidateBackgroundImage: backgroundImage.image,
+      candidateCanvas: this.readCandidateCanvas(skinPackages, packageId, candidateDark),
       candidateBackgroundFit: skinBackground === null ? 'cover' : skinBackground.fit,
       candidateBackgroundOpacity: skinBackground === null ? 1 : skinBackground.opacity,
       candidateAnimation: candidateAnimation,
@@ -1603,7 +1662,7 @@ export class KeyboardSession implements HardwareKeyTarget {
   }
 
   /** One mode of the global theme. A refused request draws the native tokens rather than failing the session. */
-  private resolveTheme(preferences: PreparedPreferences, dark: boolean): ResolvedTheme | null {
+  private resolveTheme(preferences: PreparedPreferences, dark: boolean, panelDrawn: boolean = false): ResolvedTheme | null {
     const request: ResolveThemeRequest = {
       // 固定明暗的主题在另一种明暗下按跟随系统解析，见 `GlobalTheme.fitsMode`。两种明暗于是不再一致，`fixedAppearance` 也就不再把各界面钉在那种明暗上。
       global_theme: GlobalTheme.effectiveId(this.themeCatalog, preferences.global_theme, dark),
@@ -1611,7 +1670,8 @@ export class KeyboardSession implements HardwareKeyTarget {
       custom_theme: GlobalTheme.hostDrawnCustomTheme(preferences.custom_theme),
       dark: dark,
       layout: preferences.candidate_layout === 'horizontal' ? 'horizontal' : 'vertical',
-      skins_directory: `${this.stateDirectory}/skins`
+      skins_directory: `${this.stateDirectory}/skins`,
+      canvas_panel_drawn: panelDrawn
     };
     try {
       const resolved: ResolvedTheme | null =
@@ -3130,7 +3190,12 @@ export class KeyboardSession implements HardwareKeyTarget {
     if (this.sharedMirror === null || this.stateDirectory.length === 0) {
       return;
     }
-    const imported: string[] = SharedStateSync.keyboardSync(this.sharedMirror, this.stateDirectory, this.sharedFullMode());
+    const fullMode: boolean = this.sharedFullMode();
+    const imported: string[] = SharedStateSync.keyboardSync(this.sharedMirror, this.stateDirectory, fullMode);
+    // 设置应用发布的会话由 Rust 在锁里决定要不要采用；这里排一次让本地状态尽早跟上，云剪贴板这类认证请求自己经 `beforeRequest` 再排一次。基础访问模式下键盘不交换会话。
+    if (fullMode) {
+      AccountSessionAdoption.adopt(this.sharedMirror, this.stateDirectory, 'settings');
+    }
     if (imported.includes('dictionary-selection') && this.handle !== 0) {
       const resources: string = this.resourceDirectory;
       const state: string = this.stateDirectory;
@@ -3405,8 +3470,8 @@ export class KeyboardSession implements HardwareKeyTarget {
     const staging: string = `${stateRoot}/dictionary-snapshot-staging`;
     try {
       if (!fs.accessSync(staging)) fs.mkdirSync(staging, true);
-      // 每次空闲处理都重新读共享的会话文件：键盘进程可能比设置里的一次账号切换活得更久。
-      const accountId: string | null = storedSessionUserId(new FileSessionStore(stateRoot).load());
+      // 每次空闲处理都重新读本沙箱的会话文件（目录模式的 status，只读本地文件）：键盘进程可能比设置里的一次账号切换活得更久。
+      const accountId: string | null = statusUserId(client.accountStatus(stateRoot));
       const action: SnapshotQueueProcessAction = {
         operation: 'process', directory: `${stateRoot}/dictionary-snapshots`,
         staging_root: staging, options: options, account_id: accountId
@@ -3445,14 +3510,14 @@ export class KeyboardSession implements HardwareKeyTarget {
         const loaded: SnapshotResponse = JSON.parse(client.loadPreferences(stateRoot)) as SnapshotResponse;
         const snapshot: PreferencesSnapshot | null = NativeReplyPolicy.successfulValue(loaded);
         if (snapshot === null) return JSON.stringify(loaded);
-        const options: Record<string, Object> = {
+        const options: DictionaryUpdateOptions = {
           api_version: 1, resources: resources, preferences_directory: stateRoot,
           user_data: `${stateRoot}/user`, cache: `${stateRoot}/cache`,
           dictionaries: `${stateRoot}/user/dictionaries`, preferences: snapshot.preferences,
           edition: AppEdition.current().id,
         };
         const languages: string = `${resources.substring(0, resources.lastIndexOf('/'))}/language-dictionaries`;
-        if (fs.accessSync(languages)) options['language_dictionaries'] = languages;
+        if (fs.accessSync(languages)) options.language_dictionaries = languages;
         return client.dictionary(JSON.stringify({ options: options, action: action }));
       } catch (error) {
         KeyboardLog.error(`dictionary update unavailable: ${describeError(error)}`);
@@ -4399,11 +4464,12 @@ export class KeyboardSession implements HardwareKeyTarget {
         CandidateNumberFontPolicy.size(settings.candidateFontSize), settings.candidateMinWidthVp)
       : CandidateWidthPolicy.widthVp(entries, editing, settings.candidateFontSize,
         settings.candidatePreeditFontSize, settings.candidateMinWidthVp);
-    return settings.candidateShowPreedit
+    const width: number = settings.candidateShowPreedit
       ? CandidatePagerPolicy.panelWidthVp(base, editing, settings.candidatePreeditFontSize, page, pageCount,
         CandidateWidthPolicy.MAX_WIDTH_VP, CandidateLogoPolicy.slotWidthVp(
           CandidateLogoPolicy.visible(KeyboardFormFactor.isDesktop(), settings.candidateShowPreedit)))
       : base;
+    return Math.min(CandidateWidthPolicy.MAX_WIDTH_VP, width + CandidateCanvasPolicy.extraWidth(settings.candidateCanvas));
   }
 
   private publishTranslationPage(): void {
@@ -4518,42 +4584,50 @@ export class KeyboardSession implements HardwareKeyTarget {
   }
 
   private async fetchCloud(handle: number, queryDocument: string, epoch: number): Promise<boolean> {
-    let url: string;
-    try {
-      const reply: NativeReply<string> = JSON.parse(
-        client.cloudRequestUrl(queryDocument)) as NativeReply<string>;
-      if (reply.ok !== true || typeof reply.value !== 'string') return false;
-      url = reply.value;
-    } catch (error) {
-      KeyboardLog.error(`cloud query unavailable: ${describeError(error)}`);
-      return false;
+    const query: OnlineQuery = JSON.parse(queryDocument) as OnlineQuery;
+    const descriptor: CloudHttpDescriptor | null | undefined = query.cloud_request;
+    if (descriptor === null || descriptor === undefined || !AiEndpoint.allowed(descriptor.url)
+      || (descriptor.method !== 'GET' && descriptor.method !== 'POST')
+      || descriptor.timeout_ms < 100 || descriptor.timeout_ms > 10000
+      || descriptor.max_response_bytes !== OnlineCandidatePolicy.MAX_CLOUD_RESPONSE_BYTES) return false;
+    if (descriptor.cached_response !== undefined) {
+      if (epoch !== this.onlineEpoch || handle !== this.handle) return false;
+      return this.applyCloudBody(handle, queryDocument, descriptor.cached_response);
     }
     const request = http.createHttp();
     installNoRedirectGuard(request);
     this.onlineRequests.add(request);
+    const deadline: number = setTimeout((): void => { request.destroy(); }, descriptor.timeout_ms);
     try {
-      const response: http.HttpResponse = await request.request(url, {
-        method: http.RequestMethod.GET,
-        header: { Accept: 'application/json' },
-        connectTimeout: OnlineCandidatePolicy.CLOUD_TIMEOUT_MS,
-        readTimeout: OnlineCandidatePolicy.CLOUD_TIMEOUT_MS
+      const response: http.HttpResponse = await request.request(descriptor.url, {
+        method: descriptor.method === 'POST' ? http.RequestMethod.POST : http.RequestMethod.GET,
+        header: descriptor.headers,
+        connectTimeout: descriptor.connect_timeout_ms,
+        readTimeout: descriptor.timeout_ms,
+        maxLimit: descriptor.max_response_bytes,
+        extraData: descriptor.method === 'POST' ? descriptor.body_utf8 : undefined
       });
       if (epoch !== this.onlineEpoch || handle !== this.handle || response.responseCode < 200
         || response.responseCode >= 300 || typeof response.result !== 'string'
         || !OnlineCandidatePolicy.acceptsCloudBody(response.result)) return false;
-      const applied: NativeReply<OnlineApplyValue> = JSON.parse(client.applyCloudResponse(
-        handle, queryDocument, response.result)) as NativeReply<OnlineApplyValue>;
-      if (applied.ok === true && NativeReplyPolicy.hasValue(applied.value)
-        && applied.value.applied) this.render(applied.value.view);
-      return applied.ok === true && NativeReplyPolicy.hasValue(applied.value)
-        && applied.value.applied;
+      return this.applyCloudBody(handle, queryDocument, response.result);
     } catch (error) {
-      KeyboardLog.error(`cloud candidate unavailable: ${describeError(error)}`);
+      KeyboardLog.error('cloud candidate unavailable');
       return false;
     } finally {
+      clearTimeout(deadline);
       this.onlineRequests.delete(request);
       request.destroy();
     }
+  }
+
+  private applyCloudBody(handle: number, queryDocument: string, body: string): boolean {
+    if (!OnlineCandidatePolicy.acceptsCloudBody(body)) return false;
+    const applied: NativeReply<OnlineApplyValue> = JSON.parse(client.applyCloudResponse(
+      handle, queryDocument, body)) as NativeReply<OnlineApplyValue>;
+    if (applied.ok === true && NativeReplyPolicy.hasValue(applied.value)
+      && applied.value.applied) this.render(applied.value.view);
+    return applied.ok === true && NativeReplyPolicy.hasValue(applied.value) && applied.value.applied;
   }
 
   /** 告诉 Host API 这次 AI 没有回答。共享内核已经不放 AI 占位行，这个调用答 applied:false、不改候选列表；调用和接口留着不变；万一答了 applied:true 才重画。 */
@@ -4581,8 +4655,8 @@ export class KeyboardSession implements HardwareKeyTarget {
       KeyboardLog.error(`AI query unavailable: ${describeError(error)}`);
       return false;
     }
-    // 描述符由 client-providers 按同一规则生成，这里在发出前再拦一次：http 只能发往本机或局域网，Token 不明文经过互联网。
-    if (typeof descriptor.url !== 'string' || !AiEndpointPolicy.allowed(descriptor.url)) return false;
+    // 描述符由 client-providers 按同一规则生成，这里在发出前再经 Rust 拦一次：http 只能发往本机或局域网，Token 不明文经过互联网。
+    if (typeof descriptor.url !== 'string' || !AiEndpoint.allowed(descriptor.url)) return false;
     const request = http.createHttp();
     installNoRedirectGuard(request);
     this.onlineRequests.add(request);

@@ -1,13 +1,17 @@
 #pragma once
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
+#include "CandidateCanvas.h"
 #include "CandidatePalette.h"
+#include "CandidateSkinLayout.h"
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace msime::windows {
-// Reads the package assets (decoration, background, geometry and toolbar palette) from the catalog msime_client_skin_catalog returns. Its candidate colours come from msime_client_resolve_theme instead, and the assets are drawn exactly when that resolution names the package in candidate_skin. The catalog serializes SkinSummary in camelCase. The shared catalog already validated the manifest; nothing here trusts it further than the bounds below.
+// Reads the package assets (decoration, background, geometry and toolbar palette) from the catalog msime_client_skin_catalog returns. Its main candidate colours come from msime_client_resolve_theme instead (apply_candidate_skin_extra_slots only adds the slots that resolution does not carry), and the assets are drawn exactly when that resolution names the package in candidate_skin. The catalog serializes SkinSummary in camelCase. The shared catalog already validated the manifest; nothing here trusts it further than the bounds below.
 // The mascot a package draws above the card, if it has one.
 //
 // The catalog parses these and the settings preview renders them, but the live
@@ -156,6 +160,240 @@ inline std::optional<float> candidate_skin_corner_radius(const nlohmann::json &c
   return package ? detail::candidate_skin_radius(*package, "cornerRadiusDip")
                  : std::nullopt;
 }
+namespace detail {
+// 一个 0 到 max 之间的数，越界、不是数或没写都是空。共享 catalog 已经按同样的范围校验过清单，这里只是不把读不懂的值带进几何。
+inline std::optional<double> candidate_skin_number(const nlohmann::json &object,
+                                                   const char *key, double max) {
+  if (!object.is_object() || !object.contains(key) || !object.at(key).is_number())
+    return std::nullopt;
+  const auto value = object.at(key).get<double>();
+  if (!std::isfinite(value) || value < 0.0 || value > max)
+    return std::nullopt;
+  return value;
+}
+inline std::optional<bool> candidate_skin_flag(const nlohmann::json &object,
+                                               const char *key) {
+  if (!object.is_object() || !object.contains(key) || !object.at(key).is_boolean())
+    return std::nullopt;
+  return object.at(key).get<bool>();
+}
+// `SkinLength` 序列化成 `{"value": 数, "em": 布尔}`；DIP 和 em 各有自己的上限，与 catalog 的 read_length 相同。
+inline std::optional<CandidateSkinLength>
+candidate_skin_length_value(const nlohmann::json &object, const char *key,
+                            double max_dip, double max_em) {
+  if (!object.is_object() || !object.contains(key) || !object.at(key).is_object())
+    return std::nullopt;
+  const auto &length = object.at(key);
+  const auto em = candidate_skin_flag(length, "em").value_or(false);
+  const auto value = candidate_skin_number(length, "value", em ? max_em : max_dip);
+  if (!value)
+    return std::nullopt;
+  return CandidateSkinLength{*value, em};
+}
+// 一张 `SkinGeometry`（camelCase）。
+inline CandidateSkinGeometry candidate_skin_geometry_table(const nlohmann::json &table) {
+  CandidateSkinGeometry geometry;
+  if (!table.is_object())
+    return geometry;
+  geometry.padding = candidate_skin_length_value(table, "padding", 64.0, 4.0);
+  geometry.item_gap = candidate_skin_length_value(table, "itemGap", 64.0, 4.0);
+  geometry.item_extra_height =
+      candidate_skin_length_value(table, "itemExtraHeight", 64.0, 4.0);
+  geometry.number_inset = candidate_skin_length_value(table, "numberInset", 64.0, 4.0);
+  geometry.item_padding_right =
+      candidate_skin_length_value(table, "itemPaddingRight", 64.0, 4.0);
+  geometry.item_min_width =
+      candidate_skin_length_value(table, "itemMinWidth", 500.0, 40.0);
+  geometry.number_gap = candidate_skin_length_value(table, "numberGap", 64.0, 4.0);
+  geometry.selected_bar_width =
+      candidate_skin_length_value(table, "selectedBarWidth", 16.0, 1.0);
+  geometry.number_scale = candidate_skin_number(table, "numberScale", 2.0);
+  geometry.selected_bar_height_em =
+      candidate_skin_number(table, "selectedBarHeightEm", 2.0);
+  geometry.selected_bar_inside = candidate_skin_flag(table, "selectedBarInside");
+  geometry.item_corners_follow_card =
+      candidate_skin_flag(table, "itemCornersFollowCard");
+  geometry.justify_rows = candidate_skin_flag(table, "justifyRows");
+  if (table.contains("pageArrowStyle") && table.at("pageArrowStyle").is_string()) {
+    const auto style = table.at("pageArrowStyle").get<std::string>();
+    if (style == "chevron")
+      geometry.page_arrow_style = CandidatePageArrowStyle::chevron;
+    else if (style == "triangle")
+      geometry.page_arrow_style = CandidatePageArrowStyle::triangle;
+  }
+  if (table.contains("preeditMarginDip") && table.at("preeditMarginDip").is_object()) {
+    const auto &margin = table.at("preeditMarginDip");
+    const auto top = candidate_skin_number(margin, "top", 500.0),
+               right = candidate_skin_number(margin, "right", 500.0),
+               bottom = candidate_skin_number(margin, "bottom", 500.0),
+               left = candidate_skin_number(margin, "left", 500.0);
+    if (top && right && bottom && left)
+      geometry.preedit_margin = CandidateSkinInsets{*top, *right, *bottom, *left};
+  }
+  return geometry;
+}
+} // namespace detail
+// 包的版式、外框、阴影、材质、翻页箭头、收紧宽度和卷轴展开（见 CandidateSkinLayout.h）。读不懂的值当作没写，卡片保留宿主自己的值。
+inline CandidateSkinLayout candidate_skin_layout(const nlohmann::json &catalog,
+                                                 const std::string &id) {
+  CandidateSkinLayout layout;
+  const auto *package = detail::candidate_skin_package(catalog, id);
+  if (!package)
+    return layout;
+  for (const auto &[key, target] :
+       {std::pair{"geometry", &layout.geometry},
+        std::pair{"horizontal", &layout.horizontal},
+        std::pair{"vertical", &layout.vertical}})
+    if (package->contains(key))
+      *target = detail::candidate_skin_geometry_table(package->at(key));
+  if (const auto width = detail::candidate_skin_number(*package, "borderWidthDip", 4.0))
+    layout.border_width = static_cast<float>(*width);
+  if (const auto radius =
+          detail::candidate_skin_number(*package, "itemCornerRadiusDip", 16.0))
+    layout.item_corner_radius = static_cast<float>(*radius);
+  if (package->contains("shadow") && package->at("shadow").is_string()) {
+    const auto shadow = package->at("shadow").get<std::string>();
+    if (shadow == "none")
+      layout.shadow = CandidateSkinShadow::none;
+    else if (shadow == "soft")
+      layout.shadow = CandidateSkinShadow::soft;
+    else if (shadow == "strong")
+      layout.shadow = CandidateSkinShadow::strong;
+  }
+  if (package->contains("backdrop") && package->at("backdrop").is_string()) {
+    const auto backdrop = package->at("backdrop").get<std::string>();
+    if (backdrop == "acrylic")
+      layout.backdrop = CandidateSkinBackdrop::acrylic;
+    else if (backdrop == "mica")
+      layout.backdrop = CandidateSkinBackdrop::mica;
+  }
+  layout.panel_image = package->contains("borderImage") && package->at("borderImage").is_object();
+  layout.page_arrows = detail::candidate_skin_flag(*package, "pageArrows");
+  layout.fit_content = detail::candidate_skin_flag(*package, "fitContent");
+  layout.expand_panel = detail::candidate_skin_flag(*package, "expandPanel");
+  // catalog 只收 2-8 的整数，越界或不是整数时当作没写。
+  if (const auto rows = detail::candidate_skin_number(*package, "expandRows", 8.0);
+      rows && *rows >= 2.0 && std::floor(*rows) == *rows)
+    layout.expand_rows = static_cast<int>(*rows);
+  return layout;
+}
+namespace detail {
+// `sliceDip` / `stretchDip` / `widthDip`：1、2 或 4 个 0-500 的数，与 catalog 的 read_box_values 相同；读不懂时为空。
+inline std::optional<std::vector<double>> candidate_skin_box_values(const nlohmann::json &object,
+                                                                   const char *key) {
+  if (!object.contains(key) || !object.at(key).is_array())
+    return std::nullopt;
+  const auto &array = object.at(key);
+  if (array.size() != 1 && array.size() != 2 && array.size() != 4)
+    return std::nullopt;
+  std::vector<double> values;
+  for (const auto &value : array) {
+    if (!value.is_number())
+      return std::nullopt;
+    const auto number = value.get<double>();
+    if (!std::isfinite(number) || number < 0.0 || number > 500.0)
+      return std::nullopt;
+    values.push_back(number);
+  }
+  return values;
+}
+// `SkinInsets`（四个键都在）；上下不超过 max_vertical，左右不超过 max_horizontal，与 catalog 的 read_insets 相同。
+inline std::optional<CandidateCanvasEdges>
+candidate_skin_canvas_insets(const nlohmann::json &object, const char *key, double max_vertical,
+                             double max_horizontal) {
+  if (!object.contains(key) || !object.at(key).is_object())
+    return std::nullopt;
+  const auto &insets = object.at(key);
+  const auto top = candidate_skin_number(insets, "top", max_vertical),
+             right = candidate_skin_number(insets, "right", max_horizontal),
+             bottom = candidate_skin_number(insets, "bottom", max_vertical),
+             left = candidate_skin_number(insets, "left", max_horizontal);
+  if (!top || !right || !bottom || !left)
+    return std::nullopt;
+  return CandidateCanvasEdges{*top, *right, *bottom, *left};
+}
+// -limit 到 limit 之间的数，没写时是 0；不是数或越界时为空。
+inline std::optional<double> candidate_skin_offset(const nlohmann::json &object, const char *key,
+                                                   double limit) {
+  if (!object.contains(key))
+    return 0.0;
+  if (!object.at(key).is_number())
+    return std::nullopt;
+  const auto value = object.at(key).get<double>();
+  if (!std::isfinite(value) || value < -limit || value > limit)
+    return std::nullopt;
+  return value;
+}
+} // namespace detail
+// `base = "canvas"` 包的画布（CandidateCanvas.h）：九宫格面板、内容内边距、外留白、行距和自由挂件。图片路径按包内相对路径解析成绝对路径，和装饰图、背景图同一道检查（不出包目录、不经符号链接、文件存在）。catalog 只在 `canvas` 时才给出这些键；读不懂的面板整个不要（版式也不按它的边宽留），读不懂的挂件只丢那一个，读不懂的内边距、外留白和行距当作没写。
+inline CandidateSkinCanvas candidate_skin_canvas(const nlohmann::json &catalog,
+                                                 const std::string &id,
+                                                 const std::filesystem::path &root) {
+  CandidateSkinCanvas canvas;
+  const auto *package = detail::candidate_skin_package(catalog, id);
+  if (!package || !detail::candidate_skin_flag(*package, "canvas").value_or(false))
+    return canvas;
+  canvas.active = true;
+  if (package->contains("borderImage") && package->at("borderImage").is_object()) {
+    const auto &value = package->at("borderImage");
+    const auto slice = detail::candidate_skin_box_values(value, "sliceDip");
+    auto source = value.contains("source")
+                      ? detail::candidate_skin_file(value.at("source"), id, root)
+                      : std::wstring{};
+    if (slice && !source.empty()) {
+      CandidateCanvasBorder border;
+      border.source = std::move(source);
+      if (value.contains("lightSource"))
+        border.light_source = detail::candidate_skin_file(value.at("lightSource"), id, root);
+      // 写了 stretch_dip 时它盖过 slice_dip；没写 width_dip 时边宽取（盖过之后的）切片数值。
+      const auto stretch = detail::candidate_skin_box_values(value, "stretchDip");
+      border.slice = candidate_canvas_box(stretch ? *stretch : *slice);
+      const auto width = detail::candidate_skin_box_values(value, "widthDip");
+      border.width = width ? candidate_canvas_box(*width) : border.slice;
+      border.fill = detail::candidate_skin_flag(value, "fill").value_or(true);
+      canvas.border = std::move(border);
+    }
+  }
+  canvas.content_insets =
+      detail::candidate_skin_canvas_insets(*package, "contentInsetsDip", 200.0, 500.0);
+  canvas.outer_insets =
+      detail::candidate_skin_canvas_insets(*package, "outerInsetsDip", 500.0, 500.0);
+  canvas.line_gap = detail::candidate_skin_number(*package, "lineGapDip", 100.0);
+  if (package->contains("decorations") && package->at("decorations").is_array())
+    for (const auto &value : package->at("decorations")) {
+      if (canvas.decorations.size() >= 32)
+        break;
+      if (!value.is_object() || !value.contains("image"))
+        continue;
+      CandidateCanvasDecoration decoration;
+      decoration.image = detail::candidate_skin_file(value.at("image"), id, root);
+      const auto anchor = value.contains("anchor") && value.at("anchor").is_string()
+                              ? candidate_canvas_anchor(value.at("anchor").get<std::string>())
+                              : std::optional<CandidateCanvasAnchor>{CandidateCanvasAnchor::right};
+      const auto offset_x = detail::candidate_skin_offset(value, "offsetXDip", 2000.0);
+      const auto offset_y = detail::candidate_skin_offset(value, "offsetYDip", 2000.0);
+      const auto width = detail::candidate_skin_number(value, "widthDip", 2000.0);
+      const auto height = detail::candidate_skin_number(value, "heightDip", 2000.0);
+      if (decoration.image.empty() || !anchor || !offset_x || !offset_y || !width ||
+          !height || !(*width > 0.0) || !(*height > 0.0))
+        continue;
+      decoration.anchor = *anchor;
+      decoration.offset_x = *offset_x;
+      decoration.offset_y = *offset_y;
+      decoration.width = *width;
+      decoration.height = *height;
+      if (value.contains("zIndex")) {
+        if (!value.at("zIndex").is_number_integer())
+          continue;
+        const auto z = value.at("zIndex").get<int64_t>();
+        if (z < -1000 || z > 1000)
+          continue;
+        decoration.z_index = static_cast<int>(z);
+      }
+      canvas.decorations.push_back(std::move(decoration));
+    }
+  return canvas;
+}
 inline CandidateSkinBackground
 candidate_skin_background(const nlohmann::json &catalog, const std::string &id,
                           const std::filesystem::path &root) {
@@ -212,6 +450,104 @@ inline CandidateSkinToolbar candidate_skin_toolbar(const nlohmann::json &catalog
   toolbar.dark = colors("dark");
   toolbar.light = colors("light");
   return toolbar;
+}
+
+// 只叠加共享主题解析（msime_client_resolve_theme）不带的候选颜色槽位：表面、边框、文字、编号、强调、选中、悬停、释义和选中竖条开关已经按「底、皮肤包、取色器」的顺序解析好，这里不再覆盖。`pickers` 是自定义主题的 `custom_theme.candidate_colors`，取色器仍然优先：设了文字色时不叠皮肤的候选文字和预编辑文字，设了选中色时不叠皮肤的选中文字、选中编号和选中释义，保留解析层按亮度推出的可读颜色。画不出的值保持宿主默认。
+inline CandidatePalette apply_candidate_skin_extra_slots(
+    CandidatePalette palette, const nlohmann::json &candidate,
+    const nlohmann::json &pickers, bool dark);
+inline CandidatePalette apply_candidate_skin_extra_slots(
+    CandidatePalette palette, const nlohmann::json &catalog,
+    const std::string &id, const nlohmann::json &pickers, bool dark) {
+  const auto *package = detail::candidate_skin_package(catalog, id);
+  if (!package || !package->contains("candidate") ||
+      !package->at("candidate").is_object())
+    return palette;
+  return apply_candidate_skin_extra_slots(palette, package->at("candidate"),
+                                          pickers, dark);
+}
+
+inline CandidatePalette apply_candidate_skin_extra_slots(
+    CandidatePalette palette, const nlohmann::json &candidate,
+    const nlohmann::json &pickers, bool dark) {
+  if (!candidate.is_object())
+    return palette;
+  const auto mode = dark ? "dark" : "light";
+  if (!candidate.contains(mode) || !candidate.at(mode).is_object())
+    return palette;
+  const auto &colors = candidate.at(mode);
+  auto picked = [&pickers](const char *key) {
+    return pickers.is_object() && pickers.contains(key) &&
+           pickers.at(key).is_string();
+  };
+  // Only a value that parses is drawn; anything else leaves the host's derived colour.
+  auto apply = [&colors](const char *key, CandidateColor &target) {
+    if (colors.contains(key) && colors.at(key).is_string())
+      if (auto parsed = try_parse_css_color(colors.at(key).get<std::string>()))
+        target = *parsed;
+  };
+  auto optional = [&colors](const char *key,
+                            std::optional<CandidateColor> &target) {
+    if (colors.contains(key) && colors.at(key).is_string())
+      if (auto parsed = try_parse_css_color(colors.at(key).get<std::string>()))
+        target = *parsed;
+  };
+  if (!picked("text")) {
+    optional("candidate_text", palette.candidate_text);
+    optional("preedit_text", palette.preedit_text);
+  }
+  if (!picked("selected")) {
+    apply("selected_text", palette.selected_text);
+    apply("selected_number", palette.selected_number);
+    optional("selected_translation", palette.selected_translation);
+  }
+  optional("preedit_caret", palette.preedit_caret);
+  optional("selected_bar", palette.selected_bar);
+  optional("preedit_background", palette.preedit_background);
+  optional("preedit_divider", palette.preedit_divider);
+  optional("page_arrow_divider", palette.page_arrow_divider);
+  // 材质参数是 0-1 的数，catalog 已经校验过范围；读不懂的当作没写。
+  auto fraction = [&colors](const char *key, std::optional<float> &target) {
+    if (colors.contains(key) && colors.at(key).is_number()) {
+      const auto value = colors.at(key).get<double>();
+      if (value >= 0.0 && value <= 1.0)
+        target = static_cast<float>(value);
+    }
+  };
+  fraction("backdrop_opacity", palette.backdrop_opacity);
+  fraction("backdrop_luminosity", palette.backdrop_luminosity);
+  if (colors.contains("menu") && colors.at("menu").is_object()) {
+    const auto &menu = colors.at("menu");
+    auto menu_color = [&menu](const char *key, CandidateColor &target) {
+      if (menu.contains(key) && menu.at(key).is_string())
+        if (auto parsed = try_parse_css_color(menu.at(key).get<std::string>()))
+          target = *parsed;
+    };
+    menu_color("background", palette.menu_fill);
+    menu_color("border", palette.menu_border);
+    menu_color("text", palette.menu_text);
+    menu_color("hover", palette.menu_hover);
+  }
+  return palette;
+}
+
+// The faces the card draws with: a skin's font_family goes first and the user's configured face drops to the head of the fallback chain, as msime-windows' candidate_skin_scene does. `skin` is empty when the package names no font or names one that is not installed, and then the configured chain is used as it is.
+struct CandidateFontChain {
+  std::wstring primary;
+  std::vector<std::wstring> fallback;
+};
+inline CandidateFontChain
+candidate_skin_font_chain(const std::wstring &configured,
+                          const std::vector<std::wstring> &configured_fallback,
+                          const std::wstring &skin) {
+  if (skin.empty() || skin == configured)
+    return {configured, configured_fallback};
+  CandidateFontChain chain{skin, {configured}};
+  for (const auto &family : configured_fallback)
+    if (family != skin && std::find(chain.fallback.begin(), chain.fallback.end(),
+                                    family) == chain.fallback.end())
+      chain.fallback.push_back(family);
+  return chain;
 }
 
 inline CandidateSkinAnimationPreset candidate_skin_animation_preset(

@@ -156,6 +156,44 @@ fn create_with(fixture: &Fixture, name: &str, words: &[PersonalWord]) -> String 
 }
 
 #[test]
+fn collections_borrowed_outbox_keeps_the_existing_wire_format_and_order() {
+    let id = Uuid::from_u128(1);
+    let mut outbox = Outbox::default();
+    let removed = english("removed");
+    let first = PersonalWord {
+        value: "合成\"正文".into(),
+        ..english("first")
+    };
+    let last = english("last");
+    outbox.queue(OutboxKind::Add, id, removed.clone());
+    outbox.queue(OutboxKind::Add, id, first.clone());
+    outbox.queue(OutboxKind::Remove, id, last.clone());
+    outbox.take(&removed.identity());
+    let legacy = serde_json::to_vec(&OutboxFile {
+        operations: outbox.operations().cloned().collect(),
+    })
+    .unwrap();
+    let borrowed = serde_json::to_vec(&OutboxFileRef {
+        operations: OutboxOperations(&outbox),
+    })
+    .unwrap();
+    assert_eq!(borrowed, legacy);
+    let restored = Outbox::from_file(serde_json::from_slice(&borrowed).unwrap()).unwrap();
+    assert_eq!(
+        restored
+            .operations()
+            .map(|operation| operation.word.identity())
+            .collect::<Vec<_>>(),
+        [first.identity(), last.identity()]
+    );
+    assert!(restored.get(&removed.identity()).is_none());
+    assert_eq!(
+        restored.get(&last.identity()).unwrap().op,
+        OutboxKind::Remove
+    );
+}
+
+#[test]
 fn collections_load_lists_import_formats_and_starts_empty() {
     let fixture = Fixture::new();
     let view = fixture.store.load().unwrap();
@@ -356,7 +394,53 @@ fn collections_queue_words_counts_distinct_additions() {
 }
 
 #[test]
-fn collections_hold_at_most_twenty_thousand_entries() {
+fn collections_rime_import_retains_thirty_three_thousand_entries_after_reload() {
+    let fixture = Fixture::new();
+    let count = 33_555;
+    let view = fixture
+        .store
+        .create("合成大词库", PersonalWordKind::Pinyin)
+        .unwrap();
+    let id = id_of(&view, "合成大词库");
+    fixture.store.set_enabled(&id, false).unwrap();
+    let text: String = (0..count)
+        .map(|index| format!("合成{}\tni hao\t{}\n", letters(index), index % 7623))
+        .collect();
+    let view = fixture
+        .store
+        .import(ImportRequest {
+            id: Some(&id),
+            name: None,
+            kind: PersonalWordKind::Pinyin,
+            format: "rime",
+            text: &text,
+            readings: None,
+        })
+        .unwrap();
+    let report = view.import.unwrap();
+    assert_eq!(report.imported, count);
+    assert!(!report.truncated);
+    assert_eq!(
+        fixture.store.load().unwrap().collections[0].entry_count,
+        count
+    );
+    let lock = fixture.store.lock().unwrap();
+    let state = fixture.store.read_state(&lock.directory).unwrap();
+    let entries = state.entries(Uuid::parse_str(&id).unwrap());
+    assert_eq!(entries.len(), count);
+    assert_eq!(
+        entries.last().unwrap().value,
+        format!("合成{}", letters(count - 1))
+    );
+    assert_eq!(entries.last().unwrap().key, "ni hao");
+    assert!(
+        fixture.requests().is_empty(),
+        "禁用集合不能提前送进引擎队列"
+    );
+}
+
+#[test]
+fn collections_reject_entries_over_the_capacity() {
     let fixture = Fixture::new();
     let view = fixture
         .store
@@ -546,6 +630,34 @@ fn import(
         text,
         readings: Some(&Readings),
     })
+}
+
+#[test]
+fn collections_import_rime_percentage_weights_reach_the_personal_dictionary() {
+    let mut fixture = Fixture::new();
+    let view = import(
+        &fixture,
+        PersonalWordKind::Pinyin,
+        "rime",
+        "---\nname: demo\n...\n丁\tding\t99.93%\n丁\tzheng\t0.07%\n三\tsan\t100%\n",
+    )
+    .unwrap();
+    let report = view.import.unwrap();
+    assert_eq!((report.imported, report.failed), (3, 0));
+    fixture.drain();
+    for (key, value, weight) in [
+        ("ding", "丁", 9993),
+        ("zheng", "丁", 7),
+        ("san", "三", 10000),
+    ] {
+        let word = PersonalWord {
+            kind: PersonalWordKind::Pinyin,
+            key: key.into(),
+            value: value.into(),
+            weight,
+        };
+        assert_eq!(fixture.dictionary.get(&word.identity()), Some(&weight));
+    }
 }
 
 #[test]

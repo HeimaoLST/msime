@@ -6,13 +6,18 @@ let package = Package(
   platforms: [.macOS(.v12), .iOS(.v15)],
   products: [.library(name: "MSIMEBackend", targets: ["MSIMEBackend"])],
   targets: [
+    // C 头文件的类型（`rust/module.modulemap`），不链接 Rust：函数指针由宿主经 `msime_rust_client` 交来。
+    .systemLibrary(name: "CMSIMEClient", path: "rust"),
     .target(
       name: "MSIMEBackend",
+      dependencies: ["CMSIMEClient"],
       path: ".",
-      exclude: ["Package.swift", "Tests"],
+      exclude: ["Package.swift", "Tests", "rust"],
       sources: [
         "account/BackendAccountClient.swift",
-        "clients/BackendAiClient.swift",
+        "account/BackendRustClient.swift",
+        "account/BackendRustAccount.swift",
+        "account/BackendRustSessionStore.swift",
         "account/BackendAccountSession.swift",
         "account/BackendAnonymousAccount.swift",
         "clients/BackendChatClient.swift",
@@ -21,12 +26,7 @@ let package = Package(
         "content/BackendCommunityResourceClient.swift",
         "content/BackendDictionaryClient.swift",
         "clients/BackendPreferencesClient.swift",
-        "clients/BackendPhrasesClient.swift",
-        "clients/BackendTypingUploadClient.swift",
         "clients/BackendSnapshotClient.swift",
-        "clients/BackendSkinArtworkClient.swift",
-        "storage/IOSPreferencePlan.swift",
-        "storage/BackendSyncPolicy.swift",
         "storage/BackendLocalStore.swift",
         "storage/BackendBoundedFileReader.swift",
       ]

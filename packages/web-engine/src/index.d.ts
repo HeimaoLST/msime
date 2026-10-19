@@ -187,7 +187,7 @@ export declare function createShiftTap(): {
   up(e: KeyboardEvent): boolean;
 };
 
-/** 内置皮肤 ID：`system`（网页上画桌面端设置页预览的平台默认配色，跟随明暗）、五个全局主题，以及 msime-windows 的五个内置外观。 */
+/** 内置皮肤 ID：`system`（网页上画桌面端设置页预览的平台默认配色，跟随明暗）、五个全局主题，以及 msime-windows 的六个内置外观。 */
 export type MsimeSkinId =
   | "system"
   | "shuishan"
@@ -196,6 +196,7 @@ export type MsimeSkinId =
   | "night"
   | "ink"
   | "wechat"
+  | "wechat_scroll"
   | "graphite"
   | "willow_green"
   | "autumn_osmanthus"
@@ -241,17 +242,88 @@ export interface MsimeSkinPalette {
   number?: string;
   /** 次要文字（编码提示）的颜色。 */
   translation?: string;
+  /** 与共享 catalog JSON 相同的细分颜色字段。 */
+  candidate_text?: string;
+  preedit_text?: string;
+  preedit_caret?: string;
+  selected_text?: string;
+  selected_number?: string;
+  selected_translation?: string;
+  selected_bar?: string;
   /** 是否在高亮候选左边画选中条，默认画。 */
   showSelectedBar?: boolean;
+}
+
+/** 相对候选卡片边缘的距离，单位 CSS px。 */
+export interface MsimeSkinInsets {
+  top?: number;
+  right?: number;
+  bottom?: number;
+  left?: number;
+}
+
+export interface MsimeSkinBorderImage {
+  source: string;
+  lightSource?: string;
+  /** 一、二、四值按上、右、下、左展开，单位为源图像素。 */
+  sliceDip: readonly number[];
+  /** 提供时替代 sliceDip。 */
+  stretchDip?: readonly number[];
+  /** 目标边宽，单位 CSS px；缺省采用切片数值。 */
+  widthDip?: readonly number[];
+  fill?: boolean;
+}
+
+export interface MsimeSkinFreeDecoration {
+  image: string;
+  anchor?:
+    | "top-left"
+    | "top-right"
+    | "bottom-left"
+    | "bottom-right"
+    | "left"
+    | "right"
+    | "top"
+    | "bottom"
+    | "center";
+  offsetXDip?: number;
+  offsetYDip?: number;
+  widthDip: number;
+  heightDip: number;
+  /** 小于 1 在面板下，其余在文字上，同值保持声明顺序。 */
+  zIndex?: number;
+}
+
+export interface ResolvedCanvasGeometry {
+  borderImage: Readonly<{
+    url: string;
+    slice: Readonly<Required<MsimeSkinInsets>>;
+    width: Readonly<Required<MsimeSkinInsets>>;
+    fill: boolean;
+  }> | null;
+  contentInsets: Readonly<Required<MsimeSkinInsets>> | null;
+  outerInsets: Readonly<Required<MsimeSkinInsets>> | null;
+  lineGap: number | null;
+  decorations: readonly Readonly<{
+    url: string;
+    width: number;
+    height: number;
+    anchor: NonNullable<MsimeSkinFreeDecoration["anchor"]>;
+    offsetX: number;
+    offsetY: number;
+    zIndex: number;
+  }>[];
 }
 
 /** 皮肤对象，形状同桌面设置页的 `SkinSummary` JSON（只取候选框用得到的字段）。尺寸单位 dip 在网页上就是 CSS px；图片写成 http(s)、blob、`data:image/*` 或相对地址（按页面地址解析），其他地址丢弃。 */
 export interface MsimeSkin {
   id?: string;
-  /** 外部清单的 schema_version；写 2 时未提供 animation 也采用漂亮的安全默认动画。 */
+  /** 外部清单的 schema_version；写 2 时对任何 base 都启用动画，未提供 animation 也采用漂亮的安全默认动画。九宫格、自由挂件等 canvas 专属字段只在 `base: "canvas"` 时由清单保留。 */
   schemaVersion?: 1 | 2;
   /** 画在哪个主题之上：全局主题、`system` 或 msime-windows 的内置外观（`fluent`、`wechat` 等），默认 `system`。base 为全局主题时，皮肤固定画在那个主题的明暗下。 */
   base?: string;
+  /** 桌面 `SkinSummary` 对 `base = "canvas"` 的标记（此时 `base` 报成 `system`），只表示九宫格与自由挂件这条 canvas 路径；网页绘制九宫格面板与自由挂件，图片加载失败时使用可读卡片回退。动画是否启用不看这个标记，它也不会覆盖全局主题或 Windows 外观基底。`base: "canvas"` 必须配 `schemaVersion: 2`。 */
+  canvas?: boolean;
   /** 皮肤支持的布局，不写时全都支持。不支持当前布局或明暗时只画 base（`ResolvedSkin.drawn` 为 false）。 */
   layouts?: readonly MsimeSkinLayout[];
   /** 皮肤支持的明暗，不写时全都支持。 */
@@ -278,6 +350,13 @@ export interface MsimeSkin {
   /** 候选框背景图；opacity 默认 1，夹到 0 到 1。 */
   background?: { image?: string; fit?: "cover" | "contain" | "stretch"; opacity?: number } | null;
   candidate?: { dark?: MsimeSkinPalette; light?: MsimeSkinPalette };
+  /** 共享 catalog 保留的面板原配色；只有面板成功加载后才使用。直接传皮肤对象时可只提供 candidate。 */
+  panelCandidate?: { dark?: MsimeSkinPalette; light?: MsimeSkinPalette };
+  borderImage?: MsimeSkinBorderImage | null;
+  contentInsetsDip?: MsimeSkinInsets | null;
+  outerInsetsDip?: MsimeSkinInsets | null;
+  lineGapDip?: number | null;
+  decorations?: readonly MsimeSkinFreeDecoration[];
   animation?: MsimeSkinAnimation | null;
 }
 
@@ -304,8 +383,16 @@ export interface ResolvedSkin {
     selectedNumber: string;
     hover: string;
     showSelectedBar: boolean;
+    preeditText: string;
+    caret: string;
+    selectedBar: string;
+    selectedSecondary: string;
   }>;
+  /** 面板等待加载或失败时使用。自绘调用方必须等图片可用后才切换到 palette。 */
+  readonly fallbackPalette: ResolvedSkin["palette"];
+  readonly fallbackVariables: Readonly<Record<string, string>>;
   readonly geometry: Readonly<{
+    canvas: Readonly<ResolvedCanvasGeometry> | null;
     /** 圆角（px），皮肤没给时为 null。 */
     cornerRadius: number | null;
     minWidth: number | null;

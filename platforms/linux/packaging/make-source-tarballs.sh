@@ -3,7 +3,7 @@
 #
 # 这些构建农场在构建时都没有网络，而完整版要的东西有一半不在仓库里：Cargo 依赖、由 pnpm 构建并嵌进设置窗口的前端，以及 package-container.sh 构建时下载的语音运行库、手写模型、离线释义和方言词库。这里把它们一次取齐：
 #
-#   msime-VERSION.tar.xz         当前提交的 `git archive`，顶层目录 msime-VERSION/。
+#   msime-VERSION.tar.xz         当前提交的 `git archive`，顶层目录 msime-VERSION/，另加一个 platforms/linux/release-date.txt（见下）。
 #   msime-VERSION-vendor.tar.xz  顶层目录 msime-VERSION-vendor/，内容：
 #     cargo/                     `cargo vendor --locked` 的输出，含 Cargo.lock 里的 git 依赖。
 #     cargo-config.toml          `cargo vendor` 打印的源替换配置；构建时把其中的 directory 改写成 cargo/ 的绝对路径。
@@ -12,12 +12,14 @@
 #     voice-runtime/linux-x86_64/.archive/、voice-runtime/linux-aarch64/.archive/  按 resources/voice-runtime.lock.json 下载的原始归档。
 #     handwriting-model/、offline-glosses/、language-dictionaries/  各自 fetch 脚本按锁文件取回的文件。
 #     opencc/                    `scripts/fetch_opencc.py` 按 resources/opencc.lock.json 校验的编译输入。
-#   msime-VERSION-frontend.tar.xz  顶层目录 msime-VERSION-frontend/，只有上面 frontend/ 的内容（dist/ 与 frontend-npm-NOTICES.txt）。Gentoo 的 crate 逐个列在 SRC_URI 里、资源按锁文件地址下载，不需要整个 vendor 包，但 pnpm 依赖没法逐个列出，前端只能取这份构建好的。
+#   msime-VERSION-frontend.tar.xz  顶层目录 msime-VERSION-frontend/，只有上面 frontend/ 的内容（dist/ 与 frontend-npm-NOTICES.txt），另加同一份 release-date.txt。Gentoo 的 crate 逐个列在 SRC_URI 里、资源按锁文件地址下载，不需要整个 vendor 包，但 pnpm 依赖没法逐个列出，前端只能取这份构建好的。
+#
+# release-date.txt 是设置应用关于页显示的发布日期 YYYY-MM-DD：构建农场解包的源码里没有 .git，apps/desktop/src-tauri/build.rs 读不到提交日期，就读 platforms/linux/release-date.txt。日期取 HEAD 的提交日期，发布 workflow 在 main 的发版合并提交上运行，这就是发版当天；设了 MSIME_RELEASE_DATE 时用它。Gentoo 的版本 ebuild 用 GitHub 的标签归档，它在 src_prepare 里把前端包里的那份复制过去。
 #
 # 数据一律经仓库自己的 fetch 脚本取得，构建时再用同一批脚本对着源码树里的锁文件跑一遍：文件已在锁定的摘要上就不联网，对不上就去下载，而构建农场没有网络，于是 vendor 包与源码不一致时构建直接失败。这样哈希只记在锁文件一处，规格文件和 debian/ 里都不另抄一份。语音运行库只留下原始归档，解出的库由构建时的那次 fetch 从归档重新解出。
 #
 # 用法：platforms/linux/packaging/make-source-tarballs.sh VERSION OUTDIR
-#   需要网络，以及 git、cargo、corepack（pnpm）、python3、GNU tar 和 xz。在仓库检出里运行，打包的是 HEAD 已提交的内容。
+#   需要网络，以及 git（2.40 起才有 `git archive --add-virtual-file`）、cargo、corepack（pnpm）、python3、GNU tar 和 xz。在仓库检出里运行，打包的是 HEAD 已提交的内容。
 #   最后打印三个文件的 SHA-256。
 set -euo pipefail
 
@@ -53,8 +55,14 @@ vendor="$stage/$name-vendor"
 mkdir -p "$vendor/frontend" "$vendor/voice-runtime" "$vendor/opencc"
 # 两个 tarball 里的文件时间都取 HEAD 的提交时间，同一提交重复生成得到相同内容。
 epoch=$(git log -1 --format=%ct HEAD)
+release_date=${MSIME_RELEASE_DATE:-$(git log -1 --format=%cs HEAD)}
+[[ "$release_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || {
+  echo "release date must be YYYY-MM-DD: $release_date" >&2
+  exit 2
+}
 
-git archive --format=tar --prefix="$name/" HEAD | xz -T0 -9 > "$out/$name.tar.xz"
+# --add-virtual-file 的路径不加 --prefix，顶层目录要自己写上。
+git archive --format=tar --prefix="$name/" --add-virtual-file="$name/platforms/linux/release-date.txt:$release_date"$'\n' HEAD | xz -T0 -9 > "$out/$name.tar.xz"
 
 # 在仓库根目录调用，Cargo 才会按 rust-toolchain.toml 选编译器。打印出的配置里 directory 是这台机器上的绝对路径，换成相对的 cargo，构建时再改写成解包后的位置。
 cargo vendor --locked --versioned-dirs "$vendor/cargo" | sed 's|^directory = .*|directory = "cargo"|' > "$vendor/cargo-config.toml"
@@ -82,6 +90,7 @@ tar --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
 
 mkdir -p "$stage/$name-frontend"
 cp -a "$vendor/frontend/." "$stage/$name-frontend/"
+printf '%s\n' "$release_date" > "$stage/$name-frontend/release-date.txt"
 tar --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
   -C "$stage" -cf - "$name-frontend" | xz -T0 -9 > "$out/$name-frontend.tar.xz"
 

@@ -8,6 +8,8 @@ import { platformOsName } from "./label-helpers";
 
 export interface SystemInfoSource {
   appVersion: string;
+  /** 发布日期 `YYYY-MM-DD`，不知道时为空或不给。 */
+  releaseDate?: string;
   host?: Pick<
     HostCapabilities,
     | "platform"
@@ -28,17 +30,24 @@ export interface SystemInfoEntry {
 }
 
 /**
- * 「关于」页「系统信息」列出的各项，也是「复制」出去的内容（#6644）：应用版本、系统、内核、桌面会话、输入法框架、设备型号、处理器架构和输入方案。宿主报告不了的项直接省略，不写「未知」。只描述机器、会话和输入法设置，不含账号、输入内容或任何路径。
+ * 「关于」页「系统信息」列出的各项，也是「复制」出去的内容（#6644）：应用版本（带发布日期）、系统、内核、桌面会话、输入法框架、设备型号、处理器架构和输入方案。宿主报告不了的项直接省略，不写「未知」。只描述机器、会话和输入法设置，不含账号、输入内容或任何路径。
  */
 export function systemInfoEntries({
   appVersion,
+  releaseDate,
   host,
   scheme,
 }: SystemInfoSource): SystemInfoEntry[] {
-  const edition = host?.edition?.display_name;
+  // 版本号后的括注与关于页「当前版本」一致，非完整版另写版本名：`v0.53.0（水杉五笔，2026-10-19 发布）`。
+  const notes = [host?.edition?.display_name, releaseDate && `${releaseDate} 发布`].filter(
+    (note): note is string => !!note,
+  );
   const os = host ? platformOsName(host.platform) : undefined;
   const fields: [string, string | undefined][] = [
-    ["应用版本", appVersion ? `v${appVersion}${edition ? `（${edition}）` : ""}` : undefined],
+    [
+      "应用版本",
+      appVersion ? `v${appVersion}${notes.length ? `（${notes.join("，")}）` : ""}` : undefined,
+    ],
     ["系统", os && (host?.os_version ? `${os} ${host.os_version}` : os)],
     ["内核", host?.kernel_version],
     ["桌面环境", host?.desktop_session],

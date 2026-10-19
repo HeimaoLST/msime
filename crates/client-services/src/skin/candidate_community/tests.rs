@@ -167,6 +167,68 @@ fn pack_sends_the_manifest_verbatim_and_exactly_the_referenced_images() {
 }
 
 #[test]
+fn pack_accepts_canvas_and_scroll_for_negotiated_upload() {
+    let root = tempfile::tempdir().unwrap();
+    // 本地打包不依赖部署版本；网络上传单独探测明确的服务端能力。
+    let canvas = root.path().join("canvas-demo");
+    fs::create_dir_all(&canvas).unwrap();
+    fs::write(
+        canvas.join("skin.toml"),
+        "schema_version = 2\nid = 'canvas-demo'\nname = 'Canvas'\nversion = '1.0'\nbase = 'canvas'\npreview = 'preview.png'\n[supports]\nlayouts = ['horizontal']\nthemes = ['light', 'dark']\n[candidate_window]\n[candidate_window.border_image]\nsource = 'panel.png'\nlight_source = 'panel-light.png'\nslice_dip = [1]\n[license]\nassets = 'CC0-1.0'\n",
+    )
+    .unwrap();
+    fs::write(canvas.join("preview.png"), png(1000)).unwrap();
+    fs::write(canvas.join("panel.png"), png(1000)).unwrap();
+    fs::write(canvas.join("panel-light.png"), png(1000)).unwrap();
+    assert!(catalog::load_package(root.path(), "canvas-demo").is_ok());
+    assert_eq!(pack(root.path(), "canvas-demo").unwrap().file_count, 3);
+    assert!(pack_as(root.path(), "canvas-demo", CandidateSkinVisibility::Private).is_ok());
+
+    let scroll = root.path().join("scroll-demo");
+    fs::create_dir_all(&scroll).unwrap();
+    fs::write(
+        scroll.join("skin.toml"),
+        "schema_version = 1\nid = 'scroll-demo'\nname = 'Scroll'\nversion = '1.0'\nbase = 'wechat_scroll'\npreview = 'preview.png'\n[supports]\nlayouts = ['horizontal']\nthemes = ['light', 'dark']\n[candidate_window]\n[license]\nassets = 'CC0-1.0'\n",
+    )
+    .unwrap();
+    fs::write(scroll.join("preview.png"), png(1000)).unwrap();
+    assert!(catalog::load_package(root.path(), "scroll-demo").is_ok());
+    assert!(pack(root.path(), "scroll-demo").is_ok());
+
+    // 服务端认得的 msime-windows 外观照常打包。
+    let wechat = root.path().join("wechat-demo");
+    fs::create_dir_all(&wechat).unwrap();
+    fs::write(
+        wechat.join("skin.toml"),
+        "schema_version = 1\nid = 'wechat-demo'\nname = 'Wechat'\nversion = '1.0'\nbase = 'wechat'\npreview = 'preview.png'\n[supports]\nlayouts = ['horizontal']\nthemes = ['light', 'dark']\n[candidate_window]\n[license]\nassets = 'CC0-1.0'\n",
+    )
+    .unwrap();
+    fs::write(wechat.join("preview.png"), png(1000)).unwrap();
+    assert!(pack(root.path(), "wechat-demo").is_ok());
+}
+
+#[test]
+fn pack_accepts_empty_optional_metadata_for_negotiated_upload() {
+    let root = tempfile::tempdir().unwrap();
+    // 新服务端与目录把空串当作没写；旧部署的网络上传由能力探测拦截。
+    for (id, line) in [
+        ("empty-author", "author = ''\n"),
+        ("empty-description", "description = ''\n"),
+    ] {
+        let skin = root.path().join(id);
+        fs::create_dir_all(&skin).unwrap();
+        fs::write(
+            skin.join("skin.toml"),
+            format!("schema_version = 1\nid = '{id}'\nname = 'Empty'\nversion = '1.0'\nbase = 'system'\npreview = 'preview.png'\n{line}[supports]\nlayouts = ['horizontal']\nthemes = ['light', 'dark']\n[candidate_window]\n[license]\nassets = 'CC0-1.0'\n"),
+        )
+        .unwrap();
+        fs::write(skin.join("preview.png"), png(1000)).unwrap();
+        assert!(catalog::load_package(root.path(), id).is_ok(), "{id}");
+        assert!(pack(root.path(), id).is_ok(), "{id}");
+    }
+}
+
+#[test]
 fn pack_falls_back_to_the_preview_as_decoration_without_duplicating_it() {
     let root = tempfile::tempdir().unwrap();
     write_skin(root.path(), "sakura", TOP, "", "", LICENSE);
@@ -206,7 +268,7 @@ fn pack_refuses_what_the_server_would_refuse() {
             "image = 'images/deco.gif'\n",
             BACKGROUND_TABLE,
             LICENSE,
-            FILE_TYPE,
+            IMAGE_INVALID,
         ),
         (
             TOP,
@@ -1300,7 +1362,7 @@ fn transport_lists_with_scope_and_encoded_search() {
     assert_eq!(page.skins, vec![item()]);
     let (head, _) = received.recv().unwrap();
     assert!(head.starts_with(
-        "GET /v1/community/candidate-skins?offset=20&q=%E6%A8%B1%20%E8%8A%B1&scope=mine&fields=sync&fields=moderation&include=category HTTP/1.1"
+        "GET /v1/community/candidate-skins?offset=20&q=%E6%A8%B1%20%E8%8A%B1&scope=mine&fields=sync&fields=moderation&include=category&resources=canvas-v1 HTTP/1.1"
     ));
     assert!(head.contains("authorization: Bearer "));
 }
@@ -1323,7 +1385,9 @@ fn transport_publishes_a_body_larger_than_the_account_default() {
         response
     );
     let (head, body) = received.recv().unwrap();
-    assert!(head.starts_with("POST /v1/community/candidate-skins?include=category HTTP/1.1"));
+    assert!(head.starts_with(
+        "POST /v1/community/candidate-skins?include=category&resources=canvas-v1 HTTP/1.1"
+    ));
     assert!(head.contains("authorization: Bearer "));
     assert!(body.len() > 2_880_000);
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1354,7 +1418,7 @@ fn transport_accepts_a_download_above_one_mebibyte() {
     );
     let (head, _) = received.recv().unwrap();
     assert!(head.starts_with(&format!(
-        "POST /v1/community/candidate-skins/{}/download HTTP/1.1",
+        "POST /v1/community/candidate-skins/{}/download?resources=canvas-v1 HTTP/1.1",
         item().id.hyphenated()
     )));
 }
@@ -1505,7 +1569,7 @@ fn transport_reads_the_sync_list_and_refuses_a_malformed_row() {
         vec![entry.clone()]
     );
     let (head, _) = received.recv().unwrap();
-    assert!(head.starts_with("GET /v1/community/candidate-skins/sync HTTP/1.1"));
+    assert!(head.starts_with("GET /v1/community/candidate-skins/sync?resources=canvas-v1 HTTP/1.1"));
 
     let mut bad = entry.clone();
     bad.request_sha256 = "A".repeat(64);
@@ -1537,7 +1601,7 @@ fn transport_replaces_and_sets_visibility_by_id() {
     );
     let (head, body) = received.recv().unwrap();
     assert!(head.starts_with(&format!(
-        "PUT /v1/community/candidate-skins/{}?include=category HTTP/1.1",
+        "PUT /v1/community/candidate-skins/{}?include=category&resources=canvas-v1 HTTP/1.1",
         item().id.hyphenated()
     )));
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1559,7 +1623,7 @@ fn transport_replaces_and_sets_visibility_by_id() {
     );
     let (head, body) = received.recv().unwrap();
     assert!(head.starts_with(&format!(
-        "PATCH /v1/community/candidate-skins/{}?include=category HTTP/1.1",
+        "PATCH /v1/community/candidate-skins/{}?include=category&resources=canvas-v1 HTTP/1.1",
         item().id.hyphenated()
     )));
     assert_eq!(
@@ -1646,7 +1710,7 @@ fn transport_filters_by_category_and_always_includes_it() {
     assert_eq!(page.skins, vec![item()]);
     let (head, _) = received.recv().unwrap();
     assert!(head.starts_with(
-        "GET /v1/community/candidate-skins?offset=0&q=&fields=sync&category=acg&include=category HTTP/1.1"
+        "GET /v1/community/candidate-skins?offset=0&q=&fields=sync&category=acg&include=category&resources=canvas-v1 HTTP/1.1"
     ));
 
     let (origin, received) = serve_once(serde_json::to_vec(&item()).unwrap());
@@ -1654,7 +1718,7 @@ fn transport_filters_by_category_and_always_includes_it() {
     assert_eq!(client.candidate_skin(item().id, None).unwrap(), item());
     let (head, _) = received.recv().unwrap();
     assert!(head.starts_with(&format!(
-        "GET /v1/community/candidate-skins/{}?fields=sync&fields=moderation&include=category HTTP/1.1",
+        "GET /v1/community/candidate-skins/{}?fields=sync&fields=moderation&include=category&resources=canvas-v1 HTTP/1.1",
         item().id.hyphenated()
     )));
 }
@@ -1673,7 +1737,7 @@ fn transport_sets_the_category_by_id() {
     );
     let (head, body) = received.recv().unwrap();
     assert!(head.starts_with(&format!(
-        "PATCH /v1/community/candidate-skins/{}?include=category HTTP/1.1",
+        "PATCH /v1/community/candidate-skins/{}?include=category&resources=canvas-v1 HTTP/1.1",
         item().id.hyphenated()
     )));
     assert_eq!(
@@ -1911,3 +1975,5 @@ fn a_jpeg_that_ends_early_or_has_too_many_scans_does_not_decode() {
     assert_eq!(check_image("image/jpeg", at_limit), Ok(64));
     assert_eq!(check_image("image/jpeg", over_limit), Err(IMAGE_INVALID));
 }
+
+mod canvas_resources;

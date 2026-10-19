@@ -14,7 +14,9 @@ use crate::cache::FifoCache;
 use crate::dictionary::pinyin::{PinyinDatabase, INSERTED_WEIGHT};
 use crate::dictionary::DictRow;
 use crate::error::{EngineError, Result};
-use crate::ime::online_batch::replace_online_candidate_batch;
+use crate::ime::online_batch::{
+    replace_cached_online_candidate_batch, replace_online_candidate_batch,
+};
 use crate::lattice::decode::{decode_pinned, BigramMemo, PinnedSpan, SentenceNgramTables};
 use crate::lattice::merge::{
     merge_lattice_candidates, merge_lattice_candidates_borrowed, whole_sentence_insert_position,
@@ -493,7 +495,10 @@ impl QuanpinDictionary {
                 }
             });
         let key = self.series_slot(&cache_key);
-        let mut list = self.series_cache.get(&key).unwrap_or_default();
+        if let Some(list) = self.series_cache.get_mut(&key) {
+            return replace_cached_online_candidate_batch(list, raw, words, source);
+        }
+        let mut list = Vec::new();
         if !replace_online_candidate_batch(&mut list, raw, words, source) {
             return false;
         }
@@ -1849,3 +1854,9 @@ mod alternative_row_stream_tests;
 
 #[cfg(test)]
 mod filtered_query_tests;
+
+#[cfg(test)]
+mod empty_projection_tests;
+
+#[cfg(test)]
+mod online_cache_update_tests;

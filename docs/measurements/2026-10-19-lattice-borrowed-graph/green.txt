@@ -1,0 +1,10 @@
+     Running unittests src/lib.rs (target/release/deps/msime_engine-5894a2ed2b392c5a)
+
+running 5 tests
+test lattice::decode::borrowed_fields_tests::borrowed_graph_release_comparison ... ignored, 同机 release 配对计时，须使用无计数包装的 System 分配器
+test lattice::decode::borrowed_fields_tests::borrowed_graph_does_not_allocate_for_explicit_fields ... ok
+test lattice::decode::borrowed_fields_tests::borrowed_graph_keeps_external_field_addresses ... ok
+test lattice::decode::borrowed_fields_tests::borrowed_graph_preserves_queries_capacity_scores_and_owned_output ... ok
+test lattice::decode::borrowed_fields_tests::borrowed_graph_preserves_language_models_and_typo_paths ... ok
+
+test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 2394 filtered out; finished in 0.06s

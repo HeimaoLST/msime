@@ -242,12 +242,18 @@ public:
     std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
     if (::lstat(path.c_str(), &info) == 0) {
       if (!S_ISSOCK(info.st_mode)) return false;
-      const int probe = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+      const int probe = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
       if (probe < 0) return false;
       const bool live =
           ::connect(probe, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) == 0;
+      const int error = errno;
       ::close(probe);
-      if (live) return false;
+      // 队列满或其他探测失败不表示监听者已退出，只有明确拒绝连接才回收路径。
+      if (live || error != ECONNREFUSED) return false;
+      struct stat current {};
+      if (::lstat(path.c_str(), &current) != 0 || current.st_dev != info.st_dev ||
+          current.st_ino != info.st_ino)
+        return false;
       ::unlink(path.c_str());
     }
     const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """把 msime 与 msime-bin 两个 PKGBUILD 改写到某个 Linux 发布版本，并重新生成 .SRCINFO。
 
-用法：render.py VERSION [--sha256sums FILE] [--source-sha256 HEX] [--no-srcinfo]
+用法：render.py VERSION [--sha256sums FILE] [--source-sha256 HEX] [--release-date YYYY-MM-DD] [--no-srcinfo]
 
     VERSION          发布版本 MAJOR.MINOR.PATCH，对应 linux-vVERSION 标签与发布。
     --sha256sums     该发布的 SHA256SUMS（release-linux.yml 上传的那份）；不给时从 GitHub 发布下载。msime-bin 的 x86_64 与 aarch64 两个 .rpm 的校验值取自这里，不另算一遍；缺了哪一个都失败。
     --source-sha256  linux-vVERSION 源码归档的 SHA-256；不给时下载 GitHub 生成的归档自己算。
+    --release-date   设置应用关于页显示的发布日期，即 linux-vVERSION 那个提交的日期；不给时在本仓库里取 `git log -1 --format=%cs linux-vVERSION`。源码包从标签归档构建，里面没有 .git，只能由这里写进 PKGBUILD 的 _releasedate。
     --no-srcinfo     不生成 .SRCINFO。生成它要 makepkg（Arch 上以非 root 用户运行），只在没有 Arch 环境时用来检查改写结果。
 
-pkgrel 一律重置为 1。改写只动 pkgver、pkgrel、_rpmrel 与校验值这几行，PKGBUILD 的其余部分保持原样。
+pkgrel 一律重置为 1。改写只动 pkgver、pkgrel、_releasedate、_rpmrel 与校验值这几行，PKGBUILD 的其余部分保持原样。
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[3]
 REPO = "metasequoiaime/msime"
 # CPack 生成的 .rpm 的 Release 字段，packaging.cmake 没有设置 CPACK_RPM_PACKAGE_RELEASE，默认是 1。
 RPM_RELEASE = "1"
@@ -41,6 +43,17 @@ def source_sha256(version: str) -> str:
         while chunk := response.read(1 << 20):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def tag_date(version: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "log", "-1", "--format=%cs", f"linux-v{version}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        sys.exit(f"cannot read the date of linux-v{version} here ({result.stderr.strip()}); pass --release-date YYYY-MM-DD")
+    return result.stdout.strip()
 
 
 def rpm_sha256(version: str, sums: str, arch: str) -> str:
@@ -72,6 +85,7 @@ def main() -> None:
     parser.add_argument("version")
     parser.add_argument("--sha256sums", type=Path)
     parser.add_argument("--source-sha256")
+    parser.add_argument("--release-date")
     parser.add_argument("--no-srcinfo", action="store_true")
     arguments = parser.parse_args()
     version = arguments.version
@@ -90,7 +104,11 @@ def main() -> None:
     if not re.fullmatch(r"[0-9a-f]{64}", source):
         sys.exit(f"not a SHA-256: {source}")
 
-    rewrite(HERE / "msime" / "PKGBUILD", {"pkgver": version, "pkgrel": "1", "sha256sums": f"('{source}')"})
+    release_date = arguments.release_date or tag_date(version)
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", release_date):
+        sys.exit(f"release date must be YYYY-MM-DD: {release_date}")
+
+    rewrite(HERE / "msime" / "PKGBUILD", {"pkgver": version, "pkgrel": "1", "_releasedate": release_date, "sha256sums": f"('{source}')"})
     rewrite(HERE / "msime-bin" / "PKGBUILD", {
         "pkgver": version,
         "pkgrel": "1",

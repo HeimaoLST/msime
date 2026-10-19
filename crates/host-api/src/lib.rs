@@ -471,7 +471,19 @@ impl HostSession {
             prompt_custom_3: ai.prompt_custom_3.clone(),
         });
     }
-    /// The latest requested preference decides, in both directions: a change deferred until the composition ends would otherwise keep a just-disabled cloud answering, or keep a just-enabled one silent for the rest of the composition. Engine takes a cloud row on the query's own eligibility, not on the applied preferences.
+    /// 以最新请求的开关与来源配置判断回包；组字结束才应用的旧偏好不能让已关闭或已切换的服务继续回答。
+    fn cloud_query_is_current(&self, query: &OnlineQuery) -> bool {
+        let preferences = self
+            .requested
+            .as_ref()
+            .map_or(&self.applied, |snapshot| &snapshot.preferences);
+        self.cloud_candidates_enabled()
+            && query.cloud_request.as_ref().map_or_else(
+                || preferences.cloud_candidate_provider == Default::default(),
+                |request| request.provider_id == preferences.cloud_candidate_provider.identity(),
+            )
+    }
+
     fn cloud_candidates_enabled(&self) -> bool {
         self.requested
             .as_ref()
@@ -694,8 +706,10 @@ impl HostSession {
             engine_chinese_punctuation(preferences.chinese_punctuation, options.punctuation_lock);
         // 繁体输出开关一变，`corner_when_traditional` 解析出的样式也跟着变；两者都是偏好，都会在空闲时走到这里重建。
         apply_punctuation_marks(&mut options, &preferences);
-        // Build and validate first; errors leave the original session usable.
+        // 先构建并校验，失败时原会话仍然可用。
         let mut engine = Session::new(&options).map_err(|e| e.to_string())?;
+        // 云候选席位不是 EngineOptions；新引擎默认关闭，每次重建都要恢复当前偏好。
+        engine.set_cloud_candidates_enabled(preferences.cloud_candidates);
         if self.punctuation_override.is_some() || self.punctuation_lock_override.is_some() {
             engine
                 .set_chinese_punctuation_enabled(engine_chinese_punctuation(
@@ -961,8 +975,15 @@ impl HostSession {
                 previous.preferences.cloud_candidates
             })
             && !snapshot.preferences.cloud_candidates;
-        if cloud_disabled && !self.runtime.is_idle() {
-            // 关闭云候选时移除已显示的云行，并使重新打开前发出的查询失效。
+        let cloud_changed = self
+            .requested
+            .as_ref()
+            .map_or(&self.applied.cloud_candidate_provider, |previous| {
+                &previous.preferences.cloud_candidate_provider
+            })
+            != &snapshot.preferences.cloud_candidate_provider;
+        if (cloud_disabled || cloud_changed) && !self.runtime.is_idle() {
+            // 关闭云候选或切换来源配置时移除旧云行，使迟到回包失效。
             self.runtime
                 .clear_online_candidates(0)
                 .map_err(|e| e.to_string())?;
@@ -2481,13 +2502,14 @@ fn refreshed_layout(
     Ok(refreshed)
 }
 
-/// `document` with `language_dictionaries` naming what is installed beside its resources, or `None` when it already does or is not in the prepared layout.
+/// 为准备流程生成的文档补齐语言词库路径；无需变化或布局不匹配时返回 `None`。
 ///
-/// The Cantonese, Zhuyin and Stroke dictionaries arrive with a package, not with a dictionary generation, so options published by an older package are brought up to what is installed even when the generation is current, and lose the key once the dictionaries are gone. Only the directory `prepare_host_configuration` records is kept in step; a document naming another directory that still exists keeps it.
+/// 优先资源相邻目录，其次已校验的下载语言代次，最后是更新记录中的原安装包目录。
+/// 主词库代次不变也需刷新；显式指定且仍存在的其他目录继续保留。
 fn with_installed_language_dictionaries(
     document: &Value,
 ) -> Result<Option<Value>, Box<dyn std::error::Error>> {
-    let Some((resources, _, _)) = prepared_layout(document) else {
+    let Some((resources, _, state)) = prepared_layout(document) else {
         return Ok(None);
     };
     let beside = language_dictionaries_directory(resources)
@@ -2501,7 +2523,19 @@ fn with_installed_language_dictionaries(
     {
         return Ok(None);
     }
-    let installed = installed_language_dictionaries(resources);
+    // 主词库可以位于下载代次中，语言词库仍由更新记录或原安装包提供。
+    let installed = installed_language_dictionaries(resources).or_else(|| {
+        let edition = Edition::of_host_options(document)?;
+        dictionary_updates::languages(state, edition)
+            .and_then(|path| path.to_str().map(str::to_owned))
+            .or_else(|| {
+                let baseline = edition.resource_set().ok()?;
+                let bundled = msime_client_providers::dictionary_updates::bundled_resources(
+                    state, &baseline,
+                )?;
+                installed_language_dictionaries(&bundled)
+            })
+    });
     if recorded == installed.as_deref() {
         return Ok(None);
     }

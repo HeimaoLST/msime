@@ -14,11 +14,16 @@ use std::{
 use thiserror::Error;
 use uuid::Uuid;
 
+mod android_v1;
+
 const MAXIMUM_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
 const MAXIMUM_STATE_BYTES: u64 = 65_536;
 const STATE_NAME: &str = "state.json";
 const STATE_LOCK_NAME: &str = "state.lock";
 const WORKER_LOCK_NAME: &str = "worker.lock";
+
+/// 本地备份恢复排进来的请求的所有者，与 Android `DictionarySnapshotQueue.LOCAL_RESTORE_OWNER` 相同，磁盘上已经排着的请求用的就是这个值，不能改。这份快照来自用户自己选的备份文件，不属于任何账号：认领和激活时不比对当前账号（未登录、换了账号都照样激活，也不用知道当前账号是谁），只有 [`DictionarySnapshotQueue::cancel`] 给的正好是这个值时才会取消它。
+pub const LOCAL_RESTORE_OWNER: &str = "local-backup";
 
 #[derive(Debug, Error)]
 pub enum SnapshotQueueError {
@@ -58,6 +63,16 @@ pub struct SnapshotRequest {
     pub expected_local_version: String,
     pub file_sha256: String,
     pub status: SnapshotRequestStatus,
+}
+
+impl SnapshotRequest {
+    /// 请求是否仍归当前账号，与 Android `DictionarySnapshotQueue.owned` 相同：本地备份恢复的请求（[`LOCAL_RESTORE_OWNER`]）不属于任何账号，总是成立，不看 `current_account_id`；其余请求的所有者必须等于当前账号（未登录是空字符串，不等于任何请求的所有者）。不知道当前账号是谁（`None`）时是 `None`，调用方原样留着请求，下次再试。
+    fn owned_by(&self, current_account_id: Option<&str>) -> Option<bool> {
+        if self.account_id == LOCAL_RESTORE_OWNER {
+            return Some(true);
+        }
+        current_account_id.map(|current| current == self.account_id)
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -205,17 +220,29 @@ impl DictionarySnapshotQueue {
         }
     }
 
+    /// 读出队列状态。还没有 `state.json` 时读 Android 旧版的 `state.bin`（只读，转换只在持锁时做，见 [`Self::import_android_v1_at`]），两份都没有是空状态。
     fn read_from(
         directory: &crate::file_lock::PrivateDirectory,
     ) -> Result<SnapshotQueueState, SnapshotQueueError> {
+        if let Some(state) = Self::read_json(directory)? {
+            return Ok(state);
+        }
+        if let Some(state) = android_v1::read(directory)? {
+            return Ok(state);
+        }
+        // 转换先写好 state.json 才删 state.bin。不持锁的读者两次都没读到时可能正好夹在另一个进程的转换中间，再读一次 state.json。
+        Ok(Self::read_json(directory)?.unwrap_or(SnapshotQueueState {
+            version: 1,
+            ..SnapshotQueueState::default()
+        }))
+    }
+
+    fn read_json(
+        directory: &crate::file_lock::PrivateDirectory,
+    ) -> Result<Option<SnapshotQueueState>, SnapshotQueueError> {
         let file = match crate::file_lock::open_private_file_at(directory, OsStr::new(STATE_NAME)) {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(SnapshotQueueState {
-                    version: 1,
-                    ..SnapshotQueueState::default()
-                });
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
                 return Err(SnapshotQueueError::Invalid);
             }
@@ -236,7 +263,51 @@ impl DictionarySnapshotQueue {
         let state: SnapshotQueueState =
             serde_json::from_slice(&bytes).map_err(|_| SnapshotQueueError::Invalid)?;
         state.validate()?;
-        Ok(state)
+        Ok(Some(state))
+    }
+
+    /// 在已经持有 `state.lock` 的目录里把 Android 旧版的 `state.bin` 就地转成 `state.json`，返回这一次是否转换了。快照文件两边同名（`<id>.ndjson`），原样留着，不复制。
+    ///
+    /// 顺序是先原子地写好 `state.json`、对目录 fsync，再删 `state.bin`：中途崩溃或断电时要么只有 `state.bin`（下一次重新转换），要么两份都在（下一次只补删 `state.bin`），队列不会丢。已经有 `state.json` 时一律以它为准，不再读 `state.bin`。`state.bin` 读不懂时是 `Invalid`，两份文件都不动，与 `state.json` 读不懂时相同。
+    fn import_android_v1_at(
+        directory: &crate::file_lock::PrivateDirectory,
+    ) -> Result<bool, SnapshotQueueError> {
+        match crate::file_lock::open_private_file_at(directory, OsStr::new(STATE_NAME)) {
+            Ok(_) => return remove_android_v1_state(directory).map(|()| false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+                return Err(SnapshotQueueError::Invalid);
+            }
+            Err(_) => return Err(SnapshotQueueError::Unavailable),
+        }
+        let Some(state) = android_v1::read(directory)? else {
+            return Ok(false);
+        };
+        Self::write_to(directory, &state)?;
+        directory
+            .sync_all()
+            .map_err(|_| SnapshotQueueError::Unavailable)?;
+        remove_android_v1_state(directory)?;
+        Ok(true)
+    }
+
+    /// Android 旧版队列（Java 写的 `state.bin`）就地转成 `state.json`，在 `state.lock` 的 flock 里做，要等正在持锁的激活做完。返回这一次是否转换了：目录不存在、没有 `state.bin`、或者已经转换过时是 `false`，什么也不改，也不创建目录。其余会改状态的操作持锁时也先做同样的转换，所以 `:ime` 进程先跑起来也不会把旧队列当成空的覆盖掉。
+    ///
+    /// 目录里已经没有 `state.bin` 时不取锁直接返回 `false`：转换完成以后再没有谁会写 `state.bin`（写它的 Java 队列已经不在了），这时取锁只会让 Android 读状态的 `read`（它每次都经这里）和主进程启动时的这一步排在 `:ime` 持着锁的整次激活后面。`state.bin` 还在、或者打不开它（比如是符号链接）时照旧持锁处理，错误也在锁里报。
+    pub fn import_android_v1(&self) -> Result<bool, SnapshotQueueError> {
+        let Some(root) = self.existing_root()? else {
+            return Ok(false);
+        };
+        let directory = crate::file_lock::open_private_directory(&root)
+            .map_err(|_| SnapshotQueueError::Unavailable)?;
+        let legacy =
+            crate::file_lock::open_private_file_at(&directory, OsStr::new(android_v1::STATE_NAME));
+        if matches!(&legacy, Err(error) if error.kind() == std::io::ErrorKind::NotFound) {
+            return Ok(false);
+        }
+        drop((legacy, directory));
+        let lock = self.lock_wait()?;
+        Self::import_android_v1_at(&lock.directory)
     }
 
     fn write_to(
@@ -260,10 +331,28 @@ impl DictionarySnapshotQueue {
         ) -> Result<T, SnapshotQueueError>,
     ) -> Result<T, SnapshotQueueError> {
         let lock = self.lock(STATE_LOCK_NAME)?;
+        Self::import_android_v1_at(&lock.directory)?;
         let mut state = Self::read_from(&lock.directory)?;
         let result = action(&lock, &mut state)?;
         Self::write_to(&lock.directory, &state)?;
         Ok(result)
+    }
+
+    /// 等着拿到 `state.lock`，不像 [`Self::lock`] 那样在别人持锁时报 `Busy`。
+    fn lock_wait(&self) -> Result<SnapshotQueueLock, SnapshotQueueError> {
+        let root = self.root()?;
+        let directory = crate::file_lock::open_private_directory(&root)
+            .map_err(|_| SnapshotQueueError::Unavailable)?;
+        let file =
+            crate::file_lock::open_private_lock_file_at(&directory, OsStr::new(STATE_LOCK_NAME))
+                .map_err(|_| SnapshotQueueError::Unavailable)?;
+        let file = crate::file_lock::ScopedFileLock::exclusive(file)
+            .map_err(|_| SnapshotQueueError::Unavailable)?;
+        Ok(SnapshotQueueLock {
+            directory,
+            root,
+            _file: file,
+        })
     }
 
     fn update_wait<T>(
@@ -273,19 +362,8 @@ impl DictionarySnapshotQueue {
             &mut SnapshotQueueState,
         ) -> Result<T, SnapshotQueueError>,
     ) -> Result<T, SnapshotQueueError> {
-        let root = self.root()?;
-        let directory = crate::file_lock::open_private_directory(&root)
-            .map_err(|_| SnapshotQueueError::Unavailable)?;
-        let file =
-            crate::file_lock::open_private_lock_file_at(&directory, OsStr::new(STATE_LOCK_NAME))
-                .map_err(|_| SnapshotQueueError::Unavailable)?;
-        let file = crate::file_lock::ScopedFileLock::exclusive(file)
-            .map_err(|_| SnapshotQueueError::Unavailable)?;
-        let lock = SnapshotQueueLock {
-            directory,
-            root,
-            _file: file,
-        };
+        let lock = self.lock_wait()?;
+        Self::import_android_v1_at(&lock.directory)?;
         let mut state = Self::read_from(&lock.directory)?;
         let result = action(&lock, &mut state)?;
         Self::write_to(&lock.directory, &state)?;
@@ -518,10 +596,11 @@ impl DictionarySnapshotQueue {
         })
     }
 
+    /// 认领排着的请求。`current_account_id` 是当前账号（未登录是空字符串），`None` 是这次不知道当前账号是谁：属于某个账号的请求原样留着、返回 `None`，本地备份恢复的请求（[`LOCAL_RESTORE_OWNER`]）照样认领。属于别的账号的请求取消并删掉快照。
     pub fn claim(
         &self,
         lease: &SnapshotWorkerLease,
-        current_account_id: &str,
+        current_account_id: Option<&str>,
     ) -> Result<Option<SnapshotRequest>, SnapshotQueueError> {
         let ((claimed, cancelled), directory) = self.update_worker(lease, |state| {
             let Some(request) = state
@@ -531,9 +610,13 @@ impl DictionarySnapshotQueue {
             else {
                 return Ok((None, None));
             };
-            if request.account_id != current_account_id {
-                request.status = SnapshotRequestStatus::Cancelled;
-                return Ok((None, Some(request.id)));
+            match request.owned_by(current_account_id) {
+                None => return Ok((None, None)),
+                Some(false) => {
+                    request.status = SnapshotRequestStatus::Cancelled;
+                    return Ok((None, Some(request.id)));
+                }
+                Some(true) => {}
             }
             request.status = SnapshotRequestStatus::Preparing;
             Ok((Some(request.clone()), None))
@@ -544,13 +627,14 @@ impl DictionarySnapshotQueue {
         Ok(claimed)
     }
 
+    /// 完成认领过的请求。`current_account_id` 与 [`Self::claim`] 相同：`None` 时属于某个账号的请求原样留着（不激活、不删快照，返回 `false`），本地备份恢复的请求照样激活。
     pub fn complete(
         &self,
         id: Uuid,
         lease: &SnapshotWorkerLease,
         current_version: &str,
         already_applied: bool,
-        current_account_id: &str,
+        current_account_id: Option<&str>,
         apply: impl FnOnce() -> Result<String, SnapshotQueueError>,
     ) -> Result<bool, SnapshotQueueError> {
         if !valid_local_version(current_version) {
@@ -563,10 +647,13 @@ impl DictionarySnapshotQueue {
             if request.id != id || !can_complete {
                 return Err(SnapshotQueueError::Conflict);
             }
+            let owned = request.owned_by(current_account_id);
             if already_applied {
                 request.status = SnapshotRequestStatus::Applied;
                 state.local_version = Some(current_version.to_owned());
-            } else if request.account_id != current_account_id {
+            } else if owned.is_none() {
+                return Ok(None);
+            } else if owned == Some(false) {
                 request.status = SnapshotRequestStatus::Cancelled;
             } else if request.expected_local_version != current_version {
                 request.status = SnapshotRequestStatus::Conflict;
@@ -579,8 +666,11 @@ impl DictionarySnapshotQueue {
                 request.status = SnapshotRequestStatus::Applied;
                 state.local_version = Some(next);
             }
-            Ok(request.status == SnapshotRequestStatus::Applied)
+            Ok(Some(request.status == SnapshotRequestStatus::Applied))
         })?;
+        let Some(applied) = applied else {
+            return Ok(false);
+        };
         delete_snapshot_at(&directory, id)?;
         Ok(applied)
     }
@@ -676,6 +766,16 @@ fn delete_snapshot_at(
     id: Uuid,
 ) -> Result<(), SnapshotQueueError> {
     match crate::file_lock::remove_private_file_at(directory, OsStr::new(&format!("{id}.ndjson"))) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(SnapshotQueueError::Unavailable),
+    }
+}
+
+fn remove_android_v1_state(
+    directory: &crate::file_lock::PrivateDirectory,
+) -> Result<(), SnapshotQueueError> {
+    match crate::file_lock::remove_private_file_at(directory, OsStr::new(android_v1::STATE_NAME)) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err(SnapshotQueueError::Unavailable),
@@ -782,7 +882,7 @@ mod tests {
             .unwrap();
         let before = other.read().unwrap();
         assert!(matches!(
-            other.claim(&lease, "fixture"),
+            other.claim(&lease, Some("fixture")),
             Err(SnapshotQueueError::Invalid)
         ));
         assert_eq!(other.read().unwrap(), before);
@@ -828,9 +928,12 @@ mod tests {
             fs::read(queue.file_path(id).unwrap()).unwrap(),
             b"synthetic snapshot\n"
         );
-        assert_eq!(queue.claim(&fresh, "fixture").unwrap().unwrap().id, id);
+        assert_eq!(
+            queue.claim(&fresh, Some("fixture")).unwrap().unwrap().id,
+            id
+        );
         assert!(queue
-            .complete(id, &fresh, &initial, false, "fixture", || {
+            .complete(id, &fresh, &initial, false, Some("fixture"), || {
                 Ok(version(&id.to_string(), 'c'))
             })
             .unwrap());
@@ -840,7 +943,7 @@ mod tests {
     #[test]
     fn old_worker_cannot_claim_a_replacement_queue() {
         assert_replaced_queue_rejects_old_worker(|queue, stale, _, _| {
-            queue.claim(stale, "stale-account").map(|_| ())
+            queue.claim(stale, Some("stale-account")).map(|_| ())
         });
     }
 
@@ -850,7 +953,7 @@ mod tests {
         let mut activated = false;
         assert_replaced_queue_rejects_old_worker(|queue, stale, id, initial| {
             queue
-                .complete(id, stale, initial, false, "fixture", || {
+                .complete(id, stale, initial, false, Some("fixture"), || {
                     activated = true;
                     Ok(version(&id.to_string(), 'c'))
                 })
@@ -881,11 +984,11 @@ mod tests {
             .enqueue(&source, "fixture", 1, &initial, &digest)
             .unwrap();
         let lease = queue.acquire_worker_lease().unwrap();
-        queue.claim(&lease, "fixture").unwrap();
+        queue.claim(&lease, Some("fixture")).unwrap();
         let replacement_state = fs::read(root.join(STATE_NAME)).unwrap();
         let name = format!("{id}.ndjson");
         assert!(queue
-            .complete(id, &lease, &initial, false, "fixture", || {
+            .complete(id, &lease, &initial, false, Some("fixture"), || {
                 fs::rename(&root, &moved).unwrap();
                 fs::create_dir(&root).unwrap();
                 fs::write(root.join(STATE_NAME), &replacement_state).unwrap();
@@ -925,7 +1028,10 @@ mod tests {
 
         let restored = DictionarySnapshotQueue::new(root).unwrap();
         let lease = restored.acquire_worker_lease().unwrap();
-        let request = restored.claim(&lease, "fixture-account").unwrap().unwrap();
+        let request = restored
+            .claim(&lease, Some("fixture-account"))
+            .unwrap()
+            .unwrap();
         assert_eq!(request.id, id);
         assert_eq!(request.status, SnapshotRequestStatus::Preparing);
         let applied = version(&id.to_string(), 'b');
@@ -1047,7 +1153,7 @@ mod tests {
             .enqueue(&source, "old-account", 1, &initial, &digest)
             .unwrap();
         let lease = queue.acquire_worker_lease().unwrap();
-        assert!(queue.claim(&lease, "new-account").unwrap().is_none());
+        assert!(queue.claim(&lease, Some("new-account")).unwrap().is_none());
         assert_eq!(
             queue.read().unwrap().request.unwrap().status,
             SnapshotRequestStatus::Cancelled
@@ -1057,7 +1163,7 @@ mod tests {
         let signed_out = queue
             .enqueue(&source, "old-account", 2, &initial, &digest)
             .unwrap();
-        assert!(queue.claim(&lease, "").unwrap().is_none());
+        assert!(queue.claim(&lease, Some("")).unwrap().is_none());
         assert_eq!(
             queue.read().unwrap().request.unwrap().status,
             SnapshotRequestStatus::Cancelled
@@ -1067,7 +1173,7 @@ mod tests {
         let changed_during_prepare = queue
             .enqueue(&source, "old-account", 3, &initial, &digest)
             .unwrap();
-        assert!(queue.claim(&lease, "old-account").unwrap().is_some());
+        assert!(queue.claim(&lease, Some("old-account")).unwrap().is_some());
         let mut activated = false;
         assert!(!queue
             .complete(
@@ -1075,7 +1181,7 @@ mod tests {
                 &lease,
                 &initial,
                 false,
-                "new-account",
+                Some("new-account"),
                 || {
                     activated = true;
                     Ok(version("changed", 'b'))
@@ -1143,10 +1249,10 @@ mod tests {
             .enqueue(&source, "fixture", 1, &initial, &digest)
             .unwrap();
         let lease = queue.acquire_worker_lease().unwrap();
-        queue.claim(&lease, "fixture").unwrap();
+        queue.claim(&lease, Some("fixture")).unwrap();
         let mut activated = false;
         assert!(!queue
-            .complete(id, &lease, &changed, false, "fixture", || {
+            .complete(id, &lease, &changed, false, Some("fixture"), || {
                 activated = true;
                 Ok(version(&id.to_string(), 'c'))
             })
@@ -1197,7 +1303,7 @@ mod tests {
             .enqueue(&source, "fixture", 1, &initial, &digest)
             .unwrap();
         let lease = queue.acquire_worker_lease().unwrap();
-        queue.claim(&lease, "fixture").unwrap();
+        queue.claim(&lease, Some("fixture")).unwrap();
         queue.cancel("fixture").unwrap();
 
         assert!(matches!(
@@ -1206,7 +1312,7 @@ mod tests {
                 &lease,
                 &version(&id.to_string(), 'b'),
                 true,
-                "fixture",
+                Some("fixture"),
                 || { panic!("cancelled request must not be applied") }
             ),
             Err(SnapshotQueueError::Conflict)
@@ -1239,9 +1345,9 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let worker_queue = DictionarySnapshotQueue::new(worker_root).unwrap();
             let lease = worker_queue.acquire_worker_lease().unwrap();
-            worker_queue.claim(&lease, "fixture").unwrap();
+            worker_queue.claim(&lease, Some("fixture")).unwrap();
             worker_queue
-                .complete(id, &lease, &worker_version, false, "fixture", || {
+                .complete(id, &lease, &worker_version, false, Some("fixture"), || {
                     entered_send.send(()).unwrap();
                     release_receive.recv().unwrap();
                     Ok(version(&id.to_string(), 'b'))

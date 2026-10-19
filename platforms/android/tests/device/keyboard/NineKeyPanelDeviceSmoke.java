@@ -10,7 +10,7 @@ import java.util.function.Predicate;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-/** Device acceptance for the quanpin nine-key expanded panel: spelling column, locks, backspace and filters inside the open panel. */
+/** 全拼九键展开面板的设备验收：拼音列、锁定、退格和面板内筛选。 */
 public final class NineKeyPanelDeviceSmoke extends DeviceSmoke {
     private static final String PANEL = "九键候选面板";
 
@@ -46,6 +46,14 @@ public final class NineKeyPanelDeviceSmoke extends DeviceSmoke {
             restartIme();
             openEditor();
             tap(field("msime-test-plain"));
+            // 前一套英文纠错会保留全局英文状态；通过真实语言键建立中文九键前置条件。
+            stage = "restore Chinese nine-key input mode";
+            Predicate<AccessibilityNodeInfo> language = node -> node.isClickable()
+                && node.getContentDescription() != null
+                && node.getContentDescription().toString().startsWith("切换到");
+            AccessibilityNodeInfo mode = await(key("中").or(key("英")).and(language));
+            if (equalsText("英", mode.getText())) tap(key("英").and(language));
+            await(key("ABC"));
 
             // 6464224：6464 可以是 ming 或 ning，224 可以是 bai 或 cai。
             stage = "nine-key composition";

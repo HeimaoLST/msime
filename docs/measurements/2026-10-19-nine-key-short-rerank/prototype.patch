@@ -1,0 +1,344 @@
+diff --git a/crates/engine/src/nine_key.rs b/crates/engine/src/nine_key.rs
+index 83bfd4a..34464a1 100644
+--- a/crates/engine/src/nine_key.rs
++++ b/crates/engine/src/nine_key.rs
+@@ -1613,0 +1614,9 @@ impl NineKeySession {
++            if scored_len < 2 {
++                place_keyboard_pick(
++                    candidates,
++                    &[],
++                    self.sentence_association.show_next_on_duplicate,
++                    self.sentence_association.word_lattice,
++                );
++                return;
++            }
+@@ -6070,0 +6080,329 @@ mod tests {
++    impl NineKeySession {
++        fn frozen_rerank_sentences(&mut self, candidates: &mut Vec<WordItem>) {
++            if !self.sentence_association.neural_keyboard {
++                return;
++            }
++            let paths = &self.paths;
++            let keyboard = self.keyboard.get_or_insert_with(|| {
++                shared_sentence_model(&paths.resource(assets::NEURAL_MODEL_KEYBOARD))
++                    .map(|model| NeuralReranker::new(CandidateSource::NeuralKeyboard, model))
++            });
++            let ranked: &[String] = if let Some(keyboard) = keyboard.as_mut() {
++                let (scored, scored_len) = collect_lattice_sentences(candidates);
++                let scored = &scored[..scored_len];
++                let context = &self.rescoring_context;
++                let ranked = if let Some(index) = self
++                    .rerank_cache
++                    .iter()
++                    .position(|entry| rerank_cache_matches(entry, context, scored))
++                {
++                    // 缓存命中直接借用已拥有的顺序；不再复制签名或排名字符串。
++                    self.rerank_cache[index].ranked.as_slice()
++                } else {
++                    // 缓存未命中时才拥有签名；命中路径只借用当前候选行比较。
++                    let signature: Vec<(String, i64)> = scored
++                        .iter()
++                        .flatten()
++                        .map(|item| (item.word.clone(), comparable_weight(item)))
++                        .collect();
++                    let mut sentences: Vec<SentencePath> = scored
++                        .iter()
++                        .flatten()
++                        .map(|item| SentencePath {
++                            sentence: item.word.clone(),
++                            // 重排器只读取词面和静态分；规范读法和词段不会参与模型评分，
++                            // 也不会在重排后回到候选行，因此不必为临时路径复制它们。
++                            key: String::new(),
++                            log_prob: comparable_weight(item) as f64 / 1000.0,
++                            words: Vec::new(),
++                            typo_edges: 0,
++                        })
++                        .collect();
++                    let ranked = if keyboard.rerank(&mut sentences, context) {
++                        sentences.into_iter().map(|path| path.sentence).collect()
++                    } else {
++                        Vec::new()
++                    };
++                    if self.rerank_cache.len() >= RERANK_CACHE_ENTRIES {
++                        self.rerank_cache.remove(0);
++                    }
++                    self.rerank_cache.push(RerankEntry {
++                        context: context.clone(),
++                        sentences: signature,
++                        ranked,
++                    });
++                    self.rerank_cache.last().unwrap().ranked.as_slice()
++                };
++                ranked
++            } else {
++                &[]
++            };
++            place_keyboard_pick(
++                candidates,
++                ranked,
++                self.sentence_association.show_next_on_duplicate,
++                self.sentence_association.word_lattice,
++            );
++        }
++    }
++
++    #[test]
++    fn rerank_declines_before_building_single_path_state() {
++        let Ok(path) = crate::lattice::neural::test_model_path(assets::NEURAL_MODEL_KEYBOARD)
++        else {
++            eprintln!("skipped: 需要固定键盘模型资源");
++            return;
++        };
++        let model = std::sync::Arc::new(
++            chinese_ime_lm::SentenceModel::load(&std::fs::read(path).unwrap()).unwrap(),
++        );
++        for word_lattice in [true, false] {
++            for count in [0, 1] {
++                let mut session = detached();
++                session.sentence_association = SentenceAssociationOptions {
++                    neural_keyboard: true,
++                    word_lattice,
++                    ..SentenceAssociationOptions::default()
++                };
++                session.keyboard = Some(Some(NeuralReranker::new(
++                    CandidateSource::NeuralKeyboard,
++                    std::sync::Arc::clone(&model),
++                )));
++                let mut candidates: Vec<_> = (0..count).map(|_| sentence("唯一整句", 0)).collect();
++                let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
++                    session.rerank_sentences(&mut candidates)
++                });
++                assert_eq!(allocations, 0);
++                if word_lattice && count == 1 {
++                    assert_eq!(
++                        row_sources(&candidates),
++                        [("唯一整句", CandidateSource::Generated)]
++                    );
++                } else {
++                    assert!(candidates.is_empty());
++                }
++                assert!(session.rerank_cache.is_empty());
++            }
++        }
++    }
++
++    fn short_rerank_model() -> Option<std::sync::Arc<chinese_ime_lm::SentenceModel>> {
++        let path = match crate::lattice::neural::test_model_path(assets::NEURAL_MODEL_KEYBOARD) {
++            Ok(path) => path,
++            Err(reason) => {
++                eprintln!("skipped: {reason}");
++                return None;
++            }
++        };
++        Some(std::sync::Arc::new(
++            chinese_ime_lm::SentenceModel::load(&std::fs::read(path).unwrap()).unwrap(),
++        ))
++    }
++
++    fn short_rerank_session(
++        model: Option<&std::sync::Arc<chinese_ime_lm::SentenceModel>>,
++    ) -> NineKeySession {
++        let mut session = detached();
++        session.sentence_association.neural_keyboard = true;
++        session.keyboard = Some(model.map(|model| {
++            NeuralReranker::new(
++                CandidateSource::NeuralKeyboard,
++                std::sync::Arc::clone(model),
++            )
++        }));
++        session
++    }
++
++    fn short_rerank_rows(count: usize) -> Vec<WordItem> {
++        [
++            "你好",
++            "你们",
++            "您好",
++            "今天",
++            "明天",
++            "天气",
++            "你好啊",
++            "你好呀",
++            "大家好",
++            "天好",
++            "朋友",
++            "您好呀",
++        ]
++        .into_iter()
++        .take(count)
++        .enumerate()
++        .map(|(index, text)| sentence(text, -(index as i64) * 100))
++        .collect()
++    }
++
++    #[test]
++    fn short_rerank_preserves_model_load_and_sequence_outputs() {
++        // 缺失模型也沿用原来的首次加载与失败缓存时机。
++        for count in [0, 1, 2] {
++            let mut old = detached();
++            let mut new = detached();
++            old.sentence_association.neural_keyboard = true;
++            new.sentence_association.neural_keyboard = true;
++            old.frozen_rerank_sentences(&mut short_rerank_rows(count));
++            new.rerank_sentences(&mut short_rerank_rows(count));
++            assert!(matches!(old.keyboard, Some(None)));
++            assert!(matches!(new.keyboard, Some(None)));
++        }
++        let Some(model) = short_rerank_model() else {
++            return;
++        };
++        for available in [false, true] {
++            for word_lattice in [false, true] {
++                for duplicate in [false, true] {
++                    let mut old = short_rerank_session(available.then_some(&model));
++                    let mut new = short_rerank_session(available.then_some(&model));
++                    for session in [&mut old, &mut new] {
++                        session.sentence_association.word_lattice = word_lattice;
++                        session.sentence_association.show_next_on_duplicate = duplicate;
++                    }
++                    for context in ["", "合成上文", "另一段上文"] {
++                        old.rescoring_context = context.into();
++                        new.rescoring_context = context.into();
++                        for count in [2, 1, 0, 2, 12, 1, 12, 2, 0] {
++                            let mut a = short_rerank_rows(count);
++                            let mut b = a.clone();
++                            old.frozen_rerank_sentences(&mut a);
++                            new.rerank_sentences(&mut b);
++                            assert_eq!(a, b);
++                            assert_eq!(a.capacity(), b.capacity());
++                            if available && count >= 2 {
++                                let input = short_rerank_rows(count);
++                                let (scored, len) = collect_lattice_sentences(&input);
++                                let matching = |entry: &&RerankEntry| {
++                                    rerank_cache_matches(entry, context, &scored[..len])
++                                };
++                                let left = old.rerank_cache.iter().find(matching).unwrap();
++                                let right = new.rerank_cache.iter().find(matching).unwrap();
++                                assert_eq!(left.context, right.context);
++                                assert_eq!(left.sentences, right.sentences);
++                                assert_eq!(left.ranked, right.ranked);
++                            }
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn short_rerank_preserves_mixed_rows_after_cache_eviction() {
++        let Some(model) = short_rerank_model() else {
++            return;
++        };
++        for word_lattice in [false, true] {
++            for duplicate in [false, true] {
++                let mut old = short_rerank_session(Some(&model));
++                let mut new = short_rerank_session(Some(&model));
++                for session in [&mut old, &mut new] {
++                    session.sentence_association.word_lattice = word_lattice;
++                    session.sentence_association.show_next_on_duplicate = duplicate;
++                    session.rescoring_context = "合成上文".into();
++                }
++                let compare =
++                    |old: &mut NineKeySession, new: &mut NineKeySession, mut a: Vec<WordItem>| {
++                        let mut b = Vec::with_capacity(a.capacity());
++                        b.extend(a.iter().cloned());
++                        old.frozen_rerank_sentences(&mut a);
++                        new.rerank_sentences(&mut b);
++                        assert_eq!(a, b);
++                        assert_eq!(a.capacity(), b.capacity());
++                    };
++                compare(&mut old, &mut new, short_rerank_rows(2));
++                for index in 0..=RERANK_CACHE_ENTRIES {
++                    for count in [0, 1] {
++                        let mut rows = vec![item("你好", "64426", 1000, CandidateSource::Database)];
++                        rows.extend(short_rerank_rows(count).into_iter().map(|mut row| {
++                            row.weight = -(index as i64);
++                            row
++                        }));
++                        rows.push(item("你们", "64636", 0, CandidateSource::Generated));
++                        compare(&mut old, &mut new, rows);
++                    }
++                }
++                // 旧实现被短列表挤出有效排名；新实现保留它，两者后续输出仍须一致。
++                assert_eq!(old.rerank_cache.len(), RERANK_CACHE_ENTRIES);
++                assert_eq!(new.rerank_cache.len(), 1);
++                compare(&mut old, &mut new, short_rerank_rows(2));
++                compare(&mut old, &mut new, short_rerank_rows(12));
++            }
++        }
++    }
++
++    #[test]
++    #[ignore = "手动普通System分配器完整重排入口配对，不能与构建同时运行"]
++    fn short_rerank_complete_paired_budget() {
++        use std::hint::black_box;
++        use std::time::{Duration, Instant};
++        let model = short_rerank_model().expect("计时必须提供固定键盘模型");
++        let run = |session: &mut NineKeySession,
++                   rows: &[WordItem],
++                   cold: bool,
++                   old: bool,
++                   iterations: usize| {
++            let start = Instant::now();
++            for _ in 0..iterations {
++                if cold {
++                    session.rerank_cache.clear();
++                }
++                let mut candidates = black_box(rows).to_vec();
++                if old {
++                    session.frozen_rerank_sentences(black_box(&mut candidates));
++                } else {
++                    session.rerank_sentences(black_box(&mut candidates));
++                }
++                black_box(&candidates);
++                drop(candidates);
++            }
++            start.elapsed()
++        };
++        let mut failures = Vec::new();
++        for count in [0, 1, 2] {
++            for available in [false, true] {
++                for cold in [false, true] {
++                    let rows = short_rerank_rows(count);
++                    let mut old = short_rerank_session(available.then_some(&model));
++                    let mut new = short_rerank_session(available.then_some(&model));
++                    run(&mut old, &rows, cold, true, 2);
++                    run(&mut new, &rows, cold, false, 2);
++                    let mut iterations = 128;
++                    while run(&mut old, &rows, cold, true, iterations) < Duration::from_millis(5) {
++                        iterations *= 2;
++                    }
++                    let mut ratios = Vec::new();
++                    for pair in 0..21 {
++                        let (a, b) = if pair % 2 == 0 {
++                            (
++                                run(&mut old, &rows, cold, true, iterations),
++                                run(&mut new, &rows, cold, false, iterations),
++                            )
++                        } else {
++                            let b = run(&mut new, &rows, cold, false, iterations);
++                            (run(&mut old, &rows, cold, true, iterations), b)
++                        };
++                        println!("short-rerank-pair,{count},{available},{cold},{pair},{iterations},{},{}", a.as_nanos(), b.as_nanos());
++                        ratios.push(b.as_secs_f64() / a.as_secs_f64());
++                    }
++                    ratios.sort_by(f64::total_cmp);
++                    let limit = if count < 2 && available && cold {
++                        0.98
++                    } else {
++                        1.05
++                    };
++                    println!(
++                        "short-rerank-summary,{count},{available},{cold},{},{limit}",
++                        ratios[10]
++                    );
++                    if ratios[10] >= limit {
++                        failures.push((count, available, cold, ratios[10], limit));
++                    }
++                }
++            }
++        }
++        assert!(failures.is_empty(), "预算失败：{failures:?}");
++    }
++

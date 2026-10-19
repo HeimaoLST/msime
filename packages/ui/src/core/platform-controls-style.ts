@@ -19,7 +19,7 @@ export const groupTitle =
  * 除 HarmonyOS 手机外，所有平台都照旧把它画成 1px 的上边框。HarmonyOS 手机则改用沿行顶边的背景图来画：粗 `--p-row-divider-w`（.5px），从起始边向内 `--p-row-divider-inset`（16px）处开始，一直延伸到末端边，这是边框做不到的。它用展开写法（longhand）书写，让行自身的背景色（按下时的填充）留在下面。每个类名都完整写出，因为样式表只生成它在源码中找到的类名。
  */
 export const groupRows =
-  "flex flex-col gap-[var(--p-row-gap)] rounded-[var(--p-group-r)] bg-[var(--p-group-bg)] [box-shadow:var(--p-group-shadow)] [&>:not([hidden])~:not([hidden])]:[border-top:1px_solid_var(--p-row-divider)] harmony:[&>:not([hidden])~:not([hidden])]:[border-top:0] harmony:[&>:not([hidden])~:not([hidden])]:[background-image:linear-gradient(var(--p-row-divider),var(--p-row-divider))] harmony:[&>:not([hidden])~:not([hidden])]:[background-position:right_top] harmony:[&>:not([hidden])~:not([hidden])]:[background-size:calc(100%_-_var(--p-row-divider-inset))_var(--p-row-divider-w)] harmony:[&>:not([hidden])~:not([hidden])]:[background-repeat:no-repeat]";
+  "settings-glass-group flex flex-col gap-[var(--p-row-gap)] rounded-[var(--p-group-r)] bg-[var(--p-group-bg)] [box-shadow:var(--p-group-shadow)] [&>:not([hidden])~:not([hidden])]:[border-top:1px_solid_var(--p-row-divider)] harmony:[&>:not([hidden])~:not([hidden])]:[border-top:0] harmony:[&>:not([hidden])~:not([hidden])]:[background-image:linear-gradient(var(--p-row-divider),var(--p-row-divider))] harmony:[&>:not([hidden])~:not([hidden])]:[background-position:right_top] harmony:[&>:not([hidden])~:not([hidden])]:[background-size:calc(100%_-_var(--p-row-divider-inset))_var(--p-row-divider-w)] harmony:[&>:not([hidden])~:not([hidden])]:[background-repeat:no-repeat]";
 
 export const row =
   "flex min-h-[var(--p-row-h)] min-w-0 items-center gap-[var(--p-row-ctl-gap)] rounded-[var(--p-row-r)] bg-[var(--p-row-bg)] [padding:var(--p-row-pad)] [box-shadow:var(--p-row-shadow)]";
@@ -29,9 +29,9 @@ export const rowText = sharedRowText;
 export const rowTitle = "block [font-size:var(--p-row-fs)] [color:var(--p-text)]";
 export const rowDescription = "block [font-size:var(--p-sub-fs)] [color:var(--p-sub)]";
 export const rowControl = controlRow;
-/** 控件要整行宽度的行（文本框、整行滑块）。HarmonyOS 手机只有约 360px 宽，控件放在标题旁边会把说明挤成几个字一行、把地址截断，所以那里控件换到标题下方独占一行，和标题之间只隔 6px；其余平台与 `row` 相同。 */
-export const wideRow = `${row} harmony:flex-wrap harmony:gap-y-1.5`;
-export const wideRowControl = `${rowControl} harmony:w-full harmony:shrink`;
+/** 控件要整行宽度的行（文本框、整行滑块）。HarmonyOS 手机只有约 360px 宽，控件放在标题旁边会把说明挤成几个字一行、把地址截断，所以那里控件换到标题下方独占一行，和标题之间只隔 6px；macOS AI 页的长文本也使用标题下方布局，其余页面与 `row` 相同。 */
+export const wideRow = `settings-wide-row ${row} harmony:flex-wrap harmony:gap-y-1.5`;
+export const wideRowControl = `settings-wide-row-control ${rowControl} harmony:w-full harmony:shrink`;
 /** 跳转行：整行是一个按钮，外形与 `row` 相同，悬停时变色。 */
 export const linkRow = `${row} w-full cursor-pointer border-0 text-left hover:bg-[var(--p-hover)]`;
 
@@ -61,7 +61,7 @@ export const switchState = "[display:var(--p-sw-label)] [font-size:14px] [color:
 // ---- segmented ----
 
 export const segmented =
-  "inline-flex max-w-full items-stretch gap-0.5 rounded-[var(--p-seg-r)] bg-[var(--p-seg-bg)] p-0.5 [border:var(--p-seg-border)]";
+  "settings-glass-segmented inline-flex max-w-full items-stretch gap-0.5 rounded-[var(--p-seg-r)] bg-[var(--p-seg-bg)] p-0.5 [border:var(--p-seg-border)]";
 /** Windows marks the chosen item with a short accent bar; `--p-seg-indicator` is 0 elsewhere, which draws nothing. */
 export const segment =
   "relative flex min-h-7 cursor-pointer items-center justify-center rounded-[var(--p-seg-item-r)] px-3 [font-size:13px] [color:var(--p-text)] after:absolute after:bottom-0.5 after:left-1/2 after:hidden after:h-[3px] after:w-[var(--p-seg-indicator)] after:-translate-x-1/2 after:rounded-full after:bg-accent has-[:checked]:bg-[var(--p-seg-on)] has-[:checked]:[color:var(--p-seg-on-fg)] has-[:checked]:[box-shadow:var(--p-seg-on-shadow)] has-[:checked]:after:block has-[:disabled]:cursor-default has-[:disabled]:opacity-50 has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-1 has-[:focus-visible]:outline-accent";
@@ -76,9 +76,9 @@ export const select =
 
 // ---- text input ----
 
-/** 设置行里的文本框。桌面平台保持原样；HarmonyOS 手机上画成与词库页搜索框同款的无边框胶囊，底色比所在分组略深一层，占满控件区。 */
+/** 设置行里的文本框。macOS 统一输入表面与尺寸；HarmonyOS 手机使用占满控件区的无边框胶囊。 */
 export const textInput =
-  "harmony:box-border harmony:h-10 harmony:min-w-0 harmony:flex-1 harmony:appearance-none harmony:rounded-full harmony:border-0 harmony:bg-[rgba(255,255,255,0.08)] harmony:px-4 harmony:[font-family:inherit] harmony:text-[15px] harmony:text-[var(--p-text)] harmony:placeholder:text-[var(--p-sub)] harmony:light-theme:bg-[rgba(0,0,0,0.05)]";
+  "settings-text-input harmony:box-border harmony:h-10 harmony:min-w-0 harmony:flex-1 harmony:appearance-none harmony:rounded-full harmony:border-0 harmony:bg-[rgba(255,255,255,0.08)] harmony:px-4 harmony:[font-family:inherit] harmony:text-[15px] harmony:text-[var(--p-text)] harmony:placeholder:text-[var(--p-sub)] harmony:light-theme:bg-[rgba(0,0,0,0.05)]";
 /** 带「显示」按钮的密钥框：框占满剩余宽度，按钮是行尾的强调色文字。 */
 export const secretInput =
   "harmony:flex harmony:w-full harmony:min-w-0 harmony:items-center harmony:gap-2";

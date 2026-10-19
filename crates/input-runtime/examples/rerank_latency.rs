@@ -25,6 +25,8 @@
 //! boundary, the IPC hop, or the time the platform spends drawing the candidate panel. The budget
 //! it checks is therefore a ceiling on this crate's share of a frame, not a guarantee about what a
 //! user perceives.
+mod eval_resources;
+
 #[path = "convert_eval/grid_keys.rs"]
 mod grid_keys;
 
@@ -162,6 +164,7 @@ fn type_case(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut resources: Option<PathBuf> = None;
+    let mut resource_lock: Option<PathBuf> = None;
     let mut sets: Vec<PathBuf> = Vec::new();
     let mut budget_ms = FRAME_MS;
     let mut warmup = 5usize;
@@ -177,6 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         match args[index].as_str() {
             "--resources" => resources = Some(PathBuf::from(take(&mut index)?)),
+            "--resource-lock" => resource_lock = Some(PathBuf::from(take(&mut index)?)),
             "--set" => sets.push(PathBuf::from(take(&mut index)?)),
             "--budget-ms" => budget_ms = take(&mut index)?.parse()?,
             "--warmup" => warmup = take(&mut index)?.parse()?,
@@ -189,11 +193,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         index += 1;
     }
     let resources = resources.ok_or(
-        "usage: rerank_latency --resources <verified-dir> --set <file.tsv> [--budget-ms 16] [--warmup 5] [--limit N] [--grid nine|fourteen|shuangpin-<profile>]",
+        "usage: rerank_latency --resources <verified-dir> --set <file.tsv> [--resource-lock <file.json>] [--budget-ms 16] [--warmup 5] [--limit N] [--grid nine|fourteen|shuangpin-<profile>]",
     )?;
     if sets.is_empty() {
         return Err("at least one --set is required".into());
     }
+
+    let verified = eval_resources::verify(&resources, resource_lock.as_deref())?;
 
     let mut cases = Vec::new();
     for set in &sets {
@@ -207,13 +213,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let state = tempfile::tempdir()?;
-    let generation = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/desktop-dictionary.lock.json"),
-    )?;
-    let generation: serde_json::Value = serde_json::from_str(&generation)?;
-    let generation = generation["source_commit"]
-        .as_str()
-        .ok_or("lock has no source_commit")?;
     let mut options = msime_engine::host::prepare_options(
         resources.to_str().ok_or("non-UTF-8 resource path")?,
         state
@@ -226,7 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join("cache")
             .to_str()
             .ok_or("non-UTF-8 state")?,
-        generation,
+        &verified.source_commit,
     )?;
     options.scheme = 0;
     options.learning = false;

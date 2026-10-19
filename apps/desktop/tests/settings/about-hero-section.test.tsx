@@ -12,7 +12,13 @@ afterEach(() => {
 });
 
 test("renders the product mark, name, and platform description", () => {
-  render(<AboutHeroSection logo="data:image/svg+xml,synthetic" description="桌面输入体验" />);
+  const { container } = render(
+    <AboutHeroSection logo="data:image/svg+xml,synthetic" description="桌面输入体验" />,
+  );
+  const welcome = container.querySelector('img[data-mascot="welcome"]')!;
+  expect(welcome.getAttribute("aria-hidden")).toBe("true");
+  expect(welcome.getAttribute("alt")).toBe("");
+  expect(screen.getAllByRole("img")).toHaveLength(1);
 
   expect((screen.getByRole("img", { name: "水杉 IME" }) as HTMLImageElement).src).toBe(
     "data:image/svg+xml,synthetic",
@@ -37,6 +43,18 @@ test("the HarmonyOS hero states the product, the version on this platform and th
   expect(screen.getByText("© 2026 Metasequoia")).toBeTruthy();
   // 设计稿的标语和眉标只属于桌面版主视觉。
   expect(screen.queryByText("Metasequoia IME")).toBeNull();
+});
+
+test("the HarmonyOS hero writes the release date after the version when it is known", () => {
+  render(
+    <HarmonyAboutHero
+      version="1.4.2"
+      releaseDate="2026-10-19"
+      platformLabel="HarmonyOS"
+      update="idle"
+    />,
+  );
+  expect(screen.getByText("版本 1.4.2（2026-10-19 发布） · HarmonyOS")).toBeTruthy();
 });
 
 test("the HarmonyOS hero leaves out the update pill when the host has no update check", () => {
@@ -124,6 +142,7 @@ function renderAbout(
   host: Record<string, unknown>,
   openExternalUrl = vi.fn(),
   checkUpdate = vi.fn().mockResolvedValue({ status: "current", update: release("1.4.2") }),
+  readAppReleaseDate?: () => Promise<string>,
 ) {
   render(
     <SettingsPage
@@ -132,6 +151,7 @@ function renderAbout(
         load: vi.fn().mockResolvedValue(initial),
         save: vi.fn(),
         readAppVersion: vi.fn().mockResolvedValue("1.4.2"),
+        readAppReleaseDate,
         openExternalUrl,
         checkUpdate,
         host: testHost({ platform: "harmony", ...host }),
@@ -192,4 +212,10 @@ test("the hero pill runs the release check and reports an outcome that is not cu
   );
   // 并非最新，所以胶囊按钮再次提供检查，而不是声称当前已是最新版本。
   expect(within(about).getByRole("button", { name: "检查更新" })).toBeTruthy();
+});
+
+test("HarmonyOS 关于 reads the release date from the bridge into the hero", async () => {
+  renderAbout({}, vi.fn(), undefined, vi.fn().mockResolvedValue("2026-10-19"));
+  const about = await screen.findByRole("group", { name: "关于" });
+  expect(await within(about).findByText("版本 1.4.2（2026-10-19 发布） · HarmonyOS")).toBeTruthy();
 });

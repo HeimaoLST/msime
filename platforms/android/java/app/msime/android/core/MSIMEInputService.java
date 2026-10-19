@@ -146,6 +146,8 @@ public final class MSIMEInputService extends InputMethodService {
     private LinearLayout candidates;
     private LinearLayout verticalCandidates;
     FrameLayout candidateViewport;
+    CandidateCanvasColumn candidateCanvasRegion;
+    CandidateCanvasFrame expandedCandidateCanvas;
     private HorizontalScrollView horizontalCandidateScroll;
     private ScrollView verticalCandidateScroll;
     private final java.util.List<Button> candidateButtons = new java.util.ArrayList<>();
@@ -496,6 +498,7 @@ public final class MSIMEInputService extends InputMethodService {
     Runnable diagnosticDismissTask;
     final EnglishLetterCaseState letterCase = new EnglishLetterCaseState();
     boolean dedicatedEnglish;
+    private boolean temporaryEnglishShift;
     /** 方案异步保存完成前暂不绘制中间的中文视图。 */
     private boolean renderingSuppressed;
     private boolean hardwareLanguageShift = true;
@@ -783,8 +786,9 @@ public final class MSIMEInputService extends InputMethodService {
         1, 1, 0, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(1),
         new ThreadPoolExecutor.DiscardOldestPolicy());
     final AiPolishClient aiPolishClient = new AiPolishClient(new AiPolishHttpTransport());
+    private final CandidateSkinResolver candidateSkinResolver = new CandidateSkinResolver();
     private final PreferencesReloader preferencesReloader = new PreferencesReloader(
-        (task, delay) -> main.postDelayed(task, delay), preferencesWorker, NativeClient::loadPreferences);
+        (task, delay) -> main.postDelayed(task, delay), preferencesWorker, candidateSkinResolver::read);
 
     /** 候选区标题行（品牌标记、预编辑、状态、页码、展开）的固定高度。 */
     static final int CANDIDATE_HEADER_HEIGHT_DP = 34;
@@ -934,7 +938,7 @@ public final class MSIMEInputService extends InputMethodService {
             preferencesWorker.execute(() -> {
                 final String response;
                 try {
-                    response = NativeClient.loadPreferences(directory);
+                    response = candidateSkinResolver.read(directory);
                 } catch (RuntimeException | LinkageError error) {
                     return;
                 }
@@ -942,6 +946,7 @@ public final class MSIMEInputService extends InputMethodService {
                     if (generation != appearanceLoadGeneration || session != 0) return;
                     try {
                         boolean previousClipboard = clipboardHistoryEnabled;
+                        preferencesDirectory = directory;
                         applyEditorPreferences(value(response).optJSONObject("preferences"));
                         offerRecentClipOnHistoryEnabled(previousClipboard);
                         render();
@@ -1345,6 +1350,15 @@ public final class MSIMEInputService extends InputMethodService {
 
     boolean commitText(String text) { return commitText(text, typingSource()); }
 
+    /** 完整符号对是用户明确选择的模板，不受自动补半个的开关影响；分两次写入，让光标停在中间。 */
+    boolean commitLiteralText(String text) {
+        String closing = PairedPunctuationPolicy.literalPairClosing(text);
+        if (closing == null) return commitText(text);
+        TypingSource source = typingSource();
+        return commitText(text.substring(0, text.length() - closing.length()), source)
+            && commitClosingMark(closing, source);
+    }
+
     private void applyPairedPunctuation(boolean enabled) {
         pairedPunctuation = enabled;
         if (!enabled) pairedPunctuationStack.clear();
@@ -1368,9 +1382,8 @@ public final class MSIMEInputService extends InputMethodService {
             return false;
         }
         CharSequence after = textAfterCursor(closing.length());
-        // 光标后面已经是后半个（正常情况）时不必再读光标前面，省一次跨进程调用。
-        CharSequence before = after == null || after.toString().startsWith(closing)
-            ? null : textBeforeCursor(closing.length());
+        // 光标后面可能是外层同名后半个，要检查刚写出的后半个有没有跑到光标前面。
+        CharSequence before = after == null ? null : textBeforeCursor(closing.length());
         if (PairedPunctuationPolicy.caretPassedClosing(closing, after, before)) {
             selectionEcho.commit(closing.length());
             selectionEcho.expect();
@@ -1429,9 +1442,62 @@ public final class MSIMEInputService extends InputMethodService {
         preferencesReloader.start(preferencesDirectory, this::reloadPreferences);
     }
 
+    private int currentEditorFieldId;
+    private int currentEditorImeOptions;
+    private Runnable pendingCompositionMarkerLoss;
+
+    private void cancelPendingCompositionMarkerLoss() {
+        if (pendingCompositionMarkerLoss != null) main.removeCallbacks(pendingCompositionMarkerLoss);
+        pendingCompositionMarkerLoss = null;
+    }
+
+    /** 新按键不能在失去标记的旧区间上继续追加；先按原规则处理尚未被重启接手的回报。 */
+    private void finishPendingCompositionMarkerLoss() {
+        Runnable pending = pendingCompositionMarkerLoss;
+        cancelPendingCompositionMarkerLoss();
+        if (pending != null) pending.run();
+    }
+
+    /** 重启连接不等于换文档；只有新连接确认还保存自己的拼音组字时才延续原会话。 */
+    private boolean retainRestartedComposition(EditorInfo info, InputConnection next) {
+        if (info == null || next == null || currentDocumentIdentifier == 0 || session == 0
+                || view == null || editorCompositionSuppressed
+                || !EditorPolicy.useEngine(info.inputType)
+                || info.inputType != editorInputType || info.fieldId != currentEditorFieldId
+                || info.imeOptions != currentEditorImeOptions
+                || !currentEditorPackage.equals(info.packageName)) return false;
+        return retainCompositionAtSelection(next, info.initialSelStart, info.initialSelEnd);
+    }
+
+    /** 编辑器可能先移除组字标记、再通知连接重启；只重标记已核对的原区间，不重新写文字。 */
+    private boolean retainCompositionAtSelection(InputConnection next, int start, int end) {
+        if (next == null || session == 0 || view == null || editorCompositionSuppressed) return false;
+        int scheme = InputViewValuePolicy.scheme(view, -1);
+        if (scheme != 0 && scheme != 1) return false;
+        String marked = composingText(view, InputViewValuePolicy.editingText(view), true);
+        if (!selectionEcho.matchesRestartComposition(start, end, marked.length())) return false;
+        try {
+            CharSequence before = next.getTextBeforeCursor(marked.length(), 0);
+            if (!android.text.TextUtils.equals(before, marked)) return false;
+            // 重启可能去掉标记但留下文字；先恢复已核对的区间，下一次写入才不会追加第二份组字。
+            return next.setComposingRegion(end - marked.length(), end);
+        } catch (RuntimeException disconnected) {
+            return false;
+        }
+    }
+
     @Override public void onStartInput(EditorInfo info, boolean restarting) {
+        cancelPendingCompositionMarkerLoss();
         super.onStartInput(info, restarting);
         cancelInputViewRefresh();
+        InputConnection nextConnection = getCurrentInputConnection();
+        if (restarting && retainRestartedComposition(info, nextConnection)) {
+            connection = nextConnection;
+            resetCaretAnchor();
+            updateAutomaticCapitalization();
+            render();
+            return;
+        }
         long startGeneration = ++engineStartGeneration;
         cloudClipboardGeneration++;
         clipboardImageGeneration++;
@@ -1471,6 +1537,8 @@ public final class MSIMEInputService extends InputMethodService {
             && currentEditorPackage.equals(nextPackage);
         if (!keepKeyboardLayer) keyboardLayer = KeyboardLayout.Layer.LETTERS;
         editorInputType = nextInputType;
+        currentEditorFieldId = info == null ? 0 : info.fieldId;
+        currentEditorImeOptions = info == null ? 0 : info.imeOptions;
         if (directNumberPad()) keyboardLayer = KeyboardLayout.Layer.SYMBOLS;
         currentEditorPackage = nextPackage;
         allowLearning = info != null && EditorPolicy.allowLearning(info.imeOptions);
@@ -1622,6 +1690,7 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     @Override public void onFinishInput() {
+        cancelPendingCompositionMarkerLoss();
         flushKeyPresses();
         clearQuickDeleteUndo();
         imeLetterRows.cancelBackspaceRepeat();
@@ -1948,6 +2017,11 @@ public final class MSIMEInputService extends InputMethodService {
         // 会话停下时不知道编辑器里是否还有组字区（restartInput 前应用常已清空或改写了文字），换成确定读音可能把它插进文档，所以只结束组字区，不写文字。
         else if (connection != null) bridge.abandon(sink(typingSource()));
         view = null;
+        if (temporaryEnglishShift) {
+            dedicatedEnglish = false;
+            temporaryEnglishShift = false;
+            letterCase.reset();
+        }
         closeCandidatePanel();
         // 换编辑器时不让任何工具栏面板（含常用语）活下来，理由同 finishInputViewPresentation。
         if (keepMoreTools) {
@@ -2030,13 +2104,13 @@ public final class MSIMEInputService extends InputMethodService {
     /**
      * runtime-options.json 里的偏好是首次安装时写下的出厂默认（见 Bootstrap.prepare），拿它建会话，引擎先按默认方案（全拼 26 键）起来，过一两秒实时偏好重载后才换成用户的方案，九键用户每次都看到键盘从 26 键跳成九键。建会话前在工作线程上读一次实时偏好换进去；读不到时照旧用原来那份。不允许学习的输入框照样把 learning 关掉。
      */
-    private static EngineStartOptions withLivePreferences(String optionsText, boolean suppressLearning) {
+    private EngineStartOptions withLivePreferences(String optionsText, boolean suppressLearning) {
         try {
             JSONObject options = new JSONObject(optionsText);
             String directory = InputViewValuePolicy.textOr(options, "preferences_directory", "");
             if (directory.isEmpty() || !new File(directory).isAbsolute())
                 return new EngineStartOptions(optionsText, null);
-            String response = NativeClient.loadPreferences(directory);
+            String response = candidateSkinResolver.read(directory);
             JSONObject envelope = new JSONObject(response);
             JSONObject live = JsonPolicy.strictTrue(envelope.opt("ok"))
                 ? envelope.getJSONObject("value").optJSONObject("preferences") : null;
@@ -2132,7 +2206,7 @@ public final class MSIMEInputService extends InputMethodService {
                         // The next idle boundary retries a busy or unavailable journal.
                         return;
                     }
-                    // 个人词库每同步一次只写 4 条，导入的词库又按队列空位分批送进来。这里把下一批送进去，只要还有没写完的（队列里还有，或者刚送进了新的）就马上再来一轮，直到全部写完。每一轮都回到主线程重新确认此刻没有输入会话：键盘一弹出就停，下次空闲时接着写。
+                    // 个人词库每同步一次最多写 128 条，导入的词库又按队列空位分批送进来。这里把下一批送进去，只要还有没写完的（队列里还有，或者刚送进了新的）就马上再来一轮，直到全部写完。每一轮都回到主线程重新确认此刻没有输入会话：键盘一弹出就停，下次空闲时接着写。
                     DictionaryCollectionsStore.Result<Integer> sent = DictionaryCollectionsStore.flushSent(this);
                     if (queued > 0 || (sent.value() != null && sent.value() > 0))
                         main.post(() -> schedulePersonalDictionarySynchronization(true));
@@ -2153,14 +2227,14 @@ public final class MSIMEInputService extends InputMethodService {
     private void scheduleDictionarySnapshotProcessing() {
         if (runtimeOptionsForSnapshot.isEmpty()) return;
         String options = runtimeOptionsForSnapshot;
-        Path filesRoot = getFilesDir().toPath();
-        Path root = filesRoot.resolve("bootstrap/state/dictionary-snapshots");
-        Path staging = root.resolve("staging");
         Context application = getApplicationContext();
         try {
             preferencesWorker.execute(() -> {
-                try { DictionarySnapshotWorker.process(filesRoot, root, staging, options,
-                    () -> SyncSignals.accountId(application)); }
+                try {
+                    Path root = DictionarySnapshotQueue.directory(application);
+                    DictionarySnapshotWorker.process(root, root.resolve("staging"), options,
+                        () -> SyncSignals.accountId(application));
+                }
                 catch (Exception | LinkageError ignored) { /* Retry at the next idle boundary. */ }
             });
         } catch (RuntimeException ignored) { /* Service shutdown owns the final worker state. */ }
@@ -3450,17 +3524,6 @@ public final class MSIMEInputService extends InputMethodService {
         }
     }
 
-    /** The cloud service URL the shared host built for this query, or empty when unavailable. */
-    private String cloudRequestUrl(String document) {
-        try {
-            JSONObject envelope = new JSONObject(NativeClient.cloudRequestUrl(document));
-            return JsonPolicy.strictTrue(envelope.opt("ok"))
-                ? envelope.optString("value", "") : "";
-        } catch (JSONException | RuntimeException | LinkageError error) {
-            return "";
-        }
-    }
-
     /** The AI HTTPS descriptor in this envelope, or null when it no longer matches the settings. */
     private static JSONObject aiRequestDescriptor(String raw) {
         if (raw == null) return null;
@@ -3501,7 +3564,9 @@ public final class MSIMEInputService extends InputMethodService {
             InputViewValuePolicy.booleanValue(query, "cloud_candidates", false),
             InputViewValuePolicy.booleanValue(query, "cloud_eligible", false),
             InputViewValuePolicy.booleanValue(query, "ai_eligible", false),
-            InputViewValuePolicy.booleanValue(assistant, "enabled", false) ? assistant.toString() : "");
+            InputViewValuePolicy.booleanValue(assistant, "enabled", false) ? assistant.toString() : "")
+            + "|cloud_provider=" + (query.optJSONObject("cloud_request") == null ? ""
+                : query.optJSONObject("cloud_request").optString("provider_id", ""));
         if (signature.equals(onlineSignature)) return;
         onlineSignature = signature;
         if (!signature.equals(aiResolvedSignature)) aiResolvedSignature = "";
@@ -3535,9 +3600,9 @@ public final class MSIMEInputService extends InputMethodService {
             cloudComplete = !requestsCloud(query);
             String aiDocument = document;
             if (requestsCloud(query)) {
-                String url = cloudRequestUrl(document);
-                if (!url.isEmpty()) {
-                    String body = OnlineCandidateTransport.cloud(url);
+                JSONObject descriptor = query.optJSONObject("cloud_request");
+                if (descriptor != null) {
+                    String body = OnlineCandidateTransport.cloud(descriptor);
                     if (OnlineCandidatePolicy.acceptsCloudBody(body)) {
                         String refreshed = applyOnlineResult(targetSession, epoch,
                             () -> NativeClient.applyCloudResponse(targetSession, document, body));
@@ -3727,6 +3792,7 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     boolean character(int ascii, boolean shifted) {
+        finishPendingCompositionMarkerLoss();
         clearQuickDeleteUndo();
         if (session == 0) return false;
         try { return apply(NativeClient.character(session, ascii, shifted)); }
@@ -3763,6 +3829,7 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     boolean command(int code) {
+        finishPendingCompositionMarkerLoss();
         if (code == 0) clearQuickDeleteUndo();
         if (session == 0) return false;
         try { return apply(NativeClient.command(session, code)); }
@@ -3794,6 +3861,7 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     void type(char key) {
+        finishPendingCompositionMarkerLoss();
         clearQuickDeleteUndo();
         if (connection == null) return;
         if (directEnglishActive()) {
@@ -3801,6 +3869,7 @@ public final class MSIMEInputService extends InputMethodService {
             if (TextPolicy.isAsciiLetter(output)) {
                 commitEnglishLiteral(output);
                 if (letterCase.consumeLetter()) {
+                    finishTemporaryEnglishShift();
                     imeLetterRows.refreshLetterCase();
                     render();
                 }
@@ -3850,6 +3919,7 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     boolean punctuation(int ascii) {
+        finishPendingCompositionMarkerLoss();
         if (session == 0) return false;
         CharSequence before = null;
         if (connection != null) {
@@ -4488,6 +4558,12 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     private void toggleInputLanguage(boolean shouldRender) {
+        temporaryEnglishShift = false;
+        toggleInputLanguage(shouldRender, true);
+    }
+
+    /** 临时大写只改变当前会话，不覆盖用户主动选择的中英模式。 */
+    private void toggleInputLanguage(boolean shouldRender, boolean rememberMode) {
         if (session == 0) return;
         boolean nextEnglish = !dedicatedEnglish;
         boolean previousSuppressed = renderingSuppressed;
@@ -4499,7 +4575,7 @@ public final class MSIMEInputService extends InputMethodService {
             boolean previousUppercase = letterCase.usesUppercase();
             JSONObject nextView = value(NativeClient.setEnglishMode(session, nextEnglish));
             dedicatedEnglish = nextEnglish;
-            if (inputModeStore != null) {
+            if (rememberMode && inputModeStore != null) {
                 inputModeStore.remember(imeModeScope, currentEditorPackage, nextEnglish);
             }
             view = nextView;
@@ -4519,6 +4595,12 @@ public final class MSIMEInputService extends InputMethodService {
         } finally {
             renderingSuppressed = previousSuppressed;
         }
+    }
+
+    private void finishTemporaryEnglishShift() {
+        if (!temporaryEnglishShift || letterCase.usesUppercase()) return;
+        temporaryEnglishShift = false;
+        if (dedicatedEnglish && session != 0) toggleInputLanguage(true, false);
     }
 
     private static int touchLayout(JSONObject value) {
@@ -4714,6 +4796,7 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
+        finishPendingCompositionMarkerLoss();
         // Every physical press counts once, whoever ends up handling it; the OS's auto-repeat does not.
         if (event.getRepeatCount() == 0) countKey(KeyPressIds.forKeyCode(keyCode));
         if (event.getRepeatCount() == 0 && physicalKeyboardEvent(event)) noteHardwareTyping();
@@ -4826,7 +4909,10 @@ public final class MSIMEInputService extends InputMethodService {
                     char output = letterCase.usesUppercase() || event.isShiftPressed()
                         ? Character.toUpperCase((char) unicode) : Character.toLowerCase((char) unicode);
                     commitEnglishLiteral(output);
-                    if (letterCase.consumeLetter()) imeLetterRows.refreshLetterCase();
+                    if (letterCase.consumeLetter()) {
+                        finishTemporaryEnglishShift();
+                        imeLetterRows.refreshLetterCase();
+                    }
                 } else {
                     commitEnglishLiteral(unicode);
                 }
@@ -4941,6 +5027,25 @@ public final class MSIMEInputService extends InputMethodService {
 
     @Override public void onUpdateSelection(int oldStart, int oldEnd, int newStart, int newEnd, int composingStart, int composingEnd) {
         super.onUpdateSelection(oldStart, oldEnd, newStart, newEnd, composingStart, composingEnd);
+        cancelPendingCompositionMarkerLoss();
+        int scheme = InputViewValuePolicy.scheme(view, -1);
+        // restartInput 前可能先丢失标记，旧连接也已不可读；给紧随的重启一小段接手机会。
+        if (composingStart == -1 && composingEnd == -1
+                && session != 0 && !editorCompositionSuppressed && (scheme == 0 || scheme == 1)
+                && view != null && selectionEcho.matchesRestartComposition(newStart, newEnd,
+                    composingText(view, InputViewValuePolicy.editingText(view), true).length())) {
+            pendingCompositionMarkerLoss = () -> {
+                pendingCompositionMarkerLoss = null;
+                updateEditorSelection(oldStart, oldEnd, newStart, newEnd, composingStart, composingEnd);
+            };
+            main.postDelayed(pendingCompositionMarkerLoss, 100);
+            return;
+        }
+        updateEditorSelection(oldStart, oldEnd, newStart, newEnd, composingStart, composingEnd);
+    }
+
+    private void updateEditorSelection(int oldStart, int oldEnd, int newStart, int newEnd,
+            int composingStart, int composingEnd) {
         boolean selectionChanged = oldStart != newStart || oldEnd != newEnd;
         if (selectionChanged) {
             editorContextRevision++;
@@ -5269,7 +5374,12 @@ public final class MSIMEInputService extends InputMethodService {
 
     private CandidateAppearance.Palette candidateAppearanceFor(JSONObject preferences, boolean systemDark) {
         KeyboardSkin strip = surfaceSkin(preferences, "candidate_theme", systemDark);
-        return CandidateAppearance.from(preferences, imeStyler == null ? strip : imeStyler.themed(strip));
+        CandidateAppearance.Palette fallback = CandidateAppearance.from(preferences,
+            imeStyler == null ? strip : imeStyler.themed(strip));
+        String surfaceMode = preferences == null ? "follow" : preferences.optString("candidate_theme", "follow");
+        String appMode = preferences == null ? "system" : preferences.optString("theme", "system");
+        return candidateSkinResolver.paletteFor(preferencesDirectory, preferences,
+            KeyboardSkin.resolveDark(surfaceMode, appMode, systemDark), fallback);
     }
 
     /**
@@ -7450,23 +7560,24 @@ public final class MSIMEInputService extends InputMethodService {
     CharSequence candidateLabel(String prefix, String text, String annotation,
                                         boolean highlighted) {
         if (annotation.isEmpty() && prefix.isEmpty())
-            return CandidateSymbolLabel.apply(text, 0, text.length());
+            return CandidateSymbolLabel.apply(this, text, 0, text.length());
         String primary = prefix + text;
         SpannableString label = new SpannableString(annotation.isEmpty() ? primary : primary + "\n" + annotation);
         if (!prefix.isEmpty()) {
-            label.setSpan(new ForegroundColorSpan(candidateAppearance.number()), 0, prefix.length(),
+            label.setSpan(new ForegroundColorSpan(candidateAppearance.numberFor(highlighted)), 0, prefix.length(),
                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
-        if (annotation.isEmpty()) return CandidateSymbolLabel.apply(label, prefix.length(), primary.length());
+        if (annotation.isEmpty()) return CandidateSymbolLabel.apply(this, label, prefix.length(), primary.length());
         int annotationStart = primary.length() + 1;
         // 0.62 倍：候选字与一行释义要一起放进 36 dp 的候选行，0.72 倍时释义下半截被裁掉。
         label.setSpan(new RelativeSizeSpan(0.62f), annotationStart, label.length(),
             Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         int foreground = candidateAppearance.textFor(highlighted);
-        int secondary = ColorPolicy.withAlpha(foreground, 0.58f);
+        int secondary = candidateAppearance.externalSkin()
+            ? candidateAppearance.secondaryFor(highlighted) : ColorPolicy.withAlpha(foreground, 0.58f);
         label.setSpan(new ForegroundColorSpan(secondary), annotationStart, label.length(),
             Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        return CandidateSymbolLabel.apply(label, prefix.length(), primary.length());
+        return CandidateSymbolLabel.apply(this, label, prefix.length(), primary.length());
     }
 
     /** Keep a candidate word intact; the surrounding strip/panel owns scrolling and wrapping. */
@@ -7590,6 +7701,7 @@ public final class MSIMEInputService extends InputMethodService {
      * <p>Returns false when there is nothing to act on, which lets the key type its own symbol.
      */
     private boolean selectCandidateEdge(WordCharacterPolicy.Edge edge) {
+        finishPendingCompositionMarkerLoss();
         JSONObject candidate = highlightedCandidate();
         JSONObject id = candidate == null ? null : candidate.optJSONObject("id");
         if (id == null || session == 0
@@ -7620,6 +7732,7 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     void selectVisibleCandidate(Button button, int slot) {
+        finishPendingCompositionMarkerLoss();
         JSONObject candidate = visibleCandidate(slot);
         JSONObject id = candidate == null ? null : candidate.optJSONObject("id");
         if (id == null) return;
@@ -7635,6 +7748,7 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     private boolean selectHardwareCandidate(int slot) {
+        finishPendingCompositionMarkerLoss();
         int actualSlot = visibleCandidateSlot(slot);
         JSONObject candidate = visibleCandidate(actualSlot);
         JSONObject id = candidate == null ? null : candidate.optJSONObject("id");
@@ -7714,6 +7828,8 @@ public final class MSIMEInputService extends InputMethodService {
             ViewPolicy.hide(expandedCandidates);
             if (expandedCandidateScroll != null)
                 ViewPolicy.hide(expandedCandidateScroll);
+            if (expandedCandidateCanvas != null)
+                ViewPolicy.hide(expandedCandidateCanvas);
         }
         if (imeNineKeyPanel != null) imeNineKeyPanel.dismiss();
     }
@@ -8306,7 +8422,8 @@ public final class MSIMEInputService extends InputMethodService {
         imeLetterRows.keyPreviewLayer = new FrameLayout(this);
         surface.fullBleed.add(imeLetterRows.keyPreviewLayer);
         keyboardSurface.addView(imeLetterRows.keyPreviewLayer, LayoutPolicy.frameMatchParentParams());
-        LinearLayout candidateRegion = LayoutPolicy.column(this);
+        candidateCanvasRegion = new CandidateCanvasColumn(this);
+        LinearLayout candidateRegion = candidateCanvasRegion;
         imeToolbar.buildCandidateHeader(candidateRegion);
         diagnosticView = ViewPolicy.textLabel(this, "", 12);
         KeyboardTypographyPolicy.setKeyTextSize(diagnosticView, 12);
@@ -8398,13 +8515,14 @@ public final class MSIMEInputService extends InputMethodService {
             // 韩语键面上 Shift 是双辅音那一排，不是切到英文的入口；越南语和藏文里它是字母大小写。
             if (!dedicatedEnglish && session != 0 && !helpcodeCompositionEligible()
                     && !letterCompositionActive()) {
-                toggleInputLanguage();
-                if (!dedicatedEnglish) return;
-                // Match Apple: the Shift that entered English starts from lowercase even if the
-                // editor would otherwise request automatic capitalization.
+                toggleInputLanguage(false, false);
+                if (!dedicatedEnglish || session == 0) return;
+                temporaryEnglishShift = true;
+                // 这次 Shift 从小写开始，避免编辑器的自动大写把首次点按解释为关闭。
                 letterCase.reset();
             }
             letterCase.toggle(SystemClock.uptimeMillis());
+            finishTemporaryEnglishShift();
             // 只换键面不重建键行（#6997）：重建后的新键在下一次布局前宽高为 0，紧跟着 Shift 按下的字母会被丢掉。
             imeLetterRows.refreshLetterCase();
             render();
@@ -8496,7 +8614,10 @@ public final class MSIMEInputService extends InputMethodService {
         expandedCandidateScroll.addView(expandedCandidates,
             LayoutPolicy.scrollMatchParentParams());
         ViewPolicy.hide(expandedCandidateScroll);
-        keyboardSurface.addView(expandedCandidateScroll, LayoutPolicy.frameMatchParentParams());
+        expandedCandidateCanvas = new CandidateCanvasFrame(this);
+        expandedCandidateCanvas.addView(expandedCandidateScroll, LayoutPolicy.frameMatchParentParams());
+        ViewPolicy.hide(expandedCandidateCanvas);
+        keyboardSurface.addView(expandedCandidateCanvas, LayoutPolicy.frameMatchParentParams());
         keyboardSurface.addView(imeNineKeyPanel.build(), LayoutPolicy.frameMatchParentParams());
         clipboardPanel = LayoutPolicy.column(this);
         ViewPolicy.setSymmetricPadding(clipboardPanel, 24, 16);

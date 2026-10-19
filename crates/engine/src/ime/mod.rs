@@ -586,7 +586,17 @@ impl ImeSession {
         {
             return false;
         }
+        if self
+            .scheme
+            .as_wubi()
+            .is_some_and(|wubi| wubi.extended_length_allowed())
+        {
+            return true;
+        }
         let raw = &self.state.request.raw_input;
+        if pinyin_prefix_can_continue_after_code(raw, letter) {
+            return true;
+        }
         let starts_new_pinyin_syllable = crate::pinyin::segment::is_complete_pinyin_input(raw)
             && std::str::from_utf8(&[letter]).is_ok_and(crate::pinyin::syllables::is_prefix);
         self.state.candidates.iter().any(|item| {
@@ -882,8 +892,25 @@ impl ImeSession {
             }
             None => self.decode(&request),
         };
-        // 未命中五笔码时允许延长；四码碰撞但能续输拼音时，由 handle_key 临时放开。
-        let extended = self.wubi_options.mixed_pinyin && !decoded.wubi_table_answered;
+        // 未命中五笔码时允许延长；四码碰撞但能续输拼音时，由上一键的拼音候选保留延长状态。
+        // 不能只看当前四码的拼音列表：`hang`、`cang` 这类输入会被切成一个完整音节，
+        // 更长的 `han'guo`、`can'guan` 候选要到下一次切分后才会出现。
+        let previous_pinyin_candidates = request.scheme == SchemeType::Wubi
+            && self.wubi_options.mixed_pinyin
+            && self.state.request.raw_input.len() >= 3
+            && self.state.candidates.iter().any(|item| {
+                item.scheme == SchemeType::Quanpin && !item.canonical_pinyin.is_empty()
+            });
+        let was_extended = self
+            .scheme
+            .as_wubi()
+            .is_some_and(|wubi| wubi.extended_length_allowed());
+        let inherited_pinyin_continuation = request.scheme == SchemeType::Wubi
+            && self.wubi_options.mixed_pinyin
+            && ((request.raw_input.len() == 4 && previous_pinyin_candidates)
+                || (request.raw_input.len() > 4 && was_extended));
+        let extended = self.wubi_options.mixed_pinyin
+            && (!decoded.wubi_table_answered || inherited_pinyin_continuation);
         if let Some(wubi) = self.scheme.as_wubi_mut() {
             wubi.set_extended_length_allowed(extended);
         }
@@ -995,7 +1022,10 @@ impl ImeSession {
         let pinyin_rows = self.registry.query(&mixed);
         self.mixed_pinyin_request = mixed;
         Decoded {
-            candidates: merge_pinyin_fallback(candidates, pinyin_rows),
+            // 没有完整五笔码命中时，码表返回的只是更长编码的前缀补全。
+            // 这类行不能盖过当前输入的拼音精确候选：`edu` 的 `edui`、`eduq`
+            // 会把“额度”挤到后面，空格就会选中罕见的五笔补全字。
+            candidates: merge_mixed_candidates(candidates, pinyin_rows, wubi_table_answered),
             wubi_table_answered,
         }
     }
@@ -1053,6 +1083,33 @@ fn same_candidate_identity(left: &WordItem, right: &WordItem) -> bool {
         && left.canonical_pinyin == right.canonical_pinyin
 }
 
+/// 四码同时落在一个更长拼音的音节边界中时，当前默认切分可能只显示整音节候选。
+/// 例如 `hang` 既是五笔整码，也可以按 `han'g...` 继续输入“韩国”。只接受合法的完整首音节和合法的未完成尾音节，避免把任意第五码当成拼音。
+fn pinyin_prefix_can_continue_after_code(raw: &str, letter: u8) -> bool {
+    if !letter.is_ascii_lowercase() {
+        return false;
+    }
+    let next = [letter];
+    let Ok(next) = std::str::from_utf8(&next) else {
+        return false;
+    };
+    (1..raw.len()).any(|split| {
+        let (head, tail) = raw.split_at(split);
+        crate::pinyin::segment::is_complete_pinyin_input(head)
+            && pinyin_prefix_with_next(tail, next.as_bytes()[0])
+    })
+}
+
+fn pinyin_prefix_with_next(tail: &str, next: u8) -> bool {
+    let mut bytes = [0; 16];
+    if tail.len() + 1 > bytes.len() {
+        return false;
+    }
+    bytes[..tail.len()].copy_from_slice(tail.as_bytes());
+    bytes[tail.len()] = next;
+    std::str::from_utf8(&bytes[..tail.len() + 1]).is_ok_and(crate::pinyin::syllables::is_prefix)
+}
+
 /// 从已构造的请求复用方案显示文本，避免刷新时再次调用 `Scheme::preedit()` 分配同一份字符串。
 fn reuse_request_preedit(request: &QueryRequest, destination: &mut String) {
     let source = match request.scheme {
@@ -1102,11 +1159,24 @@ fn wubi_table_answered(candidates: &[WordItem], code: &str) -> bool {
     candidates.iter().any(|item| item.pinyin == code)
 }
 
-/// Wubi rows first, so wubi ranking and fixed positions keep precedence, then the quanpin rows whose word is not shown yet, in quanpin order. Every row keeps its producer's scheme: the session reads "answered by the pinyin fallback" and routes pins, removals and learning from those tags (overlays.md §3.3), so no list-level flag is kept here.
-fn merge_pinyin_fallback(
-    mut candidates: Vec<WordItem>,
-    mut pinyin_rows: Vec<WordItem>,
+/// 按当前输入是否命中完整五笔码决定两组候选的先后；每行保留自己的生产方案，选词、固定、删除和学习仍按行的来源路由（overlays.md §3.3）。
+#[cfg(test)]
+fn merge_pinyin_fallback(candidates: Vec<WordItem>, pinyin_rows: Vec<WordItem>) -> Vec<WordItem> {
+    merge_mixed_candidates(candidates, pinyin_rows, true)
+}
+
+/// 合并五笔和拼音候选。完整五笔码命中时保留五笔优先；只有更长编码的前缀补全时，
+/// 拼音精确候选优先，避免用户输入拼音时被前缀补全抢走首位。
+fn merge_mixed_candidates(
+    candidates: Vec<WordItem>,
+    pinyin_rows: Vec<WordItem>,
+    wubi_first: bool,
 ) -> Vec<WordItem> {
+    let (mut candidates, mut pinyin_rows) = if wubi_first {
+        (candidates, pinyin_rows)
+    } else {
+        (pinyin_rows, candidates)
+    };
     if pinyin_rows.is_empty() {
         return candidates;
     }
@@ -1327,6 +1397,18 @@ mod tests {
     }
 
     #[test]
+    fn unmatched_wubi_prefix_rows_follow_exact_pinyin_rows() {
+        let list = merge_mixed_candidates(
+            vec![wubi("edui", "膫"), wubi("eduq", "须将")],
+            vec![quanpin("e'du", "额度")],
+            false,
+        );
+        assert_eq!(words(&list), vec!["额度", "膫", "须将"]);
+        assert_eq!(list[0].scheme, SchemeType::Quanpin);
+        assert_eq!(list[1].scheme, SchemeType::Wubi);
+    }
+
+    #[test]
     fn an_unmatched_code_is_answered_by_quanpin_alone() {
         // test_wubi_mixed_input_session.cpp:106-116: `nihao` has no wubi row, so the list equals the quanpin list.
         let pinyin = vec![quanpin("ni'hao", "你好"), quanpin("ni'hao", "拟好")];
@@ -1438,5 +1520,11 @@ mod tests {
         assert_eq!(words(&list), vec!["妳", "你好"]);
         assert_eq!(list[1].pinyin, "ni'hao");
         assert!(!only_pinyin_rows(&list));
+    }
+
+    #[test]
+    fn pinyin_prefix_split_can_continue() {
+        assert!(pinyin_prefix_can_continue_after_code("hang", b'u'));
+        assert!(pinyin_prefix_can_continue_after_code("cang", b'u'));
     }
 }

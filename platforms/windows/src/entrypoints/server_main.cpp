@@ -3,6 +3,7 @@
 #include "AuxListener.h"
 #include "VoiceTheme.h"
 #include "CandidateAppearance.h"
+#include "CandidateCanvasImages.h"
 #include "CandidateSkin.h"
 #include "CandidateThemeSettings.h"
 #include "SkinResourceRevision.h"
@@ -21,6 +22,7 @@
 #include "ToolbarTooltips.h"
 #include "SystemPanels.h"
 #include "FocusedSession.h"
+#include "ClientAgent.h"
 #include "InputSchemeTraits.h"
 #include "FullscreenForeground.h"
 #include "HostApiDiagnosticLine.h"
@@ -64,6 +66,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <unordered_map>
 #include <cstdlib>
 #include <exception>
@@ -219,6 +222,27 @@ std::filesystem::path anonymous_account_directory() {
 #else
   return {};
 #endif
+}
+// 本机自报的 User-Agent（#8201 的 P11）：Rust 拼出，注册匿名账号时带上，服务端「我的设备」据此显示 windows、版本号和设备。拼不出时为空，注册照旧不带它。
+std::string windows_client_agent() {
+  const auto device = msime::windows::windows_device_model();
+  const auto system = msime::windows::windows_system_description();
+  const auto request =
+      nlohmann::json{{"platform", "windows"},
+                     {"version", MSIME_WINDOWS_VERSION},
+                     {"device", device.empty() ? nlohmann::json(nullptr) : nlohmann::json(device)},
+                     {"system", system.empty() ? nlohmann::json(nullptr) : nlohmann::json(system)},
+                     {"edition", MSIME_EDITION_ID}}
+          .dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+  const auto raw = msime::host_api::own_string(msime_client_client_agent(
+      reinterpret_cast<const uint8_t *>(request.data()), request.size()));
+  if (!raw)
+    return {};
+  const auto document = nlohmann::json::parse(raw.get(), nullptr, false);
+  if (!document.is_object() || !document.value("ok", false) || !document.contains("value") ||
+      !document.at("value").is_string())
+    return {};
+  return document.at("value").get<std::string>();
 }
 // 使用统计的目录：msime::telemetry::default_directory() 是 %LOCALAPPDATA%\MSIME，本版本换成同级的用户目录（版本表 platforms.windows.user_data_directory），各版本的安装 id 和事件队列互不相干。full 的目录名就是 MSIME，结果与 default_directory() 相同。
 std::filesystem::path edition_telemetry_directory() {
@@ -963,15 +987,18 @@ int wmain(int argc, wchar_t **argv) {
     // The user's anonymous MSIME account is registered on the first run after install, as on every other platform; once anonymous-session.json exists this is a file read. It runs off the main thread for the same reason as the telemetry event, and a failure (offline, rate limited) is simply retried on the next start.
     if (const auto account = anonymous_account_directory(); production && !account.empty()) {
       // 选了「水杉账号」时候选释义用这个目录里的会话：设置应用登录的账号优先，没有登录时用这里注册的匿名账号。
-      {
-        const auto directory = account.u8string();
-        msime::windows::TranslationWorker::set_account_directory(
-            std::string(directory.begin(), directory.end()));
-      }
-      std::thread([directory = account.u8string()] {
+      const auto utf8_directory = account.u8string();
+      const std::string directory(utf8_directory.begin(), utf8_directory.end());
+      const auto agent = windows_client_agent();
+      msime::windows::TranslationWorker::set_account_directory(directory, agent);
+      std::thread([directory, agent] {
+        auto request = nlohmann::json{{"directory", directory}};
+        if (!agent.empty())
+          request["client_agent"] = agent;
+        const auto body = request.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
         auto result = msime::host_api::own_string(
-            msime_client_ensure_anonymous_account(
-                reinterpret_cast<const uint8_t *>(directory.data()), directory.size()));
+            msime_client_ensure_anonymous_account_with_agent(
+                reinterpret_cast<const uint8_t *>(body.data()), body.size()));
       }).detach();
     }
     diagnostic_log.server(std::string(production ? "Production" : "Preview") +
@@ -1346,7 +1373,8 @@ int wmain(int argc, wchar_t **argv) {
       if (click.action == CandidateAction::Select) {
         if (server.request_selection(click.lease, click.session,
                                      click.generation, click.index,
-                                     click.translation_page) ==
+                                     click.translation_page,
+                                     click.expanded_text) ==
             SelectionRequestResult::Failed)
           throw std::runtime_error("Candidate selection failed");
         return;
@@ -1440,6 +1468,10 @@ int wmain(int argc, wchar_t **argv) {
           server.candidate_rendered(value.lease, value.render_serial);
         },
         candidate_mouse_wheel->load(std::memory_order_acquire));
+    // 皮肤的卷轴展开：点开「∨」后由 Server 在输入队列上取这一代的完整候选列表，随候选快照交回候选窗。
+    candidates.set_expansion_handler([&](const FocusLease &lease, bool open) {
+      server.set_candidate_expansion(lease, open);
+    });
     if (typing_overlay)
       candidates.set_typing_effect_presenter([&typing_overlay](const TypingEffectPresentation &presentation) {
         return typing_overlay->present(presentation);
@@ -1458,16 +1490,51 @@ int wmain(int argc, wchar_t **argv) {
                     .first;
       return found->second;
     };
-    auto resolved_theme = [&](bool dark,
-                              bool horizontal) -> const CandidateThemeResolution & {
-      const auto request = candidate_theme_request(
-          current_candidate_theme, dark, horizontal, config.skin_directory);
+    auto resolved_theme = [&](bool dark, bool horizontal,
+                              bool canvas_panel_drawn = false) -> const CandidateThemeResolution & {
+      const auto request = candidate_theme_request(current_candidate_theme, dark, horizontal,
+                                                   config.skin_directory, canvas_panel_drawn);
       auto key = request.dump();
       auto found = resolved_themes.find(key);
       if (found == resolved_themes.end())
         found = resolved_themes.emplace(std::move(key), resolve_theme(request))
                     .first;
       return found->second;
+    };
+    // The card's palette for a resolved theme: the shared resolution, with the package's extra slots (candidate_text, preedit, selected row, bar and menu colours) the resolution does not carry, under the user's pickers. 不画 canvas 面板的界面（工具条、菜单、语音浮层、双拼键位图，以及面板图解不出来的候选卡片）拿到的是共享 catalog 给 canvas 包的不透明 `canvas` 外观可读配色，与其他宿主相同。
+    auto card_palette = [&](const CandidateThemeResolution &theme, bool dark) {
+      return apply_candidate_skin_extra_slots(
+          candidate_theme_palette(theme, dark),
+          package_assets(theme.candidate_skin).candidate_colors,
+          candidate_theme_pickers(current_candidate_theme), theme.dark.value_or(dark));
+    };
+    // 候选卡片在这一种明暗下要画的 canvas 画布：按卡片实际的明暗选面板图，面板和挂件都用 WIC 确认解得出来。不是 canvas 包时为空。
+    auto card_canvas = [&](const CandidateThemeResolution &theme, bool dark) {
+      return candidate_canvas_drawable(package_assets(theme.candidate_skin).canvas_skin,
+                                       !theme.dark.value_or(dark),
+                                       candidate_canvas_image_decodes);
+    };
+    // 候选卡片自己的配色：面板画得出来时向共享层要 `canvas_panel_drawn` 的解析，取包为贴图挑的原配色（取色器照旧优先）；否则就是 card_palette。
+    auto card_canvas_palette = [&](const CandidateThemeResolution &theme, bool dark, bool horizontal,
+                                   const msime::windows::CandidateSkinCanvas &canvas) {
+      return candidate_canvas_panel_drawn(canvas)
+                 ? card_palette(resolved_theme(dark, horizontal, true), dark)
+                 : card_palette(theme, dark);
+    };
+    // canvas 包的面板图或挂件解不出来（文件损坏、系统没有对应的解码器）时，每款包记一次。
+    std::set<std::string> canvas_skins_noticed;
+    auto notice_canvas_skin = [&](const std::string &id,
+                                  const msime::windows::CandidateSkinAssets &assets,
+                                  const msime::windows::CandidateSkinCanvas &drawn) {
+      if (!assets.canvas_skin.active || !canvas_skins_noticed.insert(id).second)
+        return;
+      if (assets.canvas_skin.border && !candidate_canvas_panel_drawn(drawn))
+        notice("Candidate skin " + id +
+               ": the canvas border_image does not decode, so the card uses the opaque canvas look");
+      if (const auto dropped =
+              assets.canvas_skin.decorations.size() - drawn.decorations.size())
+        notice("Candidate skin " + id + ": " + std::to_string(dropped) +
+               " canvas decoration image(s) do not decode and are not drawn");
     };
     bool candidate_theme_dirty = true;
     bool candidate_dark_applied = config.dark_theme;
@@ -1490,32 +1557,40 @@ int wmain(int argc, wchar_t **argv) {
     {
       const auto &theme =
           resolved_theme(config.dark_theme, config.horizontal_candidates);
-      auto palette = candidate_theme_palette(theme, config.dark_theme);
+      const auto canvas = card_canvas(theme, config.dark_theme);
+      auto palette = card_canvas_palette(theme, config.dark_theme,
+                                         config.horizontal_candidates, canvas);
+      auto keymap_palette = card_palette(theme, config.dark_theme);
+      const auto &assets = package_assets(theme.candidate_skin);
       if (config.candidate_selected_bar)
-        palette.show_selected_bar = *config.candidate_selected_bar;
+        palette.show_selected_bar = keymap_palette.show_selected_bar =
+            *config.candidate_selected_bar;
       candidates.set_palette(palette);
       if (keymap)
-        keymap->set_palette(palette);
+        keymap->set_palette(keymap_palette);
       // An external package may ask for a wider card than the font implies; the artwork is drawn against that width.
-      const auto &assets = package_assets(theme.candidate_skin);
       candidates.set_skin_min_width(assets.min_width);
       candidates.set_skin_decoration(assets.decoration);
       candidates.set_skin_background(assets.background);
       candidates.set_skin_corner_radius(assets.corner_radius);
+      candidates.set_skin_layout(assets.layout);
+      candidates.set_skin_font_family(assets.font_family);
       candidates.set_skin_animation(assets.animation);
+      candidates.set_skin_canvas(canvas);
+      notice_canvas_skin(theme.candidate_skin, assets, canvas);
       candidate_skin_applied = theme.candidate_skin;
     }
     candidates.set_follow_cursor(follow_cursor->load(std::memory_order_acquire));
     // The toolbar and the menus draw the card's theme in their own light/dark mode, with the card's layout deciding whether a package is drawn.
     auto surface_palette = [&](bool dark) {
-      return candidate_theme_palette(
-          resolved_theme(dark, candidate_horizontal_applied), dark);
+      return card_palette(resolved_theme(dark, candidate_horizontal_applied), dark);
     };
     // The toolbar's palette in `dark`: the theme's, with the toolbar colours and radius of the package that theme draws in that mode.
     auto toolbar_surface_palette = [&](bool dark) {
       const auto &theme = resolved_theme(dark, candidate_horizontal_applied);
-      return apply_toolbar_skin(toolbar_palette(candidate_theme_palette(theme, dark)),
-                                package_assets(theme.candidate_skin).toolbar, dark);
+      return apply_toolbar_skin(
+          toolbar_palette(card_palette(theme, dark)),
+          package_assets(theme.candidate_skin).toolbar, dark);
     };
     bool toolbar_visible = toolbar_enabled->load(std::memory_order_acquire);
     FloatingToolbarWindow toolbar(
@@ -2124,12 +2199,17 @@ int wmain(int argc, wchar_t **argv) {
         if (candidate_theme_dirty || skin_resources_changed || dark != candidate_dark_applied ||
             candidate_horizontal != candidate_horizontal_applied) {
           const auto &theme = resolved_theme(dark, candidate_horizontal);
-          auto next_palette = candidate_theme_palette(theme, dark);
+          // 面板图跟着明暗换（`light_source`），所以每次重新套用配色都重新选一次画布。
+          const auto canvas = card_canvas(theme, dark);
+          auto next_palette = card_canvas_palette(theme, dark, candidate_horizontal, canvas);
+          auto keymap_palette = card_palette(theme, dark);
           if (config.candidate_selected_bar)
-            next_palette.show_selected_bar = *config.candidate_selected_bar;
+            next_palette.show_selected_bar = keymap_palette.show_selected_bar =
+                *config.candidate_selected_bar;
           candidates.set_theme_palette(next_palette);
+          candidates.set_skin_canvas(canvas);
           if (keymap)
-            keymap->set_palette(next_palette);
+            keymap->set_palette(keymap_palette);
           if (skin_resources_changed || theme.candidate_skin != candidate_skin_applied) {
             const auto &assets = package_assets(theme.candidate_skin);
             candidates.invalidate_skin_images();
@@ -2137,7 +2217,10 @@ int wmain(int argc, wchar_t **argv) {
             candidates.set_skin_decoration(assets.decoration);
             candidates.set_skin_background(assets.background);
             candidates.set_skin_corner_radius(assets.corner_radius);
+            candidates.set_skin_layout(assets.layout);
+            candidates.set_skin_font_family(assets.font_family);
             candidates.set_skin_animation(assets.animation);
+            notice_canvas_skin(theme.candidate_skin, assets, canvas);
             candidate_skin_applied = theme.candidate_skin;
           }
           candidate_dark_applied = dark;

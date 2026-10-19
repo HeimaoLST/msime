@@ -366,6 +366,11 @@ impl Session {
         Ok(())
     }
 
+    /// 读取当前云席位开关，供运行时在修改候选前预留新代次。
+    pub fn cloud_candidates_enabled(&self) -> bool {
+        self.inner.cloud_candidates_enabled()
+    }
+
     pub fn set_cloud_candidates_enabled(&mut self, enabled: bool) {
         self.inner.set_cloud_candidates_enabled(enabled);
     }

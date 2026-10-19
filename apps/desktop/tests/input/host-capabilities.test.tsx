@@ -110,7 +110,7 @@ test("a touch host that can name the editor's application gets the mode scope co
   await screen.findByLabelText("中英文状态");
   cleanup();
   mount({ host: capabilities({ platform: "android", ime_mode_scope: false }) });
-  await screen.findByLabelText("输入模式");
+  await settingsFormReady();
   expect(screen.queryByLabelText("中英文状态")).toBeNull();
 });
 
@@ -154,34 +154,36 @@ test("Windows and Linux hosts expose the shared fuzzy-pinyin settings on the 输
 });
 
 test("shortcut groups follow declared capabilities, not the platform name", async () => {
-  // A Windows host that declares the capabilities gets the controls, proving the
-  // gate is the capability and not a platform-name or user-agent match.
+  // Windows 宿主声明能力后显示对应控件，门槛是能力而非平台名或用户代理。
   const capable = mount({
     host: capabilities({ platform: "windows", mode_switch_shortcuts: true, panel_shortcuts: true }),
   });
   await settingsFormReady();
   fireEvent.click(screen.getByRole("button", { name: /^(快捷键|按键设置)$/ }));
-  // 面板快捷键是一行只读参考，收在「按键速查」里。
+  expect(screen.getByRole("group", { name: "输入模式切换快捷键" })).toBeTruthy();
+  // 面板快捷键是一行只读参考，桌面需先进入「按键速查」标签。
+  selectSettingsTab("按键速查");
   expect(
     within(screen.getByRole("region", { name: "按键速查" })).getByText("打开屏幕键盘"),
   ).toBeTruthy();
   expect(screen.getByText("Ctrl+Shift+Super+K", { selector: "kbd" })).toBeTruthy();
-  expect(screen.getByRole("group", { name: "输入模式切换快捷键" })).toBeTruthy();
   capable.unmount();
 
   const macos = mount({ host: capabilities({ platform: "macos", panel_shortcuts: true }) });
   await settingsFormReady();
   fireEvent.click(screen.getByRole("button", { name: /^(快捷键|按键设置)$/ }));
+  selectSettingsTab("按键速查");
   expect(screen.getByText("Ctrl+Shift+Command+K", { selector: "kbd" })).toBeTruthy();
   expect(screen.queryByText("Ctrl+Shift+Super+K", { selector: "kbd" })).toBeNull();
   macos.unmount();
 
-  // A Linux host that does not declare them keeps them hidden.
+  // Linux 宿主未声明这些能力时，设置与速查标签都不显示对应内容。
   mount({ host: capabilities({ platform: "linux" }) });
   await settingsFormReady();
   fireEvent.click(screen.getByRole("button", { name: /^(快捷键|按键设置)$/ }));
-  expect(screen.queryByText("打开屏幕键盘")).toBeNull();
   expect(screen.queryByRole("group", { name: "输入模式切换快捷键" })).toBeNull();
+  selectSettingsTab("按键速查");
+  expect(screen.queryByText("打开屏幕键盘")).toBeNull();
 });
 
 test("Linux number-row selection follows its capability and saves through shared preferences", async () => {
@@ -595,7 +597,7 @@ test("a host with one commit path is not offered a choice between three", async 
       }}
     />,
   );
-  await screen.findByText("录音行为");
+  await settingsFormReady();
   expect(screen.queryByLabelText("结果提交策略")).toBeNull();
   cleanup();
   render(
@@ -608,7 +610,8 @@ test("a host with one commit path is not offered a choice between three", async 
       }}
     />,
   );
-  expect(await screen.findByLabelText("结果提交策略")).toBeTruthy();
+  await settingsFormReady();
+  expect(screen.getByRole("combobox", { name: "结果提交策略" })).toBeTruthy();
 });
 
 test("the shuangpin preedit choice reaches every host that draws the composition", async () => {
@@ -748,7 +751,7 @@ test("a host that can enumerate microphones gets the picker, whatever it is call
           load: async () => initial,
           save: vi.fn(),
           listVoiceCaptureDevices: read,
-          // 录音设备收在「服务配置」子视图里，这里测的是能力。HarmonyOS 只有一种录音方式（`voice_capture_backends` 为 false），只给一个「麦克风」下拉。
+          // 录音设备位于「录音行为」标签，这里测的是能力。HarmonyOS 只有一种录音方式（`voice_capture_backends` 为 false），只给一个「麦克风」下拉。
           host: capabilities({
             platform: "harmony",
             mobile_settings: false,
@@ -759,12 +762,15 @@ test("a host that can enumerate microphones gets the picker, whatever it is call
       />,
     );
   voice(true);
-  expect(await screen.findByLabelText("麦克风")).toBeTruthy();
+  await settingsFormReady();
+  fireEvent.click(screen.getByRole("tab", { name: "录音行为" }));
+  expect(screen.getByRole("combobox", { name: "麦克风" })).toBeTruthy();
   expect(screen.queryByLabelText("可用录音设备")).toBeNull();
   cleanup();
   voice(false);
-  await screen.findByText("录音行为");
-  expect(screen.queryByLabelText("麦克风")).toBeNull();
+  await settingsFormReady();
+  fireEvent.click(screen.getByRole("tab", { name: "录音行为" }));
+  expect(screen.queryByRole("combobox", { name: "麦克风" })).toBeNull();
 });
 
 test("the mode badge switch follows the capability rather than the macOS platform name", async () => {
@@ -807,8 +813,8 @@ test("a host whose skin folder is unreachable is offered an import, not a folder
     openSkinDirectory: async () => undefined,
   });
   await settingsFormReady();
-  // 2in1 是桌面形态，本地皮肤操作在「主题外观」的「本地皮肤」标签中。
-  fireEvent.click(screen.getByRole("button", { name: "主题外观" }));
+  // 2in1 是桌面形态，本地皮肤操作在「主题」的「本地皮肤」标签中。
+  fireEvent.click(screen.getByRole("button", { name: "主题" }));
   selectSettingsTab("本地皮肤");
   expect(screen.getByRole("button", { name: "导入皮肤" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "打开目录" })).toBeNull();
@@ -821,7 +827,7 @@ test("a desktop host still opens its skin folder", async () => {
     openSkinDirectory: async () => undefined,
   });
   await settingsFormReady();
-  fireEvent.click(screen.getByRole("button", { name: "主题外观" }));
+  fireEvent.click(screen.getByRole("button", { name: "主题" }));
   selectSettingsTab("本地皮肤");
   expect(screen.getByRole("button", { name: "打开目录" })).toBeTruthy();
 });

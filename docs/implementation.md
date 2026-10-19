@@ -199,7 +199,7 @@ ArkTS 宿主，`module.json5` 声明 `mainElement: "KeyboardExtensionAbility"`�
 
 测试跟着边界走：能在宿主机上跑的就别要求设备，需要设备才成立的就明确标成设备套件，两者不互相冒充。
 
-**共享 Rust。** 裸 `cargo test` 覆盖十五个 `default-members`（`path-trust`、`client-base`、`client-core`、`client-providers`、`client-services`、`engine`、`engine-wasm`、`input-runtime`、`host-api`、`host-windows`、`host-macos`、`tauri-mobile-platform`、`ios-native-ffi`、`mcp-server`、`script-runtime`）；`verify-local.sh` 另外把 `msime-desktop` 一并跑上，并单独检测「编译失败」而不是把它误读成「零个失败测试名」。真实词库不是单测的前提：`crates/engine/examples/` 下是一批探针，接收一个已备齐的资源目录后在临时用户目录里验证具体行为（九键候选顺序、调频五种模式、混输优先级、辅助码五种方案、双拼四套键位、首尾字抽取），原资源不被改写。`crates/input-runtime/examples/` 另有 `convert_eval` 与 `rerank_latency`，前者跑 `resources/eval/` 的四套数据集比对基线，后者量重排的逐键延迟。
+**共享 Rust。** 裸 `cargo test` 覆盖十五个 `default-members`（`path-trust`、`client-base`、`client-core`、`client-providers`、`client-services`、`engine`、`engine-wasm`、`input-runtime`、`host-api`、`host-windows`、`host-macos`、`tauri-mobile-platform`、`ios-native-ffi`、`mcp-server`、`script-runtime`）；`verify-local.sh` 另外把 `msime-desktop` 一并跑上，并单独检测「编译失败」而不是把它误读成「零个失败测试名」。真实词库不是单测的前提：`crates/engine/examples/` 下是一批探针，接收一个已备齐的资源目录后在临时用户目录里验证具体行为（九键候选顺序、调频五种模式、混输优先级、辅助码五种方案、双拼四套键位、首尾字抽取），原资源不被改写。`crates/input-runtime/examples/` 另有 `convert_eval` 与 `rerank_latency`，前者跑 `resources/eval/` 的四套数据集比对基线，后者量重排的逐键延迟。两者在准备会话之前用编译时嵌入的资源锁校验锁内各文件的长度和 SHA-256；比较自定义模型或资源子集时，用 `--resource-lock <file.json>` 显式提供对应清单，仍逐项校验。校验位于计时之外，标准错误输出包含资源来源提交与清单代次，避免旧库或缺失 n 元表的目录冒充当前产品。
 
 **共享界面。** `apps/desktop/tests/` 下 99 个 Vitest 文件按 account / candidate / chat / community / core / dictionary / emoji / input / settings / skin / support / voice 十二个域组织。写这些用例有一条必须遵守的时序：`render(<SettingsPage …>)` 之后要先等初始加载落定再去点侧栏，页面此时还在解析快照，加载完成后自己做的选择会覆盖掉提前点下的分类——不等就会得到一个随机失败、看起来像产品回归的用例。
 

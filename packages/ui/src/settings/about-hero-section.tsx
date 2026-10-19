@@ -1,4 +1,5 @@
 import { MsimeMark } from "../core/brand-logo";
+import { MascotIllustration } from "../core/mascot";
 import * as doc from "./document-style";
 
 export interface AboutHeroSectionProps {
@@ -13,11 +14,12 @@ export function AboutHeroSection({ logo, description }: AboutHeroSectionProps) {
       <div className={doc.mark}>
         <img src={logo} alt="水杉 IME" />
       </div>
-      <div>
+      <div className="min-w-0 flex-1 wrap-anywhere">
         <div className={doc.eyebrow}>Metasequoia IME</div>
         <div className={doc.heroTitle}>水杉 IME</div>
         <p>{description}</p>
       </div>
+      <MascotIllustration scene="welcome" size={112} className="shrink-0 max-phone:size-16" />
     </div>
   );
 }
@@ -28,6 +30,8 @@ export type AboutUpdateState = "idle" | "checking" | "latest";
 export interface HarmonyAboutHeroProps {
   /** 当前运行的应用版本，显示为 `版本 {version} · {platformLabel}`。 */
   version: string;
+  /** 发布日期 `YYYY-MM-DD`；给了时版本行是 `版本 {version}（{releaseDate} 发布） · {platformLabel}`。 */
+  releaseDate?: string;
   /** 手机上为 `HarmonyOS`，2in1 上为 `HarmonyOS 2in1`。 */
   platformLabel: string;
   update: AboutUpdateState;
@@ -48,6 +52,7 @@ const updateLabels: Record<AboutUpdateState, string> = {
  */
 export function HarmonyAboutHero({
   version,
+  releaseDate,
   platformLabel,
   update,
   updateStatus,
@@ -61,7 +66,7 @@ export function HarmonyAboutHero({
       <div className={doc.appHeroText}>
         <span className={doc.appHeroTitle}>水杉输入法</span>
         <span className={doc.appHeroVersion}>
-          版本 {version} · {platformLabel}
+          {`版本 ${version}${releaseDate ? `（${releaseDate} 发布）` : ""} · ${platformLabel}`}
         </span>
         <span className={doc.appHeroCopyright}>© 2026 Metasequoia</span>
         {updateStatus && (

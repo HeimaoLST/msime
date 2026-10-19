@@ -1,0 +1,32 @@
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+
+# 从已应用 candidate.patch.txt 的隔离工作树根目录执行；无计数包装的二进制仅供计时。
+source = Path("crates/engine/src/ime/personal_rerank.rs")
+original = source.read_bytes()
+marker = b"    #[global_allocator]\n"
+assert original.count(marker) == 1
+try:
+    source.write_bytes(original.replace(marker, b""))
+    environment = dict(os.environ)
+    environment.pop("MSIME_EVAL_RESOURCES", None)
+    environment["CARGO_BUILD_JOBS"] = "4"
+    result = subprocess.run([
+        "cargo", "test", "--release", "--locked", "-p", "msime-engine", "--lib",
+        "--no-run", "--message-format=json",
+    ], env=environment, stdout=subprocess.PIPE, text=True, check=True)
+    artifacts = [item for line in result.stdout.splitlines()
+                 if (item := json.loads(line)).get("reason") == "compiler-artifact"
+                 and item.get("target", {}).get("name") == "msime_engine"
+                 and item.get("profile", {}).get("test") and item.get("executable")]
+    assert len(artifacts) == 1
+    target = Path("target/borrowed-graph-system-tests")
+    shutil.copy2(artifacts[0]["executable"], target)
+    print(target, hashlib.sha256(target.read_bytes()).hexdigest())
+finally:
+    source.write_bytes(original)
+    assert source.read_bytes() == original

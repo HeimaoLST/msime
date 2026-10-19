@@ -276,12 +276,20 @@ std::string parse_transcription(const std::string &response) {
   } catch (const nlohmann::json::exception &) {
     throw VoiceError("Invalid voice response");
   }
+  if (json.contains("error") && !json["error"].is_null())
+    throw VoiceError("Voice transcription service returned an error");
   const auto member = [](const nlohmann::json &object, const char *key) {
     if (!object.is_object())
       return std::string();
     const auto found = object.find(key);
     return found != object.end() && found->is_string() ? found->get<std::string>() : std::string();
   };
+  // 明确失败状态约束整个回复，不能被优先返回的转写别名绕过。
+  if (json.contains("choices") && json["choices"].is_array() && !json["choices"].empty()) {
+    const auto finish_reason = member(json["choices"][0], "finish_reason");
+    if (finish_reason == "length" || finish_reason == "content_filter")
+      throw VoiceError("Incomplete transcription text");
+  }
   for (const char *key : {"text", "transcription"})
     if (auto text = member(json, key); !text.empty())
       return text;
@@ -574,11 +582,14 @@ std::string polish_cloud_text(
                                          std::to_string(status));
   try {
     const auto result_json = nlohmann::json::parse(response.body);
-    const auto polished = result_json.at("choices")
-                              .at(0)
-                              .at("message")
-                              .at("content")
-                              .get<std::string>();
+    if (result_json.contains("error") && !result_json.at("error").is_null())
+      throw VoiceError("Voice polish service returned an error");
+    const auto &choice = result_json.at("choices").at(0);
+    const auto finish_reason = choice.value("finish_reason", nlohmann::json());
+    // 明确截断或过滤的半段正文不能覆盖完整转写；缺省状态兼容旧服务。
+    if (finish_reason == "length" || finish_reason == "content_filter")
+      throw VoiceError("Incomplete polished text");
+    const auto polished = choice.at("message").at("content").get<std::string>();
     if (!polished.empty())
       return polished;
   } catch (const nlohmann::json::exception &) {

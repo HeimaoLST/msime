@@ -14,7 +14,9 @@ use crate::dictionary::DictRow;
 use crate::helpcode::{
     match_single_helpcode, matches_double_helpcodes, HelpcodeKeymap, SingleHelpcodeMatch,
 };
-use crate::ime::online_batch::replace_online_candidate_batch;
+use crate::ime::online_batch::{
+    replace_cached_online_candidate_batch, replace_online_candidate_batch,
+};
 use crate::lattice::decode::{decode_constrained_sentences, SentenceNgramTables};
 use crate::lattice::merge::{merge_lattice_candidates, whole_sentence_insert_position};
 use crate::lattice::neural::{
@@ -530,7 +532,7 @@ impl ShuangpinDictionary {
         true
     }
 
-    /// Online rows into the series cache for `raw`.
+    /// 将在线行写入 `raw` 的系列缓存，命中时直接修改原页。
     pub fn insert_word_to_series_cache(
         &mut self,
         raw: &str,
@@ -541,8 +543,11 @@ impl ShuangpinDictionary {
             return false;
         }
         let key = self.sentence_cache_key(raw);
-        // An absent key starts an empty list: the rows show on the next query for `raw` (SD:1373-1384).
-        let mut list = self.series_cache.get(&key).unwrap_or_default();
+        if let Some(list) = self.series_cache.get_mut(&key) {
+            return replace_cached_online_candidate_batch(list, raw, words, source);
+        }
+        // 缺槽时从空列表开始，下次查询 `raw` 即可读取在线行（SD:1373-1384）。
+        let mut list = Vec::new();
         if !replace_online_candidate_batch(&mut list, raw, words, source) {
             return false;
         }
@@ -550,7 +555,7 @@ impl ShuangpinDictionary {
         true
     }
 
-    /// Online rows into the helpcode cache for `raw` and `help_codes`.
+    /// 将在线行写入 `raw` 与 `help_codes` 对应的已有辅助码缓存。
     pub fn insert_word_to_active_helpcode_cache(
         &mut self,
         raw: &str,
@@ -558,16 +563,12 @@ impl ShuangpinDictionary {
         source: CandidateSource,
         help_codes: &str,
     ) -> bool {
-        // Only a cached answer takes the rows; an absent key is a failure (SD:1386-1408).
+        // 只有已有答案接收在线行；缺槽仍返回失败（SD:1386-1408）。
         let insert = |cache: &mut FifoCache<String, Vec<WordItem>>, key: &String| {
-            let Some(mut list) = cache.get(key) else {
+            let Some(list) = cache.get_mut(key) else {
                 return false;
             };
-            if !replace_online_candidate_batch(&mut list, raw, words, source) {
-                return false;
-            }
-            cache.insert(key.clone(), list);
-            true
+            replace_cached_online_candidate_batch(list, raw, words, source)
         };
         if !help_codes.is_empty() {
             let key = self.sentence_cache_key(&double_helpcode_cache_key(raw, help_codes));
@@ -1340,3 +1341,6 @@ mod tests {
         assert_eq!(codes.as_slice().len(), INLINE_TYPO_CODES + 1);
     }
 }
+
+#[cfg(test)]
+mod online_cache_update_tests;

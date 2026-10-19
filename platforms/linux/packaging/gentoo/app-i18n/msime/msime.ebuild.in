@@ -122,6 +122,8 @@ src_prepare() {
 	cp -r "${frontend}/dist" apps/desktop/dist || die
 	mkdir -p "${WORKDIR}/notices" || die
 	cp "${frontend}/frontend-npm-NOTICES.txt" "${WORKDIR}/notices/" || die
+	# 关于页的发布日期。标签归档里没有 .git，apps/desktop/src-tauri/build.rs 读 platforms/linux/release-date.txt，这份随前端包一起由 make-source-tarballs.sh 写入。
+	cp "${frontend}/release-date.txt" platforms/linux/ || die
 
 	local entry dir name distfile
 	for entry in "${MSIME_RESOURCES[@]}"; do

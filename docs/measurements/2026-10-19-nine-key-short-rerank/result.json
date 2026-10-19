@@ -1,0 +1,214 @@
+{
+  "baseline_commit": "c5ee0690ab2f8ff04657b06f63ebaa018d40e9da",
+  "decision": "rejected",
+  "reason": "模型缺失、零整句的冷/热两组控制中位比超过预设1.05；不复跑选择结果，不调整门槛。",
+  "machine": "Mac13,1",
+  "rust": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "prototype_source_sha256": "da3ec3165f0e8bdc22e027ebf84714fd4b88696d270025d8109ea34c57eccee2",
+  "prototype_patch_sha256": "9a8d01318552e6e4c0d8568b723ac49f887d07f9abc96a27ca09f06ce09ffe7d",
+  "resource_lock_sha256": "d265c50c2ab19ddaa3eca0060fa8f013988d22df2cff703b1bdbe5455eb7cd8d",
+  "resource_generation": "7356c4a452d8ba15475c0e57f134fccf7b7cbe267440461541c74d09b11b6ffe",
+  "resource_source_commit": "128a332cabc5fa42b1cf5f827033ad5697ff528b",
+  "model_sha256": "86ac529510cb3b4968a5e6ade83ec8080f5b34a0a681e75c362accbbd387d1c1",
+  "configuration": {
+    "allocator": "System；临时将计数分配器的唯一 #[global_allocator] 替换为 #[allow(dead_code)]，复制 release 测试程序后在 finally 逐字恢复源文件。",
+    "build": [
+      "cargo",
+      "test",
+      "--release",
+      "--locked",
+      "-p",
+      "msime-engine",
+      "--lib",
+      "--no-run",
+      "--message-format=json"
+    ],
+    "test": "nine_key::tests::short_rerank_complete_paired_budget",
+    "pairs_per_shape": 21,
+    "baseline_calibration_ms": 5,
+    "boundary": "候选复制、完整 rerank_sentences 入口、候选析构；pair 偶数旧版先运行，奇数新版先运行。",
+    "cold": "仅清空外层 rerank_cache 条目，保留 Vec 容量；模型前缀与续算缓存保持热态。",
+    "validity": "五次连续一秒无构建观测后开始；运行期间一秒采样。未观测到构建不能证明机器独占。"
+  },
+  "shapes": [
+    {
+      "sentences": 0,
+      "model_available": false,
+      "outer_cache_cold": false,
+      "median_ratio": 1.0655488906554889,
+      "limit": 1.05,
+      "passed": false,
+      "old_ns_per_call": 4.8916730880737305,
+      "new_ns_per_call": 5.219578742980957
+    },
+    {
+      "sentences": 0,
+      "model_available": false,
+      "outer_cache_cold": true,
+      "median_ratio": 1.0656354590717785,
+      "limit": 1.05,
+      "passed": false,
+      "old_ns_per_call": 4.95286750793457,
+      "new_ns_per_call": 5.275051116943359
+    },
+    {
+      "sentences": 0,
+      "model_available": true,
+      "outer_cache_cold": false,
+      "median_ratio": 0.5706448972445339,
+      "limit": 1.05,
+      "passed": true,
+      "old_ns_per_call": 10.88825798034668,
+      "new_ns_per_call": 6.2050018310546875
+    },
+    {
+      "sentences": 0,
+      "model_available": true,
+      "outer_cache_cold": true,
+      "median_ratio": 0.304569682496596,
+      "limit": 0.98,
+      "passed": true,
+      "old_ns_per_call": 20.897228240966797,
+      "new_ns_per_call": 6.374835968017578
+    },
+    {
+      "sentences": 1,
+      "model_available": false,
+      "outer_cache_cold": false,
+      "median_ratio": 0.9914040476608497,
+      "limit": 1.05,
+      "passed": true,
+      "old_ns_per_call": 58.577850341796875,
+      "new_ns_per_call": 58.074317932128906
+    },
+    {
+      "sentences": 1,
+      "model_available": false,
+      "outer_cache_cold": true,
+      "median_ratio": 0.9990087636120167,
+      "limit": 1.05,
+      "passed": true,
+      "old_ns_per_call": 58.36518859863281,
+      "new_ns_per_call": 58.56959533691406
+    },
+    {
+      "sentences": 1,
+      "model_available": true,
+      "outer_cache_cold": false,
+      "median_ratio": 0.8429775725545627,
+      "limit": 1.05,
+      "passed": true,
+      "old_ns_per_call": 69.36995697021484,
+      "new_ns_per_call": 59.060096740722656
+    },
+    {
+      "sentences": 1,
+      "model_available": true,
+      "outer_cache_cold": true,
+      "median_ratio": 0.3425022706241828,
+      "limit": 0.98,
+      "passed": true,
+      "old_ns_per_call": 170.52716064453125,
+      "new_ns_per_call": 58.645904541015625
+    },
+    {
+      "sentences": 2,
+      "model_available": false,
+      "outer_cache_cold": false,
+      "median_ratio": 0.9978231575729002,
+      "limit": 1.05,
+      "passed": true,
+      "old_ns_per_call": 110.39414978027344,
+      "new_ns_per_call": 110.23583984375
+    },
+    {
+      "sentences": 2,
+      "model_available": false,
+      "outer_cache_cold": true,
+      "median_ratio": 0.9979211036578541,
+      "limit": 1.05,
+      "passed": true,
+      "old_ns_per_call": 110.88435363769531,
+      "new_ns_per_call": 110.9771728515625
+    },
+    {
+      "sentences": 2,
+      "model_available": true,
+      "outer_cache_cold": false,
+      "median_ratio": 0.9989615309315577,
+      "limit": 1.05,
+      "passed": true,
+      "old_ns_per_call": 147.6370391845703,
+      "new_ns_per_call": 147.7038116455078
+    },
+    {
+      "sentences": 2,
+      "model_available": true,
+      "outer_cache_cold": true,
+      "median_ratio": 0.9763599042080054,
+      "limit": 1.05,
+      "passed": true,
+      "old_ns_per_call": 442.45660400390625,
+      "new_ns_per_call": 430.97430419921875
+    }
+  ],
+  "monitor": {
+    "binary_sha256": "ba38a107501d8bcf54d117fabe4bca6ec6ec7704782c8eb0f2942d5527f629b9",
+    "binary_sha256_after": "ba38a107501d8bcf54d117fabe4bca6ec6ec7704782c8eb0f2942d5527f629b9",
+    "returncode": 101,
+    "duration_seconds": 4.25,
+    "monitor": [
+      {
+        "elapsed_seconds": 0.003,
+        "builds": {}
+      },
+      {
+        "elapsed_seconds": 1.051,
+        "builds": {}
+      },
+      {
+        "elapsed_seconds": 2.093,
+        "builds": {}
+      },
+      {
+        "elapsed_seconds": 3.136,
+        "builds": {}
+      },
+      {
+        "elapsed_seconds": 4.193,
+        "builds": {}
+      }
+    ],
+    "invalid_due_to_builds": false
+  },
+  "quality": {
+    "artifacts": {
+      "old": {
+        "sha256": "b07fac493c459ac49ac14a8c50b79ba1007274a856d3b50dad424e2fbf1ac21b",
+        "report_sha256": "23dac8f9a06e5b6231c7c797b9c2072eac994592ae89a44394913a8c0ddc4562"
+      },
+      "new": {
+        "sha256": "0a33eaf75da09286baf492dca6a8dff6d5d63449961728d87dc7e71750285a27",
+        "report_sha256": "23dac8f9a06e5b6231c7c797b9c2072eac994592ae89a44394913a8c0ddc4562"
+      }
+    },
+    "equal": true,
+    "report_file": "quality.json"
+  },
+  "correctness": {
+    "engine_library_passed": 2350,
+    "engine_library_ignored": 50,
+    "engine_integration_passed": 31,
+    "runtime_library_passed": 323,
+    "clippy_passed": true,
+    "fmt_passed": true,
+    "quick_passed": true,
+    "zero_allocations": "已加载真实模型的0/1条整句，词网格开/关均为0；旧版空列表红测试为1。",
+    "sequence": "完整 WordItem 与候选容量、模型可用/缺失、上下文、词网格及重复选项、混合来源、超过16个不同短签名后回访2/12条整句。",
+    "environment": "MSIME_NEURAL_MODEL_DIR 指向固定资源；MSIME_EVAL_RESOURCES 未设。",
+    "discarded_fixture_attempt": "首次误将当前 dict-v2.0.24 传给要求 dict-v2.0.1 的日语断言，实际1285198对预期1284987；保留失败后移除错误环境变量，重新完整通过。"
+  },
+  "scope": "原型只影响引擎 neural_keyboard；默认 Runtime 重排不经过此分支。没有修复默认九键p95 16ms超预算。",
+  "paired_csv_sha256": "78f6b58191d8631d7cc52e56e2ee9035c48414b168112b367def2ad3a5502248",
+  "prototype_patch_format": "零上下文统一差异；使用 git apply --unidiff-zero 应用。"
+}

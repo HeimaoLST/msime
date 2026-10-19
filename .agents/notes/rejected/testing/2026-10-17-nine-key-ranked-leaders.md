@@ -903,3 +903,5 @@ fn full_pipeline_preserves_winner_changes_across_rank_dimensions() {
 被否后，`crates/engine/src/nine_key.rs`、两份旧refresh测试、计数分配器均与固定基线逐字相同；新增测试文件已删除，完整测试与patch只保留于本笔记。恢复后固定模型资源目录运行 `cargo test --locked -p msime-engine --no-fail-fast --quiet`：2,242项单测、31项golden通过，38项保持忽略，无失败；Rustfmt与diff空白检查通过。没有用改版质量或真实逐键延迟结果替代失败的合成门禁。
 
 本地 `bash scripts/verify-local.sh --quick` 通过：仓库契约检查、笔记检查、Rust工作区与共享Apple bridge编译通过；macOS未构建产品bundle，Tauri外壳跳过，各平台无关阶段按最终仅md/csv的范围跳过，没有平台GUI验收。`pnpm run verify-notes` 通过1,202篇活跃笔记及4份归档封印。独立审查逐行复算126个统计、核对全部2,646对原始记录、27行内存数据和源码恢复；修正红测试复现缺口后无阻断项。
+
+后续的[九键前页去重索引](../../implemented/testing/2026-10-19-nine-key-leading-index.md)只减少词面复制并继续沿用原最终排名，本篇否决结论保持有效。

@@ -1,3 +1,4 @@
+import { CandidateCanvasPolicy } from '../keyboard/candidate/CandidateCanvasPolicy';
 import InputMethodExtensionAbility from '@ohos.InputMethodExtensionAbility';
 import inputMethodEngine from '@ohos.inputMethodEngine';
 import Want from '@ohos.app.ability.Want';
@@ -5,7 +6,6 @@ import { KeyboardSession, KeyboardPreferences } from '../keyboard/KeyboardSessio
 import { CandidateAnchor, CandidateAnchorPolicy } from './CandidateAnchorPolicy';
 import { KeyboardLog, describeError } from '../keyboard/KeyboardLog';
 import fs from '@ohos.file.fs';
-import client from 'libmsimeclient.so';
 import display from '@ohos.display';
 import window from '@ohos.window';
 import ConfigurationConstant from '@ohos.app.ability.ConfigurationConstant';
@@ -38,6 +38,8 @@ import { HeldKeys, KeyIdPolicy } from '../keyboard/KeyIdPolicy';
 import { HarmonyTelemetry } from '../telemetry/Telemetry';
 import { HarmonySharedSandboxPolicy } from '../keyboard/HarmonySharedSandboxPolicy';
 import { SharedStateMirror } from '../keyboard/SharedStateMirror';
+import { AccountSessionAdoption } from '../account/AccountSessionAdoption';
+import { HarmonyAccountIdentity } from '../account/HarmonyAccountIdentity';
 import { SharedStateSync } from '../keyboard/SharedStateSync';
 
 // Where the badge goes and how long it stays, from platforms/macos/src/input/InputModeHUDPanel.mm: shown long enough to read and gone before the next word. Its size is the floating toolbar's, from InputModeHudPolicy.sizeVp.
@@ -391,10 +393,10 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
       ? KeyboardMetrics.totalHeightVp(settings.rowSpacingTenths, settings.heightAdjustment,
         KeyboardSession.shared.glossRows(), settings.candidateFontSize,
         settings.candidatePreeditFontSize, true)
-      : KeyboardMetrics.candidateHeightVp(settings.candidateLayout, this.candidateCount,
+      : (KeyboardMetrics.candidateHeightVp(settings.candidateLayout, this.candidateCount,
         settings.candidateShowPreedit, settings.candidateDecorationTopVp,
         KeyboardSession.shared.glossRows(), settings.candidateFontSize,
-        settings.candidatePreeditFontSize);
+        settings.candidatePreeditFontSize) + CandidateCanvasPolicy.extraHeight(settings.candidateCanvas, settings.candidateShowPreedit));
     const widthVp: number = tall ? DESKTOP_SURFACE_WIDTH_VP : this.candidateWidthVp;
     await this.panel.resize(Math.round(widthVp * this.density),
       Math.round(heightVp * this.density));
@@ -516,10 +518,10 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
     }
     const width: number = this.candidateWidthVp * this.density;
     const settings: KeyboardPreferences = KeyboardSession.shared.preferences();
-    const height: number = KeyboardMetrics.candidateHeightVp(settings.candidateLayout,
+    const height: number = (KeyboardMetrics.candidateHeightVp(settings.candidateLayout,
       this.candidateCount, settings.candidateShowPreedit,
       settings.candidateDecorationTopVp, KeyboardSession.shared.glossRows(),
-      settings.candidateFontSize, settings.candidatePreeditFontSize) * this.density;
+      settings.candidateFontSize, settings.candidatePreeditFontSize) + CandidateCanvasPolicy.extraHeight(settings.candidateCanvas, settings.candidateShowPreedit)) * this.density;
     const gap: number = KeyboardMetrics.CANDIDATE_WINDOW_GAP_VP * this.density;
     const anchor: CandidateAnchor = CandidateAnchorPolicy.position(settings.candidateFollowCursor,
       this.candidateAnchor, this.caret);
@@ -873,18 +875,21 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
         fs.mkdirSync(state, true);
       }
       // 设置应用经共享沙箱发布的偏好、皮肤、插件等，在会话第一次读它们之前导入；拿不到共享目录时照旧只用自己的 files/state。
-      const groupDir: string | null = await SharedStateMirror.resolve(this.context);
-      const sharedSandbox = HarmonySharedSandboxPolicy.status(groupDir);
-      if (sharedSandbox.available) {
-        const mirror: SharedStateMirror = new SharedStateMirror(sharedSandbox.directory, files);
-        const fullMode = (): boolean => this.fullAccessMode();
+      const fullMode = (): boolean => this.fullAccessMode();
+      const resolving: Promise<SharedStateMirror | null> = SharedStateMirror.resolve(this.context)
+        .then((groupDir: string | null): SharedStateMirror | null => {
+          const status = HarmonySharedSandboxPolicy.status(groupDir);
+          return status.available ? new SharedStateMirror(status.directory, files) : null;
+        });
+      // 在拿到共享目录之前就占住会话镜像的队列：设置应用发布的会话要先采用过来，本进程的认证请求（匿名注册、云剪贴板）都排在它后面（迁移差异 M2）。
+      AccountSessionAdoption.adoptOnStart(resolving, state, 'settings', fullMode);
+      const mirror: SharedStateMirror | null = await resolving;
+      if (mirror !== null) {
         KeyboardSession.shared.useSharedSandbox(mirror, fullMode);
         SharedStateSync.keyboardSync(mirror, state, fullMode());
       }
-      // 覆盖从未打开应用就启用键盘的场景；应用首次启动也会注册账号，由先运行的一方完成。
-      client.ensureAnonymousAccount(state).catch((error: Error): void => {
-        KeyboardLog.error(`anonymous account: ${describeError(error)}`);
-      });
+      // 覆盖从未打开应用就启用键盘的场景。完整体验模式下键盘获得焦点或编辑结束时发布这个匿名会话，设置应用第一次启动时本地还没有匿名会话，由 session_adopt 采用它，不再注册第二个；键盘发布之前就打开了设置应用、或者键盘在基础访问模式下时，设置应用仍会注册自己的那个。
+      HarmonyAccountIdentity.ensureAnonymous(state);
       // 每个键盘进程只启动一个用量上报会话；在下方提前返回之前创建，让没有面板的进程也能上报。
       HarmonyTelemetry.keyboardStarted(state);
       if (!StagedResources.stage(`${this.context.resourceDir}/engine`, resources,
@@ -960,10 +965,10 @@ export default class KeyboardExtensionAbility extends InputMethodExtensionAbilit
         // 面板尺寸与视图布局使用同一组数值，避免裁掉最底行。
         const settings: KeyboardPreferences = KeyboardSession.shared.preferences();
         const heightVp: number = desktop
-          ? KeyboardMetrics.candidateHeightVp(settings.candidateLayout, 0,
+          ? (KeyboardMetrics.candidateHeightVp(settings.candidateLayout, 0,
             settings.candidateShowPreedit, settings.candidateDecorationTopVp,
             KeyboardSession.shared.glossRows(), settings.candidateFontSize,
-            settings.candidatePreeditFontSize)
+            settings.candidatePreeditFontSize) + CandidateCanvasPolicy.extraHeight(settings.candidateCanvas, settings.candidateShowPreedit))
           // 刚创建时还没有组字也没有面板，工具条画不画只看工具栏设置，视图之后按同一条规则（`TouchToolbarPolicy`）改高度。
           : KeyboardMetrics.totalHeightVp(settings.rowSpacingTenths, settings.heightAdjustment,
             KeyboardSession.shared.glossRows(), settings.candidateFontSize,

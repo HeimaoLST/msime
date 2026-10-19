@@ -34,3 +34,5 @@ Status: implemented
 ## Consequences
 
 不存在句子来源且候选加路径数超过64时省一次哈希桶申请和候选扫描；仍然解码、纠错并按原顺序评分全部适用模型。默认分支的emit截断继续在边界计算之前。有来源时去重表在神经评分之后建立，逻辑峰值时机可能改变，不声称所有样本峰值或RSS/设备延迟降低。不能将这里的早返回挪到评分前。无公开API、依赖、unsafe、生产文件读写或Android资源变化。哈希表容量仍依照[Rust HashSet::with_capacity](https://doc.rust-lang.org/std/collections/struct.HashSet.html#method.with_capacity)。
+
+[单路径合并跳过候选集合](2026-10-19-lattice-single-path-dedup.md)进一步规定实际路径数为一时最多扫描一次候选，省去集合；多路径继续使用原 64 条分流，模型评分、无来源返回与输出块容量不变。

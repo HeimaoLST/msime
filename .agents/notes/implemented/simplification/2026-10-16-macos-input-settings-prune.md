@@ -23,6 +23,8 @@ macOS 的「输入」页默认状态（full 版、全拼、模糊音关）有约
 
 ## Decision
 
+语言与中文方案的选择控件由[输入语言与中文方案分层选择](../feature/2026-10-19-input-language-scheme-hierarchy.md)补充；本篇关于单方案说明和按当前方案显示选项的约束继续保留。
+
 ### macOS 固定三项（按宿主能力位）
 
 - `HostCapabilities` 新增 `tab_page_paging_switches` 和 `mixed_input_minimum_prefix`，macOS 为假。其余宿主上的取值见下面的「各平台跟进」：`tab_page_paging_switches` 在 Windows 和 HarmonyOS 上也为假，Linux、Android、iOS 为真；`mixed_input_minimum_prefix` 在 Windows 和 Linux 上也为假，三个触屏宿主为真。TS 类型里两项可选，缺省按真处理（早于它们的宿主照旧显示）。
@@ -91,6 +93,8 @@ macOS 这一轮之后，三个平台逐项核对：控件在这个平台上存�
 **共同的同步前提**：`settings_sync.rs` 目前不同步 `navigation.*` 和 `mixed_input.minimum_prefix`。哪天开始同步，所有固定它们的宿主都要改为按条件显示（翻页键是 macOS、Windows、HarmonyOS，触发字符数是三个桌面宿主），否则别的设备同步来的值会在这些宿主上看不见却生效。
 
 ### 共享页的布局改动（所有宿主）
+
+其中桌面快捷键页的页尾折叠入口已由[按键速查顶部标签](../feature/2026-10-19-shortcuts-reference-top-tabs.md)取代；手机仍保留本篇的折叠布局。
 
 - **只有一个方案的语言**：日语、韩语、粤拼、注音、笔画、藏文改成没有控件的说明行（「罗马音：直接输入罗马音……」），仍按当前方案隐藏而不删除。
 - **双拼的各行**：双拼方案、编辑自定义键位、键位提示，以及从「候选窗口」页移来的「双拼预编辑」，只在双拼方案下出现。

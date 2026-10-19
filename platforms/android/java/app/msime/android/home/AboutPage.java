@@ -27,6 +27,7 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
 import app.msime.android.AppEdition;
+import app.msime.android.AppVersionPolicy;
 import app.msime.android.BoundsPolicy;
 import app.msime.android.DeviceInfoReport;
 import app.msime.android.FilePolicy;
@@ -191,7 +192,8 @@ public final class AboutPage extends DetailPage {
         header.addView(name, nameParams);
 
         TextView version = ViewPolicy.styledLabel(context,
-            "版本 " + UpdateJobService.currentVersion(context) + " · Android", 13, 400, ThemeColorPolicy.subText(context));
+            "版本 " + AppVersionPolicy.displayVersion(UpdateJobService.currentVersion(context), AppVersionPolicy.releaseDate())
+                + " · Android", 13, 400, ThemeColorPolicy.subText(context));
         ViewPolicy.setCentered(version);
         LinearLayout.LayoutParams versionParams = LayoutPolicy.wrapParams();
         versionParams.topMargin = DimensionPolicy.pixels(context, 6);

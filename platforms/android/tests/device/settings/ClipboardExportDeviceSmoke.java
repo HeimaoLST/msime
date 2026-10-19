@@ -147,13 +147,15 @@ public final class ClipboardExportDeviceSmoke extends Instrumentation {
         openPage();
         stage = "cancel directory change";
         choose();
-        await(node -> picker(node) && node.isVisibleToUser());
+        waitFor(() -> {
+            AccessibilityNodeInfo root = automation.getRootInActiveWindow();
+            return root != null && picker(root);
+        }, "directory picker foreground");
         stage = "cancel picker returns to clipboard settings";
-        for (int attempt = 0; attempt < 6 && findAll(node -> picker(node) && node.isVisibleToUser()) != null; attempt++) {
-            shell("input keyevent 4");
-            SystemClock.sleep(250);
-        }
-        await(text("导出文件夹"));
+        // 关闭后的选择器仍可能留在其他窗口的无障碍树里，不能据此继续返回并退出设置页。
+        shell("input keyevent 4");
+        waitFor(() -> find(automation.getRootInActiveWindow(), text("导出文件夹")) != null,
+            "clipboard settings foreground");
         check(ROOT.equals(saved()), "cancel preserves selection");
 
         stage = "incomplete permission does not change selection";
@@ -212,11 +214,18 @@ public final class ClipboardExportDeviceSmoke extends Instrumentation {
         tap(text("导出文件夹"));
         tap(text("Download（默认）"));
         waitFor(() -> savedUnchecked().isEmpty(), "default destination reset");
-        if (Build.VERSION.SDK_INT < 29) check(export().contains("先选择"), "legacy requests a grant");
+        // 关闭隐私开关允许输入法清空历史，目录验收必须重新建立非空合成夹具。
+        seed();
+        if (Build.VERSION.SDK_INT < 29) {
+            String result = export();
+            check(result.contains("先选择"), "legacy requests a grant; empty=" + result.contains("为空")
+                + "; disabled=" + result.contains("未开启") + "; settings=" + result.contains("设置读取失败"));
+        }
         else check(export().startsWith("导出完成"), "default Download restored");
         choose();
         selectFolder(null);
         stage = "deleted directory requires reselection";
+        seed();
         check(DocumentsContract.deleteDocument(getTargetContext().getContentResolver(), document(ROOT, "root")), "delete root");
         check(export().contains("重新选择"), "deleted directory not redirected");
     }
@@ -355,10 +364,7 @@ public final class ClipboardExportDeviceSmoke extends Instrumentation {
         await(node -> picker(node) && node.isVisibleToUser());
         stage = "picker navigation drawer: " + reason;
         // 初始页可能是最近文件、其他根或上次的子目录，先从导航抽屉进入合成根。
-        tap(node -> picker(node) && node.getContentDescription() != null && (
-            node.getContentDescription().toString().equalsIgnoreCase("Show roots")
-                || node.getContentDescription().toString().contains("根目录")
-                || node.getContentDescription().toString().contains("导航")));
+        openPickerRoots();
         stage = "picker root option: " + reason;
         tap(node -> text("MSIME 测试导出").test(node) && "android:id/title".equals(node.getViewIdResourceName()));
         stage = "picker destination: " + reason;
@@ -375,6 +381,49 @@ public final class ClipboardExportDeviceSmoke extends Instrumentation {
         }
         await(text("导出文件夹"));
         await(node -> text("导出").test(node) && node.isEnabled());
+    }
+
+    private AccessibilityNodeInfo activePicker() {
+        if (Build.VERSION.SDK_INT >= 34) automation.clearCache();
+        AccessibilityNodeInfo root = automation.getRootInActiveWindow();
+        return root != null && picker(root) ? root : null;
+    }
+
+    private static boolean pickerRootsOpen(AccessibilityNodeInfo root) {
+        return find(root, node -> node.getViewIdResourceName() != null
+            && node.getViewIdResourceName().endsWith(":id/roots_list")) != null;
+    }
+
+    private void openPickerRoots() throws Exception {
+        Predicate<AccessibilityNodeInfo> navigation = node -> node.getContentDescription() != null && (
+            node.getContentDescription().toString().equalsIgnoreCase("Show roots")
+                || node.getContentDescription().toString().contains("根目录")
+                || node.getContentDescription().toString().contains("导航"));
+        long deadline = SystemClock.uptimeMillis() + 15000;
+        int attempts = 0;
+        while (SystemClock.uptimeMillis() < deadline) {
+            AccessibilityNodeInfo root = activePicker();
+            if (pickerRootsOpen(root)) return;
+            // 窗口切换期间读不到当前根时只等待；不能从后台窗口找到旧按钮再点击。
+            if (find(root, navigation) != null) {
+                automation.waitForIdle(300, 3000);
+                root = activePicker();
+                if (pickerRootsOpen(root)) return;
+                AccessibilityNodeInfo button = find(root, navigation);
+                if (button != null) {
+                    check(attempts++ < 3, "picker navigation drawer did not open");
+                    click(button);
+                    // 点击返回不代表抽屉已打开，先等待可见结果，再决定是否需要重试。
+                    long observation = Math.min(deadline, SystemClock.uptimeMillis() + 3000);
+                    while (SystemClock.uptimeMillis() < observation) {
+                        if (pickerRootsOpen(activePicker())) return;
+                        SystemClock.sleep(100);
+                    }
+                }
+            }
+            SystemClock.sleep(100);
+        }
+        throw new AssertionError("picker navigation drawer did not open");
     }
 
     private static byte[] read(java.io.InputStream input) throws IOException {

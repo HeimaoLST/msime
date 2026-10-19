@@ -7,6 +7,8 @@
 //!
 //! Learning is off and each case gets a fresh session, so one case cannot bias the next.
 
+#[path = "../eval_resources/mod.rs"]
+mod eval_resources;
 mod grid_keys;
 mod metrics;
 
@@ -33,6 +35,7 @@ struct Case {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut resources: Option<PathBuf> = None;
+    let mut resource_lock: Option<PathBuf> = None;
     let mut sets: Vec<PathBuf> = Vec::new();
     let mut limit: Option<usize> = None;
     let mut report_path: Option<PathBuf> = None;
@@ -54,6 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         match args[index].as_str() {
             "--resources" => resources = Some(PathBuf::from(take(&mut index)?)),
+            "--resource-lock" => resource_lock = Some(PathBuf::from(take(&mut index)?)),
             "--set" => sets.push(PathBuf::from(take(&mut index)?)),
             "--limit" => limit = Some(take(&mut index)?.parse()?),
             "--report" => report_path = Some(PathBuf::from(take(&mut index)?)),
@@ -73,10 +77,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         index += 1;
     }
     let resources =
-        resources.ok_or("usage: convert_eval --resources <verified-dir> --set <file.tsv> [...]")?;
+        resources.ok_or("usage: convert_eval --resources <verified-dir> --set <file.tsv> [--resource-lock <file.json>] [...]")?;
     if sets.is_empty() {
         return Err("at least one --set is required".into());
     }
+
+    let verified = eval_resources::verify(&resources, resource_lock.as_deref())?;
 
     let mut cases = Vec::new();
     for set in &sets {
@@ -111,6 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dump.as_deref(),
         grid,
         keyboard_neural,
+        &verified.source_commit,
     )?;
     let json = render(&report, &cases);
 
@@ -181,26 +188,17 @@ fn run(
     dump: Option<&Path>,
     grid: Option<KeyGrid>,
     keyboard_neural: bool,
+    source_commit: &str,
 ) -> Result<Report, Box<dyn std::error::Error>> {
     // Optional JSONL of the real candidate lists, for offline experiments that must not be able
     // to change what the harness measures.
     let mut dumped = String::new();
-    // prepare_options is what actually makes a resource directory usable: it verifies the
-    // generation, creates the user dictionaries and returns the four paths the Engine expects.
-    // Passing the verified directory straight to EngineOptions yields a session with no
-    // dictionaries attached, which produces an empty candidate list rather than an error.
-    let generation = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/desktop-dictionary.lock.json"),
-    )?;
-    let generation: serde_json::Value = serde_json::from_str(&generation)?;
-    let generation = generation["source_commit"]
-        .as_str()
-        .ok_or("lock has no source_commit")?;
+    // 入口已核对资源清单；这里准备可写词库代次，不能把包目录直接当用户词库。
     let mut options = msime_engine::host::prepare_options(
         resources.to_str().ok_or("non-UTF-8 resource path")?,
         state.join("user").to_str().ok_or("non-UTF-8 state path")?,
         state.join("cache").to_str().ok_or("non-UTF-8 cache path")?,
-        generation,
+        source_commit,
     )?;
     options.scheme = 0;
     // Off so a case cannot promote its own answer for the cases that follow.

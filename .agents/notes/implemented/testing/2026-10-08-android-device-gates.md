@@ -76,3 +76,5 @@ CI 的 Android job 只做 `check-host.sh`、各版本 Gradle 编译和 NewApi li
 - `actionlint` 检查了三个 workflow。CI 上 x86_64 的这条路径要靠这个 PR 自己的运行来证明。
 
 相关：[设备测试包和 ArkTS 的编译缺口](2026-10-08-compile-gates-for-device-suite-and-arkts.md) 只保证设备测试能编译，这篇让它们真正跑起来。
+
+分页网格接手稀疏横拖时的首段位移由[原生触摸回归](../bug-fix/2026-10-19-android-paged-grid-intercept-delta.md)单独约束，该回归接入最低 API 的核心套件。

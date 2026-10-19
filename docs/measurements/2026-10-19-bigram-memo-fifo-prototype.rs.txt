@@ -1,0 +1,405 @@
+use super::super::ngram::tests::pair_table;
+use super::*;
+
+// 冻结7d00657a65的键构造之后、完整表失效与HashMap访问路径。
+#[derive(Default)]
+struct Reference {
+    table: usize,
+    scores: HashMap<u64, f32, BuildHasherDefault<KeyHasher>>,
+    lookups: usize,
+    max_scores_capacity: usize,
+}
+
+impl Reference {
+    fn score<const COUNT: bool>(&mut self, table: &Arc<NgramTable>, key: u64) -> f32 {
+        let address = Arc::as_ptr(table) as usize;
+        if self.table != address {
+            self.scores.clear();
+            self.table = address;
+        }
+        let full = self.scores.len() >= BIGRAM_MEMO_CAPACITY;
+        let score = match self.scores.entry(key) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) if full => {
+                let key = entry.into_key();
+                self.scores.clear();
+                if COUNT {
+                    self.lookups += 1;
+                }
+                let score = table.score(key);
+                self.scores.insert(key, score);
+                score
+            }
+            Entry::Vacant(entry) => {
+                if COUNT {
+                    self.lookups += 1;
+                }
+                let score = table.score(key);
+                entry.insert(score);
+                score
+            }
+        };
+        if COUNT {
+            self.max_scores_capacity = self.max_scores_capacity.max(self.scores.capacity());
+        }
+        score
+    }
+}
+
+#[derive(Default)]
+struct Candidate {
+    table: usize,
+    scores: HashMap<u64, f32, BuildHasherDefault<KeyHasher>>,
+    order: Vec<u64>,
+    next: usize,
+    max_order_capacity: usize,
+    lookups: usize,
+    max_scores_capacity: usize,
+}
+
+impl Candidate {
+    fn score<const COUNT: bool>(&mut self, table: &Arc<NgramTable>, key: u64) -> f32 {
+        let address = Arc::as_ptr(table) as usize;
+        if self.table != address {
+            self.scores.clear();
+            self.order.clear();
+            self.next = 0;
+            self.table = address;
+        }
+        let full = self.scores.len() >= BIGRAM_MEMO_CAPACITY;
+        let score = match self.scores.entry(key) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) if full => {
+                let key = entry.into_key();
+                let old = self.order[self.next];
+                let removed = self.scores.remove(&old);
+                debug_assert!(removed.is_some());
+                self.order[self.next] = key;
+                self.next = (self.next + 1) % BIGRAM_MEMO_CAPACITY;
+                if COUNT {
+                    self.lookups += 1;
+                }
+                let score = table.score(key);
+                self.scores.insert(key, score);
+                score
+            }
+            Entry::Vacant(entry) => {
+                self.order.push(key);
+                if COUNT {
+                    self.lookups += 1;
+                }
+                let score = table.score(key);
+                entry.insert(score);
+                score
+            }
+        };
+        if COUNT {
+            self.max_scores_capacity = self.max_scores_capacity.max(self.scores.capacity());
+            self.max_order_capacity = self.max_order_capacity.max(self.order.capacity());
+        }
+        score
+    }
+    fn lookups(&self) -> usize {
+        self.lookups
+    }
+}
+
+#[test]
+fn an_unfilled_fifo_miss_hashes_only_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let table = Arc::new(pair_table(
+        directory.path(),
+        "one.bin",
+        &[("前", "后", 1.0)],
+    ));
+    let mut candidate = Candidate::default();
+    candidate.score::<true>(&table, 1);
+    BIGRAM_MEMO_HASH_CALLS.with(|calls| calls.set(0));
+    candidate.score::<true>(&table, 2);
+    assert_eq!(
+        BIGRAM_MEMO_HASH_CALLS.with(|calls| calls.get()),
+        1,
+        "未满FIFO应沿用entry的单次哈希"
+    );
+}
+
+#[test]
+fn a_full_fifo_keeps_every_key_except_the_oldest() {
+    let directory = tempfile::tempdir().unwrap();
+    let table = Arc::new(pair_table(
+        directory.path(),
+        "pairs.bin",
+        &[("前", "后", 1.0)],
+    ));
+    let mut candidate = Candidate::default();
+    for key in 1..=BIGRAM_MEMO_CAPACITY as u64 {
+        candidate.score::<true>(&table, key);
+    }
+    let before = candidate.lookups();
+    candidate.score::<true>(&table, 1);
+    assert_eq!(candidate.lookups(), before, "命中不能查询底表");
+    candidate.score::<true>(&table, BIGRAM_MEMO_CAPACITY as u64 + 1);
+    assert!(!candidate.scores.contains_key(&1), "命中不能刷新FIFO年龄");
+    assert_eq!(candidate.next, 1);
+    let before = candidate.lookups();
+    candidate.score::<true>(&table, 2);
+    assert_eq!(candidate.lookups(), before, "满FIFO只应淘汰最老项");
+    for key in BIGRAM_MEMO_CAPACITY + 2..=BIGRAM_MEMO_CAPACITY * 2 {
+        candidate.score::<true>(&table, key as u64);
+    }
+    assert_eq!(candidate.next, 0, "替换整圈后应回绕");
+    assert_eq!(candidate.scores.len(), BIGRAM_MEMO_CAPACITY);
+    assert_eq!(candidate.order.len(), BIGRAM_MEMO_CAPACITY);
+    for (index, &key) in candidate.order.iter().enumerate() {
+        assert_eq!(key, (BIGRAM_MEMO_CAPACITY + index + 1) as u64);
+        assert!(candidate.scores.contains_key(&key));
+    }
+    candidate.score::<true>(&table, (BIGRAM_MEMO_CAPACITY * 2 + 1) as u64);
+    assert_eq!(candidate.next, 1);
+    assert!(!candidate
+        .scores
+        .contains_key(&(BIGRAM_MEMO_CAPACITY as u64 + 1)));
+}
+
+#[test]
+fn scores_keep_bits_after_collisions_and_table_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = Arc::new(pair_table(
+        directory.path(),
+        "first.bin",
+        &[
+            ("前", "后", -0.0),
+            ("甲", "乙", f32::from_bits(0x7fc0_1234)),
+        ],
+    ));
+    let second = Arc::new(pair_table(
+        directory.path(),
+        "second.bin",
+        &[("前", "后", 3.0)],
+    ));
+    let mut candidate = Candidate::default();
+    for table in [&first, &second, &first] {
+        for (previous, next) in [("前", "后"), ("甲", "乙"), ("缺", "失")] {
+            let key = table.bigram_key(previous, next).unwrap();
+            for _ in 0..2 {
+                assert_eq!(
+                    candidate.score::<true>(table, key).to_bits(),
+                    table.score(key).to_bits()
+                );
+            }
+            for collision in 1..=17 {
+                let key = key.wrapping_add(collision * 4096);
+                assert_eq!(
+                    candidate.score::<true>(table, key).to_bits(),
+                    table.score(key).to_bits()
+                );
+            }
+            assert_eq!(
+                candidate.score::<true>(table, key).to_bits(),
+                table.score(key).to_bits()
+            );
+        }
+        for key in [0, u64::MAX] {
+            assert_eq!(
+                candidate.score::<true>(table, key).to_bits(),
+                table.score(key).to_bits()
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "需固定完整合成轨迹，使用release手工配对"]
+#[allow(clippy::assertions_on_constants)]
+fn fifo_trace_release_budget() {
+    use std::hint::black_box;
+    use std::time::Instant;
+    assert!(!cfg!(debug_assertions));
+    let resources = std::env::var_os("MSIME_NEURAL_MODEL_DIR").unwrap();
+    let trace = std::env::var_os("MSIME_MEMO_TRACE").unwrap();
+    let table = Arc::new(
+        NgramTable::load(&std::path::Path::new(&resources).join("msime-bigram.bin")).unwrap(),
+    );
+    let bytes = std::fs::read(trace).unwrap();
+    assert_eq!(bytes.len(), 110796740 * 8);
+    let keys: Vec<_> = bytes
+        .chunks_exact(8)
+        .map(|key| u64::from_le_bytes(key.try_into().unwrap()))
+        .collect();
+    drop(bytes);
+    let mut old = Reference::default();
+    let mut new = Candidate::default();
+    for &key in &keys {
+        assert_eq!(
+            new.score::<true>(&table, key).to_bits(),
+            old.score::<true>(&table, key).to_bits()
+        );
+    }
+    eprintln!(
+        "FIFO_TRACE keys={} reference_lookups={} candidate_lookups={}",
+        keys.len(),
+        old.lookups,
+        new.lookups()
+    );
+    eprintln!(
+        "FIFO_CAPACITY trace reference_map={} candidate_map={} candidate_order={}",
+        old.max_scores_capacity, new.max_scores_capacity, new.max_order_capacity
+    );
+    assert_eq!(old.lookups, 16481705);
+    assert!(new.lookups() <= 14833534);
+    let baseline = |keys: &[u64]| {
+        let mut memo = Reference::default();
+        let mut sum = 0u64;
+        for &key in keys {
+            sum = sum.wrapping_add(u64::from(
+                memo.score::<false>(black_box(&table), black_box(key))
+                    .to_bits(),
+            ));
+        }
+        black_box(sum)
+    };
+    let candidate = |keys: &[u64]| {
+        let mut memo = Candidate::default();
+        let mut sum = 0u64;
+        for &key in keys {
+            sum = sum.wrapping_add(u64::from(
+                memo.score::<false>(black_box(&table), black_box(key))
+                    .to_bits(),
+            ));
+        }
+        black_box(sum)
+    };
+    let expected = baseline(&keys);
+    assert_eq!(candidate(&keys), expected);
+    let mut pairs = Vec::new();
+    for pair in 0..6 {
+        let measure = |arm: &dyn Fn(&[u64]) -> u64| {
+            let started = Instant::now();
+            assert_eq!(arm(black_box(&keys)), expected);
+            started.elapsed().as_secs_f64()
+        };
+        let (old, new) = if pair % 2 == 0 {
+            let old = measure(&baseline);
+            (old, measure(&candidate))
+        } else {
+            let new = measure(&candidate);
+            (measure(&baseline), new)
+        };
+        pairs.push((new / old, old, new));
+    }
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    eprintln!("FIFO_TRACE pairs={pairs:?}");
+    assert!(pairs[3].0 < 0.95, "完整轨迹未达预算：{pairs:?}");
+}
+
+fn synthetic_key(key: u64) -> u64 {
+    (key.wrapping_mul(0x9e37_79b9_7f4a_7c15) & !4095) | (key & 4095)
+}
+
+#[test]
+#[ignore = "完整资源缓存形状配对，使用release手工运行"]
+#[allow(clippy::assertions_on_constants)]
+fn fifo_shapes_release_budget() {
+    use std::hint::black_box;
+    use std::time::{Duration, Instant};
+    assert!(!cfg!(debug_assertions));
+    let resources = std::env::var_os("MSIME_NEURAL_MODEL_DIR").unwrap();
+    let table = Arc::new(
+        NgramTable::load(&std::path::Path::new(&resources).join("msime-bigram.bin")).unwrap(),
+    );
+    // 连续未命中的容量观测独立运行，不进入计时入口。
+    let mut old = Reference::default();
+    let mut new = Candidate::default();
+    for index in 1..=BIGRAM_MEMO_CAPACITY * 64 {
+        let key = synthetic_key(index as u64);
+        assert_eq!(
+            old.score::<true>(&table, key).to_bits(),
+            new.score::<true>(&table, key).to_bits()
+        );
+    }
+    eprintln!(
+        "FIFO_CAPACITY miss-stream keys={} reference_map={} candidate_map={} candidate_order={}",
+        BIGRAM_MEMO_CAPACITY * 64,
+        old.max_scores_capacity,
+        new.max_scores_capacity,
+        new.max_order_capacity
+    );
+    drop((old, new));
+    let mut results = Vec::new();
+    for shape in ["full-hit", "small-hot", "miss-stream", "conflict"] {
+        let size = match shape {
+            "small-hot" => 64,
+            "conflict" => 512,
+            _ => 32768,
+        };
+        let keys: Vec<u64> = (1..=size)
+            .map(|key| synthetic_key(if shape == "conflict" { key * 4096 } else { key }))
+            .collect();
+        let run = |new: bool, rounds: usize| {
+            let mut old = Reference::default();
+            let mut candidate = Candidate::default();
+            let mut sum = 0u64;
+            for &key in &keys {
+                let value = if new {
+                    candidate.score::<false>(black_box(&table), black_box(key))
+                } else {
+                    old.score::<false>(black_box(&table), black_box(key))
+                };
+                sum = sum.wrapping_add(u64::from(value.to_bits()));
+            }
+            let started = Instant::now();
+            for round in 0..rounds {
+                for (position, &key) in keys.iter().enumerate() {
+                    let key = if shape == "miss-stream" {
+                        synthetic_key((round as u64 + 1) * size + position as u64 + 1)
+                    } else {
+                        key
+                    };
+                    let value = if new {
+                        candidate.score::<false>(black_box(&table), black_box(key))
+                    } else {
+                        old.score::<false>(black_box(&table), black_box(key))
+                    };
+                    sum = sum.wrapping_add(u64::from(value.to_bits()));
+                }
+            }
+            black_box((sum, started.elapsed()))
+        };
+        let mut rounds = 1;
+        loop {
+            let old = run(false, rounds);
+            let new = run(true, rounds);
+            assert_eq!(old.0, new.0);
+            if old.1.min(new.1) >= Duration::from_millis(20) {
+                break;
+            }
+            rounds *= 2;
+        }
+        let mut pairs = Vec::new();
+        for pair in 0..21 {
+            let (old, new) = if pair % 2 == 0 {
+                let old = run(false, rounds);
+                (old, run(true, rounds))
+            } else {
+                let new = run(true, rounds);
+                (run(false, rounds), new)
+            };
+            assert_eq!(old.0, new.0);
+            pairs.push((
+                new.1.as_secs_f64() / old.1.as_secs_f64(),
+                old.1.as_secs_f64(),
+                new.1.as_secs_f64(),
+            ));
+        }
+        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        eprintln!(
+            "FIFO_SHAPE {shape} rounds={rounds} median={} pairs={pairs:?}",
+            pairs[10].0
+        );
+        results.push((shape, pairs[10].0));
+    }
+    assert!(
+        results.iter().all(|(_, ratio)| *ratio < 1.05),
+        "形状预算失败：{results:?}"
+    );
+}

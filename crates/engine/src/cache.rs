@@ -28,6 +28,11 @@ impl<K: Hash + Eq, V: Clone> FifoCache<K, V> {
         self.entries.peek(key)
     }
 
+    /// 借用已有槽原地更新，不改变 FIFO 插入年龄。
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.entries.peek_mut(key)
+    }
+
     pub fn get_ref_by<Q>(&self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,

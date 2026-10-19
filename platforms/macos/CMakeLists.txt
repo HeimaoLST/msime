@@ -102,7 +102,8 @@ target_compile_options(usage-reporting-path-test PRIVATE -fobjc-arc -UNDEBUG -Wa
 target_compile_definitions(usage-reporting-path-test PRIVATE MSIME_USAGE_REPORTING_TEST_SUPPORT="/tmp/msime-usage-reporting-path-test")
 target_link_libraries(usage-reporting-path-test PRIVATE apple-client)
 add_test(NAME usage-reporting-path COMMAND usage-reporting-path-test)
-add_executable(MSIMEClientInputMethod MACOSX_BUNDLE src/cloud/CloudFileTransfer.mm src/input/input_method_main.mm src/cloud/CloudClipboardWindowController.mm src/cloud/CloudClipboardClient.mm src/cloud/CloudURLSession.mm src/core/AccountSessionManager.mm src/core/AccountAuthClient.mm src/core/AccountWindowController.mm src/core/AccountKeychain.mm src/cloud/CloudDictionaryClient.mm src/settings/PreferencesWindowController.mm src/core/SupportWindowController.mm src/voice/VoiceInputService.mm src/voice/VoiceWaveOverlay.mm src/voice/VoiceCuePlayer.mm src/voice/VoiceAudioMuter.mm src/voice/VoiceSettings.mm src/voice/VoiceProviderSettings.mm src/input/InputController.mm src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm src/candidate/CandidateSkinAppearance.mm src/settings/AppearancePreferences.mm src/core/DiagnosticLog.cpp src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/core/ChineseTextConversion.mm src/settings/ShuangpinKeymapPanel.mm src/input/InputSourceRegistration.mm src/core/FloatingToolbarPanel.mm src/core/UpdateController.mm src/dictionary/DictionaryWindowController.mm src/core/ClientDictionaryRuntime.mm src/dictionary/DictionaryInstaller.mm ../../crates/host-macos/native/uninstaller.mm)
+# src/cloud 的 CloudClipboardClient、CloudClipboardWindowController、CloudDictionaryClient、CloudURLSession 是账号和云端改走 Rust（#8201）以前的 Objective-C 实现，输入法里已经没有代码引用它们，不再编进输入法；它们仍由下面的 cloud-clipboard-deletion、cloud-clipboard-selection、cloud-dictionary-client 三个测试目标编译，scripts/test-macos-cloud-query-encoding.py 和 test-macos-cloud-redirect-policy.py 也读它们的源码，所以文件留着，删不删由负责人定。同一批里没人引用的 CloudFileTransfer 和 src/core/Account{AuthClient,Keychain,SessionManager,WindowController} 已经删掉。
+add_executable(MSIMEClientInputMethod MACOSX_BUNDLE src/input/input_method_main.mm src/settings/PreferencesWindowController.mm src/core/SupportWindowController.mm src/voice/VoiceInputService.mm src/voice/VoiceWaveOverlay.mm src/voice/VoiceCuePlayer.mm src/voice/VoiceAudioMuter.mm src/voice/VoiceSettings.mm src/voice/VoiceProviderSettings.mm src/input/InputController.mm src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm src/candidate/CandidateSkinAppearance.mm src/settings/AppearancePreferences.mm src/core/DiagnosticLog.cpp src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/core/ChineseTextConversion.mm src/settings/ShuangpinKeymapPanel.mm src/input/InputSourceRegistration.mm src/core/FloatingToolbarPanel.mm src/core/UpdateController.mm src/dictionary/DictionaryWindowController.mm src/core/ClientDictionaryRuntime.mm src/dictionary/DictionaryInstaller.mm ../../crates/host-macos/native/uninstaller.mm)
 target_sources(MSIMEClientInputMethod PRIVATE src/core/AISettingsWindow.mm src/core/ScreenKeyboardPanel.mm src/cloud/CloudCandidateRequest.mm src/core/CustomTranslationBatch.mm src/voice/VoicePCMBuffer.mm src/voice/HTTPVoiceRequest.mm)
 target_sources(MSIMEClientInputMethod PRIVATE src/voice/DoubaoVoiceRequest.mm src/voice/LocalVoiceRequest.mm)
 target_sources(MSIMEClientInputMethod PRIVATE src/core/DesktopInputSession.mm)
@@ -115,6 +116,8 @@ file(GLOB_RECURSE MSIME_BACKEND_SWIFT CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/content/*.swift"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/storage/*.swift"
   "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend-ui/*.swift"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/rust/*"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../crates/host-api/include/msime_client.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/backend/*.swift")
 # bundle 里每个 Mach-O 都要包含的架构：发布包传 CMAKE_OSX_ARCHITECTURES="arm64;x86_64" 出 universal，未设置时只编宿主架构。CMake 自己编的目标直接跟随 CMAKE_OSX_ARCHITECTURES；Swift 后端和预编译的 sherpa-onnx 不经过 CMake 的编译器，所以在下面显式按这份列表处理。
 set(MSIME_BUNDLE_ARCHITECTURES ${CMAKE_OSX_ARCHITECTURES})
@@ -132,7 +135,7 @@ add_custom_command(OUTPUT "${MSIME_SWIFT_BACKEND_OUTPUT}"
 add_custom_target(macos-swift-backend DEPENDS "${MSIME_SWIFT_BACKEND_OUTPUT}")
 add_dependencies(MSIMEClientInputMethod macos-swift-backend)
 target_link_libraries(MSIMEClientInputMethod PRIVATE "${MSIME_SWIFT_BACKEND_OUTPUT}")
-target_include_directories(MSIMEClientInputMethod PRIVATE src)
+target_include_directories(MSIMEClientInputMethod PRIVATE src ../../shared/backend/rust)
 target_compile_options(MSIMEClientInputMethod PRIVATE -fobjc-arc -Wall -Wextra -Werror)
 target_link_libraries(MSIMEClientInputMethod PRIVATE apple-client msime-voice-providers "-framework AppKit" "-framework InputMethodKit" "-framework Carbon" "-framework AVFoundation" "-framework Speech")
 # 单按 Caps Lock 切换中英文时用 IOKit 的 IOHIDSetModifierLockState 撤回大写锁定（系统框架，不需要额外权限）。
@@ -151,6 +154,9 @@ if(NOT MSIME_MACOS_VERSION MATCHES "^([0-9]+)\\.([0-9][0-9]?[0-9]?)\\.([0-9][0-9
 endif()
 math(EXPR MACOSX_BUNDLE_BUNDLE_VERSION "((${CMAKE_MATCH_1} * 1000 + ${CMAKE_MATCH_2}) * 1000 + ${CMAKE_MATCH_3}) * 1000 + ${MSIME_BUILD_NUMBER}")
 message(STATUS "Bundle build number: ${MACOSX_BUNDLE_BUNDLE_VERSION}")
+# version.txt is the only place the version is written: Info.plist.in takes CFBundleShortVersionString from this variable, and the sources that need a fallback for an unbundled executable read MSIME_MACOS_VERSION_STRING, so a release bumps version.txt (and build-number.txt) and nothing else.
+set(MACOSX_BUNDLE_SHORT_VERSION_STRING "${MSIME_MACOS_VERSION}")
+add_compile_definitions(MSIME_MACOS_VERSION_STRING="${MSIME_MACOS_VERSION}")
 # 版本（edition）是 shared/contracts/editions.json 里的 id。full 用 Info.plist.in 和 resources/<语言>.lproj/InfoPlist.strings 原样构建，产物与引入版本之前相同；其他版本由 scripts/edition_bundle.py 在配置时从同样的模板生成该版本的 Info.plist 和 InfoPlist.strings（bundle id、模式、版本键），可执行文件也改成该版本的名字。原生代码在运行时从 Info.plist 读版本身份（src/core/EditionIdentity.h），所以除了这几个文件，各版本编出来的东西完全一样；发布包只编 full，再用同一个脚本把 bundle 改成各个版本（package-release.sh）。
 set(MSIME_EDITION "full" CACHE STRING "Edition id from shared/contracts/editions.json")
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -365,16 +371,22 @@ if(MSIME_OPTIONS_FILE)
   set_source_files_properties("${MSIME_OPTIONS_FILE}" PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
 endif()
 include(ClipboardTests.cmake)
-set(MSIME_DESKTOP_DICTIONARY_PROVIDER_SOURCES
-  ../../shared/backend/account/BackendAccountClient.swift ../../shared/backend/account/BackendAccountSession.swift ../../shared/backend/storage/BackendBoundedFileReader.swift
-  ../../shared/backend/content/BackendDictionaryClient.swift ../../shared/backend/clients/BackendCandidateClient.swift
-  ../../shared/backend/clients/BackendSnapshotClient.swift src/backend/dictionary/BackendCloudDictionaryProvider.swift
-  src/backend/dictionary/BackendLocalSnapshot.swift src/backend/dictionary/BackendFileTransfer.swift src/backend/dictionary/BackendDesktopSnapshots.swift
+# 云词库和云剪贴板的 IPC provider 经 Rust（#8201 迁移计划 4e）：Rust 是 tests/core/FakeRustTable.swift 的替身函数表，`-I shared/backend/rust` 只为 C 头文件的类型。
+set(MSIME_BACKEND_RUST_ACCOUNT_SOURCES
+  ../../shared/backend/account/BackendAccountClient.swift ../../shared/backend/account/BackendAccountSession.swift
+  ../../shared/backend/account/BackendAnonymousAccount.swift ../../shared/backend/account/BackendRustClient.swift
+  ../../shared/backend/account/BackendRustAccount.swift ../../shared/backend/account/BackendRustSessionStore.swift
+  ../../shared/backend/storage/BackendLocalStore.swift ../../shared/backend/storage/BackendBoundedFileReader.swift
+  tests/core/FakeRustTable.swift)
+set(MSIME_DESKTOP_DICTIONARY_PROVIDER_SOURCES ${MSIME_BACKEND_RUST_ACCOUNT_SOURCES}
+  src/backend/core/BackendEdition.swift src/backend/dictionary/BackendCloudDictionaryProvider.swift
+  src/backend/dictionary/BackendLocalDictionary.swift src/backend/dictionary/BackendFileTransfer.swift src/backend/dictionary/BackendDesktopSnapshots.swift
   tests/dictionary/DesktopCloudDictionaryProviderTest.swift)
 list(TRANSFORM MSIME_DESKTOP_DICTIONARY_PROVIDER_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/desktop-dictionary-provider-test"
   COMMAND "${MSIME_XCRUN}" swiftc -Onone -parse-as-library
     -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
+    -I "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/rust"
     ${MSIME_DESKTOP_DICTIONARY_PROVIDER_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/desktop-dictionary-provider-test"
   DEPENDS ${MSIME_DESKTOP_DICTIONARY_PROVIDER_SOURCES} VERBATIM)
 add_custom_target(desktop-dictionary-provider-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/desktop-dictionary-provider-test")
@@ -390,14 +402,14 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/secure-file-reader-test"
 add_custom_target(secure-file-reader-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/secure-file-reader-test")
 add_test(NAME secure-file-reader COMMAND "${CMAKE_CURRENT_BINARY_DIR}/secure-file-reader-test")
 set_tests_properties(secure-file-reader PROPERTIES TIMEOUT 30)
-set(MSIME_DESKTOP_CLOUD_PROVIDER_SOURCES
-  ../../shared/backend/account/BackendAccountClient.swift ../../shared/backend/account/BackendAccountSession.swift ../../shared/backend/storage/BackendBoundedFileReader.swift
-  ../../shared/backend/clients/BackendClipboardClient.swift src/backend/clipboard/BackendCloudClipboardProvider.swift
+set(MSIME_DESKTOP_CLOUD_PROVIDER_SOURCES ${MSIME_BACKEND_RUST_ACCOUNT_SOURCES}
+  src/backend/clipboard/BackendCloudClipboardProvider.swift
   src/backend/clipboard/BackendCloudClipboardDriver.swift tests/clipboard/DesktopCloudClipboardProviderTest.swift)
 list(TRANSFORM MSIME_DESKTOP_CLOUD_PROVIDER_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/desktop-cloud-provider-test"
   COMMAND "${MSIME_XCRUN}" swiftc -Onone -parse-as-library
     -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
+    -I "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/rust"
     ${MSIME_DESKTOP_CLOUD_PROVIDER_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/desktop-cloud-provider-test"
   DEPENDS ${MSIME_DESKTOP_CLOUD_PROVIDER_SOURCES} VERBATIM)
 add_custom_target(desktop-cloud-provider-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/desktop-cloud-provider-test")
@@ -406,10 +418,29 @@ set_tests_properties(desktop-cloud-provider PROPERTIES TIMEOUT 30)
 # The account backend harness compiles the whole Swift backend with its test entry point, the same source list build_backend_swift.sh links into the dylib, so the script owns the list rather than a second copy here.
 add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/backend-account-swift-test"
   COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_backend_account_swift.sh" "${CMAKE_CURRENT_BINARY_DIR}/backend-account-swift-test"
-  DEPENDS ${MSIME_BACKEND_SWIFT} "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/BackendAccountTests.swift"
+  DEPENDS ${MSIME_BACKEND_SWIFT} "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/BackendAccountTests.swift" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/FakeRustTable.swift"
     "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_backend_account_swift.sh" VERBATIM)
 add_custom_target(backend-account-swift-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/backend-account-swift-test")
 add_test(NAME backend-account-swift COMMAND "${CMAKE_CURRENT_BINARY_DIR}/backend-account-swift-test")
+# 注入会话存储对着真的 Rust 宿主库（#8201 迁移计划 4a）：后端的回调读写临时目录里的 `account-session.json` 和 App Group 文件，Rust 经 `msime_rust_client_linked()` 填的同一张函数表调用。不联网、不碰钥匙串。
+set(MSIME_BACKEND_RUST_STORE_SOURCES
+  ../../shared/backend/account/BackendAccountClient.swift ../../shared/backend/account/BackendAccountSession.swift
+  ../../shared/backend/account/BackendAnonymousAccount.swift ../../shared/backend/account/BackendRustClient.swift
+  ../../shared/backend/account/BackendRustSessionStore.swift ../../shared/backend/storage/BackendLocalStore.swift
+  ../../shared/backend/storage/BackendBoundedFileReader.swift tests/core/BackendRustSessionStoreTest.swift)
+list(TRANSFORM MSIME_BACKEND_RUST_STORE_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/backend-rust-session-store-test"
+  COMMAND "${MSIME_XCRUN}" swiftc -Onone -parse-as-library
+    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
+    -I "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/rust"
+    ${MSIME_BACKEND_RUST_STORE_SOURCES} "${MSIME_HOST_LIBRARY}" -lsqlite3 -lc++
+    -framework Foundation -framework Security -framework CoreText -framework CoreAudio -framework AudioToolbox -framework AppKit
+    -o "${CMAKE_CURRENT_BINARY_DIR}/backend-rust-session-store-test"
+  DEPENDS ${MSIME_BACKEND_RUST_STORE_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/rust/MSIMERustClient.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/rust/module.modulemap" "${MSIME_HOST_LIBRARY}" VERBATIM)
+add_custom_target(backend-rust-session-store-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/backend-rust-session-store-test")
+add_test(NAME backend-rust-session-store COMMAND "${CMAKE_CURRENT_BINARY_DIR}/backend-rust-session-store-test")
+set_tests_properties(backend-rust-session-store PROPERTIES TIMEOUT 60)
 set_tests_properties(backend-account-swift PROPERTIES TIMEOUT 60)
 set(MSIME_EMOJI_WINDOW_CHROME_SOURCES src/backend/emoji/BackendEmojiWindowController.swift tests/emoji/EmojiWindowChromeTest.swift)
 list(TRANSFORM MSIME_EMOJI_WINDOW_CHROME_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
@@ -770,6 +801,7 @@ add_test(NAME tool-application-activation COMMAND tool-application-activation-te
 add_executable(backend-library-load-test tests/core/BackendLibraryLoadTest.mm)
 target_compile_options(backend-library-load-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(backend-library-load-test PRIVATE "-framework Foundation")
+target_include_directories(backend-library-load-test PRIVATE ../../shared/backend/rust)
 add_dependencies(backend-library-load-test MSIMEClientInputMethod)
 add_test(NAME backend-library-load COMMAND backend-library-load-test "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks/MSIMEBackend.dylib")
 set(MSIME_SPARKLE_ROOT "" CACHE PATH "Directory containing the pinned Sparkle.framework (Apple reference: 2.9.6)")
@@ -844,7 +876,7 @@ add_test(NAME ai-settings-snapshot COMMAND ai-settings-snapshot-test)
 # AI 接口地址策略逐条跑 shared/contracts/ai-endpoint/cases.json，与 client-providers 的权威实现对照。
 add_executable(ai-endpoint-policy-test tests/settings/AIEndpointPolicyTest.mm)
 target_compile_options(ai-endpoint-policy-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
-target_link_libraries(ai-endpoint-policy-test PRIVATE "-framework Foundation")
+target_link_libraries(ai-endpoint-policy-test PRIVATE apple-client "-framework Foundation")
 add_test(NAME ai-endpoint-policy COMMAND ai-endpoint-policy-test)
 add_executable(ai-settings-window-test tests/settings/AISettingsWindowTest.mm src/core/AISettingsWindow.mm)
 target_compile_options(ai-settings-window-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
@@ -1010,10 +1042,20 @@ add_executable(candidate-row-layout-test tests/candidate/CandidateRowLayoutTest.
 target_link_libraries(candidate-row-layout-test PRIVATE ${MSIME_CONTROLLER_TEST_LIBS})
 target_compile_options(candidate-row-layout-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG "-F${MSIME_SPARKLE_ROOT}")
 add_test(NAME candidate-row-layout COMMAND candidate-row-layout-test)
-add_executable(candidate-hover-test tests/candidate/CandidateHoverTest.mm)
+# Canvas 的切片与动画资源独立验证，不依赖输入会话和词库。
+add_executable(candidate-canvas-test tests/candidate/CandidateCanvasTest.mm src/candidate/CandidateCanvas.mm)
+target_compile_options(candidate-canvas-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(candidate-canvas-test PRIVATE "-framework AppKit" "-framework QuartzCore" "-framework ImageIO")
+add_test(NAME candidate-canvas COMMAND candidate-canvas-test)
+add_executable(candidate-hover-test tests/candidate/CandidateHoverTest.mm src/candidate/CandidateCanvas.mm)
 target_compile_options(candidate-hover-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
-target_link_libraries(candidate-hover-test PRIVATE "-framework AppKit")
+target_link_libraries(candidate-hover-test PRIVATE "-framework AppKit" "-framework QuartzCore" "-framework ImageIO")
 add_test(NAME candidate-hover COMMAND candidate-hover-test)
+
+add_executable(settings-glass-test tests/settings/SettingsGlassTest.mm)
+target_compile_options(settings-glass-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(settings-glass-test PRIVATE "-framework AppKit" "-framework WebKit")
+add_test(NAME settings-glass COMMAND settings-glass-test)
 # Where the candidate window goes: under the caret, flipped above it when there is no room, and
 # clamped into the display it is on - including one whose coordinates are negative.
 add_executable(candidate-placement-test tests/candidate/CandidatePlacementTest.mm)
@@ -1248,7 +1290,7 @@ foreach(msime_target IN LISTS MSIME_DIRECTORY_TARGETS)
 endforeach()
 
 # CandidateSkin.cpp 通过 SkinManifestBridge.mm 读取外部皮肤清单，后者调用 Rust 宿主库里共享的 client-services 加载器。编译其中一个文件的每个目标都需要另一个文件和 apple-client，所以由这个循环把它们绑在一起，而不是手工维护一份新使用方可能漏掉的列表。
-set_source_files_properties(src/candidate/SkinManifestBridge.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+set_source_files_properties(src/candidate/SkinManifestBridge.mm src/candidate/CandidateCanvas.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 get_property(MSIME_SKIN_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(msime_target IN LISTS MSIME_SKIN_TARGETS)
   get_target_property(msime_target_sources ${msime_target} SOURCES)
@@ -1258,7 +1300,8 @@ foreach(msime_target IN LISTS MSIME_SKIN_TARGETS)
   if(NOT "src/candidate/SkinManifestBridge.mm" IN_LIST msime_target_sources)
     target_sources(${msime_target} PRIVATE src/candidate/SkinManifestBridge.mm)
   endif()
-  target_link_libraries(${msime_target} PRIVATE apple-client)
+  target_sources(${msime_target} PRIVATE src/candidate/CandidateCanvas.mm)
+  target_link_libraries(${msime_target} PRIVATE apple-client "-framework QuartzCore" "-framework ImageIO")
 endforeach()
 
 # VoiceInputService.mm passes the system recogniser's text through shared/voice's tidy_local_transcript, so every target compiling it links the library that defines it. Found by source rather than listed, for the same reason as the loops above.

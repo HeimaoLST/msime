@@ -1,6 +1,10 @@
 //! The desktop hosts' account session: one owner-only JSON file, shared by every process of the user that signs in.
 //!
 //! On macOS the settings app and the input method both hold the account, and the backend rotates the refresh token on every refresh and revokes the whole session when a spent one comes back. The two therefore read the same file on every access and take the same lock file around a refresh, the way the iOS app and its keyboard extension share theirs through the App Group. The file layout on macOS is the Swift backend's (`BackendSavedSession`, an `expiresAt` in seconds since 2001), so `shared/backend` reads it unchanged; the other hosts keep [`SavedAccountSession`]. Either layout is accepted on load.
+//!
+//! 鸿蒙的 ArkTS 桥接（`AccountCloudBridge.ts`）以前把登录会话存成第三种扁平布局 `{access_token, refresh_token, token_type, expires_at, user}`，`expires_at` 是 Unix 毫秒。升级后第一次读到的还是它，所以读取时也认这种布局（只读）；下一次保存按存储的布局写，鸿蒙的目录模式是 Native。
+//!
+//! 本目录里的文件要求属主与所在目录相同。另一个沙箱发布的会话文件（[`read_published_session`]，鸿蒙设置应用与键盘之间的 `session_adopt`）在鸿蒙上改成要求属主是本进程的有效 uid、不看所在目录：发布目录由发布方进程自己建（`SharedStateMirror.ets` 的 `ensureParent`），文件和目录本来就同一个属主；改成看有效 uid 是为了连「别的 uid 先建好发布目录、再放进自己的文件」也拒收（与目录相同的规则会放行这种情况）。前提是设置应用和键盘是同一个应用的两个进程、有效 uid 相同，真机上要核对的是这一点。权限位的规则不变。细节见 `anonymous::owner_is_trusted`。
 
 use super::*;
 use std::fs::File;
@@ -36,6 +40,17 @@ struct AppleSavedSession {
     expires_at: f64,
     #[serde(rename = "sessionID", default, skip_serializing_if = "Option::is_none")]
     session_id: Option<uuid::Uuid>,
+}
+
+/// 鸿蒙 ArkTS 桥接以前保存的扁平布局，只读。没有 `expires_in` 和 `session_id`：前者读出时按剩余时长补出，后者留空，第一次认证请求前由 `BackendAccountSession` 补上并按 Native 写回。
+#[derive(Deserialize)]
+struct HarmonyFlatSession {
+    access_token: String,
+    refresh_token: String,
+    token_type: String,
+    /// Unix 毫秒。
+    expires_at: u64,
+    user: AccountUser,
 }
 
 #[derive(Clone)]
@@ -155,10 +170,37 @@ pub(crate) fn encode_session(
     .map_err(|_| AccountError::Storage)
 }
 
-/// 两种布局都接受；合法性由读取方（`BackendAccountSession` 的 `validate_saved_session`）再查一遍。
+/// 三种布局都接受（Native、Apple，以及只读的鸿蒙扁平布局）；合法性由读取方（`BackendAccountSession` 的 `validate_saved_session`）再查一遍。
 pub(crate) fn decode(bytes: &[u8]) -> Result<SavedAccountSession, AccountError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| AccountError::Storage)?
+        .as_millis();
+    decode_at(
+        bytes,
+        u64::try_from(now).map_err(|_| AccountError::Storage)?,
+    )
+}
+
+/// 与 [`decode`] 相同，`now_unix_ms` 是补出扁平布局的 `expires_in` 用的当前时间。
+fn decode_at(bytes: &[u8], now_unix_ms: u64) -> Result<SavedAccountSession, AccountError> {
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| AccountError::Storage)?;
+    if value.get("tokens").is_none() && value.get("access_token").is_some() {
+        let flat: HarmonyFlatSession =
+            serde_json::from_value(value).map_err(|_| AccountError::Storage)?;
+        return Ok(SavedAccountSession {
+            tokens: AccountTokens {
+                access_token: flat.access_token,
+                refresh_token: flat.refresh_token,
+                token_type: flat.token_type,
+                expires_in: harmony_expires_in(flat.expires_at, now_unix_ms),
+                user: flat.user,
+            },
+            expires_at_unix_ms: flat.expires_at,
+            session_id: None,
+        });
+    }
     if value.get("expiresAt").is_none() {
         return serde_json::from_value(value).map_err(|_| AccountError::Storage);
     }
@@ -173,6 +215,35 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<SavedAccountSession, AccountError> 
         expires_at_unix_ms: expires_at_unix_ms.round() as u64,
         session_id: saved.session_id,
     })
+}
+
+/// 扁平布局没有 `expires_in`，按鸿蒙旧版 ArkTS 桥接的算法补出（#8201 删掉的 `AccountSessionPolicy.ts` 里的 `anonymousSessionForStorage`）：`now` 时刻剩余的整秒数，四舍五入，至少为 1。`validate_tokens` 拒收 0，所以访问令牌已经过期的会话也是 1，照样能拿刷新令牌去刷新。
+fn harmony_expires_in(expires_at_unix_ms: u64, now_unix_ms: u64) -> u64 {
+    (expires_at_unix_ms
+        .saturating_sub(now_unix_ms)
+        .saturating_add(500)
+        / 1000)
+        .max(1)
+}
+
+/// 读另一个沙箱发布的会话文件（鸿蒙设置应用与键盘之间的镜像，`session_adopt`）：不跟随符号链接、最多 64 KiB，权限位与本目录的会话文件同一条规则（鸿蒙上只拒绝其他用户位，其他平台只能属主可读写）；属主在鸿蒙上必须是本进程的有效 uid、不看所在目录（发布目录在 data-group 共享目录下，规则和理由见 `anonymous::owner_is_trusted`），其他平台与本目录的会话文件相同、必须等于所在目录的属主。三种布局都认。文件或所在目录不存在时是 `None`；`path` 必须有文件名。只解码，合法性由 [`BackendAccountSession::adopt_session`] 检查。
+pub fn read_published_session(path: &Path) -> Result<Option<SavedAccountSession>, AccountError> {
+    read_published_session_with(path, cfg!(target_env = "ohos"))
+}
+
+/// [`read_published_session`] 的实现；`ohos` 为真时按鸿蒙的规则查属主和权限位，测试据此在其他平台上覆盖两种规则。
+fn read_published_session_with(
+    path: &Path,
+    ohos: bool,
+) -> Result<Option<SavedAccountSession>, AccountError> {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(AccountError::Invalid);
+    };
+    let name = name.to_str().ok_or(AccountError::Invalid)?;
+    FileAccountSessionStorage::new(parent, AccountSessionFileLayout::Native)
+        .read_private_with(name, MAX_SESSION_BYTES, ohos, true)?
+        .map(|bytes| decode(&bytes))
+        .transpose()
 }
 
 fn read_bounded_file(file: File, maximum: u64) -> Result<Vec<u8>, AccountError> {
@@ -219,12 +290,25 @@ fn save_bytes(
 }
 
 impl FileAccountSessionStorage {
-    /// 读目录里的一个私有文件；不存在时为 `None`。自建中继的密钥串（`crate::clipboard_relay`）也经它读。
+    /// 读目录里的一个私有文件；不存在时为 `None`。自建中继的密钥串（`crate::clipboard_relay`）也经它读。鸿蒙上放宽属组位，规则见 `anonymous::forbidden_session_mode_bits`。
     pub(crate) fn read_private(
         &self,
         name: &str,
         maximum: u64,
     ) -> Result<Option<Vec<u8>>, AccountError> {
+        self.read_private_with(name, maximum, cfg!(target_env = "ohos"), false)
+    }
+
+    /// [`Self::read_private`] 的实现；`ohos` 为真时按鸿蒙的规则查权限位，测试据此在其他平台上覆盖两种规则。`published` 为真时读的是另一个沙箱发布的文件，属主按 `anonymous::owner_is_trusted` 的发布规则查。
+    fn read_private_with(
+        &self,
+        name: &str,
+        maximum: u64,
+        ohos: bool,
+        published: bool,
+    ) -> Result<Option<Vec<u8>>, AccountError> {
+        #[cfg(not(unix))]
+        let _ = (ohos, published);
         crate::storage::reject_symlink(&self.directory).map_err(|_| AccountError::Storage)?;
         #[cfg(unix)]
         let directory = match crate::storage::open_private_directory(&self.directory) {
@@ -257,9 +341,13 @@ impl FileAccountSessionStorage {
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
             let directory_metadata = directory.metadata().map_err(|_| AccountError::Storage)?;
-            if metadata.mode() & 0o077 != 0 || metadata.uid() != directory_metadata.uid() {
+            if !super::anonymous::private_file_is_trusted(
+                &metadata,
+                &directory_metadata,
+                ohos,
+                published,
+            ) {
                 return Err(AccountError::Storage);
             }
         }
@@ -338,6 +426,12 @@ impl AccountSessionStorage for FileAccountSessionStorage {
         body()
     }
 }
+
+#[cfg(test)]
+mod harmony_tests;
+
+#[cfg(test)]
+pub(crate) mod layout_cases_tests;
 
 #[cfg(test)]
 mod tests {
@@ -435,31 +529,21 @@ mod tests {
 
     #[test]
     fn an_apple_layout_document_keeps_the_email_and_avatar_of_its_user() {
-        // Swift 的 `BackendSavedSession` 写出的形状：expiresAt 是 2001 年起的秒数，sessionID 是 UUID。
-        let document = br#"{"tokens":{"access_token":"synthetic-access","refresh_token":"synthetic-refresh","token_type":"Bearer","expires_in":900,"user":{"id":"synthetic-user","display_name":"","created_at":"2026-01-01T00:00:00Z","email":"person@example.test","avatar_url":"https://media.msime.app/avatars/synthetic.jpg"}},"expiresAt":800000000,"sessionID":"6f9619ff-8b86-d011-b42d-00c04fc964ff"}"#;
-        let saved = decode(document).unwrap();
-        assert_eq!(
-            saved.tokens.user.email.as_deref(),
-            Some("person@example.test")
-        );
+        // Swift 的 `BackendSavedSession` 实际写出的字节（共享用例 `apple_swift`）：带邮箱和头像，再按 Apple 布局写回时两个字段原样保留。
+        let case = layout_cases_tests::layout_case("apple_swift");
+        let saved = decode(&layout_cases_tests::case_document(&case)).unwrap();
+        let user = &case["session"]["tokens"]["user"];
+        assert_eq!(saved.tokens.user.email.as_deref(), user["email"].as_str());
         assert_eq!(
             saved.tokens.user.avatar_url.as_deref(),
-            Some("https://media.msime.app/avatars/synthetic.jpg")
+            user["avatar_url"].as_str()
         );
-        assert_eq!(saved.expires_at_unix_ms, 1_778_307_200_000);
-        assert!(saved.session_id.is_some());
-
-        // 再按 Apple 布局写回，两个字段原样保留。
         let encoded: serde_json::Value = serde_json::from_slice(
             &encode_session(AccountSessionFileLayout::Apple, &saved).unwrap(),
         )
         .unwrap();
-        assert_eq!(encoded["tokens"]["user"]["email"], "person@example.test");
-        assert_eq!(
-            encoded["tokens"]["user"]["avatar_url"],
-            "https://media.msime.app/avatars/synthetic.jpg"
-        );
-        assert_eq!(encoded["expiresAt"], 800_000_000.0);
+        assert_eq!(encoded["tokens"]["user"]["email"], user["email"]);
+        assert_eq!(encoded["tokens"]["user"]["avatar_url"], user["avatar_url"]);
     }
 
     #[test]

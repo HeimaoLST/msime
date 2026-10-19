@@ -1,6 +1,6 @@
 // 候选栏：按水杉桌面端候选框的结构和样式画预编辑行、候选和翻页标记，配色和几何来自 skin.js 的 resolveSkin。
 //
-// 隔离：整个候选栏画在宿主元素 <msime-candidates> 的 Shadow DOM 里，页面的 CSS 改不到它，它的样式也漏不出去。样式表是可构造样式表（adoptedStyleSheets），每个皮肤的取值只经 `style.setProperty` 写到 Shadow DOM 内的根元素上，不用 <style> 元素，也不写 style 属性的文本，所以页面的 CSP 不开 `style-src 'unsafe-inline'` 也能用。皮肤里的图片用 <img> 加载，地址不进 CSS。
+// 隔离：整个候选栏画在宿主元素 <msime-candidates> 的 Shadow DOM 里，页面的 CSS 改不到它，它的样式也漏不出去。样式表是可构造样式表（adoptedStyleSheets），每个皮肤的取值只经 `style.setProperty` 写到 Shadow DOM 内的根元素上，不用 <style> 元素，也不写 style 属性的文本，所以页面的 CSP 不开 `style-src 'unsafe-inline'` 也能用。装饰图用 <img> 加载；canvas 面板只使用宿主生成且已校验的 border-image 属性，不执行包内 CSS。
 //
 // 页面能改的只有 `::part()` 暴露出来的部分，见 PARTS 和 README。
 import { PLATFORM_PALETTE, resolveSkin } from "./skin.js";
@@ -234,6 +234,29 @@ ${platformVariables(PLATFORM_PALETTE.dark)}
   display: none;
 }
 
+/* Canvas 的挂件只参与绘制，留白由父层参与窗口测量；面板与文字的层级单独隔离。 */
+.skin-stage { position: relative; isolation: isolate; }
+.skin-layer { position: absolute; inset: 0; pointer-events: none; }
+.skin-layer-below { z-index: 0; }
+.skin-layer-above { z-index: 2; }
+.skin-stage > .container { z-index: 1; }
+.skin-picture { position: absolute; pointer-events: none; }
+.skin-picture > img, .skin-picture > canvas { width: 100%; height: 100%; object-fit: contain; }
+.skin-picture[hidden], .skin-panel[hidden] { display: none; }
+.skin-panel { position: absolute; inset: 0; z-index: 0; border: 0 solid transparent; pointer-events: none; }
+.skin-panel > canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.container[data-panel] { background: transparent; border: 0; border-radius: 0; box-shadow: none; }
+.container[data-panel] > .row, .container[data-panel] > .row-wrapper { position: relative; z-index: 1; }
+.candidate[data-canvas] .container {
+  padding: var(--msime-canvas-content-top) var(--msime-canvas-content-right) var(--msime-canvas-content-bottom) var(--msime-canvas-content-left);
+}
+.candidate[data-canvas] .containerParent {
+  max-width: none;
+  padding: calc(var(--msime-canvas-outer-top) + var(--msime-skin-decoration-top)) var(--msime-canvas-outer-right) var(--msime-canvas-outer-bottom) var(--msime-canvas-outer-left);
+}
+.candidate[data-canvas] { overflow: clip; }
+.candidate[data-canvas] .pinyin { margin-bottom: var(--msime-canvas-line-gap, 0px); }
+
 /* ---- 行 ---- */
 .row {
   margin-top: 2px;
@@ -405,6 +428,10 @@ ${platformVariables(PLATFORM_PALETTE.dark)}
   left: max(0px, calc(50% - var(--msime-skin-decoration-width) / 2));
   object-position: center bottom;
 }
+.pinyin .text { color: var(--cand-preedit-text, var(--cand-text)); }
+.cursor { background: var(--cand-caret, var(--accent-strong)); }
+.first::before { background: var(--cand-selected-bar-color, var(--accent-strong)); }
+.first .cand-helpcode { color: var(--cand-selected-secondary, var(--cand-selected-num)); }
 `;
 
 // 可构造样式表只能被创建它的文档采用，所以按文档各建一份，同一文档里的候选栏共用。
@@ -452,6 +479,64 @@ function setImage(img, url) {
   img.setAttribute("src", url);
 }
 
+/** 图片保留浏览器原生动画；减弱动态效果时用 canvas 的首帧绘制，不读回或导出跨域像素。 */
+function skinPicture(doc, url, reduced, onReady) {
+  const node = element(doc, "div", "skin-picture");
+  const image = element(doc, "img");
+  image.alt = "";
+  image.draggable = false;
+  let alive = true;
+  let loaded = false;
+  const display = () => {
+    if (!alive || !loaded) return;
+    if (reduced()) {
+      const still = element(doc, "canvas");
+      still.width = image.naturalWidth;
+      still.height = image.naturalHeight;
+      still.getContext("2d").drawImage(image, 0, 0);
+      node.replaceChildren(still);
+    } else node.replaceChildren(image);
+  };
+  const ready = () => {
+    if (!alive) return;
+    loaded = image.naturalWidth > 0 && image.naturalHeight > 0;
+    node.hidden = !loaded;
+    display();
+    onReady?.(loaded);
+  };
+  const error = () => {
+    if (!alive) return;
+    loaded = false;
+    node.hidden = true;
+    onReady?.(false);
+  };
+  image.addEventListener("load", ready);
+  image.addEventListener("error", error);
+  node.hidden = true;
+  image.src = url;
+  return { node, image, get loaded() { return loaded; }, display,
+    dispose() { alive = false; image.removeEventListener("load", ready); image.removeEventListener("error", error); node.remove(); } };
+}
+
+/** 九宫格的源像素边距和目标 CSS px 边距分别缩到各自可用范围，四角保持固定边宽。 */
+function nineSlice(imageWidth, imageHeight, width, height, border) {
+  const axis = (length, before, after) => {
+    const scale = Math.min(1, length / (before + after || 1));
+    return [0, before * scale, length - after * scale, length];
+  };
+  const sx = axis(imageWidth, border.slice.left, border.slice.right);
+  const sy = axis(imageHeight, border.slice.top, border.slice.bottom);
+  const dx = axis(width, border.width.left, border.width.right);
+  const dy = axis(height, border.width.top, border.width.bottom);
+  return Array.from({ length: 9 }, (_, i) => {
+    const x = i % 3, y = Math.floor(i / 3);
+    return { sx: sx[x], sy: sy[y], sw: sx[x + 1] - sx[x], sh: sy[y + 1] - sy[y],
+      x: dx[x], y: dy[y], width: dx[x + 1] - dx[x], height: dy[y + 1] - dy[y], draw: border.fill || i !== 4 };
+  });
+}
+
+function px(node, key, value) { node.style.setProperty(key, `${value}px`); }
+
 /**
  * 创建一个候选栏。skin 是内置皮肤 id、皮肤对象或 undefined（默认皮肤），见 skin.js 的 resolveSkin；layout 为 "horizontal" 或 "vertical"；dark 为 "auto"（跟随 prefers-color-scheme）、true 或 false；点击第 i 个候选时调用 onPick(i)；helpcode 为 true 时在候选后显示编码；帧里有辅助码提示（page[i].hint）时总是显示提示。皮肤 id 未知时抛 TypeError。
  */
@@ -469,6 +554,8 @@ export function createCandidateBar({ skin, layout = "horizontal", dark = "auto",
   let anchor = null;
   let destroyed = false;
   let applied = [];
+  let pictures = [];
+  let panelPicture = null;
   // 这次组字里画过的最高高度，隐藏时清零。
   let tallest = 0;
   let hideTimer = null;
@@ -492,7 +579,15 @@ export function createCandidateBar({ skin, layout = "horizontal", dark = "auto",
   const card = element(doc, "div", "container", PARTS.card);
   const background = element(doc, "img", "skin-background-image", PARTS.background);
   background.alt = "";
-  parent.append(decoration, card);
+  const stage = element(doc, "div", "skin-stage");
+  const below = element(doc, "div", "skin-layer skin-layer-below");
+  const above = element(doc, "div", "skin-layer skin-layer-above");
+  below.setAttribute("aria-hidden", "true");
+  above.setAttribute("aria-hidden", "true");
+  const panel = element(doc, "div", "skin-panel");
+  panel.setAttribute("aria-hidden", "true");
+  stage.append(below, card, above);
+  parent.append(decoration, stage);
   root.append(parent);
   shadow.append(root);
 
@@ -518,7 +613,89 @@ export function createCandidateBar({ skin, layout = "horizontal", dark = "auto",
   root.addEventListener("pointermove", onPointerMove);
   root.addEventListener("click", onClick);
 
-  // 把 resolveSkin 的结果写到根元素上：先清掉上一个皮肤写的属性，再逐个 setProperty 写 variables。图片不走 CSS 的 url()，用 geometry 里的地址交给 <img>，加载失败时能单独藏起来。
+  const reduced = () => Boolean(motionMedia?.matches);
+  const setPalette = (active) => {
+    const variables = active ? resolved.variables : resolved.fallbackVariables;
+    for (const [key, value] of Object.entries(variables)) {
+      if (key.startsWith("--cand-") || key === "--accent-strong" || key === "--msime-skin-selected-bar") root.style.setProperty(key, value);
+    }
+    if (active) card.dataset.panel = "";
+    else delete card.dataset.panel;
+    panel.hidden = !active;
+  };
+  const layoutCanvas = () => {
+    const canvas = resolved.geometry.canvas;
+    if (!canvas) return;
+    const width = card.offsetWidth, height = card.offsetHeight;
+    for (const picture of pictures) {
+      const deco = picture.decoration;
+      if (!deco) continue;
+      const x = deco.anchor.includes("left") || deco.anchor === "left" ? 0 : deco.anchor.includes("right") || deco.anchor === "right" ? width - deco.width : (width - deco.width) / 2;
+      const y = deco.anchor.includes("top") || deco.anchor === "top" ? 0 : deco.anchor.includes("bottom") || deco.anchor === "bottom" ? height - deco.height : (height - deco.height) / 2;
+      px(picture.node, "left", x + deco.offsetX);
+      px(picture.node, "top", y + deco.offsetY);
+    }
+    if (!panelPicture?.loaded) return;
+    const image = panelPicture.image;
+    const border = canvas.borderImage;
+    if (reduced()) {
+      panel.style.removeProperty("border-image-source");
+      let still = panel.firstChild;
+      if (!still) { still = element(doc, "canvas"); panel.append(still); }
+      const scale = view.devicePixelRatio || 1;
+      still.width = Math.ceil(width * scale); still.height = Math.ceil(height * scale);
+      const context = still.getContext("2d"); context.scale(scale, scale);
+      for (const tile of nineSlice(image.naturalWidth, image.naturalHeight, width, height, border)) {
+        if (tile.draw && tile.sw > 0 && tile.sh > 0 && tile.width > 0 && tile.height > 0) context.drawImage(image, tile.sx, tile.sy, tile.sw, tile.sh, tile.x, tile.y, tile.width, tile.height);
+      }
+    } else {
+      panel.replaceChildren();
+      // 这里只生成固定的 border-image 属性；URL 与数值均由 resolveSkin 校验，包内 CSS 不会执行。
+      panel.style.setProperty("border-image-source", `url("${border.url}")`);
+      panel.style.setProperty("border-image-slice", `${Object.values(border.slice).join(" ")}${border.fill ? " fill" : ""}`);
+      panel.style.setProperty("border-image-width", Object.values(border.width).map((n) => `${n}px`).join(" "));
+    }
+  };
+  const clearCanvas = () => {
+    for (const picture of pictures) picture.dispose();
+    pictures = []; panelPicture = null;
+    panel.replaceChildren(); panel.removeAttribute("style"); below.replaceChildren(); above.replaceChildren();
+    panel.hidden = true;
+    delete card.dataset.panel;
+  };
+  const applyCanvas = () => {
+    clearCanvas();
+    const canvas = resolved.geometry.canvas;
+    if (!canvas) { delete root.dataset.canvas; return; }
+    root.dataset.canvas = "";
+    const border = canvas.borderImage?.width;
+    for (const side of ["top", "right", "bottom", "left"]) {
+      const base = side === "top" || side === "bottom" ? 2 : resolved.layout === "vertical" ? 2 : 1;
+      const content = canvas.contentInsets ? Math.max(canvas.contentInsets[side], border?.[side] ?? 0) : (border?.[side] ?? 0) + base;
+      root.style.setProperty(`--msime-canvas-content-${side}`, `${content}px`);
+      root.style.setProperty(`--msime-canvas-outer-${side}`, `${canvas.outerInsets?.[side] ?? 0}px`);
+    }
+    if (canvas.lineGap !== null) root.style.setProperty("--msime-canvas-line-gap", `${canvas.lineGap}px`);
+    else root.style.removeProperty("--msime-canvas-line-gap");
+    for (const deco of canvas.decorations) {
+      const picture = skinPicture(doc, deco.url, reduced);
+      picture.decoration = deco;
+      px(picture.node, "width", deco.width); px(picture.node, "height", deco.height);
+      (deco.zIndex < 1 ? below : above).append(picture.node);
+      pictures.push(picture);
+    }
+    if (canvas.borderImage) {
+      panelPicture = skinPicture(doc, canvas.borderImage.url, () => false, (loaded) => {
+        if (destroyed) return;
+        setPalette(loaded);
+        if (frame && !root.hidden) place();
+      });
+      pictures.push(panelPicture);
+      setPalette(false);
+    }
+  };
+
+  // 把 resolveSkin 的结果写到根元素上：先清掉上一个皮肤写的属性，再逐个 setProperty 写 variables。图片地址来自已校验的 geometry；先由 <img> 确认可用，面板失败时保留可读回退。
   const applySkin = () => {
     for (const name of applied) root.style.removeProperty(name);
     applied = [];
@@ -532,7 +709,9 @@ export function createCandidateBar({ skin, layout = "horizontal", dark = "auto",
       applied.push(name);
     }
 
-    const { decoration: deco, background: bg } = resolved.geometry;
+    applyCanvas();
+    const { decoration: deco } = resolved.geometry;
+    const bg = resolved.geometry.canvas?.borderImage ? null : resolved.geometry.background;
     if (deco) {
       root.dataset.decorated = "";
       root.dataset.decorationAlign = ALIGNS.has(deco.align) ? deco.align : "right";
@@ -557,6 +736,7 @@ export function createCandidateBar({ skin, layout = "horizontal", dark = "auto",
     if (entering) root.dataset.entering = "";
     else delete root.dataset.entering;
     const rows = [];
+    if (resolved.geometry.canvas?.borderImage) rows.push(panel);
     if (card.dataset.background !== undefined) rows.push(background);
 
     const pinyin = element(doc, "div", "row pinyin", PARTS.preedit);
@@ -616,9 +796,11 @@ export function createCandidateBar({ skin, layout = "horizontal", dark = "auto",
     const html = doc.documentElement;
     const vw = html.clientWidth || view.innerWidth;
     const vh = html.clientHeight || view.innerHeight;
-    root.style.setProperty("--msime-max-width", `${Math.max(0, vw - 2 * MARGIN)}px`);
+    const outer = resolved.geometry.canvas?.outerInsets;
+    root.style.setProperty("--msime-max-width", `${Math.max(0, vw - 2 * MARGIN - (outer?.left ?? 0) - (outer?.right ?? 0))}px`);
     root.style.setProperty("left", "0px");
     root.style.setProperty("top", "0px");
+    layoutCanvas();
     const { width, height } = root.getBoundingClientRect();
     const left = finite(anchor?.left, MARGIN);
     const top = finite(anchor?.top, 0);
@@ -656,6 +838,14 @@ export function createCandidateBar({ skin, layout = "horizontal", dark = "auto",
     if (darkArg === "auto" && !destroyed) update({});
   };
   media?.addEventListener?.("change", onScheme);
+  const onMotion = () => {
+    if (destroyed) return;
+    for (const picture of pictures) picture.display();
+    if (frame && !root.hidden) layoutCanvas();
+  };
+  motionMedia?.addEventListener?.("change", onMotion);
+  const onResize = () => { if (!destroyed && frame && !root.hidden) place(); };
+  view.addEventListener?.("resize", onResize);
 
   applySkin();
   container.append(host);
@@ -715,6 +905,9 @@ export function createCandidateBar({ skin, layout = "horizontal", dark = "auto",
         hideTimer = null;
       }
       frame = null;
+      clearCanvas();
+      view.removeEventListener?.("resize", onResize);
+      motionMedia?.removeEventListener?.("change", onMotion);
       media?.removeEventListener?.("change", onScheme);
       root.removeEventListener("mousedown", onMouseDown);
       root.removeEventListener("pointermove", onPointerMove);

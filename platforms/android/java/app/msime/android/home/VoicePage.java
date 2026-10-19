@@ -11,7 +11,10 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import app.msime.android.AccountFailureText;
+import app.msime.android.AccountStore;
 import app.msime.android.AndroidLocalSettings;
+import app.msime.android.DeviceDataApi;
 import app.msime.android.DoubaoAsrPolicy;
 import app.msime.android.LocalVoiceModelPolicy;
 import app.msime.android.LocalVoiceModels;
@@ -23,6 +26,7 @@ import app.msime.android.TextPolicy;
 import app.msime.android.VoiceConfiguration;
 import app.msime.android.VoicePolishPolicy;
 import app.msime.android.VoicePolishSettingsPolicy;
+import app.msime.android.VoiceProviderCatalog;
 import app.msime.android.VoiceProviderPolicy;
 import app.msime.android.VoiceRecognitionActivity;
 import app.msime.android.core.InputViewValuePolicy;
@@ -48,7 +52,7 @@ import org.json.JSONObject;
  *
  * <p>本地识别要用的语音运行库（libonnxruntime 与 libsherpa-onnx-c-api）在 full 版里不随安装包，是按需下载的资源包 `voice-runtime`：选本地模型或打开离线识别时还没有运行库就经 {@link ResourcePackService} 下载（按流量计费的网络先确认），「本地模型」组里显示下载状态；安装包自带运行库时不需要它。
  *
- * <p>「上传语音以改进识别」（本地设置的 `platform.android.voice_contribute_audio`，只在本机、不同步）默认关闭；每次从关切到开都先弹确认框说明上传什么、保存多久，用户确认后才写（P19）。
+ * <p>「上传语音以改进识别」（本地设置的 `platform.android.voice_contribute_audio`，只在本机、不同步）默认关闭；每次从关切到开都先弹确认框说明上传什么、保存多久，用户确认后才写（P19）。下面的「删除上传过的语音样本」经 Rust 的 voice_delete 删掉这台设备匿名账号名下的样本，不要求登录。
  */
 public final class VoicePage extends ReloadingDetailPage {
     @Override protected java.util.List<String> sectionTitles() {
@@ -75,7 +79,7 @@ public final class VoicePage extends ReloadingDetailPage {
     private record State(JSONObject preferences, AndroidLocalSettings.Snapshot local, boolean punctuationSupported,
             boolean runtimeReady, @Nullable ResourcePacks.Pack runtimePack, @Nullable String resolvedProvider,
             List<LocalVoiceModels.Model> models, @Nullable String modelsError, boolean polishConfigured,
-            boolean platformRecognizerAvailable) {}
+            boolean platformRecognizerAvailable, VoiceProviderCatalog catalog) {}
 
     /** 一次「测试」的结果：{@code message} 是共享层给的中文结果，不含凭据。 */
 
@@ -150,7 +154,7 @@ public final class VoicePage extends ReloadingDetailPage {
             DoubaoAsrPolicy.PROVIDER.equals(InputViewValuePolicy.textOr(preferences.optJSONObject("voice_input"),
                 "asr_provider", "")), runtimeReady, runtime, configuration.provider(),
             models, modelsError, configuration.polish() != null,
-            VoiceRecognitionActivity.available(context));
+            VoiceRecognitionActivity.available(context), VoiceProviderCatalog.read());
     }
 
     /** 安装包自带语音运行库：按名字能载入。没带时载入失败，按需下载的资源包补上它。 */
@@ -212,6 +216,25 @@ public final class VoicePage extends ReloadingDetailPage {
         boolean contribute = local.bool(AndroidLocalSettings.VOICE_CONTRIBUTE_AUDIO);
         contributeRow = privacy.toggle("上传语音以改进识别", "语音片段匿名处理，可随时关闭", contribute,
             this::onContributeChanged);
+        privacy.button("删除上传过的语音样本", "删掉这台设备之前上传的语音和识别文字，不需要登录", "删除",
+            this::confirmDeleteVoiceSamples);
+    }
+
+    /**
+     * 删掉这台设备匿名账号名下上传过的语音样本（Rust 的 voice_delete，#8201 迁移计划 5c）：语音贡献只用匿名账号，从没登录过的用户也能删；注销账号或删除云端数据时那一步没做成的，也在这里重试。服务端要求最近登录，Rust 会用保存的匿名身份重新登录一次再删，这一次计入每天的匿名登录限额。
+     */
+    private void confirmDeleteVoiceSamples() {
+        MessageDialog.confirm(requireContext(), "删除上传过的语音样本？",
+            "这台设备之前上传的语音和识别出的文字会从水杉云删掉，无法恢复。以后是否继续上传由上面的开关决定。",
+            "删除", () -> HostTask.runNetwork(this, context -> {
+                try {
+                    DeviceDataApi.deleteVoiceSamples(context);
+                    return "";
+                } catch (AccountStore.Failure failure) {
+                    return AccountFailureText.voiceDelete(failure.code, failure.retryAfterSeconds);
+                }
+            }, failure -> MsToast.show(requireContext(), failure == null || !failure.isEmpty()
+                ? (failure == null ? "没有删掉，请稍后重试" : failure) : "已删除上传过的语音样本")));
     }
 
     /** 「识别服务」组：服务选择，选了联网服务时再列出它要的密钥和可改的接口、模型。 */
@@ -221,7 +244,9 @@ public final class VoicePage extends ReloadingDetailPage {
         String status = VoiceProviderPolicy.LOCAL.equals(provider)
             ? VoiceProviderPolicy.localStatus(selectedModel(voice, state) != null, state.runtimeReady())
             : VoiceProviderPolicy.status(provider, state.resolvedProvider(), state.platformRecognizerAvailable());
-        service.nav("识别服务", status, VoiceProviderPolicy.label(provider), () -> pickProvider(provider, state));
+        if (!state.catalog().available()) service.note("服务目录暂不可用，请稍后返回重试。");
+        service.nav("识别服务", status, state.catalog().asrLabel(provider), () -> pickProvider(provider, state))
+            .setEnabled(state.catalog().available());
         if (!VoiceProviderPolicy.network(provider)) return;
 
         String box = InputViewValuePolicy.textOr(voice, "asr_token", "").trim();
@@ -238,8 +263,11 @@ public final class VoicePage extends ReloadingDetailPage {
             }
             String tokenTitle = legacy ? "Access Token" : "API Key";
             service.nav(tokenTitle, null, hasToken ? "已设置" : "未设置", () -> editToken("asr", provider, tokenTitle));
+            String endpointLabel = state.catalog().available() ? state.catalog().doubaoEndpointLabel(endpoint)
+                : endpoint.isEmpty() ? "默认" : HomeTextPolicy.shortLabel(endpoint);
             service.nav("识别接口", VoiceProviderPolicy.endpointProblem(provider, endpoint),
-                VoiceProviderPolicy.doubaoEndpointLabel(endpoint), () -> pickDoubaoEndpoint(provider, endpoint));
+                endpointLabel, () -> pickDoubaoEndpoint(provider, endpoint, state.catalog()))
+                .setEnabled(state.catalog().available());
             String resource = InputViewValuePolicy.textOr(voice, "asr_resource_id", "").trim();
             service.nav("资源 ID", null, resource.isEmpty() ? "默认" : HomeTextPolicy.shortLabel(resource), () -> editText("资源 ID",
                 "火山引擎控制台里开通的识别资源；留空使用 volc.seedasr.sauc.duration", resource,
@@ -262,8 +290,9 @@ public final class VoicePage extends ReloadingDetailPage {
     private void pickProvider(String selected, State state) {
         OptionSheet sheet = new OptionSheet(requireContext(), "识别服务", null);
         String current = selected.isEmpty() ? VoiceProviderPolicy.SYSTEM : selected;
-        for (String provider : VoiceProviderPolicy.PROVIDERS) {
-            sheet.option(VoiceProviderPolicy.label(provider), provider.equals(current), () -> {
+        for (VoiceProviderCatalog.Provider entry : state.catalog().asr()) {
+            String provider = entry.id();
+            sheet.option(entry.title(), provider.equals(current), () -> {
                 if (provider.equals(current)) return;
                 saveProvider(provider, firstInstalled(state));
                 // 本地识别要运行库，选它时就开始备好，和打开离线识别一样。
@@ -413,28 +442,31 @@ public final class VoicePage extends ReloadingDetailPage {
         };
     }
 
-    /** 已装模型：没在用的可以选用；都可以删除，删的是正在用的那个时一并清掉 `asr_model_path`。 */
+    /** 已装模型：没在用的可以选用；都可以删除，删除成功后按当时的当前选择清理 `asr_model_path`。 */
     private void manageModel(LocalVoiceModels.Model model, boolean selected) {
         OptionSheet sheet = new OptionSheet(requireContext(), model.title(), null);
         if (!selected) sheet.option("使用这个模型", false, () -> saveVoice("asr_model_path", model.path()));
         sheet.option("删除", false, () -> MessageDialog.confirm(requireContext(),
             "删除「" + model.title() + "」？",
             selected ? "这是正在使用的模型，删除后本地识别和离线识别要重新下载或选用别的模型。" : "删除后要用时需要重新下载。",
-            "删除", () -> removeModel(model, selected)));
+            "删除", () -> removeModel(model)));
         sheet.show();
     }
 
-    private void removeModel(LocalVoiceModels.Model model, boolean selected) {
+    private void removeModel(LocalVoiceModels.Model model) {
         HostTask.run(this, context -> {
             try {
                 LocalVoiceModels.remove(context, model.id());
             } catch (ResourcePacks.Failure error) {
                 return error.code();
             }
-            if (selected) KeyboardSheets.write(context, preferences -> {
-                JSONObject voice = KeyboardSheets.child(preferences, "voice_input");
-                if (LocalVoiceModelPolicy.selected(model.path(), InputViewValuePolicy.textOr(voice, "asr_model_path", "")))
-                    voice.put("asr_model_path", "");
+            KeyboardSheets.write(context, preferences -> {
+                JSONObject voice = preferences.optJSONObject("voice_input");
+                String chosen = InputViewValuePolicy.textOr(voice, "asr_model_path", "");
+                String next = LocalVoiceModelPolicy.selectionAfterRemoval(model.path(), chosen);
+                if (chosen.equals(next)) return;
+                voice = KeyboardSheets.child(preferences, "voice_input");
+                voice.put("asr_model_path", next);
             });
             return "";
         }, failure -> {
@@ -466,14 +498,12 @@ public final class VoicePage extends ReloadingDetailPage {
         sheet.show();
     }
 
-    private void pickDoubaoEndpoint(String provider, String endpoint) {
-        String label = VoiceProviderPolicy.doubaoEndpointLabel(endpoint);
+    private void pickDoubaoEndpoint(String provider, String endpoint, VoiceProviderCatalog catalog) {
+        VoiceProviderCatalog.StreamEndpoint selected = catalog.selectedEndpoint(endpoint);
         OptionSheet sheet = new OptionSheet(requireContext(), "识别接口", null);
-        sheet.option("整句流式（准确率更高）", "整句流式".equals(label),
-            () -> saveVoice("asr_endpoint", VoiceProviderPolicy.DOUBAO_NOSTREAM));
-        sheet.option("双向流式（增量结果）", "双向流式".equals(label),
-            () -> saveVoice("asr_endpoint", VoiceProviderPolicy.DOUBAO_ASYNC));
-        sheet.option("自定义地址…", "自定义地址".equals(label), () -> editEndpoint("asr", provider, endpoint));
+        for (VoiceProviderCatalog.StreamEndpoint entry : catalog.doubaoEndpoints())
+            sheet.option(entry.title(), entry.equals(selected), () -> saveVoice("asr_endpoint", entry.endpoint()));
+        sheet.option("自定义地址…", selected == null, () -> editEndpoint("asr", provider, endpoint));
         sheet.show();
     }
 
@@ -483,8 +513,8 @@ public final class VoicePage extends ReloadingDetailPage {
      * @param prefix 字段前缀：识别是 {@code asr}（`asr_provider`、`asr_token`、`asr_tokens`），润色是 {@code polish}
      */
     private void editToken(String prefix, String provider, String title) {
-        String label = "asr".equals(prefix) ? VoiceProviderPolicy.label(provider)
-            : VoicePolishSettingsPolicy.providerLabel(provider);
+        VoiceProviderCatalog catalog = lastState == null ? VoiceProviderCatalog.unavailable() : lastState.catalog();
+        String label = "asr".equals(prefix) ? catalog.asrLabel(provider) : catalog.polishLabel(provider);
         InputDialog dialog = new InputDialog(requireContext(), title, label + " 的" + title + "，只保存在本机");
         EditText field = dialog.addField("留空表示删除", "",
             InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
@@ -577,7 +607,9 @@ public final class VoicePage extends ReloadingDetailPage {
                 next.put("polish_enabled", checked);
             }));
         if (!enabled) return;
-        polish.nav("润色服务", null, VoicePolishSettingsPolicy.providerLabel(provider), () -> pickPolishProvider(provider));
+        polish.nav("润色服务", state.catalog().available() ? null : "服务目录暂不可用，请稍后返回重试。",
+            state.catalog().polishLabel(provider), () -> pickPolishProvider(provider, state.catalog()))
+            .setEnabled(state.catalog().available());
         polish.nav("润色 API Key", null, hasToken ? "已设置" : "未设置", () -> editToken("polish", provider, "API Key"));
         String model = InputViewValuePolicy.textOr(voice, "polish_model", "").trim();
         polish.nav("润色模型", null, model.isEmpty() ? "默认" : HomeTextPolicy.shortLabel(model), () -> editText("润色模型",
@@ -597,11 +629,12 @@ public final class VoicePage extends ReloadingDetailPage {
         polish.footer("识别出的文字会发给所选服务整理后再上屏。API Key 只保存在本机，不随设置同步。");
     }
 
-    private void pickPolishProvider(String selected) {
+    private void pickPolishProvider(String selected, VoiceProviderCatalog catalog) {
         OptionSheet sheet = new OptionSheet(requireContext(), "润色服务", null);
-        String current = selected.isEmpty() ? VoicePolishSettingsPolicy.PROVIDERS[0] : selected;
-        for (String provider : VoicePolishSettingsPolicy.PROVIDERS) {
-            sheet.option(VoicePolishSettingsPolicy.providerLabel(provider), provider.equals(current), () -> {
+        String current = selected.isEmpty() && !catalog.polish().isEmpty() ? catalog.polish().get(0).id() : selected;
+        for (VoiceProviderCatalog.Provider entry : catalog.polish()) {
+            String provider = entry.id();
+            sheet.option(entry.title(), provider.equals(current), () -> {
                 if (!provider.equals(current)) savePolishProvider(provider);
             });
         }

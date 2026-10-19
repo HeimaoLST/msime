@@ -190,6 +190,56 @@ group("account sessions are only exchanged in full experience mode", () => {
   );
 });
 
+group("the keyboard publishes its anonymous identity in full experience mode", () => {
+  const published = KEYBOARD_ENTRIES.find((entry) => entry.name === "anonymous-account");
+  check(
+    published !== undefined &&
+      published.path === "anonymous-account.json" &&
+      published.base === "state" &&
+      published.fullModeOnly,
+    "settings can only take the identity of the anonymous account it adopted if the keyboard publishes it",
+  );
+});
+
+group(
+  "sessions and the anonymous identity are left to session_adopt, everything else is copied",
+  () => {
+    // 身份随匿名会话由 Rust 采用（迁移差异 M40），不再按文件复制：复制会让键盘拿着自己的匿名会话、换上设置应用的身份，或者设置应用采用了键盘的会话、留着自己的身份。
+    for (const name of ["account-session", "anonymous-session", "anonymous-account"]) {
+      check(
+        SharedStateMirrorPolicy.importDecision(name) === "handled",
+        `${name} is neither copied nor deleted by the mirror`,
+      );
+    }
+    check(
+      SharedStateMirrorPolicy.importDecision("key-feedback") === "copy",
+      "other files are still copied (and deleted when the publisher has none)",
+    );
+    check(
+      SharedStateMirrorPolicy.importDecision("app-theme") === "copy",
+      "other files are still copied",
+    );
+  },
+);
+
+group("the anonymous identity has no special case for which side changed it later", () => {
+  // 键盘先注册了 K、还没发布时设置应用注册了 S 并发布（300）；键盘随后获得焦点，先发布自己的 K（500），再导入。身份交给 Rust 以后与其他条目一样按变化时刻判断，留不留身份由 session_adopt 随会话决定。
+  const settings = manifest("settings", [
+    ["anonymous-account", "s-identity", 300],
+    ["preferences", "s-preferences", 300],
+  ]);
+  const keyboard = manifest("keyboard", [
+    ["anonymous-account", "k-identity", 500],
+    ["preferences", "k-preferences", 500],
+  ]);
+  const pending = SharedStateMirrorPolicy.pending(settings, null, keyboard, SETTINGS_ENTRIES, true);
+  check(
+    !pending.some((entry) => entry.name === "anonymous-account") &&
+      !pending.some((entry) => entry.name === "preferences"),
+    "the later change wins for the identity as for any other entry",
+  );
+});
+
 group("when both sides changed an entry the later change wins", () => {
   const keyboard = manifest("keyboard", [["preferences", "k1", 500]]);
   const settingsOlder = manifest("settings", [["preferences", "s1", 300]]);

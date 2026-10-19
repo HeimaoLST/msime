@@ -115,6 +115,8 @@ export interface SettingsClient {
   /** 打开偏好文档所在目录，修复备份也保存在这里。 */
   openPreferencesDirectory?: () => Promise<void>;
   readAppVersion?: () => Promise<string>;
+  /** 本次构建的发布日期 `YYYY-MM-DD`，关于页把它写在版本号后面。构建时拿不到日期（没有 git 的源码树、开发构建）时返回空字符串，页面只显示版本号。反馈和使用统计里的 `app_version` 仍只是版本号。 */
+  readAppReleaseDate?: () => Promise<string>;
   /** 原生更新器自行检查、下载、验签并安装完整应用；提供时优先于仅查发布列表的入口。 */
   checkForApplicationUpdate?: () => Promise<void>;
   /** 经由 `msime_client_services::update_check`（Tauri 的 `update_check` 命令，或原生宿主上的 `msime_client_update_check`）把本平台、本版本最新的已发布版本与当前运行的版本号比较。未提供时关于页不提供检查更新。 */

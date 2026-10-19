@@ -1,4 +1,5 @@
 import groovy.json.JsonSlurper
+import java.time.LocalDate
 import java.util.Properties
 
 plugins { id("com.android.application") }
@@ -13,6 +14,28 @@ val releaseVersion = (findProperty("msimeVersion") as String?)?.trim()?.takeIf {
 val releaseVersionParts = Regex("""^(\d{1,3})\.(\d{1,3})\.(\d{1,3})$""").matchEntire(releaseVersion)
     ?.groupValues?.drop(1)?.map { it.toInt() }
     ?: error("Android release version must be major.minor.patch, got '$releaseVersion'")
+
+// 发布日期（`YYYY-MM-DD`），写进 BuildConfig 的 `RELEASE_DATE`，只给关于页显示在版本号后面；versionName 不带它，反馈和使用统计报的仍是纯版本号。依次取：构建时的环境变量 MSIME_RELEASE_DATE；与 version.txt 并列的 release-date.txt（只在源码包里有）；构建所在提交的日期（发版从 main 上 release 分支的合并提交构建，这就是发版当天）；都没有时为空，关于页不显示日期。build-apk.sh 经 Gradle 打包，环境变量原样传到这里，不需要另外转交。
+val releaseDatePattern = Regex("""^\d{4}-\d{2}-\d{2}$""")
+fun checkedReleaseDate(value: String, source: String): String {
+    check(releaseDatePattern.matches(value) && runCatching { LocalDate.parse(value) }.isSuccess) {
+        "Android release date from $source must be YYYY-MM-DD, got '$value'"
+    }
+    return value
+}
+val releaseDate = providers.environmentVariable("MSIME_RELEASE_DATE").orNull?.trim()?.takeIf { it.isNotEmpty() }
+    ?.let { checkedReleaseDate(it, "MSIME_RELEASE_DATE") }
+    ?: hostRoot.resolve("release-date.txt").takeIf { it.isFile }?.readText()?.trim()?.takeIf { it.isNotEmpty() }
+        ?.let { checkedReleaseDate(it, "platforms/android/release-date.txt") }
+    // 不在 git 仓库里或没有 git 时没有日期，不算错误。
+    ?: runCatching {
+        providers.exec {
+            commandLine("git", "log", "-1", "--format=%cs")
+            workingDir = hostRoot
+            isIgnoreExitValue = true
+        }.standardOutput.asText.get().trim()
+    }.getOrNull()?.takeIf { releaseDatePattern.matches(it) }
+    ?: ""
 
 // 产品版本（edition）：版本表 shared/contracts/editions.json 里每个有 Android 段的版本是一个同名的 productFlavor（full、pinyin、wubi、japanese、vietnamese、tibetan），可以同时装在一台设备上。full 的 applicationId、清单和资源与引入版本之前相同；其他版本的 applicationId 加上 `.<id>`，ContentProvider 的 authority 写成 `${applicationId}.<名字>`，随之各不相同。应用名、输入法子类型名和子类型语言（日文、越南文、藏文版登记在 ja_JP、vi_VN、bo 下）取自 platforms/android/editions/<id>/res，图标所有版本相同。
 data class AndroidEdition(
@@ -62,6 +85,8 @@ android {
         // Grows with every release, as the platform requires for an update to install: 0.1.0 is 1000, 1.2.3 is 1002003.
         versionCode = releaseVersionParts[0] * 1_000_000 + releaseVersionParts[1] * 1_000 + releaseVersionParts[2]
         versionName = releaseVersion
+        // 宿主经反射读它（AppVersionPolicy.releaseDate），理由同下面 productFlavors 里的 EDITION。
+        buildConfigField("String", "RELEASE_DATE", "\"$releaseDate\"")
         ndk { abiFilters += nativeAbis }
     }
 

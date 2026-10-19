@@ -1,0 +1,16 @@
+from pathlib import Path
+import hashlib,json,os,subprocess,time
+root=Path('/Volumes/Workspace/worktrees/nine-key-memo-fifo');exe=Path('/Volumes/Workspace/nine-key-fifo-test-path').read_text().strip();monitor=[];start=time.monotonic();binary_sha_before=hashlib.sha256(Path(exe).read_bytes()).hexdigest()
+env=dict(os.environ,MSIME_NEURAL_MODEL_DIR='/Volumes/Workspace/ime/msime/target/resources/7356c4a452d8ba15475c0e57f134fccf7b7cbe267440461541c74d09b11b6ffe',MSIME_MEMO_TRACE='/Volumes/Workspace/nine-key-fifo.keys')
+with Path('/Volumes/Workspace/nine-key-fifo-budget.log').open('w') as output:
+ process=subprocess.Popen([exe,'memo_fifo_tests','--ignored','--nocapture','--test-threads=1'],cwd=root,env=env,stdout=output,stderr=subprocess.STDOUT)
+ while process.poll() is None:
+  commands=subprocess.check_output(['ps','-axo','comm='],text=True).splitlines()
+  monitor.append(dict(elapsed_seconds=round(time.monotonic()-start,3),load_1m=os.getloadavg()[0],**{n:sum(Path(c.strip()).name==n for c in commands) for n in ['cargo','rustc','clang']}))
+  if any(monitor[-1][n] for n in ['cargo','rustc','clang']):
+   process.terminate();process.wait();break
+  time.sleep(1)
+binary_sha_after=hashlib.sha256(Path(exe).read_bytes()).hexdigest()
+result=dict(binary_sha_before=binary_sha_before,binary_sha_after=binary_sha_after,valid=binary_sha_before==binary_sha_after and all(not s[n] for s in monitor for n in ['cargo','rustc','clang']),returncode=process.returncode,duration_seconds=time.monotonic()-start,monitor=monitor)
+Path('/Volumes/Workspace/nine-key-fifo-budget-monitor.json').write_text(json.dumps(result,indent=2)+'\n')
+print(Path('/Volumes/Workspace/nine-key-fifo-budget.log').read_text());raise SystemExit(process.returncode)

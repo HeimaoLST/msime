@@ -1,15 +1,6 @@
 package app.msime.android;
 
-import java.io.BufferedInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
-import java.nio.file.Paths;
-import java.security.MessageDigest;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -46,31 +37,14 @@ public final class NativeClient {
     public static String snapshotVersion(String options) {
         return TextPolicy.utf8(snapshotVersionRaw(options.getBytes(StandardCharsets.UTF_8)));
     }
-    /** Streams one NDJSON record at a time into native preparation. Call on a worker. */
-    public static String snapshotPrepare(String request, String file) {
-        try {
-            String adjusted = replaceRecordCount(request, inspectSnapshot(file));
-            return TextPolicy.utf8(snapshotPrepareRaw(adjusted.getBytes(StandardCharsets.UTF_8),
-                file.getBytes(StandardCharsets.UTF_8)));
-        } catch (Exception error) {
-            return TextPolicy.utf8(snapshotPrepareRaw("{}".getBytes(StandardCharsets.UTF_8),
-                "invalid".getBytes(StandardCharsets.UTF_8)));
-        }
-    }
-    public static String snapshotDiscard(long handle) {
-        if (handle <= 0) throw new IllegalArgumentException("Invalid snapshot handle");
-        return TextPolicy.utf8(snapshotDiscardRaw(handle));
-    }
-    public static String snapshotActivate(long handle, String expectedVersion) {
-        if (handle <= 0) throw new IllegalArgumentException("Invalid snapshot handle");
-        return TextPolicy.utf8(snapshotActivateRaw(handle, expectedVersion.getBytes(StandardCharsets.UTF_8)));
-    }
     /** May block on the shared file lock. Call on a worker, without a session handle. */
     public static String loadPreferences(String directory) { return TextPolicy.utf8(loadPreferencesRaw(directory.getBytes(StandardCharsets.UTF_8))); }
     /** The global theme picker entries: ids, titles, appearance and built-in palettes, in picker order. */
     public static String themeCatalog() { return TextPolicy.utf8(themeCatalogRaw()); }
-    /** Resolves the colours of the selected global theme for one mode. Pure computation, safe on the main thread. */
+    /** 解析当前主题的单种明暗配色；带 `skins_directory` 的请求会校验包资源，必须在工作线程调用。 */
     public static String resolveTheme(String request) { return TextPolicy.utf8(resolveThemeRaw(request.getBytes(StandardCharsets.UTF_8))); }
+    public static String skinPackage(String request) { return TextPolicy.utf8(skinPackageRaw(request.getBytes(StandardCharsets.UTF_8))); }
+    public static String skinResource(String request) { return TextPolicy.utf8(skinResourceRaw(request.getBytes(StandardCharsets.UTF_8))); }
     /** 应用主题目录：`{app_themes:[{id,title,season,seasonal,light,dark}],default}`。纯计算。 */
     public static String appThemeCatalog() { return TextPolicy.utf8(appThemeCatalogRaw()); }
     /** 应用主题在本地月份与明暗模式下的颜色：`{id,season,accent,accent_soft,on_accent,background,card,hair}`。纯计算，可在主线程调用。 */
@@ -115,8 +89,6 @@ public final class NativeClient {
     public static String communityResourceLibrary(String request) {
         return TextPolicy.utf8(communityResourceLibraryRaw(utf8(request)));
     }
-    /** AI 设计皮肤的 compose / parse / artwork 决策；HTTP 由宿主自己发。纯计算。 */
-    public static String aiSkinPlan(String request) { return TextPolicy.utf8(aiSkinPlanRaw(utf8(request))); }
     /** 皮肤试用的结束与崩溃恢复。写偏好，在工作线程调用。 */
     public static String keyboardSkinTrial(String request) { return TextPolicy.utf8(keyboardSkinTrialRaw(utf8(request))); }
     /** 社区皮肤安装并开始试用。写偏好与两个加锁文件，在工作线程调用。 */
@@ -419,6 +391,9 @@ public final class NativeClient {
         return TextPolicy.utf8(mobileVoiceConfigurationRaw(utf8(directory)));
     }
 
+    /** 共享语音服务与豆包流式接口目录；纯计算，不读写偏好、不联网。 */
+    public static String voiceProviderCatalog() { return TextPolicy.utf8(voiceProviderCatalogRaw()); }
+
     /**
      * The user's own pinyin dictionary words as recognition hotwords: `{"options": HostOptions, "limit": n}` in, `{"hotwords":[{"text","pinyin"}]}` out. Reads the dictionary store, so call on a worker.
      */
@@ -473,6 +448,86 @@ public final class NativeClient {
     public static void resourcePackCancel(String pack) {
         resourcePackCancelRaw(pack == null ? null : pack.getBytes(StandardCharsets.UTF_8));
     }
+
+    /**
+     * 注入给 Rust 的会话存储（{@code msime_client_session_store}）的 Java 一侧：只提供字节，编解码、布局、校验和刷新都在 Rust。只在主进程里注册一次，同一份存储注册两次会各自缓存会话、拿同一个会轮换的刷新令牌各刷新一次。
+     *
+     * <p>Rust 可能在任意线程上并发调用这三个方法，包括 Rust 自己起的线程；方法里不能再调 NativeClient 的账号与云端入口，也不能等待账号刷新。抛出的异常按失败处理，在 JNI 一侧清掉，不会抛给调用 Rust 的那一方。
+     */
+    public interface SessionStore {
+        /** 登录会话。 */
+        int ITEM_ACCOUNT = 1;
+        /** 云剪贴板密钥串，属于登录会话，清掉登录会话时一起删除。 */
+        int ITEM_CLIPBOARD_KEYSTORE = 2;
+        /** 本机匿名账号的会话。 */
+        int ITEM_ANONYMOUS = 3;
+        /** 匿名账号的身份，save 是「不存在才写」。 */
+        int ITEM_ANONYMOUS_IDENTITY = 4;
+
+        /** 该项最后一次成功写入的字节；不存在时返回 null，空数组也按不存在处理。比 Rust 给的上限（会话和身份 65536 字节，密钥串 4096 字节）长的按失败处理。 */
+        byte[] load(int item);
+
+        /** 原子地整体替换该项，返回 0 是已写入。{@link #ITEM_ANONYMOUS_IDENTITY} 已经有值时不覆盖、返回 1。其他返回值是失败。 */
+        int save(int item, byte[] bytes);
+
+        /** 删掉该项，不存在也算成功：返回 0 是成功，其他值是失败。 */
+        int remove(int item);
+    }
+
+    /** 流式对话的一段增量（UTF-8，不会把一个字符拆在两段里），在调用流式对话的那个工作线程上按到达顺序收到。可以在这里取消那次对话；抛出异常以后不再收到增量，对话照常进行到结束，然后异常抛给调用方。 */
+    public interface ChatDelta {
+        void onDelta(byte[] text);
+    }
+
+    /** AI 皮肤每画完一张插画收到一次，completed 从 1 到 3，在调用生成的那个工作线程上。可以在这里取消那次生成；抛出异常时的处理与 {@link ChatDelta} 相同。 */
+    public interface AiSkinProgress {
+        void onProgress(int completed);
+    }
+
+    /** 注册会话存储（{@code msime_client_session_store_register}），只给 {@link AccountStore} 用：返回信封，成功时 value 是 {@code {session_store}}。clientAgent 为 null 时请求以 MSIME/Android 发出。不联网。 */
+    static String sessionStoreRegister(SessionStore store, String clientAgent) {
+        return TextPolicy.utf8(sessionStoreRegisterRaw(store, clientAgent == null ? null : utf8(clientAgent)));
+    }
+
+    /** 由 Rust 拼出本宿主自报的 User-Agent（{@code msime_client_client_agent}）。不联网，任意线程。 */
+    static String clientAgent(String request) { return TextPolicy.utf8(clientAgentRaw(utf8(request))); }
+
+    /** 账号操作（{@code msime_client_account}），请求带 {@code session_store}。除 status 和 forget 外都阻塞网络，经存储的调用都不能放在主线程上。 */
+    static String account(String request) { return TextPolicy.utf8(accountRaw(utf8(request))); }
+
+    /** 登录的优先、否则匿名账号的访问令牌（{@code msime_client_account_access_token}）。可能刷新令牌、阻塞网络；回复含凭据，不要写进日志。 */
+    static String accountAccessToken(String request) { return TextPolicy.utf8(accountAccessTokenRaw(utf8(request))); }
+
+    /** 账号释义的 sans-IO 一半（{@code msime_client_account_gloss}），只给 {@link BackendTranslationClient} 用：拼请求体、解读收到的响应，不联网、不读会话，两个进程都能调，任意线程。 */
+    static String accountGloss(String request) { return TextPolicy.utf8(accountGlossRaw(utf8(request))); }
+
+    /** 社区操作（{@code msime_client_community}），请求带 {@code session_store}。阻塞网络，放在工作线程上。 */
+    static String community(String request) { return TextPolicy.utf8(communityRaw(utf8(request))); }
+
+    /** 云剪贴板的账号路径（{@code msime_client_account_cloud_clipboard}），请求带 {@code session_store}。阻塞网络，放在工作线程上。 */
+    static String accountCloudClipboard(String request) { return TextPolicy.utf8(accountCloudClipboardRaw(utf8(request))); }
+
+    /** 流式对话（{@code msime_client_account_chat_stream}）：增量在调用线程上交给 listener，最长阻塞 125 秒，放在工作线程上。 */
+    static String accountChatStream(String request, ChatDelta listener) {
+        return TextPolicy.utf8(accountChatStreamRaw(utf8(request), listener));
+    }
+
+    /** 取消一次流式对话（{@code {request_id}}），任意线程，立即返回。 */
+    static String accountChatCancel(String request) { return TextPolicy.utf8(accountChatCancelRaw(utf8(request))); }
+
+    /** AI 皮肤一次生成三套（{@code msime_client_ai_skin_generate}）：最长约 5 分钟，放在工作线程上。 */
+    static String aiSkinGenerate(String request, AiSkinProgress listener) {
+        return TextPolicy.utf8(aiSkinGenerateRaw(utf8(request), listener));
+    }
+
+    /** 取消一次 AI 皮肤生成（{@code {request_id}}），任意线程，立即返回。 */
+    static String aiSkinCancel(String request) { return TextPolicy.utf8(aiSkinCancelRaw(utf8(request))); }
+
+    /** 词库快照激活队列（{@code msime_client_snapshot_queue}），只给 {@link DictionarySnapshotQueue} 用。不读会话，主进程和 `:ime` 都能调；会读写文件，process 还会准备和激活整份快照，放在工作线程上。 */
+    static String snapshotQueue(String request) { return TextPolicy.utf8(snapshotQueueRaw(utf8(request))); }
+
+    /** 自动云同步（{@code msime_client_cloud_sync}），只给 {@link SyncSignals} 和 {@link RustCloudSync} 用。peek、mark_dirty 和 import_legacy 不读会话，两个进程都能调；其余操作带 {@code session_store}，只在主进程里调。run 会联网，放在工作线程上。 */
+    static String cloudSync(String request) { return TextPolicy.utf8(cloudSyncRaw(utf8(request))); }
 
     /** 本地语音模型安装的进度：{@code {id, stage, downloaded, total}} 的 JSON 字节，stage 是 "download"（从本地文件安装时是 "import"）、"verify"、"extract" 或 "done"。在调用 {@link #voiceLocalModelInstall} 的工作线程上调用；不要在这里抛异常或做耗时的事。 */
     public interface LocalModelProgress {
@@ -547,6 +602,11 @@ public final class NativeClient {
     /** 自定义翻译接口地址下面的提示：value 是 {@code {issue, accepted}}，issue 是给用户看的一句话（没有问题时为空串），accepted 是偏好能否保存这个地址。不做 I/O。 */
     public static String translationEndpointIssue(String endpoint) {
         return TextPolicy.utf8(translationEndpointIssueRaw(utf8(endpoint)));
+    }
+
+    /** AI 辅助接口地址的检查：value 是 {@code {origin, problem, hint}}，origin 是 {@code ai_assistant.tokens} 里存 Token 的来源键（不能用时为 null），problem 是 null、{@code invalid} 或 {@code cleartext_public}，hint 是设置页写在地址下面的说明。不做 I/O，规则只在 Rust。 */
+    public static String aiEndpointCheck(String endpoint) {
+        return TextPolicy.utf8(aiEndpointCheckRaw(utf8(endpoint)));
     }
 
     /** 翻译服务设置页的「测试连接」：请求 {@code {service, config}}，service 是 translation.custom、translation.niutrans 或 translation.tencent，config 是表单里的值；value 是 {@code {ok, message}}，message 不含凭据和服务的回复。阻塞到约 15 秒，只在工作线程上调用。请求带着凭据，不得写进日志。 */
@@ -820,9 +880,6 @@ public final class NativeClient {
     private static native byte[] prepareHostRaw(byte[] options);
     private static native byte[] refreshHostRaw(byte[] path);
     private static native byte[] snapshotVersionRaw(byte[] options);
-    private static native byte[] snapshotPrepareRaw(byte[] request, byte[] file);
-    private static native byte[] snapshotDiscardRaw(long handle);
-    private static native byte[] snapshotActivateRaw(long handle, byte[] expectedVersion);
     private static native byte[] loadPreferencesRaw(byte[] directory);
     private static native byte[] telemetryBeginRaw(byte[] request);
     private static native byte[] telemetryEndRaw(byte[] request);
@@ -834,6 +891,8 @@ public final class NativeClient {
     private static native int typingStatisticsEnabledRaw(byte[] directory);
     private static native byte[] themeCatalogRaw();
     private static native byte[] resolveThemeRaw(byte[] request);
+    private static native byte[] skinPackageRaw(byte[] request);
+    private static native byte[] skinResourceRaw(byte[] request);
     private static native byte[] appThemeCatalogRaw();
     private static native byte[] resolveAppThemeRaw(byte[] request);
     private static native byte[] restoreDefaultPreferencesRaw(byte[] directory, long expectedRevision);
@@ -846,7 +905,6 @@ public final class NativeClient {
     private static native byte[] dictionaryManifestRaw(byte[] resources);
     private static native byte[] pluginsRaw(byte[] request);
     private static native byte[] communityResourceLibraryRaw(byte[] request);
-    private static native byte[] aiSkinPlanRaw(byte[] request);
     private static native byte[] keyboardSkinTrialRaw(byte[] request);
     private static native byte[] communitySkinInstallRaw(byte[] request);
     private static native byte[] keySoundPackRaw(byte[] request);
@@ -882,6 +940,7 @@ public final class NativeClient {
     private static native byte[] setPrivateSessionRaw(long session, boolean enabled);
     private static native byte[] setEnglishModeRaw(long session, boolean enabled);
     private static native byte[] mobileVoiceConfigurationRaw(byte[] directory);
+    private static native byte[] voiceProviderCatalogRaw();
     private static native byte[] simplifiedToTraditionalRaw(byte[] text);
     private static native byte[] resetCacheRaw(long session);
     private static native void releaseProcessCacheRaw();
@@ -941,6 +1000,7 @@ public final class NativeClient {
     private static native boolean customTranslationReplyFailedRaw(byte[] body);
     private static native boolean niutransTranslationReplyFailedRaw(byte[] body);
     private static native byte[] translationEndpointIssueRaw(byte[] endpoint);
+    private static native byte[] aiEndpointCheckRaw(byte[] endpoint);
     private static native byte[] testApiCredentialRaw(byte[] request);
     private static native byte[] voiceLocalModelsRaw(byte[] request);
     private static native byte[] voiceLocalModelInstallRaw(byte[] request, LocalModelProgress listener);
@@ -956,77 +1016,21 @@ public final class NativeClient {
     private static native void localSpeechDestroyRaw(long handle);
     private static native int localSpeechReleaseRaw(long idleMillis);
     private static native byte[] destroyRaw(long session);
-
-    private static final Pattern TYPE = Pattern.compile("\\\"type\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
-    private static final Pattern RECORDS = Pattern.compile("(\\\"records\\\"\\s*:\\s*)\\d+");
-    private static final Pattern FOOTER_RECORDS = Pattern.compile("\\\"records\\\"\\s*:\\s*(\\d+)");
-    private static final Pattern SHA256 = Pattern.compile("\\\"sha256\\\"\\s*:\\s*\\\"([0-9a-f]{64})\\\"");
-
-    private static String replaceRecordCount(String request, int records) {
-        Matcher matcher = RECORDS.matcher(request);
-        if (!matcher.find()) throw new IllegalArgumentException("Snapshot request is missing records");
-        return matcher.replaceFirst(Matcher.quoteReplacement(matcher.group(1) + records));
-    }
-
-    private static int inspectSnapshot(String file) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        int engineRecords = 0;
-        int dataRecords = 0;
-        boolean header = false;
-        boolean ended = false;
-        String footerHash = null;
-        int footerRecords = -1;
-        try (BufferedInputStream input = new BufferedInputStream(
-                Files.newInputStream(Paths.get(file), LinkOption.NOFOLLOW_LINKS))) {
-            ByteArrayOutputStream line = new ByteArrayOutputStream();
-            int value;
-            while ((value = input.read()) != -1) {
-                if (value == '\n') {
-                    if (line.size() == 0) throw new IOException("empty snapshot line");
-                    byte[] bytes = line.toByteArray();
-                    if (bytes.length > 65_535) throw new IOException("snapshot line too large");
-                    String text = new String(bytes, StandardCharsets.UTF_8);
-                    Matcher type = TYPE.matcher(text);
-                    if (!type.find()) throw new IOException("missing snapshot type");
-                    String kind = type.group(1);
-                    if ("header".equals(kind)) {
-                        if (header || dataRecords != 0 || ended) throw new IOException("invalid snapshot header");
-                        header = true;
-                        // The header counts and hashes like any other record, which is what
-                        // the Server's footer was written against; skipping it rejects every
-                        // valid snapshot.
-                        digest.update(bytes);
-                        digest.update((byte) '\n');
-                        dataRecords++;
-                    } else if ("footer".equals(kind)) {
-                        if (!header || footerHash != null) throw new IOException("invalid snapshot footer");
-                        Matcher count = FOOTER_RECORDS.matcher(text);
-                        Matcher hash = SHA256.matcher(text);
-                        if (!count.find() || !hash.find()) throw new IOException("invalid snapshot footer");
-                        footerRecords = Integer.parseInt(count.group(1));
-                        footerHash = hash.group(1);
-                        ended = true;
-                    } else if ("entry".equals(kind) || "overlay".equals(kind)
-                            || "position".equals(kind) || "selection".equals(kind)) {
-                        if (!header || ended) throw new IOException("invalid snapshot record");
-                        digest.update(bytes);
-                        digest.update((byte) '\n');
-                        dataRecords++;
-                        if (!"entry".equals(kind)) engineRecords++;
-                    } else throw new IOException("unknown snapshot record");
-                    line.reset();
-                } else {
-                    line.write(value);
-                    if (line.size() > 65_535) throw new IOException("snapshot line too large");
-                }
-            }
-            if (line.size() != 0) throw new IOException("unterminated snapshot line");
-        }
-        if (!header || footerHash == null || footerRecords != dataRecords
-                || !footerHash.equals(DigestPolicy.hex(digest.digest())) || engineRecords > 500_000) {
-            throw new IOException("invalid snapshot envelope");
-        }
-        return engineRecords;
-    }
-
+    // 账号与云端（#8201）：会话由 Rust 持有，经 SessionStore 注入的存储读写；登录、令牌和刷新经 AccountStore 调用，其余入口经上面各自的包装调用（sessionStoreUnregisterRaw 只有设备冒烟用）；aiSkinJobRaw、cloudDictionaryRaw 是 5a 按头文件接好的入口，产品还没有调用方，只有设备冒烟核对请求不合法码，是否删由负责人定。
+    private static native byte[] sessionStoreRegisterRaw(SessionStore store, byte[] clientAgent);
+    private static native byte[] sessionStoreUnregisterRaw(long sessionStore);
+    private static native byte[] clientAgentRaw(byte[] request);
+    private static native byte[] accountRaw(byte[] request);
+    private static native byte[] accountAccessTokenRaw(byte[] request);
+    private static native byte[] accountCloudClipboardRaw(byte[] request);
+    private static native byte[] accountChatStreamRaw(byte[] request, ChatDelta listener);
+    private static native byte[] accountChatCancelRaw(byte[] request);
+    private static native byte[] accountGlossRaw(byte[] request);
+    private static native byte[] communityRaw(byte[] request);
+    private static native byte[] aiSkinGenerateRaw(byte[] request, AiSkinProgress listener);
+    private static native byte[] aiSkinCancelRaw(byte[] request);
+    private static native byte[] aiSkinJobRaw(byte[] request);
+    private static native byte[] cloudDictionaryRaw(byte[] request);
+    private static native byte[] snapshotQueueRaw(byte[] request);
+    private static native byte[] cloudSyncRaw(byte[] request);
 }

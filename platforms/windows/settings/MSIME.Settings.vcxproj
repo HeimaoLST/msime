@@ -52,6 +52,9 @@
     <MsimeEdition Condition="'$(MsimeEdition)' == ''">full</MsimeEdition>
     <!-- 本次构建的版本号，「关于」页显示并拿来检查更新；Build-Client.ps1 传入 TargetVersion，开发构建取 platforms/windows/version.txt，与 CMake 给 Server 的 MSIME_WINDOWS_VERSION 相同。 -->
     <MsimeVersion Condition="'$(MsimeVersion)' == ''">$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\..\version.txt').Trim())</MsimeVersion>
+    <!-- 本次构建的发布日期 YYYY-MM-DD，「关于」页显示在版本号后面。依次取环境变量 MSIME_RELEASE_DATE、platforms/windows/release-date.txt（只在源码包里有），都没有时由下面的 MsimeReleaseDate 目标取 git 当前提交的日期；仍然没有就为空，「关于」页只显示版本号。发布工作流从 main 的发版合并提交构建，所以 git 的日期就是发版当天。 -->
+    <MsimeReleaseDate Condition="'$(MsimeReleaseDate)' == ''">$(MSIME_RELEASE_DATE)</MsimeReleaseDate>
+    <MsimeReleaseDate Condition="'$(MsimeReleaseDate)' == '' and Exists('$(MSBuildProjectDirectory)\..\release-date.txt')">$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\..\release-date.txt').Trim())</MsimeReleaseDate>
   </PropertyGroup>
   <!-- 优化构建只链接一次，不产生增量链接的 .ilk，并去掉未引用和相同的 COMDAT；只开 /DEBUG 时这两项都会被关掉。PDB 仍然生成，供符号发布资产使用。 -->
   <PropertyGroup Condition="'$(Configuration)' == 'RelWithDebInfo' or '$(Configuration)' == 'Release'">
@@ -89,4 +92,21 @@
     <PackageReference Include="Microsoft.Windows.CppWinRT" Version="2.0.250303.1" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <!-- 求值阶段不能运行进程，git 回退只能放在目标里，所以 MSIME_WINDOWS_RELEASE_DATE 在编译前加到编译项上，而不是写进上面的 ItemDefinitionGroup。git 不在 PATH 上或不在仓库里时不报错，日期为空。Exec 经 cmd 批处理执行，%25%25 在批处理里是一个 %，git 收到的是 %cs。 -->
+  <Target Name="MsimeReleaseDate" BeforeTargets="ClCompile">
+    <Error Condition="'$(MsimeReleaseDate)' != '' and !$([System.Text.RegularExpressions.Regex]::IsMatch('$(MsimeReleaseDate)', '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'))" Text="MSIME_RELEASE_DATE 或 release-date.txt 必须是 YYYY-MM-DD：$(MsimeReleaseDate)" />
+    <Exec Condition="'$(MsimeReleaseDate)' == ''" Command="git -C &quot;$(MSBuildProjectDirectory)&quot; log -1 --format=%25%25cs 2&gt;nul" ConsoleToMSBuild="true" IgnoreExitCode="true" IgnoreStandardErrorWarningFormat="true" EchoOff="true" StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="MsimeGitReleaseDate" />
+      <Output TaskParameter="ExitCode" PropertyName="MsimeGitExitCode" />
+    </Exec>
+    <PropertyGroup Condition="'$(MsimeReleaseDate)' == '' and '$(MsimeGitExitCode)' == '0' and $([System.Text.RegularExpressions.Regex]::IsMatch('$(MsimeGitReleaseDate)', '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'))">
+      <MsimeReleaseDate>$(MsimeGitReleaseDate)</MsimeReleaseDate>
+    </PropertyGroup>
+    <Message Importance="normal" Text="MSIME_WINDOWS_RELEASE_DATE=&quot;$(MsimeReleaseDate)&quot;" />
+    <ItemGroup>
+      <ClCompile>
+        <PreprocessorDefinitions>%(PreprocessorDefinitions);MSIME_WINDOWS_RELEASE_DATE=&quot;$(MsimeReleaseDate)&quot;</PreprocessorDefinitions>
+      </ClCompile>
+    </ItemGroup>
+  </Target>
 </Project>

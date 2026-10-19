@@ -1,6 +1,7 @@
 import app.msime.android.CandidateAppearance;
 import app.msime.android.KeyboardSkin;
 import java.util.List;
+import java.util.Map;
 
 public final class CandidateAppearanceSmoke {
     static void check(boolean condition) { if (!condition) throw new AssertionError(); }
@@ -59,6 +60,23 @@ public final class CandidateAppearanceSmoke {
         check("Noto Sans SC".equals(invalidFonts.fontFamily()));
         check(invalidFonts.englishFont().isEmpty());
         check(invalidFonts.fallbackFonts().equals(List.of("Noto Sans SC", "Microsoft YaHei")));
+        // 包的选中填充与文字单独解析，八位颜色保持共享契约的末尾透明度。
+        CandidateAppearance.Palette external = CandidateAppearance.fromResolved(fonts, "fixture",
+            Map.of("surface", "#123456", "text", "#ABCDEF", "number", "#98765499",
+                "selected", "#224466", "selected_text", "#FFFFFF",
+                "selected_number", "#FFFFFF99", "secondary", "#876543", "hover", "#00000000"));
+        check(external.externalSkin() && !fonts.externalSkin());
+        check(external.surface() == 0xff123456 && external.textFor(false) == 0xffabcdef);
+        check(external.chip() == 0xff224466 && external.chipText() == 0xffffffff);
+        check(external.textFor(true) == 0xffffffff && external.numberFor(true) == 0x99ffffff);
+        check(external.numberFor(false) == 0x99987654 && external.secondaryFor(false) == 0xff876543);
+        check(external.hover() == 0 && external.fontFamily().equals(fonts.fontFamily()));
+        check(external.preferredFont().equals(fonts.preferredFont()));
+        CandidateAppearance.Palette partial = CandidateAppearance.fromResolved(system, "partial",
+            Map.of("surface", "invalid", "accent", "#112233"));
+        check(partial.surface() == system.surface() && partial.chip() == system.chip());
+        check(partial.chipText() == 0xff112233 && partial.text() == system.text());
+        check(!partial.key().equals(system.key()));
         System.out.println("Android candidate appearance: keyboard-palette strip, accent-only selection, "
             + "alpha-last hints and font fallback passed");
     }

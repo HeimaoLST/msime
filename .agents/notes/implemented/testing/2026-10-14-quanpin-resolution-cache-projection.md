@@ -38,6 +38,8 @@ Status: implemented
 
 检索活跃笔记中的 `resolution_cache`、`SeriesResolution`、解析缓存、纠错缓存和切分借用键，没有同一解析结果投影决定。插件行迭代、词库缓冲、macOS 预览 token、系统主题、语音服务与 AI endpoint 的解析结果记录均无关。[热行缓存投影](../../implemented/testing/2026-10-14-quanpin-row-cache-projection.md)只处理词库行的临时页，部分重叠于首字母展开调用，保留其字段和行缓存决定，不吸收或归档。
 
+[在线缓存原地更新](2026-10-19-online-cache-in-place.md)消除后续缓存页深复制。解析投影测试使用固定 `4f499433c5` 的外层回写壳隔离这项独立收益，仍调用现行 `project_resolution`，保留原精确分配与布局预算；真实生产回写由新增集成对照覆盖。
+
 ## Alternatives considered
 
 - 用 `Arc<SeriesResolution>` 替换缓存拥有值：热命中可以共享全部字段；不选，因为会增加冷路径分配和引用计数，还需重新判断直接保存计算结果的多余容量。现有两个回写调用只需要键，借用投影足够。

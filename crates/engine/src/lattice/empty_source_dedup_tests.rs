@@ -262,7 +262,18 @@ fn absent_sentence_sources_skip_only_the_unused_large_dedup_table() {
                                         } else {
                                             usize::from(mode == 2) + 2 * usize::from(mode == 3)
                                         };
-                                        assert_eq!(after + saved + order_savings, before, "路径={n}/占位={filler}/重复={duplicates}/字面={include_lattice_best}/继续={show_next_on_duplicate}/emit={emit}/模型={mode}/热={warm}/纠错={typo_enabled}");
+                                        // 有来源的单路径另外少建一张集合，无来源收益继续单独计量。
+                                        let paths = if mode == 0 && options.emit > 0 {
+                                            n.min(options.emit)
+                                        } else {
+                                            n
+                                        };
+                                        let single_path_savings = usize::from(
+                                            paths == 1
+                                                && !no_sources
+                                                && input.len() + paths > SMALL_SENTENCE_MERGE,
+                                        );
+                                        assert_eq!(after + saved + order_savings + single_path_savings, before, "路径={n}/占位={filler}/重复={duplicates}/字面={include_lattice_best}/继续={show_next_on_duplicate}/emit={emit}/模型={mode}/热={warm}/纠错={typo_enabled}");
                                         if n > 0 && no_sources {
                                             assert_eq!(new.0, input);
                                             if typo_enabled {

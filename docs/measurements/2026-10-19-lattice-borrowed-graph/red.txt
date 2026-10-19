@@ -1,0 +1,26 @@
+     Running unittests src/lib.rs (target/release/deps/msime_engine-5894a2ed2b392c5a)
+
+running 2 tests
+
+thread 'lattice::decode::borrowed_fields_tests::borrowed_graph_does_not_allocate_for_explicit_fields' (68348764) panicked at crates/engine/src/lattice/graph_borrowed_fields_tests.rs:36:5:
+assertion `left == right` failed: 同样图容量只因显式字段非空而额外分配
+  left: 8
+ right: 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'lattice::decode::borrowed_fields_tests::borrowed_graph_keeps_external_field_addresses' (68348765) panicked at crates/engine/src/lattice/graph_borrowed_fields_tests.rs:16:9:
+assertion `left == right` failed: 图边必须借用外部词面
+  left: 0x1029736a0
+ right: 0x1029749e0
+test lattice::decode::borrowed_fields_tests::borrowed_graph_does_not_allocate_for_explicit_fields ... FAILED
+test lattice::decode::borrowed_fields_tests::borrowed_graph_keeps_external_field_addresses ... FAILED
+
+failures:
+
+failures:
+    lattice::decode::borrowed_fields_tests::borrowed_graph_does_not_allocate_for_explicit_fields
+    lattice::decode::borrowed_fields_tests::borrowed_graph_keeps_external_field_addresses
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 2394 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p msime-engine --lib`

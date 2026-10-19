@@ -13,6 +13,7 @@ export function ToolsSettingsPage() {
   const {
     client,
     iosPlatform,
+    mobilePlatform,
     macosPlatform,
     snapshot,
     draft,
@@ -23,6 +24,8 @@ export function ToolsSettingsPage() {
     openPanel,
     clipboardHistory,
     toggleClipboardHistory,
+    introTabs,
+    selectIntroTab,
   } = useSettingsForm();
   // 已保存的中继配置决定云剪贴板走哪条路；在本页保存或改回账号后，历史记录一组要按新的路重新查可用状态。
   const savedRelay = snapshot?.preferences.cloud_clipboard_relay;
@@ -30,6 +33,8 @@ export function ToolsSettingsPage() {
   return (
     <SettingsPageFieldset disabled={busy} hidden={page !== "tools"} ariaLabel="剪贴板">
       <ClipboardHistorySection
+        activeTab={introTabs.tools}
+        onTabChange={(tab) => selectIntroTab("tools", tab)}
         client={client.clipboard}
         historyEnabled={clipboardHistory}
         historyLimit={clipboardHistoryLimit(draft)}
@@ -37,6 +42,7 @@ export function ToolsSettingsPage() {
         revision={snapshot?.revision}
         page={page}
         ios={iosPlatform}
+        tabbed={!mobilePlatform}
         onToggle={toggleClipboardHistory}
         onLimitChange={(limit) =>
           setDraft((current) =>
@@ -46,27 +52,28 @@ export function ToolsSettingsPage() {
         onError={setError}
         cloudRequest={page === "tools" ? client.cloudClipboardRequest : undefined}
         cloudRoute={cloudRoute}
-        // macOS 的「云剪贴板」组里没有任何控件，只有这一句去哪里打开的说明；组撤掉了，说明挪进一直显示的「剪贴板」组。剪贴板历史关着时「历史记录」组不出现，所以不能放在那里。
+        // macOS 的云剪贴板入口说明放在「剪贴板」设置内；关闭历史记录后仍能查看。
         note={macosPlatform ? CLOUD_PANEL_SESSION_NOTE : undefined}
-      />
-      {!macosPlatform && client.openCloudClipboard && (
-        <GroupList title="云剪贴板">
-          <OpenPanelRow
-            title="云剪贴板"
-            action={() => openPanel(client.openCloudClipboard)}
-            label="打开云剪贴板"
+      >
+        {!macosPlatform && client.openCloudClipboard && (
+          <GroupList title="云剪贴板">
+            <OpenPanelRow
+              title="云剪贴板"
+              action={() => openPanel(client.openCloudClipboard)}
+              label="打开云剪贴板"
+            />
+          </GroupList>
+        )}
+        {client.cloudClipboardRelay && (
+          <CloudClipboardRelaySection
+            relay={draft.cloud_clipboard_relay}
+            disabled={busy}
+            onChange={(relay) =>
+              setDraft((current) => (current ? withCloudClipboardRelay(current, relay) : current))
+            }
           />
-        </GroupList>
-      )}
-      {client.cloudClipboardRelay && (
-        <CloudClipboardRelaySection
-          relay={draft.cloud_clipboard_relay}
-          disabled={busy}
-          onChange={(relay) =>
-            setDraft((current) => (current ? withCloudClipboardRelay(current, relay) : current))
-          }
-        />
-      )}
+        )}
+      </ClipboardHistorySection>
     </SettingsPageFieldset>
   );
 }

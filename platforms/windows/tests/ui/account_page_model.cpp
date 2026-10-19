@@ -1,6 +1,12 @@
 #include "../../settings/AccountPageModel.h"
 #include <cstdio>
+#include <nlohmann/json.hpp>
 #include <string>
+
+// CMake 把 shared/contracts/account-errors/cases.json 编进 account_errors_cases.inc（逐字节的数组），Wine 里跑测试时不用再找仓库路径。
+static const unsigned char kAccountErrorCases[] = {
+#include "account_errors_cases.inc"
+};
 
 using namespace msime::settings::account;
 namespace {
@@ -11,31 +17,39 @@ void check(bool condition, const char *what) {
     ++failures;
   }
 }
+
+// 用例是 UTF-8；宽字符串在 Windows 上是 UTF-16，在其他平台上是 UTF-32。用例里没有不合法的 UTF-8。
+std::wstring widen(const std::string &text) {
+  std::wstring result;
+  for (size_t index = 0; index < text.size();) {
+    const auto lead = static_cast<unsigned char>(text[index]);
+    const size_t length = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+    char32_t point = length == 1 ? lead : lead & (0x3F >> (length - 1));
+    for (size_t next = 1; next < length; ++next)
+      point = (point << 6) | (static_cast<unsigned char>(text[index + next]) & 0x3F);
+    index += length;
+    if constexpr (sizeof(wchar_t) == 2) {
+      if (point > 0xFFFF) {
+        point -= 0x10000;
+        result += static_cast<wchar_t>(0xD800 + (point >> 10));
+        result += static_cast<wchar_t>(0xDC00 + (point & 0x3FF));
+        continue;
+      }
+    }
+    result += static_cast<wchar_t>(point);
+  }
+  return result;
+}
 } // namespace
 
 int main() {
-  // normalizeAccountName 与 JavaScript 的 trim 一样去掉全角空格、不换行空格和 BOM，中间的空白留着。
-  check(normalize_name(L"  水杉 小鹿\t") == L"水杉 小鹿", "ascii trim");
-  check(normalize_name(L"　 名字﻿ ") == L"名字", "unicode trim");
-  check(normalize_name(L" \t ").empty(), "blank trims to empty");
+  // 登录目标沿用现有的去空白方式；昵称规则的测试随实现迁到共享 Rust。
+  check(trim_login_target(L"  demo@example.test\t") == L"demo@example.test", "ascii trim");
+  check(trim_login_target(L"\u3000\u00a0demo@example.test\ufeff\u2028") == L"demo@example.test",
+        "unicode trim");
+  check(trim_login_target(L" \t ").empty(), "blank trims to empty");
 
-  // isValidAccountName：非空、最多 64 个码点、不含控制字符。
-  check(!valid_name(L""), "empty name is invalid");
-  check(!valid_name(L"   "), "blank name is invalid");
-  check(valid_name(L" 小鹿 "), "trimmed name is valid");
-  check(valid_name(std::wstring(64, L'名')), "64 characters");
-  check(!valid_name(std::wstring(65, L'名')), "65 characters");
-  std::wstring emoji;
-  for (int i = 0; i < 64; ++i)
-    emoji += L"\U0001F98C";
-  check(code_points(emoji) == 64 && valid_name(emoji), "a surrogate pair counts once");
-  check(!valid_name(emoji + L"\U0001F98C"), "65 surrogate pairs");
-  check(!valid_name(L"a\nb") && !valid_name(L"a\x7F") && !valid_name(std::wstring(L"a\0b", 3)),
-        "control characters");
-
-  // preferredAccountName 和账号 ID 的短写。
-  check(preferred_name(L"  小鹿 ", L"abcdef12-3456") == L"小鹿", "own name");
-  check(preferred_name(L" ", L"abcdef12-3456") == L"水杉小鹿·ABCDEF", "generated name");
+  // 账号 ID 的短写。
   check(id_label(L"0a1b2c3d-x") == L"#0A1B2C", "id label");
   check(id_label(L"ab") == L"#AB", "short id");
   check(initial(L"水杉") == L"水" && initial(L"\U0001F98C鹿") == L"\U0001F98C" && initial(L"").empty(),
@@ -47,16 +61,20 @@ int main() {
             provider_name(L"apple") == L"Apple" && provider_name(L"wechat") == L"wechat",
         "provider names");
 
-  // accountMessage：审核的三种、账号错误码，其余都是服务暂不可用。
-  check(error_message(L"account_blocked_content") == L"内容包含不允许发布的词语，请修改后再提交",
-        "blocked content");
-  check(error_message(L"account_banned") == L"该账号已被封禁，暂时无法使用账号相关功能", "banned");
-  check(error_message(L"account_invalid") == L"填写的内容无效，请检查后重试。", "invalid");
-  check(error_message(L"account_avatar_invalid") == L"请选择 1 MiB 以内的 PNG 或 JPEG 图片。",
-        "avatar invalid");
-  check(error_message(L"account_unauthorized") == L"登录已失效，请重新登录。", "unauthorized");
-  check(error_message(L"account_conflict") == L"云端设置已被其他设备更新，请刷新后重新确认。",
-        "conflict");
+  // accountMessage：逐条跑各平台共用的 shared/contracts/account-errors/cases.json，每个码说成 `shared` 那一句（与共享账号页相同，不读 Retry-After）。
+  const auto contract =
+      nlohmann::json::parse(std::string(reinterpret_cast<const char *>(kAccountErrorCases), sizeof(kAccountErrorCases)));
+  size_t error_cases = 0;
+  for (const auto &item : contract.at("cases")) {
+    const auto code = item.at("code").get<std::string>();
+    const bool same = error_message(widen(code)) == widen(item.at("shared").get<std::string>());
+    if (!same)
+      std::fprintf(stderr, "FAIL: account error %s\n", code.c_str());
+    check(same, "account error case");
+    ++error_cases;
+  }
+  check(error_cases > 10, "account error cases were read");
+  // 用例之外：不是账号码的写法和空串也是服务暂不可用。
   check(error_message(L"conflict") == L"账号服务暂不可用，请稍后再试。" &&
             error_message(L"") == L"账号服务暂不可用，请稍后再试。",
         "unknown codes");

@@ -30,12 +30,22 @@ import urllib.request
 from msime_provider_runtime import open_server
 
 
-class RustAccountApi:
-    """通过共享 Rust 账号和翻译契约访问 host-api。
+# provider 用到的 host-api 入口，都是 char *f(const uint8_t *request, size_t length)；少一个就当作没有可用的库。host_library_contract.py 逐个核对它们在 msime_client.h 里的声明。
+HOST_LIBRARY_SYMBOLS = (
+    "msime_client_ensure_anonymous_account_with_agent",
+    "msime_client_client_agent",
+    "msime_client_account",
+)
+# 「水杉账号」释义每次请求的超时，交给 msime_client_account 的 translate 作 timeout_ms：上限是原来 Python 发 /v1/translate 时的 2.5 秒，下限是 Rust 接受的最小值 1 秒。
+ACCOUNT_TRANSLATE_TIMEOUT_MS = (1000, 2500)
+# 两次补注册匿名账号之间至少隔这么久（秒），与 Windows 的 account_registration_retry 相同：注册计入服务端每个出口地址每天 5 次的匿名登录额度，注册失败时不能每页候选都再试一次。
+ANONYMOUS_REGISTRATION_RETRY = 600.0
 
-    Linux 仍由 Python 负责 provider 的传输，但账号身份、令牌轮换和响应
-    校验归 host-api 所有。库延迟加载，源码树测试没有可选的宿主库时也能
-    启动 provider。
+
+class RustAccountApi:
+    """经 host-api 的账号契约做账号相关的事。
+
+    账号身份、会话选择（登录的优先，没有登录时用本机匿名账号）、令牌刷新、/v1/translate 请求和响应的逐项规范化都在 Rust 里；Python 只管什么时候问、问哪几个词，以及会话都不可用时补注册匿名账号。库延迟加载，源码树测试没有可选的宿主库时也能启动 provider。
     """
 
     def __init__(self, directory):
@@ -44,12 +54,21 @@ class RustAccountApi:
         self._responses = None
         self._load_failed = False
         self._lock = threading.Lock()
+        # None 是还没拼过，空串是拼不出。
+        self._client_agent = None
+        # 上一次补注册的 time.monotonic()；None 是这个进程还没补注册过。
+        self._registration_lock = threading.Lock()
+        self._registered_at = None
 
     def _load(self):
         with self._lock:
             if self._library is not None or self._load_failed:
                 return self._library
             candidates = []
+            # 安装时 CMake 记下的库路径（相对 bin，带本版本的库名），rpm 和 Gentoo 的 lib64 都由它给出；下面按 <prefix>/lib 猜的几处只剩源码树和旧布局用得上。
+            installed = installed_host_library()
+            if installed is not None:
+                candidates.append(installed)
             configured = os.environ.get("MSIME_HOST_LIBRARY")
             if configured:
                 candidates.append(configured)
@@ -75,9 +94,7 @@ class RustAccountApi:
                 except (OSError, TypeError):
                     continue
                 try:
-                    for name in ("msime_client_ensure_anonymous_account",
-                                 "msime_client_account_access_token",
-                                 "msime_client_account_gloss"):
+                    for name in HOST_LIBRARY_SYMBOLS:
                         function = getattr(library, name)
                         function.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
                         function.restype = ctypes.c_void_p
@@ -100,42 +117,99 @@ class RustAccountApi:
         except (OSError, UnicodeError, ValueError, TypeError):
             return None
 
-    def ensure_anonymous(self):
-        encoded = str(self.directory).encode("utf-8")
-        library = self._load()
-        if library is None:
-            return False
-        try:
-            pointer = library.msime_client_ensure_anonymous_account(encoded, len(encoded))
-            response = self._responses.decode(pointer)
-        except (OSError, UnicodeError, ValueError, TypeError):
-            return False
-        return isinstance(response, dict) and response.get("ok") is True and response.get("value") is True
-
-    def access_token(self, rejected_token=None):
-        payload = {"directory": str(self.directory)}
-        if isinstance(rejected_token, str) and rejected_token:
-            payload["rejected_token"] = rejected_token
-        response = self._call("msime_client_account_access_token", payload)
-        value = response.get("value") if isinstance(response, dict) and response.get("ok") is True else None
-        token = value.get("access_token") if isinstance(value, dict) else None
-        return token if isinstance(token, str) and token else None
-
-    def prepare_translation(self, texts, source, target):
-        response = self._call("msime_client_account_gloss", {
-            "operation": "request", "texts": texts,
-            "source_lang": source, "target_lang": target,
+    def client_agent(self):
+        """注册匿名账号时自报的 User-Agent，由 Rust 拼出（msime_client_client_agent），服务端「我的设备」据此显示 linux 和版本。拼不出时为 None，注册照常进行，与不带 client_agent 时相同。"""
+        if self._client_agent is not None:
+            return self._client_agent or None
+        version, edition = installed_version_and_edition()
+        response = self._call("msime_client_client_agent", {
+            "platform": "linux", "version": version, "device": None,
+            "system": linux_system(), "edition": edition,
         })
         value = response.get("value") if isinstance(response, dict) and response.get("ok") is True else None
-        body = value.get("body") if isinstance(value, dict) else None
-        return body if isinstance(body, str) else None
+        self._client_agent = value if isinstance(value, str) else ""
+        return self._client_agent or None
 
-    def parse_translation(self, texts, status, body, retry_after=None):
-        payload = {"operation": "parse", "texts": texts, "status": status, "body": body}
-        if retry_after is not None:
-            payload["retry_after"] = retry_after
-        response = self._call("msime_client_account_gloss", payload)
-        return response.get("value") if isinstance(response, dict) and response.get("ok") is True else None
+    def ensure_anonymous(self):
+        payload = {"directory": str(self.directory)}
+        agent = self.client_agent()
+        if agent is not None:
+            payload["client_agent"] = agent
+        response = self._call("msime_client_ensure_anonymous_account_with_agent", payload)
+        return isinstance(response, dict) and response.get("ok") is True and response.get("value") is True
+
+    def translate(self, texts, source, target, deadline):
+        """「水杉账号」释义：返回与 texts 等长的列表（没有释义的一项是 None），整批失败或 deadline（time.monotonic()）已过时返回 None。
+
+        经 msime_client_account 的 translate，登录的账号优先，没有登录时用本机匿名账号，服务端以 401 拒绝令牌时 Rust 刷新一次、在同一个账号里重试。两种会话都不可用（account_unauthorized：安装后的注册没成功、文件被删、匿名会话被服务端吊销后已被 Rust 清掉）时补注册匿名账号再问一次，ANONYMOUS_REGISTRATION_RETRY 之内只补一次。
+        """
+        response = self._account_translate(texts, source, target, deadline)
+        if (isinstance(response, dict) and response.get("error") == "account_unauthorized" and
+                self._may_register() and self.ensure_anonymous()):
+            response = self._account_translate(texts, source, target, deadline)
+        value = response.get("value") if isinstance(response, dict) and response.get("ok") is True else None
+        values = value.get("translations") if isinstance(value, dict) else None
+        if not isinstance(values, list) or len(values) != len(texts):
+            return None
+        return [item if isinstance(item, str) and item else None for item in values]
+
+    def _account_translate(self, texts, source, target, deadline):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        low, high = ACCOUNT_TRANSLATE_TIMEOUT_MS
+        payload = {"directory": str(self.directory), "action": {
+            "operation": "translate", "texts": texts, "source_lang": source, "target_lang": target,
+            "timeout_ms": max(low, min(high, int(remaining * 1000)))}}
+        # 与注册时同一个 User-Agent：头文件要求同一个宿主的各次调用都带同一个 client_agent。
+        agent = self.client_agent()
+        if agent is not None:
+            payload["client_agent"] = agent
+        return self._call("msime_client_account", payload)
+
+    def _may_register(self):
+        with self._registration_lock:
+            now = time.monotonic()
+            if self._registered_at is not None and now < self._registered_at + ANONYMOUS_REGISTRATION_RETRY:
+                return False
+            self._registered_at = now
+            return True
+
+
+def installed_host_library():
+    """CMake 配置进 msime_voice_paths.py 的 host 库路径；源码树里没有这个模块，返回 None。"""
+    try:
+        from msime_voice_paths import HOST_LIBRARY
+    except ImportError:
+        return None
+    return Path(__file__).resolve().parent / HOST_LIBRARY
+
+
+def installed_version_and_edition():
+    """安装包的版本号和版本 ID，与 msime_voice_paths.py 一起由 CMake 写出；源码树里是空版本号（Rust 写成 0）和 full。"""
+    try:
+        from msime_voice_paths import EDITION, VERSION
+    except ImportError:
+        return "", "full"
+    return VERSION, EDITION
+
+
+def linux_system():
+    """「我的设备」里系统那一栏：os-release 的 NAME 加 VERSION_ID（例如 Ubuntu 24.04）；读不到时为 None，Rust 写成 unknown。"""
+    for path in ("/etc/os-release", "/usr/lib/os-release"):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                text = handle.read(16384)
+        except (OSError, UnicodeError):
+            continue
+        fields = {}
+        for line in text.splitlines():
+            key, separator, value = line.strip().partition("=")
+            if separator:
+                fields[key] = value.strip().strip("\"'")
+        system = " ".join(part for part in (fields.get("NAME", ""), fields.get("VERSION_ID", "")) if part)
+        return system or None
+    return None
 
 
 class ResponseDecoder:
@@ -165,16 +239,18 @@ http_process_lock = threading.Lock()
 http_stopping = threading.Event()
 MAX_AI_CACHE_ENTRIES = 4096
 MAX_TRANSLATION_CACHE_ENTRIES = 4096
+# 缓存不跨进程保留；随机挑战让凭据签名也只在本进程内稳定。
+_CREDENTIAL_CACHE_CHALLENGE = os.urandom(32)
 NEGATIVE_TRANSLATION_CACHE_TTL = 480
-ANONYMOUS_ACCOUNT_ORIGIN = "https://api.msime.app"
 CLOUD_REQUEST_TIMEOUT = 2.0
 # AI 推理与 Windows、client-providers 保持 8 秒总预算和 2.5 秒连接预算。
 AI_REQUEST_TIMEOUT = 8.0
 AI_CONNECT_TIMEOUT = 2.5
-HTTP_WORKER_MAX_TIMEOUT = AI_REQUEST_TIMEOUT
-# One request line from client-core. UnixSocketProvider::ai_test lets a polish test carry an 8192-byte prompt and an 8192-byte sample in a request up to 32768 bytes, so that kind alone gets the larger limit; every other request keeps the 16384-byte one.
+HTTP_WORKER_MAX_TIMEOUT = 10.0
+# 在线查询包含再次转义的 HTTP 模板与请求头；其余请求保留原有上限。
 REQUEST_LINE_LIMIT = 16384
 AI_TEST_REQUEST_LINE_LIMIT = 32768
+ONLINE_REQUEST_LINE_LIMIT = 131072
 # 空白提示词槽位所代表的联想提示词：Windows 把它编译进 AiAssistantConfig::prompt（ime_config.h），client-providers 把同样的文本存为 ai::DEFAULT_CANDIDATE_PROMPT，供在那里构造请求的宿主使用。共享偏好让这个槽位留空，所以没有这一份时，Linux 的每个 AI 请求都带着空的 system 消息，模型回的是 JSON 解析器拒收的散文。ai_service_contract.py 保证这份副本与 client-providers 的那份相同。
 DEFAULT_AI_PROMPT = "你是一个中文全拼输入法联想引擎。输入为已经切分好的拼音数组、前文上下文和候选数量。\n\n优先生成与拼音严格对应的中文候选：若有 N 段拼音，首选必须尽量为 N 个汉字，每段拼音对应一个汉字，不得随意增删或改变读音。结合上下文、常用程度、语义完整性和固定搭配排序。\n\n若去掉分词后能明显组成更合理的英文单词、缩写、产品名或技术术语，如 `deep + seek → DeepSeek`、`git + hub → GitHub`，可优先返回英文；不要生造英文或做牵强匹配。\n\n只输出合法 JSON，不要解释或输出 Markdown：\n\n{\n\"candidates\": [\n{\n\"text\": \"候选内容\",\n\"type\": \"chinese或english\",\n\"confidence\": 0.98\n}\n]\n}\n\n候选按推荐程度降序排列，数量不超过指定上限；没有合理结果时返回空数组。"
 DEFAULT_TRANSLATION_PROMPT = "你是一个机器翻译服务。把用户给出的文本从 source_language 翻译成 target_language。只翻译文本本身，保留原意和标点，不要解释、注释或改写。只输出合法 JSON，不要输出 Markdown：{\"translation\":\"译文\"}。没有合适译文时输出空字符串。"
@@ -221,7 +297,7 @@ def request_opener(url, connect_timeout=None):
     return urllib.request.build_opener(*handlers)
 
 
-def fetch_direct(url, timeout, body=None, token=None, extra_headers=None, connect_timeout=None):
+def fetch_direct(url, timeout, body=None, token=None, extra_headers=None, connect_timeout=None, max_response_bytes=65536):
     headers = {"Content-Type": "application/json", "User-Agent": "MSIME-Client"}
     if token:
         headers["Authorization"] = "Bearer " + token
@@ -229,13 +305,13 @@ def fetch_direct(url, timeout, body=None, token=None, extra_headers=None, connec
     payload = body if isinstance(body, bytes) else None if body is None else json.dumps(body).encode()
     request = urllib.request.Request(url, data=payload, headers=headers)
     with request_opener(url, connect_timeout).open(request, timeout=timeout) as response:
-        payload = response.read(65537)
-    if len(payload) > 65536:
+        payload = response.read(max_response_bytes + 1)
+    if len(payload) > max_response_bytes:
         raise ValueError("response too large")
     return payload
 
 
-def fetch(url, timeout, body=None, token=None, extra_headers=None, connect_timeout=None):
+def fetch(url, timeout, body=None, token=None, extra_headers=None, connect_timeout=None, max_response_bytes=65536):
     # Include DNS, TLS, upload and response reads in one deadline. Request data travels only through anonymous pipes, never command-line arguments.
     deadline = time.monotonic() + timeout
     body = body if isinstance(body, bytes) else None if body is None else json.dumps(body).encode()
@@ -244,6 +320,8 @@ def fetch(url, timeout, body=None, token=None, extra_headers=None, connect_timeo
                "token": token, "extra_headers": extra_headers}
     if connect_timeout is not None:
         request["connect_timeout"] = connect_timeout
+    if max_response_bytes != 65536:
+        request["max_response_bytes"] = max_response_bytes
     metadata = json.dumps(request).encode()
     if len(metadata) > 262144 or timeout <= 0:
         raise ValueError("invalid HTTP request")
@@ -259,7 +337,7 @@ def fetch(url, timeout, body=None, token=None, extra_headers=None, connect_timeo
         if remaining <= 0:
             raise TimeoutError("HTTP request deadline exceeded")
         output, _ = process.communicate(metadata, timeout=remaining)
-        if process.returncode != 0 or len(output) > 65536:
+        if process.returncode != 0 or len(output) > max_response_bytes:
             raise ValueError("HTTP request failed")
         return json.loads(output)
     finally:
@@ -297,6 +375,9 @@ def http_request_worker():
         if connect_timeout is not None and (
                 type(connect_timeout) not in (int, float) or not 0 < connect_timeout <= timeout):
             return 1
+        limit = request.get("max_response_bytes", 65536)
+        if type(limit) is not int or not 0 < limit <= 262144:
+            return 1
         # The parent normally enforces the deadline and reaps this worker.
         # Keep a process-local limit too, so a crashed parent cannot leave DNS
         # or a slowly streaming HTTP response running indefinitely. The default
@@ -326,24 +407,34 @@ def candidate(text, source):
 
 
 def cloud(query):
-    # A cache probe never leaves the machine; only the debounced request may reach the network.
+    """只执行 Rust 的描述符；把原始 JSON 交回共享解析器，不在脚本里维护服务协议。"""
     if (query.get("ai_cache_only") or not query.get("cloud_candidates", True) or
             not query.get("cloud_eligible")):
         return None
-    text = query.get("query_text")
-    if not isinstance(text, str) or not text or len(text.encode()) > 4096:
+    descriptor = query.get("cloud_request")
+    if not isinstance(descriptor, dict):
         return None
-    params = urllib.parse.urlencode({"text": text, "itc": "ja-t-i0-und" if
-        query.get("scheme") == 3 else "zh-t-i0-pinyin", "num": 1, "ie": "utf-8", "oe": "utf-8"})
-    result = fetch("https://inputtools.google.com/request?" + params, CLOUD_REQUEST_TIMEOUT)
-    # Match Windows cloud_ime's SUCCESS/first-candidate contract while
-    # rejecting malformed provider JSON before indexing nested values.
-    if (isinstance(result, list) and len(result) >= 2 and result[0] == "SUCCESS" and
-        isinstance(result[1], list) and result[1] and isinstance(result[1][0], list) and
-        len(result[1][0]) >= 2 and isinstance(result[1][0][1], list) and
-        result[1][0][1]):
-        return candidate(result[1][0][1][0], 0)
-    return None
+    if isinstance(descriptor.get("cached_response"), str):
+        return {"cloud_response": descriptor["cached_response"]}
+    url = descriptor.get("url")
+    method = descriptor.get("method")
+    timeout_ms = descriptor.get("timeout_ms")
+    connect_ms = descriptor.get("connect_timeout_ms")
+    if (not isinstance(url, str) or not secure_custom_endpoint(url)
+            or method not in ("GET", "POST")
+            or not isinstance(timeout_ms, int) or not 100 <= timeout_ms <= 10000
+            or not isinstance(connect_ms, int) or not 0 < connect_ms <= timeout_ms):
+        return None
+    body = descriptor.get("body_utf8", "")
+    headers = descriptor.get("headers")
+    if not isinstance(body, str) or len(body.encode()) > 8192 or not isinstance(headers, dict):
+        return None
+    result = fetch(url, timeout_ms / 1000,
+                   body.encode() if method == "POST" else None,
+                   extra_headers=headers, connect_timeout=connect_ms / 1000, max_response_bytes=262144)
+    if result is None:
+        return None
+    return {"cloud_response": json.dumps(result, ensure_ascii=False)}
 
 
 def ai_prompt(options):
@@ -375,6 +466,13 @@ def ai_config_matches(options, config):
         for key in ("provider", "endpoint", "model"))
 
 
+def credential_cache_fingerprint(value):
+    # API 凭据作为 HMAC 密钥，对本进程的随机挑战签名，不创建密码验证器。
+    # 长度前缀区分 HMAC 补零后可能相同的密钥，例如空串和一个 NUL。
+    key = len(value).to_bytes(4, "big") + value
+    return hmac.digest(key, _CREDENTIAL_CACHE_CHALLENGE, "sha256")
+
+
 def ai_cache_key(query, config):
     options = query.get("ai_assistant")
     segments = query.get("pinyin_segments")
@@ -390,9 +488,8 @@ def ai_cache_key(query, config):
     token = config.get("token") if isinstance(config, dict) else None
     if not isinstance(token, str):
         return None
-    # A credential rotation must not reuse an answer generated under the
-    # previous credential. Keep only a digest in the in-memory key.
-    identity["credential_sha256"] = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    # 凭据轮换后不能复用旧答案；内存缓存键只保留本进程的凭据指纹。
+    identity["credential_hmac"] = credential_cache_fingerprint(token.encode("utf-8")).hex()
     configured_limit = options.get("candidate_limit", 3)
     identity["candidate_limit"] = (configured_limit
                                     if type(configured_limit) is int and 1 <= configured_limit <= 10
@@ -569,34 +666,11 @@ def ai_translation(text, target, options, path):
     return translation_gloss(value)
 
 
-def anonymous_translation(texts, source, target, server):
+def account_translation(texts, source, target, server, deadline):
+    """「水杉账号」的一组释义，与 texts 等长；请求、会话和逐项规范化都在 Rust（RustAccountApi.translate）。"""
     rust_account = getattr(server, "rust_account", None)
-    if rust_account is not None:
-        # Registration and token refresh are Rust-owned. The provider only
-        # sends the already selected translation request and asks Rust to
-        # apply the same per-item response rules as every other platform.
-        if not rust_account.ensure_anonymous():
-            return [None] * len(texts)
-        token = rust_account.access_token()
-        if not token:
-            return [None] * len(texts)
-        body = rust_account.prepare_translation(texts, source, target)
-        if not body:
-            return [None] * len(texts)
-        try:
-            request = json.loads(body)
-        except (TypeError, ValueError):
-            return [None] * len(texts)
-        result = safely(fetch, ANONYMOUS_ACCOUNT_ORIGIN + "/v1/translate", 2.5,
-                        request, token)
-        if not isinstance(result, dict):
-            return [None] * len(texts)
-        parsed = rust_account.parse_translation(texts, 200, json.dumps(result, ensure_ascii=False))
-        values = parsed.get("translations") if isinstance(parsed, dict) else None
-        if not isinstance(values, list):
-            return [None] * len(texts)
-        return [value if isinstance(value, str) and value else None for value in values[:len(texts)]] + [None] * max(0, len(texts) - len(values))
-    return [None] * len(texts)
+    values = rust_account.translate(texts, source, target, deadline) if rust_account is not None else None
+    return values if isinstance(values, list) and len(values) == len(texts) else [None] * len(texts)
 
 
 # DeepL 官方 API 的两个主机，与 crates/client-core/src/translation.rs 的 custom_translation_request 一致：Free 密钥（以 :fx 结尾）走 api-free.deepl.com，其余走 api.deepl.com。
@@ -808,7 +882,7 @@ def translations(query, server):
             return []
         app_id, apikey = app_id.strip(), apikey.strip()
         niutrans = {"enabled": True, "app_id": app_id, "apikey": apikey}
-        provider = ("niutrans", hashlib.sha256((app_id + "\0" + apikey).encode()).digest())
+        provider = ("niutrans", credential_cache_fingerprint((app_id + "\0" + apikey).encode()))
     elif selected == "custom":
         endpoint = custom.get("endpoint", "")
         if not isinstance(endpoint, str) or len(endpoint) > 2048:
@@ -824,10 +898,12 @@ def translations(query, server):
         # requests in both directions and for cache identity, without editing
         # the incoming query or the user's persisted preferences.
         custom = {**custom, "endpoint": endpoint, "api_key": token}
-        # Keep credentials out of cache keys and separate caches when they change.
-        provider = (endpoint, hashlib.sha256(token.encode()).digest())
+        # 缓存键不保留凭据，凭据改变时隔离缓存。
+        provider = (endpoint, credential_cache_fingerprint(token.encode()))
     elif selected == "ai":
-        provider = ("ai", options.get("provider", ""))
+        # options 要在这里先取出来：下面才赋值的话，Python 把它当成还没赋值的局部变量，这一行抛 UnboundLocalError，AI 候选翻译从来没走到请求那一步。
+        options = query.get("ai_assistant")
+        provider = ("ai", options.get("provider", "") if isinstance(options, dict) else "")
     else:
         # Each request keeps one credential snapshot, including both directions.
         # A removed or invalid file disables Tencent until a valid file is restored.
@@ -836,10 +912,9 @@ def translations(query, server):
         if not tencent_config:
             return []
         scope = json.dumps(tencent_config, sort_keys=True, separators=(",", ":")).encode()
-        provider = ("tencent", hashlib.sha256(scope).digest())
+        provider = ("tencent", credential_cache_fingerprint(scope))
     deadline = time.monotonic() + 6
     if selected == "ai":
-        options = query.get("ai_assistant")
         rows = []
         for text in texts:
             if time.monotonic() >= deadline:
@@ -866,9 +941,7 @@ def translations(query, server):
             groups.setdefault(direction, []).append(text)
     for (source, destination), pending in groups.items():
         if selected == "account":
-            remaining = min(2.5, deadline - time.monotonic())
-            values = anonymous_translation(pending, source, destination, server) if remaining > 0 else None
-            values = values or [None] * len(pending)
+            values = account_translation(pending, source, destination, server, deadline)
         elif selected == "niutrans":
             values = []
             for text in pending:
@@ -1055,13 +1128,14 @@ def read_request(rfile):
 
     The limits count the JSON without its newline, the way client-core checks request.len() before appending the terminator.
     """
-    line = rfile.readline(AI_TEST_REQUEST_LINE_LIMIT + 2)
-    if len(line) - 1 > AI_TEST_REQUEST_LINE_LIMIT or not line.endswith(b"\n"):
+    line = rfile.readline(ONLINE_REQUEST_LINE_LIMIT + 2)
+    if len(line) - 1 > ONLINE_REQUEST_LINE_LIMIT or not line.endswith(b"\n"):
         return None
     request = json.loads(line)
     if not isinstance(request, dict):
         return None
-    if len(line) - 1 > REQUEST_LINE_LIMIT and request.get("kind") != "ai_test":
+    limit = {"online": ONLINE_REQUEST_LINE_LIMIT, "ai_test": AI_TEST_REQUEST_LINE_LIMIT}.get(request.get("kind"), REQUEST_LINE_LIMIT)
+    if len(line) - 1 > limit:
         return None
     return request
 
@@ -1105,18 +1179,24 @@ class Handler(socketserver.StreamRequestHandler):
                                     self.server.ai_candidate_cache,
                                     self.server.ai_candidate_cache_lock)]
                 rows = []
+                cloud_response = None
                 seen = set()
                 for job in jobs:
                     result = job.result()
                     for row in result if isinstance(result, list) else [result]:
-                        if row is None or row["text"] in seen:
+                        if row is None:
+                            continue
+                        if "cloud_response" in row:
+                            cloud_response = row["cloud_response"]
+                            continue
+                        if row["text"] in seen:
                             continue
                         proposed = rows + [row]
                         if len(json.dumps({"candidates": proposed}, ensure_ascii=False).encode()) + 1 > 16384:
                             continue
                         rows.append(row)
                         seen.add(row["text"])
-            self.wfile.write(json.dumps({"candidates": rows}, ensure_ascii=False).encode() + b"\n")
+            self.wfile.write(json.dumps({"candidates": rows, "cloud_response": cloud_response}, ensure_ascii=False).encode() + b"\n")
         except Exception:
             pass
 

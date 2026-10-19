@@ -14,9 +14,9 @@ const catalog = JSON.parse(readFileSync(resolve(repoRoot, "packages/ui/src/theme
 const parity = JSON.parse(readFileSync(resolve(repoRoot, "apps/desktop/tests/candidate/custom-theme-parity.json"), "utf8"));
 
 const COLOR = /^#[0-9A-F]{6}([0-9A-F]{2})?$/;
-const PALETTE_KEYS = ["surface", "border", "text", "number", "secondary", "accent", "selected", "selectedText", "selectedNumber", "hover", "showSelectedBar"];
+const PALETTE_KEYS = ["surface", "border", "text", "number", "secondary", "accent", "selected", "selectedText", "selectedNumber", "hover", "showSelectedBar", "preeditText", "caret", "selectedBar", "selectedSecondary"];
 const camel = { selected_text: "selectedText", selected_number: "selectedNumber", show_selected_bar: "showSelectedBar" };
-const WINDOWS_LOOKS = ["wechat", "graphite", "willow_green", "autumn_osmanthus", "microsoft"];
+const WINDOWS_LOOKS = ["wechat", "wechat_scroll", "graphite", "willow_green", "autumn_osmanthus", "microsoft"];
 // CSS 声明里能用来跳出值的字符和片段。
 const BREAKOUT = /[;{}"'\\<>\n\r]|url\((?!")|\)(?!$)|javascript:/i;
 
@@ -57,8 +57,13 @@ test("SKINS lists system, the catalog's built-in themes and the Windows looks", 
   assert.deepEqual([...SKINS], ["system", ...builtins, ...WINDOWS_LOOKS]);
   assert.deepEqual(builtins, ["shuishan", "light", "paper", "night", "ink"]);
   assert.ok(Object.isFrozen(SKINS));
-  assert.ok(!SKINS.includes("custom") && !SKINS.includes("fluent"));
+  assert.ok(!SKINS.includes("custom") && !SKINS.includes("fluent") && !SKINS.includes("canvas"));
   assert.equal(DEFAULT_SKIN, "shuishan");
+  // index.d.ts 的 MsimeSkinId 必须与运行时的 SKINS 同步，否则 TypeScript 用户选不了运行时接受的外观。
+  const typings = readFileSync(resolve(repoRoot, "packages/web-engine/src/index.d.ts"), "utf8");
+  const union = /export type MsimeSkinId =([^;]+);/.exec(typings);
+  assert.ok(union, "MsimeSkinId union not found");
+  assert.deepEqual([...union[1].matchAll(/"([a-z_]+)"/g)].map((match) => match[1]), [...SKINS]);
 });
 
 test("every custom-theme-parity case gives exactly its expected palette", () => {
@@ -230,7 +235,7 @@ test("supports.layouts and themes decide whether the package is drawn, as resolv
   const off = resolveSkin(vertical, { layout: "horizontal" });
   assert.equal(off.drawn, false);
   assert.notEqual(off.palette.accent, "#00AA00");
-  assert.deepEqual(off.geometry, { cornerRadius: null, minWidth: null, decoration: null, background: null });
+  assert.deepEqual(off.geometry, { canvas: null, cornerRadius: null, minWidth: null, decoration: null, background: null });
   assert.equal(off.variables["--msime-skin-radius"], undefined);
   // SkinSummary 的顶层 layouts/themes 与清单的 supports 等价。
   const lightOnly = { ...base, layouts: ["horizontal"], themes: ["light"] };
@@ -263,6 +268,7 @@ test("geometry follows dimension, decorationImage and the background rules", () 
     background: { image: "skins/bg.webp", fit: "stretch", opacity: 0.5 },
   });
   assert.deepEqual(result.geometry, {
+    canvas: null,
     cornerRadius: 16,
     minWidth: 320,
     decoration: { url: "https://example.com/mascot.png", top: 40, width: 120, align: "center" },
@@ -296,6 +302,20 @@ test("schema v2 resolves a bounded motion contract and safe CSS variables", () =
   const legacy = resolveSkin({ schemaVersion: 1, animation: { enter: "spring" } });
   assert.equal(legacy.animation.enter, "none");
   assert.equal(resolveSkin({ schemaVersion: 2, animation: { durationMs: 9999 } }).animation.durationMs, 180);
+  // v2 动画对任何 base 都生效；canvas 只额外表示九宫格与自由挂件。
+  assert.equal(resolveSkin({ schemaVersion: 2, base: "system", animation: { enter: "spring" } }).animation.enter, "spring");
+  assert.equal(resolveSkin({ schemaVersion: 2, base: "night", animation: { enter: "slide_up" } }).animation.enter, "slide_up");
+  assert.equal(resolveSkin({ schemaVersion: 2, base: "canvas", animation: { enter: "slide_up" } }).animation.enter, "slide_up");
+  assert.equal(resolveSkin({ schemaVersion: 2, canvas: true }).animation.enter, "fade_scale");
+  assert.equal(resolveSkin({ schemaVersion: 2, base: "system", animation: { enter: "none", selection: "none" } }).animation.selection, "none");
+});
+
+test("base canvas requires schema v2 and the canvas flag never replaces a theme base", () => {
+  assert.throws(() => resolveSkin({ base: "canvas" }), { name: "TypeError", message: "skin base canvas requires schemaVersion 2" });
+  assert.throws(() => resolveSkin({ schemaVersion: 1, base: "canvas" }), { name: "TypeError", message: "skin base canvas requires schemaVersion 2" });
+  assert.deepEqual(resolveSkin({ schemaVersion: 2, base: "canvas" }).palette, resolveSkin({ schemaVersion: 2, base: "system" }).palette);
+  assert.deepEqual(resolveSkin({ schema_version: 2, base: "canvas" }).palette, resolveSkin({ schemaVersion: 2 }).palette);
+  assert.deepEqual(resolveSkin({ base: "night", canvas: true }).palette, resolveSkin({ base: "night" }).palette);
 });
 
 test("hostile skin objects are neutralised", () => {
@@ -380,12 +400,14 @@ test("hostile skin objects are neutralised", () => {
 
 test("normalizedColor matches theme::normalized_color", () => {
   assert.equal(normalizedColor("#abc"), "#AABBCC");
+  // `#RGBA` as `theme::normalized_color` reads it: alpha last.
+  assert.equal(normalizedColor("#e8a4"), "#EE88AA44");
   assert.equal(normalizedColor(" #aabbccdd "), "#AABBCCDD");
   assert.equal(normalizedColor("transparent"), "#00000000");
   assert.equal(normalizedColor("rgb(1, 2, 3)"), "#010203");
   assert.equal(normalizedColor("rgba(255,255,255,.5)"), "#FFFFFF80");
   assert.equal(normalizedColor("RGBA(0,0,0,1e0)"), "#000000FF");
-  for (const bad of ["#abcd", "rgb(1,2)", "rgba(1,2,3)", "rgb(-1,2,3)", "rgb(1.5,2,3)", "rgba(1,2,3,-0.1)", "red", "hsl(0,0%,0%)"]) assert.equal(normalizedColor(bad), null, bad);
+  for (const bad of ["#12345", "#1234567", "rgb(1,2)", "rgba(1,2,3)", "rgb(-1,2,3)", "rgb(1.5,2,3)", "rgba(1,2,3,-0.1)", "red", "hsl(0,0%,0%)"]) assert.equal(normalizedColor(bad), null, bad);
   for (const [alpha, expected] of [["0", "00"], ["1", "FF"], ["0.5", "80"], [".5", "80"], ["1.", "FF"], ["1e0", "FF"], ["+1", "FF"], ["-0", "00"], ["1.e0", "FF"]]) assert.equal(normalizedColor(`rgba(0,0,0,${alpha})`), `#000000${expected}`, alpha);
   for (const bad of ["1..2", ".e1", "e1", "", "."]) assert.equal(normalizedColor(`rgba(0,0,0,${bad})`), null, bad);
 });
@@ -397,4 +419,48 @@ test("a long malformed alpha is rejected in linear time", () => {
   assert.equal(normalizedColor(hostile), null);
   assert.equal(resolveSkin({ candidate: { light: { surface: hostile, text: hostile } } }).palette.surface, PLATFORM_PALETTE.light.surface);
   assert.ok(performance.now() - start < 500, `took ${performance.now() - start} ms`);
+});
+
+test("canvas keeps panel colours separate from the readable loading fallback", () => {
+  const skin = { schemaVersion: 2, base: "canvas", borderImage: { source: "dark.png", lightSource: "light.png", sliceDip: [24], widthDip: [12] },
+    candidate: { light: { text: "#f5ecff", selected_text: "#fff", preedit_text: "#ffc4dc", selected_bar: "#ffd27a", accent: "#ff8fb8" } } };
+  const result = resolveSkin(skin);
+  assert.equal(result.geometry.canvas.borderImage.url, "light.png");
+  assert.equal(result.palette.text, "#F5ECFF");
+  assert.equal(result.palette.selectedText, "#FFFFFF");
+  assert.equal(result.palette.preeditText, "#FFC4DC");
+  assert.equal(result.palette.selectedBar, "#FFD27A");
+  assert.equal(result.fallbackPalette.text, "#1A1A1A");
+  assert.equal(result.fallbackPalette.surface, "#FFFFFF");
+  assert.equal(result.fallbackPalette.accent, "#FF8FB8");
+  assert.equal(result.fallbackPalette.secondary, "#6940A5");
+  assert.equal(resolveSkin({ ...skin, borderImage: { source: "javascript:x", sliceDip: [2] } }).palette.text, "#1A1A1A");
+  assertSafeVariables(result.fallbackVariables);
+  assertComplete(result);
+  const summary = resolveSkin({ ...skin, base: "system", canvas: true, candidate: { light: result.fallbackPalette }, panelCandidate: skin.candidate });
+  assert.deepEqual(summary.palette, result.palette);
+  assert.deepEqual(summary.fallbackPalette, result.fallbackPalette);
+  assert.equal(resolveSkin(skin, { dark: true }).geometry.canvas.borderImage.url, "dark.png");
+  assert.ok(Object.isFrozen(result.geometry.canvas.borderImage.width));
+});
+
+test("canvas geometry follows source slice, DIP widths, bounded insets and stable widget layers", () => {
+  const skin = { schemaVersion: 2, base: "canvas", borderImage: { source: "panel.png", sliceDip: [20], stretchDip: [8, 16], widthDip: [4, 5, 6, 7], fill: false },
+    contentInsetsDip: { left: 20 }, outerInsetsDip: { top: 30, right: 36 }, lineGapDip: 6,
+    decorations: [{ image: "a.gif", widthDip: 40, heightDip: 20, zIndex: 2 }, { image: "b.apng", widthDip: 10, heightDip: 10, zIndex: -1 }, { image: "c.webp", widthDip: 32, heightDip: 32, zIndex: 2 }] };
+  const geometry = resolveSkin(skin).geometry.canvas;
+  assert.deepEqual(geometry.borderImage.slice, { top: 8, right: 16, bottom: 8, left: 16 });
+  assert.deepEqual(geometry.borderImage.width, { top: 4, right: 5, bottom: 6, left: 7 });
+  assert.equal(geometry.borderImage.fill, false);
+  assert.deepEqual(geometry.contentInsets, { top: 0, right: 0, bottom: 0, left: 20 });
+  assert.equal(geometry.lineGap, 6);
+  assert.deepEqual(geometry.decorations.map((d) => d.url), ["b.apng", "a.gif", "c.webp"]);
+  assert.equal(resolveSkin({ ...skin, base: "system" }).geometry.canvas, null);
+  assert.equal(resolveSkin({ ...skin, layouts: ["vertical"] }).geometry.canvas, null);
+  const hostile = resolveSkin({ ...skin, borderImage: { source: "javascript:x", sliceDip: [1] }, contentInsetsDip: { left: Infinity }, lineGapDip: "8px", decorations: [{ image: "javascript:x", widthDip: 10, heightDip: 10 }] });
+  assert.equal(hostile.geometry.canvas.borderImage, null);
+  assert.deepEqual(hostile.geometry.canvas.decorations, []);
+  assert.equal(hostile.geometry.canvas.contentInsets.left, 0);
+  assert.equal(hostile.geometry.canvas.lineGap, 0);
+  assertComplete(hostile);
 });

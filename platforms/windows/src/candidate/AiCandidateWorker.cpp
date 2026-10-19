@@ -20,7 +20,7 @@ namespace {
 // The reference debounces AI requests harder than cloud ones: each is a paid
 // model call, and a user mid-word would otherwise spend several.
 constexpr auto kDebounce = std::chrono::milliseconds(650);
-constexpr size_t kMaximumQueryBytes = 16384;
+constexpr size_t kMaximumQueryBytes = MSIME_ONLINE_QUERY_MAX_BYTES;
 constexpr size_t kMaximumResponseBytes = 1024 * 1024;
 constexpr uint8_t kDefaultLimit = 3;
 constexpr size_t kMaximumCacheEntries = 4096;
@@ -169,7 +169,7 @@ std::optional<std::string> https_post(const nlohmann::json &descriptor,
     HttpResponse response{{}, cancelled};
     curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS_STR, protocol.c_str());
-    if (ai_endpoint_connects_directly(url))
+    if (ai_endpoint_protocol_connects_directly(protocol))
       curl_easy_setopt(curl.get(), CURLOPT_NOPROXY, "*");
     // 请求描述带着凭据，跟随重定向就等于把它交给响应指定的任意主机；不跟随也保证局域网的 http 请求不会被转到公网主机。
     curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 0L);

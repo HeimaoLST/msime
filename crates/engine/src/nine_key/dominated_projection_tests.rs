@@ -84,7 +84,7 @@ impl NineKeySession {
         let mut candidates = std::mem::take(&mut self.candidates);
         candidates.clear();
         let mut key = String::with_capacity(locked_key.len() + self.digits.len() * 4 + 1);
-        let mut leading: HashMap<String, RankKey> = HashMap::new();
+        let mut leading = LeadingMap::default();
         let prefer_exact = !self.splits.is_empty();
         let initials =
             self.locked.is_empty() && initial.is_none() && initials_apply(remaining.len(), splits);
@@ -419,9 +419,9 @@ fn assert_dominated_rows_are_rejected_before_field_copies() {
     let (_, new_count) = count(|| after.refresh());
     assert_session(&after, &before);
     eprintln!("完整热刷新申请：{old_count} → {new_count}");
-    // 新路径同时复用首候选读音行、主读音列表、拼写匹配索引和左列选项缓冲。
+    // 新路径同时复用首候选读音行、主读音列表、拼写匹配索引、左列选项、切分路径输出和搜索页缓冲。
     assert_eq!(
-        new_count + 1046,
+        new_count + 1123,
         old_count,
         "重复前缀行和读音字符串不能先复制再丢弃"
     );

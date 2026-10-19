@@ -115,9 +115,21 @@ pub fn ensure_anonymous_account_with<A: AccountApi>(
         return Ok(());
     }
     let identity = anonymous_identity(directory)?;
-    BackendAccountSession::new(api, AnonymousSessionStorage::new(directory))
-        .sign_in_anonymous(&identity.subject, &identity.secret)
-        .map(|_| ())
+    // 会话在 account-refresh.lock 里保存，并且只在身份还是登录用的这一份时保存：登录要联网，期间 session_adopt（鸿蒙两个沙箱之间的镜像）可能已经在同一把锁里把身份连同会话换成了另一个匿名账号，或者删掉了身份。这时不写这一次登录的会话，否则本地留下的是这个账号的会话、另一个账号的身份，会话失效以后会登录成另一个账号。
+    let still_current = || {
+        Ok(matches!(
+            read_private_json::<AnonymousIdentity>(&directory.join(ANONYMOUS_ACCOUNT_FILE)),
+            Ok(Some(saved)) if saved.subject == identity.subject && saved.secret == identity.secret
+        ))
+    };
+    match BackendAccountSession::new(api, LockedAnonymousSessionStorage::new(directory))
+        .sign_in_anonymous_if(&identity.subject, &identity.secret, still_current)
+    {
+        Ok(_) => Ok(()),
+        // 身份被换掉时采用方已经写好了它的会话，本机仍有匿名会话。
+        Err(AccountError::Cancelled) if has_session(directory) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// [`ensure_anonymous_account`] 的注入存储版本：匿名会话在 `session` 的存储里（宿主的 `ANONYMOUS` 项），身份在 `identity` 的 [`SessionStoreItem::AnonymousIdentity`] 项。登录在调用方缓存的这个会话对象上完成，存储不跨进程共享时它也能直接看到新会话。
@@ -202,6 +214,101 @@ pub fn has_saved_anonymous_identity(
     source: AnonymousIdentitySource<'_>,
 ) -> Result<bool, AccountError> {
     saved_anonymous_identity(source).map(|identity| identity.is_some())
+}
+
+/// 另一个沙箱发布的匿名账号身份（鸿蒙设置应用与键盘之间的镜像），交给 [`BackendAccountSession::adopt_anonymous_session_with_identity`]，采用匿名会话时一起采用，会话和身份始终属于同一个匿名账号。
+pub struct PublishedAnonymousIdentity {
+    identity: Option<AnonymousIdentity>,
+}
+
+/// 读另一个沙箱发布的身份文件 `anonymous-account.json`：规则与发布的会话文件（`file_storage::read_published_session`）相同（不跟随符号链接；鸿蒙上属主必须是本进程的有效 uid、不看所在目录，只拒绝其他用户位；其他平台属主与所在目录相同、只能属主可读写；最多 64 KiB，见 [`owner_is_trusted`]）。文件或所在目录不存在时表示发布方没有身份；读不了、不是 `{subject, secret}` 或不合法时是 [`AccountError::Storage`]。`path` 必须有文件名。
+pub fn read_published_anonymous_identity(
+    path: &Path,
+) -> Result<PublishedAnonymousIdentity, AccountError> {
+    read_published_anonymous_identity_with(path, cfg!(target_env = "ohos"))
+}
+
+/// [`read_published_anonymous_identity`] 的实现；`ohos` 为真时按鸿蒙的规则查属主和权限位（见 [`owner_is_trusted`]），测试据此在其他平台上覆盖两种规则。
+fn read_published_anonymous_identity_with(
+    path: &Path,
+    ohos: bool,
+) -> Result<PublishedAnonymousIdentity, AccountError> {
+    if path.file_name().is_none() {
+        return Err(AccountError::Invalid);
+    }
+    let missing = path.parent().is_some_and(directory_missing);
+    let identity = if missing {
+        None
+    } else {
+        read_private_json_with::<AnonymousIdentity>(path, ohos, true)?
+    };
+    if identity
+        .as_ref()
+        .is_some_and(|identity| !identity.is_valid())
+    {
+        return Err(AccountError::Storage);
+    }
+    Ok(PublishedAnonymousIdentity { identity })
+}
+
+impl PublishedAnonymousIdentity {
+    /// 采用匿名会话时，在刷新锁里、写会话之前把本地身份换成发布方的：发布方有身份就写它（与本地相同时不写）；发布方没有身份而采用的会话换了账号（本地原来没有会话、读不了，或 `user.id` 不同）时删掉本地身份，它属于另一个账号，留着的话会话失效以后会登录回那个账号；同一个账号时本地身份不动。返回写会话失败时用来还原的原值。
+    pub(super) fn follow(
+        &self,
+        directory: &Path,
+        same_account: bool,
+    ) -> Result<Option<IdentityRestore>, AccountError> {
+        let local = read_private_json::<AnonymousIdentity>(&directory.join(ANONYMOUS_ACCOUNT_FILE));
+        let target = match (&self.identity, same_account) {
+            (Some(identity), _) => Some(identity),
+            (None, true) => return Ok(None),
+            (None, false) => None,
+        };
+        match (&local, target) {
+            (Ok(Some(local)), Some(target))
+                if local.subject == target.subject && local.secret == target.secret =>
+            {
+                return Ok(None)
+            }
+            (Ok(None), None) => return Ok(None),
+            _ => {}
+        }
+        replace_identity(directory, target)?;
+        // 本地原来的身份读不了时还原不了，写会话失败时留着发布方的那份。
+        Ok(local.ok().map(|previous| IdentityRestore { previous }))
+    }
+}
+
+/// [`PublishedAnonymousIdentity::follow`] 换掉身份以后、写会话失败时把本地身份还原成原来的样子。
+pub(super) struct IdentityRestore {
+    previous: Option<AnonymousIdentity>,
+}
+
+impl IdentityRestore {
+    pub(super) fn restore(self, directory: &Path) -> Result<(), AccountError> {
+        replace_identity(directory, self.previous.as_ref())
+    }
+}
+
+/// 把 `directory` 里的身份整份换成 `identity`，`None` 是删掉。
+fn replace_identity(
+    directory: &Path,
+    identity: Option<&AnonymousIdentity>,
+) -> Result<(), AccountError> {
+    match identity {
+        Some(identity) => {
+            let bytes = serde_json::to_vec(identity).map_err(|_| AccountError::Storage)?;
+            write_private(directory, ANONYMOUS_ACCOUNT_FILE, &bytes, false).map(|_| ())
+        }
+        None => {
+            crate::storage::reject_symlink(directory).map_err(|_| AccountError::Storage)?;
+            match crate::storage::remove_private_file(&directory.join(ANONYMOUS_ACCOUNT_FILE)) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(_) => Err(AccountError::Storage),
+            }
+        }
+    }
 }
 
 /// 删除本机匿名账号名下的语音样本（`DELETE /v1/users/me/data` 的 `voice` 分区），给「删除云端数据」用：语音贡献只用匿名账号（#8201 的决定 12），登录账号的 `data_delete` 删不到它们。
@@ -352,7 +459,7 @@ where
     }
 }
 
-/// [`shared_access_token`] 读匿名会话用的存储：文件仍是 `anonymous-session.json`，但每次都重新读，刷新时持与登录会话同一把 `account-refresh.lock`。输入法进程里几个线程可能同时取令牌，每次调用又各建一个会话，不加锁时它们会拿同一个刷新令牌各刷新一次，而服务端见到用过的刷新令牌会吊销整个会话。[`ensure_anonymous_account`] 和其他宿主读写匿名会话的方式不变；host-api 按目录缓存匿名会话时也用它。
+/// [`shared_access_token`] 读匿名会话用的存储：文件仍是 `anonymous-session.json`，但每次都重新读，刷新时持与登录会话同一把 `account-refresh.lock`。输入法进程里几个线程可能同时取令牌，每次调用又各建一个会话，不加锁时它们会拿同一个刷新令牌各刷新一次，而服务端见到用过的刷新令牌会吊销整个会话。其他宿主读写匿名会话的方式不变；host-api 按目录缓存匿名会话时也用它，[`ensure_anonymous_account`] 注册后也在这把锁里保存会话，与 `session_adopt` 换身份互斥。
 pub struct LockedAnonymousSessionStorage {
     session: AnonymousSessionStorage,
     lock: FileAccountSessionStorage,
@@ -453,9 +560,9 @@ fn read_private_file(file: std::fs::File) -> Result<Vec<u8>, AccountError> {
     )
 }
 
-/// 会话文件不允许带的权限位。鸿蒙的 `@ohos.file.fs` 没有 chmod，宿主 ArkTS 代码轮换匿名会话后重写的文件按应用 umask 带属组读写位；应用沙箱里属组只有本应用，目录也已由 `prepare_directory` 收紧为 0700，所以鸿蒙上只拒绝其他用户位，其他平台仍要求文件只有属主可读写。
+/// 会话文件不允许带的权限位。鸿蒙的 `@ohos.file.fs` 没有 chmod，宿主 ArkTS 代码轮换匿名会话后重写的文件按应用 umask 带属组读写位；应用沙箱里属组只有本应用，目录也已由 `prepare_directory` 收紧为 0700，所以鸿蒙上只拒绝其他用户位，其他平台仍要求文件只有属主可读写。登录会话和云剪贴板密钥串（`file_storage` 的 `read_private`）用同一条规则：ArkTS 以前也是这样写 `account-session.json` 和 `cloud-clipboard-keystore` 的。
 #[cfg(any(unix, test))]
-fn forbidden_session_mode_bits(ohos: bool) -> u32 {
+pub(super) fn forbidden_session_mode_bits(ohos: bool) -> u32 {
     if ohos {
         0o007
     } else {
@@ -463,18 +570,53 @@ fn forbidden_session_mode_bits(ohos: bool) -> u32 {
     }
 }
 
+/// 文件的属主可不可信。本沙箱目录里的文件（`published` 为假）和鸿蒙之外的发布文件要求属主与所在目录相同。鸿蒙上另一个沙箱发布的文件（`ohos` 和 `published` 都为真）改成要求属主是本进程的有效 uid `euid`、不看所在目录：发布目录由发布方进程自己建（`SharedStateMirror.ets` 的 `ensureParent`），文件和目录本来就同一个属主，与目录相同的规则多半也能通过；改成看有效 uid，是为了连「别的 uid 先建好发布目录、再放进自己的文件」也拒收（与目录相同的规则在这种情况下会放行）。前提是设置应用和键盘是同一个应用的两个进程、有效 uid 相同，所以发布方写的文件属主就是读的这一方；真机上要核对的是两个进程的 uid，不是 data-group 目录的属主。权限位与本目录的文件同一条规则（[`forbidden_session_mode_bits`]）：发布的副本带着发布方本地文件的权限位，ArkTS 写过的是属组可读写的。
+#[cfg(any(unix, test))]
+pub(super) fn owner_is_trusted(
+    file_uid: u32,
+    directory_uid: u32,
+    euid: u32,
+    ohos: bool,
+    published: bool,
+) -> bool {
+    if ohos && published {
+        file_uid == euid
+    } else {
+        file_uid == directory_uid
+    }
+}
+
+/// 打开的私有文件按 [`forbidden_session_mode_bits`] 和 [`owner_is_trusted`] 查权限位和属主，`file_storage` 的 `read_private` 也用它。
+#[cfg(unix)]
+pub(super) fn private_file_is_trusted(
+    metadata: &std::fs::Metadata,
+    directory: &std::fs::Metadata,
+    ohos: bool,
+    published: bool,
+) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    metadata.mode() & forbidden_session_mode_bits(ohos) == 0
+        && owner_is_trusted(
+            metadata.uid(),
+            directory.uid(),
+            rustix::process::geteuid().as_raw(),
+            ohos,
+            published,
+        )
+}
+
 #[cfg(unix)]
 fn validate_opened_private_json_file(
     file: &std::fs::File,
     directory: &std::fs::File,
+    ohos: bool,
+    published: bool,
 ) -> Result<(), AccountError> {
-    use std::os::unix::fs::MetadataExt;
-
     let metadata = file.metadata().map_err(|_| AccountError::Storage)?;
     let directory_metadata = directory.metadata().map_err(|_| AccountError::Storage)?;
     if !metadata.is_file()
-        || metadata.mode() & forbidden_session_mode_bits(cfg!(target_env = "ohos")) != 0
-        || metadata.uid() != directory_metadata.uid()
+        || !private_file_is_trusted(&metadata, &directory_metadata, ohos, published)
     {
         return Err(AccountError::Storage);
     }
@@ -482,6 +624,17 @@ fn validate_opened_private_json_file(
 }
 
 fn read_private_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, AccountError> {
+    read_private_json_with(path, cfg!(target_env = "ohos"), false)
+}
+
+/// [`read_private_json`] 的实现；`published` 为真时读的是另一个沙箱发布的文件，属主按 [`owner_is_trusted`] 的发布规则查。
+fn read_private_json_with<T: DeserializeOwned>(
+    path: &Path,
+    ohos: bool,
+    published: bool,
+) -> Result<Option<T>, AccountError> {
+    #[cfg(not(unix))]
+    let _ = (ohos, published);
     let parent = path.parent().ok_or(AccountError::Storage)?;
     #[cfg(unix)]
     let name = path.file_name().ok_or(AccountError::Storage)?;
@@ -495,7 +648,7 @@ fn read_private_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, Acco
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(AccountError::Storage),
         };
-        validate_opened_private_json_file(&file, &directory)?;
+        validate_opened_private_json_file(&file, &directory, ohos, published)?;
         read_private_file(file)?
     };
     #[cfg(not(unix))]
@@ -583,11 +736,15 @@ mod tests {
     }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    type DuringLogin = Box<dyn FnOnce() + Send>;
+
     #[derive(Clone, Default)]
     struct RegisteringApi {
         challenges: Arc<Mutex<Vec<(String, String)>>>,
         logins: Arc<Mutex<Vec<(String, String)>>>,
         failures: Arc<AtomicUsize>,
+        /// 登录请求在路上时（令牌还没交回）做的事，模拟同一个目录里并发的 `session_adopt`。
+        during_login: Arc<Mutex<Option<DuringLogin>>>,
     }
 
     impl AccountApi for RegisteringApi {
@@ -619,6 +776,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((challenge.into(), credential.into()));
+            if let Some(during) = self.during_login.lock().unwrap().take() {
+                during();
+            }
             Ok(AccountTokens {
                 access_token: "a".repeat(64),
                 refresh_token: "b".repeat(64),
@@ -693,6 +853,51 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o077, 0, "{name} is readable by others");
         }
+    }
+
+    /// 注册的登录请求在路上时，`session_adopt` 在同一把锁里把身份连同会话换成了另一个匿名账号 K（鸿蒙设置应用采用键盘注册的那个）：登录回来以后不再写自己的会话，本地仍是 K 的会话和 K 的身份，而不是这一次登录的会话、K 的身份。
+    #[test]
+    fn a_registration_does_not_overwrite_a_session_adopted_with_its_identity_meanwhile() {
+        let root = tempfile::tempdir().unwrap();
+        let (local, keyboard) = (root.path().join("settings"), root.path().join("keyboard"));
+        let published = AnonymousIdentity::generate();
+        let bytes = serde_json::to_vec(&published).unwrap();
+        assert!(write_private(&keyboard, ANONYMOUS_ACCOUNT_FILE, &bytes, true).unwrap());
+        let mut adopted = anonymous_session('e', 'f');
+        adopted.tokens.user.id = "msime-keyboard00000000".into();
+        let api = RegisteringApi::default();
+        let (directory, identity_path, session) = (
+            local.clone(),
+            keyboard.join(ANONYMOUS_ACCOUNT_FILE),
+            adopted.clone(),
+        );
+        *api.during_login.lock().unwrap() = Some(Box::new(move || {
+            let identity = read_published_anonymous_identity(&identity_path).unwrap();
+            let outcome = BackendAccountSession::new(
+                RegisteringApi::default(),
+                LockedAnonymousSessionStorage::new(&directory),
+            )
+            .adopt_anonymous_session_with_identity(
+                Some(session),
+                SessionAdoptSource::Keyboard,
+                &directory,
+                &identity,
+            );
+            assert_eq!(outcome, Ok(SessionAdoptOutcome::Adopted));
+        }));
+
+        ensure_anonymous_account_with(api.clone(), &local).unwrap();
+
+        assert_eq!(api.logins.lock().unwrap().len(), 1);
+        let saved = AnonymousSessionStorage::new(&local)
+            .load()
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.tokens.user.id, "msime-keyboard00000000");
+        let identity: AnonymousIdentity =
+            serde_json::from_slice(&std::fs::read(local.join(ANONYMOUS_ACCOUNT_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(identity.subject, published.subject);
     }
 
     #[test]
@@ -1169,10 +1374,10 @@ mod tests {
             std::ffi::OsStr::new(ANONYMOUS_ACCOUNT_FILE),
         )
         .unwrap();
-        assert!(validate_opened_private_json_file(&file, &parent).is_ok());
+        assert!(validate_opened_private_json_file(&file, &parent, false, false).is_ok());
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(validate_opened_private_json_file(&file, &parent).is_err());
+        assert!(validate_opened_private_json_file(&file, &parent, false, false).is_err());
     }
 
     #[cfg(unix)]
@@ -1210,5 +1415,62 @@ mod tests {
             Some(AccountError::Storage)
         );
         assert_eq!(std::fs::read(&target).unwrap(), br#"{}"#);
+    }
+
+    /// 两条属主规则。本沙箱的文件和鸿蒙之外的发布文件：与所在目录同一个属主。鸿蒙上的发布文件：是本进程的有效 uid，所在目录是谁的都不管，别的 uid 的文件不认，连它先建好目录、再放进自己的文件也不认。
+    #[test]
+    fn published_files_on_harmony_must_belong_to_the_reader_and_others_to_their_directory() {
+        let (me, owner, other) = (20_010_001, 3_000, 20_010_099);
+        for ohos in [false, true] {
+            assert!(owner_is_trusted(owner, owner, me, ohos, false));
+            assert!(!owner_is_trusted(me, owner, me, ohos, false));
+        }
+        assert!(owner_is_trusted(owner, owner, me, false, true));
+        assert!(!owner_is_trusted(me, owner, me, false, true));
+        assert!(owner_is_trusted(me, owner, me, true, true));
+        assert!(owner_is_trusted(me, me, me, true, true));
+        assert!(!owner_is_trusted(other, owner, me, true, true));
+        assert!(!owner_is_trusted(other, other, me, true, true));
+    }
+
+    /// 发布的身份文件与发布的会话文件同一条规则：鸿蒙上自己写在别人目录里的照样读，其他平台拒收。用 root 的 `/tmp`（macOS 上是 `/private/tmp`）造出这种目录；以 root 运行时造不出来，没有 `/tmp` 的系统（Android 15 以前，API 28 的设备单测就是这样）也造不出来，都什么也不查。
+    #[cfg(unix)]
+    #[test]
+    fn harmony_reads_a_published_identity_it_owns_in_a_directory_owned_by_someone_else() {
+        use std::io::Write as _;
+        use std::os::unix::fs::MetadataExt;
+
+        let shared = if cfg!(target_vendor = "apple") {
+            Path::new("/private/tmp")
+        } else {
+            Path::new("/tmp")
+        };
+        if !shared.is_dir() {
+            return;
+        }
+        let mut file = tempfile::Builder::new()
+            .prefix("msime-synthetic-identity-")
+            .tempfile_in(shared)
+            .unwrap();
+        if file.as_file().metadata().unwrap().uid() == std::fs::metadata(shared).unwrap().uid() {
+            return;
+        }
+        let subject = format!("msime-{}", "p".repeat(16));
+        write!(
+            file,
+            r#"{{"subject":"{subject}","secret":"{}"}}"#,
+            "p".repeat(48)
+        )
+        .unwrap();
+        file.as_file().sync_all().unwrap();
+        let published = read_published_anonymous_identity_with(file.path(), true).unwrap();
+        assert_eq!(
+            published.identity.map(|identity| identity.subject),
+            Some(subject)
+        );
+        assert_eq!(
+            read_published_anonymous_identity_with(file.path(), false).err(),
+            Some(AccountError::Storage)
+        );
     }
 }

@@ -1,0 +1,223 @@
+{
+  "exit_code": 101,
+  "seconds": 17.94616708403919,
+  "records": [
+    {
+      "elapsed_seconds": 0.082,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 7,
+      "load_1m": 38.150390625
+    },
+    {
+      "elapsed_seconds": 0.627,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 6,
+      "load_1m": 39.17919921875
+    },
+    {
+      "elapsed_seconds": 1.195,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 8,
+      "load_1m": 39.17919921875
+    },
+    {
+      "elapsed_seconds": 1.776,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 8,
+      "load_1m": 39.17919921875
+    },
+    {
+      "elapsed_seconds": 2.356,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 8,
+      "load_1m": 39.17919921875
+    },
+    {
+      "elapsed_seconds": 2.939,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 6,
+      "load_1m": 39.17919921875
+    },
+    {
+      "elapsed_seconds": 3.549,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 8,
+      "load_1m": 39.17919921875
+    },
+    {
+      "elapsed_seconds": 4.118,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 8,
+      "load_1m": 39.17919921875
+    },
+    {
+      "elapsed_seconds": 4.675,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 8,
+      "load_1m": 39.17919921875
+    },
+    {
+      "elapsed_seconds": 5.245,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 8,
+      "load_1m": 42.36767578125
+    },
+    {
+      "elapsed_seconds": 5.826,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 8,
+      "load_1m": 42.36767578125
+    },
+    {
+      "elapsed_seconds": 6.407,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 8,
+      "load_1m": 42.36767578125
+    },
+    {
+      "elapsed_seconds": 6.972,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 8,
+      "load_1m": 42.36767578125
+    },
+    {
+      "elapsed_seconds": 7.526,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 7,
+      "load_1m": 42.36767578125
+    },
+    {
+      "elapsed_seconds": 8.081,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 6,
+      "load_1m": 42.36767578125
+    },
+    {
+      "elapsed_seconds": 8.659,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 6,
+      "load_1m": 42.36767578125
+    },
+    {
+      "elapsed_seconds": 9.264,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 8,
+      "load_1m": 42.36767578125
+    },
+    {
+      "elapsed_seconds": 9.825,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 8,
+      "load_1m": 42.36767578125
+    },
+    {
+      "elapsed_seconds": 10.4,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 8,
+      "load_1m": 42.498046875
+    },
+    {
+      "elapsed_seconds": 10.977,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 6,
+      "load_1m": 42.498046875
+    },
+    {
+      "elapsed_seconds": 11.592,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 6,
+      "load_1m": 42.498046875
+    },
+    {
+      "elapsed_seconds": 12.191,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 3,
+      "load_1m": 42.498046875
+    },
+    {
+      "elapsed_seconds": 12.78,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 6,
+      "load_1m": 42.498046875
+    },
+    {
+      "elapsed_seconds": 13.358,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 4,
+      "load_1m": 42.498046875
+    },
+    {
+      "elapsed_seconds": 13.956,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 8,
+      "load_1m": 42.498046875
+    },
+    {
+      "elapsed_seconds": 14.561,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 4,
+      "load_1m": 42.498046875
+    },
+    {
+      "elapsed_seconds": 15.153,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 8,
+      "load_1m": 49.4248046875
+    },
+    {
+      "elapsed_seconds": 15.724,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 6,
+      "load_1m": 49.4248046875
+    },
+    {
+      "elapsed_seconds": 16.304,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 6,
+      "load_1m": 49.4248046875
+    },
+    {
+      "elapsed_seconds": 16.876,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 5,
+      "load_1m": 49.4248046875
+    },
+    {
+      "elapsed_seconds": 17.445,
+      "rustc": 0,
+      "cargo": 0,
+      "clang": 8,
+      "load_1m": 49.4248046875
+    }
+  ]
+}

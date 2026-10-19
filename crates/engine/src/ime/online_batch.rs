@@ -101,6 +101,20 @@ pub fn replace_online_candidate_batch(
     true
 }
 
+/// 已有缓存页直接更新；成功后收紧外层存储，避免历史大批次的富余槽长期留存。
+pub(crate) fn replace_cached_online_candidate_batch(
+    list: &mut Vec<WordItem>,
+    key: &str,
+    words: &[String],
+    source: CandidateSource,
+) -> bool {
+    let changed = replace_online_candidate_batch(list, key, words, source);
+    if changed {
+        list.shrink_to_fit();
+    }
+    changed
+}
+
 fn unique_online_words(
     words: &[String],
     quota: usize,

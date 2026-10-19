@@ -51,7 +51,7 @@ export class SharedStateSync {
           }
           return SharedStateSync.adoptKeyboardStatistics(stateDirectory, text) ? 'handled' : 'retry';
         }
-        return 'copy';
+        return SharedStateSync.accountFileDecision(name);
       },
     };
     const imported: string[] = mirror.importFrom('keyboard', KEYBOARD_ENTRIES, true, handlers);
@@ -59,6 +59,13 @@ export class SharedStateSync {
       KeyboardLog.info(`shared state imported from the keyboard: ${imported.join(', ')}`);
     }
     return imported;
+  }
+
+  /**
+   * 两份会话和匿名账号的身份不经文件复制导入：Rust 的 `session_adopt` 在本沙箱的 `account-refresh.lock` 里按 user.id 和 expires_at 决定要不要采用（`AccountSessionAdoption`，迁移差异 M5），整份覆盖会把轮换后的令牌换回用过的那枚，或者让键盘的旧副本撤销设置应用里的换号。身份随匿名会话一起采用，会话和身份始终属于同一个匿名账号（迁移差异 M40）。发布方删掉了会话或身份时也不在这里删本地文件，是否跟着清掉同样由 Rust 决定。规则在 `SharedStateMirrorPolicy.importDecision`。
+   */
+  static accountFileDecision(name: string): ImportDecision {
+    return SharedStateMirrorPolicy.importDecision(name);
   }
 
   /** 设置应用一侧：发布设置应用管的那些条目。改完设置之后和窗口退到后台时调用。 */
@@ -90,7 +97,7 @@ export class SharedStateSync {
         if (name === 'statistics-switch') {
           return SharedStateSync.applyStatisticsSwitch(stateDirectory, text) ? 'copy' : 'retry';
         }
-        return 'copy';
+        return SharedStateSync.accountFileDecision(name);
       },
     };
     const imported: string[] = mirror.importFrom('settings', SETTINGS_ENTRIES, fullMode, handlers);

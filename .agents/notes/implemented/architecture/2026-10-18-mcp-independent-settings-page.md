@@ -6,6 +6,8 @@ Status: implemented
 
 MCP 连接以前挂在「维护与诊断」下，页面说明也把它主要描述成读取诊断日志的工具。MCP 实际还可以在用户授权后管理快捷短语和设置、制作候选窗口皮肤、读取词库与打字统计，因此把入口放在维护分组会误导用户，也让社区皮肤页无法给出清晰的使用路径。导航注册表、共享宿主路由和 Windows 原生设置还必须对同一个页面身份保持一致。
 
+桌面独立侧栏决定由[AI 功能共用导航入口](../simplification/2026-10-19-ai-settings-top-tabs.md)部分取代：桌面现在从「AI → 连接助手」进入，`mcp` 路由、能力与权限边界保留，触屏仍独立。
+
 ## Decision
 
 MCP 使用独立的 `mcp` 设置路由，在桌面和触屏宿主都显示为「AI 助手」（触屏页面标题为「连接 AI 助手」），归入「工具」分组。`SettingsCategory::Mcp` 加入 `client-core` 的共享路由词汇表，Windows 原生设置把它作为工具组中的独立页面；「维护与诊断」只保留输入法服务、诊断日志、数据目录和卸载等维护操作。
@@ -29,5 +31,7 @@ MCP 使用独立的 `mcp` 设置路由，在桌面和触屏宿主都显示为「
 - 维护页更短，Windows 原生设置侧栏从 16 页变为 17 页；Windows 的 MCP 页面仍使用既有 host-api 安装与状态接口。
 
 ## Verification
+
+页面的连接分组在宿主状态加载前就存在，`settingsFormReady` 也只代表设置表单可用。命令测试共用的 `mcpGroup` 因此等待分组内的「Claude Code」标签出现后才返回，避免把空分组当成连接内容已就绪。CI 曾在移除命令测试中读到只有说明的分组；既有命令与交互断言保持不变。不使用固定延时或扩大超时，它们不能证明状态已经填入。[MCP 宿主状态刷新](../bug-fix/2026-10-14-mcp-load-owner-refresh.md)仍持有生产组件的请求所有者与代次规则，本项只修正测试等待条件。
 
 `cargo test -p msime-client-core host_surface` 覆盖 `settings:mcp` 的解析和全部路由往返；共享设置的 MCP 连接、页面投影和社区皮肤测试通过，TypeScript 类型检查、格式检查和 `git diff --check` 通过。Windows `settings_navigation` 独立编译运行通过；macOS 设置路由覆盖脚本确认 `mcp` 已由共享路由类别覆盖，不再列为未路由页面。笔记门禁使用 `pnpm run verify-notes`。

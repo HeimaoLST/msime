@@ -91,3 +91,7 @@ Status: implemented
 ## Allocation test isolation
 
 [九键分配隔离](2026-10-17-nine-key-allocation-isolation.md)在两个精确预算测试外增加单目标子进程，排除其他并行测试推进日志与个人模型 generation 的干扰。完整原测试体、冷热形状和全部预算保留；子进程内部受控失效仍报红，不改本篇生产决定。
+
+全拒绝借用页延后申请的[后续实验](../../rejected/testing/2026-10-18-nine-key-empty-projection.md)未通过事前性能门槛，生产入口仍保持完整页预留规则。
+
+相关：[九键前页去重索引](2026-10-19-nine-key-leading-index.md)从候选下标恢复同词查询，继续遵守本篇热页投影与同页不更新表的边界。

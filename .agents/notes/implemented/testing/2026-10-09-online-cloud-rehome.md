@@ -10,6 +10,8 @@ Status: implemented
 
 云候选更新改为在原向量上稳定移除 AI 行，把最多协议配额内的 AI `WordItem` 暂存于栈上固定数组，追加回原向量后用切片旋转放到第二槽。超出协议配额的历史异常列表保留原有 `partition` 回退路径。
 
+缓存页外层由[在线缓存原地更新](2026-10-19-online-cache-in-place.md)直接借用，成功回写后单独缩容；本篇的批次函数自身仍保持容量与顺序契约。
+
 ## Alternatives considered
 
 - **继续 `partition` 加 `splice`**：逻辑直观，但每次云更新都创建临时向量并搬移整个列表。

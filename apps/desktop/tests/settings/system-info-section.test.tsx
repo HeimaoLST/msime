@@ -79,6 +79,25 @@ test("names the edition next to the version when it is not full", () => {
   ).toEqual({ label: "应用版本", value: "v0.11.0（水杉五笔）" });
 });
 
+test("writes the release date after the version, after the edition name when there is one", () => {
+  expect(systemInfoEntries({ appVersion: "0.11.0", releaseDate: "2026-10-19" })[0]).toEqual({
+    label: "应用版本",
+    value: "v0.11.0（2026-10-19 发布）",
+  });
+  expect(
+    systemInfoEntries({
+      appVersion: "0.11.0",
+      releaseDate: "2026-10-19",
+      host: { platform: "linux", edition: { display_name: "水杉五笔" } },
+    })[0],
+  ).toEqual({ label: "应用版本", value: "v0.11.0（水杉五笔，2026-10-19 发布）" });
+  // 不知道发布日期时与之前一样只写版本号。
+  expect(systemInfoEntries({ appVersion: "0.11.0", releaseDate: "" })[0]).toEqual({
+    label: "应用版本",
+    value: "v0.11.0",
+  });
+});
+
 const initial: Snapshot = {
   format_version: 1,
   revision: 1,
@@ -125,6 +144,30 @@ test("the 关于 page shows the 系统信息 group and its 复制 button copies 
   expect(copied).toContain("输入法框架：IBus");
   expect(copied).toContain("应用版本：v0.11.0");
   expect(await within(group).findByText("已复制")).toBeTruthy();
+});
+
+test("the 系统信息 group and its copy carry the release date the host reports", async () => {
+  const copyText = vi.fn().mockResolvedValue(undefined);
+  render(
+    <SettingsPage
+      initialPage="about"
+      client={{
+        load: vi.fn().mockResolvedValue(initial),
+        save: vi.fn(),
+        readAppVersion: vi.fn().mockResolvedValue("0.11.0"),
+        readAppReleaseDate: vi.fn().mockResolvedValue("2026-10-19"),
+        copyText,
+        host: testHost(linuxHost),
+      }}
+    />,
+  );
+  const about = await screen.findByRole("group", { name: "关于" });
+  fireEvent.click(within(about).getByRole("tab", { name: "系统信息" }));
+  const group = within(about).getByRole("region", { name: "系统信息" });
+  expect(await within(group).findByText("v0.11.0（2026-10-19 发布）")).toBeTruthy();
+  fireEvent.click(within(group).getByRole("button", { name: "复制系统信息" }));
+  await waitFor(() => expect(copyText).toHaveBeenCalledTimes(1));
+  expect(copyText.mock.calls[0][0]).toContain("应用版本：v0.11.0（2026-10-19 发布）");
 });
 
 test("without a clipboard the fields are still listed but there is no 复制 button", async () => {

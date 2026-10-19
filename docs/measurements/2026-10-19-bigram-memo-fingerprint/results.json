@@ -1,0 +1,79 @@
+{
+  "baseline": "2cb3eb0a9f3799019d2859a5cf034d31b2f0fd45",
+  "toolchain": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "target": "aarch64-apple-darwin",
+  "capture": {
+    "example": "rerank_latency",
+    "grid": "nine",
+    "cases": 81,
+    "keystrokes_per_arm": 1791,
+    "warmup_cases": 5,
+    "selected_memo": "first observed BigramMemo object, unchanged table",
+    "capture_exit": 1,
+    "exit_reason": "16ms budget exceeded; instrumented timings are not evidence",
+    "binary_sha256": "cf6d23e08860ba55ca2b23f184c5ee53c3bac29db919a6af1df0ba6de3e69ca7",
+    "trace_size": 886373920,
+    "trace_count": 110796740,
+    "trace_sha256": "8418ce8a4f555dfe06631113c0a648e36abae74d283b9067e6050245dcb53258"
+  },
+  "resources": {
+    "generation": "7356c4a452d8ba15475c0e57f134fccf7b7cbe267440461541c74d09b11b6ffe",
+    "source_commit": "128a332cabc5fa42b1cf5f827033ad5697ff528b",
+    "lock_sha256": "d265c50c2ab19ddaa3eca0060fa8f013988d22df2cff703b1bdbe5455eb7cd8d",
+    "eval_sha256": "b21fd929d6bfac057897620e384742018019a14c21aebd716f04f60bb819282f"
+  },
+  "diagnostic_binary_sha256": "53f5efd42641c3c73abfaff07292ea4de0705e3e468611c7872a8c44631c82f4",
+  "runs": [
+    {
+      "mixed": false,
+      "calls": 110796740,
+      "hits": 94315035,
+      "misses": 16481705,
+      "clears": 502,
+      "comparisons": 94740603,
+      "false_matches": 425568,
+      "digest": 6341175403596618636,
+      "maximum_capacity": 57344
+    },
+    {
+      "mixed": true,
+      "calls": 110796740,
+      "hits": 94315035,
+      "misses": 16481705,
+      "clears": 502,
+      "comparisons": 94735156,
+      "false_matches": 420121,
+      "digest": 6341175403596618636,
+      "maximum_capacity": 57344
+    },
+    {
+      "comparison_reduction_gate": false
+    }
+  ],
+  "comparison_reduction_fraction": 5.749382870193469e-05,
+  "false_match_reduction_fraction": 0.012799364613880744,
+  "predeclared_reduction_fraction": 0.1,
+  "measurement": "counts only; no CPU timing or product change",
+  "artifacts": {
+    "diagnostic.rs.txt": "3024671238617a6bd49aa0f80900e525f35a87a1dbf9fdd68787ea62a9f11700",
+    "recorder.diff.txt": "ef1e43f86b9acfb7ea7c215e139accd82e9c9d611044085a2ec49f7ac1eb734e"
+  },
+  "verification": {
+    "production_decode_restored": true,
+    "independent_read_only_review": "no blocking findings",
+    "notes_exit": 0,
+    "diff_check_exit": 0,
+    "quick_exit": 0,
+    "quick_coverage": [
+      "repository contracts",
+      "1418 active notes and 4 archived seals",
+      "Rust workspace check excluding unavailable msime-desktop bundle",
+      "shared Apple bridge build"
+    ],
+    "quick_skipped": [
+      "actionlint: scope",
+      "platform phases: scope",
+      "msime-desktop: native bundle unavailable"
+    ]
+  }
+}

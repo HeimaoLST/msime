@@ -1,0 +1,1006 @@
+diff --git a/crates/engine/src/lattice/decode.rs b/crates/engine/src/lattice/decode.rs
+index b8256c6a27..756ea702ee 100644
+--- a/crates/engine/src/lattice/decode.rs
++++ b/crates/engine/src/lattice/decode.rs
+@@ -6,6 +6,7 @@
+ //!
+ //! A trigram cannot be searched the same way without carrying two words of history in every beam entry, so it is applied after the search: the n best paths are rescored with what the third word adds over the second, then reordered. That is the reason to decode more paths than are shown.
+
++use std::borrow::Cow;
+ use std::cell::RefCell;
+ use std::collections::{hash_map::Entry, HashMap, HashSet};
+ use std::hash::{BuildHasherDefault, Hasher};
+@@ -325,16 +326,16 @@ pub fn decode_typo_sentence(
+     )
+ }
+
+-pub(super) struct Edge {
++pub(super) struct Edge<S = String> {
+     end: usize,
+-    word: String,
+-    key: String,
++    word: S,
++    key: S,
+     log_prob: f64,
+     typo: bool,
+ }
+
+-/// Edges by start column.
+-pub(super) type Graph = Vec<Vec<Edge>>;
++/// 按起始列保存图边；拥有型查询沿用默认字符串，稳定缓存页可借用字段。
++pub(super) type Graph<S = String> = Vec<Vec<Edge<S>>>;
+
+ /// WL:110-148.
+ pub(super) fn build_graph(
+@@ -409,15 +410,15 @@ pub(super) fn build_graph(
+     graph
+ }
+
+-/// 与 `build_graph` 相同，但查询行只读借用调用方缓存；图边仍取得自己的字段所有权。
++/// 与 `build_graph` 相同，但显式字段借用调用方缓存，隐式跨度键由图持有。
+ pub(super) fn build_graph_borrowed<'rows>(
+     syllables: &[String],
+     lookup: &mut impl FnMut(&[String]) -> &'rows [LatticeLexeme],
+     options: &LatticeOptions<'_>,
+-) -> Graph {
++) -> Graph<Cow<'rows, str>> {
+     let n = syllables.len();
+     let max_len = options.max_phrase_syllables.max(1);
+-    let mut graph: Graph = (0..n).map(|_| Vec::new()).collect();
++    let mut graph: Graph<Cow<'rows, str>> = (0..n).map(|_| Vec::new()).collect();
+     struct CachedSpan {
+         column: usize,
+         edges: std::ops::Range<usize>,
+@@ -458,11 +459,11 @@ pub(super) fn build_graph_borrowed<'rows>(
+                         }
+                         edges.push(Edge {
+                             end,
+-                            word: row.value.clone(),
++                            word: Cow::Borrowed(row.value.as_str()),
+                             key: if row.key.is_empty() {
+-                                span_key.get_or_insert_with(|| span.join("'")).clone()
++                                Cow::Owned(span_key.get_or_insert_with(|| span.join("'")).clone())
+                             } else {
+-                                row.key.clone()
++                                Cow::Borrowed(row.key.as_str())
+                             },
+                             log_prob: edge_log_prob(row.weight, end - start, options),
+                             typo: false,
+@@ -480,28 +481,36 @@ pub(super) fn build_graph_borrowed<'rows>(
+     graph
+ }
+
+-struct BeamColumn<'g> {
+-    hyps: Vec<Hyp<'g>>,
++struct BeamColumn<'g, S = String> {
++    hyps: Vec<Hyp<'g, S>>,
+     streamed: bool,
+ }
+
+-#[derive(Clone, Copy)]
+-struct Hyp<'g> {
++struct Hyp<'g, S = String> {
+     score: f64,
+     /// 前驱假设的列号与行号；起点填 `(0, 0)`，只有 `edge` 非空时才可回溯。
+     prev: (usize, usize),
+     /// 到达本假设的图边；仅起点为 `None`，同时表示没有前驱。
+-    edge: Option<&'g Edge>,
++    edge: Option<&'g Edge<S>>,
+     typo_edges: usize,
+ }
+
++// 假设只复制图边引用，字段存储本身不必实现 Copy 或 Clone。
++impl<S> Copy for Hyp<'_, S> {}
++
++impl<S> Clone for Hyp<'_, S> {
++    fn clone(&self) -> Self {
++        *self
++    }
++}
++
+ /// The C++ comparator of both beam sorts (WL:106, WL:447).
+-fn scores_higher(a: &Hyp<'_>, b: &Hyp<'_>) -> bool {
++fn scores_higher<S>(a: &Hyp<'_, S>, b: &Hyp<'_, S>) -> bool {
+     a.score > b.score
+ }
+
+ /// Keeps the best `beam` hypotheses with libc++'s `partial_sort`, whose heap selection decides which of several tied hypotheses survive and in what order (WL:101-108).
+-fn keep_beam(column: &mut Vec<Hyp<'_>>, beam: usize) {
++fn keep_beam<S>(column: &mut Vec<Hyp<'_, S>>, beam: usize) {
+     if column.len() <= beam {
+         return;
+     }
+@@ -510,7 +519,7 @@ fn keep_beam(column: &mut Vec<Hyp<'_>>, beam: usize) {
+ }
+
+ /// 按前向图累计各列在剪枝前可能收到的假设上界；源列剪枝后最多保留 `beam` 条。
+-fn column_capacities(graph: &Graph, extra: Option<&Graph>, beam: usize) -> Vec<usize> {
++fn column_capacities<S>(graph: &Graph<S>, extra: Option<&Graph<S>>, beam: usize) -> Vec<usize> {
+     let mut capacities = vec![0usize; graph.len() + 1];
+     capacities[0] = 1;
+     for (start, edges) in graph.iter().enumerate() {
+@@ -555,23 +564,23 @@ fn personal_transition(
+ const SMALL_BIGRAM_ROWS: usize = 8;
+
+ /// WL:385-485. `extra` holds more edges per column searched as if they were part of `graph`, so the typo decode adds edges without copying the literal graph.
+-pub(super) fn decode_graph(
+-    graph: &Graph,
++pub(super) fn decode_graph<S: AsRef<str>>(
++    graph: &Graph<S>,
+     options: &LatticeOptions<'_>,
+-    extra: Option<&Graph>,
++    extra: Option<&Graph<S>>,
+ ) -> Vec<SentencePath> {
+     // 常见预算与非末列一致，单独实例化以保留展开循环的固定束宽。
+     if options.nbest > options.beam {
+-        decode_graph_with_terminal::<true>(graph, options, extra)
++        decode_graph_with_terminal::<true, S>(graph, options, extra)
+     } else {
+-        decode_graph_with_terminal::<false>(graph, options, extra)
++        decode_graph_with_terminal::<false, S>(graph, options, extra)
+     }
+ }
+
+-fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
+-    graph: &Graph,
++fn decode_graph_with_terminal<const WIDE_TERMINAL: bool, S: AsRef<str>>(
++    graph: &Graph<S>,
+     options: &LatticeOptions<'_>,
+-    extra: Option<&Graph>,
++    extra: Option<&Graph<S>>,
+ ) -> Vec<SentencePath> {
+     let n = graph.len();
+     let personal = active_personal(options);
+@@ -585,7 +594,7 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
+         options.beam
+     };
+     // 各列先按入列上界决定是否流式选择；末列使用最终结果预算。
+-    let mut columns: Vec<BeamColumn<'_>> = capacities
++    let mut columns: Vec<BeamColumn<'_, S>> = capacities
+         .into_iter()
+         .enumerate()
+         .map(|(position, capacity)| {
+@@ -632,7 +641,7 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
+         let outgoing = literal.iter().chain(extra_edges.iter());
+         for (index, hyp) in current.iter().enumerate() {
+             // Column 0 has no predecessor, so the start token carries what the corpus knows about how sentences open; every later column uses the word the hypothesis arrived on.
+-            let previous = hyp.edge.map_or(SENTENCE_START, |edge| edge.word.as_str());
++            let previous = hyp.edge.map_or(SENTENCE_START, |edge| edge.word.as_ref());
+             let bonuses = bigram_table.map(|table| {
+                 let cached_row = if used_bigram_rows <= SMALL_BIGRAM_ROWS {
+                     small_bigram_row_words[..used_bigram_rows]
+@@ -658,12 +667,12 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
+                         Some(memo) => scores.extend(
+                             outgoing
+                                 .clone()
+-                                .map(|edge| memo.score(table, previous, &edge.word)),
++                                .map(|edge| memo.score(table, previous, edge.word.as_ref())),
+                         ),
+                         None => scores.extend(
+                             outgoing
+                                 .clone()
+-                                .map(|edge| table.bigram(previous, &edge.word)),
++                                .map(|edge| table.bigram(previous, edge.word.as_ref())),
+                         ),
+                     }
+                     used_bigram_rows += 1;
+@@ -690,7 +699,7 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
+             let context = personal.map(|personal| {
+                 let earlier = match hyp.prev {
+                     (column, at) if column > 0 => {
+-                        done[column].hyps[at].edge.map(|edge| edge.word.as_str())
++                        done[column].hyps[at].edge.map(|edge| edge.word.as_ref())
+                     }
+                     _ => None,
+                 };
+@@ -708,7 +717,7 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
+                         score += personal_transition(
+                             personal,
+                             context,
+-                            &edge.word,
++                            edge.word.as_ref(),
+                             static_bonus,
+                             options,
+                         );
+@@ -768,9 +777,10 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
+             cursor = Some(&columns[column].hyps[at]);
+         }
+         trace.reverse();
+-        let mut sentence = String::with_capacity(trace.iter().map(|edge| edge.word.len()).sum());
++        let mut sentence =
++            String::with_capacity(trace.iter().map(|edge| edge.word.as_ref().len()).sum());
+         for edge in &trace {
+-            sentence.push_str(&edge.word);
++            sentence.push_str(edge.word.as_ref());
+         }
+         if sentence.is_empty()
+             || (inline_unique && paths.iter().any(|path| path.sentence == sentence))
+@@ -780,14 +790,18 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
+         // 保留的路径才复制拥有词；按边数连接读音，空读音也保留原分隔符。
+         let mut words = Vec::with_capacity(n);
+         let mut key = String::with_capacity(
+-            trace.iter().map(|edge| edge.key.len()).sum::<usize>() + trace.len().saturating_sub(1),
++            trace
++                .iter()
++                .map(|edge| edge.key.as_ref().len())
++                .sum::<usize>()
++                + trace.len().saturating_sub(1),
+         );
+         for (index, edge) in trace.iter().enumerate() {
+-            words.push(edge.word.clone());
++            words.push(edge.word.as_ref().to_owned());
+             if index != 0 {
+                 key.push('\'');
+             }
+-            key.push_str(&edge.key);
++            key.push_str(edge.key.as_ref());
+         }
+         paths.push(SentencePath {
+             sentence,
+@@ -881,8 +895,8 @@ fn rescore_with_trigram(paths: &mut [SentencePath], options: &LatticeOptions<'_>
+ }
+
+ /// WL:490-525. Typo edges keep the literal edge scale minus their penalty, so the comparison with the literal sentence is on the same terms as everything else in the decode.
+-pub(super) fn decode_typo_on_graph(
+-    graph: &Graph,
++pub(super) fn decode_typo_on_graph<S: AsRef<str> + From<String>>(
++    graph: &Graph<S>,
+     options: &LatticeOptions<'_>,
+     literal_best: &SentencePath,
+     edges: &[TypoEdge],
+@@ -894,7 +908,7 @@ pub(super) fn decode_typo_on_graph(
+             capacities[typo.start] = capacities[typo.start].saturating_add(1);
+         }
+     }
+-    let mut extra: Graph = capacities.into_iter().map(Vec::with_capacity).collect();
++    let mut extra: Graph<S> = capacities.into_iter().map(Vec::with_capacity).collect();
+     let mut any = false;
+     for typo in edges {
+         if typo.start >= typo.end || typo.end > n || typo.value.is_empty() {
+@@ -902,8 +916,8 @@ pub(super) fn decode_typo_on_graph(
+         }
+         extra[typo.start].push(Edge {
+             end: typo.end,
+-            word: typo.value.clone(),
+-            key: typo.key.clone(),
++            word: typo.value.clone().into(),
++            key: typo.key.clone().into(),
+             log_prob: edge_log_prob(typo.weight, typo.end - typo.start, options) - typo.penalty,
+             typo: true,
+         });
+@@ -1120,7 +1134,7 @@ pub(super) mod tests {
+
+     #[test]
+     fn decode_without_bigram_does_not_allocate_bigram_rows() {
+-        let graph = vec![Vec::new()];
++        let graph: Graph = vec![Vec::new()];
+         let options = LatticeOptions::default();
+         let (paths, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+             decode_graph(&graph, &options, None)
+@@ -1736,3 +1750,7 @@ mod constrained_tests;
+ #[cfg(test)]
+ #[path = "decode_row_index_tests.rs"]
+ mod row_index_tests;
++
++#[cfg(test)]
++#[path = "graph_borrowed_fields_tests.rs"]
++mod borrowed_fields_tests;
+diff --git a/crates/engine/src/lattice/merge.rs b/crates/engine/src/lattice/merge.rs
+index 251e722656..3e9342cb94 100644
+--- a/crates/engine/src/lattice/merge.rs
++++ b/crates/engine/src/lattice/merge.rs
+@@ -45,7 +45,7 @@ pub fn merge_lattice_candidates(
+     )
+ }
+
+-/// 词典缓存行在建图期间保持借用，避免缓存命中先复制整页行再复制图边字段。
++/// 词典缓存字段借用至本次同步解码结束，输出候选取得独立字段所有权。
+ #[allow(clippy::too_many_arguments)]
+ pub(crate) fn merge_lattice_candidates_borrowed<'rows>(
+     candidates: &mut Vec<WordItem>,
+@@ -74,7 +74,7 @@ pub(crate) fn merge_lattice_candidates_borrowed<'rows>(
+ }
+
+ #[allow(clippy::too_many_arguments)]
+-fn merge_lattice_graph(
++fn merge_lattice_graph<S: AsRef<str> + From<String>>(
+     candidates: &mut Vec<WordItem>,
+     syllables: &[String],
+     typed_pinyin: &str,
+@@ -82,7 +82,7 @@ fn merge_lattice_graph(
+     typo_source: Option<&mut TypoEdgeSource<'_>>,
+     rerankers: &mut [NeuralReranker],
+     rescoring_context: &str,
+-    graph: super::decode::Graph,
++    graph: super::decode::Graph<S>,
+ ) -> Option<TypoSentence> {
+     let mut paths = decode_graph(&graph, options, None);
+     if paths.is_empty() {
+diff --git a/crates/engine/src/lattice/graph_borrowed_fields_tests.rs b/crates/engine/src/lattice/graph_borrowed_fields_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/engine/src/lattice/graph_borrowed_fields_tests.rs
+@@ -0,0 +1,368 @@
++use super::tests::{row, syllables};
++use super::*;
++use crate::ime::personal_rerank::allocations::count;
++
++#[test]
++fn borrowed_graph_keeps_external_field_addresses() {
++    let keys = syllables("a'a");
++    let rows = [row("a", "合成甲", 1000)];
++    let graph = build_graph_borrowed(
++        &keys,
++        &mut |span| if span.len() == 1 { &rows } else { &[] },
++        &LatticeOptions::default(),
++    );
++    for column in &graph {
++        assert_eq!(column.len(), 1);
++        assert_eq!(
++            column[0].word.as_ptr(),
++            rows[0].value.as_ptr(),
++            "图边必须借用外部词面"
++        );
++        assert_eq!(
++            column[0].key.as_ptr(),
++            rows[0].key.as_ptr(),
++            "图边必须借用外部读音"
++        );
++    }
++}
++
++#[test]
++fn borrowed_graph_does_not_allocate_for_explicit_fields() {
++    let keys = syllables("a'a");
++    let populated = [row("a", "合成甲", 1000)];
++    let empty = [row("", "", 0)];
++    fn build<'r>(keys: &[String], rows: &'r [LatticeLexeme]) -> (Graph<Cow<'r, str>>, usize) {
++        count(|| {
++            build_graph_borrowed(
++                keys,
++                &mut |span| if span.len() == 1 { rows } else { &[] },
++                &LatticeOptions::default(),
++            )
++        })
++    }
++    let (empty_graph, empty_count) = build(&keys, &empty);
++    let (populated_graph, populated_count) = build(&keys, &populated);
++    assert_eq!(empty_graph.len(), populated_graph.len());
++    assert_eq!(
++        populated_count, empty_count,
++        "同样图容量只因显式字段非空而额外分配"
++    );
++}
++
++#[path = "graph_borrowed_legacy_tests.rs"]
++mod legacy;
++
++fn fixture(
++    keys: &[String],
++    width: usize,
++    profile: usize,
++) -> HashMap<Vec<String>, Vec<LatticeLexeme>> {
++    let mut rows = HashMap::new();
++    for start in 0..keys.len() {
++        for end in start + 1..=keys.len() {
++            let span = &keys[start..end];
++            rows.entry(span.to_vec()).or_insert_with(|| {
++                (0..if profile == 3 { 0 } else { width })
++                    .map(|index| {
++                        row(
++                            &if profile == 2 || profile == 1 && index % 2 == 0 {
++                                String::new()
++                            } else {
++                                span.join("'")
++                            },
++                            &if profile == 4 || profile == 1 && index % 3 == 1 {
++                                String::new()
++                            } else {
++                                format!("合成{index}😀")
++                            },
++                            [-7, 0, 1000, i64::MAX][index % 4],
++                        )
++                    })
++                    .collect()
++            });
++        }
++    }
++    rows
++}
++
++fn assert_graph<S: AsRef<str>>(actual: &Graph<S>, expected: &Graph) {
++    assert_eq!(actual.len(), expected.len());
++    assert_eq!(actual.capacity(), expected.capacity());
++    for (a, b) in actual.iter().zip(expected) {
++        assert_eq!(a.len(), b.len());
++        assert_eq!(a.capacity(), b.capacity());
++        for (a, b) in a.iter().zip(b) {
++            assert_eq!(
++                (
++                    a.end,
++                    a.word.as_ref(),
++                    a.key.as_ref(),
++                    a.log_prob.to_bits(),
++                    a.typo
++                ),
++                (
++                    b.end,
++                    b.word.as_str(),
++                    b.key.as_str(),
++                    b.log_prob.to_bits(),
++                    b.typo
++                )
++            );
++        }
++    }
++}
++
++fn assert_paths(actual: &Vec<SentencePath>, expected: &Vec<SentencePath>) {
++    super::capacity_tests::assert_paths(actual, expected);
++    assert_eq!(actual.capacity(), expected.capacity());
++    for (a, b) in actual.iter().zip(expected) {
++        assert_eq!(a.words.capacity(), b.words.capacity());
++        assert_eq!(a.key.capacity(), b.key.capacity());
++        assert_eq!(a.sentence.capacity(), b.sentence.capacity());
++        for (a, b) in a.words.iter().zip(&b.words) {
++            assert_eq!(a.capacity(), b.capacity());
++        }
++    }
++}
++
++#[test]
++fn borrowed_graph_preserves_queries_capacity_scores_and_owned_output() {
++    use crate::ime::personal_rerank::allocations::measure;
++    let mut cases = 0;
++    for input in [
++        None,
++        Some(""),
++        Some("a"),
++        Some("a'ba'ca"),
++        Some("a'a'a'a"),
++        Some("a'ba'a'ba'a"),
++        Some("a''a"),
++        Some("😀'a'😀"),
++    ] {
++        let keys: Vec<String> = input
++            .map(|text| text.split('\'').map(str::to_owned).collect())
++            .unwrap_or_default();
++        for max_phrase_syllables in [0, 1, 3, 9] {
++            for span_limit in [0, 1, 2, 5, usize::MAX] {
++                for profile in 0..5 {
++                    let rows = fixture(&keys, 4, profile);
++                    let options = LatticeOptions {
++                        max_phrase_syllables,
++                        span_limit,
++                        ..LatticeOptions::default()
++                    };
++                    let mut old_calls = Vec::new();
++                    let mut new_calls = Vec::new();
++                    let (old, before) = measure(|| {
++                        legacy::build_graph_borrowed(
++                            &keys,
++                            &mut |span| {
++                                old_calls.push(span.to_vec());
++                                rows.get(span).unwrap().as_slice()
++                            },
++                            &options,
++                        )
++                    });
++                    let (new, after) = measure(|| {
++                        build_graph_borrowed(
++                            &keys,
++                            &mut |span| {
++                                new_calls.push(span.to_vec());
++                                rows.get(span).unwrap().as_slice()
++                            },
++                            &options,
++                        )
++                    });
++                    assert_graph(&new, &old);
++                    assert_eq!(new_calls, old_calls);
++                    // 显式键省一次，隐式键继续按原方式拥有；逐边根据原输入行独立计数。
++                    let expected_saved: usize = (0..keys.len())
++                        .map(|start| {
++                            (start + 1..=keys.len().min(start + max_phrase_syllables.max(1)))
++                                .map(|end| {
++                                    rows.get(&keys[start..end])
++                                        .unwrap()
++                                        .iter()
++                                        .take(span_limit)
++                                        .filter(|row| !row.value.is_empty())
++                                        .map(|row| 1 + usize::from(!row.key.is_empty()))
++                                        .sum::<usize>()
++                                })
++                                .sum::<usize>()
++                        })
++                        .sum();
++                    assert_eq!(before.allocations - after.allocations, expected_saved,
++                               "输入={input:?}/最大跨度={max_phrase_syllables}/上限={span_limit}/形状={profile}");
++                    assert_eq!(before.minimum_bytes, 0);
++                    assert_eq!(after.minimum_bytes, 0);
++                    assert!(after.peak_bytes <= before.peak_bytes);
++                    if input == Some("a'ba'a'ba'a") && max_phrase_syllables == 3 && span_limit == 5
++                    {
++                        eprintln!("allocation profile={profile} old_count={} new_count={} old_peak={} new_peak={} old_live={} new_live={}",
++                                  before.allocations, after.allocations, before.peak_bytes, after.peak_bytes, before.remaining_bytes, after.remaining_bytes);
++                    }
++                    let old_paths = legacy::decode_graph(&old, &options, None);
++                    let new_paths = decode_graph(&new, &options, None);
++                    assert_paths(&new_paths, &old_paths);
++                    drop(old);
++                    drop(new);
++                    drop(rows);
++                    assert_paths(&new_paths, &old_paths);
++                    cases += 1;
++                }
++            }
++        }
++    }
++    assert_eq!(cases, 800);
++}
++
++#[test]
++fn borrowed_graph_preserves_language_models_and_typo_paths() {
++    use super::super::ngram::tests::{pair_table, triple_table};
++    use super::super::personal::tests::record_run;
++    let directory = tempfile::tempdir().unwrap();
++    let bigram = Arc::new(pair_table(
++        directory.path(),
++        "pairs.bin",
++        &[
++            (SENTENCE_START, "合成0😀", 0.75),
++            ("合成0😀", "合成2😀", -0.25),
++        ],
++    ));
++    let trigram = Arc::new(triple_table(
++        directory.path(),
++        "triples.bin",
++        &[(SENTENCE_START, "合成0😀", "合成2😀", 0.75)],
++    ));
++    let mut personal = PersonalNgram::default();
++    record_run(&mut personal, &["合成0😀", "合成2😀", "合成3😀"], 7);
++    for width in [0, 1, 9, 32, 65] {
++        let keys = syllables("a'ba'a'ba");
++        let rows = fixture(&keys, width, 1);
++        for (beam, nbest) in [(0, 0), (1, 5), (8, 12), (32, 6), (65, 65)] {
++            for mode in 0..16 {
++                let old_memo = RefCell::new(BigramMemo::default());
++                let new_memo = RefCell::new(BigramMemo::default());
++                let options = LatticeOptions {
++                    beam,
++                    nbest,
++                    bigram: (mode & 1 != 0).then(|| Arc::clone(&bigram)),
++                    trigram: (mode & 2 != 0).then(|| Arc::clone(&trigram)),
++                    personal: (mode & 4 != 0).then_some(&personal),
++                    bigram_memo: (mode & 8 != 0).then_some(&new_memo),
++                    ..LatticeOptions::default()
++                };
++                let old_options = LatticeOptions {
++                    bigram_memo: (mode & 8 != 0).then_some(&old_memo),
++                    ..options.clone()
++                };
++                let old = legacy::build_graph_borrowed(
++                    &keys,
++                    &mut |span| rows.get(span).unwrap().as_slice(),
++                    &old_options,
++                );
++                let new = build_graph_borrowed(
++                    &keys,
++                    &mut |span| rows.get(span).unwrap().as_slice(),
++                    &options,
++                );
++                for _ in 0..2 {
++                    let expected = legacy::decode_graph(&old, &old_options, None);
++                    let actual = decode_graph(&new, &options, None);
++                    assert_paths(&actual, &expected);
++                    if let Some(literal) = actual.first() {
++                        let typo = [
++                            TypoEdge {
++                                start: 1,
++                                end: 3,
++                                value: "改正合成".into(),
++                                key: "ba'a".into(),
++                                weight: i64::MAX,
++                                penalty: 0.5,
++                            },
++                            TypoEdge {
++                                start: 0,
++                                end: 9,
++                                value: "越界".into(),
++                                key: "".into(),
++                                weight: 1,
++                                penalty: 0.0,
++                            },
++                        ];
++                        assert_eq!(
++                            decode_typo_on_graph(&new, &options, literal, &typo),
++                            decode_typo_on_graph(&old, &old_options, &expected[0], &typo)
++                        );
++                    }
++                    assert_eq!(new_memo.borrow().table, old_memo.borrow().table);
++                    assert_eq!(new_memo.borrow().scores, old_memo.borrow().scores);
++                }
++            }
++        }
++    }
++}
++
++#[test]
++#[ignore = "同机 release 配对计时，须使用无计数包装的 System 分配器"]
++fn borrowed_graph_release_comparison() {
++    use std::hint::black_box;
++    use std::time::Instant;
++    assert!(!cfg!(debug_assertions), "计时须用 release 构建");
++    let mut failures = Vec::new();
++    for repeated in [false, true] {
++        for columns in [1, 4, 12] {
++            let keys: Vec<_> = (0..columns)
++                .map(|index| format!("k{}", if repeated { 0 } else { index }))
++                .collect();
++            for width in [1, 8, 32] {
++                for profile in [0, 1, 3] {
++                    let rows = fixture(&keys, width, profile);
++                    let options = LatticeOptions::default();
++                    let elapsed = |old: bool, repeats: usize| {
++                        let start = Instant::now();
++                        for _ in 0..repeats {
++                            if old {
++                                drop(black_box(legacy::build_graph_borrowed(
++                                    black_box(&keys),
++                                    &mut |span| rows.get(span).unwrap().as_slice(),
++                                    black_box(&options),
++                                )));
++                            } else {
++                                drop(black_box(build_graph_borrowed(
++                                    black_box(&keys),
++                                    &mut |span| rows.get(span).unwrap().as_slice(),
++                                    black_box(&options),
++                                )));
++                            }
++                        }
++                        start.elapsed().as_secs_f64()
++                    };
++                    let mut repeats = 1;
++                    while elapsed(true, repeats).min(elapsed(false, repeats)) < 0.020 {
++                        repeats *= 2;
++                    }
++                    let mut ratios = Vec::new();
++                    for pair in 0..21 {
++                        let (old, new) = if pair % 2 == 0 {
++                            let old = elapsed(true, repeats);
++                            (old, elapsed(false, repeats))
++                        } else {
++                            let new = elapsed(false, repeats);
++                            (elapsed(true, repeats), new)
++                        };
++                        println!("sample repeated={repeated} columns={columns} width={width} profile={profile} repeats={repeats} pair={pair} old_s={old:.9} new_s={new:.9}");
++                        ratios.push(new / old);
++                    }
++                    ratios.sort_by(f64::total_cmp);
++                    let ratio = ratios[10];
++                    let budget = if profile == 3 { 1.05 } else { 0.95 };
++                    println!("result repeated={repeated} columns={columns} width={width} profile={profile} ratio={ratio:.9} budget={budget}");
++                    if ratio >= budget {
++                        failures.push((repeated, columns, width, profile, ratio, budget));
++                    }
++                }
++            }
++        }
++    }
++    assert!(failures.is_empty(), "借用建图完整预算失败: {failures:?}");
++}
+diff --git a/crates/engine/src/lattice/graph_borrowed_legacy_tests.rs b/crates/engine/src/lattice/graph_borrowed_legacy_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/engine/src/lattice/graph_borrowed_legacy_tests.rs
+@@ -0,0 +1,310 @@
++use super::*;
++
++// 冻结 43715313f397281bdc974e9c007b23b786920647 的完整借用建图和解码入口，仅移除注释。
++
++pub(super) fn build_graph_borrowed<'rows>(
++    syllables: &[String],
++    lookup: &mut impl FnMut(&[String]) -> &'rows [LatticeLexeme],
++    options: &LatticeOptions<'_>,
++) -> Graph {
++    let n = syllables.len();
++    let max_len = options.max_phrase_syllables.max(1);
++    let mut graph: Graph = (0..n).map(|_| Vec::new()).collect();
++    struct CachedSpan {
++        column: usize,
++        edges: std::ops::Range<usize>,
++        reserve: usize,
++    }
++    let span_capacity = (0..n)
++        .map(|start| n.min(start.saturating_add(max_len)) - start)
++        .sum();
++    let mut span_cache: HashMap<&[String], CachedSpan> = HashMap::with_capacity(span_capacity);
++    for start in 0..n {
++        let (earlier, remaining) = graph.split_at_mut(start);
++        let edges = &mut remaining[0];
++        for end in start + 1..=n.min(start + max_len) {
++            let span = &syllables[start..end];
++            match span_cache.entry(span) {
++                std::collections::hash_map::Entry::Occupied(entry) => {
++                    let cached = entry.get();
++                    edges.reserve(cached.reserve);
++                    for edge in &earlier[cached.column][cached.edges.clone()] {
++                        edges.push(Edge {
++                            end,
++                            word: edge.word.clone(),
++                            key: edge.key.clone(),
++                            log_prob: edge.log_prob,
++                            typo: false,
++                        });
++                    }
++                }
++                std::collections::hash_map::Entry::Vacant(entry) => {
++                    let rows = lookup(span);
++                    let reserve = rows.len().min(options.span_limit);
++                    edges.reserve(reserve);
++                    let begin = edges.len();
++                    let mut span_key = None;
++                    for row in rows.iter().take(options.span_limit) {
++                        if row.value.is_empty() {
++                            continue;
++                        }
++                        edges.push(Edge {
++                            end,
++                            word: row.value.clone(),
++                            key: if row.key.is_empty() {
++                                span_key.get_or_insert_with(|| span.join("'")).clone()
++                            } else {
++                                row.key.clone()
++                            },
++                            log_prob: edge_log_prob(row.weight, end - start, options),
++                            typo: false,
++                        });
++                    }
++                    entry.insert(CachedSpan {
++                        column: start,
++                        edges: begin..edges.len(),
++                        reserve,
++                    });
++                }
++            }
++        }
++    }
++    graph
++}
++
++pub(super) fn decode_graph(
++    graph: &Graph,
++    options: &LatticeOptions<'_>,
++    extra: Option<&Graph>,
++) -> Vec<SentencePath> {
++    if options.nbest > options.beam {
++        decode_graph_with_terminal::<true>(graph, options, extra)
++    } else {
++        decode_graph_with_terminal::<false>(graph, options, extra)
++    }
++}
++
++fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
++    graph: &Graph,
++    options: &LatticeOptions<'_>,
++    extra: Option<&Graph>,
++) -> Vec<SentencePath> {
++    let n = graph.len();
++    let personal = active_personal(options);
++    let bigram_table = options.bigram.as_ref();
++    let bigram = options.bigram.as_deref();
++    let mut memo = options.bigram_memo.map(RefCell::borrow_mut);
++    let capacities = column_capacities(graph, extra, options.beam);
++    let terminal_limit = if WIDE_TERMINAL {
++        options.beam.max(options.nbest)
++    } else {
++        options.beam
++    };
++    let mut columns: Vec<BeamColumn<'_>> = capacities
++        .into_iter()
++        .enumerate()
++        .map(|(position, capacity)| {
++            let limit = if WIDE_TERMINAL && position == n {
++                terminal_limit
++            } else {
++                options.beam
++            };
++            let stream_capacity = limit.saturating_add(1);
++            let streamed = limit != 0 && capacity > stream_capacity;
++            BeamColumn {
++                hyps: Vec::with_capacity(if streamed { stream_capacity } else { capacity }),
++                streamed,
++            }
++        })
++        .collect();
++    columns[0].hyps.push(Hyp {
++        score: 0.0,
++        prev: (0, 0),
++        edge: None,
++        typo_edges: 0,
++    });
++
++    let row_capacity = options.beam.max(options.nbest);
++    let mut bigram_rows: Vec<Vec<f32>> = Vec::new();
++    let mut bigram_row_indices: HashMap<&str, usize> = HashMap::new();
++    let mut small_bigram_row_words = [""; SMALL_BIGRAM_ROWS];
++    for pos in 0..n {
++        if columns[pos].streamed {
++            cxx_sort::finish_partial(&mut columns[pos].hyps, options.beam, &mut scores_higher);
++        } else {
++            keep_beam(&mut columns[pos].hyps, options.beam);
++        }
++        let (done, ahead) = columns.split_at_mut(pos + 1);
++        let current = &done[pos].hyps;
++        let mut used_bigram_rows = 0;
++        bigram_row_indices.clear();
++        let literal = &graph[pos];
++        let extra_edges = extra.map_or(&[][..], |extra| extra[pos].as_slice());
++        let outgoing_len = literal.len() + extra_edges.len();
++        let outgoing = literal.iter().chain(extra_edges.iter());
++        for (index, hyp) in current.iter().enumerate() {
++            let previous = hyp.edge.map_or(SENTENCE_START, |edge| edge.word.as_str());
++            let bonuses = bigram_table.map(|table| {
++                let cached_row = if used_bigram_rows <= SMALL_BIGRAM_ROWS {
++                    small_bigram_row_words[..used_bigram_rows]
++                        .iter()
++                        .position(|word| *word == previous)
++                } else {
++                    bigram_row_indices.get(previous).copied()
++                };
++                let row = if let Some(row) = cached_row {
++                    row
++                } else {
++                    let row = used_bigram_rows;
++                    if row == bigram_rows.len() {
++                        if bigram_rows.is_empty() {
++                            bigram_rows.reserve_exact(row_capacity);
++                        }
++                        bigram_rows.push(Vec::new());
++                    }
++                    let scores = &mut bigram_rows[row];
++                    scores.clear();
++                    scores.reserve_exact(outgoing_len);
++                    match memo.as_deref_mut() {
++                        Some(memo) => scores.extend(
++                            outgoing
++                                .clone()
++                                .map(|edge| memo.score(table, previous, &edge.word)),
++                        ),
++                        None => scores.extend(
++                            outgoing
++                                .clone()
++                                .map(|edge| table.bigram(previous, &edge.word)),
++                        ),
++                    }
++                    used_bigram_rows += 1;
++                    if row < SMALL_BIGRAM_ROWS {
++                        small_bigram_row_words[row] = previous;
++                    } else {
++                        if row == SMALL_BIGRAM_ROWS {
++                            bigram_row_indices.reserve(row_capacity);
++                            bigram_row_indices.extend(
++                                small_bigram_row_words
++                                    .iter()
++                                    .enumerate()
++                                    .map(|(index, word)| (*word, index)),
++                            );
++                        }
++                        bigram_row_indices.insert(previous, row);
++                    }
++                    row
++                };
++                &bigram_rows[row]
++            });
++            let context = personal.map(|personal| {
++                let earlier = match hyp.prev {
++                    (column, at) if column > 0 => {
++                        done[column].hyps[at].edge.map(|edge| edge.word.as_str())
++                    }
++                    _ => None,
++                };
++                personal.context(earlier, Some(previous))
++            });
++            for (at, edge) in outgoing.clone().enumerate() {
++                let mut score = hyp.score + edge.log_prob;
++                let static_bonus = bonuses.map_or(0.0, |bonuses| f64::from(bonuses[at]));
++                if bigram.is_some() {
++                    score += options.bigram_weight * static_bonus.max(0.0);
++                }
++                if let (Some(personal), Some(context)) = (personal, context.as_ref()) {
++                    if context.confidence > 0.0 {
++                        score += personal_transition(
++                            personal,
++                            context,
++                            &edge.word,
++                            static_bonus,
++                            options,
++                        );
++                    }
++                }
++                let next = Hyp {
++                    score,
++                    prev: (pos, index),
++                    edge: Some(edge),
++                    typo_edges: hyp.typo_edges + usize::from(edge.typo),
++                };
++                let target = &mut ahead[edge.end - pos - 1];
++                if target.streamed {
++                    let limit = if WIDE_TERMINAL && edge.end == n {
++                        terminal_limit
++                    } else {
++                        options.beam
++                    };
++                    cxx_sort::push_partial(&mut target.hyps, limit, next, &mut scores_higher);
++                } else {
++                    target.hyps.push(next);
++                }
++            }
++        }
++    }
++
++    let terminal = &mut columns[n];
++    let mut last = std::mem::take(&mut terminal.hyps);
++    if last.is_empty() {
++        return Vec::new();
++    }
++    if terminal.streamed {
++        cxx_sort::finish_partial(&mut last, terminal_limit, &mut scores_higher);
++    } else {
++        keep_beam(&mut last, terminal_limit);
++    }
++    cxx_sort::sort(&mut last, &mut scores_higher);
++    let take = options.nbest.min(last.len());
++
++    let inline_unique = last.len() <= SMALL_SENTENCE_PATHS;
++    let mut paths: Vec<SentencePath> = Vec::with_capacity(last.len());
++    let mut trace = Vec::new();
++    for hyp in &last {
++        if inline_unique && paths.len() == take {
++            break;
++        }
++        trace.clear();
++        trace.reserve_exact(n);
++        let mut cursor = Some(hyp);
++        while let Some(step) = cursor {
++            let Some(edge) = step.edge else { break };
++            trace.push(edge);
++            let (column, at) = step.prev;
++            cursor = Some(&columns[column].hyps[at]);
++        }
++        trace.reverse();
++        let mut sentence = String::with_capacity(trace.iter().map(|edge| edge.word.len()).sum());
++        for edge in &trace {
++            sentence.push_str(&edge.word);
++        }
++        if sentence.is_empty()
++            || (inline_unique && paths.iter().any(|path| path.sentence == sentence))
++        {
++            continue;
++        }
++        let mut words = Vec::with_capacity(n);
++        let mut key = String::with_capacity(
++            trace.iter().map(|edge| edge.key.len()).sum::<usize>() + trace.len().saturating_sub(1),
++        );
++        for (index, edge) in trace.iter().enumerate() {
++            words.push(edge.word.clone());
++            if index != 0 {
++                key.push('\'');
++            }
++            key.push_str(&edge.key);
++        }
++        paths.push(SentencePath {
++            sentence,
++            key,
++            log_prob: hyp.score,
++            words,
++            typo_edges: hyp.typo_edges,
++        });
++    }
++    drop(trace);
++    if !inline_unique {
++        retain_unique_sentences(&mut paths, take);
++    }
++    rescore_with_trigram(&mut paths, options);
++    paths
++}

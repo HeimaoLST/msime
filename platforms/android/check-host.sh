@@ -23,7 +23,7 @@ if [[ ! -f "$android_jar" ]]; then
   exit 1
 fi
 output_dir=$(mktemp -d)
-trap 'rm -f "$output_dir/manifest.apk" "$output_dir/resources.zip"; find "$output_dir" -name "*.class" -delete; find "$output_dir" -depth -type d -empty -delete' EXIT
+trap 'rm -f "$output_dir/manifest.apk" "$output_dir/resources.zip" "$output_dir/jni-callbacks/jni-callbacks-test"; find "$output_dir" -name "*.class" -delete; find "$output_dir" -depth -type d -empty -delete' EXIT
 # Command 9 was unmapped when this guard was added; it is now Action::Finish in
 # crates/host-api/src/ffi/input.rs, and the declined-punctuation path needs it.
 # What must not come back is the literal, which is how the unmapped call got in.
@@ -441,14 +441,6 @@ if sed -n '/private static JSONObject nativeValue(String response)/,/^    }$/p' 
     "$repo_root/platforms/android/java/app/msime/android/home/CloudSync.java" \
     | rg -n 'getBoolean\("ok"\)|optBoolean\("ok"'; then
   echo "Android cloud sync native envelopes must require a typed boolean ok field" >&2
-  exit 1
-fi
-# Personal dictionary imports are acknowledged separately from the value envelope. A malformed
-# acknowledgement must not be reported as a successful merge item.
-if sed -n '/private boolean queueImport(String options, List<SyncMergePolicy.Word> words)/,/^    }$/p' \
-    "$repo_root/platforms/android/java/app/msime/android/home/CloudSync.java" \
-    | rg -n 'getBoolean\("ok"\)|optBoolean\("ok"'; then
-  echo "Android cloud sync imports must require a typed boolean ok field" >&2
   exit 1
 fi
 # Typing statistics writes are optional, but their acknowledgement still controls failure
@@ -979,10 +971,43 @@ jni_compiler="$ndk/toolchains/llvm/prebuilt/$host_tag/bin/aarch64-linux-android2
 if [[ -n "$host_tag" && -x "$jni_compiler" ]]; then
   "$jni_compiler" -std=c++20 -fsyntax-only -Wall -Werror \
     -I"$repo_root/crates/host-api/include" -I"$repo_root/shared" \
-    "$repo_root/platforms/android/native/client_jni.cpp"
-  echo "client_jni.cpp: aarch64-linux-android compile against the shared header passed"
+    "$repo_root/platforms/android/native/client_jni.cpp" \
+    "$repo_root/platforms/android/native/JniCallbacks.cpp"
+  echo "client_jni.cpp, JniCallbacks.cpp: aarch64-linux-android compile against the shared header passed"
 else
   echo "client_jni.cpp: skipped (pinned NDK 28.2.13676358 not installed)"
+fi
+# 会话存储和 listener 的回调进 Java 的那一半（native/JniCallbacks.cpp）只能在真的 JVM 上验：没 attach 的线程要自己 attach、返回前 detach，本来就 attach 着的线程不能被它 detach，Java 抛出的异常要清掉、不留给调用 Rust 的一方，release 要放掉全局引用。模拟器上的设备冒烟造不出没 attach 的线程（Rust 在自己的线程上回调存储，例如 AI 皮肤出图遇到 401 时刷新令牌，离线的设备测试触发不了），所以这里用 JDK 的 JNI 调用接口起一个带 -Xcheck:jni 的 JVM 直接驱动它，-Xcheck:jni 报出的 WARNING 也算失败。没有 JDK 头文件、libjvm 或宿主 C++ 编译器的机器跳过并说明。
+java_home=$(java -XshowSettings:properties -version 2>&1 | sed -n 's/^ *java\.home = //p' | head -n 1)
+case $(uname -s) in
+  Darwin) jni_platform=darwin; libjvm=libjvm.dylib ;;
+  Linux) jni_platform=linux; libjvm=libjvm.so ;;
+  *) jni_platform=""; libjvm="" ;;
+esac
+host_cxx=${CXX:-c++}
+if [[ -n "$jni_platform" && -n "$java_home" && -f "$java_home/include/jni.h" && -f "$java_home/lib/server/$libjvm" ]] \
+    && command -v "$host_cxx" >/dev/null 2>&1; then
+  jni_test_dir="$output_dir/jni-callbacks"
+  mkdir -p "$jni_test_dir"
+  javac --release 17 -Xlint:all -Werror -d "$jni_test_dir" "$repo_root/platforms/android/tests/native/JniCallbacksFixture.java"
+  "$host_cxx" -std=c++17 -Wall -Wextra -Werror -pthread \
+    -I"$java_home/include" -I"$java_home/include/$jni_platform" \
+    "$repo_root/platforms/android/tests/native/JniCallbacksTest.cpp" \
+    "$repo_root/platforms/android/native/JniCallbacks.cpp" \
+    -L"$java_home/lib/server" -ljvm -Wl,-rpath,"$java_home/lib/server" \
+    -o "$jni_test_dir/jni-callbacks-test"
+  jni_test_output=$("$jni_test_dir/jni-callbacks-test" "$jni_test_dir" 2>&1) || {
+    printf '%s\n' "$jni_test_output" >&2
+    echo "JniCallbacks.cpp failed on the desktop JVM" >&2
+    exit 1
+  }
+  printf '%s\n' "$jni_test_output"
+  if [[ "$jni_test_output" == *WARNING* ]]; then
+    echo "JniCallbacks.cpp: -Xcheck:jni reported a JNI misuse" >&2
+    exit 1
+  fi
+else
+  echo "JniCallbacks.cpp: desktop JVM check skipped (no JDK headers and libjvm, or no host C++ compiler)"
 fi
 # This script compiles against API 35 while the manifest declares minSdk 28, so a
 # newer java.nio API passes here and only fails in the real APK build. These two
@@ -1007,6 +1032,55 @@ fi
 if ! rg -Uq 'android:name="app\.msime\.android\.AccountSessionProvider"[[:space:]]+android:authorities="\$\{applicationId\}\.account-session"[[:space:]]+android:exported="false"[[:space:]]*/>' \
     "$repo_root/platforms/android/AndroidManifest.xml"; then
   echo "Android account session provider must be declared unexported in the main process" >&2
+  exit 1
+fi
+# 登录会话、匿名会话、登录和刷新都由 Rust 持有（#8201 迁移计划 5b）：Java 不再自己发 /v1/auth/ 下的请求（登录、刷新、挑战、Apple 网页授权、登录方式），这三份会话存储的名字只出现在注入给 Rust 的存储适配器 AccountStore 里。存储注册时不置 SHARED，Rust 读一次就缓存；主进程里再有一个 Java 写入方，Rust 就会拿旧的刷新令牌去刷新，服务端随即吊销整个会话。
+if rg -n '"/v1/auth/' "$repo_root/platforms/android/java"; then
+  echo "Android Java must not send /v1/auth/ requests itself; Rust owns sign-in and refresh" >&2
+  exit 1
+fi
+if rg -n 'msime_account_session_v2|msime_anonymous_session_v1|msime_anonymous_account_v1' "$repo_root/platforms/android/java" \
+    | rg -v '/account/AccountStore\.java:'; then
+  echo "Only AccountStore may name the session stores Rust owns" >&2
+  exit 1
+fi
+# 账号页、我的设备、云端数据、反馈、诊断上传、下载链接、AI 皮肤和社区都改调 Rust 的 msime_client_account、msime_client_community 和 msime_client_ai_skin_generate（#8201 迁移计划 5c）：这些请求路径不能再出现在 Java 里，Java 只拼 Rust 的请求、读它的回答。云剪贴板页不涉及内容的开关、保留时长、置顶、删除和清空也经 Rust，只有端到端加密驱动还用 CloudClipboardApi.PATH；AI 对话页经 Rust 的流式入口，不再用 BackendAccount 的 Java 实现。
+if rg -n '"/v1/(users/me/(sessions|data|avatar|diagnostics|download-link)|feedback|skins/jobs|community/|models)' "$repo_root/platforms/android/java"; then
+  echo "Android Java must not send account page, feedback, diagnostics, download-link, AI skin or community requests itself; Rust owns them" >&2
+  exit 1
+fi
+if rg -n 'PATH \+ "/' "$repo_root/platforms/android/java/app/msime/android/account/CloudClipboardApi.java" \
+  || rg -n 'BackendAccount' "$repo_root/platforms/android/java/app/msime/android/home/ChatFragment.java"; then
+  echo "Android cloud clipboard settings and AI chat must go through Rust" >&2
+  exit 1
+fi
+# 「水杉账号」的候选释义（#8201 迁移计划 5e）：请求体怎么拼、回答怎么读都在 Rust 的 msime_client_account_gloss，路径也由它给；Java 只带着 provider 的 shared_access_token 把那一次请求发出去，不能再自己拼 /v1/translate 或解读译文。
+if rg -n '"/v1/translate"' "$repo_root/platforms/android/java" \
+  || ! rg -q 'NativeClient\.accountGloss\(' "$repo_root/platforms/android/java/app/msime/android/voice/BackendTranslationClient.java"; then
+  echo "Android account glosses must be built and read by Rust's msime_client_account_gloss" >&2
+  exit 1
+fi
+# 重复实现删掉以后（#8201 迁移计划 5f），Java 里还自己拼水杉云端请求路径的只剩三处：云剪贴板的端到端加密驱动（设置页的 CloudClipboardApi 和两边共用的 CloudClipboardE2e，路径由 Rust 的驱动给、这里只核对前缀），以及不在迁移范围内的打字统计与 QQ 绑定（TypingUploadApi）。账号、登录、同步、对话、云剪贴板开关和删除、`/v1/users/me` 都经 Rust，其他地方再出现 `"/v1/` 就是又在 Java 里写了一份。
+if rg -n '"/v1/' "$repo_root/platforms/android/java" \
+    | rg -v '/account/(CloudClipboardApi|CloudClipboardE2e|TypingUploadApi)\.java:'; then
+  echo "Android Java must not build Metasequoia cloud request paths outside the clipboard driver and typing upload; Rust owns them" >&2
+  exit 1
+fi
+# 词库快照激活队列和云同步的状态都由 Rust 持有（#8201 迁移计划 5d）：Java 的 FileChannel.lock 是 fcntl，与 Rust 的 flock 互相看不见，所以 Java 里不能再有读写队列状态（旧的 state.bin）或加队列锁的代码，也不能再读写云同步的进度（cursor_、gen_、clean_ 这几类键、开关、上次同步时间），记改动只经 SyncSignals 调 Rust 的 mark_dirty。旧状态只在 RustCloudSync 里整份交给 Rust 的 import_legacy。
+if rg -n 'FileChannel|FileLock|DataOutputStream|DataInputStream' \
+    "$repo_root/platforms/android/java/app/msime/android/dictionary/DictionarySnapshotQueue.java" \
+    "$repo_root/platforms/android/java/app/msime/android/dictionary/DictionarySnapshotWorker.java" \
+  || rg -n '"state\.bin"|"bootstrap/state/dictionary-snapshots"|dictionary-snapshots"' "$repo_root/platforms/android/java" \
+    | rg -v '/dictionary/DictionarySnapshotQueue\.java:' \
+  || rg -n '"(cursor|gen|clean)_"|"last_synced_at"|"phrases_unheld"|KEY_ENABLED' "$repo_root/platforms/android/java"; then
+  echo "Android Java must not read or write the snapshot queue or cloud sync progress itself; Rust owns both" >&2
+  exit 1
+fi
+if ! rg -q '"import_android_v1"' "$repo_root/platforms/android/java/app/msime/android/dictionary/DictionarySnapshotQueue.java" \
+  || ! rg -q '"import_legacy"' "$repo_root/platforms/android/java/app/msime/android/account/RustCloudSync.java" \
+  || ! awk '/static void migrate\(Context context\)/ { inside = 1 } inside && /importAndroidV1\(queue\)/ { queue = NR } inside && /importLegacy\(/ { legacy = NR } inside && /^    }$/ { exit } END { exit !(queue && legacy && queue < legacy) }' \
+      "$repo_root/platforms/android/java/app/msime/android/account/RustCloudSync.java"; then
+  echo "Android must convert the old snapshot queue before importing the old cloud sync progress" >&2
   exit 1
 fi
 # The host compiles against AndroidX and Material now, and those are AARs that only Gradle resolves,
@@ -1125,6 +1199,34 @@ done < "$repo_root/platforms/android/tests/device/editor-sources.txt"
 mkdir -p "$output_dir/device"
 javac --release 17 -Xlint:all -Werror -cp "$android_jar" -d "$output_dir/device" "${device_sources[@]}"
 echo "Compiled ${#device_sources[@]} Android device-suite sources"
+# 设备测试包里编进了 NativeClient，却没有 libmsime_android.so：targetPackage 是测试包自己（app.msime.android.test）的 instrumentation 跑在测试包的进程里，第一次碰到 NativeClient 就是 UnsatisfiedLinkError。要经 JNI 调 Rust 的设备冒烟得以产品包为目标，跑进应用进程，那里的库路径带着应用的原生库（测试包的类排在前面，见 CloudClipboardDriverDeviceSmoke）。BackendAccountSessionDeviceSmoke 的释义用例曾经这样只编译过、一上设备就失败。这里按 jdeps 给出的类引用从每个这样的 instrumentation 往下找，能走到 NativeClient 就失败，并打印那条引用链。
+device_self_targets=$(rg -o -r '$1' 'instrumentation android:name="([^"]+)" android:targetPackage="app\.msime\.android\.test"' \
+  "$repo_root/platforms/android/tests/device/AndroidManifest.xml" || true)
+device_class_deps=$(jdeps -verbose:class -filter:none -cp "$android_jar" "$output_dir/device" 2>/dev/null)
+if ! DEVICE_SELF_TARGETS="$device_self_targets" awk '
+  $2 == "->" && $3 ~ /^app\.msime\./ { from = $1; to = $3; sub(/\$.*/, "", from); sub(/\$.*/, "", to); edges[from] = edges[from] " " to }
+  END {
+    native = "app.msime.android.NativeClient"; bad = 0
+    count = split(ENVIRON["DEVICE_SELF_TARGETS"], list, "\n")
+    for (i = 1; i <= count; i++) {
+      delete seen; delete via; head = 1; tail = 1; queue[1] = list[i]; seen[list[i]] = 1
+      while (head <= tail) {
+        current = queue[head++]
+        width = split(edges[current], targets, " ")
+        for (j = 1; j <= width; j++) if (targets[j] != "" && !(targets[j] in seen)) { seen[targets[j]] = 1; via[targets[j]] = current; queue[++tail] = targets[j] }
+      }
+      if (native in seen) {
+        chain = native; step = native
+        while (step in via) { step = via[step]; chain = step " -> " chain }
+        print "Android device smoke reaches NativeClient but runs in the test package without libmsime_android.so; target app.msime.android instead: " chain > "/dev/stderr"
+        bad = 1
+      }
+    }
+    exit bad || count == 0
+  }' <<< "$device_class_deps"; then
+  echo "Android device smokes that call Rust over JNI must instrument app.msime.android" >&2
+  exit 1
+fi
 # Resources are compiled but not linked here: they reference Material's theme attributes, and linking
 # those needs the library's own resources, which is Gradle's job. Compiling still catches a malformed
 # drawable, layout or values file, which is what this step was for.

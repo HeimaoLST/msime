@@ -3,62 +3,19 @@ import XCTest
 import UIKit
 
 final class AISkinServiceTests: XCTestCase {
-  private func response(_ transform: (inout [[String:Any]]) -> Void = { _ in }) throws -> String {
-    var designs: [[String:Any]] = (0..<3).map { index in
-      ["name":"测试设计 \(index)","description":"合成测试方案","background":"#FFFFFF","keyBackground":"#F0F0F0",
-       "keyForeground":"#FFFFFF","accent":"#FFFFFF","actionBackground":"#185C47","gradientEnd":NSNull(),
-       "gradientHorizontal":false,"cornerRadius":index * 5,"borderWidth":0,"shadow":0.1,"pattern":index,"monospaced":false]
-    }
-    transform(&designs)
-    return String(data:try JSONSerialization.data(withJSONObject:["skins":designs]),encoding:.utf8)!
-  }
-  func testThreeEditableDesignsRepairContrastAndRoundTrip() throws {
-    let proposals = try AISkinService.parse(response())
-    XCTAssertEqual(proposals.count,3)
-    XCTAssertEqual(Set(proposals.map(\.design)).count,3)
-    for proposal in proposals {
-      XCTAssertTrue(proposal.design.hasReadableText)
-      XCTAssertNil(proposal.design.photo)
-      let saved = SavedKeyboardSkin(name:proposal.name,design:proposal.design)
-      let restored = try JSONDecoder().decode(SavedKeyboardSkin.self,from:JSONEncoder().encode(saved))
-      XCTAssertEqual(restored.design,proposal.design)
-    }
-  }
-  func testRecordedCloudResponseProducesThreeSaveableDesigns() throws {
-    let file = try XCTUnwrap(Bundle(for:Self.self).url(forResource:"AISkinReference",withExtension:"json"))
-    let proposals = try AISkinService.parse(String(contentsOf:file,encoding:.utf8))
-    XCTAssertEqual(proposals.count,3)
-    XCTAssertEqual(proposals.first?.name,"静谧奶油")
-    for proposal in proposals {
-      XCTAssertTrue(proposal.design.hasReadableText)
-      XCTAssertEqual(try JSONDecoder().decode(CustomKeyboardSkin.self,from:JSONEncoder().encode(proposal.design)),proposal.design)
-    }
-  }
-  func testInvalidOrDuplicateDesignNeverBecomesASkin() throws {
-    for text in ["```json\n{}\n```", "{}", try response { $0.removeLast() },
-                 try response { $0[0]["background"] = "https://example.com/image.png" },
-                 try response { $0[0]["cornerRadius"] = 100 },
-                 try response { $0[0]["keyShape"] = "external.svg" },
-                 try response { $0[0]["keyMaterial"] = "unknown" },
-                 try response { $0[1] = $0[0] },
-                 try response { $0[0]["background"] = "#000000"; $0[0]["keyBackground"] = "#FFFFFF" }] {
-      XCTAssertThrowsError(try AISkinService.parse(text))
-    }
-  }
-  func testArtworkPromptUsesFortyToOneHundredUnicodeScalars() throws {
-    for length in [39, 101] {
-      let text = try response { $0[0]["artworkPrompt"] = String(repeating: "景", count: length) }
-      XCTAssertThrowsError(try AISkinService.parse(text), "Accepted \(length) Unicode scalars")
-    }
-    for length in [40, 100] {
-      let text = try response { $0[0]["artworkPrompt"] = String(repeating: "景", count: length) }
-      XCTAssertEqual(try AISkinService.parse(text)[0].artworkPrompt?.unicodeScalars.count, length)
-    }
-    let composed = String(repeating: "e\u{301}", count: 20)
-    XCTAssertEqual(composed.count, 20)
-    XCTAssertEqual(composed.unicodeScalars.count, 40)
-    let text = try response { $0[0]["artworkPrompt"] = composed }
-    XCTAssertEqual(try AISkinService.parse(text)[0].artworkPrompt, composed)
+  /// 多行输入框里的换行和制表符折成一个空格再交给 Rust（Rust 拒收一切控制字符）；500 个字的上限按 Unicode 标量计，与 Rust 相同，超出的在调 Rust 之前就拒绝。方案的解析和校验在 Rust（`msime_client_ai_skin_generate`），由 host-api 的测试覆盖。
+  func testMultilinePromptIsFoldedBeforeRust() throws {
+    let folded = try XCTUnwrap(AISkinService.requestPrompt("  竹林里的熊猫 \r\n\n  茶会\t夜色\n"))
+    XCTAssertEqual(folded, "竹林里的熊猫 茶会 夜色")
+    XCTAssertNil(AISkinService.requestPrompt(" \n\t "))
+    XCTAssertNil(AISkinService.requestPrompt("竹林\u{0007}茶会"))
+    // 一个家庭 emoji 是一个字形、七个 Unicode 标量：100 个就是 700 个标量，字形数没超 500，Rust 也会拒绝。
+    let family = String(repeating: "👨‍👩‍👧‍👦", count: 100)
+    XCTAssertLessThanOrEqual(family.count, 500)
+    XCTAssertNil(AISkinService.requestPrompt(family))
+    let limit = String(repeating: "景", count: AISkinService.maximumPromptScalars)
+    XCTAssertEqual(AISkinService.requestPrompt(limit), limit)
+    XCTAssertNil(AISkinService.requestPrompt(limit + "景"))
   }
   @MainActor
   func testKeyStylesSurviveSavingAndRenderDistinctSurfaces() throws {

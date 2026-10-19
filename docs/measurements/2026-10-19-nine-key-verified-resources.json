@@ -1,0 +1,328 @@
+{
+  "baseline_commit": "bd4452e150e8c698855bba8e8397545729f4c13d",
+  "machine": "Mac13,1",
+  "logical_cpus": 10,
+  "rust": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "binary_sha256": "906697d81809e0ab157e127f9eeffd0f6464429149b8b43c3d4c4271f478c187",
+  "resource_lock_sha256": "d265c50c2ab19ddaa3eca0060fa8f013988d22df2cff703b1bdbe5455eb7cd8d",
+  "source_commit": "128a332cabc5fa42b1cf5f827033ad5697ff528b",
+  "generation": "7356c4a452d8ba15475c0e57f134fccf7b7cbe267440461541c74d09b11b6ffe",
+  "helpcodes": "absent",
+  "resource_artifacts": [
+    {
+      "name": "msime-pinyin.db",
+      "url": "https://github.com/metasequoiaime/msime-dictionary/releases/download/dict-v2.0.24/msime-pinyin.db",
+      "sha256": "7c672458e6068c22c07b33b146c5a07f4e734959abc3bddd2784fe18a7582a76",
+      "size": 73723904
+    },
+    {
+      "name": "msime-wubi.db",
+      "url": "https://github.com/metasequoiaime/msime-dictionary/releases/download/dict-v2.0.24/msime-wubi.db",
+      "sha256": "851ed68211311a76847fe6a26096702747abbaab8dffb141698e0365143b31c1",
+      "size": 14536704
+    },
+    {
+      "name": "msime-english.db",
+      "url": "https://github.com/metasequoiaime/msime-dictionary/releases/download/dict-v2.0.24/msime-english.db",
+      "sha256": "d216f66cab7edb9072ba7a07f3fe35623e76870438b76d360a89cc2a4795d3cd",
+      "size": 4526080
+    },
+    {
+      "name": "msime-scowl_Copyright.txt",
+      "url": "https://github.com/metasequoiaime/msime-dictionary/releases/download/dict-v2.0.24/msime-scowl_Copyright.txt",
+      "sha256": "586063cc4345559d5347c6cdb73fbb4d1261118bb009a03530754df004419193",
+      "size": 4028
+    },
+    {
+      "name": "msime-bigram.bin",
+      "url": "https://github.com/metasequoiaime/msime-dictionary/releases/download/dict-v2.0.24/msime-bigram.bin",
+      "sha256": "79607ae9fcd80ef6df2f001cfbc1fa6048f81c1de00f45c634bbc8e132642d88",
+      "size": 12000016
+    },
+    {
+      "name": "msime-trigram.bin",
+      "url": "https://github.com/metasequoiaime/msime-dictionary/releases/download/dict-v2.0.24/msime-trigram.bin",
+      "sha256": "59e4eeba6f3e96cc46f3ae1477e9268187bb9df346634564e989889b282d68ea",
+      "size": 12000016
+    },
+    {
+      "name": "msime-others.db",
+      "url": "https://github.com/metasequoiaime/msime-dictionary/releases/download/dict-v2.0.24/msime-others.db",
+      "sha256": "9f3cae5b407038e0e4536c40582a0bc0feb732657f0ae2d38196374cede52f94",
+      "size": 1314816
+    },
+    {
+      "name": "msime-japanese.dat",
+      "url": "https://github.com/metasequoiaime/msime-dictionary/releases/download/dict-v2.0.24/msime-japanese.dat",
+      "sha256": "83e093c5697ee81e3ccde63856e9131446e373d452854b4012ad34eb6efbe469",
+      "size": 66547565
+    },
+    {
+      "name": "msime-mozc_dictionary_oss_README.txt",
+      "url": "https://github.com/metasequoiaime/msime-dictionary/releases/download/dict-v2.0.24/msime-mozc_dictionary_oss_README.txt",
+      "sha256": "6b1de66bc6fa30e0b45dc45b8c8f6c57bd78aff923c261a3efffac8eb86f7bac",
+      "size": 5750
+    },
+    {
+      "name": "msime-mozc_LICENSE.txt",
+      "url": "https://github.com/metasequoiaime/msime-dictionary/releases/download/dict-v2.0.24/msime-mozc_LICENSE.txt",
+      "sha256": "44cdd923b91ea9199293abecc2762c70c87dbf1e581c027a94c416368d1a648c",
+      "size": 5734
+    },
+    {
+      "name": "msime-dictionary-manifest.json",
+      "url": "https://github.com/metasequoiaime/msime-dictionary/releases/download/dict-v2.0.24/msime-dictionary-manifest.json",
+      "sha256": "5b656a5db35b4dcf804ce4348d8584c899d0012fe62bbbe3689204ddaba8722f",
+      "size": 4627
+    },
+    {
+      "name": "sentence-model.safetensors",
+      "url": "https://github.com/metasequoiaime/chinese-ime-lm/releases/download/model-v1/sentence-model.safetensors",
+      "sha256": "86ac529510cb3b4968a5e6ade83ec8080f5b34a0a681e75c362accbbd387d1c1",
+      "size": 4486280
+    }
+  ],
+  "set": "resources/eval/sentences-nine-key-v1.tsv",
+  "set_sha256": "b21fd929d6bfac057897620e384742018019a14c21aebd716f04f60bb819282f",
+  "grid": "nine",
+  "budget_ms": 16,
+  "warmup_cases": 5,
+  "percentile": "nearest rank",
+  "quality_equivalence": {
+    "quanpin": {
+      "equal": true,
+      "cases": 60,
+      "overall": {
+        "cases": 60,
+        "found": 0.85,
+        "mrr": 0.825,
+        "top1": 0.817,
+        "top1_char_prefix": 0.902,
+        "top5": 0.833,
+        "top9": 0.833
+      },
+      "before_sha256": "e9de7574da727db763cd236cc8164b722e985b75375a3629c3165c9172c89253",
+      "after_sha256": "e9de7574da727db763cd236cc8164b722e985b75375a3629c3165c9172c89253"
+    },
+    "nine": {
+      "equal": true,
+      "cases": 81,
+      "overall": {
+        "cases": 81,
+        "found": 0.753,
+        "mrr": 0.639,
+        "top1": 0.617,
+        "top1_char_prefix": 0.768,
+        "top5": 0.654,
+        "top9": 0.728
+      },
+      "before_sha256": "548774486a737d2e3ca5d3071da8274fa6a7a28ed9835b6584f21c33eaa541c7",
+      "after_sha256": "548774486a737d2e3ca5d3071da8274fa6a7a28ed9835b6584f21c33eaa541c7"
+    }
+  },
+  "cases": 81,
+  "keystrokes_per_arm": 1791,
+  "warmup_cases_discarded": 5,
+  "arms": {
+    "engine only": {
+      "mean_ms": 4.8,
+      "p50_ms": 4.89,
+      "p95_ms": 9.53,
+      "p99_ms": 11.6,
+      "max_ms": 14.35
+    },
+    "with model": {
+      "mean_ms": 7.87,
+      "p50_ms": 6.59,
+      "p95_ms": 20.13,
+      "p99_ms": 25.31,
+      "max_ms": 34.01
+    },
+    "reranker adds": {
+      "mean_ms": 3.08,
+      "p50_ms": 0.4,
+      "p95_ms": 12.45,
+      "p99_ms": 17.1,
+      "max_ms": 26.14
+    }
+  },
+  "over_budget": {
+    "keys": 226,
+    "total": 1791,
+    "percent": 12.6
+  },
+  "returncode": 1,
+  "monitor": [
+    {
+      "elapsed_seconds": 0.037,
+      "load_1m": 15.47509765625,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 1.076,
+      "load_1m": 14.79638671875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 2.12,
+      "load_1m": 14.79638671875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 3.154,
+      "load_1m": 14.79638671875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 4.189,
+      "load_1m": 14.79638671875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 5.225,
+      "load_1m": 14.79638671875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 6.268,
+      "load_1m": 14.4921875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 7.304,
+      "load_1m": 14.4921875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 8.343,
+      "load_1m": 14.4921875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 9.376,
+      "load_1m": 14.4921875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 10.411,
+      "load_1m": 14.4921875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 11.448,
+      "load_1m": 13.97216796875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 12.49,
+      "load_1m": 13.97216796875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 13.531,
+      "load_1m": 13.97216796875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 14.571,
+      "load_1m": 13.97216796875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 15.605,
+      "load_1m": 13.97216796875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 16.644,
+      "load_1m": 13.33349609375,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 17.684,
+      "load_1m": 13.33349609375,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 18.718,
+      "load_1m": 13.33349609375,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 19.762,
+      "load_1m": 13.33349609375,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 20.801,
+      "load_1m": 12.90625,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 21.838,
+      "load_1m": 12.90625,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 22.874,
+      "load_1m": 12.90625,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 23.914,
+      "load_1m": 12.90625,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    }
+  ],
+  "duration_seconds": 24.103,
+  "limitations": "完整锁定资源的首次基线，不能与历史残缺资源的延迟解释为算法回退或提速；系统负载与进程计数不能证明独占机器。此片只修复评测输入身份，16ms预算保持不变。",
+  "working_tree_change": "仅接入评测资源身份校验；产品按键与重排实现与baseline_commit相同。"
+}

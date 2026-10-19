@@ -6,12 +6,19 @@ namespace msime::windows {
 std::optional<PendingReply>
 InputState::select_candidate(const FocusLease &lease, uint64_t expected_session,
                              uint64_t generation, size_t index,
-                             uint64_t translation_page) {
+                             uint64_t translation_page,
+                             const std::optional<std::string> &expanded_text) {
   check_thread();
   auto *owner = session(lease.transport);
   return owner ? owner->select_candidate(lease, expected_session, generation,
-                                         index, translation_page)
+                                         index, translation_page, expanded_text)
                : std::nullopt;
+}
+std::optional<CandidateExpansionFetch>
+InputState::expanded_candidates(const FocusLease &lease) {
+  check_thread();
+  auto *owner = session(lease.transport);
+  return owner ? owner->expanded_candidates(lease) : std::nullopt;
 }
 std::optional<PendingReply> InputState::toggle_character_set(
     const FocusLease &lease, const FanyImeNamedpipeData &packet, bool enabled,
@@ -56,7 +63,7 @@ struct WorkerScope {
 } // namespace
 InputState::InputState(FocusGate &gate, size_t clients, std::string options)
     : gate_(gate), router_(gate, clients), options_(std::move(options)) {
-  if (options_.empty() || options_.size() > 16384)
+  if (options_.empty() || options_.size() > 1048576)
     throw std::invalid_argument("Invalid input queue configuration");
   const auto document = nlohmann::json::parse(options_);
   navigation_ = preference_navigation(

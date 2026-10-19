@@ -18,7 +18,7 @@ export interface MirrorEntry {
   readonly base: "state" | "files";
   readonly path: string;
   /**
-   * 只在键盘处于完整体验模式时交换。账号会话属于这一类：服务端会轮换刷新令牌，同一个刷新令牌用第二次会被拒绝，所以两边持有同一份会话时必须都能把刷新后的会话写回；基础访问模式下键盘写不了共享目录，就不导入，继续用自己的匿名账号。
+   * 只在键盘处于完整体验模式时交换。账号会话属于这一类：服务端会轮换刷新令牌，同一个刷新令牌用第二次会被拒绝，所以两边持有同一份会话时必须都能把刷新后的会话发布出去、由另一边的 Rust 采用；基础访问模式下键盘写不了共享目录，就不导入，继续用自己的匿名账号。
    */
   readonly fullModeOnly: boolean;
 }
@@ -83,6 +83,10 @@ export const MANIFEST_FILE: string = "manifest.json";
 export const STATISTICS_SWITCH_FILE: string = "typing-statistics-switch.json";
 const RETENTIONS: string[] = ["forever", "30d", "90d", "180d", "365d"];
 
+/** 本机匿名账号的身份文件（`{subject, secret}`），会话过期或被拒以后靠它重新登录同一个匿名账号。 */
+export const ANONYMOUS_IDENTITY_FILE: string = "anonymous-account.json";
+export const ANONYMOUS_IDENTITY_ENTRY: string = "anonymous-account";
+
 /** 设置应用发布、键盘导入的条目。 */
 export const SETTINGS_ENTRIES: MirrorEntry[] = [
   {
@@ -138,10 +142,10 @@ export const SETTINGS_ENTRIES: MirrorEntry[] = [
     fullModeOnly: true,
   },
   {
-    name: "anonymous-account",
+    name: ANONYMOUS_IDENTITY_ENTRY,
     kind: "file",
     base: "state",
-    path: "anonymous-account.json",
+    path: ANONYMOUS_IDENTITY_FILE,
     fullModeOnly: true,
   },
   {
@@ -153,7 +157,7 @@ export const SETTINGS_ENTRIES: MirrorEntry[] = [
   },
 ];
 
-/** 键盘在完整体验模式下发布、设置应用导入的条目：键盘里改的偏好和按键反馈、刷新过的账号会话，以及打字统计。 */
+/** 键盘在完整体验模式下发布、设置应用导入的条目：键盘里改的偏好和按键反馈、刷新过的账号会话、匿名账号的身份（随匿名会话由 Rust 采用），以及打字统计。 */
 export const KEYBOARD_ENTRIES: MirrorEntry[] = [
   {
     name: "preferences",
@@ -177,6 +181,13 @@ export const KEYBOARD_ENTRIES: MirrorEntry[] = [
     fullModeOnly: true,
   },
   {
+    name: ANONYMOUS_IDENTITY_ENTRY,
+    kind: "file",
+    base: "state",
+    path: ANONYMOUS_IDENTITY_FILE,
+    fullModeOnly: true,
+  },
+  {
     name: "anonymous-session",
     kind: "file",
     base: "state",
@@ -192,7 +203,24 @@ export const KEYBOARD_ENTRIES: MirrorEntry[] = [
   },
 ];
 
+/** 由 Rust 的 `session_adopt` 采用、不按文件复制导入的条目：登录会话、本机匿名账号的会话（#8201 第 2 步），以及匿名账号的身份，它随匿名会话一起采用（`identity_path`，迁移差异 M40），会话和身份始终属于同一个匿名账号。 */
+export const RUST_ADOPTED_ENTRIES: readonly string[] = [
+  "account-session",
+  "anonymous-session",
+  ANONYMOUS_IDENTITY_ENTRY,
+];
+
 export class SharedStateMirrorPolicy {
+  /** 这个条目是不是交给 Rust 采用：导入时调用方返回 `handled`，不复制也不删除本地文件。 */
+  static adoptedByRust(name: string): boolean {
+    return RUST_ADOPTED_ENTRIES.includes(name);
+  }
+
+  /** 导入一个普通文件前的决定：两份会话和匿名账号的身份交给 Rust（`handled`，不复制也不删除本地文件），其余条目照常复制。 */
+  static importDecision(name: string): ImportDecision {
+    return SharedStateMirrorPolicy.adoptedByRust(name) ? "handled" : "copy";
+  }
+
   /** FNV-1a 32 位加长度，只用来判断内容是否变了，不是安全用途。 */
   static fingerprintText(text: string): string {
     let hash: number = 0x811c9dc5;

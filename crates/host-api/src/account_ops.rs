@@ -1,19 +1,21 @@
-//! `msime_client_account` 在 #8201 新增的操作（流式对话是单独的 `msime_client_account_chat_stream`，见 [`chat_stream`]）：对话、注销账号、释义、常用语、我的设备、云端数据、反馈、诊断上传、发送下载链接和语音贡献。请求形状、返回值和错误码见头文件；规则和传输都在 client-services，这里只按操作把它们接起来。
+//! `msime_client_account` 在 #8201 新增的操作（流式对话是单独的 `msime_client_account_chat_stream`，见 [`chat_stream`]）：对话、注销账号、释义、常用语、设置文档的上传（`preferences_put`）、我的设备、云端数据、反馈、诊断上传、发送下载链接和语音贡献，以及鸿蒙设置应用与键盘之间的会话镜像（`session_adopt`，只在目录模式，规则在 client-services 的 `BackendAccountSession::adopt_session`）。请求形状、返回值和错误码见头文件；规则和传输都在 client-services，这里只按操作把它们接起来。
 //!
 //! 写成对 [`AccountApi`] 和 [`AccountSessionStorage`] 泛型的函数，测试用假的后端驱动；C 导出（`super::ffi::account`）把按目录或注入存储建好的两个会话交进来。
 //!
-//! 令牌从哪个会话来：注销账号、常用语、我的设备、云端数据和发送下载链接只用登录账号；对话、模型目录、释义、反馈和诊断上传登录账号优先、没有登录时用本机匿名账号；语音贡献和删除语音样本（`voice_delete`）只用本机匿名账号（#8201 的决定 12），注销账号成功后、删除云端数据的 `voice` 分区时也尽力删掉匿名账号名下的样本，云端数据汇总把匿名账号的语音样本合进 `voice` 分区；查看、换令牌和删除诊断快照绑定到上传时返回的 `user_id`，登录会话和匿名会话都不是它时是 `account_identity_changed`，不会退回另一个账号。
+//! 令牌从哪个会话来：注销账号、常用语、设置文档的上传、我的设备、云端数据和发送下载链接只用登录账号；对话、模型目录、释义、反馈和诊断上传登录账号优先、没有登录时用本机匿名账号；语音贡献和删除语音样本（`voice_delete`）只用本机匿名账号（#8201 的决定 12），注销账号成功后、删除云端数据的 `voice` 分区时也尽力删掉匿名账号名下的样本，云端数据汇总把匿名账号的语音样本合进 `voice` 分区；查看、换令牌和删除诊断快照绑定到上传时返回的 `user_id`，登录会话和匿名会话都不是它时是 `account_identity_changed`，不会退回另一个账号。
 
 use base64::Engine as _;
 use msime_client_services::account::page::{ChatModelsResponse, ChatResponse};
 use msime_client_services::account::{
     delete_anonymous_voice_samples, has_saved_anonymous_identity, prepare_chat, prepare_feedback,
-    prepare_voice_contribution, translate_request_body, valid_data_sections,
-    with_shared_access_token, AccountApi, AccountChatMessage, AccountDataSummary, AccountError,
-    AccountFailure, AccountFeedbackInput, AccountPhrase, AccountPhrases, AccountSessionStorage,
-    AccountTranslateRequest, AccountVoiceContributionInput, AnonymousIdentitySource,
-    BackendAccountSession, ChatStreamCancel, DEFAULT_TRANSLATE_TIMEOUT_MS,
-    MAX_VOICE_CONTRIBUTION_AUDIO_BYTES, TRANSLATE_TIMEOUT_MS,
+    prepare_voice_contribution, read_published_anonymous_identity, read_published_session,
+    translate_request_body, valid_data_sections, with_shared_access_token, AccountApi,
+    AccountChatMessage, AccountDataSummary, AccountError, AccountFailure, AccountFeedbackInput,
+    AccountPhrase, AccountPhrases, AccountPreferenceValue, AccountPreferences,
+    AccountSessionStorage, AccountTranslateRequest, AccountVoiceContributionInput,
+    AnonymousIdentitySource, BackendAccountSession, ChatStreamCancel, SessionAdoptOutcome,
+    SessionAdoptSource, DEFAULT_TRANSLATE_TIMEOUT_MS, MAX_VOICE_CONTRIBUTION_AUDIO_BYTES,
+    TRANSLATE_TIMEOUT_MS,
 };
 use msime_client_services::diagnostics::upload::{
     prepare_upload, valid_diagnostic_label, DIAGNOSTIC_TTLS,
@@ -60,6 +62,13 @@ pub(crate) enum Operation {
     PhrasesSave {
         revision: i64,
         phrases: Vec<AccountPhrase>,
+    },
+    /// 整份替换云端的设置文档（#8201 的 P4），按 `revision` 比较并交换，见 [`BackendAccountSession::put_preferences_checked`]。`document` 是文档的 `settings`，`revision` 是读到它时云端的修订号（导出入口给的 `merged.revision`）；给了 `user_id` 时只写这个账号。
+    PreferencesPut {
+        document: BTreeMap<String, AccountPreferenceValue>,
+        revision: i64,
+        #[serde(default)]
+        user_id: Option<String>,
     },
     SessionsList,
     SessionRevoke {
@@ -141,6 +150,25 @@ pub(crate) enum Operation {
     QqLinkDelete {
         id: String,
     },
+    /// 采用另一个沙箱发布的会话（鸿蒙设置应用与键盘之间的镜像，#8201 的 P3），只在目录模式下可用。`path` 是发布的会话文件的绝对路径，不给时表示发布方没有这份会话。`identity_path` 只用于匿名会话，是发布方身份文件的绝对路径（文件不存在表示发布方没有身份），给了时身份跟着采用的匿名会话走；不给时身份不动，与加这个字段之前相同。
+    SessionAdopt {
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        identity_path: Option<String>,
+        item: SessionItem,
+        from: SessionAdoptSource,
+    },
+}
+
+/// `session_adopt` 采用的是目录里的哪一份会话。
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SessionItem {
+    /// `account-session.json`，登录会话。
+    Account,
+    /// `anonymous-session.json`，本机匿名账号的会话。
+    Anonymous,
 }
 
 /// 串行化本进程里的打字统计上传和删除：关掉上传后的 `DELETE` 不能和还在路上的 `PUT` 交错，否则服务端可能先删、后收到旧的上传。每次调用都新建统计目录的 store，它自带的锁管不到别的调用，所以这里用一把进程级的锁。
@@ -478,6 +506,20 @@ where
         Operation::PhrasesSave { revision, phrases } => {
             value(account.put_phrases(&AccountPhrases { revision, phrases })?)
         }
+        Operation::PreferencesPut {
+            document,
+            revision,
+            user_id,
+        } => {
+            let user_id = user_id.as_deref().map(bound_user).transpose()?;
+            value(account.put_preferences_checked(
+                &AccountPreferences {
+                    revision,
+                    settings: document,
+                },
+                user_id,
+            )?)
+        }
         Operation::SessionsList => value(account.devices()?),
         Operation::SessionRevoke { id } => Ok(json!({ "signed_out": account.revoke_device(&id)? })),
         Operation::DataSummary => data_summary(account, anonymous, identity),
@@ -679,6 +721,49 @@ where
         Operation::QqLinkDelete { id } => {
             account.delete_qq_link(&id)?;
             Ok(Value::Null)
+        }
+        Operation::SessionAdopt {
+            path,
+            identity_path,
+            item,
+            from,
+        } => {
+            // 镜像的两边都是目录里的文件；注入存储的宿主自己管存储，没有这个操作。
+            let AnonymousIdentitySource::Directory(directory) = identity else {
+                return Err(invalid());
+            };
+            // 身份只跟着匿名会话走，登录会话带它是请求不合法。
+            if identity_path.is_some() && matches!(item, SessionItem::Account) {
+                return Err(invalid());
+            }
+            let published = match path {
+                Some(path) => read_published_session(absolute_path(&path)?)?,
+                None => None,
+            };
+            let published_identity = match identity_path {
+                Some(path) => Some(read_published_anonymous_identity(absolute_path(&path)?)?),
+                None => None,
+            };
+            let outcome = match (item, published_identity) {
+                (SessionItem::Account, _) => account.adopt_session(published, from)?,
+                (SessionItem::Anonymous, None) => {
+                    anonymous()?.adopt_anonymous_session(published, from)?
+                }
+                (SessionItem::Anonymous, Some(published_identity)) => anonymous()?
+                    .adopt_anonymous_session_with_identity(
+                        published,
+                        from,
+                        directory,
+                        &published_identity,
+                    )?,
+            };
+            // 本地读不了而没有采用时仍报 unchanged（老宿主照旧能认），另外带 local_unreadable，让宿主知道这个结论不只取决于发布物、同一份以后还要再试。
+            Ok(match outcome {
+                SessionAdoptOutcome::LocalUnreadable => {
+                    json!({ "outcome": SessionAdoptOutcome::Unchanged, "local_unreadable": true })
+                }
+                outcome => json!({ "outcome": outcome }),
+            })
         }
     }
 }

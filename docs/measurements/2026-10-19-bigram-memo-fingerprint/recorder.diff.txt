@@ -1,0 +1,37 @@
+diff --git a/crates/engine/src/lattice/decode.rs b/crates/engine/src/lattice/decode.rs
+index b8256c6a27..81ec1725fe 100644
+--- a/crates/engine/src/lattice/decode.rs
++++ b/crates/engine/src/lattice/decode.rs
+@@ -159,6 +159,7 @@ impl BigramMemo {
+             return 0.0;
+         };
+         let address = Arc::as_ptr(table) as usize;
++        fingerprint_trace(self as *const Self as usize, address, key);
+         if self.table != address {
+             self.scores.clear();
+             self.table = address;
+@@ -1736,3 +1737,24 @@ mod constrained_tests;
+ #[cfg(test)]
+ #[path = "decode_row_index_tests.rs"]
+ mod row_index_tests;
++
++// 仅记录公开评测的首个备忘对象，采集后撤回。
++fn fingerprint_trace(memo: usize, table: usize, key: u64) {
++    use std::io::Write;
++    thread_local! {
++        static TRACE: RefCell<Option<(usize, usize, std::io::BufWriter<std::fs::File>)>> = RefCell::new(None);
++    }
++    TRACE.with(|state| {
++        let mut state = state.borrow_mut();
++        if state.is_none() {
++            let path = std::env::var_os("MSIME_FINGERPRINT_TRACE").expect("诊断路径已指定");
++            let file = std::fs::File::create(path).expect("诊断文件可写");
++            *state = Some((memo, table, std::io::BufWriter::with_capacity(16 * 1024 * 1024, file)));
++        }
++        let (selected, selected_table, writer) = state.as_mut().unwrap();
++        if memo == *selected {
++            assert_eq!(table, *selected_table, "诊断选中对象的表不变");
++            writer.write_all(&key.to_le_bytes()).expect("完整诊断写入");
++        }
++    });
++}

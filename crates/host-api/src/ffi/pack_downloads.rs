@@ -94,7 +94,7 @@ fn progress_phase(stage: &str) -> &'static CStr {
     }
 }
 
-/// C 回调：`(context, phase, done, total)`，phase 是 "download"、"verify" 或 "done"，只在调用期间有效。
+/// C 回调：`(context, phase, done, total)`，phase 是 "download"、"import"、"verify" 或 "done"，只在调用期间有效。
 pub type ResourcePackProgress =
     unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, u64, u64);
 
@@ -126,7 +126,14 @@ pub unsafe extern "C" fn msime_client_resource_packs(
 ///
 /// With `"files": ["<absolute path>", ...]` (at most 16) the pack is installed from those local files instead of the network (`resource_packs::import`): files are matched by size and SHA-256, never by name, `sources` is ignored, the download phase is reported as "import", a missing file fails with "local_model_import_missing: <name>" and an unreadable one with "local_model_import_unreadable: <detail>".
 ///
-/// `progress` (may be null) is called on the calling thread with `(context, phase, done, total)`, phase one of "download", "import", "verify", "done"; the phase string is only valid during the call. `msime_client_resource_pack_cancel` stops it from any thread and the call then fails with "local_model_cancelled". One install or adoption per pack at a time; another fails with "resource_pack_busy". Other failures are "resource_pack_unknown", "invalid resource pack request", "invalid state root" or a "local_model_*" code (network, http_status, size_mismatch, checksum_mismatch, unsafe_archive, missing_file, io, invalid_mirror, invalid_root).
+/// `progress` 可为 null，在调用线程上收到 `(context, phase, done, total)`，阶段为
+/// "download"、"import"、"verify"、"done"，阶段字符串只在回调期间有效。
+/// 首次进度在任务登记后、任何文件或网络 I/O 前发送，字节数为 0，总量为资源包大小；
+/// 回调可重入 `msime_client_resource_pack_cancel`，取消后返回 "local_model_cancelled"。
+/// 每个资源包同时只允许一个安装或收编，否则返回 "resource_pack_busy"。
+/// 其他错误为 "resource_pack_unknown"、"invalid resource pack request"、"invalid state root"
+/// 或 "local_model_*"（network、http_status、size_mismatch、checksum_mismatch、unsafe_archive、
+/// missing_file、io、invalid_mirror、invalid_root）。
 ///
 /// # Safety
 /// `request` must point to `length` readable bytes. `progress` must stay valid for the call, must copy the phase string before returning and must not unwind.
@@ -176,12 +183,25 @@ pub unsafe extern "C" fn msime_client_resource_pack_install(
         let mut report = |event: InstallProgress| {
             if let Some(callback) = progress {
                 let phase = progress_phase(event.stage);
-                // SAFETY: the caller guarantees the callback stays valid for this call and does not unwind; the phase string is static.
+                // SAFETY: 调用方保证回调在本次调用期间有效且不展开栈；阶段字符串为静态值。
                 unsafe {
                     callback(context, phase.as_ptr(), event.downloaded, event.total);
                 }
             }
         };
+        // 登记之后、访问文件或网络之前通知宿主，允许回调重入取消而不丢失请求。
+        report(InstallProgress {
+            stage: if files.is_some() {
+                "import"
+            } else {
+                "download"
+            },
+            downloaded: 0,
+            total: pack.size(),
+        });
+        if task.cancel.load(Ordering::Relaxed) {
+            return Err("local_model_cancelled".into());
+        }
         let path = match &files {
             Some(files) => {
                 resource_packs::import(state_root, pack, files, &mut report, &task.cancel)
@@ -456,8 +476,59 @@ mod tests {
     }
 
     #[test]
-    fn progress_phases_are_the_three_the_contract_names() {
+    fn initial_progress_can_cancel_a_registered_install_before_any_io() {
+        unsafe extern "C" fn cancel_on_progress(
+            context: *mut std::ffi::c_void,
+            phase: *const c_char,
+            done: u64,
+            total: u64,
+        ) {
+            // 回调只记录参数并重入取消入口，断言留在调用完成后，避免跨 C 边界 panic。
+            let observed = unsafe { &mut *context.cast::<Vec<(String, u64, u64)>>() };
+            let phase = unsafe { CStr::from_ptr(phase) }
+                .to_string_lossy()
+                .into_owned();
+            observed.push((phase, done, total));
+            let pack = b"japanese";
+            unsafe { msime_client_resource_pack_cancel(pack.as_ptr(), pack.len()) };
+        }
+        for from_files in [false, true] {
+            let state = tempfile::tempdir().unwrap();
+            let mut request = json!({ "state_root": state.path(), "pack": "japanese" });
+            if from_files {
+                request["files"] = json!([]);
+            } else {
+                // 即使初始回调回归，明文镜像也会在联网前被拒绝，测试不会下载真实资源。
+                request["sources"] = json!(["http://synthetic.invalid/"]);
+            }
+            let request = serde_json::to_vec(&request).unwrap();
+            let mut observed: Vec<(String, u64, u64)> = Vec::new();
+            let result = read(unsafe {
+                msime_client_resource_pack_install(
+                    request.as_ptr(),
+                    request.len(),
+                    Some(cancel_on_progress),
+                    (&mut observed as *mut Vec<(String, u64, u64)>).cast(),
+                )
+            });
+            assert_eq!(result["error"], "local_model_cancelled", "{result}");
+            let phase = if from_files { "import" } else { "download" };
+            assert_eq!(
+                observed,
+                vec![(phase.into(), 0, ResourcePack::Japanese.size())]
+            );
+            assert!(!resource_packs::root(state.path()).exists());
+            assert!(!resource_pack_tasks()
+                .lock()
+                .unwrap()
+                .contains_key("japanese"));
+        }
+    }
+
+    #[test]
+    fn progress_phases_match_the_contract_names() {
         assert_eq!(progress_phase("download"), c"download");
+        assert_eq!(progress_phase("import"), c"import");
         assert_eq!(progress_phase("verify"), c"verify");
         assert_eq!(progress_phase("extract"), c"verify");
         assert_eq!(progress_phase("done"), c"done");

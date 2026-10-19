@@ -1,0 +1,55 @@
+error[E0283]: type annotations needed
+    --> crates/engine/src/lattice/decode.rs:1137:26
+     |
+1137 |         let graph = vec![Vec::new()];
+     |                          ^^^^^^^^ cannot infer type of the type parameter `T` declared on the struct `Vec`
+...
+1140 |             decode_graph(&graph, &options, None)
+     |             ------------ type must be known at this point
+     |
+     = note: multiple `impl`s satisfying `_: AsRef<str>` found in the following crates: `alloc`, `core`:
+             - impl AsRef<str> for std::string::String;
+             - impl AsRef<str> for str;
+note: required by a bound in `decode::decode_graph`
+    --> crates/engine/src/lattice/decode.rs:567:31
+     |
+ 567 | pub(super) fn decode_graph<S: AsRef<str>>(
+     |                               ^^^^^^^^^^ required by this bound in `decode_graph`
+help: consider specifying a concrete type for the type parameter `T`
+     |
+1137 |         let graph = vec![Vec::</* Type */>::new()];
+     |                             ++++++++++++++
+
+error: lifetime may not live long enough
+  --> crates/engine/src/lattice/graph_borrowed_fields_tests.rs:35:9
+   |
+34 |       let build = |rows: &[LatticeLexeme]| {
+   |                          -               - return type of closure is (Vec<Vec<decode::Edge<std::borrow::Cow<'2, str>>>>, usize)
+   |                          |
+   |                          let's call the lifetime of this reference `'1`
+35 | /         count(|| {
+36 | |             build_graph_borrowed(
+37 | |                 &keys,
+38 | |                 &mut |span| if span.len() == 1 { rows } else { &[] },
+...  |
+41 | |         })
+   | |__________^ returning this value requires that `'1` must outlive `'2`
+
+error[E0505]: cannot move out of `rows` because it is borrowed
+   --> crates/engine/src/lattice/graph_borrowed_fields_tests.rs:202:37
+    |
+166 |                     let (new, after) = measure(|| {
+    |                                                -- borrow of `rows` occurs here
+...
+171 |                                 rows.get(span).unwrap().as_slice()
+    |                                 ---- borrow occurs due to use in closure
+...
+202 |                     drop((old, new, rows));
+    |                          -----------^^^^-
+    |                          |          |
+    |                          |          move out of `rows` occurs here
+    |                          borrow later used here
+
+Some errors have detailed explanations: E0283, E0505.
+For more information about an error, try `rustc --explain E0283`.
+error: could not compile `msime-engine` (lib test) due to 3 previous errors

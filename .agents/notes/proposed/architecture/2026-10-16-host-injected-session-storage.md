@@ -54,9 +54,9 @@ Status: proposed
 
 ### 当前落地切片（Linux）
 
-Linux 的在线 provider 已把匿名账号注册、令牌读取与翻译响应解析切到 `host-api`。Python 进程经 `ctypes` 调用 `msime_client_ensure_anonymous_account` 和 `msime_client_account_access_token`，因此身份文件、刷新锁、登录账号优先和令牌轮换只由 Rust 实现；翻译请求仍由 provider 的 HTTP worker 发出，但收到的响应经 `msime_client_account_gloss` 按 client-services 的逐项规则解析。provider 不再实现或调用 `/v1/auth/challenges`、`/v1/auth/login`、`/v1/auth/refresh`，也不再直接读写匿名账号文件。库路径优先取 `MSIME_HOST_LIBRARY`，安装包按 `<prefix>/lib/<client-directory>/libmsime_host_api*.so` 查找，便于各 Linux edition 共用同一套脚本。
+Linux 的在线 provider 已把匿名账号注册和账号释义整条切到 `host-api`。Python 进程经 `ctypes` 调用 `msime_client_ensure_anonymous_account_with_agent` 和 `msime_client_account` 的 `translate`，因此身份文件、刷新锁、登录账号优先、令牌轮换、`/v1/translate` 请求和逐项规范化只由 Rust 实现，provider 只在 `account_unauthorized` 时补注册一次匿名账号（见 [Linux provider 的「水杉账号」释义改调 msime_client_account 的 translate](../../implemented/architecture/2026-10-18-linux-account-translation-through-rust.md)）。provider 不再实现或调用 `/v1/auth/challenges`、`/v1/auth/login`、`/v1/auth/refresh`，也不再直接读写匿名账号文件。库路径先取安装时 CMake 写进 `msime_voice_paths.py` 的 `HOST_LIBRARY`，再取 `MSIME_HOST_LIBRARY`，最后按 `<prefix>/lib/<client-directory>/libmsime_host_api*.so` 和源码树查找，便于各 Linux edition 和 rpm、Gentoo 的 `lib64` 共用同一套脚本。
 
-这一步保留了 provider 的 HTTP worker 和候选、AI、第三方翻译路径；它们没有账号会话语义，暂不随账号迁移。测试用假的 Rust bridge 检查 provider 只走 Rust 账号契约，Rust 本身的账号和 `account_gloss` 测试继续覆盖实际校验与存储规则。
+provider 的 HTTP worker 只剩候选、AI 和第三方翻译路径；它们没有账号会话语义，不随账号迁移。测试用假的 Rust bridge 检查 provider 只走 Rust 账号契约，Rust 本身的账号和 `translate` 测试继续覆盖实际校验与存储规则。
 
 ### 新接口的错误形状与校验
 
@@ -68,7 +68,7 @@ Linux 的在线 provider 已把匿名账号注册、令牌读取与翻译响应�
 - 注销账号（已有的 `delete` 和 `account_delete`）成功以后同样尽力删掉匿名账号的语音样本，结果同样在 `voice_samples` 里，失败不撤销、也不让注销失败：注销是不可逆的，已经做成的事不能因为附带的一步报成失败，否则宿主会让用户再注销一次、而账号已经没了。`voice_delete` 不要求登录，从没登录过的用户也能删掉自己的样本。云端数据汇总在登录账号的之后再用匿名账号取一次汇总，把 `voice` 分区合进去；这一次失败时汇总照样返回，`anonymous_voice` 标成 `unknown`，因为汇总只是展示，页面上一个分区数不准好过整页打不开。汇总不为此重新登录匿名账号（`GET` 不要求最近登录），也就不耗额度；所以本机还留着匿名身份、会话却已经过期清掉（服务端的会话 30 天后一律过期）时同样是 `unknown`，名下的样本还在，不能报成没有匿名账号的 `none`。
 - 服务端响应的结构体不拒绝未知字段。AI 皮肤的 `RawSkinJob` 曾带 `deny_unknown_fields`，msime-cloud 在 2026-10-01 给 202 响应加了 `expires_at` 以后每次创建插画任务都解析失败；回放当前形状的本地测试抓不到服务端以后再加的字段。
 - AI 皮肤生成的进度回调在调用线程上依次调用：出图线程只经通道报告完成。与头文件里其他进度回调的约定一致，JNI 和 NAPI 胶水可以直接用调用线程的 env；出图线程遇到 401 时仍可能在 Rust 的线程上调用存储回调，按上面的「任意线程」处理。
-- 对话的流式与取消（决定 15）是单独的 `msime_client_account_chat_stream`，因为 `msime_client_account` 没有回调参数；请求、预检和令牌来源与 `chat` 相同，宿主给 `request_id`，`msime_client_account_chat_cancel` 按 id 从任何线程或回调里取消，与 AI 皮肤的生成和取消是同一种形状。增量回调与进度回调一样在调用线程上依次调用。请求和读取在 Rust 自己的一个后台线程上做，读到的字节经有界通道交给调用线程解析：reqwest 的阻塞客户端不能从别的线程打断一次读取，所以取消让调用线程立刻不再等，连接由后台线程在服务端下一次发数据时（最晚到 125 秒的总时限）断开。开始输出以后的失败按服务端契约分两种：上游失败事件是 `account_unavailable`，没等到 `[DONE]` 的断开是 `account_network`，已经交出的增量不收回。换号核对只在回答完整以后做一次，与 `chat` 相同。
+- 对话的流式与取消（决定 15）是单独的 `msime_client_account_chat_stream`，因为 `msime_client_account` 没有回调参数；请求、预检和令牌来源与 `chat` 相同，宿主给 `request_id`，`msime_client_account_chat_cancel` 按 id 从任何线程或回调里取消，与 AI 皮肤的生成和取消是同一种形状。先于登记到达的取消（宿主已经调用、Rust 还没登记 id）两张登记表都记下最近 64 个，同一个 id 随后登记时按已取消开始，所以取消过的 id 不能再用。增量回调与进度回调一样在调用线程上依次调用。请求和读取在 Rust 自己的一个后台线程上做，读到的字节经有界通道交给调用线程解析：reqwest 的阻塞客户端不能从别的线程打断一次读取，所以取消让调用线程立刻不再等，连接由后台线程在服务端下一次发数据时（最晚到 125 秒的总时限）断开。开始输出以后的失败按服务端契约分两种：上游失败事件是 `account_unavailable`，没等到 `[DONE]` 的断开是 `account_network`，已经交出的增量不收回。换号核对只在回答完整以后做一次，与 `chat` 相同。
 - 给已登录账号添加登录方式（决定 9）是已有登录操作上的 `purpose:"link"`，不是另开一组操作：邮箱、Google ID token 和 Apple 网页登录的申请和完成两步都带它，Rust 不记哪个 challenge 是绑定，与 Apple 网页登录的 verifier 一样由宿主保存。两步都只用登录会话并带着它的令牌，never 用匿名账号；完成时服务端为同一个账号签发一个新会话，Rust 在刷新锁里核对会话代次和账号都没变以后用它替换本地会话（新的登录 ID，推进代次，与 Android 的 `keepSession` 相同），宿主紧接着做要求最近登录的操作时用的就是它。完成一步遇到 401 不刷新重试：验证码不对和令牌失效同是 401 `invalid_credentials`，重试会多耗一次 challenge 尝试。两步的失败都走 `AccountFailure`，否则分不出 `account_recent_login_required`；不带 `purpose` 的登录仍是原来的 `AccountError` 码。
 
 ## Related notes
@@ -77,6 +77,8 @@ Linux 的在线 provider 已把匿名账号注册、令牌读取与翻译响应�
 - [鸿蒙设置应用与键盘扩展经共享沙箱镜像交换数据](../../implemented/architecture/2026-10-09-harmony-ime-shared-sandbox.md)：部分重叠。鸿蒙的会话在 ArkTS 里、两个进程沙箱分开，是它不走注入、改为整端切到目录模式的背景之一。
 - [iOS 原生应用的自动云同步](../../implemented/feature/2026-10-12-ios-automatic-cloud-sync.md)：与本篇无关；同步编排收进 Rust 的决定见下一条。
 - [多分类自动云同步的编排收进 Rust](2026-10-16-cloud-sync-orchestration-in-rust.md)：部分重叠。同步的 C 入口沿用这里的会话来源和 `session_store` 字段。
+- [Android 的会话存储经 JNI 注入，回调胶水在桌面 JVM 上验证](../../implemented/architecture/2026-10-18-android-session-store-jni.md)：部分重叠。Android 实现这里的 JNI 回调契约（缓存 `JavaVM`、attach 与 detach、清异常），下面「风险」里只能在 Android 迁移时验证的那一条改由 `check-host.sh` 在桌面 JVM 上验证。
+- [Apple 宿主经一张函数表调用 Rust，会话存储由 Swift 注入](../../implemented/architecture/2026-10-18-apple-rust-client-table.md)：部分重叠。macOS 与 iOS 实现这里的回调契约（钥匙串和 App Group 的位置、锁文件、失败不当作不存在），以及 Swift 怎样在不链接 Rust 的 dylib 和 `swift test` 里拿到这些 C 入口。
 - [旧账号会话迁移不覆盖新登录](../../implemented/bug-fix/2026-10-13-account-session-migration-no-clobber.md)：无关；匿名身份的「不存在才写」沿用的是同一种 no-clobber 思路，但那篇只管目录间的会话迁移。
 
 ## Alternatives considered

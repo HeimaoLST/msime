@@ -5,6 +5,8 @@
 # Every platform keeps its build output in its own target/ (platforms/ios/target/sim-shots, a stray platforms/target/linux), and checks that import sibling modules leave bytecode caches next to them. Neither should depend on a contributor's global ignore file.
 /platforms/*/target/
 /platforms/target/
+# 发布日期只写进源码包（make-source-tarballs.sh 这类脚本生成），检出里的构建从 git 读提交日期；见 apps/desktop/src-tauri/build.rs。
+/platforms/*/release-date.txt
 __pycache__/
 .build/
 node_modules/

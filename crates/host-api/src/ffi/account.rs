@@ -4,7 +4,7 @@
 //!
 //! 请求带 `session_store` 而不带 `directory` 时，会话在宿主注入的存储里（[`super::session_store`]），会话对象是注册时建好的那一个。
 //!
-//! #8201 新增的操作（对话、释义、常用语、我的设备、云端数据、反馈、诊断上传、发送下载链接、语音贡献和删除语音样本）在 [`crate::account_ops`]；已有的 `delete` 注销成功以后也经它删匿名账号的语音样本；它们失败时还可能带 `retry_after_seconds`。用到匿名账号的几项，按目录时用同一目录里的 `anonymous-session.json`（每个目录、每个 `client_agent` 一个会话对象，刷新时与登录会话共用 `account-refresh.lock`）和 `anonymous-account.json` 里的身份，注入时用该 store 的匿名会话和 `ANONYMOUS_IDENTITY` 项。
+//! #8201 新增的操作（对话、释义、常用语、我的设备、云端数据、反馈、诊断上传、发送下载链接、语音贡献、删除语音样本和鸿蒙两个沙箱之间的会话镜像 `session_adopt`）在 [`crate::account_ops`]；已有的 `delete` 注销成功以后也经它删匿名账号的语音样本；它们失败时还可能带 `retry_after_seconds`。用到匿名账号的几项，按目录时用同一目录里的 `anonymous-session.json`（每个目录、每个 `client_agent` 一个会话对象，刷新时与登录会话共用 `account-refresh.lock`）和 `anonymous-account.json` 里的身份，注入时用该 store 的匿名会话和 `ANONYMOUS_IDENTITY` 项。
 //!
 //! Part of the C ABI; see the parent module for what these shims guarantee.
 
@@ -20,10 +20,10 @@ use msime_client_services::account::settings_sync::{
     prepare_desktop_settings_apply, upload_desktop_settings,
 };
 use msime_client_services::account::{
-    adopt_legacy_account_session, ensure_anonymous_account, ensure_anonymous_account_in,
-    ensure_anonymous_account_with, valid_client_agent, AccountError, AccountPreferences,
-    AccountSessionFileLayout, AnonymousIdentitySource, BackendAccountClient, BackendAccountSession,
-    FileAccountSessionStorage, LockedAnonymousSessionStorage,
+    adopt_legacy_account_session, client_agent, ensure_anonymous_account,
+    ensure_anonymous_account_in, ensure_anonymous_account_with, valid_client_agent, AccountError,
+    AccountPreferences, AccountSessionFileLayout, AnonymousIdentitySource, BackendAccountClient,
+    BackendAccountSession, FileAccountSessionStorage, LockedAnonymousSessionStorage,
 };
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -32,6 +32,8 @@ const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_DIRECTORY_BYTES: usize = 16 * 1024;
 /// `msime_client_ensure_anonymous_account_with_agent` 的请求上限：16 KiB 的目录加上 `client_agent` 和 JSON 本身。
 const MAX_ENSURE_ANONYMOUS_REQUEST_BYTES: usize = 32 * 1024;
+/// `msime_client_client_agent` 的请求上限。
+const MAX_CLIENT_AGENT_REQUEST_BYTES: usize = 16 * 1024;
 
 pub(super) type Session = BackendAccountSession<BackendAccountClient, SessionStorage>;
 
@@ -627,6 +629,81 @@ pub unsafe extern "C" fn msime_client_ensure_anonymous_account_with_agent(
     })
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountNameRequest {
+    name: String,
+    id: String,
+}
+
+/// 计算昵称草稿的规范化、合法性与默认显示名；不创建会话、不读文件、不联网。
+///
+/// # Safety
+/// `request` 必须在本次调用期间指向 `length` 个可读字节；NULL 被拒绝。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_account_name(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        let request: AccountNameRequest = unsafe {
+            with_bounded_bytes(request, length, 16 * 1024, "account_invalid", |bytes| {
+                serde_json::from_slice(bytes).map_err(|_| "account_invalid".to_owned())
+            })?
+        };
+        Ok(json!(msime_client_services::account::name::present_name(
+            &request.name,
+            &request.id,
+        )))
+    })
+}
+
+/// `msime_client_client_agent` 的请求。
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientAgentRequest {
+    platform: String,
+    version: String,
+    #[serde(default)]
+    device: Option<String>,
+    #[serde(default)]
+    system: Option<String>,
+    edition: String,
+}
+
+/// 拼出宿主自报的 User-Agent（#8201 迁移计划 P11），规则在 client-services 的 `account::client_agent`，用例在 `shared/contracts/client-agent/cases.json`。不联网、不读文件。
+///
+/// # Safety
+/// `request` 指向 `length` 个可读的 UTF-8 JSON 字节，NULL 被拒绝。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_client_agent(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        let invalid = || AccountError::Invalid.code().to_owned();
+        // SAFETY: 由调用方契约保证。
+        let request: ClientAgentRequest = unsafe {
+            with_bounded_bytes(
+                request,
+                length,
+                MAX_CLIENT_AGENT_REQUEST_BYTES,
+                "account_invalid",
+                |bytes| serde_json::from_slice(bytes).map_err(|_| invalid()),
+            )?
+        };
+        client_agent(
+            &request.platform,
+            &request.version,
+            request.device.as_deref(),
+            request.system.as_deref(),
+            &request.edition,
+        )
+        .map(Value::String)
+        .map_err(|error| error.code().to_owned())
+    })
+}
+
 pub(super) fn absolute_directory(value: &str) -> Result<&Path, String> {
     let path = Path::new(value);
     if value.len() > MAX_DIRECTORY_BYTES || !path.is_absolute() {
@@ -725,9 +802,13 @@ pub unsafe extern "C" fn msime_client_account(request: *const u8, length: usize)
 }
 
 #[cfg(test)]
+mod client_agent_assembly_tests;
+#[cfg(test)]
 mod client_agent_tests;
 #[cfg(test)]
 mod link_tests;
+#[cfg(test)]
+mod session_adopt_tests;
 #[cfg(test)]
 mod voice_samples_tests;
 
@@ -916,31 +997,35 @@ mod tests {
         }
 
         #[test]
-        fn an_apple_layout_store_reads_what_swift_wrote() {
-            let store = leaked_store();
-            let id = registered(store, SHARED, 1);
-            // Swift 的 BackendSavedSession：expiresAt 是 2001 年起的秒数。
-            let document = json!({
-                "tokens": {
-                    "access_token": "a".repeat(64),
-                    "refresh_token": "b".repeat(64),
-                    "token_type": "Bearer",
-                    "expires_in": 900,
-                    "user": {
-                        "id": "synthetic-user",
-                        "display_name": "",
-                        "created_at": "2026-01-01T00:00:00Z",
-                        "email": "person@example.test",
-                    },
-                },
-                "expiresAt": 800_000_000.0,
-                "sessionID": "6f9619ff-8b86-d011-b42d-00c04fc964ff",
-            });
-            put(store, 1, document.to_string().into_bytes());
-            let user = &store_action(id, json!({ "operation": "status" }))["value"]["user"];
-            assert_eq!(user["id"], "synthetic-user");
-            assert_eq!(user["email"], "person@example.test");
-            unregister(id);
+        fn every_shared_layout_case_reads_through_a_host_store() {
+            // 共享用例 `shared/contracts/account-session-layouts/cases.json`：Swift、Rust、鸿蒙旧版 ArkTS 和 Android 原来的 Java 写的真实字节，经 C 接口注册的宿主存储交来，status 认出用例里的账号；Apple 布局的用例按 layout 1 注册，其余按 layout 0。读不出的是 account_storage。
+            let contract: Value = serde_json::from_str(include_str!(
+                "../../../../shared/contracts/account-session-layouts/cases.json"
+            ))
+            .unwrap();
+            for case in contract["cases"].as_array().unwrap() {
+                let name = case["name"].as_str().unwrap();
+                let store = leaked_store();
+                let id = registered(store, SHARED, u32::from(case["layout"] == "apple"));
+                put(
+                    store,
+                    1,
+                    case["document"].as_str().unwrap().as_bytes().to_vec(),
+                );
+                let status = store_action(id, json!({ "operation": "status" }));
+                if let Some(code) = case["error"].as_str() {
+                    assert_eq!(status, json!({ "ok": false, "error": code }), "{name}");
+                } else {
+                    let user = &case["session"]["tokens"]["user"];
+                    assert_eq!(status["value"]["user"]["id"], user["id"], "{name}");
+                    assert_eq!(
+                        status["value"]["user"].get("email"),
+                        user.get("email"),
+                        "{name}"
+                    );
+                }
+                unregister(id);
+            }
         }
 
         #[test]

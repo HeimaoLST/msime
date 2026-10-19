@@ -5,7 +5,7 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'none'; img-src 'self' data:" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'none'; img-src 'self' data: http://localhost:*" />
     <title>@msime/web-engine 候选栏检查</title>
   </head>
   <body>
@@ -250,9 +250,158 @@
         bar.destroy();
       }
 
+      // 从 DevTools 取得真实合成结果后在页面里读像素，验证九块实际画到了正确的位置。
+      async function screenshotPixels(points) {
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+        return await new Promise((done) => {
+          window.finishPixelCheck = async (data) => {
+            const image = new Image(); image.src = `data:image/png;base64,${data}`;
+            await image.decode();
+            const canvas = document.createElement("canvas");
+            canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+            const ctx = canvas.getContext("2d"); ctx.drawImage(image, 0, 0);
+            const pixels = [];
+            for (const point of points) {
+              const pixel = [...ctx.getImageData(Math.round(point.x), Math.round(point.y), 1, 1).data].slice(0, 3);
+              pixels.push(pixel);
+              if (point.rgb) equal(pixel.join(), point.rgb.join(), point.name);
+            }
+            delete document.body.dataset.pixelRequest;
+            delete window.finishPixelCheck;
+            done(pixels);
+          };
+          document.body.dataset.pixelRequest = "true";
+        });
+      }
+
+      async function setReduced(value) {
+        await new Promise((done) => {
+          window.finishMotionCheck = () => { delete document.body.dataset.motionRequest; delete window.finishMotionCheck; done(); };
+          document.body.dataset.motionRequest = value ? "reduce" : "no-preference";
+        });
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      }
+
+      async function canvasSkin() {
+        current = "canvas rendering";
+        const waitFor = async (predicate, message) => {
+          const deadline = performance.now() + 3000;
+          while (!predicate() && performance.now() < deadline) await new Promise((done) => setTimeout(done, 10));
+          check(predicate(), message);
+        };
+        const png = (paint, width = 6, height = 6) => {
+          const canvas = document.createElement("canvas"); canvas.width = width; canvas.height = height;
+          paint(canvas.getContext("2d")); return canvas.toDataURL();
+        };
+        const colours = ["#ff0000", "#00ff00", "#0000ff", "#ffff00", "#ff00ff", "#00ffff", "#880000", "#008800", "#000088"];
+        const panelUrl = png((ctx) => colours.forEach((color, i) => { ctx.fillStyle = color; ctx.fillRect((i % 3) * 2, Math.floor(i / 3) * 2, 2, 2); }));
+        const green = png((ctx) => { ctx.fillStyle = "#119922"; ctx.fillRect(0, 0, 6, 6); });
+        const cyan = png((ctx) => { ctx.fillStyle = "#11aacc"; ctx.fillRect(0, 0, 6, 6); });
+        const skin = { schemaVersion: 2, base: "canvas", animation: { enter: "none", exit: "none", selection: "none" }, minWidthDip: 220,
+          borderImage: { source: panelUrl, sliceDip: [2], widthDip: [8], fill: true },
+          contentInsetsDip: { top: 20, right: 20, bottom: 20, left: 20 }, outerInsetsDip: { top: 16, right: 16, bottom: 16, left: 16 }, lineGapDip: 6,
+          candidate: { light: { text: "#f5ecff", preedit_text: "#ffc4dc", selected_text: "#fff", selected_bar: "#ffd27a" } },
+          decorations: [{ image: green, anchor: "top-left", offsetXDip: -30, offsetYDip: -10, widthDip: 50, heightDip: 30, zIndex: 0 },
+            { image: cyan, anchor: "top-right", offsetXDip: 10, offsetYDip: -10, widthDip: 30, heightDip: 30, zIndex: 1 }] };
+        skin.background = { image: cyan, fit: "stretch" };
+        const picks = [];
+        const bar = createCandidateBar({ skin, dark: false, onPick: (i) => picks.push(i) });
+        bar.render(composingFrame("ni", ["示例甲", "示例乙"]), { left: 40, top: 180, bottom: 200 });
+        const root = parts(bar.element).root;
+        const card = root.querySelector(".container");
+        const panel = root.querySelector(".skin-panel");
+        equal(getComputedStyle(parts(bar.element).first.querySelector(".cand-content")).color, rgb("#1A1A1A"), "the loading fallback is readable");
+        await waitFor(() => card.dataset.panel !== undefined && panel.style.borderImageSource !== "" && [...root.querySelectorAll(".skin-picture > img")].every((img) => img.complete), "the panel and widgets load");
+        equal(getComputedStyle(parts(bar.element).first.querySelector(".cand-content")).color, rgb("#FFFFFF"), "loaded panel uses its selected text colour");
+        equal(getComputedStyle(root.querySelector(".pinyin .text")).color, rgb("#FFC4DC"), "preedit colour slot");
+        equal(card.dataset.background, undefined, "panel takes priority over the legacy background image");
+        equal(getComputedStyle(card).paddingLeft, "20px", "content insets from the panel edge");
+        equal(getComputedStyle(root.querySelector(".pinyin")).marginBottom, "6px", "line gap");
+        const box = card.getBoundingClientRect();
+        const all = root.getBoundingClientRect();
+        equal(box.left - all.left, 16, "outer left inset affects the popup bounds");
+        equal(box.top - all.top, 16, "outer top inset affects the popup bounds");
+        await screenshotPixels([
+          { x: box.left + 4, y: box.top + 4, rgb: [255, 0, 0], name: "top left source corner keeps its destination width" },
+          { x: box.left + box.width / 2, y: box.top + 4, rgb: [0, 255, 0], name: "top source edge stretches" },
+          { x: box.left + 25, y: box.bottom - 12, rgb: [255, 0, 255], name: "centre fill stretches behind content" },
+          { x: box.left - 5, y: box.top - 5, rgb: [17, 153, 34], name: "back widget extends into outer inset" },
+          { x: all.left - 2, y: box.top - 5, rgb: [255, 255, 255], name: "widgets are clipped to the reserved popup bounds" },
+          { x: box.right - 4, y: box.top + 4, rgb: [17, 170, 204], name: "z index one widget is above the panel" },
+        ]);
+        await setReduced(true);
+        equal(panel.querySelectorAll("canvas").length, 1, "reduced motion freezes the panel");
+        equal(root.querySelectorAll(".skin-picture canvas").length, 2, "reduced motion freezes the widgets");
+        await screenshotPixels([{ x: box.left + 4, y: box.top + 4, rgb: [255, 0, 0], name: "the frozen panel keeps its source corner" }]);
+        await setReduced(false);
+        equal(panel.querySelectorAll("canvas").length, 0, "the live motion preference restores the panel image");
+        equal(root.querySelectorAll(".skin-picture img").length, 2, "the live motion preference restores widget images");
+        // 两张程序生成的纯色帧验证原生 APNG/GIF 时钟与首帧回退；没有第三方图片。
+        const movingImages = {"png": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAMCAYAAABWdVznAAAACGFjVEwAAAACAAAAAPONk3AAAAAaZmNUTAAAAAAAAAAMAAAADAAAAAAAAAAAALQD6AAA8a7+pwAAABxJREFUeJxj/M/A8J+BBMBEimIQGNVADBgOoQQArIUCFiFVnUUAAAAaZmNUTAAAAAEAAAAMAAAADAAAAAAAAAAAALQD6AAAat0UcwAAACBmZEFUAAAAAnicY2Rg+P+fgQTARIpiEBjVQAwYDqEEAKqHAhZF3Mt4AAAAAElFTkSuQmCC", "gif": "data:image/gif;base64,R0lGODlhDAAMAIEAAP8AAAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQAEgAAACwAAAAADAAMAAAIFgABCBxIsKDBgwgTKlzIsKHDhxARBgQAIfkEARIAAQAsAAAAAAwADACBAAD/AAAAAAAAAAAACBYAAQgcSLCgwYMIEypcyLChw4cQEQYEADs="};
+        for (const [format, image] of Object.entries(movingImages)) {
+          bar.setSkin({ ...skin, borderImage: { source: image, sliceDip: [4], widthDip: [8] }, decorations: [{ image, widthDip: 12, heightDip: 12, anchor: "top-left", offsetXDip: -12, zIndex: 2 }] });
+          await waitFor(() => card.dataset.panel !== undefined && root.querySelector(".skin-picture img")?.complete, `${format} loads`);
+          const rect = card.getBoundingClientRect();
+          const points = [{ x: rect.left + 3, y: rect.top + 3 }, { x: rect.left - 6, y: rect.top + 6 }];
+          const seen = [new Set(), new Set()];
+          for (let i = 0; i < 6; i++) {
+            const pixels = await screenshotPixels(points);
+            pixels.forEach((pixel, n) => seen[n].add(pixel.join()));
+            await new Promise((done) => setTimeout(done, 80));
+          }
+          check(seen[0].size > 1, `${format} panel actually plays frames`);
+          check(seen[1].size > 1, `${format} widget actually plays frames`);
+          await setReduced(true);
+          for (let i = 0; i < 2; i++) {
+            await screenshotPixels(points.map((point) => ({ ...point, rgb: [255, 0, 0], name: `${format} freezes on the first frame` })));
+            await new Promise((done) => setTimeout(done, 200));
+          }
+          await setReduced(false);
+        }
+        // 改主机名形成不同 origin；服务器不返回 CORS 头，冻结路径不能读取或导出图片像素。
+        const crossOrigin = new URL("/test/canvas-panel.svg", location.href); crossOrigin.hostname = "localhost";
+        bar.setSkin({ ...skin, borderImage: { source: crossOrigin.href, sliceDip: [4] }, decorations: [{ image: crossOrigin.href, widthDip: 12, heightDip: 12, anchor: "top-left", offsetXDip: -12 }] });
+        await waitFor(() => card.dataset.panel !== undefined && root.querySelector(".skin-picture img")?.complete, "cross origin images load without CORS");
+        await setReduced(true);
+        const crossRect = card.getBoundingClientRect();
+        await screenshotPixels([{ x: crossRect.left + 3, y: crossRect.top + 3, rgb: [255, 0, 0], name: "cross origin panel freezes without reading its pixels" },
+          { x: crossRect.left - 6, y: crossRect.top + 6, rgb: [255, 0, 0], name: "cross origin widget freezes without reading its pixels" }]);
+        await setReduced(false);
+        bar.setSkin(skin);
+        await waitFor(() => card.dataset.panel !== undefined && root.querySelector(".skin-picture img")?.complete, "restore the static skin");
+        // 挂件和面板不拦截候选点击，旧节点的迟到事件也不能改变新皮肤。
+        const target = parts(bar.element).cands[1];
+        const targetRect = target.getBoundingClientRect();
+        equal(bar.element.shadowRoot.elementFromPoint(targetRect.left + targetRect.width / 2, targetRect.top + targetRect.height / 2)?.closest("[data-index]"), target, "actual pointer hit testing reaches the candidate");
+        target.click(); equal(picks.join(), "1", "canvas candidate remains clickable");
+        check([...root.querySelectorAll(".skin-picture, .skin-panel")].every((node) => getComputedStyle(node).pointerEvents === "none"), "artwork does not receive pointer events");
+        const oldImage = root.querySelector(".skin-picture img");
+        bar.setSkin({ ...skin, borderImage: { ...skin.borderImage, fill: false } });
+        await waitFor(() => card.dataset.panel !== undefined && panel.style.borderImageSource !== "" && !panel.style.borderImageSlice.includes("fill"), "the hollow panel loads");
+        check(!panel.style.borderImageSlice.includes("fill"), "fill false hides the centre tile");
+        bar.setLayout("vertical");
+        bar.render(composingFrame("n", ["示例甲", "示例乙", "示例丙"]), { left: innerWidth - 2, top: innerHeight - 30, bottom: innerHeight - 10 });
+        const bounds = root.getBoundingClientRect();
+        check(bounds.right <= innerWidth - 3 && bounds.bottom <= innerHeight - 3 && bounds.left >= 3, "canvas with outer insets stays within the viewport");
+        bar.setSkin({ ...skin, layouts: ["horizontal"] });
+        check(root.dataset.canvas === undefined, "an unsupported layout has no canvas geometry");
+        bar.setLayout("horizontal");
+        bar.setSkin({ ...skin, borderImage: { source: "/missing-panel.png", sliceDip: [2] } });
+        await new Promise((done) => setTimeout(done, 100));
+        check(card.dataset.panel === undefined, "a failed image leaves the fallback card");
+        equal(getComputedStyle(parts(bar.element).first.querySelector(".cand-content")).color, rgb("#1A1A1A"), "a failed panel never puts light text on white");
+        bar.setSkin("wechat");
+        oldImage.dispatchEvent(new Event("load"));
+        equal(getComputedStyle(parts(bar.element).first.querySelector(".cand-content")).color, rgb("#FFFFFF"), "a late load cannot recolour a new skin");
+        check(root.querySelectorAll(".skin-tile, .skin-picture").length === 0, "changing away disposes canvas images");
+        bar.destroy(); oldImage.dispatchEvent(new Event("error"));
+        check(!bar.element.isConnected, "late image errors cannot resurrect a destroyed popup");
+      }
+
       try {
         await candidateBar();
         await motionReplay();
+        await canvasSkin();
         await attached();
         await insideModal();
       } catch (error) {

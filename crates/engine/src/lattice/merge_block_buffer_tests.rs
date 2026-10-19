@@ -214,7 +214,10 @@ fn real_merge_all_duplicates_saves_one_allocation_across_dedup_boundary() {
             assert_eq!(new.0, input);
             assert!(new.1.is_none());
             assert_eq!(
-                after.allocations + 1,
+                // 单路径分流另外省去旧大列表的一次集合申请，原空块预算仍精确保留。
+                after.allocations
+                    + 1
+                    + usize::from(emit == 1 && input.len() + 1 > SMALL_SENTENCE_MERGE),
                 before.allocations,
                 "filler={filler_count}, emit={emit}"
             );

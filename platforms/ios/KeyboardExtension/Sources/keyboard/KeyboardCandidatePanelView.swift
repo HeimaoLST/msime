@@ -27,7 +27,7 @@ extension UIColor {
 // 带标题栏时（默认）面板独自盖住整个键盘：顶部是品牌标志、拼写、候选数和收起箭头。不带标题栏时（`showsHeader: false`）面板用满候选条下方的按键区，拼写和收起箭头由候选条保留，不另放底部按钮。
 //
 // 传入 `columns` 时是全拼九键的三栏面板：左边拼音栏、中间候选网格、右边功能键，同样位于按键区；读音留在上面的候选栏里，所以不画标题栏，返回和退格在右栏里，也不画底栏。
-final class KeyboardCandidatePanelView: UIView {
+final class KeyboardCandidatePanelView: CandidateCanvasHostView, UICollectionViewDataSource {
   static let minimumCellWidth: CGFloat = 64
   static let cellSpacing: CGFloat = 6
   static let cellHeight: CGFloat = 44
@@ -50,11 +50,15 @@ final class KeyboardCandidatePanelView: UIView {
   /// 以选中样式绘制的候选（`accentSoft` 底、强调色半粗体文字），即候选条中高亮的那个，默认是第一个。
   private let selectedIndex: Int
   private let showsHeader: Bool
-  private let skin = KeyboardTheme.current
-  private let scrollView = UIScrollView()
-  private var chips: [CandidateGridButton] = []
+  private var skin: KeyboardTheme { KeyboardTheme.current }
+  private var palette: CandidatePalette?
+  private let gridLayout = CandidateGridLayout()
+  private lazy var scrollView = UICollectionView(frame: .zero, collectionViewLayout: gridLayout)
+  private let measurementChip = CandidateGridButton(frame: .zero)
   private let count = UILabel()
   private var laidOutWidth: CGFloat = 0
+  private var pendingScrollOffset: CGPoint?
+  private var headerGap: NSLayoutConstraint?
 
   /// 宽 `width` 的网格有几列：CSS auto-fill 的列数，即按 64pt 列宽、6pt 间隔能放下几列，至少一列。
   static func columns(width: CGFloat) -> Int {
@@ -86,7 +90,8 @@ final class KeyboardCandidatePanelView: UIView {
   init(candidates: [String], preedit: String, annotations: [KeyboardCandidateAnnotation] = [],
        markers: [[CandidateMarker]] = [], aiPlaceholders: Set<Int> = [],
        candidateScale: CGFloat = 1, preeditScale: CGFloat = 1, candidateFamilies: [String] = [],
-       selectedIndex: Int = 0, showsHeader: Bool = true,
+       selectedIndex: Int = 0, showsHeader: Bool = true, palette: CandidatePalette? = nil,
+       canvas: ExternalCandidateSkin.Canvas? = nil,
        display: @escaping (String) -> String,
        menuElements: @escaping (Int) -> [UIMenuElement] = { _ in [] },
        onSelect: @escaping (Int) -> Void, onClose: @escaping () -> Void,
@@ -102,13 +107,20 @@ final class KeyboardCandidatePanelView: UIView {
     self.onSelect = onSelect
     self.selectedIndex = selectedIndex
     self.showsHeader = showsHeader
+    self.palette = palette
     super.init(frame: .zero)
+    self.canvas = canvas
+    minimumContentHeight = Self.cellHeight
     accessibilityIdentifier = "candidatePanel"
     // 在按键区里透出键盘自己的背景，与它所替代的按键下方一样。
-    backgroundColor = showsHeader && columns == nil ? skin.keyBackground.withAlphaComponent(0.98) : .clear
+    backgroundColor = canvas?.panelLoaded == true ? .clear : palette?.surface
+      ?? (showsHeader && columns == nil ? skin.keyBackground.withAlphaComponent(0.98) : .clear)
 
     scrollView.translatesAutoresizingMaskIntoConstraints = false
     scrollView.alwaysBounceVertical = false
+    scrollView.backgroundColor = .clear
+    scrollView.dataSource = self
+    scrollView.register(CandidateGridCell.self, forCellWithReuseIdentifier: "candidate")
     scrollView.disableEdgeEffects()
     scrollView.contentInsetAdjustmentBehavior = .never
     addSubview(scrollView)
@@ -118,36 +130,38 @@ final class KeyboardCandidatePanelView: UIView {
         column.translatesAutoresizingMaskIntoConstraints = false
         addSubview(column)
         NSLayoutConstraint.activate([
-          column.topAnchor.constraint(equalTo: topAnchor),
-          column.bottomAnchor.constraint(equalTo: bottomAnchor),
+          column.topAnchor.constraint(equalTo: candidateContentGuide.topAnchor),
+          column.bottomAnchor.constraint(equalTo: candidateContentGuide.bottomAnchor),
           column.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.15),
         ])
       }
       NSLayoutConstraint.activate([
-        columns.leading.leadingAnchor.constraint(equalTo: leadingAnchor),
-        columns.trailing.trailingAnchor.constraint(equalTo: trailingAnchor),
+        columns.leading.leadingAnchor.constraint(equalTo: candidateContentGuide.leadingAnchor),
+        columns.trailing.trailingAnchor.constraint(equalTo: candidateContentGuide.trailingAnchor),
         scrollView.leadingAnchor.constraint(equalTo: columns.leading.trailingAnchor, constant: Self.cellSpacing),
         scrollView.trailingAnchor.constraint(equalTo: columns.trailing.leadingAnchor, constant: -Self.cellSpacing),
-        scrollView.topAnchor.constraint(equalTo: topAnchor),
-        scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        scrollView.topAnchor.constraint(equalTo: candidateContentGuide.topAnchor),
+        scrollView.bottomAnchor.constraint(equalTo: candidateContentGuide.bottomAnchor),
       ])
       rebuildChips()
       return
     }
     NSLayoutConstraint.activate([
-      scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: showsHeader ? 12 : 0),
-      scrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: showsHeader ? -12 : 0),
+      scrollView.leadingAnchor.constraint(equalTo: candidateContentGuide.leadingAnchor, constant: showsHeader ? 12 : 0),
+      scrollView.trailingAnchor.constraint(equalTo: candidateContentGuide.trailingAnchor, constant: showsHeader ? -12 : 0),
     ])
     if showsHeader {
       let header = makeHeader(preedit: preedit, preeditScale: preeditScale, onClose: onClose)
+      let gap = scrollView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: canvas?.lineGap ?? 4)
+      headerGap = gap
       NSLayoutConstraint.activate([
-        scrollView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 4),
-        scrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+        gap,
+        scrollView.bottomAnchor.constraint(equalTo: candidateContentGuide.bottomAnchor, constant: -8),
       ])
     } else {
       NSLayoutConstraint.activate([
-        scrollView.topAnchor.constraint(equalTo: topAnchor),
-        scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        scrollView.topAnchor.constraint(equalTo: candidateContentGuide.topAnchor, constant: 0),
+        scrollView.bottomAnchor.constraint(equalTo: candidateContentGuide.bottomAnchor, constant: 0),
       ])
     }
     rebuildChips()
@@ -200,14 +214,23 @@ final class KeyboardCandidatePanelView: UIView {
     header.translatesAutoresizingMaskIntoConstraints = false
     addSubview(header)
     NSLayoutConstraint.activate([
-      header.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-      header.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-      header.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+      header.leadingAnchor.constraint(equalTo: candidateContentGuide.leadingAnchor, constant: 12),
+      header.trailingAnchor.constraint(equalTo: candidateContentGuide.trailingAnchor, constant: -12),
+      header.topAnchor.constraint(equalTo: candidateContentGuide.topAnchor, constant: 6),
       header.heightAnchor.constraint(equalToConstant: 32),
       brandMark.widthAnchor.constraint(equalToConstant: 16),
       brandMark.heightAnchor.constraint(equalToConstant: 16),
     ])
     return header
+  }
+
+  func applyAppearance(palette: CandidatePalette?, canvas: ExternalCandidateSkin.Canvas?) {
+    self.palette = palette
+    self.canvas = canvas
+    headerGap?.constant = canvas?.lineGap ?? 4
+    backgroundColor = canvas?.panelLoaded == true ? .clear : palette?.surface ?? (showsHeader ? skin.keyBackground : .clear)
+    rebuildChips()
+    setNeedsLayout()
   }
 
   func updateAnnotations(_ annotations: [KeyboardCandidateAnnotation]) {
@@ -230,20 +253,33 @@ final class KeyboardCandidatePanelView: UIView {
     setNeedsLayout()
   }
 
-  // 格子要在已知宽度下摆放，所以在这里定位；候选块本身每组注释只构建一次。
+  // 布局只保存几何；UICollectionView 负责可见按钮、滚动、菜单和无障碍的生命周期。
   override func layoutSubviews() {
     super.layoutSubviews()
     let available = scrollView.bounds.width
-    guard available > 0, available != laidOutWidth else { return }
-    laidOutWidth = available
-    layoutGrid(width: available)
+    if available > 0, available != laidOutWidth {
+      laidOutWidth = available
+      layoutGrid(width: available)
+    }
+    scrollView.layoutIfNeeded()
   }
 
   private func rebuildChips() {
-    for chip in chips { chip.removeFromSuperview() }
-    chips = candidates.enumerated().map { makeChip(candidate: $1, index: $0) }
-    for chip in chips { scrollView.addSubview(chip) }
-    if laidOutWidth > 0 { layoutGrid(width: laidOutWidth) }
+    pendingScrollOffset = scrollView.contentOffset
+    laidOutWidth = 0
+    gridLayout.replace(frames: [], size: .zero)
+    scrollView.reloadData()
+    setNeedsLayout()
+  }
+
+  func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+    candidates.count
+  }
+
+  func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+    let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "candidate", for: indexPath) as! CandidateGridCell
+    _ = makeChip(candidate: candidates[indexPath.item], index: indexPath.item, reusing: cell.chip)
+    return cell
   }
 
   private func layoutGrid(width: CGFloat) {
@@ -251,25 +287,37 @@ final class KeyboardCandidatePanelView: UIView {
     let content = max(0, width - padding * 2)
     let columns = Self.columns(width: content)
     let columnWidth = max(0, (content - spacing * CGFloat(columns - 1)) / CGFloat(columns))
-    let spans = chips.map {
-      Self.span(titleWidth: $0.titleWidth, annotated: $0.glossLines > 0, columns: columns, columnWidth: columnWidth)
+    let spans = candidates.indices.map { index in
+      let chip = makeChip(candidate: candidates[index], index: index, reusing: measurementChip, interactive: false)
+      return Self.span(titleWidth: chip.titleWidth, annotated: chip.glossLines > 0,
+                       columns: columns, columnWidth: columnWidth)
     }
-    var rows: [[(chip: CandidateGridButton, column: Int, span: Int)]] = [[]]
-    for (chip, cell) in zip(chips, Self.place(spans: spans, columns: columns)) {
-      if cell.row >= rows.count { rows.append([]) }
-      rows[rows.count - 1].append((chip, cell.column, cell.span))
-    }
-    var y = padding
-    for row in rows where !row.isEmpty {
-      let height = row.map { cellHeight(for: $0.chip, width: cellWidth(span: $0.span, columnWidth: columnWidth)) }.max()
-        ?? Self.cellHeight
-      for cell in row {
-        cell.chip.frame = CGRect(x: padding + CGFloat(cell.column) * (columnWidth + spacing), y: y,
-                                 width: cellWidth(span: cell.span, columnWidth: columnWidth), height: height)
+    let cells = Self.place(spans: spans, columns: columns)
+    var frames = [CGRect](repeating: .zero, count: candidates.count)
+    var y = padding, rowStart = 0
+    while rowStart < cells.count {
+      var rowEnd = rowStart + 1
+      while rowEnd < cells.count, cells[rowEnd].row == cells[rowStart].row { rowEnd += 1 }
+      var height = Self.cellHeight
+      for index in rowStart..<rowEnd {
+        let chip = makeChip(candidate: candidates[index], index: index, reusing: measurementChip, interactive: false)
+        height = max(height, cellHeight(for: chip, width: cellWidth(span: cells[index].span, columnWidth: columnWidth)))
+      }
+      for index in rowStart..<rowEnd {
+        let cell = cells[index]
+        frames[index] = CGRect(x: padding + CGFloat(cell.column) * (columnWidth + spacing), y: y,
+                               width: cellWidth(span: cell.span, columnWidth: columnWidth), height: height)
       }
       y += height + spacing
+      rowStart = rowEnd
     }
-    scrollView.contentSize = CGSize(width: width, height: max(0, y - spacing) + padding)
+    gridLayout.replace(frames: frames, size: CGSize(width: width, height: max(0, y - spacing) + padding))
+    scrollView.layoutIfNeeded()
+    // 旋转或换代后收窄偏移，避免旧列表末尾的偏移把较短的新列表留在空白处。
+    let offset = min(max(0, (pendingScrollOffset ?? scrollView.contentOffset).y),
+                     max(0, gridLayout.collectionViewContentSize.height - scrollView.bounds.height))
+    pendingScrollOffset = nil
+    scrollView.setContentOffset(CGPoint(x: 0, y: offset), animated: false)
   }
 
   private func cellWidth(span: Int, columnWidth: CGFloat) -> CGFloat {
@@ -284,13 +332,14 @@ final class KeyboardCandidatePanelView: UIView {
     return ceil(max(Self.cellHeight, insets + lines + 2, chip.glossLines > 0 ? measured : 0))
   }
 
-  private func makeChip(candidate: String, index: Int) -> CandidateGridButton {
+  private func makeChip(candidate: String, index: Int, reusing chip: CandidateGridButton,
+                        interactive: Bool = true) -> CandidateGridButton {
     let number = index + 1
     let text = display(candidate)
     let annotation = annotations.indices.contains(index) ? annotations[index] : .none
     let marks = markers.indices.contains(index) ? markers[index] : []
     let selected = index == selectedIndex
-    let secondary = skin.secondary
+    let secondary = (selected ? palette?.selectedTranslation : nil) ?? palette?.secondary ?? skin.secondary
     let paragraph = NSMutableParagraphStyle()
     paragraph.lineBreakMode = .byTruncatingTail
     paragraph.alignment = .center
@@ -312,16 +361,20 @@ final class KeyboardCandidatePanelView: UIView {
     var configuration = UIButton.Configuration.plain()
     configuration.attributedTitle = title
     configuration.baseForegroundColor = selected || marks.contains { $0.symbol == "pin.fill" }
-      ? skin.accent : skin.keyForeground
+      ? (selected ? palette?.selectedText : nil) ?? palette?.accent ?? skin.accent : palette?.text ?? skin.keyForeground
     let aiPlaceholder = aiPlaceholders.contains(index)
     if aiPlaceholder { configuration.baseForegroundColor = secondary }
     configuration.contentInsets = Self.cellInsets
     configuration.background.cornerRadius = skin.cornerRadius
-    let fill = selected ? skin.accentSoft : skin.keyBackground
+    let fill = selected ? palette?.selected ?? skin.accentSoft : palette != nil ? UIColor.clear : skin.keyBackground
     configuration.background.backgroundColor = fill
-    let chip = CandidateGridButton(
-      configuration: configuration,
-      primaryAction: UIAction { [weak self] _ in self?.onSelect(index) })
+    if selected, let palette, palette.showSelectedBar {
+      configuration.background.customView = CandidateSelectionBarView(color: palette.selectedBar ?? palette.accent)
+    }
+    configuration.background.strokeWidth = palette == nil ? 0 : 1
+    configuration.background.strokeColor = palette?.border ?? .clear
+    configuration.background.cornerRadius = canvas?.itemCornerRadius ?? skin.cornerRadius
+    chip.configuration = configuration
     chip.configurationUpdateHandler = { button in
       button.configuration?.background.backgroundColor = button.isHighlighted ? fill.keyboardPressedBrightness(0.88) : fill
     }
@@ -330,20 +383,25 @@ final class KeyboardCandidatePanelView: UIView {
     chip.glossLines = glossLines
     chip.titleLineCount = 1 + glossLines
     // 选中的格子平铺在它的底色上；其余格子都画得像按键，包括阴影。
-    chip.drawsKeyShadow = !selected && skin.hasShadow
+    chip.drawsKeyShadow = palette == nil && !selected && skin.hasShadow
     chip.accessibilityIdentifier = "panelCandidate-\(number)"
     chip.accessibilityLabel = annotation.accessibilityDescription.isEmpty
       ? "候选词 \(number)：\(text)"
       : "候选词 \(number)：\(text)，\(annotation.accessibilityDescription)"
     for marker in marks { chip.accessibilityLabel? += "，\(marker.spoken)" }
     if aiPlaceholder { chip.accessibilityLabel = "候选词 \(number)：\(CandidateMarker.pendingSpoken(candidate, markers: marks))" }
-    if selected { chip.accessibilityTraits.insert(.selected) }
-    // 在长按打开菜单时才构建，而不是一开始就给每个候选块建好：这个面板会排出整个列表，像 `yi` 这样的查询有几百个。
-    chip.menu = UIMenu(children: [
-      UIDeferredMenuElement.uncached { [weak self] completion in
-        completion(self?.menuElements(index) ?? [])
-      }
-    ])
+    chip.accessibilityTraits = selected ? [.button, .selected] : [.button]
+    // 测量复用同一个按钮，不创建交互闭包；复用可见格子时先移除上一条候选的选择动作。
+    if interactive {
+      let action = UIAction.Identifier("candidateSelect")
+      chip.removeAction(identifiedBy: action, for: .primaryActionTriggered)
+      chip.addAction(UIAction(identifier: action) { [weak self] _ in self?.onSelect(index) }, for: .primaryActionTriggered)
+      chip.menu = UIMenu(children: [
+        UIDeferredMenuElement.uncached { [weak self] completion in
+          completion(self?.menuElements(index) ?? [])
+        }
+      ])
+    }
     return chip
   }
 
@@ -352,6 +410,62 @@ final class KeyboardCandidatePanelView: UIView {
       .traits: [UIFontDescriptor.TraitKey.weight: UIFont.Weight.semibold.rawValue],
     ])
     return UIFont(descriptor: descriptor, size: font.pointSize)
+  }
+}
+
+/// 单元格只持有一个可复用按钮；候选身份在配置时绑定到完整列表的位置。
+private final class CandidateGridCell: UICollectionViewCell {
+  let chip = CandidateGridButton(frame: .zero)
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    contentView.addSubview(chip)
+    chip.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    chip.frame = contentView.bounds
+  }
+}
+
+/// 布局保留全部几何，按纵向有序的行二分查找可见范围，不在每次滚动时遍历整个候选列表。
+private final class CandidateGridLayout: UICollectionViewLayout {
+  private var frames: [CGRect] = []
+  private var size = CGSize.zero
+
+  func replace(frames: [CGRect], size: CGSize) {
+    self.frames = frames
+    self.size = size
+    invalidateLayout()
+  }
+
+  override var collectionViewContentSize: CGSize { size }
+
+  override func layoutAttributesForItem(at indexPath: IndexPath) -> UICollectionViewLayoutAttributes? {
+    guard frames.indices.contains(indexPath.item) else { return nil }
+    let attributes = UICollectionViewLayoutAttributes(forCellWith: indexPath)
+    attributes.frame = frames[indexPath.item]
+    return attributes
+  }
+
+  override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {
+    var lower = 0, upper = frames.count
+    while lower < upper {
+      let middle = lower + (upper - lower) / 2
+      if frames[middle].maxY < rect.minY { lower = middle + 1 } else { upper = middle }
+    }
+    var attributes: [UICollectionViewLayoutAttributes] = []
+    while lower < frames.count, frames[lower].minY <= rect.maxY {
+      if frames[lower].intersects(rect), let item = layoutAttributesForItem(at: IndexPath(item: lower, section: 0)) {
+        attributes.append(item)
+      }
+      lower += 1
+    }
+    return attributes
   }
 }
 

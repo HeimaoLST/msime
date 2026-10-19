@@ -114,7 +114,11 @@ fn generated_merge_moves_fields_without_changing_output_or_typo() {
                                     .unwrap()]
                             })
                             .sum();
-                        assert_eq!(after + saved, before, "路径={n}/emit={emit}/占位={filler}/重复={duplicates}/纠错={typo_enabled}");
+                        // 字段转移预算保持精确，单路径另省一次集合申请。
+                        let paths = if emit == 0 { n } else { n.min(emit) };
+                        let dedup_saved =
+                            usize::from(paths == 1 && input.len() + paths > SMALL_SENTENCE_MERGE);
+                        assert_eq!(after + saved + dedup_saved, before, "路径={n}/emit={emit}/占位={filler}/重复={duplicates}/纠错={typo_enabled}");
                         cases += 1;
                     }
                 }

@@ -81,7 +81,7 @@ fn reference(
     filtering: bool,
 ) -> Vec<WordItem> {
     let mut candidates = Vec::new();
-    let mut leading = HashMap::new();
+    let mut leading: HashMap<String, RankKey> = HashMap::new();
     for row in input {
         frozen::push_ranked(
             &mut candidates,
@@ -109,7 +109,7 @@ fn production(
     filtering: bool,
 ) -> Vec<WordItem> {
     let mut candidates = Vec::new();
-    let mut leading = HashMap::new();
+    let mut leading = LeadingMap::default();
     for row in input {
         push_ranked(
             &mut candidates,
@@ -215,7 +215,7 @@ fn full_pipeline_preserves_active_interleaving_and_boost() {
 }
 
 #[test]
-fn full_pipeline_preserves_allocation_count_and_peak_bytes() {
+fn full_pipeline_does_not_increase_allocation_count_or_peak_bytes() {
     for length in [0, 1, 8, 32, 33, 64, 128, 512, 2048] {
         for mode in 0..3 {
             let input = fixture(length, mode);
@@ -230,8 +230,14 @@ fn full_pipeline_preserves_allocation_count_and_peak_bytes() {
             let new = measure(production);
             assert_eq!(old.remaining_bytes, 0);
             assert_eq!(new.remaining_bytes, 0);
-            assert_eq!(old.allocations, new.allocations);
-            assert_eq!(old.peak_bytes, new.peak_bytes);
+            assert!(
+                new.allocations <= old.allocations,
+                "生产路径增加了申请：{old:?} -> {new:?}"
+            );
+            assert!(
+                new.peak_bytes <= old.peak_bytes,
+                "生产路径增加了峰值：{old:?} -> {new:?}"
+            );
             println!(
                 "heap {length} {mode} {} {} {} {}",
                 old.allocations, new.allocations, old.peak_bytes, new.peak_bytes

@@ -17,6 +17,7 @@ import { SystemInfoSection } from "../system-info-section";
 import { schemeTitle } from "../label-helpers";
 import { aboutTabs } from "../about-tabs";
 import { useSettingsTabs } from "../use-settings-tabs";
+import { formatAppVersion } from "../use-app-release-date";
 
 /** 当前运行的版本已是最新时 `useUpdateCheck` 报告的内容。 */
 const latestStatus = "已是最新版本";
@@ -44,6 +45,7 @@ export function AboutSettingsPage() {
     updateCheckSupported,
     availableUpdate,
     currentAppVersion,
+    appReleaseDate,
     openExternalUrl,
     checkForUpdate,
     installerTrust,
@@ -104,6 +106,7 @@ export function AboutSettingsPage() {
             {harmony ? (
               <HarmonyAboutHero
                 version={currentAppVersion}
+                releaseDate={appReleaseDate}
                 platformLabel={settingsPlatform === "hm2" ? "HarmonyOS 2in1" : "HarmonyOS"}
                 update={updateBusy ? "checking" : latest ? "latest" : "idle"}
                 updateStatus={updateBusy || latest ? undefined : updateStatus}
@@ -119,7 +122,9 @@ export function AboutSettingsPage() {
                 <div className={`${doc.linkRow} ${doc.versionRow}`}>
                   <div>
                     <div className={doc.linkTitle}>当前版本</div>
-                    <div className={doc.version}>v{currentAppVersion}</div>
+                    <div className={doc.version}>
+                      {formatAppVersion(currentAppVersion, appReleaseDate)}
+                    </div>
                     {updateStatus && (
                       <p className={doc.updateStatus} role="status">
                         {updateStatus}
@@ -149,6 +154,7 @@ export function AboutSettingsPage() {
           "system",
           <SystemInfoSection
             appVersion={currentAppVersion}
+            releaseDate={appReleaseDate}
             host={host}
             scheme={schemeTitle(draft.scheme)}
             copyText={client.copyText}

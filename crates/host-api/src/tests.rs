@@ -3,6 +3,7 @@
 //! Same `mod tests` as before, so `use super::*` still names the parent.
 
 use super::*;
+use crate::account::msime_client_account_name;
 use msime_client_core::host_surface::compiled_input_schemes;
 use sha2::{Digest, Sha256};
 
@@ -4224,6 +4225,90 @@ fn exported_settings_import_as_a_compare_and_swap_that_keeps_local_services() {
 
 #[test]
 #[cfg(not(target_os = "android"))]
+fn canvas_panel_palette_is_opt_in_and_keeps_picker_precedence() {
+    let directory = tempfile::tempdir().unwrap();
+    let package = directory.path().join("panel-fixture");
+    std::fs::create_dir(&package).unwrap();
+    // 合成的 1×1 PNG，不含用户内容。
+    use base64::Engine;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==")
+        .unwrap();
+    std::fs::write(package.join("panel.png"), png).unwrap();
+    std::fs::write(
+        package.join("skin.toml"),
+        r##"
+schema_version = 2
+id = "panel-fixture"
+name = "合成贴图"
+version = "1.0"
+base = "canvas"
+[supports]
+layouts = ["vertical"]
+themes = ["light", "dark"]
+[candidate_window.border_image]
+source = "panel.png"
+slice_dip = [0]
+[candidate.light]
+text = "#ABCDEF"
+number = "#FEDCBA"
+selected = "#112233"
+selected_text = "#AABBCC"
+selected_number = "#DDEEFF"
+preedit_caret = "#778899"
+selected_translation = "#334455"
+[candidate.dark]
+text = "#123456"
+"##,
+    )
+    .unwrap();
+    let call = |drawn: Option<bool>, dark: bool, picked: bool, layout: &str| {
+        let mut request = json!({
+            "global_theme": "custom", "dark": dark, "layout": layout,
+            "skins_directory": directory.path(),
+            "custom_theme": {"candidate_skin": "panel-fixture"},
+        });
+        if let Some(drawn) = drawn {
+            request["canvas_panel_drawn"] = json!(drawn);
+        }
+        if picked {
+            request["custom_theme"]["candidate_colors"] =
+                json!({"text": "#010203", "selected": "#FFFFFF"});
+        }
+        let raw = request.to_string();
+        let reply = read(unsafe { msime_client_resolve_theme(raw.as_ptr(), raw.len()) });
+        assert_eq!(reply["ok"], true, "{reply}");
+        reply["value"].clone()
+    };
+    let fallback = call(None, false, false, "vertical");
+    assert_eq!(fallback, call(Some(false), false, false, "vertical"));
+    assert_eq!(fallback["candidate_skin"], "panel-fixture");
+    assert_ne!(fallback["candidate"]["text"], "#ABCDEF");
+    assert_eq!(
+        call(Some(true), false, false, "vertical")["candidate"]["text"],
+        "#ABCDEF"
+    );
+    assert_eq!(
+        call(Some(true), true, false, "vertical")["candidate"]["text"],
+        "#123456"
+    );
+    let picked = call(Some(true), false, true, "vertical");
+    assert_eq!(picked["candidate"]["text"], "#010203");
+    assert_eq!(picked["candidate"]["selected"], "#FFFFFF");
+    assert_eq!(picked["candidate"]["selected_text"], "#000000");
+    assert_eq!(
+        picked["candidate_details"]["selected_translation"],
+        "#0000009D"
+    );
+    let authored = call(Some(true), false, false, "vertical");
+    assert_eq!(authored["candidate"]["selected_text"], "#AABBCC");
+    assert_eq!(authored["candidate"]["selected_number"], "#DDEEFF");
+    assert_eq!(authored["candidate_details"]["preedit_caret"], "#778899");
+    assert!(call(Some(true), false, false, "horizontal")["candidate_skin"].is_null());
+}
+
+#[test]
+#[cfg(not(target_os = "android"))]
 fn resolve_theme_reads_the_package_from_either_source() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("skins");
@@ -6077,7 +6162,7 @@ fn history_capture_bridge_validates_and_returns_no_text() {
     );
 }
 
-fn test_host(root: &std::path::Path) -> u64 {
+pub(super) fn test_host(root: &std::path::Path) -> u64 {
     test_host_preferences(root, chinese_preferences())
 }
 fn chinese_preferences() -> Preferences {
@@ -8177,7 +8262,12 @@ fn cloud_response_boundary_guards_identity_permission_and_buffers() {
     for (q, qlen, b, blen) in [
         (std::ptr::null(), 0, body.as_ptr(), body.len()),
         (query.as_ptr(), query.len(), std::ptr::null(), 0),
-        (query.as_ptr(), 16385, body.as_ptr(), body.len()),
+        (
+            query.as_ptr(),
+            msime_input_runtime::MAX_ONLINE_QUERY_BYTES + 1,
+            body.as_ptr(),
+            body.len(),
+        ),
         (query.as_ptr(), query.len(), body.as_ptr(), 262145),
     ] {
         assert_eq!(
@@ -8372,6 +8462,99 @@ fn cloud_disable_removes_visible_row_and_invalidates_old_query_after_reenable() 
     let current_query = read(msime_client_online_query(handle))["value"].to_string();
     assert_eq!(apply(&current_query)["value"]["applied"], true);
     read(msime_client_destroy(handle));
+}
+
+fn assert_cloud_seat_for_next_composition(handle: u64, enabled: bool) {
+    for byte in b"nihao" {
+        assert_eq!(
+            read(msime_client_character(handle, *byte, false))["ok"],
+            true
+        );
+    }
+    let view = read(msime_client_view(handle))["value"].clone();
+    let candidates = view["candidates"].as_array().unwrap();
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate["text"] == "本地"));
+    assert_eq!(
+        candidates.iter().any(|candidate| candidate["source"] == 15),
+        enabled,
+        "{view}"
+    );
+    assert_eq!(
+        read(msime_client_online_query(handle))["value"]["cloud_candidates"],
+        enabled
+    );
+}
+
+#[test]
+fn cloud_seat_survives_idle_preference_rebuild() {
+    for enabled in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut preferences = Preferences {
+            scheme: InputScheme::Quanpin,
+            cloud_candidates: !enabled,
+            ..chinese_preferences()
+        };
+        let handle = test_host_with_pinyin_fixture(dir.path(), preferences.clone());
+        assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+        preferences.cloud_candidates = enabled;
+        assert_eq!(update(handle, 1, &preferences)["value"]["deferred"], false);
+        assert_cloud_seat_for_next_composition(handle, enabled);
+        read(msime_client_destroy(handle));
+    }
+}
+
+#[test]
+fn cloud_seat_survives_deferred_preference_rebuild() {
+    for enabled in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut preferences = Preferences {
+            scheme: InputScheme::Quanpin,
+            cloud_candidates: !enabled,
+            ..chinese_preferences()
+        };
+        let handle = test_host_with_pinyin_fixture(dir.path(), preferences.clone());
+        assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+        assert_cloud_seat_for_next_composition(handle, !enabled);
+        preferences.cloud_candidates = enabled;
+        assert_eq!(update(handle, 1, &preferences)["value"]["deferred"], true);
+        let committed = read(msime_client_command(handle, 1));
+        assert_eq!(committed["ok"], true);
+        assert_eq!(committed["value"]["commit"], "本地");
+        SESSIONS.with(|sessions| {
+            assert!(!sessions.borrow().get(&handle).unwrap().preferences_pending);
+        });
+        assert_cloud_seat_for_next_composition(handle, enabled);
+        read(msime_client_destroy(handle));
+    }
+}
+
+#[test]
+fn cloud_seat_survives_resource_only_engine_rebuild() {
+    for enabled in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let preferences = Preferences {
+            scheme: InputScheme::Quanpin,
+            cloud_candidates: enabled,
+            ..chinese_preferences()
+        };
+        let handle = test_host_with_pinyin_fixture(dir.path(), preferences);
+        assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+        SESSIONS.with(|sessions| {
+            let mut sessions = sessions.borrow_mut();
+            let session = sessions.get_mut(&handle).unwrap();
+            assert!(session.requested.is_none());
+            session.resources_pending = true;
+        });
+        assert_eq!(read(msime_client_focus(handle, false))["ok"], true);
+        assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
+        SESSIONS.with(|sessions| {
+            assert!(!sessions.borrow().get(&handle).unwrap().resources_pending);
+        });
+        assert_cloud_seat_for_next_composition(handle, enabled);
+        read(msime_client_destroy(handle));
+    }
 }
 
 #[test]
@@ -12340,6 +12523,88 @@ fn refresh_keeps_the_language_dictionaries_in_step_with_the_installed_package() 
     assert_eq!(refresh(&installed), Some(current.clone()));
 }
 
+/// 下载代次旁没有随包语言词库时，刷新仍从已记录的安装包目录恢复语言入口。
+#[test]
+fn refresh_downloaded_generation_restores_bundled_language_dictionaries() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = root.path().join("bundle/resources");
+    let languages = root.path().join("bundle/language-dictionaries");
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&resources).unwrap();
+    std::fs::create_dir_all(&languages).unwrap();
+    std::fs::create_dir_all(state.join("dictionary-updates")).unwrap();
+    std::fs::write(languages.join("msime-stroke.db"), b"synthetic").unwrap();
+    let baseline = Edition::full().resource_set().unwrap();
+    let version = msime_client_providers::dictionary_updates::baseline_version(&baseline);
+    let mut desktop = baseline.clone();
+    for file in &mut desktop.artifacts {
+        if file
+            .url
+            .starts_with("https://github.com/metasequoiaime/msime-dictionary/releases/download/")
+        {
+            file.url = format!(
+                "https://github.com/metasequoiaime/msime-dictionary/releases/download/{version}/{}",
+                file.name
+            );
+        }
+    }
+    let selection = msime_client_providers::dictionary_updates::Selection {
+        baseline_generation: baseline.generation().unwrap(),
+        version,
+        desktop,
+        languages: None,
+        bundled_resources: resources,
+    };
+    std::fs::write(
+        state.join("dictionary-updates/installed.json"),
+        serde_json::to_vec(&json!({"active": selection, "previous": null})).unwrap(),
+    )
+    .unwrap();
+    let downloaded = state.join("dictionary-updates/generations/synthetic");
+    std::fs::create_dir_all(&downloaded).unwrap();
+    let document = json!({
+        "resources": downloaded,
+        "user_data": state.join("user"),
+        "dictionaries": state.join("user/dictionaries/synthetic"),
+        "preferences_directory": state,
+    });
+    let mut expected = document.clone();
+    expected["language_dictionaries"] = json!(languages);
+    assert_eq!(
+        super::with_installed_language_dictionaries(&document).unwrap(),
+        Some(expected.clone())
+    );
+    assert_eq!(
+        super::with_installed_language_dictionaries(&expected).unwrap(),
+        None
+    );
+    // 已记录且仍存在的其他目录继续沿用原保护规则；词库缺文件由 Engine 判定不可用。
+    std::fs::remove_file(languages.join("msime-stroke.db")).unwrap();
+    assert_eq!(
+        super::with_installed_language_dictionaries(&expected).unwrap(),
+        None
+    );
+    std::fs::write(languages.join("msime-stroke.db"), b"synthetic").unwrap();
+    let custom = root.path().join("custom-languages");
+    std::fs::create_dir(&custom).unwrap();
+    let mut explicit = document.clone();
+    explicit["language_dictionaries"] = json!(custom);
+    assert_eq!(
+        super::with_installed_language_dictionaries(&explicit).unwrap(),
+        None
+    );
+    // 无效的更新选择不能作为随包目录来源。
+    let selection_file = state.join("dictionary-updates/installed.json");
+    let mut invalid: Value =
+        serde_json::from_slice(&std::fs::read(&selection_file).unwrap()).unwrap();
+    invalid["active"]["baseline_generation"] = json!("invalid");
+    std::fs::write(selection_file, serde_json::to_vec(&invalid).unwrap()).unwrap();
+    assert_eq!(
+        super::with_installed_language_dictionaries(&document).unwrap(),
+        None
+    );
+}
+
 /// The language directory follows the resources a stale generation was prepared from, not the ones the old document recorded.
 #[test]
 fn a_prepared_generation_records_the_language_dictionaries_beside_its_new_resources() {
@@ -13193,6 +13458,90 @@ fn voice_local_models_list_install_cancel_and_remove_validate_their_requests() {
         read(unsafe { msime_client_voice_local_model_cancel(std::ptr::null(), 0) })["ok"],
         true
     );
+}
+
+#[test]
+fn voice_local_model_initial_progress_can_cancel_before_provider_io() {
+    struct Observed {
+        events: Vec<Value>,
+        cancellations: Vec<Value>,
+        cancel_request: Vec<u8>,
+    }
+    unsafe extern "C" fn cancel_on_progress(
+        json: *const u8,
+        length: usize,
+        context: *mut std::ffi::c_void,
+    ) {
+        // 回调只记录事件并重入取消入口，断言留在 C ABI 返回后。
+        let observed = unsafe { &mut *context.cast::<Observed>() };
+        let bytes = unsafe { std::slice::from_raw_parts(json, length) };
+        observed
+            .events
+            .push(serde_json::from_slice(bytes).unwrap_or(Value::Null));
+        let result = unsafe {
+            msime_client_voice_local_model_cancel(
+                observed.cancel_request.as_ptr(),
+                observed.cancel_request.len(),
+            )
+        };
+        let response = unsafe { CString::from_raw(result) };
+        observed
+            .cancellations
+            .push(serde_json::from_slice(response.as_bytes()).unwrap_or(Value::Null));
+    }
+
+    // 默认模型和 sense-voice-small 已有并行安装测试，使用另一个目录 id。
+    let id = "x-asr-zh-en-offline";
+    let model = msime_client_providers::voice::local_models::catalog()
+        .models
+        .iter()
+        .find(|model| model.id == id)
+        .unwrap();
+    for from_files in [false, true] {
+        let state = tempfile::tempdir().unwrap();
+        let root = state.path().join("models");
+        let mut request = json!({ "root": root, "id": id });
+        if from_files {
+            request["files"] = json!([]);
+        } else {
+            // 初始回调即使回归，明文镜像也会在联网前被拒绝。
+            request["mirror"] = json!("http://synthetic.invalid/");
+        }
+        let request = serde_json::to_vec(&request).unwrap();
+        let mut observed = Observed {
+            events: Vec::new(),
+            cancellations: Vec::new(),
+            cancel_request: serde_json::to_vec(&json!({ "id": id })).unwrap(),
+        };
+        let result = read(unsafe {
+            msime_client_voice_local_model_install(
+                request.as_ptr(),
+                request.len(),
+                Some(cancel_on_progress),
+                (&mut observed as *mut Observed).cast(),
+            )
+        });
+        assert_eq!(result["error"], "local_model_cancelled", "{result}");
+        let stage = if from_files { "import" } else { "download" };
+        assert_eq!(
+            observed.events,
+            vec![json!({ "id": id, "stage": stage, "downloaded": 0, "total": model.archive.size })]
+        );
+        assert_eq!(
+            observed.cancellations,
+            vec![json!({ "ok": true, "value": true })]
+        );
+        assert!(!root.exists());
+        assert_eq!(
+            read(unsafe {
+                msime_client_voice_local_model_cancel(
+                    observed.cancel_request.as_ptr(),
+                    observed.cancel_request.len(),
+                )
+            }),
+            json!({ "ok": true, "value": false })
+        );
+    }
 }
 
 #[test]
@@ -14242,7 +14591,10 @@ fn plugins_boundary_lists_imports_removes_and_keeps_the_name_list() {
     assert_eq!(saved, json!({"ok": true, "value": null}));
     assert_eq!(
         call(json!({"operation": "load_mentions"}))["value"],
-        entries
+        json!([
+            {"text": "张三", "key": "zhang'san", "phone": ""},
+            {"text": "Alice", "key": "", "phone": ""}
+        ])
     );
     assert!(state.path().join("plugins/mentions.json").is_file());
     let invalid =
@@ -14253,7 +14605,10 @@ fn plugins_boundary_lists_imports_removes_and_keeps_the_name_list() {
         .is_some_and(|detail| detail.contains("张三")));
     assert_eq!(
         call(json!({"operation": "load_mentions"}))["value"],
-        entries
+        json!([
+            {"text": "张三", "key": "zhang'san", "phone": ""},
+            {"text": "Alice", "key": "", "phone": ""}
+        ])
     );
 
     // Requests the page could not have meant.
@@ -15890,7 +16245,7 @@ fn imported_cell_words_reach_both_pinyin_keyboards_after_synchronization() {
     assert_eq!(imported["value"]["import"]["imported"], words.len());
     let first = call_android_data(msime_client_personal_dictionary_sync, options.clone());
     assert_eq!(first["ok"], true, "{first}");
-    assert_eq!(first["value"]["pending_count"], 2, "{first}");
+    assert_eq!(first["value"]["pending_count"], 0, "{first}");
     let second = call_android_data(msime_client_personal_dictionary_sync, options.clone());
     assert_eq!(second["ok"], true, "{second}");
     assert_eq!(second["value"]["pending_count"], 0, "{second}");
@@ -15954,10 +16309,10 @@ fn a_busy_dictionary_sync_preserves_pending_collection_words_for_retry() {
     assert!(state.requests.iter().all(|request| {
         request.status == PersonalWordRequestStatus::Pending && request.error.is_none()
     }));
-    for expected_pending in [2, 0] {
+    for _ in 0..2 {
         let synced = call_android_data(msime_client_personal_dictionary_sync, options.clone());
         assert_eq!(synced["ok"], true, "{synced}");
-        assert_eq!(synced["value"]["pending_count"], expected_pending);
+        assert_eq!(synced["value"]["pending_count"], 0);
     }
     let state = store.read().unwrap();
     assert!(
@@ -15969,7 +16324,7 @@ fn a_busy_dictionary_sync_preserves_pending_collection_words_for_retry() {
     );
 }
 
-/// Android 和鸿蒙手机经命名词库送细胞词库的字节：一个 8 MiB 的文件经 base64 后连同宿主选项仍在 17 MiB 的请求上限之内，导入成一个集合，装满两万条后停下并说明。
+/// Android 和鸿蒙手机经命名词库送细胞词库的字节：一个 8 MiB 的文件经 base64 后连同宿主选项仍在 17 MiB 的请求上限之内，导入成一个集合，达到集合容量后停下并说明。
 #[test]
 fn a_cell_dictionary_at_its_size_limit_fits_one_collections_request() {
     use msime_client_services::dictionary::scel::MAX_SCEL_BYTES;
@@ -16009,7 +16364,10 @@ fn a_cell_dictionary_at_its_size_limit_fits_one_collections_request() {
         read(unsafe { msime_client_dictionary_collections(request.as_ptr(), request.len()) });
     assert_eq!(imported["ok"], true, "{}", imported["error"]);
     let report = &imported["value"]["import"];
-    assert_eq!(report["imported"], 20_000);
+    assert_eq!(
+        report["imported"],
+        msime_client_services::dictionary::collections::MAX_COLLECTION_ENTRIES
+    );
     assert_eq!(report["truncated"], true);
     assert_eq!(report["failed"], 0);
     assert_eq!(
@@ -16770,9 +17128,9 @@ fn personal_dictionary_sync_leaves_busy_imports_pending() {
     assert_eq!(applied["value"]["failed_count"], 0, "{applied}");
 }
 
-/// 合成词表超过启动时的一批：第六项只有继续同步后才进入九键候选。
+/// 合成词表在一次有界同步后完整生效，第六项进入九键候选。
 #[test]
-fn imported_words_past_first_sync_batch_reach_nine_key_candidates() {
+fn imported_words_in_one_batch_reach_nine_key_candidates() {
     let directory = tempfile::tempdir().unwrap();
     let options = host_options_with_main_dictionary(directory.path());
     let words = [
@@ -16797,27 +17155,8 @@ fn imported_words_past_first_sync_batch_reach_nine_key_candidates() {
     );
     assert_eq!(imported["value"]["import"]["imported"], 9, "{imported}");
     let first = call_android_data(msime_client_personal_dictionary_sync, options.clone());
-    assert_eq!(first["value"]["pending_count"], 5, "{first}");
-    let listed = call_android_data(
-        msime_client_dictionary,
-        json!({
-            "options": options, "action": {"operation": "list", "offset": 0, "limit": 100},
-        }),
-    );
-    assert!(!listed["value"]["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["value"] == words[5]));
-    for remaining in [1, 0] {
-        let synchronized =
-            call_android_data(msime_client_personal_dictionary_sync, options.clone());
-        assert_eq!(
-            synchronized["value"]["pending_count"], remaining,
-            "{synchronized}"
-        );
-        assert_eq!(synchronized["value"]["failed_count"], 0, "{synchronized}");
-    }
+    assert_eq!(first["value"]["pending_count"], 0, "{first}");
+    assert_eq!(first["value"]["failed_count"], 0, "{first}");
     let bytes = options.to_string();
     let created = read(unsafe { msime_client_create(bytes.as_ptr(), bytes.len()) });
     let handle = created["value"]["session"].as_u64().unwrap();
@@ -16888,4 +17227,304 @@ fn touch_quick_symbols_use_the_shared_rules_across_the_abi() {
         read(unsafe { msime_client_touch_quick_symbols(std::ptr::null(), 1) })["ok"],
         false
     );
+}
+
+#[path = "dictionary/batch_tests.rs"]
+mod dictionary_batch_tests;
+
+#[test]
+fn enabling_cloud_candidates_invalidates_the_preference_update_previous_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let preferences = Preferences {
+        scheme: InputScheme::Quanpin,
+        cloud_candidates: false,
+        ..chinese_preferences()
+    };
+    let handle = test_host_with_pinyin_fixture(dir.path(), preferences.clone());
+    read(msime_client_focus(handle, true));
+    let before = type_letters(handle, b"nihao");
+    let generation = before["generation"].as_u64().unwrap();
+    assert_eq!(before["candidates"][1]["text"], "拟好");
+    let enabled = Preferences {
+        cloud_candidates: true,
+        ..preferences
+    };
+    let updated = update(handle, 1, &enabled);
+    assert_eq!(updated["value"]["deferred"], true);
+    assert_eq!(updated["value"]["view"]["candidates"][1]["text"], "☁");
+    let stale = read(msime_client_select(handle, generation, 1));
+    assert_eq!(stale["ok"], false, "旧词条身份不能被解释为新席位：{stale}");
+    let current = updated["value"]["view"]["generation"].as_u64().unwrap();
+    assert!(current > generation);
+    let repeated = update(handle, 2, &enabled);
+    assert_eq!(repeated["value"]["view"]["generation"], current);
+    let selected = read(msime_client_select(handle, current, 2));
+    assert_eq!(selected["value"]["commit"], "拟好");
+    read(msime_client_destroy(handle));
+}
+
+#[test]
+fn cloud_provider_switch_clears_old_rows_and_rejects_late_get_and_post_responses() {
+    use msime_client_core::cloud::candidates::{
+        CloudCandidatePreferences, CloudCandidateSource, CloudHttpMethod, CloudResponseFormat,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut preferences = Preferences {
+        scheme: InputScheme::Quanpin,
+        cloud_candidates: true,
+        cloud_candidate_provider: CloudCandidatePreferences {
+            cache_enabled: false,
+            ..Default::default()
+        },
+        ..chinese_preferences()
+    };
+    let handle = test_host_with_pinyin_fixture(dir.path(), preferences.clone());
+    read(msime_client_focus(handle, true));
+    for byte in b"nihao" {
+        read(msime_client_character(handle, *byte, false));
+    }
+    let apply = |query: &str, body: &[u8]| {
+        read(unsafe {
+            msime_client_apply_cloud_response(
+                handle,
+                query.as_ptr(),
+                query.len(),
+                body.as_ptr(),
+                body.len(),
+            )
+        })
+    };
+    let google = read(msime_client_online_query(handle))["value"].to_string();
+    let google_body = r#"["SUCCESS",[["ni hao",["合成谷歌"]]]]"#.as_bytes();
+    assert_eq!(apply(&google, google_body)["value"]["applied"], true);
+    let original = read(msime_client_view(handle))["value"]["editing_text"].clone();
+    preferences.cloud_candidate_provider = CloudCandidatePreferences {
+        source: CloudCandidateSource::Custom,
+        endpoint: "https://cloud.example.invalid/api?q={query}".into(),
+        headers_json: r#"{"Authorization":"Bearer synthetic"}"#.into(),
+        cache_enabled: false,
+        ..Default::default()
+    };
+    assert_eq!(update(handle, 1, &preferences)["ok"], true);
+    let after = read(msime_client_view(handle))["value"].clone();
+    assert_eq!(after["editing_text"], original);
+    assert!(!after["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["text"] == "合成谷歌"));
+    assert_eq!(apply(&google, google_body)["value"]["applied"], false);
+    let custom_query = read(msime_client_online_query(handle))["value"].clone();
+    assert_eq!(custom_query["cloud_request"]["method"], "GET");
+    assert_eq!(
+        custom_query["cloud_request"]["headers"]["Authorization"],
+        "Bearer synthetic"
+    );
+    assert!(!custom_query["cloud_request"]["url"]
+        .as_str()
+        .unwrap()
+        .contains("inputtools.google"));
+    let custom_query = custom_query.to_string();
+    let body = r#"{"candidates":[{"text":"合成自建"}]}"#.as_bytes();
+    assert_eq!(apply(&custom_query, body)["value"]["applied"], true);
+    preferences.cloud_candidate_provider.method = CloudHttpMethod::Post;
+    preferences.cloud_candidate_provider.endpoint =
+        "https://model.example.invalid/v1/chat/completions".into();
+    preferences.cloud_candidate_provider.body_template =
+        r#"{"model":"synthetic","messages":[{"role":"user","content":"{query}"}]}"#.into();
+    preferences.cloud_candidate_provider.response_format = CloudResponseFormat::JsonPath;
+    preferences.cloud_candidate_provider.response_path = "choices.0.message.content".into();
+    assert_eq!(update(handle, 2, &preferences)["ok"], true);
+    assert_eq!(apply(&custom_query, body)["value"]["applied"], false);
+    let post = read(msime_client_online_query(handle))["value"].clone();
+    assert_eq!(post["cloud_request"]["method"], "POST");
+    let payload: Value =
+        serde_json::from_str(post["cloud_request"]["body_utf8"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["messages"][0]["content"], post["query_text"]);
+    assert!(post["cloud_request"]["body_utf8"]
+        .as_str()
+        .unwrap()
+        .contains("synthetic"));
+    let response = r#"{"choices":[{"message":{"content":"合成模型"}}]}"#.as_bytes();
+    assert_eq!(apply(&post.to_string(), response)["value"]["applied"], true);
+    // 云描述符与三个合法的 AI 提示词共用 OnlineQuery，长度可以超过旧的 16 KiB。
+    preferences.ai_assistant.enabled = true;
+    preferences.ai_assistant.prompt_custom_1 = "synthetic".repeat(900);
+    preferences.ai_assistant.prompt_custom_2 = "synthetic".repeat(900);
+    preferences.ai_assistant.prompt_custom_3 = "synthetic".repeat(900);
+    assert_eq!(update(handle, 3, &preferences)["ok"], true);
+    let large = read(msime_client_online_query(handle))["value"].to_string();
+    assert!(large.len() > 16_384);
+    assert!(large.len() <= msime_input_runtime::MAX_ONLINE_QUERY_BYTES);
+    assert_eq!(
+        apply(
+            &large,
+            r#"{"choices":[{"message":{"content":"合成长配置"}}]}"#.as_bytes()
+        )["value"]["applied"],
+        true
+    );
+    read(msime_client_destroy(handle));
+}
+
+#[test]
+fn an_oversized_custom_request_does_not_fall_back_to_google() {
+    use msime_client_core::cloud::candidates::{CloudCandidatePreferences, CloudCandidateSource};
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = "https://cloud.example.invalid/api?q={query}&padding=";
+    let endpoint = format!("{prefix}{}", "x".repeat(2048 - prefix.len()));
+    let provider = CloudCandidatePreferences {
+        source: CloudCandidateSource::Custom,
+        endpoint,
+        cache_enabled: false,
+        ..Default::default()
+    };
+    assert!(provider.validate());
+    let handle = test_host_with_pinyin_fixture(
+        dir.path(),
+        Preferences {
+            scheme: InputScheme::Quanpin,
+            cloud_candidates: true,
+            cloud_candidate_provider: provider,
+            ..chinese_preferences()
+        },
+    );
+    read(msime_client_focus(handle, true));
+    type_letters(handle, b"nihaoshijie");
+    let query = read(msime_client_online_query(handle))["value"].clone();
+    assert_eq!(query["cloud_candidates"], true);
+    assert_eq!(query["cloud_eligible"], false);
+    assert!(query["cloud_request"].is_null());
+    let bytes = query.to_string();
+    let url = read(unsafe { msime_client_cloud_request_url(bytes.as_ptr(), bytes.len()) });
+    assert!(url["value"].is_null());
+    read(msime_client_destroy(handle));
+}
+
+#[test]
+fn voice_provider_catalog_export_includes_doubao_stream_choices() {
+    let catalog = read(msime_client_voice_provider_catalog());
+    let value = &catalog["value"];
+    assert_eq!(
+        value["doubao_stream_endpoints"],
+        serde_json::json!([
+            {"id":"nostream", "label":"整句流式", "title":"整句流式（准确率更高）",
+             "endpoint":"wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream"},
+            {"id":"async", "label":"双向流式", "title":"双向流式（增量结果）",
+             "endpoint":"wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"}
+        ])
+    );
+    let default = &value["asr"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["id"] == "doubao")
+        .unwrap()["endpoint"];
+    assert_eq!(default, &value["doubao_stream_endpoints"][1]["endpoint"]);
+}
+
+#[test]
+fn voice_provider_catalog_export_matches_the_shared_catalog() {
+    use msime_client_providers::voice::provider_catalog::{
+        ASR_PROVIDERS, DOUBAO_STREAM_ENDPOINTS, POLISH_PROVIDERS,
+    };
+    let catalog = read(msime_client_voice_provider_catalog());
+    assert_eq!(catalog["ok"], true);
+    assert_eq!(
+        catalog["value"],
+        serde_json::json!({
+            "asr": ASR_PROVIDERS,
+            "polish": POLISH_PROVIDERS,
+            "doubao_stream_endpoints": DOUBAO_STREAM_ENDPOINTS
+        })
+    );
+}
+
+#[test]
+fn voice_provider_update_export_returns_the_shared_patch() {
+    let request = serde_json::json!({
+        "service":"voice.asr", "provider":"local", "current":{
+            "provider":"openai", "endpoint":"https://api.openai.com/v1/audio/transcriptions",
+            "model":"whisper-1", "token":"synthetic-openai", "tokens":{"local":"synthetic-unused"}
+        }
+    })
+    .to_string();
+    let result =
+        read(unsafe { msime_client_voice_provider_update(request.as_ptr(), request.len()) });
+    assert_eq!(
+        result,
+        serde_json::json!({"ok":true,"value":{
+            "provider":"local", "endpoint":"", "model":"", "token":"",
+            "tokens":{"openai":"synthetic-openai"}
+        }})
+    );
+    let request = serde_json::json!({"service":"voice.polish","provider":"groq","current":{"model":"synthetic-model"}}).to_string();
+    let result =
+        read(unsafe { msime_client_voice_provider_update(request.as_ptr(), request.len()) });
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["value"]["provider"], "groq");
+    assert!(result["value"].get("model").is_none());
+}
+
+#[test]
+fn account_name_export_returns_the_shared_presentation_without_a_session() {
+    let request = serde_json::json!({"name":"\u{feff} 小鹿 \u{3000}","id":"abcdef12"}).to_string();
+    let result = read(unsafe { msime_client_account_name(request.as_ptr(), request.len()) });
+    assert_eq!(
+        result,
+        serde_json::json!({"ok":true,"value":{
+            "normalized":"小鹿","preferred":"小鹿","valid":true,"maximum_chars":64,
+            "maximum_utf16_units":128
+        }})
+    );
+    let request = br#"{"name":"  ","id":"abcdef12"}"#;
+    let result = read(unsafe { msime_client_account_name(request.as_ptr(), request.len()) });
+    assert_eq!(result["value"]["preferred"], "水杉小鹿·ABCDEF");
+    assert_eq!(result["value"]["valid"], false);
+}
+
+#[test]
+fn account_name_export_rejects_invalid_buffers_without_echoing_names() {
+    for request in [
+        b"\xff".as_slice(),
+        b"{",
+        b"{}",
+        br#"{"name":42,"id":"synthetic-private"}"#,
+        br#"{"name":"synthetic-private","id":null}"#,
+        br#"{"name":"synthetic-private","id":"","directory":"unexpected"}"#,
+    ] {
+        let result = read(unsafe { msime_client_account_name(request.as_ptr(), request.len()) });
+        assert_eq!(
+            result,
+            serde_json::json!({"ok":false,"error":"account_invalid"})
+        );
+    }
+    for length in [0, 1, 16_385] {
+        let result = read(unsafe { msime_client_account_name(std::ptr::null(), length) });
+        assert_eq!(result["error"], "account_invalid");
+    }
+    let result = read(unsafe { msime_client_account_name(b"x".as_ptr(), 16_385) });
+    assert_eq!(result["error"], "account_invalid");
+}
+
+#[test]
+fn voice_provider_update_export_rejects_invalid_requests_without_echoing_credentials() {
+    for request in [
+        b"\xff".as_slice(), b"{", b"{}",
+        br#"{"service":"voice.unknown","provider":"openai","current":{"token":"synthetic-private"}}"#,
+        br#"{"service":"voice.asr","provider":42,"current":{}}"#,
+        br#"{"service":"voice.asr","provider":"openai","current":{"tokens":{"openai":42}}}"#,
+        br#"{"service":"voice.asr","provider":"openai","current":null}"#,
+    ] {
+        let result = read(unsafe { msime_client_voice_provider_update(request.as_ptr(), request.len()) });
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["error"], "invalid voice request");
+    }
+    for length in [0, 1, 1_048_577] {
+        let result = read(unsafe { msime_client_voice_provider_update(std::ptr::null(), length) });
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["error"], "invalid voice request buffer");
+    }
+    let result = read(unsafe { msime_client_voice_provider_update(b"x".as_ptr(), 1_048_577) });
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["error"], "invalid voice request buffer");
 }

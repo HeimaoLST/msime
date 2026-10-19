@@ -1,4 +1,3 @@
-import { createVoiceRecognitionClient } from "./voice/voice-recognition-client";
 import { createTauriProgressClient } from "./core/tauri-progress-client";
 import { StrictMode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -31,14 +30,8 @@ import {
   type QqLinksClient,
   type ApiCredentialTestResult,
   type ApiCredentialTestService,
-  type ClipboardHistoryEntry,
-  type CloudClipboardAction,
-  type CloudClipboardPanelClient,
   type CloudDictionaryAction,
-  type CloudDictionaryEntry,
   type CloudDictionaryPanelClient,
-  type EmojiCatalogGroup,
-  type EmojiPanelClient,
   type CustomHelpcodeSchema,
   type HostCapabilities,
   type ProviderCredentialClient,
@@ -49,7 +42,6 @@ import {
   VocabularyReviewPanel,
   type VocabularyReviewClient,
   type PanelClient,
-  type VoicePanelClient,
   type Preferences,
   type PreferencesRecovery,
   type AppNotice,
@@ -90,13 +82,17 @@ import "@msime/ui/styles.css";
 import { subscribeWindowState } from "./input/window-state";
 import { discoverFontReader } from "./candidate/system-font-client";
 import { DesktopKeyboard } from "./input/desktop-keyboard";
+import { createDesktopPanelClients } from "./input/desktop-panel-clients";
+import { createDesktopClipboardClient } from "./input/desktop-clipboard-client";
 import { useHostPlatform } from "./input/panel-host";
 import { DesktopPanelTheme } from "./input/desktop-panel-theme";
 import { DesktopEmojiPanel } from "./input/desktop-emoji-panel";
 import { DesktopHandwriting } from "./input/desktop-handwriting";
 import { DesktopCloudDictionary } from "./dictionary/desktop-cloud-dictionary";
+import { createDesktopCloudDictionaryClient } from "./dictionary/desktop-cloud-dictionary-client";
 import { testDesktopApiCredential } from "./account/credential-test-client";
-import { cloudDictionaryCapabilities, isMobileHost } from "./input/mobile-host-capabilities";
+import { createAccountCommandClient } from "./account/account-command-client";
+import { isMobileHost } from "./input/mobile-host-capabilities";
 import { createMobileHostServices } from "./core/mobile-host-services";
 import {
   createDesktopCandidateSkinCommunity,
@@ -162,26 +158,6 @@ const mobileDictionary: DictionaryClient = {
     invoke("dictionary_request", { action: { operation: "import_personal", text, request_id } }),
 };
 
-async function downloadCloudEntryToLocal(
-  entry: CloudDictionaryEntry,
-  dictionaryClient: DictionaryClient,
-): Promise<void> {
-  if (!dictionaryClient.importPersonal)
-    throw new Error("personal dictionary import is unavailable");
-  const text = JSON.stringify({
-    format: "msime-personal-dictionary",
-    version: 1,
-    entries: [
-      {
-        kind: entry.kind === "quick" ? "quickPhrase" : entry.kind,
-        key: entry.code,
-        value: entry.word,
-        weight: entry.weight,
-      },
-    ],
-  });
-  await dictionaryClient.importPersonal(text, `ui-cloud-download-${Date.now()}`);
-}
 const linuxSetupClient: LinuxSetupClient = {
   run: async ({ download, cloudCandidates }, onLine) => {
     const unlisten = await listen<LinuxSetupLine>("linux-setup-output", (event) =>
@@ -282,8 +258,11 @@ const localVoiceModels: LocalVoiceModelClient = {
   remove: (id) => invoke<void>("voice_local_model_remove", { id }),
 };
 
+const clipboardClient = createDesktopClipboardClient();
 const client: SettingsClient = {
   readAppVersion: getVersion,
+  // 发布日期由 src-tauri/build.rs 在编译时写进设置应用，拿不到时是空字符串。
+  readAppReleaseDate: () => invoke<string>("app_release_date"),
   resolveFontFamilies: (names) => invoke("resolve_font_families", { names }),
   scanSkinCatalog: () => invoke("scan_skin_catalog"),
   listHelpcodeSchemas: () => invoke<CustomHelpcodeSchema[]>("list_helpcode_schemas"),
@@ -374,120 +353,12 @@ const client: SettingsClient = {
     ),
   onWindowStateChanged: (listener, onError) =>
     subscribeWindowState(getCurrentWindow(), listener, onError),
-  clipboard: {
-    clear: () => invoke("clear_clipboard_history"),
-    list: () => invoke<ClipboardHistoryEntry[]>("list_clipboard_history"),
-    sync: () => invoke<ClipboardHistoryEntry[]>("sync_clipboard_history"),
-    copy: (text) => invoke("copy_text", { text }),
-    remove: (text) => invoke("remove_clipboard_history", { text }),
-    setPinned: (text, pinned) => invoke("set_clipboard_history_pinned", { text, pinned }),
-  },
+  clipboard: clipboardClient,
   dictionary,
   loadDefaultPreferences: () => invoke<Preferences>("restored_default_preferences"),
   /* mobile host services are injected after host_capabilities resolves */
 };
-const panelClients: {
-  keyboard: PanelClient;
-  handwriting: PanelClient;
-  voice: VoicePanelClient;
-  cloudClipboard: CloudClipboardPanelClient;
-  cloudDictionary: CloudDictionaryPanelClient;
-  emoji: EmojiPanelClient;
-} = {
-  keyboard: {
-    beginWindowDrag: () => getCurrentWindow().startDragging(),
-    close: () => invoke("close_panel", { label: "keyboard-panel" }),
-    openVoice: () => invoke("open_voice_panel"),
-    rememberInputTarget: () => invoke("remember_input_target"),
-    sendKey: (request) => invoke("send_key", { request }),
-  },
-  handwriting: {
-    beginWindowDrag: () => getCurrentWindow().startDragging(),
-    close: () => invoke("close_panel", { label: "handwriting-panel" }),
-    rememberInputTarget: () => invoke("remember_input_target"),
-    recognizeHandwriting: (request) => invoke("recognize_handwriting", { request }),
-    submitHandwritingCandidate: (candidate) =>
-      invoke("submit_handwriting_candidate", { candidate }),
-    copyHandwritingCandidate: (text) => invoke("copy_text", { text }),
-  },
-  voice: {
-    maxSubmitBytes: 4096,
-    beginWindowDrag: () => getCurrentWindow().startDragging(),
-    close: () => invoke("close_panel", { label: "voice-panel" }),
-    rememberInputTarget: () => invoke("remember_input_target"),
-    loadVoiceLanguage: () => invoke<string>("voice_input_language"),
-    ...createVoiceRecognitionClient(invoke, (listener) =>
-      listen<{
-        request_id: string;
-        text: string;
-        final: boolean;
-        phase?: "recording" | "recognizing" | "polishing";
-        level?: number;
-      }>("voice-update", (event) => listener(event.payload)),
-    ),
-    sendText: (text) => invoke("send_text", { text }),
-    sendVoiceText: (text) => invoke("send_voice_text", { text }),
-    copyText: (text) => invoke("copy_text", { text }),
-  },
-  cloudClipboard: {
-    canSendText: () => invoke<boolean>("cloud_clipboard_can_send_text"),
-    close: () => invoke("close_panel", { label: "cloud-clipboard-panel" }),
-    rememberInputTarget: () => invoke("remember_input_target"),
-    sendText: (text) => invoke("send_text", { text }),
-    copyText: (text) => invoke("copy_text", { text }),
-    request: (action: CloudClipboardAction) => invoke("cloud_clipboard_request", { action }),
-  },
-  cloudDictionary: cloudDictionaryClient,
-  emoji: {
-    close: () => invoke("close_panel", { label: "emoji-panel" }),
-    rememberInputTarget: () => invoke("remember_input_target"),
-    sendText: (text) => invoke("send_text", { text }),
-    copyText: (text) => invoke("copy_text", { text }),
-    loadCatalog: () =>
-      invoke<{
-        emoji: EmojiCatalogGroup[];
-        kaomoji: EmojiCatalogGroup[];
-        symbols: EmojiCatalogGroup[];
-        unavailable?: ("emoji" | "kaomoji" | "symbols")[];
-      }>("load_emoji_catalog"),
-    clipboard: {
-      list: () =>
-        invoke<ClipboardHistoryEntry[]>("list_clipboard_history").then((entries) =>
-          entries.map((entry) => entry.text),
-        ),
-      isEnabled: async () => (await client.load()).preferences.clipboard_history ?? false,
-      enable: async () => {
-        const snapshot = await client.load();
-        if (!snapshot.preferences.clipboard_history) {
-          await client.save(snapshot.revision, {
-            ...snapshot.preferences,
-            clipboard_history: true,
-          });
-        }
-      },
-      onChanged: async (listener) => {
-        const stopHistory = await listen("clipboard-history-changed", () => listener());
-        try {
-          const stopPreferences = await listen("preferences-changed", () => listener());
-          return () => {
-            stopHistory();
-            stopPreferences();
-          };
-        } catch (error) {
-          stopHistory();
-          throw error;
-        }
-      },
-      remove: (text) => invoke("remove_clipboard_history", { text }),
-      clear: () => invoke("clear_clipboard_history"),
-      sync: () =>
-        invoke<ClipboardHistoryEntry[]>("sync_clipboard_history").then((entries) =>
-          entries.map((entry) => entry.text),
-        ),
-      copy: (text) => invoke("copy_text", { text }),
-    },
-  },
-};
+const panelClients = createDesktopPanelClients(client, cloudDictionaryClient, clipboardClient);
 const panel = new URLSearchParams(window.location.search).get("panel");
 // 桌面的手写面板在宿主列出手写模型时第一次打开就下载它，下载失败时就地设置下载镜像。客户端固定为模块级对象，避免每次渲染换一个 client 让面板重置识别队列。
 const desktopHandwritingClient: PanelClient = {
@@ -708,8 +579,11 @@ function DesktopSettings() {
             ...(!isMobileHost(host.platform) && client.cloudDictionary
               ? {
                   cloudDictionary: {
-                    ...client.cloudDictionary,
-                    ...cloudDictionaryCapabilities(host.platform, client.cloudDictionary.request),
+                    ...createDesktopCloudDictionaryClient(
+                      client.cloudDictionary,
+                      host.platform,
+                      mobileDictionary,
+                    ),
                     ...(host.platform === "macos"
                       ? {
                           snapshotNative: false,
@@ -915,22 +789,12 @@ function DesktopSettings() {
             host.platform === "linux"
               ? {
                   account: {
-                    status: () => invoke("account_status"),
-                    providers: () => invoke("account_providers"),
-                    requestCode: (provider: string, target: string) =>
-                      invoke("account_request_code", { provider, target }),
-                    login: (challengeId: string, code: string) =>
-                      invoke("account_login", { challengeId, code }),
+                    ...createAccountCommandClient(invoke),
                     googleLogin: () => invoke("account_google_login"),
                     googleCancel: () => invoke("account_google_cancel"),
-                    profile: () => invoke("account_profile"),
-                    rename: (displayName: string) => invoke("account_rename", { displayName }),
                     avatar: () => invoke<string | null>("account_avatar"),
                     chooseAvatar: () => invoke<AccountProfile | null>("account_choose_avatar"),
                     removeAvatar: () => invoke<AccountProfile>("account_remove_avatar"),
-                    logout: (all: boolean) => invoke("account_logout", { all }),
-                    deleteAccount: () => invoke("account_delete"),
-                    clearExpired: () => invoke("account_forget"),
                     qqLinks,
                     // 设置同步只在 Windows 接到账号会话上；macOS 由输入法自己的账号窗口同步它的原生设置，Linux 还没有接入。
                     ...(host.platform === "windows"
@@ -1058,19 +922,11 @@ function DesktopSettings() {
         }
       />
     );
-  const cloudDictionary = {
-    ...panelClients.cloudDictionary,
-    ...cloudDictionaryCapabilities(
-      settingsClient.host?.platform,
-      panelClients.cloudDictionary.request,
-    ),
-    ...(isMobileHost(settingsClient.host?.platform)
-      ? {
-          downloadToLocal: (entry: CloudDictionaryEntry) =>
-            downloadCloudEntryToLocal(entry, mobileDictionary),
-        }
-      : {}),
-  };
+  const cloudDictionary = createDesktopCloudDictionaryClient(
+    panelClients.cloudDictionary,
+    settingsClient.host?.platform,
+    mobileDictionary,
+  );
   if (mobilePanel === "voice") {
     return <VoicePanel client={mobileVoiceClient} theme="light" />;
   }
@@ -1179,20 +1035,11 @@ function DesktopCloudDictionarySurface() {
     };
   }, []);
   if (host === undefined) return <StatusMessage role="status">正在连接云词库…</StatusMessage>;
-  const capabilities = cloudDictionaryCapabilities(
+  const cloudDictionary = createDesktopCloudDictionaryClient(
+    panelClients.cloudDictionary,
     host?.platform,
-    panelClients.cloudDictionary.request,
+    mobileDictionary,
   );
-  const cloudDictionary = {
-    ...panelClients.cloudDictionary,
-    ...capabilities,
-    ...(isMobileHost(host?.platform)
-      ? {
-          downloadToLocal: (entry: CloudDictionaryEntry) =>
-            downloadCloudEntryToLocal(entry, mobileDictionary),
-        }
-      : {}),
-  };
   return <DesktopCloudDictionary client={cloudDictionary} />;
 }
 

@@ -8,11 +8,14 @@ platforms/android/tests/device/core/DeviceSmoke.java
 platforms/android/tests/device/core/ImageClipProvider.java
 platforms/android/tests/device/clipboard/ClipboardImageDeviceSmoke.java
 platforms/android/tests/device/candidate/CandidatePanelDeviceSmoke.java
+platforms/android/tests/device/candidate/CandidateCanvasDeviceSmoke.java
 platforms/android/tests/device/candidate/AiCandidateSeatDeviceSmoke.java
 platforms/android/tests/device/keyboard/MoreToolsDeviceSmoke.java
+platforms/android/tests/device/keyboard/PagedTileGridGestureDeviceSmoke.java
 platforms/android/tests/device/keyboard/CopyDeviceInfoDeviceSmoke.java
 platforms/android/tests/device/keyboard/EmojiPickerDeviceSmoke.java
 platforms/android/tests/device/keyboard/PairedPunctuationDeviceSmoke.java
+platforms/android/tests/device/keyboard/NineKeySidebarPairDeviceSmoke.java
 platforms/android/tests/device/keyboard/LetterHintPunctuationDeviceSmoke.java
 platforms/android/tests/device/keyboard/SuperscriptShortcutDeviceSmoke.java
 platforms/android/tests/device/keyboard/ChineseHelpcodeDeviceSmoke.java
@@ -28,6 +31,7 @@ platforms/android/tests/device/voice/HandwritingDeviceSmoke.java
 platforms/android/tests/device/settings/PreferencesDeviceSmoke.java
 platforms/android/tests/device/settings/WubiLookupDeviceSmoke.java
 platforms/android/tests/device/keyboard/ThemeModeDeviceSmoke.java
+platforms/android/tests/device/candidate/CandidateSkinDeviceSmoke.java
 platforms/android/tests/device/keyboard/KeyboardHeightDeviceSmoke.java
 platforms/android/tests/device/keyboard/BottomPaddingHeightDeviceSmoke.java
 platforms/android/tests/device/settings/BottomPaddingSettingsDeviceSmoke.java
@@ -45,13 +49,18 @@ platforms/android/tests/device/settings/AccountStorageDeviceSmoke.java
 platforms/android/tests/device/settings/CloudClipboardKeystoreDeviceSmoke.java
 platforms/android/tests/device/settings/CloudClipboardDriverDeviceSmoke.java
 platforms/android/tests/device/settings/CloudClipboardRelayDeviceSmoke.java
-platforms/android/tests/device/settings/BackendAccountRefreshDeviceSmoke.java
-platforms/android/tests/device/settings/DeviceDataSummaryDeviceSmoke.java
+platforms/android/tests/device/settings/BackendAccountSessionDeviceSmoke.java
 platforms/android/java/app/msime/android/AppVersionPolicy.java
 platforms/android/java/app/msime/android/BoundsPolicy.java
 platforms/android/java/app/msime/android/ColorPolicy.java
 platforms/android/java/app/msime/android/HttpBodyPolicy.java
 platforms/android/java/app/msime/android/HttpConnectionPolicy.java
+platforms/android/java/app/msime/android/AiProviderHeaders.java
+platforms/android/java/app/msime/android/voice/AiEndpointPolicy.java
+platforms/android/java/app/msime/android/voice/AiPolishConfiguration.java
+platforms/android/java/app/msime/android/voice/VoicePolishPolicy.java
+platforms/android/java/app/msime/android/voice/VoicePolisher.java
+platforms/android/tests/device/voice/VoicePolishReplyDeviceSmoke.java
 platforms/android/java/app/msime/android/JsonPolicy.java
 platforms/android/java/app/msime/android/ListPolicy.java
 platforms/android/java/app/msime/android/MapPolicy.java
@@ -61,6 +70,10 @@ platforms/android/java/app/msime/android/TextPolicy.java
 platforms/android/java/app/msime/android/ThreadPolicy.java
 platforms/android/java/app/msime/android/ViewPolicy.java
 platforms/android/java/app/msime/android/account/AccountHttpRequest.java
+platforms/android/java/app/msime/android/account/AccountStore.java
+platforms/android/java/app/msime/android/account/AccountFailureText.java
+platforms/android/java/app/msime/android/account/ActiveRequests.java
+platforms/android/java/app/msime/android/account/RustAccount.java
 platforms/android/java/app/msime/android/account/AccountTokenPolicy.java
 platforms/android/java/app/msime/android/account/AppleWebSignIn.java
 platforms/android/java/app/msime/android/account/BackendAccount.java
@@ -80,6 +93,7 @@ platforms/android/java/app/msime/android/community/CommunityCatalog.java
 platforms/android/java/app/msime/android/community/CommunityRequest.java
 platforms/android/java/app/msime/android/community/CommunityTextPolicy.java
 platforms/android/java/app/msime/android/core/AndroidAccountSessionStorage.java
+platforms/android/java/app/msime/android/core/NativeClient.java
 platforms/android/java/app/msime/android/core/SafePaths.java
 platforms/android/java/app/msime/android/core/WindowLayout.java
 platforms/android/java/app/msime/android/dictionary/CustomKeyboardSkin.java
@@ -136,6 +150,7 @@ platforms/android/tests/device/keyboard/InputFailureCategoryDeviceSmoke.java
 platforms/android/tests/device/candidate/StaleCandidateDeviceSmoke.java
 platforms/android/tests/device/keyboard/ChineseLanguageReturnDeviceSmoke.java
 platforms/android/tests/device/candidate/HeavyEqualsCandidateDeviceSmoke.java
+platforms/android/tests/device/candidate/HandEmojiCandidateDeviceSmoke.java
 platforms/android/tests/device/keyboard/HelpcodeImportDeviceSmoke.java
 platforms/android/tests/device/candidate/CandidateExpansionDeviceSmoke.java
 
@@ -157,6 +172,9 @@ platforms/android/tests/device/keyboard/EmojiCombinationDeviceSmoke.java
 platforms/android/tests/device/keyboard/CompositionBatchDeviceSmoke.java
 platforms/android/tests/device/keyboard/ToolbarEditorDeviceSmoke.java
 platforms/android/tests/device/voice/LocalSpeechHandleDeviceSmoke.java
+platforms/android/tests/device/voice/AiEndpointCheckDeviceSmoke.java
+platforms/android/tests/device/settings/SessionStoreDeviceSmoke.java
+platforms/android/tests/device/settings/VoiceProviderCatalogDeviceSmoke.java
 
 platforms/android/tests/device/core/BatchEditorActivity.java
 platforms/android/tests/device/keyboard/BatchCompositionDeviceSmoke.java
@@ -168,3 +186,16 @@ platforms/android/tests/device/settings/DictionaryImportDeviceSmoke.java
 platforms/android/tests/device/keyboard/NumberLayerEntryDeviceSmoke.java
 platforms/android/tests/device/keyboard/RestartingEditorActivity.java
 platforms/android/tests/device/keyboard/NumberLayerRestartDeviceSmoke.java
+platforms/android/tests/device/keyboard/CompositionRestartDeviceSmoke.java
+platforms/android/tests/device/keyboard/ChineseShiftReturnDeviceSmoke.java
+platforms/android/java/app/msime/android/NativeHandlePolicy.java
+platforms/android/java/app/msime/android/policy/SmartPunctuationContext.java
+platforms/android/java/app/msime/android/candidate/OnlineCandidatePolicy.java
+platforms/android/java/app/msime/android/keyboard/NineKeyPanelPolicy.java
+platforms/android/java/app/msime/android/DigestPolicy.java
+platforms/android/java/app/msime/android/candidate/CandidateManagementAction.java
+platforms/android/java/app/msime/android/core/AppEdition.java
+platforms/android/java/app/msime/android/keyboard/StrokeKeyboardLayout.java
+platforms/android/java/app/msime/android/voice/AiEndpointPolicy.java
+
+platforms/android/tests/device/candidate/CloudCandidateTransportDeviceSmoke.java

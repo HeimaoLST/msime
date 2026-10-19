@@ -212,7 +212,8 @@ public final class PagedTileGrid extends ViewGroup {
                 float dy = Math.abs(event.getY() - downY);
                 if (dx > touchSlop && dx > dy) {
                     dragging = true;
-                    lastX = event.getX();
+                    // 子控件在交接时收到取消，网格未必再收到同一 MOVE；现在就消费首段位移。
+                    dragTo(event.getX());
                     getParent().requestDisallowInterceptTouchEvent(true);
                 }
             }
@@ -237,13 +238,8 @@ public final class PagedTileGrid extends ViewGroup {
             }
             case MotionEvent.ACTION_MOVE -> {
                 if (!dragging && Math.abs(event.getX() - downX) > touchSlop) dragging = true;
-                if (dragging) {
-                    float delta = lastX - event.getX();
-                    int max = (pageCount() - 1) * getWidth();
-                    int next = Math.round(BoundsPolicy.bounded(getScrollX() + delta, 0f, max));
-                    scrollTo(next, 0);
-                }
-                lastX = event.getX();
+                if (dragging) dragTo(event.getX());
+                else lastX = event.getX();
                 return true;
             }
             case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
@@ -263,6 +259,14 @@ public final class PagedTileGrid extends ViewGroup {
                 return true;
             }
         }
+    }
+
+    private void dragTo(float x) {
+        float delta = lastX - x;
+        int max = (pageCount() - 1) * getWidth();
+        int next = Math.round(BoundsPolicy.bounded(getScrollX() + delta, 0f, max));
+        scrollTo(next, 0);
+        lastX = x;
     }
 
     private void trackVelocity(MotionEvent event) {

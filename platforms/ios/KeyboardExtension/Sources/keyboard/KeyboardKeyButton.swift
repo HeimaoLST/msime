@@ -69,6 +69,9 @@ final class KeyboardKeyButton: UIButton {
     }
   }
 
+  /// 连续输入的九键关闭过渡，其他按钮保留原有动画。
+  var animatesPressFeedback = true
+
   static let keyPressScale: CGFloat = 0.96
   /// 以这个透明度叠在底色上的黑色，看起来就是设计稿的 `brightness(.86)`。
   static let keyPressShade: CGFloat = 0.14
@@ -116,7 +119,7 @@ final class KeyboardKeyButton: UIButton {
       scale = 1
       shade = pressed ? 1 - value : 0
     }
-    let duration = KeyPressMotion.duration(for: pressFeedback)
+    let duration = animatesPressFeedback ? KeyPressMotion.duration(for: pressFeedback) : 0
     KeyPressMotion.animate(self, scale: scale, duration: duration)
     setPressShade(shade, duration: duration)
     if let opacity {
@@ -143,6 +146,10 @@ final class KeyboardKeyButton: UIButton {
       layoutPressShade()
     }
     CATransaction.begin()
+    if duration == 0 {
+      CATransaction.setDisableActions(true)
+      shade.removeAnimation(forKey: "opacity")
+    }
     CATransaction.setAnimationDuration(duration)
     CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .linear))
     shade.opacity = Float(value)
@@ -370,17 +377,24 @@ final class KeyboardKeyButton: UIButton {
     }
   }
 
+  private var appliedShadowBounds: CGRect?
+  private var appliedShadowRadius: CGFloat?
+
   override func layoutSubviews() {
     super.layoutSubviews()
-    // The key's own pass is the one that sees its final size. The keyboard controller's pass does not run again when the
-    // system walks the window down to its real height while the keyboard appears, so a shadow path taken there kept a
-    // key from the taller frame and hung a dark block below every key until something laid the keyboard out again.
+    // 按钮自己的布局才能看到最终尺寸。控制器不再遍历整棵视图树重复更新阴影；
+    // 按钮尺寸和圆角不变时，候选更新引发的布局也不必重建路径。
     if layer.shadowOpacity > 0 {
-      layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: KeyboardTheme.current.cornerRadius).cgPath
+      let radius = KeyboardTheme.current.cornerRadius
+      if appliedShadowBounds != bounds || appliedShadowRadius != radius || layer.shadowPath == nil {
+        layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: radius).cgPath
+        appliedShadowBounds = bounds
+        appliedShadowRadius = radius
+      }
     }
     if let shade = pressShade, shade.opacity > 0 { layoutPressShade() }
     guard let lines = titleLineCount else { return }
-    titleLabel?.numberOfLines = lines
+    if titleLabel?.numberOfLines != lines { titleLabel?.numberOfLines = lines }
   }
 }
 
@@ -500,6 +514,11 @@ enum KeyPressMotion {
       return
     }
     let target = scale == 1 ? CGAffineTransform.identity : CGAffineTransform(scaleX: scale, y: scale)
+    if duration == 0 {
+      view.layer.removeAnimation(forKey: "transform")
+      UIView.performWithoutAnimation { view.transform = target }
+      return
+    }
     guard view.transform != target else { return }
     UIView.animate(withDuration: duration, delay: 0, options: [.allowUserInteraction, .beginFromCurrentState, .curveLinear]) {
       view.transform = target
@@ -526,4 +545,22 @@ final class CandidateScrollView: UIScrollView {
     return super.touchesShouldCancel(in: view)
   }
 
+}
+
+/// 九键拼音列只在固定宽度内竖排按钮；内容变化不向整套键盘传播排列约束。
+final class KeyboardSpellingScrollView: UIScrollView {
+  var buttons: [UIButton] = [] { didSet { setNeedsLayout() } }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    var y: CGFloat = 0
+    for button in buttons where !button.isHidden {
+      let height = ceil(button.intrinsicContentSize.height)
+      let frame = CGRect(x: 0, y: y, width: bounds.width, height: height)
+      if button.frame != frame { button.frame = frame }
+      y += height + 6
+    }
+    let size = CGSize(width: bounds.width, height: max(0, y - 6))
+    if contentSize != size { contentSize = size }
+  }
 }

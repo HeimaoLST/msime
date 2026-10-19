@@ -1,0 +1,37 @@
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+names = {'cargo', 'rustc', 'clang', 'clang++', 'xcodebuild', 'swift-frontend', 'ninja'}
+def observation():
+    output = subprocess.check_output(['ps', '-axo', 'comm='], text=True)
+    count = sum(Path(line.strip()).name.strip('()') in names for line in output.splitlines())
+    return {'time': time.time(), 'builds': count, 'load': list(os.getloadavg())}
+
+executable, log, monitor = sys.argv[1:4]
+steady = 0
+start = time.monotonic()
+waiting = []
+while steady < 3:
+    item = observation()
+    waiting.append(item)
+    steady = steady + 1 if item['builds'] == 0 else 0
+    if time.monotonic() - start > 600:
+        Path(monitor).write_text(json.dumps({'waiting': waiting, 'started': False}, indent=2)+'\n')
+        raise SystemExit('等待空闲窗口超时，尚未启动计时')
+    time.sleep(1)
+with open(log, 'w') as output:
+    child = subprocess.Popen([executable, '--exact', 'lattice::decode::borrowed_fields_tests::borrowed_graph_release_comparison', '--ignored', '--nocapture', '--test-threads=1'], stdout=output, stderr=subprocess.STDOUT)
+    samples = []
+    while child.poll() is None:
+        samples.append(observation())
+        time.sleep(1)
+    code = child.wait()
+samples.append(observation())
+valid = all(item['builds'] == 0 for item in samples)
+Path(monitor).write_text(json.dumps({'waiting': waiting, 'started': True, 'samples': samples, 'valid': valid, 'exit': code}, indent=2)+'\n')
+print(json.dumps({'exit': code, 'valid': valid, 'samples': len(samples)}))
+raise SystemExit(code if valid else 99)

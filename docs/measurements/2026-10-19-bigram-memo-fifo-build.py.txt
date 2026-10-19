@@ -1,0 +1,24 @@
+from pathlib import Path
+import json, subprocess, shutil
+root=Path('/Volumes/Workspace/worktrees/nine-key-memo-fifo')
+decode=root/'crates/engine/src/lattice/decode.rs'
+allocator=root/'crates/engine/src/ime/personal_rerank.rs'
+original_decode=decode.read_bytes(); original_allocator=allocator.read_bytes()
+try:
+ s=original_decode.decode(); start=s.index('impl Hasher for KeyHasher'); end=s.index('\n}', start)+2
+ section=s[start:end]
+ assert section.count('#[cfg(test)]') == 2
+ s=s[:start]+section.replace('#[cfg(test)]','#[cfg(all(test, debug_assertions))]')+s[end:]
+ decode.write_text(s)
+ a=original_allocator.decode(); assert a.count('#[global_allocator]') == 1
+ allocator.write_text(a.replace('#[global_allocator]','#[allow(dead_code)]'))
+ with Path('/Volumes/Workspace/nine-key-fifo-final-build.jsonl').open('w') as out, Path('/Volumes/Workspace/nine-key-fifo-final-build.log').open('w') as err:
+  subprocess.run(['cargo','test','--release','--locked','-p','msime-engine','--lib','--no-run','--message-format=json'],cwd=root,stdout=out,stderr=err,check=True)
+ executables=[j['executable'] for line in Path('/Volumes/Workspace/nine-key-fifo-final-build.jsonl').read_text().splitlines() if (j:=json.loads(line)).get('executable')]
+ assert len(executables)==1,executables
+ target=root/'target/tmp/memo-fifo-system-test'; target.parent.mkdir(exist_ok=True)
+ shutil.copy2(executables[0],target)
+ Path('/Volumes/Workspace/nine-key-fifo-test-path').write_text(str(target)+'\n')
+ print(target)
+finally:
+ decode.write_bytes(original_decode); allocator.write_bytes(original_allocator)

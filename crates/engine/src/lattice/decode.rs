@@ -551,6 +551,9 @@ fn personal_transition(
     options.personal_weight * options.personal_max_bonus.min(lift)
 }
 
+// 小列只在线性借用槽中定位，超过上限后沿用原哈希索引。
+const SMALL_BIGRAM_ROWS: usize = 8;
+
 /// WL:385-485. `extra` holds more edges per column searched as if they were part of `graph`, so the typo decode adds edges without copying the literal graph.
 pub(super) fn decode_graph(
     graph: &Graph,
@@ -610,6 +613,7 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
     let row_capacity = options.beam.max(options.nbest);
     let mut bigram_rows: Vec<Vec<f32>> = Vec::new();
     let mut bigram_row_indices: HashMap<&str, usize> = HashMap::new();
+    let mut small_bigram_row_words = [""; SMALL_BIGRAM_ROWS];
     for pos in 0..n {
         if columns[pos].streamed {
             cxx_sort::finish_partial(&mut columns[pos].hyps, options.beam, &mut scores_higher);
@@ -630,14 +634,20 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
             // Column 0 has no predecessor, so the start token carries what the corpus knows about how sentences open; every later column uses the word the hypothesis arrived on.
             let previous = hyp.edge.map_or(SENTENCE_START, |edge| edge.word.as_str());
             let bonuses = bigram_table.map(|table| {
-                let row = if let Some(&row) = bigram_row_indices.get(previous) {
+                let cached_row = if used_bigram_rows <= SMALL_BIGRAM_ROWS {
+                    small_bigram_row_words[..used_bigram_rows]
+                        .iter()
+                        .position(|word| *word == previous)
+                } else {
+                    bigram_row_indices.get(previous).copied()
+                };
+                let row = if let Some(row) = cached_row {
                     row
                 } else {
                     let row = used_bigram_rows;
                     if row == bigram_rows.len() {
                         if bigram_rows.is_empty() {
                             bigram_rows.reserve_exact(row_capacity);
-                            bigram_row_indices.reserve(row_capacity);
                         }
                         bigram_rows.push(Vec::new());
                     }
@@ -657,7 +667,21 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
                         ),
                     }
                     used_bigram_rows += 1;
-                    bigram_row_indices.insert(previous, row);
+                    if row < SMALL_BIGRAM_ROWS {
+                        small_bigram_row_words[row] = previous;
+                    } else {
+                        if row == SMALL_BIGRAM_ROWS {
+                            // 第九个不同前词才建立哈希索引，行号仍按首次出现的顺序。
+                            bigram_row_indices.reserve(row_capacity);
+                            bigram_row_indices.extend(
+                                small_bigram_row_words
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(index, word)| (*word, index)),
+                            );
+                        }
+                        bigram_row_indices.insert(previous, row);
+                    }
                     row
                 };
                 &bigram_rows[row]
@@ -1708,3 +1732,7 @@ mod terminal_tests;
 #[cfg(test)]
 #[path = "decode_constrained_tests.rs"]
 mod constrained_tests;
+
+#[cfg(test)]
+#[path = "decode_row_index_tests.rs"]
+mod row_index_tests;

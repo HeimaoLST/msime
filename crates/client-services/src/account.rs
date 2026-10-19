@@ -345,11 +345,15 @@ pub struct AccountPreferenceField {
     pub value_type: String,
 }
 
+/// 服务端的偏好字段表。序列化用服务端的 snake_case；反序列化另外接受 `msime_client_account` 的 `preferences_schema` 交给宿主的 camelCase（[`page::PreferenceSchemaResponse`]），宿主把它原样传回 `msime_client_account_harmony_settings_export`、`msime_client_account_ios_settings_export`、`msime_client_account_settings_export` 等入口时不用自己改键名（#8201 的 P5）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountPreferenceSchema {
     pub fields: BTreeMap<String, AccountPreferenceField>,
+    #[serde(alias = "maximumBytes")]
     pub maximum_bytes: usize,
+    #[serde(alias = "updateMode")]
     pub update_mode: String,
+    #[serde(alias = "revisionRequired")]
     pub revision_required: bool,
 }
 
@@ -681,6 +685,8 @@ mod clipboard;
 pub mod cloud_sync;
 /// 「我的设备」：列出和撤销登录会话。
 mod devices;
+/// 云词库导出边下载边写进文件。
+mod dictionary_export;
 /// 「其他平台下载」的「发送链接」。
 mod download_link;
 /// App 内反馈。
@@ -693,6 +699,7 @@ pub mod harmony_settings;
 mod host_storage;
 /// 账号设置文档与 iOS 键盘设置（App Group）之间的映射，Tauri iOS 和 C 接口共用。
 pub mod ios_settings;
+pub mod name;
 /// 账号页读到的脱敏响应，Tauri 的账号命令和原生设置窗口的 C 接口共用。
 pub mod page;
 /// 无编码常用语的整列表同步。
@@ -714,10 +721,10 @@ mod voice_contribution;
 
 pub use anonymous::{
     delete_anonymous_voice_samples, ensure_anonymous_account, ensure_anonymous_account_in,
-    ensure_anonymous_account_with, has_saved_anonymous_identity, shared_access_token,
-    shared_access_token_in, with_shared_access_token, AnonymousIdentitySource,
-    AnonymousSessionStorage, LockedAnonymousSessionStorage, SharedAccessToken,
-    ANONYMOUS_ACCOUNT_FILE, ANONYMOUS_SESSION_FILE,
+    ensure_anonymous_account_with, has_saved_anonymous_identity, read_published_anonymous_identity,
+    shared_access_token, shared_access_token_in, with_shared_access_token, AnonymousIdentitySource,
+    AnonymousSessionStorage, LockedAnonymousSessionStorage, PublishedAnonymousIdentity,
+    SharedAccessToken, ANONYMOUS_ACCOUNT_FILE, ANONYMOUS_SESSION_FILE,
 };
 pub use api::*;
 pub use apple_web::{AccountAppleWebChallenge, AppleWebSignIn};
@@ -741,7 +748,13 @@ pub use validate::*;
 pub use voice_contribution::*;
 
 #[cfg(test)]
+mod client_agent_tests;
+#[cfg(test)]
+mod error_cases_tests;
+#[cfg(test)]
 mod link_tests;
+#[cfg(test)]
+mod preference_schema_tests;
 #[cfg(test)]
 mod sign_in_tests;
 #[cfg(test)]

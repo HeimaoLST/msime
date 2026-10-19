@@ -181,10 +181,10 @@ fn merge_lattice_graph(
     typo
 }
 
-// 只在有来源参与选择时建立候选集合；边界和容量仍按候选加路径总数计算。
+// 单路径只需扫描一次候选；多路径仍按候选加路径总数决定是否建立集合。
 fn existing_sentence_set(candidates: &[WordItem], path_count: usize) -> Option<HashSet<&str>> {
     let dedup_size = candidates.len().saturating_add(path_count);
-    (dedup_size > SMALL_SENTENCE_MERGE).then(|| {
+    (path_count > 1 && dedup_size > SMALL_SENTENCE_MERGE).then(|| {
         let mut already = HashSet::with_capacity(dedup_size);
         already.extend(candidates.iter().map(|item| item.word.as_str()));
         already
@@ -870,3 +870,7 @@ mod neural_ownership_tests;
 #[cfg(test)]
 #[path = "empty_source_dedup_tests.rs"]
 mod empty_source_dedup_tests;
+
+#[cfg(test)]
+#[path = "merge_single_path_tests.rs"]
+mod single_path_tests;

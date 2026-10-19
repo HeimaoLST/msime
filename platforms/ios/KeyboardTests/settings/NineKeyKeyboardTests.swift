@@ -1793,6 +1793,42 @@ final class NineKeyKeyboardTests: XCTestCase {
     XCTAssertEqual(shift.accessibilityValue, "关闭")
   }
 
+  func testNineKeyPressFeedbackDoesNotOutlastHighlight() throws {
+    let previousScheme = InputSchemePreference.scheme
+    defer { InputSchemePreference.scheme = previousScheme }
+    InputSchemePreference.scheme = .nineKey
+    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 414, height: 320))
+    let controller = KeyboardViewController()
+    window.rootViewController = controller
+    window.isHidden = false
+    defer { window.isHidden = true }
+    controller.loadViewIfNeeded()
+    controller.view.layoutIfNeeded()
+    for digit in 1...9 {
+      let key = try XCTUnwrap(try button("nineKey\(digit)", in: controller) as? KeyboardKeyButton)
+      XCTAssertFalse(key.animatesPressFeedback)
+      key.configuration?.background.backgroundColor = .white
+      let center = key.center
+      let bounds = key.bounds
+      for _ in 0..<3 {
+        key.isHighlighted = true
+        XCTAssertNil(key.layer.animation(forKey: "transform"))
+        let shade = try XCTUnwrap(key.layer.sublayers?.compactMap { $0 as? CAShapeLayer }.first)
+        XCTAssertEqual(shade.opacity, Float(KeyboardKeyButton.keyPressShade))
+        XCTAssertNil(shade.animation(forKey: "opacity"))
+        key.isHighlighted = false
+        XCTAssertTrue(key.transform.isIdentity)
+        XCTAssertNil(key.layer.animation(forKey: "transform"))
+        XCTAssertEqual(shade.opacity, 0)
+        XCTAssertNil(shade.animation(forKey: "opacity"))
+        XCTAssertEqual(key.center, center)
+        XCTAssertEqual(key.bounds, bounds)
+      }
+    }
+    // 其他按钮仍保留原有反馈时序。
+    XCTAssertTrue(try XCTUnwrap(try button("spaceKey", in: controller) as? KeyboardKeyButton).animatesPressFeedback)
+  }
+
   func testPressFeedbackPreservesLayoutAndResetsAfterInterruption() {
     let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 414, height: 260))
     let controller = UIViewController()
@@ -3097,6 +3133,113 @@ final class NineKeyKeyboardTests: XCTestCase {
     }
   }
 
+  func testAsyncNineKeyFirstDigitIsConsumedBeforeSpaceDeleteAndDismissal() async throws {
+    let previous = InputSchemePreference.scheme
+    defer { InputSchemePreference.scheme = previous }
+    for boundary in ["space", "delete", "dismiss", "hostChange", "mode"] {
+      InputSchemePreference.scheme = .nineKey
+      let controller = KeyboardViewController()
+      controller.asynchronousNineKeyInputEnabled = true
+      controller.loadViewIfNeeded()
+      controller.view.frame = CGRect(x: 0, y: 0, width: 390, height: 292)
+      controller.viewWillAppear(false)
+      let digit = try button("nineKey6", in: controller)
+      let gate = DispatchSemaphore(value: 0)
+      defer { gate.signal() }
+      MSIMEInputThread.shared.async { gate.wait() }
+      digit.sendActions(for: .primaryActionTriggered)
+      gate.signal()
+      if boundary == "space" {
+        try button("spaceKey", in: controller).sendActions(for: .primaryActionTriggered)
+      } else if boundary == "delete" {
+        let key = try button("nineKeyDelete", in: controller)
+        key.sendActions(for: .touchDown)
+        key.sendActions(for: .touchUpInside)
+      } else if boundary == "hostChange" {
+        controller.textWillChange(nil)
+      } else if boundary == "mode" {
+        try button("bottomLanguageKey", in: controller).sendActions(for: .primaryActionTriggered)
+      } else {
+        controller.viewWillDisappear(false)
+      }
+      XCTAssertNotEqual(try button("returnKey", in: controller).accessibilityLabel, "确认", boundary)
+      let drained = expectation(description: "旧数字续点不能恢复已结束的组字")
+      DispatchQueue.main.async { drained.fulfill() }
+      await fulfillment(of: [drained], timeout: 10)
+      XCTAssertNotEqual(try button("returnKey", in: controller).accessibilityLabel, "确认", boundary)
+      if boundary != "dismiss" { controller.viewWillDisappear(false) }
+    }
+  }
+
+  func testSpellingSidebarScrollRangeTracksVisibleButtonsAndWidth() {
+    let strip = KeyboardSpellingScrollView(frame: CGRect(x: 0, y: 0, width: 48, height: 84))
+    let buttons = (0..<20).map { index in
+      let button = UIButton(type: .system)
+      button.setTitle("pin\(index)", for: .normal)
+      strip.addSubview(button)
+      return button
+    }
+    strip.buttons = buttons
+    strip.layoutIfNeeded()
+    XCTAssertGreaterThan(strip.contentSize.height, strip.bounds.height)
+    for (first, next) in zip(buttons, buttons.dropFirst()) {
+      XCTAssertLessThanOrEqual(first.frame.maxY, next.frame.minY)
+    }
+    XCTAssertEqual(buttons.last?.frame.maxY, strip.contentSize.height)
+    strip.contentOffset.y = 100
+    strip.frame.size.width = 72
+    strip.layoutIfNeeded()
+    XCTAssertTrue(buttons.allSatisfy { $0.frame.width == strip.bounds.width })
+    buttons.forEach { $0.isHidden = true }
+    strip.buttons = buttons
+    strip.layoutIfNeeded()
+    XCTAssertEqual(strip.contentSize.height, 0)
+    buttons[3].isHidden = false
+    strip.buttons = buttons
+    strip.layoutIfNeeded()
+    XCTAssertEqual(buttons[3].frame.origin, .zero)
+    XCTAssertEqual(strip.contentSize.height, buttons[3].frame.height)
+  }
+
+  func testSpellingSidebarChangesKeepTheKeyLayout() throws {
+    let previousScheme = InputSchemePreference.scheme
+    let previousEnabled = InputSchemePreference.enabledSchemes
+    defer {
+      InputSchemePreference.enabledSchemes = previousEnabled
+      InputSchemePreference.scheme = previousScheme
+    }
+    InputSchemePreference.enabledSchemes = [.quanpin, .nineKey]
+    InputSchemePreference.scheme = .nineKey
+    let controller = KeyboardViewController()
+    controller.loadViewIfNeeded()
+    controller.view.frame = CGRect(x: 0, y: 0, width: 390, height: 292)
+    controller.viewWillAppear(false)
+    controller.view.layoutIfNeeded()
+    defer { controller.viewDidDisappear(false) }
+    let digit = try button("nineKey6", in: controller)
+    let punctuation = try button("quickPunctuationKey", in: controller)
+    let strip = try XCTUnwrap(descendants(controller.view).first {
+      $0.accessibilityIdentifier == "nineKeySpellingStrip"
+    })
+    // 完整布局会重建标点菜单；拼音侧栏切换只需更新它自己，不应重写整套键盘。
+    let menu = try XCTUnwrap(punctuation.menu)
+    let frame = digit.convert(digit.bounds, to: controller.view)
+    for _ in 0..<3 {
+      digit.sendActions(for: .primaryActionTriggered)
+      controller.view.layoutIfNeeded()
+      XCTAssertFalse(strip.isHidden)
+      XCTAssertTrue(punctuation.menu === menu)
+      XCTAssertEqual(digit.convert(digit.bounds, to: controller.view), frame)
+      let delete = try button("nineKeyDelete", in: controller)
+      delete.sendActions(for: .touchDown)
+      delete.sendActions(for: .touchUpInside)
+      controller.view.layoutIfNeeded()
+      XCTAssertTrue(strip.isHidden)
+      XCTAssertTrue(punctuation.menu === menu)
+      XCTAssertEqual(digit.convert(digit.bounds, to: controller.view), frame)
+    }
+  }
+
   func testSpellingStripReusesItsButtonsBetweenKeystrokes() throws {
     let previousScheme = InputSchemePreference.scheme
     let previousEnabled = InputSchemePreference.enabledSchemes
@@ -3127,6 +3270,20 @@ final class NineKeyKeyboardTests: XCTestCase {
       XCTAssertTrue(before === after)
     }
     XCTAssertTrue(second.contains { ($0.accessibilityIdentifier ?? "").hasPrefix("nineKeySpelling_") })
+    let labels = second.map { $0.accessibilityLabel }
+    let identifiers = second.map { $0.accessibilityIdentifier }
+    // 清空后再输入同样的组码，缓存的格子必须重新显示，保留读屏身份和拼写。
+    for _ in 0..<3 {
+      let delete = try button("nineKeyDelete", in: controller)
+      delete.sendActions(for: .touchDown)
+      delete.sendActions(for: .touchUpInside)
+    }
+    XCTAssertTrue(second.allSatisfy(\.isHidden))
+    for digit in "646" { try button("nineKey\(digit)", in: controller).sendActions(for: .primaryActionTriggered) }
+    let restored = descendants(strip).compactMap { $0 as? UIButton }.filter { !$0.isHidden }
+    XCTAssertEqual(restored.map { $0.accessibilityLabel }, labels)
+    XCTAssertEqual(restored.map { $0.accessibilityIdentifier }, identifiers)
+    controller.viewDidDisappear(false)
   }
 
   /// Nine-key digits reach the English candidates too.
@@ -3864,6 +4021,7 @@ final class NineKeyKeyboardTests: XCTestCase {
     XCTAssertNil(candidatePanel(in: controller))
     XCTAssertEqual(try preedit(in: controller), composition, "收起不能删除组字")
     expand.sendActions(for: .primaryActionTriggered)
+    controller.view.layoutIfNeeded()
     let reopened = try XCTUnwrap(candidatePanel(in: controller))
     let candidate = try XCTUnwrap(descendants(reopened).compactMap { $0 as? UIButton }
       .first { $0.accessibilityIdentifier == "panelCandidate-1" })

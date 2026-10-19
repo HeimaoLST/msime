@@ -1,0 +1,49 @@
+{
+  "binary_sha256": "d70000564d2237534268a737bde2093c8838dc843eb615a01764c5faf6f381a4",
+  "allocator": "system",
+  "returncode": 0,
+  "samples": [
+    {
+      "elapsed_seconds": 0.046,
+      "load_1m": 35.67529296875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 1.091,
+      "load_1m": 35.67529296875,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 2.138,
+      "load_1m": 33.458984375,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 3.182,
+      "load_1m": 33.458984375,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 4.221,
+      "load_1m": 33.458984375,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    },
+    {
+      "elapsed_seconds": 5.268,
+      "load_1m": 33.458984375,
+      "cargo": 0,
+      "rustc": 0,
+      "clang": 0
+    }
+  ]
+}

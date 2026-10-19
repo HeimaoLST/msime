@@ -5,6 +5,48 @@
 use crate::*;
 use msime_client_core::{is_bounded_chars_without_nul, is_bounded_text};
 
+/// 语音设置的公开服务目录；纯函数，不访问偏好或设备。返回值用标准 JSON 信封封装。
+#[no_mangle]
+pub extern "C" fn msime_client_voice_provider_catalog() -> *mut c_char {
+    response(|| {
+        use msime_client_providers::voice::provider_catalog::{
+            ASR_PROVIDERS, DOUBAO_STREAM_ENDPOINTS, POLISH_PROVIDERS,
+        };
+        Ok(json!({
+            "asr": ASR_PROVIDERS, "polish": POLISH_PROVIDERS,
+            "doubao_stream_endpoints": DOUBAO_STREAM_ENDPOINTS
+        }))
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct VoiceProviderUpdateRequest {
+    service: msime_client_providers::voice::provider_settings::ProviderService,
+    provider: String,
+    current: msime_client_providers::voice::provider_settings::ProviderFields,
+}
+
+/// 计算语音设置的换服务补丁；请求与返回均含凭据，不能记录到日志。
+///
+/// # Safety
+/// `request` 必须指向本次调用期间可读的 `length` 个字节。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_voice_provider_update(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        let query: VoiceProviderUpdateRequest = local_voice_request(request, length, 1 << 20)?;
+        Ok(json!(
+            msime_client_providers::voice::provider_settings::provider_update(
+                query.service,
+                &query.provider,
+                &query.current,
+            )
+        ))
+    })
+}
+
 /// Decode one Doubao v1 response frame for Apple hosts. The returned payload
 /// is UTF-8 JSON text; no frame bytes or credentials are retained.
 ///
@@ -596,14 +638,14 @@ pub unsafe extern "C" fn msime_client_voice_local_models(
     })
 }
 
-/// Download, verify and install one catalog model. Blocks until done: call it on a worker thread.
+/// 下载、校验并安装一个目录模型。阻塞到结束，必须在工作线程上调用。
 ///
-/// Request `{"root": "<absolute dir>", "id": "<catalog id>", "mirror": ""}`; response `{"path": "<root>/<id>"}`. `progress` (may be null) is called on the calling thread with `{"id","stage","downloaded","total"}` JSON, stage one of download, verify, extract, done; the buffer is only valid during the call. `msime_client_voice_local_model_cancel` stops it from any thread, and the call then fails with "local_model_cancelled". One install per id at a time; a second fails with "local_model_install_running". Other failures are "local_model_*" codes (network, http_status, size_mismatch, checksum_mismatch, unsafe_archive, missing_file, io, invalid_mirror, unknown).
+/// 请求 `{"root": "<absolute dir>", "id": "<catalog id>", "mirror": ""}`，响应 `{"path": "<root>/<id>"}`。`progress` 可为空，在调用线程上收到 `{"id","stage","downloaded","total"}` JSON，阶段为 download、verify、extract 或 done，缓冲区只在回调期间有效。登记后、访问文件或网络前先报告 download（导入为 import）的零字节进度，回调可重入 `msime_client_voice_local_model_cancel` 取消本次安装。取消入口可从任何线程调用，安装随后报 "local_model_cancelled"。每个 id 同时只允许一次安装，重复调用报 "local_model_install_running"。其余失败使用 "local_model_*" 错误码（network、http_status、size_mismatch、checksum_mismatch、unsafe_archive、missing_file、io、invalid_mirror、unknown）。
 ///
 /// 请求带 `"files": ["<absolute path>", ...]`（至多 16 个）时不联网，改用用户自己下载好的这些文件安装（`msime_client_providers::voice::local_models::import`）：按长度和 SHA-256 认文件，不看文件名，`mirror` 不用；进度里原来的 download 阶段报成 import；缺文件时失败为 "local_model_import_missing: <上游文件名>"，所选文件打不开或读出错时为 "local_model_import_unreadable: <说明>"。和下载共用同一个按 id 的登记，所以取消、互斥和删除时的拒绝都一样。
 ///
 /// # Safety
-/// `request` must point to `length` readable bytes. `progress` must stay valid for the call, must copy the buffer before returning and must not unwind.
+/// `request` 必须指向 `length` 字节的可读缓冲区。`progress` 必须在整个调用期间有效，在返回前复制缓冲区，且不得展开栈。
 #[no_mangle]
 pub unsafe extern "C" fn msime_client_voice_local_model_install(
     request: *const u8,
@@ -636,6 +678,11 @@ pub unsafe extern "C" fn msime_client_voice_local_model_install(
             }
             None => None,
         };
+        let model = msime_client_providers::voice::local_models::catalog()
+            .models
+            .iter()
+            .find(|model| model.id == request.id)
+            .ok_or("local_model_unknown")?;
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
             let mut installs = local_model_installs()
@@ -669,6 +716,21 @@ pub unsafe extern "C" fn msime_client_voice_local_model_install(
                 }
             }
         };
+        // 登记锁已释放，宿主可在首次回调中补发登记前的取消，避免先进入阻塞 I/O。
+        report(
+            msime_client_providers::voice::local_models::InstallProgress {
+                stage: if files.is_some() {
+                    "import"
+                } else {
+                    "download"
+                },
+                downloaded: 0,
+                total: model.archive.size,
+            },
+        );
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("local_model_cancelled".into());
+        }
         let path = match &files {
             Some(files) => msime_client_providers::voice::local_models::import(
                 root,

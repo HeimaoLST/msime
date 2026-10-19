@@ -14,7 +14,7 @@ fn old_filtered(
     rows
 }
 
-fn assert_rows(actual: &Vec<WordItem>, expected: &Vec<WordItem>, allow_smaller: bool) {
+pub(super) fn assert_rows(actual: &Vec<WordItem>, expected: &Vec<WordItem>, allow_smaller: bool) {
     let capacity = |actual: usize, expected: usize| {
         if allow_smaller {
             assert!(actual <= expected, "容量 {actual}>{expected}");

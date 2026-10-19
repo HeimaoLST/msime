@@ -12,6 +12,7 @@ mod editing;
 mod glide;
 mod input;
 mod learning;
+mod literal;
 mod online;
 pub mod options;
 mod plugin_commands;
@@ -321,7 +322,7 @@ impl Session {
         self.input.set_candidate_position(index, 0)
     }
 
-    /// Finish the whole composition starting with the host-highlighted candidate (0 when none is highlighted); remaining segments use their leading candidate, and an invalid index commits the raw input. A shifted capital that starts an incomplete pinyin spelling also uses the raw input so mixed English is not replaced by a Chinese correction.
+    /// 从宿主高亮的候选开始结束整段组字（没有高亮时为 0），剩余片段使用各自首选；索引无效时提交原文。普通拼音中的大写片段由字面候选保留。
     pub fn finish(&mut self, first_index: usize) -> KeyResult {
         if self.nine_key.active() {
             let result = self.nine_key.finish(first_index);
@@ -427,6 +428,11 @@ impl Session {
         self.nine_key.set_personal_context_enabled(enabled);
     }
 
+    /// 当前组字是否预留云候选席位；运行时在修改前据此判断候选身份是否会变化。
+    pub fn cloud_candidates_enabled(&self) -> bool {
+        self.input.cloud_candidates_enabled
+    }
+
     /// 让宿主把云候选的固定席位交给当前会话；关闭时立即去掉尚未回答的占位行。
     pub fn set_cloud_candidates_enabled(&mut self, enabled: bool) {
         self.input.set_cloud_candidates_enabled(enabled);
@@ -490,7 +496,10 @@ impl Session {
             && self.input.helpcode_enabled()
             && !self.input.local_mode.annotates_rows();
         let input = &self.input;
-        let candidates = input.candidates().to_vec();
+        let mut candidates = input.candidates().to_vec();
+        for item in &mut candidates {
+            input.apply_english_word_case(item.source, &mut item.word);
+        }
         let preedit = if !self.shuangpin_preedit_uses_raw
             && input.scheme() == SchemeType::Shuangpin
             && input.local_mode == LocalInputMode::None

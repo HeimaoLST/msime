@@ -1,0 +1,14 @@
+verified evaluation resources: source_commit=128a332cabc5fa42b1cf5f827033ad5697ff528b generation=7356c4a452d8ba15475c0e57f134fccf7b7cbe267440461541c74d09b11b6ffe
+81 cases, 1791 keystrokes per arm, 5 warm-up cases discarded
+milliseconds per keystroke:
+  engine only    mean   10.27  p50    6.55  p95   36.22  p99   89.62  max  223.49
+  with model     mean   16.41  p50    9.37  p95   60.93  p99  154.98  max  314.94
+  reranker adds  mean    6.14  p50    0.72  p95   43.91  p99  136.42  max  286.80
+over the 16.00ms budget: 523 of 1791 keystrokes (29.2%)
+slowest keystroke by case:
+   314.94  nk-064 (woyebuzhidaogaizenmebancaihao)
+   294.75  nk-066 (womenkeyiyiqiqumaidiandongxi)
+   285.78  nk-063 (nimenxianchiwomashangjiuguolai)
+   231.00  nk-056 (mingtiandehuiyigaidaoxiawule)
+   223.55  nk-057 (nichiwanfanyihouzaodianxiuxi)
+Error: "p95 with the model is 60.93ms, over the 16.00ms budget"

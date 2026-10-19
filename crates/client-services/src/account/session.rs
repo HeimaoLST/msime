@@ -6,6 +6,9 @@ use super::validate::*;
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod adopt;
+pub use adopt::*;
+
 struct SessionState {
     loaded: bool,
     saved: Option<SavedAccountSession>,
@@ -155,8 +158,19 @@ impl<A: AccountApi, S: AccountSessionStorage> BackendAccountSession<A, S> {
         subject: &str,
         secret: &str,
     ) -> Result<AccountUser, AccountError> {
+        self.sign_in_anonymous_if(subject, secret, || Ok(true))
+    }
+
+    /// 与 [`Self::sign_in_anonymous`] 相同，只是在刷新锁里、保存会话之前再问一次 `still_current`：返回假时不保存，结果是 [`AccountError::Cancelled`]。登录要联网，期间 `session_adopt` 可能已经在同一把锁里把身份连同会话换成了另一个匿名账号，这时把这一次登录的会话写上去，会话和身份就不再属于同一个账号。
+    pub(super) fn sign_in_anonymous_if(
+        &self,
+        subject: &str,
+        secret: &str,
+        still_current: impl FnOnce() -> Result<bool, AccountError>,
+    ) -> Result<AccountUser, AccountError> {
         let challenge = self.request_code("anonymous", subject)?;
-        self.sign_in_validated(&challenge.challenge_id, secret, |_| {})
+        let challenge = challenge.challenge_id;
+        self.sign_in_exchanging_if(|| self.api.login(&challenge, secret), still_current, |_| {})
     }
 
     /// Completes an Apple challenge using the identity token returned by the
@@ -488,6 +502,21 @@ impl<A: AccountApi, S: AccountSessionStorage> BackendAccountSession<A, S> {
         E: FnOnce() -> Result<AccountTokens, AccountError>,
         F: FnOnce(&str),
     {
+        self.sign_in_exchanging_if(exchange, || Ok(true), cleanup)
+    }
+
+    /// 与 [`Self::sign_in_exchanging`] 相同，只是在刷新锁里、保存之前调 `still_current`，返回假时不保存，结果是 [`AccountError::Cancelled`]。
+    fn sign_in_exchanging_if<E, G, F>(
+        &self,
+        exchange: E,
+        still_current: G,
+        cleanup: F,
+    ) -> Result<AccountUser, AccountError>
+    where
+        E: FnOnce() -> Result<AccountTokens, AccountError>,
+        G: FnOnce() -> Result<bool, AccountError>,
+        F: FnOnce(&str),
+    {
         let version = {
             let mut state = self.lock()?;
             let version = Self::next_generation(&mut state)?;
@@ -511,7 +540,7 @@ impl<A: AccountApi, S: AccountSessionStorage> BackendAccountSession<A, S> {
             } else {
                 None
             };
-            if state.generation != version {
+            if state.generation != version || !still_current()? {
                 return Err(AccountError::Cancelled);
             }
             self.storage.save(&value)?;
@@ -1128,6 +1157,32 @@ impl<A: AccountApi, S: AccountSessionStorage> BackendAccountSession<A, S> {
         Ok(updated)
     }
 
+    /// 按 `preferences.revision` 比较并交换，整份替换云端的设置文档（`PUT /v1/users/me/preferences`：服务端只在云端的修订号仍是它时写入，写入后修订号加 1），失败时是 [`AccountFailure`]（#8201 的 P4）。发送前校验：修订号为负、键或值不合规是 `account_invalid`，请求体超过服务端的 1 MiB 是 `account_too_large`；冲突（409 `revision_conflict`）是 `account_conflict`，不重试。给了 `expected_user_id` 时只写这个账号：会话已经退出、换成别的账号或请求期间重新登录时是 `account_cancelled`，不会写进另一个账号。
+    pub fn put_preferences_checked(
+        &self,
+        preferences: &AccountPreferences,
+        expected_user_id: Option<&str>,
+    ) -> Result<AccountPreferences, AccountFailure> {
+        if validate_account_preferences(preferences).is_err() {
+            return Err(AccountError::Invalid.into());
+        }
+        let body = serde_json::to_vec(preferences).map_err(|_| AccountError::Invalid)?;
+        if body.len() > MAX_JSON_BYTES {
+            return Err(AccountFailure::too_large());
+        }
+        let expected = match expected_user_id {
+            Some(user_id) => {
+                let (_, _, generation) = self.credentials_with_generation(None, Some(user_id))?;
+                Some((user_id, generation))
+            }
+            None => None,
+        };
+        self.authenticated_with_user_at(expected, |api, token| {
+            api.put_preferences_detailed(preferences, token)
+        })
+        .map(|(_, updated, _)| updated)
+    }
+
     /// Uploads preferences only for the generation that read them.
     ///
     /// A same-user re-login has a different generation even though its user id is unchanged. The
@@ -1361,6 +1416,18 @@ impl<A: AccountApi, S: AccountSessionStorage> BackendAccountSession<A, S> {
         format: &str,
     ) -> Result<AccountDictionaryExport, AccountError> {
         self.authenticated(|api, token| api.export_dictionary(kind, format, token))
+    }
+
+    /// 与 [`Self::export_dictionary`] 相同，正文直接写进 `destination`、不放进内存（见 [`BackendAccountClient::export_dictionary_to_file`]），返回写入的字节数。
+    pub fn export_dictionary_to_file(
+        &self,
+        kind: DictionaryKind,
+        format: &str,
+        destination: &Path,
+    ) -> Result<u64, AccountError> {
+        self.authenticated(|api, token| {
+            api.export_dictionary_to_file(kind, format, destination, token)
+        })
     }
 
     pub fn forget(&self) -> Result<(), AccountError> {

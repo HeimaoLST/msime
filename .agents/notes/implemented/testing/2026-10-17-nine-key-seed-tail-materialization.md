@@ -167,3 +167,7 @@ Status: implemented
 ## Final repository gates
 
 验证脚本顺序结果为：`cargo test --locked -p msime-engine -p msime-input-runtime --no-fail-fast --quiet` 通过（引擎 2250、golden 31、运行时 317，40 项忽略）；两 crate 全 targets Clippy `-D warnings` 通过；`cargo fmt --all -- --check` 通过。`bash scripts/verify-local.sh --quick` 完成其余阶段，但以已有的 HarmonyOS settings bundle 检查失败退出；该失败在本片改动前即存在，日志首段明确为 `the HarmonyOS settings page does not build`，本片没有改动 HarmonyOS 文件。Android host Java、WASM、macOS 配置/编译、共享 Apple bridge 和仓库检查均完成；HarmonyOS 因缺少 `hvigorw`/staged 资源跳过编译，Linux Docker 与 Windows MinGW 阶段按环境缺失跳过。这是本地编译和单测门禁，不是 Android 设备验收。
+
+后续[最终路径输出缓冲](2026-10-18-nine-key-path-buffer.md)复用会话已有的路径和音节字符串，中间搜索规则与本篇上限保持不变。
+
+后续[种子组合在复制前检查重复](2026-10-18-nine-key-seed-dedup.md)保留尾段切分与普通路径输出规则，只消除重复组合的前缀复制和空尾段外层向量。

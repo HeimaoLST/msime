@@ -1,5 +1,7 @@
 import re
 import plistlib
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -378,6 +380,52 @@ class ProjectConfigurationTests(unittest.TestCase):
         fetch = 'python3 "$repo_root/scripts/fetch_voice_runtime.py" --platform ios'
         self.assertIn(fetch, script)
         self.assertLess(script.index(fetch), script.rindex("xcodegen generate"))
+
+    def test_release_date_is_stamped_into_the_app_info_plist_only(self):
+        project = (IOS_ROOT / "project.yml").read_text()
+        blocks = dict(target_blocks(project))
+        # 只有 App 的「关于」页显示发布日期，键盘扩展和测试 target 不跑这个脚本。
+        self.assertEqual([name for name, body in blocks.items() if "stamp-release-date.sh" in body], ["MSIMEApp"])
+        app = blocks["MSIMEApp"]
+        self.assertIn("ENABLE_USER_SCRIPT_SANDBOXING: NO", app)
+        self.assertRegex(app, r"inputFiles:\n\s+- \$\(TARGET_BUILD_DIR\)/\$\(INFOPLIST_PATH\)\n\s+basedOnDependencyAnalysis: false")
+        # 提交的工程要与 project.yml 同步，本地用 Xcode 打开时也会写入日期。
+        generated = (IOS_ROOT / "MSIMEClient.xcodeproj/project.pbxproj").read_text()
+        self.assertIn('shellScript = "bash \\"$SRCROOT/scripts/stamp-release-date.sh\\"";', generated)
+        self.assertIn('"$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",', generated)
+        self.assertEqual(generated.count("ENABLE_USER_SCRIPT_SANDBOXING = NO;"), 2)
+
+    def test_release_date_sources_follow_the_shared_priority(self):
+        script = IOS_ROOT / "scripts/stamp-release-date.sh"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            source.mkdir()
+            plist = root / "Info.plist"
+            plist.write_bytes(plistlib.dumps({"CFBundleShortVersionString": "0.52.0"}, fmt=plistlib.FMT_BINARY))
+
+            def stamp(**extra):
+                env = {"PATH": "/usr/bin:/bin", "TARGET_BUILD_DIR": temp, "INFOPLIST_PATH": "Info.plist", "SRCROOT": str(source), **extra}
+                return subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=30)
+
+            def stamped():
+                return plistlib.loads(plist.read_bytes()).get("MSIMEReleaseDate")
+
+            # 源码目录不在 git 仓库里、也没有 release-date.txt：没有日期，不算错误。
+            self.assertEqual(stamp().returncode, 0)
+            self.assertIsNone(stamped())
+            (source / "release-date.txt").write_text("2026-10-01\n")
+            self.assertEqual(stamp().returncode, 0)
+            self.assertEqual(stamped(), "2026-10-01")
+            # 环境变量优先于文件；写入后 Info.plist 仍是 Xcode 生成时的二进制格式。
+            self.assertEqual(stamp(MSIME_RELEASE_DATE="2026-10-19").returncode, 0)
+            self.assertEqual(stamped(), "2026-10-19")
+            self.assertTrue(plist.read_bytes().startswith(b"bplist00"))
+            self.assertNotEqual(stamp(MSIME_RELEASE_DATE="2026/10/19").returncode, 0)
+            # 增量构建时这次取不到日期，就要清掉上次写入的值。
+            (source / "release-date.txt").unlink()
+            self.assertEqual(stamp().returncode, 0)
+            self.assertIsNone(stamped())
 
 
 if __name__ == "__main__":

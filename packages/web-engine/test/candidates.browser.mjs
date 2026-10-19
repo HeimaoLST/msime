@@ -26,10 +26,15 @@ function findChrome() {
   throw new Error("candidates.browser: no Chrome found; set CHROME_BIN to a Chrome or Chromium executable");
 }
 
-/** 只读的静态服务器：只提供 packages/web-engine 下的 .html 和 .js。 */
+/** 只读的测试服务器：提供源码页面，以及验证无 CORS 首帧绘制的合成 SVG。 */
 function serve() {
   const server = createServer((req, res) => {
     const path = decodeURIComponent(new URL(req.url, "http://localhost").pathname);
+    if (path === "/test/canvas-panel.svg") {
+      res.writeHead(200, { "Content-Type": "image/svg+xml" });
+      res.end('<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><rect width="12" height="12" fill="red"/></svg>');
+      return;
+    }
     const file = resolve(root, `.${path}`);
     if (!file.startsWith(root + sep) || !TYPES[extname(file)] || !existsSync(file)) {
       res.writeHead(404);
@@ -86,9 +91,18 @@ async function runPage(chrome, url) {
       });
     const { targetId } = await send("Target.createTarget", { url });
     const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
-    const read = `({ result: document.body?.dataset.result ?? null, log: document.getElementById("log")?.textContent ?? "" })`;
+    const read = `({ result: document.body?.dataset.result ?? null, log: document.getElementById("log")?.textContent ?? "", pixels: document.body?.dataset.pixelRequest ?? null, motion: document.body?.dataset.motionRequest ?? null })`;
     for (;;) {
       const { result } = await send("Runtime.evaluate", { expression: read, returnByValue: true }, sessionId);
+      if (result.value?.motion) {
+        await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: result.value.motion }] }, sessionId);
+        await send("Runtime.evaluate", { expression: "window.finishMotionCheck()" }, sessionId);
+      }
+      if (result.value?.pixels) {
+        const shot = await send("Page.captureScreenshot", { format: "png" }, sessionId);
+        const checked = await send("Runtime.evaluate", { expression: `window.finishPixelCheck(${JSON.stringify(shot.data)})`, awaitPromise: true, returnByValue: true }, sessionId);
+        if (checked.exceptionDetails) throw new Error(JSON.stringify(checked.exceptionDetails));
+      }
       if (result.value?.result) return result.value;
       if (Date.now() > deadline) return { result: null, log: `timed out after ${TIMEOUT_MS} ms; log so far: ${result.value?.log ?? ""}` };
       await new Promise((done) => setTimeout(done, 100));

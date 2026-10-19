@@ -49,12 +49,6 @@ export const skinImport: (request: string) => Promise<string>;
  * thread when the design carries a photo.
  */
 export const customSkinLibrary: (request: string) => Promise<string>;
-/**
- * `{directory,id,name,design}` starts a skin trial and imports the design, answering `{skin,trial}`.
- * One call rather than two: the trial remembers the skin being replaced, so a failed import has to
- * end it. Writes preferences and two locked files, so call it off the UI thread.
- */
-export const communitySkinInstall: (request: string) => Promise<string>;
 /** `{directory,action:{operation:"finish",id,keep}}` or `{operation:"restore_pending"}`. */
 export const keyboardSkinTrial: (request: string) => string;
 /**
@@ -62,15 +56,6 @@ export const keyboardSkinTrial: (request: string) => string;
  * kept. Every operation answers with the whole library; the keyboard process rereads the same file.
  */
 export const communityResourceLibrary: (request: string) => Promise<string>;
-/**
- * The decisions in AI skin generation, for a host that performs the requests itself.
- *
- * `{operation:"compose",prompt,model}` answers `{path,body}` carrying the shared system prompt;
- * `{operation:"parse",text}` answers the three validated plans or refuses; `{operation:"artwork"}`
- * says whether a returned image is one this client will show. The instruction and the parser are
- * one contract — the prompt names the exact document the parser accepts.
- */
-export const aiSkinPlan: (request: string) => string;
 export const savePreferences: (
   directory: string,
   expectedRevision: number,
@@ -111,6 +96,41 @@ export const repairPreferences: (directory: string) => Promise<string>;
  */
 export const ensureAnonymousAccount: (directory: string) => Promise<string>;
 /**
+ * `msime_client_ensure_anonymous_account_with_agent` 在工作线程上：`{directory, client_agent?}`，已有会话时只读一次文件、不联网。以 `{ok,value:true}` 或 `{ok:false,error}`（账号错误码）resolve；只有工作线程没有给出应答时才 reject。
+ */
+export const ensureAnonymousAccountWithAgent: (request: string) => Promise<string>;
+/** `msime_client_client_agent`：`{platform, version, device?, system?, edition}` 拼成宿主自报的 User-Agent，纯函数，同步调用。 */
+export const clientAgent: (request: string) => string;
+/**
+ * `msime_client_account` 在工作线程上：`{directory, client_agent?, action}`，操作见 C 头文件。会阻塞网络，或要等同一目录上另一次刷新放开 `account-refresh.lock`。
+ */
+export const account: (request: string) => Promise<string>;
+/** 与 `account` 相同的请求，但在自己的线程上跑，给最长阻塞 125 秒的 `chat`，不占工作线程池。 */
+export const accountThread: (request: string) => Promise<string>;
+/** 目录模式的 `{operation:"status"}`，参数是账号目录的绝对路径本身（不是 JSON）。只读本地会话文件、不联网，同步调用。 */
+export const accountStatus: (directory: string) => string;
+/** `msime_client_community` 在工作线程上：`{directory, state_root?, action}`。 */
+export const community: (request: string) => Promise<string>;
+/** `msime_client_cloud_dictionary` 在工作线程上：列表、目录、增删改、导入这些短请求。 */
+export const cloudDictionary: (request: string) => Promise<string>;
+/** 与 `cloudDictionary` 相同的请求，但在自己的线程上跑，给要下载或上传整份快照、导出词库文件的操作。 */
+export const cloudDictionarySnapshot: (request: string) => Promise<string>;
+/** `msime_client_account_cloud_clipboard` 在工作线程上：`{directory, device_name?, action}`。 */
+export const accountCloudClipboard: (request: string) => Promise<string>;
+/** `msime_client_account_harmony_settings_export` 在工作线程上：`{preferences_directory, feedback, schema, cloud?}`，不联网、不读会话。 */
+export const harmonySettingsExport: (request: string) => Promise<string>;
+/** `msime_client_account_harmony_settings_apply` 在工作线程上：`{preferences_directory, cloud, schema, feedback}`，按读到的修订号比较并交换写回偏好。 */
+export const harmonySettingsApply: (request: string) => Promise<string>;
+/**
+ * `msime_client_ai_skin_generate` 在自己的线程上：`{directory, request_id, prompt}`，最长约 5 分钟。`onProgress` 每完成一张插画在 ArkTS 线程上收到一次已完成的张数（1 到 3）。以 `{ok,value:[三套方案]}` 或 `{ok:false,error}` resolve。
+ */
+export const aiSkinGenerate: (
+  request: string,
+  onProgress?: (completed: number) => void,
+) => Promise<string>;
+/** `msime_client_ai_skin_cancel`：`{request_id}`，立即返回，生成随后以 `ai_skin_cancelled` 结束。 */
+export const aiSkinCancel: (request: string) => string;
+/**
  * Starts the usage-reporting session at keyboard start: `{directory,platform,version,preferences_directory}` in, `{enabled,crash_record_path?,previous_session_crashed?,crashes?}` out. Closes the previous session (`session_crash` only when it left a crash record), queues crash records and today's `active`, writes the new session marker. With `usage_reporting` off it clears instead. Small files only, no network.
  */
 export const telemetryBegin: (request: string) => string;
@@ -146,10 +166,6 @@ export const typingStatisticsEnabled: (directory: string) => number;
 export const vocabularyReview: (request: string) => Promise<string>;
 /** Locked mobile history operations; every mutation answers with the latest complete entry list. */
 export const mobileClipboardHistory: (request: string) => string;
-/**
- * 云剪贴板端到端加密的 sans-IO 驱动（`msime_client_cloud_clipboard_e2e`），协议见 `docs/cloud-clipboard-e2e.md` 的「客户端驱动」。传入 `{start:{op,…},keystore,device_name}` 开始一个操作，或 `{resume:<上一步的 state>,response:{status,body}}` 交回上一步请求的响应；应答 `{ok:true,value}`，`value` 是 `{request:{method,path,body},state,keystore}`、`{done,keystore}` 或 `{error:{status,code},keystore}`。驱动不联网、不读写文件：请求由宿主带上登录凭据发出，`keystore` 由宿主保存。请求最大 2 MiB。
- */
-export const cloudClipboardE2e: (request: string) => string;
 export const emojiCatalog: (query: string, resources: string) => string;
 export const candidateGlosses: (request: string, resources: string) => string;
 /** `{prefix,limit}` against the packaged English dictionary; no session, safe off the UI thread. */
@@ -171,6 +187,8 @@ export const parseAiTranslationResponse: (body: string) => string;
 export const translationQuery: (handle: number) => string;
 export const onlineQuery: (handle: number) => string;
 export const cloudRequestUrl: (query: string) => string;
+/** AI 辅助接口地址的检查，规则在 Rust：成功时 value 是 `{origin,problem,hint}`，origin 是 `ai_assistant.tokens` 里存 Token 的来源键（不能用时为 null），problem 是 null、`invalid` 或 `cleartext_public`。不做 I/O。 */
+export const aiEndpointCheck: (endpoint: string) => string;
 export const aiRequestForQuery: (handle: number, query: string) => string;
 export const aiHttpRequest: (request: string) => string;
 export const parseAiResponse: (body: string, limit: number) => string;

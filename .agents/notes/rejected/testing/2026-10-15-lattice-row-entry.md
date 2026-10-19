@@ -178,3 +178,5 @@ entry 前初始化判断和代码布局可能抵消省掉的查找，空表首�
 ## Final validation
 
 生产恢复并整合 `7de23abac0` 后完整 release 测试再次通过：引擎 2130、golden 31、runtime 288，失败 0、忽略 27。两 crate 全 targets Clippy（`-D warnings`）、fmt、notes、差异检查通过。本地 quick 完整通过，包括 Windows 本宿主 149 项、Linux 原生 87 项测试，以及 Android/WASM、Android Java 宿主、Linux 公共组件与原生宿主、macOS 原生宿主和共享 Apple bridge 编译。缺少规定环境的 Windows 全量交叉构建与 HarmonyOS 阶段按脚本跳过。随后整合 `8a6e2274dd`，其改动仅在 UI 和笔记，engine/runtime 源码、依赖和本项文件未变；最终分支由完整 pre-push 再执行 quick，结果在 PR 记录。本项不改生产行为、文件访问或 Android 资源，没有设备验收结论。九键十六毫秒目标继续未完成。
+
+后续实验改为小列线性借用槽并在宽列回退哈希；本篇否决的 entry 合并方案仍未重新接入。

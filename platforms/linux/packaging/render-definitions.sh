@@ -29,6 +29,8 @@ mkdir -p "$2"
 out=$(cd "$2" && pwd)
 parts=",${MSIME_DEFINITIONS:-rpm,debian,arch,gentoo},"
 release_url="https://github.com/metasequoiaime/msime/releases/download/linux-v$version"
+# 设置应用关于页的发布日期，与发布包编进去的同是当前检出 HEAD 的提交日期。AUR 的 msime 从标签归档构建，里面没有 .git，由 arch/render.py 写进 PKGBUILD；渲染它的容器里没有仓库，在这里算好传进去。
+release_date=$(git -C "$repo_root" log -1 --format=%cs HEAD)
 want() { [[ "$parts" == *",$1,"* ]]; }
 # 容器以 root 往 OUTDIR 写文件；结束时（包括失败时）交回给调用者，免得 OUTDIR 删不掉。
 reclaim() { docker run --rm -v "$out":/out debian:sid chown -R "$(id -u):$(id -g)" /out 2>/dev/null || true; }
@@ -106,7 +108,7 @@ if want arch; then
     useradd -m builder
     cp -r /arch /home/builder/arch
     chown -R builder: /home/builder/arch
-    su builder -c "python3 /home/builder/arch/render.py '"$version"' --sha256sums /release/SHA256SUMS"
+    su builder -c "python3 /home/builder/arch/render.py '"$version"' --release-date '"$release_date"' --sha256sums /release/SHA256SUMS"
     for pkg in msime msime-bin; do
       mkdir -p /out/$pkg
       cp /home/builder/arch/$pkg/PKGBUILD /home/builder/arch/$pkg/.SRCINFO /home/builder/arch/$pkg/msime.install /out/$pkg/

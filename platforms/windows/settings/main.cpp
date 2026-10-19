@@ -59,6 +59,7 @@
 #include "TranslationServiceSettings.h"
 #include "TypingStatisticsModel.h"
 #include "VoiceSettings.h"
+#include "ClientAgent.h"
 #include "msime_client.h"
 #include "../../common/HostApiString.h"
 #include "../../../shared/contracts/msime_edition.h"
@@ -134,6 +135,45 @@ Response take_response(char *raw) {
   } catch (...) {
     return {std::move(value), false};
   }
+}
+
+struct AccountNamePresentation {
+  std::wstring normalized;
+  std::wstring preferred;
+  bool valid = false;
+  int32_t maximum_utf16_units = 0;
+};
+
+// 纯计算接口可在 UI 线程调用；失败时不猜测昵称规则，也不提交未经校验的值。
+std::optional<AccountNamePresentation> account_name_presentation(std::wstring const &name,
+                                                               std::wstring const &id = {}) {
+  try {
+    JsonObject request;
+    request.SetNamedValue(L"name", JsonValue::CreateStringValue(hstring(name)));
+    request.SetNamedValue(L"id", JsonValue::CreateStringValue(hstring(id)));
+    const auto body = utf8(request.Stringify());
+    const auto response = take_response(msime_client_account_name(
+        reinterpret_cast<const uint8_t *>(body.data()), body.size()));
+    if (!response.ok)
+      return std::nullopt;
+    const auto value = JsonObject::Parse(text(response.text)).GetNamedObject(L"value");
+    const auto maximum = value.GetNamedNumber(L"maximum_utf16_units");
+    if (maximum < 1 || maximum > INT32_MAX || std::floor(maximum) != maximum)
+      return std::nullopt;
+    const auto normalized = value.GetNamedString(L"normalized");
+    const auto preferred = value.GetNamedString(L"preferred");
+    return AccountNamePresentation{std::wstring(normalized.c_str(), normalized.size()),
+                                   std::wstring(preferred.c_str(), preferred.size()),
+                                   value.GetNamedBoolean(L"valid"), static_cast<int32_t>(maximum)};
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+std::wstring preferred_account_name(std::wstring const &name, std::wstring const &id) {
+  if (const auto presentation = account_name_presentation(name, id))
+    return presentation->preferred;
+  return name.empty() ? L"水杉账号" : name;
 }
 
 // An environment variable, empty when it is unset. GetEnvironmentVariableW rather than the CRT's _wgetenv, which MSVC deprecates (C4996) and /WX would turn into an error.
@@ -302,7 +342,7 @@ bool make_input_method_default() {
   return set_default && set_default(input_method_id, 0) != FALSE;
 }
 
-// The page this window opens on: `--route=settings:<id>` from the Server and the other launchers. Either a settings category of the shared route vocabulary or a page id of this window; anything else opens the default page.
+// 保留启动请求的类别，窗口解析承载页时也恢复旧路由对应的顶部标签。
 std::string route_page() {
   int argc = 0;
   auto *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -323,7 +363,7 @@ std::string route_page() {
     }
     LocalFree(argv);
   }
-  return std::string(nav::offered_page_for_route(page.value_or(std::string()), MSIME_EDITION_HANDWRITING != 0));
+  return page.value_or(std::string());
 }
 
 // The runtime options file the Server hands this window, or the one the Server reads at startup when started from the Start menu. None before the input method is set up.
@@ -959,34 +999,33 @@ struct PageLabel {
   const wchar_t *summary;
 };
 
-// 「手写输入」并进了「屏幕键盘」页（见 `SettingsNavigation.h`），提供手写的版本里那一页叫「键盘手写」，与共享设置 UI 的 `screenKeyboardAndHandwritingTitle` 相同。
-constexpr std::array<PageLabel, 17> page_labels{{
-    {"typing", L"输入设置", 0xE765, L"选择输入方式；专属选项随当前方案变化。"},
-    {"expression", L"标点翻译", 0xE8C1, L"调整标点、混输、输出和选词习惯。"},
-    {"shortcuts", L"按键设置", 0xEDA7, L"设置中英文切换、选词和翻页使用的按键。"},
-    {"lexicon", L"词库管理", 0xE82D, L"管理本机词库、个人词条和常用语。"},
-    {"themes", L"主题外观", 0xE790, L"选择候选窗口皮肤，搭配自己的字体和配色。"},
-    {"candidate", L"候选窗口", 0xE8FD, L"调整候选的排列、文字和显示位置。"},
-    {"toolbar", L"快捷工具", 0xE7F4, L"选择悬浮工具栏显示的内容和交互方式。"},
-    {"osk", MSIME_EDITION_HANDWRITING ? L"键盘手写" : L"屏幕键盘", 0xE92E,
+// 「手写输入」并进了「屏幕键盘」页（见 `SettingsNavigation.h`），提供手写的版本里那一页叫「键盘与手写」，与共享设置 UI 的 `screenKeyboardAndHandwritingTitle` 相同。
+constexpr std::array<PageLabel, 16> page_labels{{
+    {"typing", L"输入", 0xE765, L"选择输入方式；专属选项随当前方案变化。"},
+    {"expression", L"标点与翻译", 0xE8C1, L"调整标点、混输、输出和选词习惯。"},
+    {"shortcuts", L"快捷键", 0xEDA7, L"设置中英文切换、选词和翻页使用的按键。"},
+    {"lexicon", L"词库", 0xE82D, L"管理本机词库、个人词条和常用语。"},
+    {"themes", L"主题", 0xE790, L"选择皮肤与配色；布局、字体和显示方式在「候选窗口」中设置。"},
+    {"candidate", L"候选窗口", 0xE8FD, L"调整布局、字体和显示方式；皮肤与配色在「主题」中设置。"},
+    {"toolbar", L"悬浮工具栏", 0xE7F4, L"选择悬浮工具栏显示的内容和交互方式。"},
+    {"osk", MSIME_EDITION_HANDWRITING ? L"键盘与手写" : L"屏幕键盘", 0xE92E,
      MSIME_EDITION_HANDWRITING ? L"设置屏幕键盘的布局、按键和外观，打开手写识别板。"
                                : L"设置屏幕键盘的布局、按键和外观。"},
     {"voice", L"语音输入", 0xE720, L"选择识别方式，配置语音转写和文本整理。"},
-    {"clip", L"剪贴管理", 0xE77F, L"管理剪贴板记录和跨设备发送。"},
+    {"clip", L"剪贴板", 0xE77F, L"管理剪贴板记录和跨设备发送。"},
     {"stats", L"打字统计", 0xE9D2, L"查看输入量、速度和使用趋势。"},
-    {"plugins", L"扩展插件", 0xEA86, L"管理输入扩展，浏览和安装社区插件。"},
-    {"ai", L"智能辅助", 0xE99A, L"配置候选补全、文本整理和服务连接。"},
-    {"mcp", L"AI助手", 0xE99A, L"连接 AI 助手，管理设置、皮肤、词库和诊断。"},
-    {"account", L"账号管理", 0xE77B, L"登录并管理跨设备同步与云端内容。"},
-    {"dev", L"维护诊断", 0xE90F, L"导入导出设置，检查本机状态和诊断信息。"},
-    {"about", L"关于水杉", 0xE946, L"查看版本和更新，查阅使用帮助、反馈问题，以及许可信息。"},
+    {"plugins", L"插件", 0xEA86, L"管理输入扩展，浏览和安装社区插件。"},
+    {"ai", L"AI", 0xE99A, L"配置 AI 辅助功能，连接本机 AI 助手。"},
+    {"account", L"账号与同步", 0xE77B, L"登录并管理跨设备同步与云端内容。"},
+    {"dev", L"维护与诊断", 0xE90F, L"导入导出设置，检查本机状态和诊断信息。"},
+    {"about", L"关于", 0xE946, L"查看版本和更新，查阅使用帮助、反馈问题，以及许可信息。"},
 }};
 static_assert(page_labels.size() == nav::pages.size());
 static_assert(page_labels[0].id == nav::default_page);
 
 // 侧栏的分组标题，按 `SettingsNavigation.h` 里的 `group` 索引，措辞与共享设置 UI 的 `settingsNavGroups` 一致。
 constexpr std::array<const wchar_t *, nav::page_group_count> group_titles{
-    {L"打字", L"更多输入方式", L"外观", L"工具", L"账号", L"支持"}};
+    {L"打字", L"输入方式", L"外观", L"工具", L"数据", L"支持"}};
 
 // 未知 id 取默认页面的标签。
 const PageLabel &page_label(std::string_view id) {
@@ -1010,6 +1049,17 @@ constexpr const wchar_t *releases_url =
 
 // 本次构建运行时的版本号：发布构建取 `Build-Client.ps1` 打上的值（`TargetVersion`），开发构建取 `platforms/windows/version.txt`，与 Server 报告的值相同。
 constexpr std::wstring_view app_version = L"" MSIME_WINDOWS_VERSION;
+
+// 本次构建的发布日期 `YYYY-MM-DD`，由 `MSIME.Settings.vcxproj` 依次取 `MSIME_RELEASE_DATE`、`platforms/windows/release-date.txt` 和 git 当前提交的日期，都没有时为空。只加在「关于」页的版本文字上，检查更新和反馈报告仍用 `app_version`。
+constexpr std::wstring_view app_release_date = L"" MSIME_WINDOWS_RELEASE_DATE;
+
+// 「关于」页的版本文字：`v0.2.1（2026-10-19 发布）`，没有发布日期时只是 `v0.2.1`。
+std::wstring app_version_label() {
+  std::wstring label = L"v" + std::wstring(app_version);
+  if (!app_release_date.empty())
+    label += L"（" + std::wstring(app_release_date) + L" 发布）";
+  return label;
+}
 
 // 检查更新的结果，措辞与共享设置页一致。
 struct UpdateOutcome {
@@ -1478,6 +1528,39 @@ std::optional<std::vector<msime::settings::plugins::Mention>> plugin_mentions(Re
   } catch (...) {
     return std::nullopt;
   }
+}
+
+// 公开预设没有文件或网络访问，首次绘制时读取一次；持有字段的副本后即可释放 C 接口的 JSON。
+struct VoiceProviderCatalog {
+  std::vector<msime::settings::voice::ProviderDefaults> asr;
+  std::vector<msime::settings::voice::ProviderDefaults> polish;
+};
+
+VoiceProviderCatalog const &voice_provider_catalog() {
+  static const VoiceProviderCatalog catalog = [] {
+    const auto response = take_response(msime_client_voice_provider_catalog());
+    if (!response.ok)
+      throw std::runtime_error("voice provider catalog unavailable");
+    const auto value = JsonObject::Parse(text(response.text)).GetNamedObject(L"value");
+    auto presets = [&value](wchar_t const *key) {
+      std::vector<msime::settings::voice::ProviderDefaults> entries;
+      for (auto const &item : value.GetNamedArray(key)) {
+        const auto preset = item.GetObject();
+        entries.push_back({std::wstring(preset.GetNamedString(L"id").c_str()),
+                           std::wstring(preset.GetNamedString(L"endpoint").c_str()),
+                           std::wstring(preset.GetNamedString(L"model").c_str()),
+                           named_strings(preset, L"models"),
+                           std::wstring(preset.GetNamedString(L"documentation").c_str()),
+                           std::wstring(preset.GetNamedString(L"title").c_str())});
+      }
+      return entries;
+    };
+    VoiceProviderCatalog result{presets(L"asr"), presets(L"polish")};
+    result.asr.push_back({L"system", L"", L"", {}, L"", L"Windows 系统识别"});
+    result.asr.push_back({L"local", L"", L"", {}, L"", L"本地模型（离线）"});
+    return result;
+  }();
+  return catalog;
 }
 
 // 偏好库会不会接受本地识别的下载镜像（asr_model_mirror）或模型目录（asr_model_path）这个值，见 msime_client_voice_model_setting_check。语音页只把认可的值写进设置，免得一个没输完的地址让保存失败。
@@ -2848,7 +2931,9 @@ Canvas chart_overlay(std::function<void(Canvas const &, double, double)> draw) {
 }
 
 struct MainWindow : WindowT<MainWindow> {
-  explicit MainWindow(std::string page) : current_page_(std::move(page)) {
+  explicit MainWindow(std::string page)
+      : current_page_(nav::offered_page_for_route(page, MSIME_EDITION_HANDWRITING != 0)) {
+    ai_mcp_view_ = page == "mcp";
     // 窗口标题和侧栏的产品名按版本取，full 仍是「水杉输入法」。
     Title(MSIME_EDITION_DISPLAY_NAME L"设置");
     ExtendsContentIntoTitleBar(true);
@@ -4740,8 +4825,6 @@ private:
       build_plugins_page(page);
     else if (id == "ai")
       build_ai_page(page);
-    else if (id == "mcp")
-      build_mcp_page(page);
     else if (id == "account")
       build_account_page(page);
     else if (id == "dev")
@@ -4775,6 +4858,31 @@ private:
 
   enum class AccountChannel { none, email, phone };
 
+  // 本机自报的 User-Agent（#8201 的 P11），由 Rust 拼出：登录、绑定和匿名账号的注册都以它发出，服务端「我的设备」据此显示 windows、版本号和设备。整个进程拼一次，所有账号请求带同一个（msime_client_account 按 directory 和 client_agent 各有一个会话对象）；拼不出时为空，请求照旧不带它。
+  static std::wstring const &account_client_agent() {
+    static const std::wstring agent = [] {
+      const auto device = msime::windows::windows_device_model();
+      const auto system = msime::windows::windows_system_description();
+      JsonObject request;
+      request.SetNamedValue(L"platform", JsonValue::CreateStringValue(L"windows"));
+      request.SetNamedValue(L"version", JsonValue::CreateStringValue(hstring(app_version)));
+      request.SetNamedValue(L"device", device.empty() ? JsonValue::CreateNullValue()
+                                                      : JsonValue::CreateStringValue(text(device)));
+      request.SetNamedValue(L"system", system.empty() ? JsonValue::CreateNullValue()
+                                                      : JsonValue::CreateStringValue(text(system)));
+      request.SetNamedValue(L"edition", JsonValue::CreateStringValue(text(MSIME_EDITION_ID)));
+      const auto body = utf8(request.Stringify());
+      const auto response = take_response(msime_client_client_agent(
+          reinterpret_cast<const uint8_t *>(body.data()), body.size()));
+      if (!response.ok)
+        return std::wstring{};
+      const auto value = account_value(response);
+      return value.ValueType() == JsonValueType::String ? std::wstring(value.GetString().c_str())
+                                                        : std::wstring{};
+    }();
+    return agent;
+  }
+
   // One msime_client_account request: the account directory the shared app signs in to, and the directory older versions kept the session in.
   static std::string account_body(JsonObject const &action) {
     JsonObject request;
@@ -4783,6 +4891,8 @@ private:
     if (const auto legacy = legacy_account_directory(); !legacy.empty())
       request.SetNamedValue(L"legacy_directory",
                             JsonValue::CreateStringValue(hstring(legacy.wstring())));
+    if (const auto &agent = account_client_agent(); !agent.empty())
+      request.SetNamedValue(L"client_agent", JsonValue::CreateStringValue(hstring(agent)));
     request.SetNamedValue(L"action", JsonValue::Parse(action.Stringify()));
     return utf8(request.Stringify());
   }
@@ -5072,7 +5182,7 @@ private:
   void request_account_code() {
     if (account_channel_ == AccountChannel::none || !account_begin())
       return;
-    const auto target = am::normalize_name(account_target_);
+    const auto target = am::trim_login_target(account_target_);
     if (target.empty()) {
       account_finish(L"account_invalid");
       return;
@@ -5201,19 +5311,25 @@ private:
     if (which == am::Confirmation::logout_all)
       sign_out_account(true);
     else
-      end_account_session(account_action(L"delete"), L"账号已注销。");
+      // account_delete 与旧的 delete 相同，只是失败时带细节：不是 10 分钟内登录的会话是 account_recent_login_required，本机登录留着，提示先退出再重新登录。
+      end_account_session(account_action(L"account_delete"), L"账号已注销。");
   }
 
   void rename_account() {
     if (!account_begin())
       return;
-    if (!am::valid_name(account_name_)) {
+    const auto name = account_name_presentation(account_name_);
+    if (!name) {
+      account_finish(L"account_unavailable");
+      return;
+    }
+    if (!name->valid) {
       account_finish(L"account_invalid");
       return;
     }
     auto action = account_action(L"rename");
     action.SetNamedValue(L"display_name",
-                         JsonValue::CreateStringValue(hstring(am::normalize_name(account_name_))));
+                         JsonValue::CreateStringValue(hstring(name->normalized)));
     account_request(action, [this](Response const &response) {
       if (!response.ok || !apply_account_profile(response, false)) {
         account_finish(account_failure(response));
@@ -5401,7 +5517,7 @@ private:
     if (account_resend_button_) {
       account_resend_button_.Content(box_value(hstring(am::resend_label(seconds))));
       account_resend_button_.IsEnabled(!account_busy_ &&
-                                       !am::normalize_name(account_target_).empty() &&
+                                       !am::trim_login_target(account_target_).empty() &&
                                        seconds == 0);
     }
     if (account_login_button_) {
@@ -6015,7 +6131,7 @@ private:
     content.ColumnDefinitions().Append(avatar_column);
     content.ColumnDefinitions().Append(text_column);
     content.ColumnDefinitions().Append(chevron_column);
-    const auto name = am::preferred_name(user.display_name, user.id);
+    const auto name = preferred_account_name(user.display_name, user.id);
     auto avatar = make_account_avatar(52, 22, name);
     Grid::SetColumn(avatar, 0);
     content.Children().Append(avatar);
@@ -6095,7 +6211,8 @@ private:
 
     TextBox nickname;
     nickname.Header(box_value(L"社区昵称"));
-    nickname.MaxLength(static_cast<int32_t>(am::max_name_length));
+    if (const auto name = account_name_presentation(account_name_))
+      nickname.MaxLength(name->maximum_utf16_units);
     nickname.Text(hstring(account_name_));
     A11y::SetName(nickname, L"编辑社区昵称");
     form.Children().Append(nickname);
@@ -6169,9 +6286,10 @@ private:
         return;
       }
       const auto &user = *account_user_;
-      const auto typed = am::normalize_name(account_name_);
+      const auto name = account_name_presentation(account_name_);
+      const auto typed = name ? name->normalized : account_name_;
       if (auto button = weak_avatar.get()) {
-        button.Content(make_account_avatar(46, 19, am::preferred_name(user.display_name, user.id)));
+        button.Content(make_account_avatar(46, 19, preferred_account_name(user.display_name, user.id)));
         button.IsEnabled(!account_busy_);
       }
       if (auto label = weak_name.get())
@@ -11651,10 +11769,92 @@ private:
 
   }
 
+  // 对话框持有草稿，所有字段确认后一次交给 Rust 校验并持久化。
+  fire_and_forget edit_cloud_provider() {
+    auto lifetime = get_strong();
+    const auto stored = document_.Value(L"cloud_candidate_provider");
+    if (!stored || stored.ValueType() != JsonValueType::Object) co_return;
+    auto config = std::make_shared<JsonObject>(JsonObject::Parse(stored.Stringify()));
+    StackPanel form;
+    form.Spacing(12);
+    form.Children().Append(make_text(L"仅发送当前组字，不发送已上屏内容、词库或历史。配置和凭据只保存在本机。公网使用 HTTPS，本机服务可用 HTTP。", 13, palette_.sub));
+    form.Children().Append(select_control(L"云候选来源", {{L"google", L"Google input-tools"}, {L"custom", L"自定义 HTTP 接口"}},
+      std::wstring(config->GetNamedString(L"source").c_str()), [config](std::wstring const &value) {
+        config->SetNamedValue(L"source", JsonValue::CreateStringValue(hstring(value)));
+      }));
+    auto field = [&](wchar_t const *key, wchar_t const *title, bool multiline) {
+      TextBox box;
+      box.Header(box_value(hstring(title)));
+      box.Text(config->GetNamedString(key, L""));
+      box.MaxLength(4096);
+      box.AcceptsReturn(multiline);
+      if (multiline) box.MinHeight(80);
+      form.Children().Append(box);
+      return box;
+    };
+    const auto endpoint = field(L"endpoint", L"接口地址（GET 用 {query}）", false);
+    form.Children().Append(select_control(L"请求方法", {{L"GET", L"GET"}, {L"POST", L"POST"}},
+      std::wstring(config->GetNamedString(L"method").c_str()), [config](std::wstring const &value) {
+        config->SetNamedValue(L"method", JsonValue::CreateStringValue(hstring(value)));
+      }));
+    const auto headers = field(L"headers_json", L"请求头（JSON，可填写 Authorization）", true);
+    const auto body = field(L"body_template", L"请求体模板（JSON 字符串里的 {query} 自动转义）", true);
+    form.Children().Append(select_control(L"响应格式", {{L"candidates", L"标准 candidates 数组"}, {L"google", L"Google input-tools"}, {L"json_path", L"JSON 路径"}},
+      std::wstring(config->GetNamedString(L"response_format").c_str()), [config](std::wstring const &value) {
+        config->SetNamedValue(L"response_format", JsonValue::CreateStringValue(hstring(value)));
+      }));
+    const auto path = field(L"response_path", L"JSON 路径（例如 data.0 或 choices.0.message.content）", false);
+    NumberBox timeout;
+    timeout.Header(box_value(L"超时（毫秒）"));
+    timeout.Minimum(100); timeout.Maximum(10000);
+    timeout.Value(config->GetNamedNumber(L"timeout_ms"));
+    form.Children().Append(timeout);
+    CheckBox cache;
+    cache.Content(box_value(L"缓存云候选（仅本机内存，按来源隔离，无结果缓存 60 秒）"));
+    cache.IsChecked(config->GetNamedBoolean(L"cache_enabled"));
+    form.Children().Append(cache);
+    auto error = make_text(L"", 13, palette_.sub);
+    form.Children().Append(error);
+    ScrollViewer scroll;
+    scroll.Content(form); scroll.MaxHeight(480);
+    ContentDialog dialog;
+    dialog.Title(box_value(L"云候选服务"));
+    dialog.Content(scroll);
+    dialog.PrimaryButtonText(L"保存"); dialog.CloseButtonText(L"取消");
+    dialog.XamlRoot(root_.XamlRoot());
+    dialog.RequestedTheme(palette_.dark ? ElementTheme::Dark : ElementTheme::Light);
+    dialog.PrimaryButtonClick([this, config, endpoint, headers, body, path, timeout, cache, error](
+        ContentDialog const &, ContentDialogButtonClickEventArgs const &args) {
+      config->SetNamedValue(L"endpoint", JsonValue::CreateStringValue(endpoint.Text()));
+      config->SetNamedValue(L"headers_json", JsonValue::CreateStringValue(headers.Text()));
+      config->SetNamedValue(L"body_template", JsonValue::CreateStringValue(body.Text()));
+      config->SetNamedValue(L"response_path", JsonValue::CreateStringValue(path.Text()));
+      if (!std::isfinite(timeout.Value())) { args.Cancel(true); return; }
+      config->SetNamedValue(L"timeout_ms", JsonValue::CreateNumberValue(timeout.Value()));
+      const auto checked = cache.IsChecked();
+      config->SetNamedValue(L"cache_enabled", JsonValue::CreateBooleanValue(checked && checked.Value()));
+      flush_pending();
+      document_.SetValue(L"cloud_candidate_provider", *config);
+      if (!commit()) {
+        args.Cancel(true);
+        error.Text(L"保存失败，请检查地址、请求头 JSON、请求体模板、响应路径和超时。");
+      } else queue_refresh();
+    });
+    co_await show_dialog(dialog);
+  }
+
   void build_input_habits(StackPanel const &page) {
     auto candidates = add_group(page, L"候选与联想");
-    bool_row(candidates, 0xE753, L"云候选", L"向在线服务请求额外候选",
+    std::wstring cloud_recipient = L"Google input-tools（inputtools.google.com）";
+    if (document_.String(L"cloud_candidate_provider.source", L"google") == L"custom") {
+      cloud_recipient = L"所选自定义服务";
+      try { cloud_recipient = Windows::Foundation::Uri(hstring(document_.String(L"cloud_candidate_provider.endpoint", L""))).Host().c_str(); }
+      catch (...) {}
+    }
+    bool_row(candidates, 0xE753, L"云候选", L"仅将当前拼写发送给 " + cloud_recipient + L"；不发送已上屏内容、词库或历史",
              L"cloud_candidates", false);
+    add_row(candidates, 0xE713, L"云候选服务", L"来源、GET/POST、请求头、JSON 模板、响应路径、超时和缓存",
+            nullptr, button_control(L"配置", [this] { edit_cloud_provider(); }));
     // 触发字符数固定为默认的 5，不再给出（HostCapabilities.mixed_input_minimum_prefix）：调低会让常见简拼被英文词抢走首选。
     bool_row(candidates, 0xE774, L"中英混输", L"中文输入时在候选项中补充英文单词",
              L"mixed_input.english", true, true);
@@ -17831,7 +18031,7 @@ private:
     std::wstring backend, id, label;
   };
 
-  // 共享语音页（`voice-settings-content.tsx` 的桌面分支）在 Windows 上的内容。共享页把服务的配置收进页内的「服务配置」子视图，这个原生页没有子视图控件，所以仍是一整页，但按共享页的先后排：按识别服务说明怎么用的一组，「识别」（开关、服务、识别语言、豆包的自动添加标点、边说边显示），语音快捷键，录音行为，然后是子视图里的那些：「识别服务配置」（接入说明、豆包鉴权方式、旧版 App Key、凭据，「更多选项」里是接口地址、识别模型、资源 ID 和豆包选项；本地模型；末尾是测试），识别结果，文本润色，录音设备。没有子视图可开，所以不画「服务配置」那一行。服务表、换服务的规则和本地模型的文字在 VoiceSettings.h。输入框边输入边写进设置、停下后保存，不重建页面，跟着输入内容变的下拉框选中项和测试按钮由 voice_sync_ 就地更新；下拉框和开关的改动保存后重画整页。
+  // 对齐共享桌面页的内容归属：识别与结果提交、快捷键、录音行为与设备、识别服务接入、文本润色。原生页继续使用直列，逐项搜索仍由现有索引负责。输入框就地更新以保留焦点，服务切换后重画页面。
   void build_voice_page(StackPanel const &page) {
     if (!indexing_) {
       credential_test_views_.clear();
@@ -17873,7 +18073,7 @@ private:
                              }, false);
                            }));
     std::vector<Option> providers;
-    for (auto const &choice : vs::asr_provider_choices())
+    for (auto const &choice : vs::asr_provider_choices(voice_provider_catalog().asr))
       providers.push_back({std::wstring(choice.value), std::wstring(choice.label)});
     auto provider_combo = select_control(
         L"识别服务", std::move(providers), provider,
@@ -17888,6 +18088,14 @@ private:
       bool_row(recognition, 0xE8D2, L"自动添加标点", L"", L"voice_input.doubao_enable_punc", true);
     bool_row(recognition, 0xE8D2, L"边说边显示", L"识别服务支持时显示实时识别片段",
              L"voice_input.stream_inline_preedit", true);
+
+    // 「识别结果」（VoiceRecognitionResultSection）：边说边显示已经移到「识别」组，这里只剩结果提交策略。
+    auto result = add_group(page, L"识别结果");
+    select_row(result, 0xE8C8, L"结果提交策略", L"由当前桌面宿主决定如何把识别结果交给前台窗口",
+               L"voice_input.commit_mode",
+               {{L"tsf", L"输入法会话"}, {L"sendinput", L"系统按键"}, {L"ctrl_v", L"剪贴板粘贴"}},
+               L"tsf");
+
 
     build_voice_hotkey_group(page);
 
@@ -17911,14 +18119,16 @@ private:
     add_row(recording, 0xE767, L"录音行为", L"录音期间的提示音与静音由输入法在本机处理",
             nullptr, checks_panel(std::move(sound_checks), 200));
 
-    // 「识别服务配置」：系统识别没有要配的，这一组不画。共享页把它收在「服务配置」子视图里，这里没有子视图，排在常用的几组下面。
+    build_capture_device_group(page);
+
+    // 「识别服务配置」只负责服务接入与测试；共享页在「服务配置」下钻显示，原生页接在录音设备后面。
     if (!system_voice || indexing_) {
       auto config = add_group(page, L"识别服务配置");
       if (service_voice || indexing_)
         build_asr_service_rows(config, provider, doubao, auth_mode);
       if (local_voice || indexing_)
         build_local_model_rows(config);
-      if (vs::is_asr_service_provider(provider) || indexing_) {
+      if (vs::is_asr_service_provider(voice_provider_catalog().asr, provider) || indexing_) {
         auto silence = make_text(
             L"测试会向当前服务发送一秒合成静音，不使用麦克风；服务可能计入 API 用量。", 12,
             palette_.sub);
@@ -17939,15 +18149,8 @@ private:
       }
     }
 
-    // 「识别结果」（VoiceRecognitionResultSection）：边说边显示已经移到「识别」组，这里只剩结果提交策略。
-    auto result = add_group(page, L"识别结果");
-    select_row(result, 0xE8C8, L"结果提交策略", L"由当前桌面宿主决定如何把识别结果交给前台窗口",
-               L"voice_input.commit_mode",
-               {{L"tsf", L"输入法会话"}, {L"sendinput", L"系统按键"}, {L"ctrl_v", L"剪贴板粘贴"}},
-               L"tsf");
 
     build_polish_group(page);
-    build_capture_device_group(page);
   }
 
   // 「语音快捷键」（VoiceHotkeysSection）：三个长按录音的组合键合成一个「长按录音」选择，末项「不使用」，宿主同一时刻只认一个。以前可以同时打开几个，这样的配置在用户改动之前照旧显示第一个，打开页面时不改写存储；换一项时三个一起写。空格锁定固定为开（宿主不再读 hotkey_hold_space_lock），不给开关。Ctrl+F9 收在「更多选项」里，与共享页一致。
@@ -18188,7 +18391,7 @@ private:
   // 云服务的几行（VoiceAsrProviderSettingsSection 的 foldAdvanced 排法和 DoubaoOptionsRows）：接入说明、豆包鉴权方式、旧版鉴权的 App Key 和令牌留在外面；接口地址、识别模型、资源 ID 和豆包的识别选项收进「更多选项」，用户改过接口地址或资源 ID 时一打开就展开。豆包的两个流式预设和自定义地址写的都是 asr_endpoint，合成一个「流式接口」下拉，选「自定义地址」或存的地址不是预设时下面多一行地址输入框。豆包的识别请求不读识别模型（VoiceInputSession 只给 DoubaoAsrClient 接口、凭据和资源 ID），选豆包时不画这一行。
   void build_asr_service_rows(StackPanel const &group, std::wstring const &provider, bool doubao,
                               std::wstring const &auth_mode) {
-    const auto *asr_preset = vs::find_defaults(vs::asr_provider_defaults(), provider);
+    const auto *asr_preset = vs::find_defaults(voice_provider_catalog().asr, provider);
     if (asr_preset)
       add_provider_link(group, L"识别服务", asr_preset->documentation);
     if (doubao || indexing_)
@@ -18217,7 +18420,7 @@ private:
     more.HorizontalAlignment(HorizontalAlignment::Stretch);
     more.HorizontalContentAlignment(HorizontalAlignment::Stretch);
     more.IsExpanded(
-        voice_service_more_open_.value_or(vs::asr_advanced_changed(
+        voice_service_more_open_.value_or(vs::asr_advanced_changed(voice_provider_catalog().asr,
             provider, endpoint, document_.String(L"voice_input.asr_resource_id", L""))) ||
         std::find(folded.begin(), folded.end(), focus_row_) != folded.end());
     more.Expanding([this](Expander const &, ExpanderExpandingEventArgs const &) {
@@ -18313,10 +18516,10 @@ private:
     config.SetNamedValue(L"provider", string(provider));
     config.SetNamedValue(L"endpoint", string(vs::provider_setting_value(
                                           document_.String(L"voice_input.asr_endpoint", L""),
-                                          provider, vs::asr_provider_defaults(), true)));
+                                          provider, voice_provider_catalog().asr, true)));
     config.SetNamedValue(L"model", string(vs::provider_setting_value(
                                        document_.String(L"voice_input.asr_model", L""), provider,
-                                       vs::asr_provider_defaults(), false)));
+                                       voice_provider_catalog().asr, false)));
     config.SetNamedValue(L"token", string(document_.String(L"voice_input.asr_token", L"")));
     if (provider != L"doubao")
       return config;
@@ -18339,57 +18542,63 @@ private:
     return config;
   }
 
-  // 每个服务各自记着的令牌（asr_tokens、polish_tokens）。
-  vs::TokenMap token_slots(std::wstring_view key) const {
-    vs::TokenMap tokens;
-    const auto value = document_.Value(key);
-    if (!value || value.ValueType() != JsonValueType::Object)
-      return tokens;
-    for (auto const &entry : value.GetObject())
-      if (entry.Value().ValueType() == JsonValueType::String)
-        tokens[std::wstring(entry.Key().c_str())] = entry.Value().GetString().c_str();
-    return tokens;
-  }
-
-  // 换服务时写的那几项（asrProviderUpdate、polishProviderUpdate 的结果），prefix 是 asr 或 polish。
-  static void apply_provider_update(PreferencesDocument &doc, std::wstring const &prefix,
-                                    vs::ProviderUpdate const &update) {
-    doc.SetString(L"voice_input." + prefix + L"_provider", update.provider);
-    doc.SetString(L"voice_input." + prefix + L"_token", update.token);
+  // 换服务的字段规则归 Rust；这里仅映射当前编辑值与前缀，不记录请求或返回。
+  std::optional<JsonObject> voice_provider_update(std::wstring const &prefix,
+                                                 std::wstring const &provider,
+                                                 std::wstring const &previous) {
+    JsonObject current;
+    current.SetNamedValue(L"provider", JsonValue::CreateStringValue(hstring(previous)));
+    for (auto field : {L"endpoint", L"model", L"token"})
+      current.SetNamedValue(field, JsonValue::CreateStringValue(
+          hstring(document_.String(L"voice_input." + prefix + L"_" + field, L""))));
     JsonObject slots;
-    for (auto const &[provider, token] : update.tokens)
-      slots.SetNamedValue(hstring(provider), JsonValue::CreateStringValue(hstring(token)));
-    doc.SetValue(L"voice_input." + prefix + L"_tokens", slots);
-    if (update.endpoint)
-      doc.SetString(L"voice_input." + prefix + L"_endpoint", *update.endpoint);
-    if (update.model)
-      doc.SetString(L"voice_input." + prefix + L"_model", *update.model);
+    const auto stored = document_.Value(L"voice_input." + prefix + L"_tokens");
+    if (stored && stored.ValueType() == JsonValueType::Object)
+      for (auto const &entry : stored.GetObject())
+        if (entry.Value().ValueType() == JsonValueType::String)
+          slots.SetNamedValue(entry.Key(), entry.Value());
+    current.SetNamedValue(L"tokens", slots);
+    JsonObject request;
+    request.SetNamedValue(L"service", JsonValue::CreateStringValue(hstring(L"voice." + prefix)));
+    request.SetNamedValue(L"provider", JsonValue::CreateStringValue(hstring(provider)));
+    request.SetNamedValue(L"current", current);
+    const auto body = utf8(request.Stringify());
+    const auto response = take_response(msime_client_voice_provider_update(
+        reinterpret_cast<const uint8_t *>(body.data()), body.size()));
+    if (response.ok) {
+      try {
+        return JsonObject::Parse(text(response.text)).GetNamedObject(L"value");
+      } catch (...) {
+      }
+    }
+    show_notice(L"切换语音服务失败，请重试。");
+    return std::nullopt;
   }
 
-  vs::ProviderFields provider_fields(std::wstring const &prefix, std::wstring_view fallback) const {
-    return {document_.String(L"voice_input." + prefix + L"_provider", fallback),
-            document_.String(L"voice_input." + prefix + L"_endpoint", L""),
-            document_.String(L"voice_input." + prefix + L"_model", L""),
-            document_.String(L"voice_input." + prefix + L"_token", L""),
-            token_slots(L"voice_input." + prefix + L"_tokens")};
+  static void apply_provider_update(PreferencesDocument &doc, std::wstring const &prefix,
+                                    JsonObject const &update) {
+    for (auto const &entry : update)
+      doc.SetValue(L"voice_input." + prefix + L"_" + entry.Key().c_str(), entry.Value());
   }
 
   // 共享页的 onProviderChange（VoiceInputBasicsSection）：换上新服务的令牌、地址和模型，选系统识别时把「自动识别」换成 zh-CN。换到或换走本地模型时，模型列表像共享页的模型管理器重新挂载一样重读。
   void select_asr_provider(std::wstring const &provider) {
-    const auto current = provider_fields(L"asr", L"doubao");
-    if (provider == current.provider)
+    const auto previous = document_.String(L"voice_input.asr_provider", L"doubao");
+    if (provider == previous)
       return;
-    const auto update = vs::asr_provider_update(provider, current);
+    const auto update = voice_provider_update(L"asr", provider, previous);
+    if (!update)
+      return;
     const bool locale = provider == L"system" &&
                         document_.String(L"voice_input.language", L"") == L"auto";
     // 换服务像共享页那样重新挂上服务的几行：豆包「流式接口」上次选的「自定义地址」不再算数。
     voice_custom_endpoint_ = false;
     change([&](PreferencesDocument &doc) {
-      apply_provider_update(doc, L"asr", update);
+      apply_provider_update(doc, L"asr", *update);
       if (locale)
         doc.SetString(L"voice_input.language", L"zh-CN");
     }, true);
-    if (provider == L"local" || current.provider == L"local")
+    if (provider == L"local" || previous == L"local")
       reset_local_models();
   }
 
@@ -18410,20 +18619,22 @@ private:
       return;
     const auto provider = document_.String(L"voice_input.polish_provider", L"siliconflow");
     std::vector<Option> providers;
-    for (auto const &choice : vs::polish_provider_choices)
-      providers.push_back({std::wstring(choice.value), std::wstring(choice.label)});
+    for (auto const &preset : voice_provider_catalog().polish)
+      providers.push_back({preset.id, preset.title});
     add_row(group, 0xE753, L"服务提供商", L"",
             select_control(L"文本润色服务提供商", std::move(providers), provider,
                            [this](std::wstring const &value) {
-                             const auto current = provider_fields(L"polish", L"siliconflow");
-                             if (value == current.provider)
+                             const auto previous = document_.String(L"voice_input.polish_provider", L"siliconflow");
+                             if (value == previous)
                                return;
-                             const auto update = vs::polish_provider_update(value, current);
+                             const auto update = voice_provider_update(L"polish", value, previous);
+                             if (!update)
+                               return;
                              change([&](PreferencesDocument &doc) {
-                               apply_provider_update(doc, L"polish", update);
+                               apply_provider_update(doc, L"polish", *update);
                              }, true);
                            }));
-    const auto *polish_preset = vs::find_defaults(vs::polish_provider_defaults(), provider);
+    const auto *polish_preset = vs::find_defaults(voice_provider_catalog().polish, provider);
     if (polish_preset)
       add_provider_link(group, L"文本润色", polish_preset->documentation);
     add_voice_model_picker(group, L"模型", L"", L"文本润色模型", L"voice_input.polish_model",
@@ -18488,10 +18699,10 @@ private:
                           config.SetNamedValue(L"provider", string(current));
                           config.SetNamedValue(L"endpoint", string(vs::provider_setting_value(
                                                                 document_.String(L"voice_input.polish_endpoint", L""),
-                                                                current, vs::polish_provider_defaults(), true)));
+                                                                current, voice_provider_catalog().polish, true)));
                           config.SetNamedValue(L"model", string(vs::provider_setting_value(
                                                              document_.String(L"voice_input.polish_model", L""),
-                                                             current, vs::polish_provider_defaults(), false)));
+                                                             current, voice_provider_catalog().polish, false)));
                           config.SetNamedValue(L"token", string(document_.String(L"voice_input.polish_token", L"")));
                           return config;
                         },
@@ -19258,6 +19469,27 @@ private:
 
   // 共享 AI 页（`ai-settings-content.tsx`、`ai-settings-page-section.tsx`）在 Windows 上的内容，顺序也相同：只有「服务」一组（开关、服务提供商、API Token、接入说明、模型（预置的和获取到的模型在一个下拉里，末项「自定义…」）、「更多选项」里的接口地址、获取模型列表和当前槽位的自定义提示词，末尾是「测试 AI 辅助配置」）。Windows 固定 AI 候选数量为 3（client-core 的 `HostPlatform::fixed_ai_candidate_limit`，TSF 从 host-api 的在线查询读这个值），所以没有「联想」组；桌面上这份配置只给拼音联想用，没有「AI 润色测试」。Windows 的设置应用没有 AI 对话（宿主不提供 chat），所以最后没有「AI 对话」一组。Token 存在偏好文件里，按接口地址的来源键分开存（ai_assistant.tokens）。服务商表和规则在 AiSettings.h。
   void build_ai_page(StackPanel const &page) {
+    if (!indexing_ && !focus_row_.empty())
+      ai_mcp_view_ = focus_row_ == L"连接 AI 助手";
+    if (!indexing_) {
+      auto tabs = segmented_control(
+          L"AI 设置分类", {{L"assistance", L"输入辅助"}, {L"connection", L"连接助手"}},
+          ai_mcp_view_ ? L"connection" : L"assistance",
+          [this](std::wstring const &value) {
+            ai_mcp_view_ = value == L"connection";
+            queue_refresh();
+          }, true, false, 3, L"ai-settings");
+      tabs.HorizontalAlignment(HorizontalAlignment::Left);
+      tabs.Margin(Thickness{0, 0, 0, 12});
+      page.Children().Append(tabs);
+    }
+    if (indexing_ || !ai_mcp_view_)
+      build_ai_assistance_page(page);
+    if (indexing_ || ai_mcp_view_)
+      build_mcp_page(page);
+  }
+
+  void build_ai_assistance_page(StackPanel const &page) {
     if (!indexing_) {
       credential_test_views_.clear();
       ai_sync_.clear();
@@ -19862,7 +20094,7 @@ private:
     update_button.Click([this](Inspectable const &, RoutedEventArgs const &) {
       on_update_button();
     });
-    add_row(updates, 0xE895, L"检查更新", L"当前版本 v" + std::wstring(app_version),
+    add_row(updates, 0xE895, L"检查更新", L"当前版本 " + app_version_label(),
             update_button, update_lines);
     if (!indexing_) {
       update_button_ = update_button;
@@ -20061,7 +20293,7 @@ private:
       mcp_result_ = mcp_failure(response_error(response), name);
     }
     mcp_busy_ = false;
-    if (!closed_ && current_page_ == "mcp")
+    if (!closed_ && current_page_ == "ai" && ai_mcp_view_)
       render_page(true);
   }
 
@@ -20108,6 +20340,7 @@ private:
 
   std::wstring mcp_result_;
   bool mcp_busy_ = false;
+  bool ai_mcp_view_ = false;
 
   // 「标点与翻译」页三个「测试配置」的结果，按服务记，跨页面重建保留（共享页 useProviderCredentials 的 credentialTests）；signature 是测试时的配置。刷新函数属于当前页面上的那一组按钮，测试结束时用它就地更新，不重画整页，免得输入框丢掉焦点和没能写入的内容。
   struct CredentialTest {
