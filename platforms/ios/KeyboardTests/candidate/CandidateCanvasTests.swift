@@ -235,6 +235,10 @@ final class CandidateCanvasTests: XCTestCase {
   }
 
   func testRealControllerSharesCanvasWithExpandedPanelAndClearsItWhenDisabled() async throws {
+    // 真实控制器只从 App Group 共享目录读皮肤；CI 以 CODE_SIGNING_ALLOWED=NO 构建测试宿主，没有这项授权，目录取不到时跳过而不是失败。
+    guard let destination = ExternalCandidateSkin.defaultRoot else {
+      throw XCTSkip("测试宿主未签名，没有 App Group 共享目录")
+    }
     preserveSharedTheme()
     let defaults = CandidatePalette.defaults
     let follows = defaults.object(forKey: CandidatePalette.followsDesktopKey)
@@ -248,7 +252,6 @@ final class CandidateCanvasTests: XCTestCase {
     defaults.set(true, forKey: CandidatePalette.followsDesktopKey)
     InputSchemePreference.scheme = .quanpin
     let source = try root().appendingPathComponent("canvas-fixture")
-    let destination = try XCTUnwrap(ExternalCandidateSkin.defaultRoot)
     let id = "ios-canvas-" + UUID().uuidString.lowercased()
     let renamed = source.deletingLastPathComponent().appendingPathComponent(id)
     try FileManager.default.moveItem(at: source, to: renamed)
@@ -298,7 +301,10 @@ final class CandidateCanvasTests: XCTestCase {
 
   /// 本机验收时暂存固定上游资源；CI 不下载、不复制这些图片进仓库。
   func testUpstreamCanvasesOnRealControllerWhenStaged() async throws {
-    let root = try XCTUnwrap(ExternalCandidateSkin.defaultRoot)
+    // 真实控制器只从 App Group 共享目录读皮肤；CI 以 CODE_SIGNING_ALLOWED=NO 构建测试宿主，没有这项授权，目录取不到时跳过而不是失败。
+    guard let root = ExternalCandidateSkin.defaultRoot else {
+      throw XCTSkip("测试宿主未签名，没有 App Group 共享目录")
+    }
     guard ["green_leaf", "sakura-night"].allSatisfy({ FileManager.default.fileExists(atPath: root.appendingPathComponent($0).appendingPathComponent("skin.toml").path) }) else {
       throw XCTSkip("未暂存固定上游的两款 canvas 皮肤")
     }
