@@ -313,6 +313,8 @@ MDBG 每天用新导出覆盖同一个地址（`https://www.mdbg.net/chinese/exp
 
 锁文件为每个平台固定一个 sherpa-onnx v1.13.8 的上游预编译产物（来源提交 `11afbd009a7f8c08f4bcf2fc1b265d0df4670fbf`）的 URL、长度和 SHA-256，`scripts/fetch_voice_runtime.py --platform <平台>` 校验后展开到被忽略的 `target/voice-runtime/<平台>/`，各平台的构建与打包脚本从那里取文件。
 
+macOS 发布包可以不内置运行库，改为资源包 `voice-runtime-macos` 按需下载：上游的 universal dylib 剥掉局部符号后用本项目的 Developer ID 重签（输入法开着 hardened runtime，只加载同一 Team ID 签名的库），作为本仓库 `voice-runtime-macos-v<版本>` Release 的资产发布，`resources/voice-runtime-macos.lock.json` 固定归档和其中 dylib 的 SHA-256。重签不改动库的代码，Apache-2.0 与 ONNX Runtime 的许可证照旧随输入法 bundle 分发。
+
 | 组件 | 许可证 | 说明 |
 | --- | --- | --- |
 | [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | Apache-2.0 | 语音识别运行时。宿主不在构建期链接它，而是在第一次识别时用 `dlopen`/`LoadLibrary` 加载其 C API 库（`shared/voice/LocalAsr.h`）。构建期只需要它的 C 头文件，原样放在 `shared/voice/third_party/sherpa-onnx/c-api.h`，许可证全文在同目录 `LICENSE`。Android 使用上游的 `.aar`，HarmonyOS 使用上游的 `.har`，iOS 使用 `SherpaOnnxC.xcframework` |
@@ -396,3 +398,11 @@ MDBG 每天用新导出覆盖同一个地址（`https://www.mdbg.net/chinese/exp
 ## 新增依赖时
 
 引入新的上游代码、字体、图标、模型或服务 SDK 时，同时提交来源提交、许可证文本、通知位置和分发限制，并在本文件登记——不要只在 README 留一个链接。资源锁文件只校验内容，不授予任何分发权利。
+
+## Windows 皮肤图片动画
+
+`platforms/windows/msimeui` 的 `AnimatedImage` 与部分图片测试来自 msime-windows 固定提交 `dd018f79858314ed542a47c528608752b13bd261`，按 GPL-3.0 分发；来源路径、本地调整和完整许可见 [UPSTREAM.md](../platforms/windows/msimeui/UPSTREAM.md) 与 [LICENSE](../platforms/windows/msimeui/LICENSE)。仍使用 Windows 系统 WIC 解码，不打包新的第三方编解码库。
+
+## Linux 原生画布翻页
+
+`platforms/linux/src/candidates/NativeCanvas.h` 的翻页尺寸、布局规则与圆角三角路径参考 msime-windows 固定提交 `dd018f79858314ed542a47c528608752b13bd261` 的 `server/src/window/candidate_skin_scene.cpp` 和 `ui/src/PagerArrows.cpp`，以 Cairo 路径和 Pango 字号重写；按 GPL-3.0 分发，完整许可见仓库根目录的 [LICENSE](../LICENSE)。本段与来源提交信息随源代码保留，二进制分发沿用本项目 GPL 许可和对应源代码提供要求。

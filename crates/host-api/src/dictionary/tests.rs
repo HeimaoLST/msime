@@ -73,6 +73,7 @@ fn import_engine_options() -> msime_engine::host::EngineOptions {
         zhuyin_dictionary: String::new(),
         stroke_dictionary: String::new(),
         japanese_dictionary: String::new(),
+        wubi_dictionary: String::new(),
     }
 }
 
@@ -983,6 +984,28 @@ fn import_maps_shared_entries_onto_the_requested_engine_kind() {
     assert_eq!(windows[0].key, "wq");
     assert_eq!(windows[0].value, "你好");
     assert_eq!(windows[0].kind, Kind::Wubi.into());
+}
+
+#[test]
+fn gboard_import_normalizes_continuous_pinyin_before_sending_it_to_engine() {
+    let options = import_engine_options();
+    let (entries, report) = parse_import(
+        &Kind::Pinyin,
+        "standard",
+        "hecheng\t合成\tzh-CN\nzzzz\t测试\tzh-CN\n",
+        Some(&options),
+    )
+    .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key, "he'cheng");
+    assert_eq!(entries[0].value, "合成");
+    assert_eq!(entries[0].weight, 10000);
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.first_failures[0].line, 2);
+    assert_eq!(
+        report.first_failures[0].issue,
+        msime_client_services::dictionary::import::ImportIssue::Pinyin
+    );
 }
 
 #[test]

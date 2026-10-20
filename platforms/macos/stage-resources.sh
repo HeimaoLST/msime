@@ -4,19 +4,23 @@ umask 077
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo_root"
-source_dir=${1:?usage: [MSIME_EDITION=<id>] stage-resources.sh <verified-resource-directory> [settled-model-directory] [offline-glosses-directory] [language-dictionaries-directory] [pronunciations-directory] [character-glosses-directory] [word-glosses-directory]}
+source_dir=${1:?usage: [MSIME_EDITION=<id>] stage-resources.sh <verified-resource-directory> [settled-model-directory] [offline-glosses-directory] [language-dictionaries-directory] [pronunciations-directory] [character-glosses-directory] [word-glosses-directory] [wordbooks-directory]}
 source_dir=$(cd "$source_dir" && pwd)
 destination="$repo_root/target/macos/EngineResources"
 
 # Use the shared verifier as the source of truth. The staged directory is ignored build output and is rebuilt as one unit, so a failed copy cannot look complete.
-# MSIME_MACOS_OMIT_ON_DEMAND=1 按发布包的规则只暂存核心词库：日文词典那一组文件（词典与两份 Mozc 许可文本，即 resources.rs 的 ON_DEMAND_JAPANESE_ARTIFACTS）不进包，由 App 在用户选日文方案时下载到 resource-packs/japanese。默认的开发流程仍暂存全部文件，作为下载之外的内置兜底。
+# MSIME_MACOS_OMIT_ON_DEMAND=1 按发布包的规则只暂存核心词库：macOS 的按需文件组（resources.rs 的 on_demand_artifacts("macos")：日文词典那一组，即词典与两份 Mozc 许可文本，以及五笔码表 msime-wubi.db）不进包，由 App 在用户选日文或五笔方案时下载到 resource-packs/japanese、resource-packs/wubi。五笔是默认方案的版本（五笔版）离不开五笔码表，照旧带着它。默认的开发流程仍暂存全部文件，作为下载之外的内置兜底。
 verify_flags=()
 if [ "${MSIME_MACOS_OMIT_ON_DEMAND:-0}" = 1 ]; then
-  verify_flags=(--omit-on-demand)
+  verify_flags=(--omit-on-demand --platform macos)
 fi
 artifacts=$(cargo run --quiet -p msime-client-core --example verify_resources --locked -- ${verify_flags[@]+"${verify_flags[@]}"} "$source_dir")
 # MSIME_EDITION=<id> 只暂存该版本带的文件（版本表 shared/contracts/editions.json，资源锁 resources/editions/<id>.lock.json），暂存结果按该版本的锁校验。缺省是 full，暂存的文件和校验与引入版本之前相同。
 edition="${MSIME_EDITION:-full}"
+default_scheme=$(python3 -I -c 'import json, sys; print(next(edition["default_scheme"] for edition in json.load(open(sys.argv[1]))["editions"] if edition["id"] == sys.argv[2]))' "$repo_root/shared/contracts/editions.json" "$edition")
+if [ "${MSIME_MACOS_OMIT_ON_DEMAND:-0}" = 1 ] && [ "$default_scheme" = wubi ]; then
+  artifacts="$artifacts"$'\n'msime-wubi.db
+fi
 edition_flags=()
 if [ "$edition" != full ]; then
   edition_lock="$repo_root/resources/editions/$edition.lock.json"
@@ -151,5 +155,16 @@ if [ -f "$words_source/zh-en.db" ] && [ -f "$words_source/word-glosses-NOTICE.tx
   echo "word glosses staged: $words_destination"
 else
   echo "no word glosses at $words_source; English glosses come from english.db only"
+fi
+# 背单词的内置词书，由 scripts/fetch_wordbooks.py 从 ECDICT 生成；设置应用在资源目录的同级读 wordbooks/，八本书只和许可证声明一起暂存。没有它们时词书列表里只有用户导入的词表。
+wordbooks_source=${8:-$repo_root/target/wordbooks}
+wordbooks_destination="$repo_root/target/macos/wordbooks"
+rm -rf "$wordbooks_destination"
+if compgen -G "$wordbooks_source/*.json" >/dev/null && [ -f "$wordbooks_source/wordbooks-NOTICE.txt" ]; then
+  mkdir -p "$wordbooks_destination"
+  cp "$wordbooks_source"/*.json "$wordbooks_source/wordbooks-NOTICE.txt" "$wordbooks_destination/"
+  echo "wordbooks staged: $wordbooks_destination"
+else
+  echo "no wordbooks at $wordbooks_source; 背单词 offers only imported books"
 fi
 echo "macOS resources staged from the pinned dictionary release: $destination"

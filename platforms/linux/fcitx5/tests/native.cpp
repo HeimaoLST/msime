@@ -111,6 +111,8 @@ void koreanHanjaGlossRow() {
               shown(glossed).formatAt(1) == secondary &&
               shown(glossed).formatAt(2) == fcitx::TextFormatFlags(fcitx::TextFormatFlag::NoFlag),
           "a translation follows the 훈음 and the annotation is not drawn twice");
+  require(glossed.display().body == "韓  나라 이름 한, 한나라 한" && glossed.display().translation == "Korea",
+          "原生画布和 classicui 保留同一训音与释义，候选正文不含释义");
   const auto helpcode = word(Json{{"text", "你"}, {"annotation", "ab"}}, true, std::string());
   require(shown(helpcode).toString() == "你  ab" && shown(helpcode).size() == 1, "a helpcode stays plain row text");
   require(word(Json{{"text", "你"}, {"annotation", "ab"}}, false, std::string()).text() == "你" &&
@@ -136,6 +138,13 @@ void scriptAnnotationRow() {
                               {"translation", "you"}}, true);
   require(shown(both).toString() == "你  ab  you  〔常用〕",
           "the engine annotation and the translation stay, the script annotation comes last");
+  require(both.display().body == "你  ab" && both.display().translation == "you" &&
+              both.display().suffix == "  〔常用〕" && both.text() == "你",
+          "原生画布独立保留正文、释义与插件后缀，上屏文字不变");
+  const Json runs = Json::array({Json{{"start", 0}, {"length", 2}, {"role", "pos"}}});
+  const auto segmented = word(Json{{"text", "你"}, {"translation", "n. synthetic"}, {"translation_runs", runs}}, false);
+  require(segmented.display().translation_runs == runs && segmented.display().translation == "n. synthetic",
+          "原生画布接收共享层的同源释义分段，不在宿主重新解析");
   const auto hanja = word(Json{{"text", "韓"}, {"annotation", "나라 이름 한"}, {"script_annotation", "注"}},
                           false, "나라 이름 한");
   require(shown(hanja).toString() == "韓  나라 이름 한  〔注〕",
@@ -406,6 +415,25 @@ void classicuiThemeTicks(FcitxEngine &engine) {
           "a failed theme write is retried once its time comes, without any input changing");
   tick(classicui, Json{{"global_theme", "system"}}, false);
   require(classicui.scans == 8 && classicui.writes == 6, "the next change of the inputs writes the theme again");
+#ifdef MSIME_FCITX5_NATIVE_CANVAS
+  // 即使本轮写入了浅色主题，也不能用原生窗口盖住用户保留的第三方深色主题。
+  FakeClassicUi partial;
+  partial.config.darkTheme.setValue("synthetic-dark");
+  require(fcitx::safeSaveAsIni(partial.config, "conf/classicui.conf"), "保存合成的深色主题");
+  engine.candidate_theme_applied_.clear();
+  engine.candidate_theme_attempt_.clear();
+  tick(partial, ink, false);
+  require(partial.config.theme.value() == host::kFcitxCandidateTheme &&
+              partial.config.darkTheme.value() == "synthetic-dark" && !engine.native_canvas_owned_,
+          "保留第三方深色主题时不接管原生画布");
+  engine.applyCandidatePanelTheme(&partial, ink, false, Json(), true);
+  require(engine.native_canvas_owned_, "主动选择水杉主题后可以接管原生画布");
+  fcitx::RawConfig external;
+  external.setValueByPath("Theme", "synthetic-light");
+  partial.setConfig(external);
+  tick(partial, ink, false);
+  require(!engine.native_canvas_owned_, "第三方主题热更新立即退出原生画布所有权");
+#endif
   if (savedDataHome) setenv("XDG_DATA_HOME", savedDataHome->c_str(), 1);
   else unsetenv("XDG_DATA_HOME");
   if (savedStateHome) setenv("XDG_STATE_HOME", savedStateHome->c_str(), 1);

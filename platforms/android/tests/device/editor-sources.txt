@@ -9,6 +9,7 @@ platforms/android/tests/device/core/ImageClipProvider.java
 platforms/android/tests/device/clipboard/ClipboardImageDeviceSmoke.java
 platforms/android/tests/device/candidate/CandidatePanelDeviceSmoke.java
 platforms/android/tests/device/candidate/CandidateCanvasDeviceSmoke.java
+platforms/android/tests/device/candidate/CandidateUpstreamSkinDeviceSmoke.java
 platforms/android/tests/device/candidate/AiCandidateSeatDeviceSmoke.java
 platforms/android/tests/device/keyboard/MoreToolsDeviceSmoke.java
 platforms/android/tests/device/keyboard/PagedTileGridGestureDeviceSmoke.java
@@ -43,6 +44,7 @@ platforms/android/tests/device/keyboard/FourteenKeyDeviceSmoke.java
 platforms/android/tests/device/keyboard/NumberPadDeviceSmoke.java
 platforms/android/tests/device/keyboard/NineKeyShuangpinDeviceSmoke.java
 platforms/android/tests/device/settings/SettingsDeviceSmoke.java
+platforms/android/tests/device/settings/SkinDeleteDeviceCheck.java
 platforms/android/tests/device/settings/SettingsLifecycleSmoke.java
 platforms/android/tests/device/voice/TypingStatisticsDeviceSmoke.java
 platforms/android/tests/device/settings/AccountStorageDeviceSmoke.java
@@ -175,6 +177,9 @@ platforms/android/tests/device/voice/LocalSpeechHandleDeviceSmoke.java
 platforms/android/tests/device/voice/AiEndpointCheckDeviceSmoke.java
 platforms/android/tests/device/settings/SessionStoreDeviceSmoke.java
 platforms/android/tests/device/settings/VoiceProviderCatalogDeviceSmoke.java
+platforms/android/tests/device/settings/VoiceProviderSettingsDeviceSmoke.java
+platforms/android/tests/device/settings/VoiceEndpointSettingsDeviceSmoke.java
+platforms/android/tests/device/settings/VocabularyReviewDeviceCheck.java
 
 platforms/android/tests/device/core/BatchEditorActivity.java
 platforms/android/tests/device/keyboard/BatchCompositionDeviceSmoke.java

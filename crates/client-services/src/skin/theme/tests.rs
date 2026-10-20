@@ -1242,3 +1242,90 @@ fn a_package_translation_colour_is_the_secondary_text() {
         Some("#123456")
     );
 }
+
+#[test]
+fn canvas_details_are_normalized_and_follow_text_picker_and_drawn_mode() {
+    use crate::skin::catalog::CandidateMenuPalette;
+    let mut custom = CustomTheme {
+        candidate_skin: Some("canvas-fixture".into()),
+        ..Default::default()
+    };
+    let package = ThemePackage {
+        id: "canvas-fixture".into(),
+        base: GlobalTheme::System,
+        layouts: vec![CandidateLayout::Vertical],
+        light: Some(CandidatePalette {
+            preedit_text: Some("#123".into()),
+            preedit_background: Some("rgba(1, 2, 3, 0.5)".into()),
+            preedit_divider: Some("transparent".into()),
+            page_arrow_divider: Some("rgba(17, 34, 51, 0.5)".into()),
+            preedit_caret: Some("#456".into()),
+            selected_bar: Some("#789".into()),
+            translation: Some("#abc".into()),
+            translation_pos: Some("#1234".into()),
+            translation_separator: Some("rgba(3, 4, 5, 0.5)".into()),
+            selected_translation: Some("#def".into()),
+            selected_translation_pos: Some("#654321".into()),
+            menu: Some(CandidateMenuPalette {
+                background: Some("#abc".into()),
+                border: Some("transparent".into()),
+                text: Some("#def".into()),
+                hover: Some("not-a-color".into()),
+            }),
+            ..Default::default()
+        }),
+        dark: None,
+    };
+    let details = |custom: &CustomTheme, dark, layout| {
+        resolve(GlobalTheme::Custom, custom, dark, layout, Some(&package)).candidate_details
+    };
+    let result = details(&custom, false, CandidateLayout::Vertical).unwrap();
+    assert_eq!(result.preedit_text.as_deref(), Some("#112233"));
+    assert_eq!(result.preedit_background.as_deref(), Some("#01020380"));
+    assert_eq!(result.preedit_divider.as_deref(), Some("#00000000"));
+    assert_eq!(result.page_arrow_divider.as_deref(), Some("#11223380"));
+    assert_eq!(
+        serde_json::to_value(&result).unwrap()["page_arrow_divider"],
+        "#11223380"
+    );
+    assert_eq!(result.preedit_caret.as_deref(), Some("#445566"));
+    assert_eq!(result.selected_bar.as_deref(), Some("#778899"));
+    assert_eq!(result.translation.as_deref(), Some("#AABBCC"));
+    assert_eq!(result.translation_pos.as_deref(), Some("#11223344"));
+    assert_eq!(result.translation_separator.as_deref(), Some("#03040580"));
+    assert_eq!(result.selected_translation_pos.as_deref(), Some("#654321"));
+    assert_eq!(
+        result.selected_translation_separator.as_deref(),
+        Some("#DDEEFF")
+    );
+    assert_eq!(result.menu_surface.as_deref(), Some("#AABBCC"));
+    assert_eq!(result.menu_border.as_deref(), Some("#00000000"));
+    assert_eq!(result.menu_text.as_deref(), Some("#DDEEFF"));
+    assert!(result.menu_hover.is_none());
+    custom.candidate_colors.text = Some("#FEDCBA".into());
+    assert_eq!(
+        details(&custom, false, CandidateLayout::Vertical)
+            .unwrap()
+            .preedit_text
+            .as_deref(),
+        Some("#FEDCBA")
+    );
+    assert!(details(&custom, true, CandidateLayout::Vertical).is_none());
+    assert!(details(&custom, false, CandidateLayout::Horizontal).is_none());
+    custom.candidate_colors.selected = Some("#ffffff".into());
+    let picked = details(&custom, false, CandidateLayout::Vertical).unwrap();
+    let readable = with_alpha("#000000", PICKED_NUMBER_ALPHA);
+    assert_eq!(
+        picked.selected_translation.as_deref(),
+        Some(readable.as_str())
+    );
+    assert_eq!(
+        picked.selected_translation_pos.as_deref(),
+        Some(readable.as_str())
+    );
+    assert_eq!(
+        picked.selected_translation_separator.as_deref(),
+        Some(readable.as_str())
+    );
+    assert_eq!(picked.translation_pos.as_deref(), Some("#11223344"));
+}

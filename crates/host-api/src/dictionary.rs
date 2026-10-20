@@ -1631,6 +1631,131 @@ pub fn personal_dictionary_sync_json(bytes: &[u8]) -> Result<serde_json::Value, 
 /// `msime_client_services::dictionary::collections` 给它排队的请求所加的 id 前缀。
 const COLLECTION_REQUEST_PREFIX: &str = "collections-";
 
+/// 同一有界调用内复用集合状态；个人同步每批独立取得并释放维护租约。
+pub(crate) fn synchronize_collections_with_budget(
+    options: &HostOptions,
+    budget: std::time::Duration,
+) -> Result<serde_json::Value, String> {
+    let directory = options
+        .preferences_directory
+        .as_deref()
+        .filter(|path| Path::new(path).is_absolute())
+        .ok_or("personal dictionary shared directory unavailable")?;
+    let personal = PersonalDictionaryStore::new(Path::new(directory).join("PersonalDictionary"));
+    let collections =
+        msime_client_services::dictionary::collections::DictionaryCollectionsStore::new(
+            directory,
+            PersonalDictionaryStore::new(Path::new(directory).join("PersonalDictionary")),
+        );
+    let started = std::time::Instant::now();
+    let mut flushing = collections
+        .begin_flush()
+        .map_err(|error| error.code().to_owned())?;
+    let bytes = serde_json::to_vec(options).map_err(|_| "invalid dictionary request")?;
+    let engine_options = options.clone().into_engine_options();
+    let mut previous = usize::MAX;
+    loop {
+        // 先成功申请维护租约并应用个人队列，繁忙时不得提前推进集合待发项。
+        let mut synchronized = personal_dictionary_sync_json(&bytes)?;
+        let access = DictionaryAccess::try_maintenance(
+            Path::new(&engine_options.user_data),
+            Path::new(&engine_options.dictionaries),
+        )
+        .map_err(|_| "dictionary access unavailable")?
+        .ok_or("dictionary maintenance busy")?;
+        let view = if budget.is_zero() {
+            flushing.flush()
+        } else {
+            flushing
+                .flush_with_engine(|edits| apply_collection_engine_batch(&engine_options, edits))
+        }
+        .map_err(|error| error.code().to_owned())?;
+        drop(access);
+        let state = personal.read().map_err(personal_dictionary_error)?;
+        let pending = state.pending_count().saturating_add(view.outbox_pending);
+        let sent = view.sent.unwrap_or(0);
+        synchronized["pending_count"] = json!(pending);
+        synchronized["failed_count"] = json!(state
+            .requests
+            .iter()
+            .filter(|request| request.status == PersonalWordRequestStatus::Failed)
+            .count());
+        synchronized["sent"] = json!(sent);
+        if pending == 0 || started.elapsed() >= budget || (sent == 0 && pending >= previous) {
+            return Ok(synchronized);
+        }
+        previous = pending;
+    }
+}
+
+fn apply_collection_engine_batch(
+    options: &msime_engine::host::EngineOptions,
+    edits: &[msime_client_services::dictionary::collections::CollectionEdit],
+) -> Result<
+    Vec<Result<msime_client_services::dictionary::collections::CollectionEditApplied, String>>,
+    String,
+> {
+    use msime_client_services::dictionary::collections::CollectionEditApplied;
+
+    let entries: Vec<_> = edits
+        .iter()
+        .map(|edit| {
+            (
+                edit.previous.as_ref().map(personal_engine_entry),
+                edit.replacement.as_ref().map(personal_engine_entry),
+            )
+        })
+        .collect();
+    let mut outcomes = vec![None; edits.len()];
+    let mut indexes = Vec::new();
+    for (index, edit) in edits.iter().enumerate() {
+        let (previous, replacement) = &entries[index];
+        if let Err(error) = crate::validate_personal_dictionary_edit(
+            options,
+            previous.as_ref(),
+            replacement.as_ref(),
+            &edit.request_id,
+        ) {
+            outcomes[index] = Some(Err(error));
+        } else {
+            indexes.push(index);
+        }
+    }
+    let engine_edits: Vec<_> = indexes
+        .iter()
+        .map(|index| msime_engine::host::DictionaryEdit {
+            previous: entries[*index].0.as_ref(),
+            replacement: entries[*index].1.as_ref(),
+            request_id: &edits[*index].request_id,
+            preserve_existing: true,
+        })
+        .collect();
+    let applied = if engine_edits.is_empty() {
+        Vec::new()
+    } else {
+        msime_engine::host::dictionary_edit_collection_batch(options, &engine_edits)
+            .map_err(|_| "dictionary batch was not committed".to_owned())?
+    };
+    for (index, result) in indexes.into_iter().zip(applied) {
+        outcomes[index] = Some(
+            result
+                .map(|outcome| match outcome {
+                    msime_engine::host::DictionaryApplied::Written => {
+                        CollectionEditApplied::Written
+                    }
+                    msime_engine::host::DictionaryApplied::AlreadyPresent => {
+                        CollectionEditApplied::AlreadyPresent
+                    }
+                })
+                .map_err(|_| "dictionary edit rejected".to_owned()),
+        );
+    }
+    outcomes
+        .into_iter()
+        .map(|outcome| outcome.ok_or_else(|| "dictionary batch result missing".to_owned()))
+        .collect()
+}
+
 /// JNI entry point for the Android IME worker.
 ///
 /// # Safety

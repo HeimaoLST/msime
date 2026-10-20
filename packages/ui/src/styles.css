@@ -2850,8 +2850,7 @@ html[data-macos-liquid-glass="true"]:has([data-settings-shell][data-platform="ma
 html[data-macos-liquid-glass="true"] body:has([data-settings-shell][data-platform="mac"]),
 html[data-macos-liquid-glass="true"] [data-settings-shell][data-platform="mac"],
 html[data-macos-liquid-glass="true"] [data-platform="mac"] .settings-sidebar,
-html[data-macos-liquid-glass="true"] [data-platform="mac"] .settings-mac-drag-row,
-html[data-macos-liquid-glass="true"] [data-platform="mac"] .settings-mac-toolbar {
+html[data-macos-liquid-glass="true"] [data-platform="mac"] .settings-mac-drag-row {
   background: transparent;
 }
 
@@ -2861,6 +2860,9 @@ html[data-macos-liquid-glass="true"] [data-platform="mac"] .settings-sidebar {
 
 html[data-macos-liquid-glass="true"] [data-platform="mac"] .settings-mac-toolbar {
   border-bottom-color: transparent;
+  /* 原生液态玻璃已经负责窗口材质；工具栏再次采样滚动内容会在 WebKit 中闪烁。 */
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 /* 新系统导航使用胶囊选中态，表单沿用共享控件与键盘、读屏行为。 */
@@ -2872,9 +2874,19 @@ html[data-macos-liquid-glass="true"] [data-settings-shell][data-platform="mac"] 
   --p-seg-item-r: 14px;
 }
 
-/* 正文也透出原生玻璃；分组与控件只叠加轻薄高光，不再使用白色或灰色实心卡片。 */
-html[data-macos-liquid-glass="true"] [data-platform="mac"] .settings-content {
-  background: transparent;
+/* 只有侧栏透出材质，正文与工具栏使用相同的实色底。 */
+html[data-macos-liquid-glass="true"] [data-settings-shell][data-platform="mac"] {
+  --settings-main-bg: #1f1f21;
+}
+
+html[data-theme="light"][data-macos-liquid-glass="true"]
+  [data-settings-shell][data-platform="mac"] {
+  --settings-main-bg: #f2f2f4;
+}
+
+html[data-macos-liquid-glass="true"] [data-platform="mac"] .settings-content,
+html[data-macos-liquid-glass="true"] [data-platform="mac"] .settings-mac-toolbar {
+  background: var(--settings-main-bg);
 }
 
 html[data-macos-liquid-glass="true"] [data-settings-shell][data-platform="mac"] {
@@ -2937,7 +2949,7 @@ html[data-theme="light"][data-macos-liquid-glass="true"]
   --p-sub: #39393d;
 }
 
-/* 弹窗用厚玻璃隔开背后的预览文字，不能复用正文卡片的薄透明表面。 */
+/* 弹窗用厚玻璃隔开背后的预览文字，不能复用正文卡片的薄透明表面。所有浮在页面上的层（对话框、底部面板、全屏子视图、浮动菜单）都带这个类，`apps/desktop/tests/settings/glass-overlay-surface.test.tsx` 逐个检查。 */
 html[data-macos-liquid-glass="true"]
   [data-settings-shell][data-platform="mac"]
   .settings-modal-surface {
@@ -3292,4 +3304,207 @@ html[data-theme="light"][data-macos-liquid-glass="true"]
   .settings-wide-row-control
   > :is(.settings-text-input, .secret-input) {
   width: 100%;
+}
+
+/*
+ * 「制作皮肤」预览的动效。预设和关键帧与 web 引擎的候选窗相同（`packages/web-engine/src/candidates.js`），由预览外层的 `data-motion-*` 属性按「消失 → 出现 → 选中」依次触发；装饰图的待机动效一直播放，幅度与各宿主相同（浮动约 3 像素、摇摆约 3°、呼吸放大到 1.03、轻跳一次）。系统要求减少动态效果时全部停下，组件同时不再切换阶段。
+ */
+.skin-editor-motion {
+  --msime-editor-duration: 180ms;
+  --msime-editor-stagger: 14ms;
+  --msime-editor-period: 3000ms;
+}
+.skin-editor-motion[data-motion-phase="enter"][data-motion-enter="fade"] .container {
+  animation: msime-editor-fade var(--msime-editor-duration) ease-out both;
+}
+.skin-editor-motion[data-motion-phase="enter"][data-motion-enter="fade_scale"] .container {
+  animation: msime-editor-fade-scale var(--msime-editor-duration) cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.skin-editor-motion[data-motion-phase="enter"][data-motion-enter="slide_up"] .container {
+  animation: msime-editor-slide-up var(--msime-editor-duration) cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.skin-editor-motion[data-motion-phase="enter"][data-motion-enter="spring"] .container {
+  animation: msime-editor-spring var(--msime-editor-duration) cubic-bezier(0.22, 1.35, 0.36, 1) both;
+}
+.skin-editor-motion[data-motion-phase="enter"][data-motion-enter="glow"] .container {
+  animation: msime-editor-glow var(--msime-editor-duration) ease-out both;
+}
+.skin-editor-motion[data-motion-phase="enter"]:is(
+    [data-motion-enter="fade_scale"],
+    [data-motion-enter="slide_up"]
+  )
+  .row-wrapper {
+  animation: msime-editor-row-reveal var(--msime-editor-duration) cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.skin-editor-motion[data-motion-phase="enter"] .row-wrapper:nth-child(2 of .row-wrapper) {
+  animation-delay: calc(var(--msime-editor-stagger) * 1);
+}
+.skin-editor-motion[data-motion-phase="enter"] .row-wrapper:nth-child(3 of .row-wrapper) {
+  animation-delay: calc(var(--msime-editor-stagger) * 2);
+}
+.skin-editor-motion[data-motion-phase="enter"] .row-wrapper:nth-child(4 of .row-wrapper) {
+  animation-delay: calc(var(--msime-editor-stagger) * 3);
+}
+.skin-editor-motion[data-motion-phase="enter"] .row-wrapper:nth-child(5 of .row-wrapper) {
+  animation-delay: calc(var(--msime-editor-stagger) * 4);
+}
+.skin-editor-motion[data-motion-phase="enter"] .row-wrapper:nth-child(6 of .row-wrapper) {
+  animation-delay: calc(var(--msime-editor-stagger) * 5);
+}
+.skin-editor-motion[data-motion-phase="select"][data-motion-selection="spring"] .cand.first {
+  animation: msime-editor-spring var(--msime-editor-duration) cubic-bezier(0.22, 1.35, 0.36, 1) both;
+}
+.skin-editor-motion[data-motion-phase="select"][data-motion-selection="glow"] .cand.first {
+  animation: msime-editor-glow var(--msime-editor-duration) ease-out both;
+}
+.skin-editor-motion[data-motion-phase="select"]:is(
+    [data-motion-selection="fade"],
+    [data-motion-selection="fade_scale"],
+    [data-motion-selection="slide_up"]
+  )
+  .cand.first {
+  animation: msime-editor-select-fade var(--msime-editor-duration) ease-out both;
+}
+.skin-editor-motion[data-motion-phase="exit"][data-motion-exit="fade"] .container {
+  animation: msime-editor-fade var(--msime-editor-duration) ease-in reverse both;
+}
+.skin-editor-motion[data-motion-phase="exit"]:is(
+    [data-motion-exit="fade_scale"],
+    [data-motion-exit="spring"]
+  )
+  .container {
+  animation: msime-editor-fade-scale var(--msime-editor-duration) ease-in reverse both;
+}
+.skin-editor-motion[data-motion-phase="exit"][data-motion-exit="slide_up"] .container {
+  animation: msime-editor-slide-up var(--msime-editor-duration) ease-in reverse both;
+}
+.skin-editor-motion[data-motion-phase="exit"][data-motion-exit="glow"] .container {
+  animation: msime-editor-glow var(--msime-editor-duration) ease-in reverse both;
+}
+.skin-editor-motion[data-decoration-motion="float"] .skin-decoration-image {
+  animation: msime-editor-float var(--msime-editor-period) ease-in-out infinite;
+}
+.skin-editor-motion[data-decoration-motion="sway"] .skin-decoration-image {
+  transform-origin: 50% 100%;
+  animation: msime-editor-sway var(--msime-editor-period) ease-in-out infinite;
+}
+.skin-editor-motion[data-decoration-motion="breathe"] .skin-decoration-image {
+  transform-origin: 50% 100%;
+  animation: msime-editor-breathe var(--msime-editor-period) ease-in-out infinite;
+}
+.skin-editor-motion[data-decoration-motion="bounce"] .skin-decoration-image {
+  animation: msime-editor-bounce var(--msime-editor-period) ease-out infinite;
+}
+@keyframes msime-editor-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes msime-editor-fade-scale {
+  from {
+    opacity: 0;
+    transform: translateY(5px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes msime-editor-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes msime-editor-spring {
+  from {
+    transform: scale(0.94);
+  }
+  65% {
+    transform: scale(1.025);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+@keyframes msime-editor-glow {
+  from {
+    filter: brightness(1.22);
+  }
+  to {
+    filter: brightness(1);
+  }
+}
+@keyframes msime-editor-select-fade {
+  from {
+    opacity: 0.45;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes msime-editor-row-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes msime-editor-float {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+  50% {
+    translate: 0 -3px;
+  }
+}
+@keyframes msime-editor-sway {
+  0%,
+  100% {
+    rotate: -3deg;
+  }
+  50% {
+    rotate: 3deg;
+  }
+}
+@keyframes msime-editor-breathe {
+  0%,
+  100% {
+    scale: 1;
+  }
+  50% {
+    scale: 1.03;
+  }
+}
+@keyframes msime-editor-bounce {
+  0%,
+  70%,
+  100% {
+    translate: 0 0;
+  }
+  80% {
+    translate: 0 -5px;
+  }
+  90% {
+    translate: 0 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skin-editor-motion .container,
+  .skin-editor-motion .row-wrapper,
+  .skin-editor-motion .cand.first,
+  .skin-editor-motion .skin-decoration-image {
+    animation: none !important;
+  }
 }

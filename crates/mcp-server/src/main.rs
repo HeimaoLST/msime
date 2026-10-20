@@ -4,10 +4,12 @@
 
 mod bounded;
 mod cli;
+mod community;
 mod config;
 mod diagnostics;
 mod preferences;
 mod prompts;
+mod runtime_options;
 mod server;
 mod skins;
 mod statistics;
@@ -233,6 +235,19 @@ fn call_arguments(arguments: config::Arguments) -> Result<serde_json::Map<String
         Ok(Value::Object(arguments)) => Ok(arguments),
         Ok(_) => Err("the arguments must be a JSON object".into()),
         Err(error) => Err(format!("the arguments are not valid JSON: {error}")),
+    }
+}
+
+/// 输出 schema 列为必填的每个字段都要真的出现在 `value` 里，否则按 schema 校验结构化结果的客户端（如 Claude Code）会拒绝整个结果（#8840）。
+#[cfg(test)]
+pub(crate) fn assert_required_fields_present<T: rmcp::schemars::JsonSchema>(value: &Value) {
+    let schema = serde_json::to_value(rmcp::schemars::schema_for!(T)).unwrap();
+    for field in schema["required"].as_array().into_iter().flatten() {
+        let field = field.as_str().unwrap();
+        assert!(
+            value.get(field).is_some(),
+            "the output schema requires {field}, but the result left it out: {value}"
+        );
     }
 }
 

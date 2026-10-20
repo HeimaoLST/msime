@@ -67,6 +67,29 @@ struct Installed {
     previous: Option<Selection>,
 }
 
+const LOADED: &str = "loaded.json";
+
+/// 输入宿主最近一次建会话时用的资源目录（规范化路径）。设置宿主和输入宿主常是两个进程，`status` 靠它判断已选中的代次是否还要重新打开输入法才生效。
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Loaded {
+    resources: PathBuf,
+}
+
+/// 输入宿主建会话时调用。从没装过更新时不建目录也不写；内容没变时不重写，避免每次弹出键盘都写一次盘。
+pub fn record_loaded(state: &Path, resources: &Path) -> Result<(), UpdateError> {
+    let folder = root(state);
+    if !folder.is_dir() {
+        return Ok(());
+    }
+    let resources = std::fs::canonicalize(resources)?;
+    let path = folder.join(LOADED);
+    if read::<Loaded>(&path).is_ok_and(|loaded| loaded.resources == resources) {
+        return Ok(());
+    }
+    write(&path, &Loaded { resources })
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -149,6 +172,18 @@ pub fn baseline_version(baseline: &ResourceSet) -> String {
         .to_owned()
 }
 
+/// 发布包可以不带、改由资源包提供的桌面词库文件属于哪个资源包：日文词典那一组是 `japanese`，五笔码表是 `wubi`，其余文件随包，为 `None`。更新只在本机已有这份文件（随包或资源包已装）时才下载它的新版本。
+fn on_demand_pack(name: &str) -> Option<crate::resource_packs::ResourcePack> {
+    use crate::resource_packs::ResourcePack;
+    if resources::ON_DEMAND_JAPANESE_ARTIFACTS.contains(&name) {
+        Some(ResourcePack::Japanese)
+    } else if resources::ON_DEMAND_WUBI_ARTIFACTS.contains(&name) {
+        Some(ResourcePack::Wubi)
+    } else {
+        None
+    }
+}
+
 fn validate_selection(selection: &Selection, baseline: &ResourceSet) -> Result<(), UpdateError> {
     if selection.baseline_generation != baseline.generation().map_err(|_| UpdateError::Invalid)?
         || version(&selection.version).is_none()
@@ -176,9 +211,9 @@ fn validate_selection(selection: &Selection, baseline: &ResourceSet) -> Result<(
             return Err(UpdateError::Invalid);
         }
     }
-    // 允许省去按需日文词典，不能省去其他随包资源。
+    // 允许省去按需下载的日文词典和五笔码表，不能省去其他随包资源。
     if baseline.artifacts.iter().any(|p| {
-        !resources::ON_DEMAND_JAPANESE_ARTIFACTS.contains(&p.name.as_str())
+        on_demand_pack(&p.name).is_none()
             && !selection.desktop.artifacts.iter().any(|a| a.name == p.name)
     }) {
         return Err(UpdateError::Invalid);
@@ -290,14 +325,21 @@ pub fn status(context: &UpdateContext) -> UpdateStatus {
         .as_ref()
         .map(|s| s.version.clone())
         .unwrap_or_else(|| baseline_version(&context.baseline));
+    // 设置宿主传入的是自己的随包资源，不是输入法正在用的那份；输入宿主建会话时记下的目录才说明新代次是否已经生效。没有记录时（还没建过会话、写不进状态目录）退回比较调用方自己的资源。
+    let recorded = read::<Loaded>(&root(&context.state_root).join(LOADED))
+        .ok()
+        .map(|loaded| loaded.resources);
+    let loaded = recorded.as_deref().unwrap_or(&context.resources);
+    let downloaded = std::fs::canonicalize(&context.state_root)
+        .map(|state| {
+            loaded.starts_with(root(&state)) || loaded.starts_with(root(&context.state_root))
+        })
+        .unwrap_or(false);
     status.pending_restart = active
         .as_ref()
         .and_then(|s| directory(&context.state_root, &s.desktop).ok())
-        .map(|p| p != context.resources)
-        .unwrap_or(
-            status.phase == "rolled_back"
-                && context.resources.starts_with(root(&context.state_root)),
-        );
+        .map(|p| p != loaded)
+        .unwrap_or((recorded.is_some() || status.phase == "rolled_back") && downloaded);
     status.can_rollback = active.is_some();
     status
 }
@@ -513,12 +555,9 @@ fn plan(
     desktop.artifacts.retain(|a| {
         !context.on_demand.contains(&a.name)
             || context.resources.join(&a.name).is_file()
-            || crate::resource_packs::installed_file(
-                &context.state_root,
-                crate::resource_packs::ResourcePack::Japanese,
-                &a.name,
-            )
-            .is_some()
+            || on_demand_pack(&a.name).is_some_and(|pack| {
+                crate::resource_packs::installed_file(&context.state_root, pack, &a.name).is_some()
+            })
     });
     for file in &mut desktop.artifacts {
         if !file.url.starts_with(DOWNLOAD) {

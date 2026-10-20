@@ -181,6 +181,8 @@ PreviousCandidate/NextCandidate/PreviousPage/NextPage 路径消费共享导航�
 
 Wine 有时在 `CreateSymbolicLinkW` 返回成功后仍未创建可由 Win32 观察到的重解析点。符号链接安全测试会先核对链接属性和标签；只有夹具真正存在才运行相应断言，否则测试自身输出跳过提示（批量 Wine 运行器只汇总 EXE 的通过与失败）。真正的重解析点拒绝行为仍需在 Windows 上运行原生测试验证。
 
+`windows-candidate-canvas-preview` 的九宫格像素断言依赖图像画刷的源矩形语义。Wine 10 尚未实现这一语义，`run-tests-wine.sh` 对它明确输出 `SKIP`，不计作通过、不加入已知失败基线；`ci-platforms.yml` 的原生 Windows candidate skin gallery 作业必须执行完整断言，失败会阻止该作业通过。Wine 实现补齐后应移除这条环境跳过。
+
 CI（`.github/workflows/ci-platforms.yml` 的 windows job）在 `debian:trixie-slim` 容器里跑 `build-cross.sh x64`——Ubuntu 24.04 的 MinGW 头文件缺 `d2d1_3.h`。`release-windows.yml` 是手动 `workflow_dispatch`，在 Windows runner 上按版本矩阵（full、wubi、pinyin）各跑一遍 `Build-Client.ps1 -Edition`、打包和装卸冒烟，再用 `installer/tests/coexistence-smoke.ps1` 把几个版本装到同一台机器上，检查它们并存、卸掉一个版本不碰 full，并在 `windows-11-arm` runner 上装卸每个版本、检查 Arm64X TIP 能在原生 ARM64 和模拟 x64 进程里创建，最后一起发布。安装器由 Windows 上的 `installer/Package-SimplySign.ps1` 编译和签名，不在 CI 里产出。
 
 ### 候选皮肤截图
@@ -192,6 +194,8 @@ CI（`.github/workflows/ci-platforms.yml` 的 windows job）在 `debian:trixie-s
 要系统材质（`backdrop`）的皮肤不铺纯色，铺彩色竖条纹（`gallery::backdrop_stripe_color`）：纯色底上看不出模糊，条纹在亚克力卡片后面糊成一片混色，卡片外面仍是清楚的条纹。这几张截图的空白和裁边自检不和纯色比，而和候选窗出现之前截下的同一块屏幕比；日志里每张都写明卡片背后实际垫了什么（`CandidateWindow::painted_backdrop()`：哪种材质和参数，或为什么是不透明底色），开头一行记下 Windows 版本、透明效果和高对比度开关。云母取样的是桌面壁纸，条纹只影响亚克力。
 
 在 Windows 上本地运行：把交叉构建的 `target/windows-full/x64` 目录（至少 `msime-candidate-skin-gallery.exe`、`msime_host_api.dll` 和 `stage-runtime.sh` 放进去的三个 MinGW 运行时 DLL）带到一台有桌面的 Windows 10 1703 或更新的机器上，在仓库根目录执行 `msime-candidate-skin-gallery.exe --skins crates\client-services\tests\fixtures\candidate-skins --output <输出目录>`。两个参数都可以省，缺省就是这个皮肤目录和 `target\windows-candidate-skin-gallery`（相对当前目录）。运行的几十秒里不要动鼠标、不要切窗口。它要交互桌面，所以不是 CTest，名字也不以 `windows-` 开头，`run-tests-wine.sh` 不会去跑它；Wine 的 DirectComposition 只是桩，截不出可信的画面。
+
+专用测试桌面上可加 `--verify-image-animation`：工具对 `verify-canvas`（APNG 自由挂件）、`verify-canvas-frame`（GIF 自由挂件）与 `verify-v2-motion-system`（传统 APNG 装饰）检查没有按键与主动刷新时窗口像素确实变化，并检查休眠／唤醒、减弱动态效果、隐藏／重开。该选项在测试期间临时切换非持久化的系统动画偏好，退出恢复原值；不要在日常桌面使用。变化前后和减弱动态效果的截图随图库输出。CI 在原生 Windows runner 上先运行 `windows-candidate-image-animation.exe` 的解码与缓存像素断言，再启用这个选项。
 
 CI 里 `windows` job 交叉编译出它以后，把它、host DLL 和三个运行时 DLL 去掉调试信息，上传为 `windows-candidate-skin-gallery-tool`；`windows-skin-gallery` job（Windows candidate skin gallery，`windows-2025`）下载后对 `crates/client-services/tests/fixtures/candidate-skins` 运行，截图上传为产物 `windows-candidate-skin-gallery`，这一步失败时也上传。
 

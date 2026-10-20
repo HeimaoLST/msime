@@ -479,6 +479,7 @@ fn requested_season(
 ///
 /// 请求带着宿主读到的两个偏好字段，所以这里不需要偏好目录，也不做偏好 I/O：`global_theme`（`GlobalTheme::ALL` 的八个 id 之一，本平台目录里没有的 `native` 也接受，解析结果与 `system` 相同、只是 `id` 为 `native`；其他 id，包括已停用的皮肤 id，都以 `invalid theme request` 失败）和 `custom_theme`（可省略，按偏好本身同样严格地校验）。`dark` 是宿主正在绘制的界面当前的明暗模式，`layout`（`horizontal` 或 `vertical`）是它的候选排列：皮肤包只在清单声明的排列和模式下绘制，宿主不另设一道关卡。`dark` 同时决定取哪个槽位：深色模式取 `custom_theme.candidate_skin_dark`，没设时与浅色模式一样取 `custom_theme.candidate_skin`；选中的包只在它清单 `base` 的明暗下绘制（见 `theme::resolve`）。`custom` 主题要用皮肤包时，宿主最多用下面两者之一说明包从哪里来：`skins_directory`（皮肤根目录的绝对路径；包按 `msime_client_skin_package` 的规则加载和校验；直接扫描皮肤的宿主及已准备 canvas 面板的 Fcitx5 使用）或 `package`（已发布的 `candidate_skin_catalog` 中的一项，只有 Linux 宿主读它，宿主要传当前模式槽位指名的那一项）。`package` 不是这样的一项时（包括 `msime_client_skin_catalog` 给出的 `SkinSummary`）调用失败：那是宿主的缺陷，照读会悄悄丢掉它声明的模式和选中条。根目录里没有、磁盘上无效、或不是当前槽位指名的那个包会被略过而不是让调用失败：主题照常在它的底上解析。
 /// `canvas_panel_drawn` 缺省为 false。只有已成功解码且实际绘制当前 canvas 面板的宿主才传 true；共享层在包配色上套用原有取色器规则，不能由宿主另行覆盖最终配色。此标志只作用于 `skins_directory` 读取的含面板包。Linux 公共 catalog 的配色仍是可读回退；Fcitx5 准备好面板后改用根目录协商。
+/// `candidate_details` 可选提供规范化的预编辑文字／光标／背景／分隔线、选中条、释义及词性／义项分隔符的普通与选中色、菜单四槽位；宿主忽略不支持的键。文字取色器同时覆盖预编辑文字，宿主不从原始包重新取色。
 /// # Safety
 /// `request` 指向 `length` 个可读的 UTF-8 JSON 字节，不接受空指针。
 /// 返回的响应必须通过 `msime_client_string_free` 释放。
@@ -1340,6 +1341,96 @@ pub unsafe extern "C" fn msime_client_skin_import(
         .map_err(str::to_owned)?;
         Ok(json!({ "id": id }))
     })
+}
+
+/// 「制作皮肤」请求最大的长度：图片合计 2 MiB 换成 base64 后约 2.7 MiB，加上 64 KiB 的清单和 JSON 的键，留出余量。
+const MAX_CANDIDATE_SKIN_EDITOR_REQUEST_BYTES: usize = 4 << 20;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CandidateSkinEditorRequest {
+    operation: String,
+    /// 只有 `create` 读它：皮肤根目录的绝对路径。
+    #[serde(default)]
+    directory: Option<String>,
+    package_id: String,
+    manifest: String,
+    #[serde(default)]
+    files: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    replace: bool,
+}
+
+/// 共享设置页「制作皮肤」的两个操作，规则全在 `msime_client_services::skin::candidate_editor`：`check` 不写皮肤目录，按目录扫描的规则读一遍草稿，回复扫描会列出的那一项（camelCase，与 `msime_client_skin_catalog` 的 `packages` 同形）；`create` 用社区下载和 MCP 同一个安装器把草稿装进 `directory`，回复 `{id,replaced}`。失败回复 `{ok:false,error,detail?}`：`error` 是 `candidate_skin_*` 或 `storage`，`detail` 是清单没通过扫描时扫描给出的原因。
+/// # Safety
+/// `request` points to `length` readable UTF-8 JSON bytes, at most 4 MiB. Null is rejected. The returned JSON must be released with `msime_client_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_candidate_skin_editor(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    use msime_client_services::skin::candidate_editor::{
+        self, CandidateSkinDraft, CandidateSkinFailure,
+    };
+    candidate_skin_editor_response(|| {
+        let invalid = || CandidateSkinFailure::code("candidate_skin_package");
+        if request.is_null() || length == 0 || length > MAX_CANDIDATE_SKIN_EDITOR_REQUEST_BYTES {
+            return Err(invalid());
+        }
+        // SAFETY: guaranteed by the documented caller contract; size checked above.
+        let bytes = unsafe { std::slice::from_raw_parts(request, length) };
+        let request: CandidateSkinEditorRequest =
+            serde_json::from_slice(bytes).map_err(|_| invalid())?;
+        let draft = CandidateSkinDraft {
+            package_id: request.package_id,
+            manifest: request.manifest,
+            files: request.files,
+        };
+        let storage = || CandidateSkinFailure::code("storage");
+        match request.operation.as_str() {
+            "check" => {
+                serde_json::to_value(candidate_editor::check(&draft)?).map_err(|_| storage())
+            }
+            "create" => {
+                let directory = request.directory.ok_or_else(invalid)?;
+                if !Path::new(&directory).is_absolute() {
+                    return Err(invalid());
+                }
+                serde_json::to_value(candidate_editor::create(
+                    Path::new(&directory),
+                    &draft,
+                    request.replace,
+                )?)
+                .map_err(|_| storage())
+            }
+            _ => Err(invalid()),
+        }
+    })
+}
+
+/// 和插件的 `plugin_response` 一样把 `detail` 带给页面。
+fn candidate_skin_editor_response(
+    operation: impl FnOnce() -> Result<
+        Value,
+        msime_client_services::skin::candidate_editor::CandidateSkinFailure,
+    >,
+) -> *mut c_char {
+    use msime_client_services::skin::candidate_editor::CandidateSkinFailure;
+    let value = match catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(Ok(value)) => json!({ "ok": true, "value": value }),
+        Ok(Err(CandidateSkinFailure {
+            code,
+            detail: Some(detail),
+        })) => json!({ "ok": false, "error": code, "detail": detail }),
+        Ok(Err(CandidateSkinFailure { code, detail: None })) => {
+            json!({ "ok": false, "error": code })
+        }
+        Err(_) => json!({ "ok": false, "error": "internal runtime failure" }),
+    };
+    // JSON escapes embedded NUL bytes, so this cannot contain an interior NUL.
+    CString::new(value.to_string())
+        .expect("JSON contains no NUL")
+        .into_raw()
 }
 
 #[derive(Debug, Deserialize)]

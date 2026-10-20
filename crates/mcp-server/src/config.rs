@@ -36,6 +36,7 @@ Testing by hand:
   If some <keys> cannot be looked up, the others still are and expand exits 1.
   Every run reads the current preferences; there is nothing to reload.
   The input method applies config set within a few seconds.
+  Pick a skin with config set candidate_skin=<id> candidate_skin_dark=<id>.
   expand leaves out cloud and AI candidates and the context of earlier words.
   From a terminal, expand implies --allow-dictionary-read.
   From a terminal, config set implies --allow-write.
@@ -54,6 +55,11 @@ For an AI assistant:
   A skin's schema_version 2 adds bounded motion on any base; base = canvas,
   also version 2, is an msime-windows full-image skin. tools describes every
   skin.toml key, its range and which hosts draw it, under create_candidate_skin.
+  Its image_files maps each image path in skin.toml to the absolute path of a
+  file on this computer, which is only read, instead of base64 in images.
+  publish_candidate_skin shares an installed skin with the skin community,
+  public or private, using the account the settings app signed in to; the
+  server never signs in or asks for a password itself.
 
 Flags:
   --options <path>         The runtime-options document the input method reads
@@ -388,6 +394,11 @@ fn default_options_path(env: &impl Fn(&str) -> Option<OsString>) -> Option<PathB
 }
 
 impl Config {
+    /// 写过皮肤目录之后要把皮肤目录发布进去的运行时选项文档：Linux 的 IBus 和 Fcitx5 宿主只从这份文档知道装了哪些皮肤，其他系统的宿主直接扫皮肤目录（macOS 按包的文件身份、Windows 每 500 ms 按文件指纹发现同名替换），没有要发布的，是 `None`。
+    pub fn linux_host_options(&self) -> Option<&Path> {
+        cfg!(target_os = "linux").then_some(self.options.as_path())
+    }
+
     /// The runtime-options document as it is now.
     pub fn read_options(&self) -> Result<Value, String> {
         let file = crate::bounded::open_private(&self.options)
@@ -472,6 +483,20 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<OsString> {
         list.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn only_linux_publishes_the_skin_catalog_to_the_runtime_options() {
+        let config = Config {
+            options: PathBuf::from("/state/runtime-options.json"),
+            state_dir: None,
+            allow_write: true,
+            allow_dictionary_read: false,
+        };
+        assert_eq!(
+            config.linux_host_options(),
+            cfg!(target_os = "linux").then_some(Path::new("/state/runtime-options.json"))
+        );
     }
 
     fn serve(command: Command) -> Config {

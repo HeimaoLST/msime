@@ -83,9 +83,9 @@ run_instrumentation() {
     || { echo "Unknown instrumentation target: $component" >&2; return 1; }
   if (( sdk >= 31 )) && [[ "$target" == app.msime.android ]]; then
     "$adb" -s "$serial" shell am start -W -n app.msime.android/app.msime.android.home.HomeActivity >/dev/null
-    "$adb" -s "$serial" shell am instrument --no-restart -w "$component"
+    "$adb" -s "$serial" shell am instrument --no-restart "${@:2}" -w "$component"
   else
-    "$adb" -s "$serial" shell am instrument -w "$component"
+    "$adb" -s "$serial" shell am instrument "${@:2}" -w "$component"
   fi
 }
 # 输入法 id 必须写成 `ime list` 给出的短写：系统按字符串原样查找，长写 app.msime.android/app.msime.android.MSIMEInputService 在 `ime enable` 时报 Unknown input method。设备测试里的 `ime` 命令都用同一个短写。
@@ -218,6 +218,14 @@ printf '%s\n' "$result"
 result=$(run_instrumentation app.msime.android.test/app.msime.android.test.VoiceProviderCatalogDeviceSmoke)
 printf '%s\n' "$result"
 [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Shared voice catalog JNI acceptance failed" >&2; exit 1; }
+# 用合成内存文档核对共享换槽和清空字段策略，不保存或发送凭据。
+result=$(run_instrumentation app.msime.android.test/app.msime.android.test.VoiceProviderSettingsDeviceSmoke)
+printf '%s\n' "$result"
+[[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Shared voice settings JNI acceptance failed" >&2; exit 1; }
+# 语音接口提示与运行时共用校验；只传合成地址，不保存或联网。
+result=$(run_instrumentation app.msime.android.test/app.msime.android.test.VoiceEndpointSettingsDeviceSmoke)
+printf '%s\n' "$result"
+[[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Shared voice endpoint JNI acceptance failed" >&2; exit 1; }
 # 账号与云端的 JNI 入口和注入的会话存储（#8201）经真实 JNI 与 Rust 核对；只用合成会话、不联网，最低 API 的核心验收也执行。
 # 其中旧快照队列那一项（迁移计划 P13）要在主进程里真的激活一份整份快照，激活要独占词库维护权；输入法还绑着时 `:ime` 的会话占着词库，Rust 答 snapshot_unavailable。产品里激活只在键盘会话结束以后的 `:ime` 空闲时做，所以这里先停用本输入法让系统解绑它，跑完再启用、选回来，后面的套件照旧用它。
 "$adb" -s "$serial" shell ime disable app.msime.android/.MSIMEInputService >/dev/null
@@ -226,6 +234,14 @@ result=$(run_instrumentation app.msime.android.test/app.msime.android.test.Sessi
 "$adb" -s "$serial" shell ime set app.msime.android/.MSIMEInputService >/dev/null
 printf '%s\n' "$result"
 [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Session store JNI acceptance failed" >&2; exit 1; }
+# 原生皮肤删除覆盖真实确认框、锁与原子替换；最低 API 的核心验收也运行。
+result=$(run_instrumentation app.msime.android.test/app.msime.android.test.SettingsDeviceSmoke -e skin-delete true)
+printf '%s\n' "$result"
+[[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Native saved skin deletion acceptance failed" >&2; exit 1; }
+# 背单词内置词书：Bootstrap 解到 files/bootstrap/wordbooks，设置页经真实 JNI 读到八本书并能作答。这是应用私有目录里的解包和文件锁，最低 API 的核心验收也运行；APK 要先用 scripts/fetch_wordbooks.py 生成的词书打包。
+result=$(run_instrumentation app.msime.android.test/app.msime.android.test.SettingsDeviceSmoke -e vocabulary true)
+printf '%s\n' "$result"
+[[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Bundled wordbook acceptance failed" >&2; exit 1; }
 if [[ "$core" == true ]]; then
   bash platforms/android/tests/device/clipboard-edit-lifecycle.sh "$serial" app.msime.android
   echo "Dedicated Android AVD: install, resource setup, core typing and clipboard save lifecycle acceptance passed"
@@ -295,6 +311,10 @@ do
   printf '%s\n' "$result"
   [[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "${entry#*|}" >&2; exit 1; }
 done
+# 中文字母长按与上滑选择大小写/符号，复用标点套件的 instrumentation 入口。
+result=$(run_instrumentation app.msime.android.test/app.msime.android.test.LetterHintPunctuationDeviceSmoke -e letter-hold true)
+printf '%s\n' "$result"
+[[ "$result" == *MSIME_DEVICE_SMOKE_PASSED* ]] || { echo "Letter hold case acceptance failed" >&2; exit 1; }
 if [[ "$settings" == true ]]; then
   for suite in OptionSheetDeviceSmoke SettingsDeviceSmoke SettingsLifecycleSmoke AccountStorageDeviceSmoke CloudClipboardKeystoreDeviceSmoke CloudClipboardDriverDeviceSmoke CloudClipboardRelayDeviceSmoke; do
     result=$("$adb" -s "$serial" shell am instrument -w "app.msime.android.test/app.msime.android.test.$suite")

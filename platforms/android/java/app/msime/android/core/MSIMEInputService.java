@@ -135,6 +135,7 @@ public final class MSIMEInputService extends InputMethodService {
     ImeNineKeyQuickPunctuation imeNineKeyQuickPunctuation;
     ImeTranslationSenses imeTranslationSenses;
     ImeStylusHandwriting imeStylusHandwriting;
+    ImeStickers imeStickers;
     long session;
     InputConnection connection;
     private EditorBridge bridge = new EditorBridge();
@@ -351,8 +352,8 @@ public final class MSIMEInputService extends InputMethodService {
     private final Runnable recentClipExpiry = this::render;
     /** 发送「最近复制」图片（#6781）时读剪贴板图片、写缓存副本和清理副本都在这条线程上。 */
     private final ExecutorService clipboardImageWorker = Executors.newSingleThreadExecutor();
-    /** 换输入框或收起输入时加一：点了发送之后输入框变了，读完的图片就不再提交给新的输入框。 */
-    private long clipboardImageGeneration;
+    /** 换输入框或收起输入时加一：点了发送之后输入框变了，读完的图片就不再提交给新的输入框。表情包的贴纸（{@link ImeStickers}）发图时也看它。 */
+    long clipboardImageGeneration;
     /** 发出 {@link ClipboardImagePolicy#RETENTION_MS} 之后删掉缓存里的副本。 */
     private final Runnable clipboardImageCleanup = this::clearClipboardImages;
     boolean toolbarFloating;
@@ -751,7 +752,7 @@ public final class MSIMEInputService extends InputMethodService {
     Button backspaceRepeatButton;
     boolean backspaceRepeated;
     boolean backspaceClearedComposition;
-    private long personalDictionarySyncGeneration;
+    private volatile long personalDictionarySyncGeneration;
     private Runnable personalDictionarySyncTask;
     /** 用户每复制一次就记进本机剪贴板历史；只在本服务（当前默认输入法）存活期间监听，关掉剪贴板历史或命中隐私规则时什么也不记。 */
     private final ClipboardManager.OnPrimaryClipChangedListener clipboardWatcher = () -> {
@@ -1492,6 +1493,7 @@ public final class MSIMEInputService extends InputMethodService {
         cancelInputViewRefresh();
         InputConnection nextConnection = getCurrentInputConnection();
         if (restarting && retainRestartedComposition(info, nextConnection)) {
+            imeDebugOverlay.recordEvent(DiagnosticEventKind.IME_START);
             connection = nextConnection;
             resetCaretAnchor();
             updateAutomaticCapitalization();
@@ -1543,6 +1545,7 @@ public final class MSIMEInputService extends InputMethodService {
         currentEditorPackage = nextPackage;
         allowLearning = info != null && EditorPolicy.allowLearning(info.imeOptions);
         refreshLocalSettings();
+        imeDebugOverlay.recordEvent(DiagnosticEventKind.IME_START);
         preferencesNotice = "";
         statisticsFailureReported = false;
         // 外观和引擎是两件事。皮肤、方案角标和键高来自同一份偏好，但它们该跟着用户走，而不是跟着
@@ -1620,6 +1623,7 @@ public final class MSIMEInputService extends InputMethodService {
         imeNineKeyQuickPunctuation = new ImeNineKeyQuickPunctuation(this);
         imeTranslationSenses = new ImeTranslationSenses(this);
         imeStylusHandwriting = new ImeStylusHandwriting(this, HANDWRITING_DEBOUNCE_MILLIS);
+        imeStickers = new ImeStickers(this);
         // 必须在 super.onCreate() 之前：InputMethodService 在那里按这个主题建输入法窗口，之后再设会抛异常。按名字查是因为 core/ 要能脱离 Gradle 生成的 R 编译（check-host.sh 的 JVM 冒烟）；res/values/themes.xml 说明了这个主题为什么存在。
         // 五笔、拼音等版本的 applicationId 带后缀，资源表的包名仍是命名空间，两个都试。
         int theme = getResources().getIdentifier("Theme.MSIME.InputMethod", "style", getPackageName());
@@ -1690,6 +1694,7 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     @Override public void onFinishInput() {
+        imeDebugOverlay.recordEvent(DiagnosticEventKind.IME_FINISH);
         cancelPendingCompositionMarkerLoss();
         flushKeyPresses();
         clearQuickDeleteUndo();
@@ -1864,6 +1869,7 @@ public final class MSIMEInputService extends InputMethodService {
         // 同样排在 shutdown 之前：正在复制的那张写完后，这一步把它和更早的副本一起删掉。
         clearClipboardImages();
         clipboardImageWorker.shutdown();
+        imeStickers.shutdown();
         imeVoiceEntry.shutdown();
         imeStylusHandwriting.shutdown();
         imeKeyFeedback.shutdown();
@@ -2199,17 +2205,17 @@ public final class MSIMEInputService extends InputMethodService {
             personalDictionarySyncTask = null;
             try {
                 preferencesWorker.execute(() -> {
-                    int queued;
-                    try {
-                        queued = value(NativeClient.personalDictionarySync(options)).optInt("pending_count", 0);
-                    } catch (Exception | LinkageError ignored) {
-                        // The next idle boundary retries a busy or unavailable journal.
-                        return;
-                    }
-                    // 个人词库每同步一次最多写 128 条，导入的词库又按队列空位分批送进来。这里把下一批送进去，只要还有没写完的（队列里还有，或者刚送进了新的）就马上再来一轮，直到全部写完。每一轮都回到主线程重新确认此刻没有输入会话：键盘一弹出就停，下次空闲时接着写。
-                    DictionaryCollectionsStore.Result<Integer> sent = DictionaryCollectionsStore.flushSent(this);
-                    if (queued > 0 || (sent.value() != null && sent.value() > 0))
-                        main.post(() -> schedulePersonalDictionarySynchronization(true));
+                    if (generation != personalDictionarySyncGeneration) return;
+                    DictionaryCollectionsStore.Result<DictionaryImportSynchronization.Batch> synchronizedWords =
+                        DictionaryCollectionsStore.synchronizeIdle(options);
+                    if (!synchronizedWords.ok()) return;
+                    DictionaryImportSynchronization.Batch batch = synchronizedWords.value();
+                    // 每 100 毫秒软预算回到主线程确认空闲；失败词挡住待发项且没有进展时停止，避免空转。
+                    if (batch.pending() > 0 && (batch.sent() > 0 || batch.failed() == 0))
+                        main.post(() -> {
+                            if (generation == personalDictionarySyncGeneration && session == 0)
+                                schedulePersonalDictionarySynchronization(true);
+                        });
                 });
             } catch (RuntimeException ignored) {
                 // Service shutdown owns the final worker state.
@@ -5586,6 +5592,7 @@ public final class MSIMEInputService extends InputMethodService {
         emojiLoading = false;
         emojiSelectedCategory = Integer.MIN_VALUE;
         emojiItems = java.util.List.of();
+        imeStickers.release();
         if (emojiPanel != null) ViewPolicy.hide(emojiPanel);
         synchronizeReplyKeyboard();
     }
@@ -5625,11 +5632,13 @@ public final class MSIMEInputService extends InputMethodService {
 
     void selectEmojiCategory(int category) {
         if (!emojiPickerVisible()) return;
-        if (category < -1 || category >= EmojiCatalogModel.categories().size()) return;
+        if (category < -1 || category > imeStickers.lastEmojiCategory()) return;
+        // 离开表情包时放掉它的缩略图；表情包一次摆完，不经目录分页。
+        if (category != imeStickers.category()) imeStickers.release();
         emojiLoadGeneration++;
         emojiSelectedCategory = category;
         emojiNextOffset = 0;
-        emojiComplete = category == -1;
+        emojiComplete = category == -1 || category == imeStickers.category();
         emojiLoading = false;
         emojiItems = java.util.List.of();
         imePanels.renderEmojiTabs();
@@ -5684,7 +5693,8 @@ public final class MSIMEInputService extends InputMethodService {
     }
 
     void loadEmojiPage() {
-        if (!emojiPickerVisible() || emojiSelectedCategory < 0 || emojiLoading || emojiComplete
+        if (!emojiPickerVisible() || emojiSelectedCategory < 0
+                || emojiSelectedCategory >= EmojiCatalogModel.categories().size() || emojiLoading || emojiComplete
                 || emojiResources.isEmpty()) return;
         int categoryIndex = emojiSelectedCategory;
         EmojiCatalogModel.Category category = EmojiCatalogModel.categories().get(categoryIndex);
@@ -6588,7 +6598,7 @@ public final class MSIMEInputService extends InputMethodService {
         touchGeometrySaving = true;
         preferencesNotice = " · 正在保存键盘设置";
         final long operation = ++preferenceSaveGeneration;
-        // 高度是设计范围（75%..160%），共享偏好放不下，写进本地设置；恢复默认时删掉本地值。
+        // 高度是设计范围（75%..170%），共享偏好放不下，写进本地设置；恢复默认时删掉本地值。
         final Integer height = reset ? null : touchKeyboardHeightAdjustment;
         final java.nio.file.Path localSettingsFile = AndroidLocalSettings.file(this);
         final JSONObject sharedDocument = pending;
@@ -6925,6 +6935,8 @@ public final class MSIMEInputService extends InputMethodService {
             PrimaryImage image = clip == null ? readPrimaryImage() : null;
             if (image != null) {
                 if (image.sensitive()) return;
+                // 键盘自己放进剪贴板的表情包贴纸不是用户复制的图片，不在工具栏上再提供一次。
+                if (imeStickers.ownsClip(image.uri())) return;
                 recentClip.offerImage(image.identity(), image.mimeType(), copiedAt);
             } else {
                 if (clip == null || clip.sensitive()) return;
@@ -8796,7 +8808,7 @@ public final class MSIMEInputService extends InputMethodService {
     private void alignOverlaysBelowTopRow(View region) {
         View parent = (View) region.getParent();
         int top = (parent == null ? 0 : parent.getTop()) + region.getBottom();
-        for (View overlay : new View[] {moreToolsScroll, expandedCandidateScroll, imeNineKeyPanel.root(),
+        for (View overlay : new View[] {moreToolsScroll, expandedCandidateCanvas, imeNineKeyPanel.root(),
                 phraseScroll, emojiPanel, symbolPanel, clipboardScroll, skinScroll, schemeScroll,
                 aiPolishContainer, textEditPanel}) {
             if (overlay == null) continue;

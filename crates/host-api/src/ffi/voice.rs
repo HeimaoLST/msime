@@ -5,6 +5,34 @@
 use crate::*;
 use msime_client_core::{is_bounded_chars_without_nul, is_bounded_text};
 
+/// 设置页的语音接口地址提示；与运行时共用 URL 校验，不读写偏好或联网。
+///
+/// # Safety
+/// `endpoint` 必须指向本次调用期间可读的 `length` 个字节；空引用或超限会被拒绝。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_voice_endpoint_issue(
+    endpoint: *const u8,
+    length: usize,
+    websocket: bool,
+) -> *mut c_char {
+    response(|| unsafe {
+        with_bounded_bytes(
+            endpoint,
+            length,
+            65_536,
+            "invalid voice endpoint",
+            |bytes| {
+                let endpoint =
+                    std::str::from_utf8(bytes).map_err(|_| "invalid voice endpoint".to_owned())?;
+                let issue = msime_client_providers::voice::provider_settings::endpoint_issue(
+                    endpoint, websocket,
+                );
+                Ok(json!({"accepted": issue.is_none(), "issue": issue}))
+            },
+        )
+    })
+}
+
 /// 语音设置的公开服务目录；纯函数，不访问偏好或设备。返回值用标准 JSON 信封封装。
 #[no_mangle]
 pub extern "C" fn msime_client_voice_provider_catalog() -> *mut c_char {
@@ -24,6 +52,8 @@ struct VoiceProviderUpdateRequest {
     service: msime_client_providers::voice::provider_settings::ProviderService,
     provider: String,
     current: msime_client_providers::voice::provider_settings::ProviderFields,
+    #[serde(default)]
+    field_policy: msime_client_providers::voice::provider_settings::ProviderFieldPolicy,
 }
 
 /// 计算语音设置的换服务补丁；请求与返回均含凭据，不能记录到日志。
@@ -42,6 +72,7 @@ pub unsafe extern "C" fn msime_client_voice_provider_update(
                 query.service,
                 &query.provider,
                 &query.current,
+                query.field_policy,
             )
         ))
     })

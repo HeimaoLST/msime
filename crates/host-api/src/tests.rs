@@ -307,6 +307,7 @@ fn local_mode_resource_gates_preserve_unrelated_modes() {
         zhuyin_dictionary: String::new(),
         stroke_dictionary: String::new(),
         japanese_dictionary: String::new(),
+        wubi_dictionary: String::new(),
     };
     apply_local_mode_resource_gates(&mut options, Edition::full());
     assert!(options.local_unicode);
@@ -1602,7 +1603,7 @@ fn backspace_selection_preference_reaches_real_sessions_and_live_updates() {
 }
 
 /// `navigation.left_right` 是共享偏好但由 runtime 解释：新建会话时读一次，之后每次偏好更新也跟着走，宿主的按键路由一行都不用改。
-/// 打开后右键在输入串末尾换成下一个候选，关着时同一个键什么也不做。
+/// 默认开启时右键在输入串末尾换成下一个候选，显式关闭后同一个键什么也不做。
 #[test]
 fn left_right_navigation_preference_reaches_real_sessions_and_live_updates() {
     let root = tempfile::tempdir().unwrap();
@@ -1619,21 +1620,35 @@ fn left_right_navigation_preference_reaches_real_sessions_and_live_updates() {
             .map(|candidate| candidate["text"].as_str().unwrap().to_owned())
     };
 
-    // 关着时右键已经停在输入串末尾：光标不动，高亮留在首选。
-    let closed = read(msime_client_command(handle, 5));
-    assert_eq!(closed["ok"], true, "{closed}");
-    assert_eq!(closed["value"]["view"]["caret_position"], 5, "{closed}");
-    assert_eq!(closed["value"]["view"]["editing_text"], "nihao", "{closed}");
-    let first = highlighted(&closed["value"]["view"]);
-    assert!(first.is_some(), "{closed}");
+    // 默认开启时右键在输入串末尾换成下一个候选，输入串一个字都没变。
+    let default_open = read(msime_client_command(handle, 5));
+    assert_eq!(default_open["ok"], true, "{default_open}");
+    assert_eq!(
+        default_open["value"]["view"]["caret_position"], 5,
+        "{default_open}"
+    );
+    assert_eq!(
+        default_open["value"]["view"]["editing_text"], "nihao",
+        "{default_open}"
+    );
+    let first = default_open["value"]["view"]["candidates"][0]["text"]
+        .as_str()
+        .map(str::to_owned);
+    let default_highlighted = highlighted(&default_open["value"]["view"]);
+    assert!(first.is_some(), "{default_open}");
+    assert_ne!(default_highlighted, first, "{default_open}");
 
-    // 偏好生效后同一个键换成下一个候选，输入串一个字都没变。
-    preferences.navigation.left_right = true;
+    // 显式关闭后同一个键恢复普通光标命令，高亮不变。
+    preferences.navigation.left_right = false;
     assert_eq!(update(handle, 1, &preferences)["ok"], true);
-    let next = read(msime_client_command(handle, 5));
-    assert_ne!(highlighted(&next["value"]["view"]), first, "{next}");
-    assert_eq!(next["value"]["view"]["caret_position"], 5, "{next}");
-    assert_eq!(next["value"]["view"]["editing_text"], "nihao", "{next}");
+    let closed = read(msime_client_command(handle, 5));
+    assert_eq!(
+        highlighted(&closed["value"]["view"]),
+        default_highlighted,
+        "{closed}"
+    );
+    assert_eq!(closed["value"]["view"]["caret_position"], 5, "{closed}");
+
     read(msime_client_destroy(handle));
 }
 
@@ -3066,6 +3081,51 @@ fn fourteen_key_grid_crosses_the_host_boundary() {
     read(msime_client_destroy(handle));
 }
 
+/// 设置宿主看不到输入法实际加载了哪份词库：建会话时把资源目录记进词库更新目录，从没装过更新时不建这个目录。
+#[test]
+fn creating_a_session_records_the_resources_it_loaded_for_dictionary_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name| {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    };
+    let resources = path("resources");
+    let dictionaries = path("dictionaries");
+    let state = path("state");
+    let fixture = "CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                   INSERT INTO tbl_1_n VALUES('ni','n','你',100);
+                   CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);
+                   CREATE TABLE quick_parases(key TEXT,value TEXT,weight INTEGER);
+                   CREATE INDEX idx_quick_parases_key_weight ON quick_parases(key,weight DESC);";
+    for directory in [&resources, &dictionaries] {
+        rusqlite::Connection::open(directory.join("msime-pinyin.db"))
+            .unwrap()
+            .execute_batch(fixture)
+            .unwrap();
+    }
+    let create = || {
+        let options = json!({ "api_version": 1, "resources": resources, "user_data": path("user"), "cache": path("cache"), "dictionaries": dictionaries, "preferences_directory": state, "preferences": chinese_preferences() }).to_string();
+        let created = read(unsafe { msime_client_create(options.as_ptr(), options.len()) });
+        assert_eq!(created["ok"], true, "{created}");
+        read(msime_client_destroy(
+            created["value"]["session"].as_u64().unwrap(),
+        ));
+    };
+    let updates = state.join("dictionary-updates");
+    create();
+    assert!(!updates.exists());
+
+    std::fs::create_dir(&updates).unwrap();
+    create();
+    let loaded: Value =
+        serde_json::from_slice(&std::fs::read(updates.join("loaded.json")).unwrap()).unwrap();
+    assert_eq!(
+        Path::new(loaded["resources"].as_str().unwrap()),
+        std::fs::canonicalize(&resources).unwrap()
+    );
+}
+
 /// 三端宿主都开着 `phrase_preedit`。14 键里选了只覆盖前一段的词，退格到只剩一个组码再退格，收回这次选词：组码要回到 14 键网格里，而不是变成全拼 26 键的 `bu`，之后的 14 键照样能打。
 #[test]
 fn retreating_a_fourteen_key_selection_keeps_composing_on_the_grid() {
@@ -3443,6 +3503,7 @@ fn the_repeat_gesture_rechecks_the_scheme_after_a_preferences_update() {
             std::fs::create_dir_all(dir.path().join(name)).unwrap();
         }
         let language_dictionaries = dir.path().join("language-dictionaries");
+        bundle_wubi_table(&dir.path().join("resources"));
         // 装入合成注音词库，保证切换后实际运行注音，而不是回退全拼。
         let database =
             rusqlite::Connection::open(language_dictionaries.join("msime-zhuyin.db")).unwrap();
@@ -3978,6 +4039,73 @@ fn a_picked_skin_folder_is_copied_in_through_the_c_abi() {
 }
 
 #[test]
+fn the_skin_editor_checks_and_installs_drafts_through_the_c_abi() {
+    // 1×1 的合成 PNG。
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg==";
+    let state = tempfile::tempdir().unwrap();
+    let root = state.path().join("skins");
+    let call = |request: Value| {
+        let request = request.to_string();
+        read(unsafe { msime_client_candidate_skin_editor(request.as_ptr(), request.len()) })
+    };
+    let manifest = "schema_version = 1\nid = 'drafted'\nname = '草稿'\nversion = '1.0'\nbase = 'wechat'\npreview = 'preview.png'\n[supports]\nlayouts = ['horizontal']\nthemes = ['light', 'dark']\n[candidate_window]\nmin_width_dip = 0\n";
+    // `check` 不写皮肤目录，回复扫描会列出的那一项，外观的颜色已经补齐。
+    let checked = call(json!({
+        "operation": "check",
+        "package_id": "drafted",
+        "manifest": manifest,
+        "files": {"preview.png": PNG},
+    }));
+    assert_eq!(checked["ok"], true);
+    assert_eq!(checked["value"]["candidate"]["light"]["accent"], "#07C160");
+    assert_eq!(checked["value"]["minWidthDip"], 0.0);
+    assert!(!root.exists());
+    let create = |replace: bool| {
+        call(json!({
+            "operation": "create",
+            "directory": root,
+            "package_id": "drafted",
+            "manifest": manifest,
+            "files": {"preview.png": PNG},
+            "replace": replace,
+        }))
+    };
+    assert_eq!(
+        create(false),
+        json!({"ok": true, "value": {"id": "drafted", "replaced": false}})
+    );
+    assert!(root.join("drafted/skin.toml").is_file());
+    assert_eq!(
+        create(false),
+        json!({"ok": false, "error": "candidate_skin_exists"})
+    );
+    assert_eq!(create(true)["value"]["replaced"], true);
+    // 清单没通过扫描时带上扫描给出的原因。
+    let refused = call(json!({
+        "operation": "check",
+        "package_id": "drafted",
+        "manifest": manifest.replace("min_width_dip = 0", "min_width_dip = 5000"),
+    }));
+    assert_eq!(
+        refused,
+        json!({"ok": false, "error": "candidate_skin_package", "detail": "invalid min_width_dip"})
+    );
+    // 页面不能写到相对路径，也不能发出未知的操作或字段。
+    for request in [
+        json!({"operation": "create", "directory": "skins", "package_id": "drafted", "manifest": manifest}),
+        json!({"operation": "create", "package_id": "drafted", "manifest": manifest}),
+        json!({"operation": "delete", "package_id": "drafted", "manifest": manifest}),
+        json!({"operation": "check", "package_id": "drafted", "manifest": manifest, "path": "/"}),
+    ] {
+        assert_eq!(call(request)["error"], "candidate_skin_package");
+    }
+    assert_eq!(
+        read(unsafe { msime_client_candidate_skin_editor(std::ptr::null(), 0) })["ok"],
+        false
+    );
+}
+
+#[test]
 #[cfg(not(target_os = "android"))]
 fn skin_package_resolves_one_manifest_with_the_catalog_loader() {
     let directory = tempfile::tempdir().unwrap();
@@ -4256,7 +4384,15 @@ selected = "#112233"
 selected_text = "#AABBCC"
 selected_number = "#DDEEFF"
 preedit_caret = "#778899"
+preedit_text = "#123"
+preedit_background = "rgba(1, 2, 3, 0.5)"
+preedit_divider = "transparent"
 selected_translation = "#334455"
+[candidate.light.menu]
+background = "#abc"
+text = "#def"
+hover = "#456"
+border = "#789"
 [candidate.dark]
 text = "#123456"
 "##,
@@ -4296,6 +4432,7 @@ text = "#123456"
     assert_eq!(picked["candidate"]["text"], "#010203");
     assert_eq!(picked["candidate"]["selected"], "#FFFFFF");
     assert_eq!(picked["candidate"]["selected_text"], "#000000");
+    assert_eq!(picked["candidate_details"]["preedit_text"], "#010203");
     assert_eq!(
         picked["candidate_details"]["selected_translation"],
         "#0000009D"
@@ -4304,6 +4441,24 @@ text = "#123456"
     assert_eq!(authored["candidate"]["selected_text"], "#AABBCC");
     assert_eq!(authored["candidate"]["selected_number"], "#DDEEFF");
     assert_eq!(authored["candidate_details"]["preedit_caret"], "#778899");
+    assert_eq!(authored["candidate_details"]["preedit_text"], "#112233");
+    assert_eq!(
+        authored["candidate_details"]["preedit_background"],
+        "#01020380"
+    );
+    assert_eq!(
+        authored["candidate_details"]["preedit_divider"],
+        "#00000000"
+    );
+    for (key, expected) in [
+        ("menu_surface", "#AABBCC"),
+        ("menu_text", "#DDEEFF"),
+        ("menu_hover", "#445566"),
+        ("menu_border", "#778899"),
+    ] {
+        assert_eq!(authored["candidate_details"][key], expected);
+        assert_eq!(fallback["candidate_details"][key], expected);
+    }
     assert!(call(Some(true), false, false, "horizontal")["candidate_skin"].is_null());
 }
 
@@ -6165,6 +6320,10 @@ fn history_capture_bridge_validates_and_returns_no_text() {
 pub(super) fn test_host(root: &std::path::Path) -> u64 {
     test_host_preferences(root, chinese_preferences())
 }
+/// 夹具的资源目录带上一个五笔码表文件（空的 SQLite 库）。macOS 的发布包可以不带 `msime-wubi.db`，资源目录里没有它时 host-api 把五笔当作没装（`wubi_dictionary_missing`），这些夹具要的是一个五笔照常可用的安装。
+fn bundle_wubi_table(resources: &std::path::Path) {
+    std::fs::write(resources.join("msime-wubi.db"), b"").unwrap();
+}
 fn chinese_preferences() -> Preferences {
     Preferences {
         default_ime_mode: msime_client_core::preferences::DefaultImeMode::Chinese,
@@ -6177,6 +6336,7 @@ fn test_host_preferences(root: &std::path::Path, preferences: Preferences) -> u6
         std::fs::create_dir_all(&path).unwrap();
         path
     };
+    bundle_wubi_table(&path("resources"));
     let options = json!({ "api_version": 1, "resources": path("resources"), "user_data": path("user"), "cache": path("cache"), "dictionaries": path("dictionaries"), "preferences": preferences }).to_string();
     let created = read(unsafe { msime_client_create(options.as_ptr(), options.len()) });
     assert_eq!(created["ok"], true);
@@ -6203,6 +6363,7 @@ fn test_host_with_pinyin_fixture(root: &std::path::Path, preferences: Preference
             .execute_batch(fixture)
             .unwrap();
     }
+    bundle_wubi_table(&resources);
     let options = json!({ "api_version": 1, "resources": resources, "user_data": path("user"), "cache": path("cache"), "dictionaries": dictionaries, "preferences": preferences }).to_string();
     let created = read(unsafe { msime_client_create(options.as_ptr(), options.len()) });
     assert_eq!(created["ok"], true);
@@ -10476,6 +10637,7 @@ fn language_dictionaries_beside_the_resources_are_discovered() {
             cantonese: Some(beside.join("msime-cantonese.db")),
             zhuyin: None,
             stroke: None,
+            wubi_missing: false,
         }
     );
 
@@ -10487,6 +10649,7 @@ fn language_dictionaries_beside_the_resources_are_discovered() {
             cantonese: Some(beside.join("msime-cantonese.db")),
             zhuyin: Some(beside.join("msime-zhuyin.db")),
             stroke: None,
+            wubi_missing: false,
         }
     );
 
@@ -10500,6 +10663,7 @@ fn language_dictionaries_beside_the_resources_are_discovered() {
             cantonese: None,
             zhuyin: None,
             stroke: Some(beside.join("msime-stroke.db")),
+            wubi_missing: false,
         }
     );
     assert_eq!(
@@ -10521,16 +10685,19 @@ fn effective_scheme_falls_back_to_the_last_chinese_scheme_then_quanpin() {
         cantonese: Some("/dictionaries/msime-cantonese.db".into()),
         zhuyin: None,
         stroke: None,
+        wubi_missing: false,
     };
     let both = LanguageDictionaries {
         cantonese: Some("/dictionaries/msime-cantonese.db".into()),
         zhuyin: Some("/dictionaries/msime-zhuyin.db".into()),
         stroke: None,
+        wubi_missing: false,
     };
     let stroke_only = LanguageDictionaries {
         cantonese: None,
         zhuyin: None,
         stroke: Some("/dictionaries/msime-stroke.db".into()),
+        wubi_missing: false,
     };
     const OFFERED: Option<&str> = None;
     const NOT_OFFERED: Option<&str> = Some("this host does not offer it");
@@ -10763,6 +10930,7 @@ fn installed_language_dictionaries_enable_their_schemes() {
     let root = tempfile::tempdir().expect("tempdir");
     let resources = root.path().join("resources");
     std::fs::create_dir_all(&resources).expect("resources");
+    bundle_wubi_table(&resources);
     let engine_scheme = |scheme: InputScheme| {
         let preferences = Preferences {
             scheme,
@@ -12603,6 +12771,75 @@ fn refresh_downloaded_generation_restores_bundled_language_dictionaries() {
         super::with_installed_language_dictionaries(&document).unwrap(),
         None
     );
+}
+
+/// 背单词的内置词书和音效包一样随安装包走：没有在线更新时在 `resources` 的上一级；更新后 `resources` 指向下载代次，仍回到更新记录里的原安装包目录。
+#[test]
+fn bundled_resource_root_survives_a_downloaded_generation() {
+    let root = tempfile::tempdir().unwrap();
+    let bundle = root.path().join("bundle");
+    let resources = bundle.join("resources");
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&resources).unwrap();
+    std::fs::create_dir_all(state.join("dictionary-updates")).unwrap();
+    let shipped = json!({
+        "resources": resources,
+        "user_data": state.join("user"),
+        "dictionaries": state.join("user/dictionaries/shipped"),
+        "preferences_directory": state,
+    });
+    assert_eq!(super::bundled_resource_root(&shipped), Some(bundle.clone()));
+
+    let baseline = Edition::full().resource_set().unwrap();
+    let version = msime_client_providers::dictionary_updates::baseline_version(&baseline);
+    let mut desktop = baseline.clone();
+    for file in &mut desktop.artifacts {
+        if file
+            .url
+            .starts_with("https://github.com/metasequoiaime/msime-dictionary/releases/download/")
+        {
+            file.url = format!(
+                "https://github.com/metasequoiaime/msime-dictionary/releases/download/{version}/{}",
+                file.name
+            );
+        }
+    }
+    let selection = msime_client_providers::dictionary_updates::Selection {
+        baseline_generation: baseline.generation().unwrap(),
+        version,
+        desktop,
+        languages: None,
+        bundled_resources: resources.clone(),
+    };
+    std::fs::write(
+        state.join("dictionary-updates/installed.json"),
+        serde_json::to_vec(&json!({"active": selection, "previous": null})).unwrap(),
+    )
+    .unwrap();
+    let downloaded = state.join("dictionary-updates/generations/synthetic");
+    std::fs::create_dir_all(&downloaded).unwrap();
+    let mut updated = shipped.clone();
+    updated["resources"] = json!(downloaded);
+    updated["dictionaries"] = json!(state.join("user/dictionaries/synthetic"));
+    assert_eq!(super::bundled_resource_root(&updated), Some(bundle.clone()));
+
+    // 更新记录里的安装包目录已经不在（应用挪了位置）时不去猜，退回 `resources` 的上一级。
+    std::fs::remove_dir_all(&bundle).unwrap();
+    assert_eq!(
+        super::bundled_resource_root(&updated),
+        Some(state.join("dictionary-updates/generations"))
+    );
+    // 不是准备布局的文档只看 `resources`；相对路径说不清指向哪里。
+    let elsewhere = root.path().join("elsewhere/resources");
+    assert_eq!(
+        super::bundled_resource_root(&json!({ "resources": elsewhere })),
+        Some(root.path().join("elsewhere"))
+    );
+    assert_eq!(
+        super::bundled_resource_root(&json!({ "resources": "share/msime-client/resources" })),
+        None
+    );
+    assert_eq!(super::bundled_resource_root(&json!({})), None);
 }
 
 /// The language directory follows the resources a stale generation was prepared from, not the ones the old document recorded.
@@ -14985,6 +15222,53 @@ fn english_glosses_prefer_the_dictionaries_and_keep_learned_ones() {
     );
 }
 
+/// 旧 macOS 配置可能仍把 `EngineResources` 放在更新前的应用包外。随包输入法提供补充表作为只读回退，
+/// 这样酸奶等长尾词不会退回到较小的反向 ECDICT 表。
+#[test]
+fn candidate_gloss_request_reads_packaged_supplementary_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = root.path().join("old-resources");
+    std::fs::create_dir_all(&resources).unwrap();
+    rusqlite::Connection::open(resources.join("msime-english.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE english_words(word TEXT COLLATE BINARY NOT NULL,display TEXT NOT NULL,weight INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(word,display)) WITHOUT ROWID;
+             CREATE TABLE en_zh_glosses(english TEXT COLLATE BINARY PRIMARY KEY,chinese_gloss TEXT NOT NULL) WITHOUT ROWID;
+             CREATE TABLE zh_en_glosses(chinese TEXT COLLATE BINARY PRIMARY KEY,english_gloss TEXT NOT NULL) WITHOUT ROWID;",
+        )
+        .unwrap();
+    let packaged = root.path().join("packaged");
+    let words = packaged.join("word-glosses/zh-en.db");
+    offline_gloss_fixture(&words, "en");
+    rusqlite::Connection::open(&words)
+        .unwrap()
+        .execute(
+            "INSERT INTO zh_glosses VALUES('酸奶', 'yogurt', 'cc-cedict')",
+            [],
+        )
+        .unwrap();
+    let resources = resources.to_string_lossy().into_owned();
+    let packaged = packaged.to_string_lossy().into_owned();
+    let request = serde_json::to_vec(&json!({
+        "generation": 1,
+        "supplementary_resources": packaged,
+        "candidates": [{"text": "酸奶", "source": 0}]
+    }))
+    .unwrap();
+    let result = read(unsafe {
+        msime_client_candidate_gloss_request(
+            request.as_ptr(),
+            request.len(),
+            resources.as_ptr(),
+            resources.len(),
+        )
+    });
+    assert_eq!(
+        result["value"]["translations"],
+        json!([{"text": "酸奶", "translation": "yogurt"}])
+    );
+}
+
 #[test]
 fn gloss_breakdown_request_lines_sentences_up_with_english_words() {
     let root = tempfile::tempdir().unwrap();
@@ -15358,6 +15642,62 @@ fn publish_resource_pack(state_root: &Path, pack: ResourcePack, files: &[&str]) 
     directory
 }
 
+/// 五笔码表的位置和五笔能否运行：资源目录带着 `msime-wubi.db` 时用它（不另给路径）；不带时用已下载的 `wubi` 资源包；两处都没有时，只在本平台的发布包可以不带它（macOS）时算缺，五笔像缺词库的粤拼一样回退。
+#[test]
+fn wubi_reads_the_bundled_table_then_the_downloaded_pack_and_falls_back_without_either() {
+    let root = tempfile::tempdir().unwrap();
+    let resources = root.path().join("resources");
+    let state = root.path().join("state");
+    std::fs::create_dir_all(&resources).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    let on_demand = ON_DEMAND_ARTIFACTS
+        .iter()
+        .any(|group| group.contains(&"msime-wubi.db"));
+    assert_eq!(on_demand, cfg!(target_os = "macos"));
+
+    assert_eq!(super::wubi_dictionary(Some(&state), &resources), None);
+    assert_eq!(super::wubi_dictionary_missing(&resources, ""), on_demand);
+    let preferences = Preferences {
+        scheme: InputScheme::Wubi,
+        last_chinese_scheme: None,
+        ..Preferences::default()
+    };
+    let all = [InputScheme::Quanpin, InputScheme::Wubi];
+    let missing = LanguageDictionaries {
+        wubi_missing: true,
+        ..LanguageDictionaries::default()
+    };
+    let (effective, diagnostic) =
+        effective_scheme(&preferences, &all, &missing, InputScheme::Quanpin);
+    assert_eq!(effective, InputScheme::Quanpin);
+    assert!(diagnostic
+        .unwrap()
+        .contains("its dictionary is not installed"));
+    let (effective, diagnostic) = effective_scheme(
+        &preferences,
+        &all,
+        &LanguageDictionaries::default(),
+        InputScheme::Quanpin,
+    );
+    assert_eq!((effective, diagnostic), (InputScheme::Wubi, None));
+
+    // 下载的资源包。
+    let pack = publish_resource_pack(&state, ResourcePack::Wubi, &["msime-wubi.db"]);
+    let downloaded = super::wubi_dictionary(Some(&state), &resources).unwrap();
+    assert_eq!(downloaded, pack.join("msime-wubi.db"));
+    assert!(!super::wubi_dictionary_missing(
+        &resources,
+        downloaded.to_str().unwrap()
+    ));
+    // 没有状态目录就找不到资源包。
+    assert_eq!(super::wubi_dictionary(None, &resources), None);
+
+    // 随包的优先：Engine 读资源目录，不另给路径。
+    std::fs::write(resources.join("msime-wubi.db"), b"bundled").unwrap();
+    assert_eq!(super::wubi_dictionary(Some(&state), &resources), None);
+    assert!(!super::wubi_dictionary_missing(&resources, ""));
+}
+
 /// 设置应用据此决定 Linux 上要不要列出语言词库资源包：只有记录的目录里三个词库都在才算随包带齐。
 #[test]
 fn packaged_language_dictionaries_need_all_three_in_the_recorded_directory() {
@@ -15389,6 +15729,7 @@ fn downloaded_language_dictionaries_win_over_the_recorded_directory() {
         cantonese: Some(recorded.join("msime-cantonese.db")),
         zhuyin: Some(recorded.join("msime-zhuyin.db")),
         stroke: Some(recorded.join("msime-stroke.db")),
+        wubi_missing: false,
     };
     assert_eq!(
         LanguageDictionaries::resolve(Some(&state), Some(&recorded)),
@@ -15427,6 +15768,7 @@ fn downloaded_language_dictionaries_win_over_the_recorded_directory() {
             cantonese: Some(pack.join("msime-cantonese.db")),
             zhuyin: Some(recorded.join("msime-zhuyin.db")),
             stroke: Some(recorded.join("msime-stroke.db")),
+            wubi_missing: false,
         }
     );
     assert_eq!(
@@ -15435,6 +15777,7 @@ fn downloaded_language_dictionaries_win_over_the_recorded_directory() {
             cantonese: Some(pack.join("msime-cantonese.db")),
             zhuyin: None,
             stroke: None,
+            wubi_missing: false,
         }
     );
 
@@ -15563,7 +15906,7 @@ fn verification_accepts_resources_shipped_without_the_on_demand_pair() {
         &resources,
         &specification,
         &fresh_state("full-macos"),
-        &ON_DEMAND_JAPANESE_ARTIFACTS,
+        &[&ON_DEMAND_JAPANESE_ARTIFACTS],
     )
     .unwrap();
 
@@ -15573,7 +15916,7 @@ fn verification_accepts_resources_shipped_without_the_on_demand_pair() {
         &resources,
         &specification,
         &fresh_state("no-license"),
-        &ON_DEMAND_JAPANESE_ARTIFACTS,
+        &[&ON_DEMAND_JAPANESE_ARTIFACTS],
     )
     .is_err());
 
@@ -15583,7 +15926,7 @@ fn verification_accepts_resources_shipped_without_the_on_demand_pair() {
         &resources,
         &specification,
         &fresh_state("half"),
-        &ON_DEMAND_JAPANESE_ARTIFACTS,
+        &[&ON_DEMAND_JAPANESE_ARTIFACTS],
     )
     .is_err());
 
@@ -15594,7 +15937,7 @@ fn verification_accepts_resources_shipped_without_the_on_demand_pair() {
         &resources,
         &specification,
         &fresh_state("slim-macos"),
-        &ON_DEMAND_JAPANESE_ARTIFACTS,
+        &[&ON_DEMAND_JAPANESE_ARTIFACTS],
     )
     .unwrap();
 
@@ -15605,7 +15948,7 @@ fn verification_accepts_resources_shipped_without_the_on_demand_pair() {
             &resources,
             &state,
             &specification,
-            &ON_DEMAND_JAPANESE_ARTIFACTS,
+            &[&ON_DEMAND_JAPANESE_ARTIFACTS],
             Edition::full(),
         )
         .unwrap(),
@@ -15636,7 +15979,7 @@ fn the_platform_shipping_rule_decides_whether_a_slim_bundle_prepares() {
     ] {
         let on_demand = on_demand_artifacts(target);
         if slim_prepares {
-            assert_eq!(on_demand, ON_DEMAND_JAPANESE_ARTIFACTS, "{target}");
+            assert_eq!(on_demand[0], ON_DEMAND_JAPANESE_ARTIFACTS, "{target}");
         } else {
             assert!(on_demand.is_empty(), "{target}");
         }
@@ -15700,7 +16043,7 @@ fn the_verified_marker_is_invalidated_when_the_shipped_set_shrinks() {
         .unwrap()
         .set_modified(modified)
         .unwrap();
-    for name in on_demand {
+    for name in on_demand.iter().flat_map(|group| group.iter()) {
         std::fs::remove_file(resources.join(name)).unwrap();
     }
 
@@ -15718,7 +16061,7 @@ fn the_verified_marker_is_invalidated_when_the_shipped_set_shrinks() {
     replaced[last] ^= 0xff;
     std::fs::write(&pinyin, &replaced).unwrap();
     verify_resources_once(&resources, &specification, &state, on_demand).unwrap();
-    let shipped = specification.as_shipped_in(&resources, on_demand);
+    let shipped = specification.as_shipped_in_groups(&resources, on_demand);
     assert_eq!(shipped.artifacts.len(), 2);
     assert_eq!(
         VerifiedMarker::read(&marker).unwrap().generation,
@@ -15937,6 +16280,7 @@ fn a_resource_pack_installed_after_the_session_opened_is_picked_up_on_focus() {
              CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);",
         )
         .unwrap();
+    bundle_wubi_table(&resources);
     let dictionaries = path("dictionaries");
     std::fs::copy(
         resources.join("msime-pinyin.db"),
@@ -15988,6 +16332,7 @@ fn a_resource_pack_installed_after_the_session_opened_is_picked_up_on_focus() {
             cantonese: Some(language.join("msime-cantonese.db")),
             zhuyin: None,
             stroke: None,
+            wubi_missing: false,
         }
     );
     assert_eq!(
@@ -17440,6 +17785,49 @@ fn voice_provider_catalog_export_matches_the_shared_catalog() {
 }
 
 #[test]
+fn voice_provider_update_export_clears_fields_only_with_the_explicit_policy() {
+    for (service, provider) in [
+        ("voice.asr", "openai"),
+        ("voice.asr", "system"),
+        ("voice.asr", "local"),
+        ("voice.asr", "synthetic-future-provider"),
+        ("voice.polish", "deepseek"),
+    ] {
+        let request = serde_json::json!({
+            "service":service, "provider":provider, "field_policy":"clear", "current":{
+                "provider":"groq", "endpoint":"https://example.invalid/synthetic-proxy",
+                "model":"synthetic-custom", "token":"synthetic-current",
+                "tokens":{provider:"synthetic-target"}
+            }
+        })
+        .to_string();
+        let result =
+            read(unsafe { msime_client_voice_provider_update(request.as_ptr(), request.len()) });
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["value"]["endpoint"], "");
+        assert_eq!(result["value"]["model"], "");
+        assert_eq!(result["value"]["tokens"]["groq"], "synthetic-current");
+        if matches!(provider, "system" | "local") {
+            assert_eq!(result["value"]["token"], "");
+            assert!(result["value"]["tokens"].get(provider).is_none());
+        } else {
+            assert_eq!(result["value"]["token"], "synthetic-target");
+        }
+    }
+    let request = serde_json::json!({
+        "service":"voice.asr", "provider":"openai", "field_policy":"clear", "current":{
+            "provider":"openai", "endpoint":"https://example.invalid/synthetic-proxy",
+            "model":"synthetic-custom", "token":"synthetic-current"
+        }
+    })
+    .to_string();
+    let result =
+        read(unsafe { msime_client_voice_provider_update(request.as_ptr(), request.len()) });
+    assert!(result["value"].get("endpoint").is_none());
+    assert!(result["value"].get("model").is_none());
+}
+
+#[test]
 fn voice_provider_update_export_returns_the_shared_patch() {
     let request = serde_json::json!({
         "service":"voice.asr", "provider":"local", "current":{
@@ -17463,6 +17851,43 @@ fn voice_provider_update_export_returns_the_shared_patch() {
     assert_eq!(result["ok"], true);
     assert_eq!(result["value"]["provider"], "groq");
     assert!(result["value"].get("model").is_none());
+}
+
+#[test]
+fn voice_endpoint_issue_export_uses_shared_validation_without_echoing_input() {
+    for (endpoint, websocket, accepted) in [
+        ("", false, true),
+        (" https://例子.invalid/合成🍃 ", false, true),
+        ("https://example.invalid:bad/v1", false, false),
+        ("https://[broken/v1", false, false),
+        ("wss://example.invalid/stream", true, true),
+        ("https://example.invalid/stream", true, false),
+    ] {
+        let result = read(unsafe {
+            msime_client_voice_endpoint_issue(endpoint.as_ptr(), endpoint.len(), websocket)
+        });
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["value"]["accepted"], accepted);
+        assert_eq!(result["value"]["issue"].is_null(), accepted);
+    }
+    for (pointer, length) in [
+        (std::ptr::null(), 0),
+        (std::ptr::null(), 1),
+        (b"x".as_ptr(), 65_537),
+        (b"\xff".as_ptr(), 1),
+    ] {
+        let result = read(unsafe { msime_client_voice_endpoint_issue(pointer, length, false) });
+        assert_eq!(
+            result,
+            serde_json::json!({"ok": false, "error": "invalid voice endpoint"})
+        );
+    }
+    let oversized = "x".repeat(65_536);
+    let result = read(unsafe {
+        msime_client_voice_endpoint_issue(oversized.as_ptr(), oversized.len(), false)
+    });
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["value"]["accepted"], false);
 }
 
 #[test]
@@ -17514,6 +17939,9 @@ fn voice_provider_update_export_rejects_invalid_requests_without_echoing_credent
         br#"{"service":"voice.asr","provider":42,"current":{}}"#,
         br#"{"service":"voice.asr","provider":"openai","current":{"tokens":{"openai":42}}}"#,
         br#"{"service":"voice.asr","provider":"openai","current":null}"#,
+        br#"{"service":"voice.asr","provider":"openai","field_policy":"unknown","current":{"token":"synthetic-private"}}"#,
+        br#"{"service":"voice.asr","provider":"openai","field_policy":true,"current":{}}"#,
+        br#"{"service":"voice.asr","provider":"openai","field_policy":null,"current":{}}"#,
     ] {
         let result = read(unsafe { msime_client_voice_provider_update(request.as_ptr(), request.len()) });
         assert_eq!(result["ok"], false);

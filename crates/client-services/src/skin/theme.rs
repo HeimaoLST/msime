@@ -182,6 +182,31 @@ pub struct CandidateDetails {
     pub preedit_caret: Option<String>,
     pub selected_translation: Option<String>,
     pub selected_bar: Option<String>,
+    /// 显式释义色与分段色；不把 `secondary` 的序号默认色误当成皮肤声明的释义色。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translation_pos: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translation_separator: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_translation_pos: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_translation_separator: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preedit_background: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preedit_divider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_arrow_divider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub menu_surface: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub menu_border: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub menu_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub menu_hover: Option<String>,
 }
 
 /// The colours a host draws for the selected theme.
@@ -288,6 +313,7 @@ pub fn resolve(
         (Some(text), None) => Some(with_alpha(text, PICKED_NUMBER_ALPHA)),
         _ => None,
     };
+    let picked_preedit_text = pickers.text.clone();
     explicit.apply(pickers);
     if picked_number.is_some() {
         explicit.number = picked_number;
@@ -298,16 +324,41 @@ pub fn resolve(
     let number = explicit.number.or(base_palette.number);
     let accent = explicit.accent.or(base_palette.accent);
     let candidate_details = drawn.and_then(|(_, palette)| {
-        let details = CandidateDetails {
-            preedit_text: color(&palette.preedit_text),
-            preedit_caret: color(&palette.preedit_caret),
-            selected_translation: color(&palette.selected_translation).map(|authored| {
+        let selected_detail = |value: &Option<String>| {
+            color(value).map(|authored| {
                 picked_selected_text
                     .as_deref()
                     .map(|text| with_alpha(text, PICKED_NUMBER_ALPHA))
                     .unwrap_or(authored)
-            }),
+            })
+        };
+        let selected_translation = selected_detail(&palette.selected_translation);
+        let details = CandidateDetails {
+            preedit_text: picked_preedit_text
+                .clone()
+                .or_else(|| color(&palette.preedit_text)),
+            preedit_caret: color(&palette.preedit_caret),
+            translation: color(&palette.translation),
+            translation_pos: color(&palette.translation_pos),
+            translation_separator: color(&palette.translation_separator),
+            selected_translation_pos: selected_detail(&palette.selected_translation_pos)
+                .or_else(|| selected_translation.clone()),
+            selected_translation_separator: selected_detail(
+                &palette.selected_translation_separator,
+            )
+            .or_else(|| selected_translation.clone()),
+            selected_translation,
             selected_bar: color(&palette.selected_bar),
+            preedit_background: color(&palette.preedit_background),
+            preedit_divider: color(&palette.preedit_divider),
+            page_arrow_divider: color(&palette.page_arrow_divider),
+            menu_surface: palette
+                .menu
+                .as_ref()
+                .and_then(|menu| color(&menu.background)),
+            menu_border: palette.menu.as_ref().and_then(|menu| color(&menu.border)),
+            menu_text: palette.menu.as_ref().and_then(|menu| color(&menu.text)),
+            menu_hover: palette.menu.as_ref().and_then(|menu| color(&menu.hover)),
         };
         (details != CandidateDetails::default()).then_some(details)
     });

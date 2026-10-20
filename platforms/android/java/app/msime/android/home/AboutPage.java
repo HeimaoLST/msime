@@ -114,6 +114,7 @@ public final class AboutPage extends DetailPage {
 
         GroupCard links = GroupCard.add(sectionColumn(column, "链接"), null).withDividers(Ui.ROW_PADDING_H);
         links.nav("官网", null, "msime.app", () -> openLink(context, SITE));
+        links.nav("项目主页", null, "github.com/metasequoiaime/msime", () -> openLink(context, REPOSITORY));
         links.nav("隐私政策", null, null, () -> openLink(context, PRIVACY));
         GroupCard.Row licences = links.nav("开源许可", null, null, this::showLicences);
         if (play) {
@@ -375,7 +376,9 @@ public final class AboutPage extends DetailPage {
             }
         }
         for (String fixed : new String[] {"client-LICENSE.txt", "emoji-combinations-NOTICE.txt", "helpcodes/NOTICE.md", "helpcodes/NOTICE-jiajia.md",
-                "helpcodes/NOTICE-wubi86.md", "offline-glosses/offline-glosses-NOTICE.txt"}) {
+                "helpcodes/NOTICE-wubi86.md", "offline-glosses/offline-glosses-NOTICE.txt",
+                // 背单词内置词书取自 ECDICT（MIT），许可声明随词书一起打进 assets/wordbooks。
+                "wordbooks/wordbooks-NOTICE.txt"}) {
             if (exists(assets, fixed)) found.add(fixed);
         }
         String[] languages = assets.list("language-dictionaries");

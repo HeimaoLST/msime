@@ -8,11 +8,12 @@ use msime_client_core::preferences::{
     InputScheme, NineKeyShuangpinProfile, Preferences, PreferencesSnapshot, PreferencesStore,
     ShuangpinCustomProfile, ShuangpinProfile, WubiProfile,
 };
+use msime_client_core::theme::{GlobalTheme, ThemeAppearance};
+use msime_client_services::skin::{catalog, theme::skin_appearance};
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -189,6 +190,54 @@ pub enum StartMode {
 pub enum Width {
     Halfwidth,
     Fullwidth,
+}
+
+/// 全局主题，与 `GlobalTheme` 同名同值。
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    /// 跟随系统的明暗，画平台自己的配色。
+    System,
+    /// 只有 iOS 提供；其他宿主按 system 画。
+    Native,
+    Shuishan,
+    Light,
+    Paper,
+    Night,
+    Ink,
+    /// 用户自己的主题：候选窗画 candidate_skin / candidate_skin_dark 选中的皮肤。
+    Custom,
+}
+
+impl From<GlobalTheme> for Theme {
+    fn from(value: GlobalTheme) -> Self {
+        match value {
+            GlobalTheme::System => Self::System,
+            GlobalTheme::Native => Self::Native,
+            GlobalTheme::Shuishan => Self::Shuishan,
+            GlobalTheme::Light => Self::Light,
+            GlobalTheme::Paper => Self::Paper,
+            GlobalTheme::Night => Self::Night,
+            GlobalTheme::Ink => Self::Ink,
+            GlobalTheme::Custom => Self::Custom,
+        }
+    }
+}
+
+impl From<Theme> for GlobalTheme {
+    fn from(value: Theme) -> Self {
+        match value {
+            Theme::System => Self::System,
+            Theme::Native => Self::Native,
+            Theme::Shuishan => Self::Shuishan,
+            Theme::Light => Self::Light,
+            Theme::Paper => Self::Paper,
+            Theme::Night => Self::Night,
+            Theme::Ink => Self::Ink,
+            Theme::Custom => Self::Custom,
+        }
+    }
 }
 
 impl From<InputScheme> for Scheme {
@@ -403,6 +452,12 @@ pub struct PreferencesView {
     pub learning: bool,
     /// AI 助手：组字停顿后把拼音和前文发给用户配置的模型，回答作为一个候选放在固定座位上，等待时那一格显示「…」，没有回答时显示「—」。接口地址、模型和密钥不在这里。
     pub ai_assistant: bool,
+    /// 全局主题，候选窗、悬浮工具栏、菜单和触屏键盘共用。只有 `custom` 画下面两个槽位里的皮肤；内置主题（shuishan、light、paper、night、ink）在两种明暗下都画自己的固定配色，system 跟随系统。
+    pub global_theme: Theme,
+    /// 浅色模式用的候选窗皮肤（list_candidate_skins 的 id），candidate_skin_dark 为 null 时深色模式也用它；null 表示没有。主题不是 custom 时这里的选择保留着但不画。
+    pub candidate_skin: Option<String>,
+    /// 深色模式用的候选窗皮肤，null 时深色模式取 candidate_skin。
+    pub candidate_skin_dark: Option<String>,
 }
 
 impl From<&PreferencesSnapshot> for PreferencesView {
@@ -452,6 +507,9 @@ impl From<&PreferencesSnapshot> for PreferencesView {
             game_candidate_overlay: preferences.game_compatibility.candidate_overlay,
             learning: preferences.learning,
             ai_assistant: preferences.ai_assistant.enabled,
+            global_theme: preferences.global_theme.into(),
+            candidate_skin: preferences.custom_theme.candidate_skin.clone(),
+            candidate_skin_dark: preferences.custom_theme.candidate_skin_dark.clone(),
         }
     }
 }
@@ -516,6 +574,14 @@ pub struct PreferencesChange {
     pub game_candidate_overlay: Option<bool>,
     /// 只能关：用户嫌 AI 候选慢、占位置或不想用时关掉它。打开会把用户打的字发给外部服务并产生费用，由用户在设置里自己打开，这里给 true 会被拒绝。
     pub ai_assistant: Option<bool>,
+    /// 换全局主题。选内置主题就在两种明暗下都画它；要画皮肤用 custom，或者直接给 candidate_skin / candidate_skin_dark。
+    pub global_theme: Option<Theme>,
+    /// 浅色模式的皮肤：已安装、能用的皮肤 id（list_candidate_skins 列出的），它的 base 必须画在浅色下（system 或浅色的内置主题）；null 取下。没给 global_theme 时，选上皮肤会把全局主题换成 custom，与设置页一样。
+    #[serde(default, deserialize_with = "present")]
+    pub candidate_skin: Option<Option<String>>,
+    /// 深色模式的皮肤，规则同 candidate_skin，base 必须画在深色下（system 或深色的内置主题）；null 取下，深色模式改用 candidate_skin。
+    #[serde(default, deserialize_with = "present")]
+    pub candidate_skin_dark: Option<Option<String>>,
 }
 
 impl PreferencesChange {
@@ -553,6 +619,23 @@ impl PreferencesChange {
             && self.diagnostic_log_tsf.is_none()
             && self.game_candidate_overlay.is_none()
             && self.ai_assistant.is_none()
+            && self.global_theme.is_none()
+            && self.candidate_skin.is_none()
+            && self.candidate_skin_dark.is_none()
+    }
+
+    /// 这次修改选上的皮肤，按槽位：`(槽位名, 皮肤 id, 是否深色槽位)`。
+    fn selected_skins(&self) -> impl Iterator<Item = (&'static str, &str, bool)> {
+        [
+            ("candidate_skin", &self.candidate_skin, false),
+            ("candidate_skin_dark", &self.candidate_skin_dark, true),
+        ]
+        .into_iter()
+        .filter_map(|(slot, skin, dark)| {
+            skin.as_ref()
+                .and_then(Option::as_deref)
+                .map(|id| (slot, id, dark))
+        })
     }
 
     fn apply(&self, preferences: &mut Preferences) {
@@ -664,6 +747,26 @@ impl PreferencesChange {
         if let Some(value) = self.ai_assistant {
             preferences.ai_assistant.enabled = value;
         }
+        let custom = &mut preferences.custom_theme;
+        let had_skin = custom.candidate_skin.is_some() || custom.candidate_skin_dark.is_some();
+        if let Some(skin) = &self.candidate_skin {
+            custom.candidate_skin = skin.clone();
+        }
+        if let Some(skin) = &self.candidate_skin_dark {
+            custom.candidate_skin_dark = skin.clone();
+        }
+        // 与设置页取下皮肤时一样：两个槽位都空了，底改回 system。设置页应用皮肤时把包的 base 写进底，留着深色皮肤的 night 会让浅色模式也画成深色。
+        if had_skin && custom.candidate_skin.is_none() && custom.candidate_skin_dark.is_none() {
+            custom.base = GlobalTheme::System;
+        }
+        match self.global_theme {
+            Some(theme) => preferences.global_theme = theme.into(),
+            // 与设置页一样，选上皮肤就换到画皮肤的自定义主题。
+            None if self.selected_skins().next().is_some() => {
+                preferences.global_theme = GlobalTheme::Custom;
+            }
+            None => {}
+        }
     }
 }
 
@@ -682,7 +785,7 @@ pub fn load(state_dir: &Path, edition: &'static Edition) -> Result<PreferencesVi
     Ok(PreferencesView::from(&snapshot))
 }
 
-/// Save `change` with compare-and-swap, and on Linux publish the result into the runtime-options document the IBus and Fcitx5 hosts read their preferences from, as the settings page does.
+/// 按修订号比较后保存 `change`。在 Linux 上像设置页保存时一样，把结果连同重新扫描的皮肤目录发布进 IBus 和 Fcitx5 宿主读偏好的运行时选项文档：宿主只画目录里列出的皮肤，目录放不下全部皮肤时优先留下选中的那款，所以换了选择就要按新选择重新裁剪。
 ///
 /// `edition` 是运行时选项记录的版本：本版本不提供的方案被拒绝，例如五笔版只能选五笔。
 pub fn update(
@@ -716,6 +819,9 @@ pub fn update(
     if change.ai_assistant == Some(true) && !previous.preferences.ai_assistant.enabled {
         return Err("the AI assistant sends what the user types to an outside service; only the user can turn it on, in the input method's settings".into());
     }
+    for (slot, id, dark) in change.selected_skins() {
+        check_skin(state_dir, slot, id, dark)?;
+    }
     let mut preferences = previous.preferences.clone();
     change.apply(&mut preferences);
     // 键位表合不合法只有 Engine 说了算：给了新表，或者要用自定义方案，就先校验，免得存下一张输入法用不了、只能悄悄退回小鹤的表。
@@ -738,7 +844,10 @@ pub fn update(
         .save(change.expected_revision, preferences)
         .map_err(|error| error.to_string())?;
     if cfg!(target_os = "linux") {
-        if let Err(error) = publish_to_runtime_options(options, &snapshot.preferences) {
+        let skins = state_dir.join(crate::skins::SKIN_DIRECTORY);
+        if let Err(error) =
+            crate::runtime_options::publish_preferences(options, &skins, &snapshot.preferences)
+        {
             // A document the hosts could not read is refused along with the save that produced it, so the store and the hosts do not disagree. A concurrent writer wins over the rollback.
             let _ = store.save(snapshot.revision, previous.preferences);
             return Err(error);
@@ -747,52 +856,31 @@ pub fn update(
     Ok(PreferencesView::from(&snapshot))
 }
 
-/// The most runtime-options.json may hold on Linux: the IBus launcher, the Fcitx5 addon and the upgrade refresh all read at most 16 KiB (`LINUX_RUNTIME_OPTIONS_LIMIT` in the desktop app).
-const LINUX_RUNTIME_OPTIONS_LIMIT: usize = 16384;
-const TOO_LARGE: &str = "the runtime options would be too large for the input method to read";
-
-/// Replace the preferences in the runtime-options document, the way `sync_runtime_options` in the desktop app does. Everything else in the document, the skin catalog included, is kept as it is.
-fn publish_to_runtime_options(path: &Path, preferences: &Preferences) -> Result<(), String> {
-    let parent = path.parent().ok_or("cannot read the runtime options")?;
-    let name = path.file_name().ok_or("cannot read the runtime options")?;
-    let directory = msime_client_core::file_lock::open_private_directory(parent)
-        .map_err(|_| "cannot read the runtime options")?;
-    publish_to_runtime_options_at(&directory, name, preferences)
-}
-
-fn publish_to_runtime_options_at(
-    directory: &msime_client_core::file_lock::PrivateDirectory,
-    name: &OsStr,
-    preferences: &Preferences,
-) -> Result<(), String> {
-    let file = msime_client_core::file_lock::open_private_file_at(directory, name)
-        .map_err(|_| "cannot read the runtime options")?;
-    let bytes = crate::bounded::read(file, LINUX_RUNTIME_OPTIONS_LIMIT as u64).map_err(
-        |error| match error {
-            crate::bounded::ReadError::TooLarge => TOO_LARGE,
-            crate::bounded::ReadError::Io => "cannot read the runtime options",
+/// 槽位里要放的皮肤必须是皮肤目录里能用的那款（与 list_candidate_skins 同一条规则），而且它的 base 要画在这个槽位的明暗下：深色 base 的皮肤放进浅色槽位，浅色模式根本不画它。
+fn check_skin(state_dir: &Path, slot: &str, id: &str, dark: bool) -> Result<(), String> {
+    if GlobalTheme::from_id(id).is_some_and(|theme| theme != GlobalTheme::Native) {
+        return Err(format!(
+            "{slot}: {id} is a built-in theme, not a skin; set global_theme to {id} to use it"
+        ));
+    }
+    let skin = catalog::load_package(state_dir.join(crate::skins::SKIN_DIRECTORY), id).map_err(
+        |reason| {
+            format!("{slot}: {id} is not an installed skin that can be used ({reason}); list_candidate_skins shows the installed skins")
         },
     )?;
-    let mut document: Value =
-        serde_json::from_slice(&bytes).map_err(|_| "cannot parse the runtime options")?;
-    if !document.is_object() {
-        return Err("cannot parse the runtime options".into());
+    let mode = |appearance: ThemeAppearance| match appearance {
+        ThemeAppearance::Light => "light",
+        ThemeAppearance::Dark => "dark",
+    };
+    match skin_appearance(skin.base) {
+        Some(appearance) if (appearance == ThemeAppearance::Dark) != dark => Err(format!(
+            "{slot}: {id} is drawn over the {mode} base {base}, so it shows only in {mode} mode; put it in {other} instead",
+            mode = mode(appearance),
+            base = skin.base.id(),
+            other = if dark { "candidate_skin" } else { "candidate_skin_dark" },
+        )),
+        _ => Ok(()),
     }
-    let mut host = serde_json::to_value(preferences).map_err(|error| error.to_string())?;
-    // The IBus and Fcitx5 hosts never draw the screen keyboard, so its photo stays out of their copy.
-    if let Some(design) = host
-        .pointer_mut("/custom_theme/keyboard")
-        .and_then(Value::as_object_mut)
-    {
-        design.remove("photo");
-    }
-    document["preferences"] = host;
-    let bytes = serde_json::to_vec_pretty(&document).map_err(|error| error.to_string())?;
-    if bytes.len() > LINUX_RUNTIME_OPTIONS_LIMIT {
-        return Err(TOO_LARGE.into());
-    }
-    msime_client_core::file_lock::write_private_file_at(directory, name, &bytes)
-        .map_err(|_| "cannot write the runtime options".into())
 }
 
 #[cfg(test)]
@@ -872,6 +960,129 @@ mod tests {
             same(json!(Width::from(width)), json!(width));
             assert_eq!(CharacterWidthPreference::from(Width::from(width)), width);
         }
+        for theme in GlobalTheme::ALL {
+            same(json!(Theme::from(theme)), json!(theme));
+            assert_eq!(GlobalTheme::from(Theme::from(theme)), theme);
+        }
+    }
+
+    /// 在 `state` 的皮肤目录里放一款画在 `base` 上的最小皮肤。
+    fn install_skin(state: &Path, id: &str, base: &str) {
+        let folder = state.join(crate::skins::SKIN_DIRECTORY).join(id);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("skin.toml"),
+            format!("schema_version = 1\nid = '{id}'\nname = '{id}'\nversion = '1.0'\nbase = '{base}'\n[supports]\nlayouts = ['horizontal', 'vertical']\nthemes = ['dark', 'light']\n[candidate_window]\nmin_width_dip = 200\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_skin_is_selected_for_each_mode_after_the_catalog_accepts_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path();
+        let options = state.join("runtime-options.json");
+        std::fs::write(&options, br#"{"api_version":1}"#).unwrap();
+        install_skin(state, "dusk", "night");
+        install_skin(state, "dawn", "paper");
+        install_skin(state, "plain", "system");
+        let run = |value: Value| {
+            let change: PreferencesChange = serde_json::from_value(value).unwrap();
+            update(state, &options, Edition::full(), &change)
+        };
+        let before = load(state, Edition::full()).unwrap();
+        assert_eq!(before.global_theme, Theme::System);
+        assert_eq!(
+            (
+                before.candidate_skin.as_deref(),
+                before.candidate_skin_dark.as_deref()
+            ),
+            (None, None)
+        );
+
+        // 选上深色皮肤，没给主题时换到 custom，与设置页一样。
+        let dark =
+            run(json!({ "expected_revision": before.revision, "candidate_skin_dark": "dusk" }))
+                .unwrap();
+        assert_eq!(dark.global_theme, Theme::Custom);
+        assert_eq!(dark.candidate_skin_dark.as_deref(), Some("dusk"));
+        assert_eq!(dark.candidate_skin, None);
+
+        // 拒绝：深色皮肤放进浅色槽位、内置主题当皮肤、没装的皮肤、过期的修订号。偏好都不动。
+        for (value, expected) in [
+            (
+                json!({ "candidate_skin": "dusk" }),
+                "shows only in dark mode; put it in candidate_skin_dark",
+            ),
+            (
+                json!({ "candidate_skin_dark": "dawn" }),
+                "shows only in light mode; put it in candidate_skin",
+            ),
+            (
+                json!({ "candidate_skin": "night" }),
+                "is a built-in theme, not a skin; set global_theme to night",
+            ),
+            (
+                json!({ "candidate_skin": "missing" }),
+                "is not an installed skin",
+            ),
+            (
+                json!({ "candidate_skin": "fluent" }),
+                "is not an installed skin",
+            ),
+        ] {
+            let mut value = value;
+            value["expected_revision"] = json!(dark.revision);
+            let error = run(value).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+        let error = run(json!({ "expected_revision": before.revision, "candidate_skin": "dawn" }))
+            .unwrap_err();
+        assert!(error.contains("changed since"), "{error}");
+        assert_eq!(load(state, Edition::full()).unwrap(), dark);
+
+        // 浅色槽位放浅色或 system 底的皮肤；给了主题时按给的主题。
+        let both = run(json!({ "expected_revision": dark.revision, "candidate_skin": "dawn", "global_theme": "night" }))
+            .unwrap();
+        assert_eq!(both.global_theme, Theme::Night);
+        assert_eq!(both.candidate_skin.as_deref(), Some("dawn"));
+        assert_eq!(both.candidate_skin_dark.as_deref(), Some("dusk"));
+        let plain = run(json!({ "expected_revision": both.revision, "candidate_skin": "plain", "candidate_skin_dark": "plain", "global_theme": "custom" }))
+            .unwrap();
+        assert_eq!(
+            (
+                plain.candidate_skin.as_deref(),
+                plain.candidate_skin_dark.as_deref()
+            ),
+            (Some("plain"), Some("plain"))
+        );
+
+        // 取下最后一款皮肤时底改回 system；主题不动。
+        let mut stored = PreferencesStore::new(state).load().unwrap();
+        stored.preferences.custom_theme.base = GlobalTheme::Night;
+        let saved = PreferencesStore::new(state)
+            .save(stored.revision, stored.preferences)
+            .unwrap();
+        let cleared = run(json!({ "expected_revision": saved.revision, "candidate_skin": null, "candidate_skin_dark": null }))
+            .unwrap();
+        assert_eq!(cleared.global_theme, Theme::Custom);
+        assert_eq!(
+            (cleared.candidate_skin, cleared.candidate_skin_dark),
+            (None, None)
+        );
+        let stored = PreferencesStore::new(state).load().unwrap().preferences;
+        assert_eq!(stored.custom_theme.base, GlobalTheme::System);
+
+        // 只换主题。没有皮肤的视图照样输出两个槽位（null），输出 schema 要求的字段一个不缺。
+        let builtin =
+            run(json!({ "expected_revision": cleared.revision, "global_theme": "paper" })).unwrap();
+        assert_eq!(builtin.global_theme, Theme::Paper);
+        let view = serde_json::to_value(&builtin).unwrap();
+        assert_eq!(view["candidate_skin"], Value::Null);
+        crate::assert_required_fields_present::<PreferencesView>(&view);
+        crate::assert_required_fields_present::<PreferencesView>(
+            &serde_json::to_value(&plain).unwrap(),
+        );
     }
 
     fn change(revision: u64) -> PreferencesChange {
@@ -1044,11 +1255,7 @@ mod tests {
     fn an_update_changes_only_what_it_names_and_refuses_a_stale_revision() {
         let directory = tempfile::tempdir().unwrap();
         let options = directory.path().join("runtime-options.json");
-        std::fs::write(
-            &options,
-            br#"{"api_version":1,"candidate_skin_catalog":[{"id":"kept"}]}"#,
-        )
-        .unwrap();
+        std::fs::write(&options, br#"{"api_version":1,"resources":"/resources"}"#).unwrap();
         let before = load(directory.path(), Edition::full()).unwrap();
         let untouched = PreferencesStore::new(directory.path()).load().unwrap();
 
@@ -1125,71 +1332,16 @@ mod tests {
         assert!(update(directory.path(), &options, Edition::full(), &invalid).is_err());
         assert_eq!(load(directory.path(), Edition::full()).unwrap(), updated);
 
-        // Linux hosts read their preferences from the runtime options; the rest of that document is kept.
+        // Linux 宿主从运行时选项读偏好和皮肤目录，两样随保存一起发布；文档里其余的键保留。
         let document: Value = serde_json::from_slice(&std::fs::read(&options).unwrap()).unwrap();
         if cfg!(target_os = "linux") {
             assert_eq!(document["preferences"]["candidate_page_size"], 7);
+            assert_eq!(document["candidate_skin_catalog"], json!({"packages": []}));
         } else {
             assert!(document.get("preferences").is_none());
+            assert!(document.get("candidate_skin_catalog").is_none());
         }
-        assert_eq!(document["candidate_skin_catalog"][0]["id"], "kept");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn publishing_runtime_options_stays_in_an_open_parent_after_replacement() {
-        use std::ffi::OsStr;
-        use std::os::unix::fs::symlink;
-
-        let root = tempfile::tempdir().unwrap();
-        let original = root.path().join("state");
-        let outside = root.path().join("outside");
-        std::fs::create_dir(&original).unwrap();
-        std::fs::create_dir(&outside).unwrap();
-        let options = original.join("runtime-options.json");
-        std::fs::write(&options, br#"{"api_version":1}"#).unwrap();
-        let directory = msime_client_core::file_lock::open_private_directory(&original).unwrap();
-
-        let moved = root.path().join("moved");
-        std::fs::rename(&original, &moved).unwrap();
-        symlink(&outside, &original).unwrap();
-
-        publish_to_runtime_options_at(
-            &directory,
-            OsStr::new("runtime-options.json"),
-            &Preferences::default(),
-        )
-        .unwrap();
-
-        let written: Value =
-            serde_json::from_slice(&std::fs::read(moved.join("runtime-options.json")).unwrap())
-                .unwrap();
-        assert!(written.get("preferences").is_some());
-        assert!(!outside.join("runtime-options.json").exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn publishing_runtime_options_rejects_a_symlinked_parent() {
-        use std::os::unix::fs::symlink;
-
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let linked = root.path().join("linked");
-        symlink(outside.path(), &linked).unwrap();
-        let outside_options = outside.path().join("runtime-options.json");
-        std::fs::write(&outside_options, br#"{"api_version":1}"#).unwrap();
-
-        let result = publish_to_runtime_options(
-            &linked.join("runtime-options.json"),
-            &Preferences::default(),
-        );
-
-        assert!(result.is_err());
-        assert_eq!(
-            std::fs::read(&outside_options).unwrap(),
-            br#"{"api_version":1}"#
-        );
+        assert_eq!(document["resources"], "/resources");
     }
 
     /// 五笔版只能选五笔：别的方案被拒绝，偏好不动；还没有偏好文件时读到的是五笔版的默认值。
@@ -1508,49 +1660,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_published_document_keeps_the_photo_out_and_refuses_to_outgrow_the_hosts() {
-        let directory = tempfile::tempdir().unwrap();
-        let options = directory.path().join("runtime-options.json");
-        std::fs::write(&options, br#"{"api_version":1}"#).unwrap();
-        let mut preferences = Preferences::default();
-        preferences.custom_theme.keyboard = Some(msime_client_core::preferences::TouchKeyboardSkinDesign {
-            photo: Some("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".into()),
-            ..Default::default()
-        });
-        preferences.validate().unwrap();
-        publish_to_runtime_options(&options, &preferences).unwrap();
-        let document: Value = serde_json::from_slice(&std::fs::read(&options).unwrap()).unwrap();
-        assert_eq!(document["api_version"], 1);
-        assert!(document["preferences"]["custom_theme"]["keyboard"].is_object());
-        assert!(document["preferences"]["custom_theme"]["keyboard"]
-            .get("photo")
-            .is_none());
-
-        std::fs::write(
-            &options,
-            serde_json::to_vec(&json!({ "padding": "x".repeat(LINUX_RUNTIME_OPTIONS_LIMIT) }))
-                .unwrap(),
-        )
-        .unwrap();
-        preferences.candidate_page_size = 5;
-        assert_eq!(
-            publish_to_runtime_options(&options, &preferences).unwrap_err(),
-            TOO_LARGE
-        );
-    }
-
-    #[test]
-    fn an_oversized_source_is_rejected_before_json_decoding() {
-        let directory = tempfile::tempdir().unwrap();
-        let options = directory.path().join("runtime-options.json");
-        std::fs::write(&options, vec![b'x'; LINUX_RUNTIME_OPTIONS_LIMIT + 1]).unwrap();
-        assert_eq!(
-            publish_to_runtime_options(&options, &Preferences::default()).unwrap_err(),
-            TOO_LARGE
-        );
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
     fn an_unreadable_runtime_options_document_does_not_leave_preferences_saved() {
@@ -1566,22 +1675,15 @@ mod tests {
             update(directory.path(), directory.path(), Edition::full(), &change).unwrap_err(),
             "cannot read the runtime options"
         );
-        assert_eq!(load(directory.path(), Edition::full()).unwrap(), before);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn publishing_rejects_a_symlinked_runtime_document() {
-        use std::os::unix::fs::symlink;
-
-        let directory = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let target = outside.path().join("runtime-options.json");
-        std::fs::write(&target, br#"{"api_version":1}"#).unwrap();
-        let linked = directory.path().join("runtime-options.json");
-        symlink(&target, &linked).unwrap();
-
-        assert!(publish_to_runtime_options(&linked, &Preferences::default()).is_err());
-        assert_eq!(std::fs::read(&target).unwrap(), br#"{"api_version":1}"#);
+        // 回滚本身也是一次按修订号的保存，revision 照常往前走（并发的写入因此能胜过它）；内容回到修改之前。
+        let after = load(directory.path(), Edition::full()).unwrap();
+        assert_eq!(after.revision, before.revision + 2);
+        assert_eq!(
+            PreferencesView {
+                revision: before.revision,
+                ..after
+            },
+            before
+        );
     }
 }

@@ -422,6 +422,28 @@ char *msime_client_skin_catalog(const uint8_t *directory, size_t length);
 char *msime_client_helpcode_schemas(const uint8_t *resources, size_t length);
 /* JSON {directory:absolute skin root,id:package folder}. Validates that one package with the same loader as msime_client_skin_catalog and returns one of its camelCase packages entries; an invalid, built-in, symlinked or missing package is {ok:false,error} with the loader's reason. Reads the package: resolve on a skin or appearance change, never while drawing. */
 char *msime_client_skin_package(const uint8_t *request, size_t length);
+/* 同步解码有界内存中的 PNG/APNG 默认图或 GIF/JPEG/WebP 首帧，不读文件。
+ * 输入最多 8 MiB，边长最多 2048。成功时只调用一次回调，rgba 为非预乘 RGBA8，
+ * length = width * height * 4。字节只在回调期间有效，宿主必须当场复制；回调不得抛异常。
+ * 只有回调返回 1 时整个调用返回 1；其他回调值返回 0。
+ * 坏图、空指针和超限返回 0，且不调用回调。
+ * 只能在皮肤资源变化时加载，不能在逐键绘制中解码；这不是动画播放接口。 */
+typedef int32_t (*msime_client_skin_image_callback)(void *context, const uint8_t *rgba,
+                                                   size_t length, uint32_t width, uint32_t height);
+int32_t msime_client_skin_image_decode(const uint8_t *bytes, size_t length,
+                                      msime_client_skin_image_callback on_frame, void *context);
+/* 同步解码整张 PNG/APNG、GIF、JPEG、WebP，全部验证成功后才按序回调。
+ * 每帧为完整画布，像素格式、借用期和线程要求与单帧接口一致；最多 120 帧、800 万像素。
+ * index 从 0 开始，count 为总帧数；delay_ms 是该帧持续时间，静态图为 0。
+ * play_count 是完整播放次数，0 表示无限；有限播放结束保持末帧。
+ * GIF 无循环声明时播放一次；APNG/GIF <=10ms 归一化为 100ms；WebP 多帧固定 100ms 无限。
+ * 坏图、空指针和超限返回 0 且无回调。任一回调不返回 1 时停止并返回 0，宿主须丢弃已收帧。
+ * 宿主必须对同一包的不同图片累计像素预算；不能在逐键绘制中调用。 */
+typedef int32_t (*msime_client_skin_animation_callback)(void *context, const uint8_t *rgba,
+    size_t length, uint32_t width, uint32_t height, uint32_t index, uint32_t count,
+    uint32_t delay_ms, uint32_t play_count);
+int32_t msime_client_skin_animation_decode(const uint8_t *bytes, size_t length,
+    msime_client_skin_animation_callback on_frame, void *context);
 /* JSON {directory:absolute path,id:skin id,relative:package asset,kind:"image"|"font"}.
  * Returns {contentType,bytes}; the manifest and package containment are
  * revalidated for every call and the requested kind must match the asset. */
@@ -433,6 +455,8 @@ char *msime_client_skin_toolbar_stylesheet(const uint8_t *request, size_t length
  * folder under its own name, replacing a skin of that name whole; returns {id}.
  * The error message is skin_name, skin_manifest or storage. Touches the disk. */
 char *msime_client_skin_import(const uint8_t *request, size_t length);
+/* The shared settings page's 「制作皮肤」, ruled by client-services skin::candidate_editor. JSON {operation:"check",package_id,manifest,files} reads the draft with the catalog loader in a scratch folder, without touching the skin root, and returns the camelCase package entry msime_client_skin_catalog would list (a template manifest such as base = "wechat" with no files resolves that look's colours). {operation:"create",directory:absolute skin root,package_id, manifest,files,replace} installs it with the installer community downloads and MCP use and returns {id,replaced}. files maps package-relative image paths to standard base64. A refusal is {ok:false,error,detail?}: error is a candidate_skin_* code or storage (candidate_skin_exists when the id is taken and replace is false), detail the loader's reason when the manifest did not load. Requests may be up to 4 MiB. Decodes images and touches the disk: use a worker. */
+char *msime_client_candidate_skin_editor(const uint8_t *request, size_t length);
 /* The queued personal dictionary, for a host that cannot take the Engine's
  * maintenance lock when the request arrives. Same request shape as
  * msime_client_dictionary - {options,action} - but the operations act on
@@ -522,11 +546,17 @@ void msime_client_release_process_cache(void);
  * models 仅作建议，不限制用户自定义模型。宿主复制字段后用 msime_client_string_free 释放返回的 JSON 缓冲区。 */
 char *msime_client_voice_provider_catalog(void);
 /* 切换语音服务的纯函数；请求 <=1 MiB：{service:"voice.asr"|"voice.polish",provider:string,
- * current:{provider?,endpoint?,model?,token?,tokens?:{id:string}}}。current 缺少的字段按空值处理。
+ * current:{provider?,endpoint?,model?,token?,tokens?:{id:string}},field_policy?:"fill_defaults"|"clear"}。
+ * current 缺少的字段按空值处理。field_policy 缺省为 fill_defaults，只替换空白或出厂值；clear 在换服务时清空地址和模型。
  * value 为 {provider,token,tokens,endpoint?,model?}：省略地址/模型表示保留原值，空串表示清空。
  * 不读写偏好、不联网；宿主负责把补丁字段映射到 asr_ 或 polish_ 并保存。
  * 请求和返回含凭据，禁止记录；返回缓冲区用 msime_client_string_free 释放。 */
 char *msime_client_voice_provider_update(const uint8_t *request, size_t length);
+/* 语音设置接口预检；输入是 <=64 KiB 的 UTF-8 地址，websocket 为 true 时按 wss 校验，否则按 https 校验。
+ * 首尾空白与运行时解析一样去除，空地址表示使用默认值；非空地址复用运行时的 2048 字节和 URL 形状规则，并保留移动宿主的小写协议、无 @ 限制。
+ * value 为 {accepted:boolean,issue:string|null}；失败提示固定，不回显输入，不访问偏好或网络。
+ * 空引用、超限和非法 UTF-8 返回错误；返回缓冲区用 msime_client_string_free 释放。 */
+char *msime_client_voice_endpoint_issue(const uint8_t *endpoint, size_t length, bool websocket);
 char *msime_client_voice_start(uint64_t session);
 char *msime_client_voice_cancel(uint64_t session);
 /* Capture bounded mono 16 kHz samples. The JSON result is transient audio and
@@ -563,7 +593,7 @@ char *msime_client_voice_local_model_cancel(const uint8_t *request, size_t lengt
 char *msime_client_voice_local_model_remove(const uint8_t *request, size_t length);
 char *msime_client_voice_model_setting_check(const uint8_t *request, size_t length);
 /* 按需资源包存放在 <state_root>/resource-packs/<id>/；state_root 是 HostOptions 的 preferences_directory（Android: files/bootstrap/state），会话下次取得焦点时读取新发布的包。
- * 包 id：japanese、language-dictionaries、handwriting、settled-model、offline-glosses、voice-runtime。请求为 length 字节的 JSON（<=16384），响应使用标准封装。install 和 adopt 是阻塞调用，只能放在工作线程。
+ * 包 id：japanese、language-dictionaries、handwriting、settled-model、offline-glosses、voice-runtime、wubi、voice-runtime-macos（锁文件固定了重签的 macOS 运行库之后才有）。请求为 length 字节的 JSON（<=16384），响应使用标准封装。install 和 adopt 是阻塞调用，只能放在工作线程。
  * 错误为 "invalid resource pack request"、"invalid state root"、"invalid source"、"resource_pack_unknown"、"resource_pack_busy"（本进程正在安装或收编该包）或 "local_model_*"。
  * resource_packs: {state_root} -> [{id, state:"missing"|"installed"|"outdated", size, schemes:[...], import_files:[{name,url,size}]}]，每包一项；size 为下载字节数，import_files 为离线安装所需文件（voice-runtime 使用归档），url 为上游下载地址。
  * resource_pack_install: {state_root, pack, sources?:["https://mirror/", ...], files?:[absolute path]} -> {path}。
@@ -1122,7 +1152,7 @@ char *msime_client_music_pack(const uint8_t *request, size_t length);
 char *msime_client_plugins(const uint8_t *request, size_t length);
 /* 不带编码的常用语（<=4 MiB）：{directory: 偏好目录的绝对路径, action:{operation:"load"|"add"{text}|"remove"{id}|"replace"{id,text}|"move"{id,index}|"install_pack"{resource}|"remove_pack"{id}}}。Value 是整份文档 {phrases:[{id,text,pack}],packs:[{id,name,revision}],skipped?}；错误是固定的代码（common_phrases_io、_corrupt、_invalid、_duplicate、_limit、_too_large、_not_found）。设置进程和键盘进程都会调用，调用时锁住文件。在工作线程上调用。 */
 char *msime_client_common_phrases(const uint8_t *request, size_t length);
-/* 具名词库集合（<=17 MiB）：{options: 带 preferences_directory 的 HostOptions, action:{operation:"load"|"create"|"rename"|"delete"|"set_enabled"|"add_words"|"remove_words"|"import"|"install_community"|"queue_words"{entries}|"flush"|"third_party_matches"{entries}, ...}}，格式见 client-services 的 dictionary::collections；import 的 format 为 "scel"（搜狗细胞词库）时文件按 base64 放在 bytes_base64（不超过 8 MiB），不带 text，结构损坏时是 import_malformed；queue_words 把不属于任何集合的词（本地备份恢复的个人词库，每次最多 20000 个）排进待发送队列，value 带 queued；third_party_matches 只读地核对最多 128 个准备发布到社区的词，value 的 third_party_matches 是其中出现在搜狗细胞词库导入的集合里的下标。词条经个人词库队列传过去，键盘在下一次会话时应用。Value 是集合视图；错误是固定的代码（collections_*、builtin_locked、unsupported_format、import_*、personal_dictionary_*）。在工作线程上调用。 */
+/* 具名词库集合（<=17 MiB）：{options: 带 preferences_directory 的 HostOptions, action:{operation:"load"|"create"|"rename"|"delete"|"set_enabled"|"add_words"|"remove_words"|"import"|"install_community"|"queue_words"{entries}|"flush"|"synchronize"|"third_party_matches"{entries}, ...}}，格式见 client-services 的 dictionary::collections；import 的 format 为 "scel"（搜狗细胞词库）时文件按 base64 放在 bytes_base64（不超过 8 MiB），不带 text，结构损坏时是 import_malformed；queue_words 把不属于任何集合的词（本地备份恢复的个人词库，每次最多 20000 个）排进待发送队列，value 带 queued；third_party_matches 只读地核对最多 128 个准备发布到社区的词，value 的 third_party_matches 是其中出现在搜狗细胞词库导入的集合里的下标。词条经个人词库队列传过去，键盘在下一次会话时应用。synchronize 在 budget_millis（1–2000，默认 2000）毫秒软预算内逐批应用个人队列并补充待发项，每批至多 128 项并释放维护租约，返回 {synchronized,pending_count,failed_count,snapshot_error,sent}，pending_count 包括未发送的集合条目；普通操作的 Value 是集合视图；错误是固定的代码（collections_*、builtin_locked、unsupported_format、import_*、personal_dictionary_*）。在工作线程上调用。 */
 char *msime_client_dictionary_collections(const uint8_t *request, size_t length);
 /* 诊断包（<=65536 字节）：{state_root: 偏好目录, include:{crash_logs,performance_logs,input_events,config_snapshot}, sources:{crash_logs,performance_logs,input_events: 绝对路径|null}, destination: .zip 的绝对路径|null}。输入事件和性能记录只有恰好是 {t_ms, kind (key_down|key_up|candidate_shown|candidate_selected|commit|backspace|panel_open|panel_close|ime_start|ime_finish|input_failure_runtime_rejected|input_failure_invalid_response|input_failure_editor_rejected|input_failure_jni_link), duration_ms} 时才保留，带其他任何键（text、key、candidate……）的整行都丢掉并计数。崩溃记录只保留异常类型和栈帧：异常说明可能带着正在输入的文字，message 只留冒号前的异常类型，stack 的说明行同样处理，路径只留文件名。input_failure_* 仅供本地诊断，云端上传器须按服务端白名单过滤。配置快照把所有凭据换成 "<redacted>"。给了 destination 时写出 zip，value 是 {path,bytes,counts}；没给时 value 是 {counts,sections}，sections 是上传请求体的对象（crash_logs、perf_trace、input_events、config_snapshot）。错误：diagnostics_invalid、diagnostics_source、diagnostics_preferences、diagnostics_write。在工作线程上调用。 */
 char *msime_client_diagnostic_bundle(const uint8_t *request, size_t length);
