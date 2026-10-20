@@ -25,6 +25,10 @@ function assertSafeVariables(variables) {
   for (const [name, value] of Object.entries(variables)) {
     assert.match(name, /^--[a-z-]+$/);
     assert.equal(typeof value, "string", name);
+    if (name === "--msime-skin-font-family") {
+      assert.match(value, /^"[^"'\\,;{}<>`\u0000-\u001f\u007f]+"$/);
+      continue;
+    }
     const inner = /^url\("(.*)"\)$/.exec(value);
     if (inner) {
       assert.doesNotMatch(inner[1], /["'\\()\s<>{}`]/, `${name}: ${value}`);
@@ -463,4 +467,84 @@ test("canvas geometry follows source slice, DIP widths, bounded insets and stabl
   assert.equal(hostile.geometry.canvas.contentInsets.left, 0);
   assert.equal(hostile.geometry.canvas.lineGap, 0);
   assertComplete(hostile);
+});
+
+
+test("resolved layout preserves em, zero values and direction without changing card minimum width", () => {
+  const length = (value, em = false) => ({ value, em });
+  const skin = { base: "system", minWidthDip: 160, resolvedLayout: {
+    cornerRadiusDip: 0, borderWidthDip: 0, itemCornerRadiusDip: 0, fitContent: false,
+    horizontal: { padding: length(.3, true), itemGap: length(0), itemExtraHeight: length(4),
+      itemMinWidth: length(80), numberScale: 0, numberGap: length(.2, true) },
+    vertical: { padding: length(8), itemGap: length(3) },
+  } };
+  const horizontal = resolveSkin(skin);
+  assert.equal(horizontal.geometry.minWidth, 160);
+  assert.equal(horizontal.geometry.cornerRadius, 0);
+  assert.equal(horizontal.variables["--msime-skin-padding"], "0.3em");
+  assert.equal(horizontal.variables["--msime-skin-item-min-width"], "80px");
+  assert.equal(horizontal.variables["--msime-skin-number-size"], "0em");
+  assert.equal(horizontal.variables["--msime-skin-border-width"], "0px");
+  assert.equal(horizontal.variables["--msime-skin-horizontal-gap"], "calc(0px + 6px)");
+  assert.equal(resolveSkin({ ...skin, resolvedLayout: { ...skin.resolvedLayout, fitContent: true } }).variables["--msime-skin-horizontal-gap"], "0px");
+  const vertical = resolveSkin(skin, { layout: "vertical" });
+  assert.equal(vertical.variables["--msime-skin-padding"], "8px");
+  assert.equal(vertical.variables["--msime-skin-vertical-gap"], "3px");
+  assert.equal(resolveSkin({ ...skin, layouts: ["vertical"] }).geometry.layout, undefined);
+});
+
+test("malformed resolved geometry cannot inject CSS or unbounded sizes", () => {
+  const resolved = resolveSkin({ base: "system", resolvedLayout: {
+    geometry: { padding: { value: "1px;display:none", em: false }, itemGap: { value: Infinity, em: false },
+      itemMinWidth: { value: -1, em: false }, numberScale: 999 },
+    borderWidthDip: -1, itemCornerRadiusDip: 100000,
+  } });
+  assert.equal(resolved.variables["--msime-skin-padding"], undefined);
+  assert.equal(resolved.variables["--msime-skin-item-min-width"], undefined);
+  assert.equal(resolved.variables["--msime-skin-number-size"], undefined);
+  assert.equal(resolved.variables["--msime-skin-border-width"], undefined);
+  assert.equal(resolved.variables["--msime-skin-item-radius"], undefined);
+});
+
+test("resolved layout retains direction-specific switches and bounds preedit margins", () => {
+  const skin = { resolvedLayout: { shadow: "soft", fitContent: true,
+    horizontal: { justifyRows: false, itemCornersFollowCard: true, trimHiddenPreeditGap: true, pageArrowStyle: "triangle",
+      preeditMarginDip: { top: 0, right: 4, bottom: 7, left: 2 } },
+    vertical: { justifyRows: true, itemCornersFollowCard: false, trimHiddenPreeditGap: false } } };
+  const horizontal = resolveSkin(skin);
+  assert.equal(horizontal.geometry.layout.justifyRows, false);
+  assert.equal(horizontal.geometry.layout.itemCornersFollowCard, true);
+  assert.equal(horizontal.geometry.layout.pageArrowStyle, "triangle");
+  assert.equal(horizontal.variables["--msime-skin-preedit-margin-bottom"], "7px");
+  assert.equal(horizontal.variables["--msime-skin-preedit-margin-top"], "0px");
+  assert.equal(horizontal.variables["--msime-skin-shadow-scale"], "0.5");
+  assert.equal(horizontal.variables["--msime-skin-card-floor"], "0px");
+  const vertical = resolveSkin(skin, { layout: "vertical" });
+  assert.equal(vertical.geometry.layout.itemCornersFollowCard, false);
+  assert.equal(vertical.geometry.layout.trimHiddenPreeditGap, false);
+  assert.equal(vertical.variables["--msime-skin-preedit-margin-bottom"], undefined);
+  const hostile = resolveSkin({ resolvedLayout: { shadow: "none;display:none", horizontal: {
+    justifyRows: "true", itemCornersFollowCard: 1, pageArrowStyle: "<svg>",
+    preeditMarginDip: { top: Infinity, right: "5px", bottom: -1, left: 501 } } } });
+  assert.equal(hostile.geometry.layout.shadow, null);
+  assert.equal(hostile.geometry.layout.justifyRows, null);
+  assert.equal(hostile.geometry.layout.itemCornersFollowCard, null);
+  assert.equal(hostile.geometry.layout.pageArrowStyle, null);
+  assert.deepEqual(hostile.geometry.layout.preeditMargin, { top: 0, right: 0, bottom: 0, left: 0 });
+  assertSafeVariables(hostile.variables);
+});
+
+test("skin font family keeps the shared single-family byte limit and declaration safety", () => {
+  for (const fontFamily of ["Courier New", "示".repeat(21), "initial"]) {
+    const result = resolveSkin({ fontFamily });
+    assert.equal(result.geometry.fontFamily, fontFamily);
+    assert.equal(result.variables["--msime-skin-font-family"], JSON.stringify(fontFamily));
+    assertSafeVariables(result.variables);
+  }
+  for (const fontFamily of ["", "示".repeat(22), "a,b", 'a"b', "a\\b", "a;b", "a\nb", "<font>"]) {
+    const result = resolveSkin({ fontFamily });
+    assert.equal(result.geometry.fontFamily, undefined);
+    assert.equal(result.variables["--msime-skin-font-family"], undefined);
+  }
+  assert.equal(resolveSkin({ fontFamily: "MSIME Fixture", layouts: ["vertical"] }).geometry.fontFamily, undefined);
 });

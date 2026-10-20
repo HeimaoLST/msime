@@ -1249,10 +1249,22 @@ static void TestKeymap(NSUserDefaults *defaults, MSIMEAppearancePreferences *app
     appearance.fontSize = 32;
     appearance.vertical = YES;
     appearance.showsCandidatePreedit = NO;
-    [controller updateKeymapPanel];
     NSFont *clearanceFont = [appearance candidateFontOfSize:32];
     CGFloat measuredHeight = ceil([@"合成" sizeWithAttributes:@{NSFontAttributeName:clearanceFont}].height);
-    assert(panel.clearance >= measuredHeight + 12 + 24);
+    HiddenCandidatePanel *candidatePanel = [[HiddenCandidatePanel alloc] initWithContentRect:NSZeroRect
+        styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
+    [controller setValue:candidatePanel forKey:@"panel"];
+    NSNumber *savedPadding = appearance.candidatePadding;
+    // 让开的距离覆盖真实卡片，既检查后备字形高度，也覆盖皮肤默认、零边距和大边距。
+    for (id padding in @[NSNull.null, @0, @24]) {
+        appearance.candidatePadding = padding == NSNull.null ? nil : padding;
+        [controller updateKeymapPanel];
+        [controller renderCandidates];
+        assert(candidatePanel.requestedVisible);
+        assert(candidatePanel.frame.size.height >= measuredHeight);
+        assert(panel.clearance >= candidatePanel.frame.size.height);
+    }
+    appearance.candidatePadding = savedPadding;
     appearance.fontSize = savedFontSize;
     appearance.fontFamily = savedFamily;
     appearance.vertical = savedVertical;
@@ -2078,6 +2090,15 @@ static void TestSessionOptions() {
     assert(sounds.count == file.count + 3 && !file[@"sound_packs"]);
     NSDictionary *named = MSIMESessionOptions(@{@"api_version":@1, @"sound_packs":@"/configured/sound-packs"}, @"/synthetic/sound-packs");
     assert([named[@"sound_packs"] isEqual:@"/configured/sound-packs"]);
+
+    // 下载词库缺少辅助码时，会话从当前输入法包回退；原始配置继续供旧宿主读取。
+    NSDictionary *helpcodes = MSIMESessionOptions(file, nil, @"/synthetic/bundle/Contents/Resources");
+    assert([helpcodes[@"helpcode_fallback_resources"] isEqual:@"/synthetic/bundle/Contents/Resources"]);
+    assert(!file[@"helpcode_fallback_resources"] && helpcodes.count == file.count + 3);
+    assert(!MSIMESessionOptions(file, nil, @"relative/resources")[@"helpcode_fallback_resources"]);
+    NSDictionary *explicitHelpcodes = MSIMESessionOptions(@{@"helpcode_fallback_resources":@"/configured/resources"},
+        nil, @"/synthetic/bundle/Contents/Resources");
+    assert([explicitHelpcodes[@"helpcode_fallback_resources"] isEqual:@"/configured/resources"]);
 
     NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
     NSString *bundlePath = [root stringByAppendingPathComponent:@"Synthetic.bundle"];

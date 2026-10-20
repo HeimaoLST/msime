@@ -3358,7 +3358,7 @@ public:
       const auto length = fcitx::utf8::lengthValidated(text);
       if (length != fcitx::utf8::INVALID_LENGTH) {
         surroundingLength = length;
-        if (surrounding.cursor() <= length)
+        if (surrounding.cursor() > 0 && surrounding.cursor() <= length)
           preceding = fcitx::utf8::getChar(
               fcitx::utf8::nextNChar(text.begin(), surrounding.cursor() - 1), text.end());
       }
@@ -6597,7 +6597,9 @@ public:
           auto *state = ic->propertyFor(&factory_);
           if (!state->native_canvas_) return;
           const auto rect = ic->cursorRect();
-          state->native_canvas_->move(rect.left(), rect.top(), rect.height());
+          if (!state->native_canvas_->move(rect.left(), rect.top(), rect.height())) {
+            try { state->render(); } catch (...) { unavailable(*state); }
+          }
         });
     native_canvas_ui_watch_ = instance->watchEvent(
         fcitx::EventType::UIChanged, fcitx::EventWatcherPhase::PostInputMethod,

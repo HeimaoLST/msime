@@ -39,6 +39,10 @@ struct CandidateLayoutMetrics
     double annotationLine = 0.0;
     double translationGap = 0.0;
     double translationLine = 0.0;
+    double itemGap = 0.0;
+    // 横排列距包含 msime-windows 文字后的固定 6 DIP；竖排仍只用 itemGap。
+    double columnGap = 0.0;
+    double itemMinWidth = 0.0;
 };
 
 // A run's box relative to the row's content column: x from where the candidate text starts, y from the row top. Zero width means the run is absent. An inline run shares the first line and is centred in it; one below the first line is top aligned and may wrap.
@@ -140,12 +144,13 @@ inline double CandidateItemNaturalWidth(const CandidateItemWidths &item, const C
     const double content =
         horizontal ? std::max(line, item.translation)
                    : line + (item.translation > 0.0 ? metrics.translationGap + item.translation : 0.0);
-    return content + metrics.chrome;
+    return std::max(content + metrics.chrome, metrics.itemMinWidth);
 }
 
 // The narrowest a horizontal page's columns can be on one line: each candidate's line (text and annotation) with its chrome, the glosses left to wrap under them. The card may grow past its usual cap to this width so a page of long candidates still stays on one line.
 inline double SingleLineMinimumWidth(const std::vector<CandidateItemWidths> &items, const CandidateLayoutMetrics &metrics)
 {
+    const double columnGap = metrics.columnGap > 0.0 ? metrics.columnGap : metrics.itemGap;
     double total = 0.0;
     for (const auto &item : items)
     {
@@ -155,13 +160,14 @@ inline double SingleLineMinimumWidth(const std::vector<CandidateItemWidths> &ite
         if (wide > 0.0)
             total += std::min(std::max(CandidateItemNaturalWidth(line, metrics, true), metrics.chrome), wide);
     }
-    return total;
+    return total + (items.empty() ? 0.0 : columnGap * static_cast<double>(items.size() - 1));
 }
 
 // The columns of a horizontal page on a single line `lineWidth` wide. Columns that fit keep their natural widths. Otherwise each column whose gloss is wider than its candidate line gives up room, never below that line and in proportion to how much it could give, so the glosses wrap under their text instead of the page starting a second line. None when the candidate lines alone do not fit.
 inline std::optional<std::vector<double>> SingleLineColumns(const std::vector<CandidateItemWidths> &items, double lineWidth,
                                                             const CandidateLayoutMetrics &metrics)
 {
+    const double columnGap = metrics.columnGap > 0.0 ? metrics.columnGap : metrics.itemGap;
     std::vector<double> natural, firm;
     natural.reserve(items.size());
     firm.reserve(items.size());
@@ -178,6 +184,8 @@ inline std::optional<std::vector<double>> SingleLineColumns(const std::vector<Ca
         naturalTotal += wide;
         firmTotal += firm.back();
     }
+    const double gaps = items.empty() ? 0.0 : columnGap * static_cast<double>(items.size() - 1);
+    lineWidth = std::max(1.0, lineWidth - gaps);
     if (naturalTotal <= lineWidth)
         return natural;
     if (firmTotal > lineWidth || !(naturalTotal > firmTotal))
@@ -222,6 +230,7 @@ inline std::vector<CandidateRowLayout> LayoutCandidatePage(const std::vector<Can
         lineStart = end;
     };
     const auto singleLine = horizontal ? SingleLineColumns(items, lineWidth, metrics) : std::nullopt;
+    const double columnGap = metrics.columnGap > 0.0 ? metrics.columnGap : metrics.itemGap;
     for (std::size_t index = 0; index < items.size(); ++index)
     {
         CandidateRowLayout row;
@@ -232,7 +241,7 @@ inline std::vector<CandidateRowLayout> LayoutCandidatePage(const std::vector<Can
             if (!singleLine && x > 0.0 && x + column > lineWidth)
             {
                 closeLine(index);
-                top += tallest;
+                top += tallest + metrics.itemGap;
                 tallest = 0.0;
                 x = 0.0;
             }
@@ -240,6 +249,7 @@ inline std::vector<CandidateRowLayout> LayoutCandidatePage(const std::vector<Can
             row.y = top;
             row.width = column;
             x += column;
+            if (index + 1 < items.size()) x += columnGap;
         }
         else
         {
@@ -259,6 +269,7 @@ inline std::vector<CandidateRowLayout> LayoutCandidatePage(const std::vector<Can
         {
             row.height = std::max(row.item.height, floorHeight);
             top += row.height;
+            if (index + 1 < items.size()) top += metrics.itemGap;
         }
         rows.push_back(row);
     }

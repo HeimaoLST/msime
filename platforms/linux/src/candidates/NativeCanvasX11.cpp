@@ -27,6 +27,7 @@ struct NativeCanvasX11::Impl {
   nlohmann::json palette;
   double scale = 1;
   int width = 1, height = 1;
+  int measured_work_width = 0, measured_work_height = 0;
   int pressed = -1, hovered = -1;
   int cursor_x = 0, cursor_y = 0, cursor_height = 0;
 
@@ -143,15 +144,26 @@ struct NativeCanvasX11::Impl {
     return work;
   }
   bool measure() {
+    const auto work = workArea();
     auto *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
     auto *cr = cairo_create(surface);
-    layout = measure_native_canvas(cr, *assets, content);
+    double limit = std::min(work.width, 8192) / scale;
+    double previous_width = std::numeric_limits<double>::infinity();
+    // 外留白和挂件也占窗口宽度；收紧面板后重新排字，不能在提交窗口时裁切。
+    for (int attempt = 0; attempt < 8; ++attempt) {
+      layout = measure_native_canvas(cr, *assets, content, limit);
+      const double wanted = std::ceil(layout.width * scale);
+      if (wanted <= std::min(work.width, 8192) || wanted >= previous_width) break;
+      previous_width = wanted;
+      limit = layout.panel.width - (wanted - std::min(work.width, 8192)) / scale - 1;
+      if (limit <= 0) break;
+    }
     cairo_destroy(cr); cairo_surface_destroy(surface);
-    const auto work = workArea();
     const double wanted_width = std::ceil(layout.width * scale), wanted_height = std::ceil(layout.height * scale);
     if (wanted_width <= 0 || wanted_height <= 0 || wanted_width > work.width ||
         wanted_height > work.height || wanted_width > 8192 || wanted_height > 8192) return false;
     width = static_cast<int>(wanted_width); height = static_cast<int>(wanted_height);
+    measured_work_width = work.width; measured_work_height = work.height;
     return true;
   }
   void menu(int at) {
@@ -291,7 +303,22 @@ bool NativeCanvasX11::show(const std::string &display, std::shared_ptr<NativeCan
   state.paint();
   return true;
 }
-void NativeCanvasX11::move(int x, int y, int height) { impl_->move(x, y, height); }
+bool NativeCanvasX11::move(int x, int y, int height) {
+  auto &state = *impl_;
+  if (!state.visible) return true;
+  state.cursor_x = x; state.cursor_y = y; state.cursor_height = height;
+  const auto work = state.workArea();
+  const bool resized = work.width != state.measured_work_width || work.height != state.measured_work_height;
+  if (resized) {
+    // 单独移动光标也可能换到更窄的屏幕；重排后旧指针格位失效。
+    state.pressed = state.hovered = -1;
+    if (!state.measure()) { hide(); return false; }
+    state.shape();
+  }
+  state.move(x, y, height);
+  if (resized) state.paint();
+  return true;
+}
 void NativeCanvasX11::hide() {
   auto &state = *impl_;
   state.pressed = state.hovered = -1;

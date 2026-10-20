@@ -2,7 +2,7 @@
 import ctypes
 import configparser
 from collections import Counter
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 import io
 import json
 import os
@@ -165,9 +165,44 @@ SELECTED = (7, 91, 173)
 WIDGET = (255, 0, 171)
 
 
+
+@contextmanager
+def synthetic_work_area(width, height):
+    """仅在专用 Xvfb 中设置合成工作区，退出时移除该测试属性。"""
+    x11 = ctypes.CDLL("libX11.so.6")
+    x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+    x11.XDefaultRootWindow.restype = ctypes.c_ulong
+    x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    x11.XInternAtom.restype = ctypes.c_ulong
+    x11.XChangeProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong,
+                                    ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_ubyte), ctypes.c_int]
+    x11.XDeleteProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong]
+    x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    display = x11.XOpenDisplay(None)
+    assert display, "无法打开隔离 Xvfb"
+    root = x11.XDefaultRootWindow(display)
+    atom = x11.XInternAtom(display, b"_NET_WORKAREA", False)
+    cardinal = x11.XInternAtom(display, b"CARDINAL", False)
+    try:
+        data = (ctypes.c_ulong * 4)(0, 0, width, height)
+        x11.XChangeProperty(display, root, atom, cardinal, 32, 0,
+                            ctypes.cast(data, ctypes.POINTER(ctypes.c_ubyte)), 4)
+        x11.XSync(display, False)
+        yield
+    finally:
+        x11.XDeleteProperty(display, root, atom)
+        x11.XSync(display, False)
+        x11.XCloseDisplay(display)
+
+
 def synthetic_translation_provider(root, cleanups):
     """只返回合成释义，通过真实本地 socket 进入宿主刷新链。"""
     path = root / "translation.sock"
+    fixture = root / "translation.txt"
+    fixture.write_text("proper n. MMM；n. MMM")
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(str(path))
     server.listen(4)
@@ -196,7 +231,7 @@ def synthetic_translation_provider(root, cleanups):
                     document = json.loads(request)
                     assert document["kind"] == "translation"
                     texts = document["query"]["candidates"]
-                    reply = {"translations": ([{"text": texts[0], "translation": "proper n. MMM；n. MMM"}]
+                    reply = {"translations": ([{"text": texts[0], "translation": fixture.read_text()}]
                                                if texts else [])}
                     client.sendall(json.dumps(reply).encode() + b"\n")
             except Exception as error:
@@ -445,7 +480,7 @@ def accept_pager(manifest, preferences, publish, entry):
     wait(lambda: selected_pixels() == original_pixels)
 
 
-def accept_translation(manifest, preferences, publish, entry):
+def accept_translation(manifest, preferences, publish, entry, fixture):
     original = manifest.read_text()
     normal = ((239, 48, 64), (20, 223, 90), (40, 112, 255))
     selected = ((255, 212, 42), (250, 57, 224), (38, 231, 231))
@@ -475,6 +510,10 @@ def accept_translation(manifest, preferences, publish, entry):
             return result
         return all(ink(color) >= 2 for color in colors)
 
+    def selected_height():
+        size = selected_pixels()
+        return size[1] if size is not None else 0
+
     wait(lambda: visible(selected))
     save_image("native-translation-selected")
     subprocess.run(["xdotool", "key", "Down"], check=True, timeout=5)
@@ -486,12 +525,53 @@ def accept_translation(manifest, preferences, publish, entry):
     manifest.write_text(style.replace("#FA39E0", "#C667F1"))
     wait(lambda: visible((selected[0], replacement, selected[2])))
     save_image("native-translation-hot-update")
+    short_height = selected_height()
     left, top, right, bottom = color_bounds(SELECTED)
     subprocess.run(["xdotool", "mousemove", str((left + right) // 2), str((top + bottom) // 2), "click", "1"],
                    check=True, timeout=5)
     wait(lambda: entry.get_text() == "你")
     assert "MMM" not in entry.get_text(), "释义进入了上屏文字"
     wait(lambda: native_window() is None)
+    # 重建组合后通过真实异步协议返回长释义；不能把回退 classicui 当作成功换行。
+    fixture.write_text("proper n. " + "MMM " * 55 + "；n. " + "合成MMM" * 12)
+    entry.set_text("")
+    subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "100", "ni"], check=True, timeout=5)
+    wait(lambda: native_window() is not None and selected_height() > short_height + 10 * NATIVE_SCALE)
+    wait(lambda: visible((selected[0], replacement, selected[2])))
+    bounds = window_geometry(native_window())
+    screen = screenshot()[0]
+    assert 0 <= int(bounds["X"]) <= screen.get_width() - int(bounds["WIDTH"]), "长释义窗口横向超出工作区"
+    assert 0 <= int(bounds["Y"]) <= screen.get_height() - int(bounds["HEIGHT"]), "长释义窗口纵向超出工作区"
+    save_image("native-long-translation")
+    original_width, original_height = int(bounds["WIDTH"]), selected_height()
+    narrow_width = screen.get_width() // 2
+    assert original_width > narrow_width, "合成长释义没有触达原工作区宽度"
+    with synthetic_work_area(narrow_width, screen.get_height()):
+        # 只移动光标矩形，不发按键或更新候选；窗口必须按新工作区重新断行。
+        entry.set_alignment(1.0)
+        wait(lambda: native_window() is not None and int(window_geometry(native_window())["WIDTH"]) <= narrow_width)
+        wait(lambda: selected_height() > original_height)
+        save_image("native-long-translation-narrow-workarea")
+    entry.set_alignment(0.0)
+    wait(lambda: native_window() is not None and int(window_geometry(native_window())["WIDTH"]) == original_width)
+    wait(lambda: selected_height() == original_height)
+    with synthetic_work_area(narrow_width, 20):
+        entry.set_alignment(0.5)
+        wait(lambda: native_window() is None)
+        wait(lambda: palette_visible((SELECTED,)))
+        assert entry.get_text() == "", "工作区回退意外提交了候选"
+        save_image("native-long-translation-workarea-fallback")
+    entry.set_alignment(0.0)
+    subprocess.run(["xdotool", "key", "BackSpace", "i"], check=True, timeout=5)
+    wait(lambda: native_window() is not None and int(window_geometry(native_window())["WIDTH"]) == original_width)
+    wait(lambda: selected_height() == original_height)
+    left, top, right, bottom = color_bounds(SELECTED)
+    # 点击新增行高的底部，检查换行后的矩形仍使用原候选身份。
+    subprocess.run(["xdotool", "mousemove", str((left + right) // 2), str(bottom - 3 * NATIVE_SCALE), "click", "1"],
+                   check=True, timeout=5)
+    wait(lambda: entry.get_text() == "你")
+    wait(lambda: native_window() is None)
+    fixture.write_text("proper n. MMM；n. MMM")
     preferences["candidate_translations"] = False
     publish()
     manifest.write_text(original)
@@ -721,6 +801,18 @@ def main():
                         popup = GdkX11.X11Window.foreign_new_for_display(Gdk.Display.get_default(), int(native_window()))
                         assert popup.get_visual().get_depth() == 32, "合成器存在时没有创建 ARGB 候选窗"
                     wait(lambda: palette_visible((WIDGET, SELECTED)))
+                    # 清单未写高亮圆角，必须继承 canvas 的 4 DIP；显式零值仍应画直角。
+                    manifest = skin / "skin.toml"
+                    default_manifest = manifest.read_text()
+                    default_selected = selected_pixels()
+                    assert default_selected[2][:3] != bytes(SELECTED), "缺省高亮未继承出厂圆角"
+                    assert default_selected[1] >= (20 * 1.35 + 2) * NATIVE_SCALE
+                    save_image("native-factory-layout")
+                    manifest.write_text(default_manifest.replace(
+                        "[candidate_window]\n", "[candidate_window]\nitem_corner_radius_dip = 0\n"))
+                    wait(lambda: selected_pixels() is not None and selected_pixels()[2][:3] == bytes(SELECTED))
+                    manifest.write_text(default_manifest)
+                    wait(lambda: selected_pixels() == default_selected)
                     selected_before = palette_top(SELECTED)
                     widget_before = palette_top(WIDGET)
                     assert widget_before < selected_before, "上方挂件未扩展原生窗口留白"
@@ -741,12 +833,14 @@ def main():
                         "number_scale = 0.45\nnumber_inset = 16\nnumber_gap = 24\n"
                         "item_padding_right = 20\nitem_gap = 12\npreedit_margin_dip = [7, 11, 9, 13]\n")
                     manifest.write_text(styled_manifest)
-                    wait(lambda: selected_pixels() is not None and
-                         selected_pixels()[1] >= int(preferences['candidate_font_size'] * 1.35 + 34) * NATIVE_SCALE)
+                    def selected_height_at_least(height):
+                        pixels = selected_pixels()
+                        return pixels is not None and pixels[1] >= height * NATIVE_SCALE
+                    wait(lambda: selected_height_at_least(int(preferences['candidate_font_size'] * 1.35 + 34)))
                     assert palette_top(SELECTED) == selected_before + 7 * NATIVE_SCALE, "拼音上边距未进入真实候选布局"
                     before_font = selected_pixels()
                     manifest.write_text(styled_manifest.replace("[candidate_window]\n", "[candidate_window]\nfont_family = 'monospace'\n"))
-                    wait(lambda: selected_pixels() is not None and selected_pixels() != before_font)
+                    wait(lambda: (pixels := selected_pixels()) is not None and pixels != before_font)
                     save_image("native-skin-layout")
                     assert focused(), "布局或字体热更新抢走编辑器焦点"
                     # 点击新增行高底部，若命中仍用旧矩形就会错选下一项。
@@ -764,7 +858,7 @@ def main():
                     wait(lambda: selected_pixels() == original_selected)
                     accept_pager(manifest, preferences, publish, entry)
                     wait(lambda: selected_pixels() == original_selected)
-                    accept_translation(manifest, preferences, publish, entry)
+                    accept_translation(manifest, preferences, publish, entry, root / "translation.txt")
                     wait(lambda: selected_pixels() == original_selected)
                     before_move = window_geometry(native_window())
                     window.move(100, 80)

@@ -4,17 +4,21 @@ Status: implemented
 
 ## Problem
 
-[原生 X11 画布](../../implemented/architecture/2026-10-20-linux-native-canvas-x11.md)和[图片动画](../../implemented/feature/2026-10-20-linux-canvas-animation.md)已有真实 GTK 验收，但布局仍写死内边距、候选高度、序号字号与间距。共享 catalog 已解析这些字段，装上同一份 msime-windows 皮肤仍画不出指定布局。固定参考 `msime-windows@dd018f79858314ed542a47c528608752b13bd261` 的 `candidate_skin_tokens.cpp`、`candidate_skin_layers.cpp` 与 `candidate_skin_scene.cpp`。
+[原生 X11 画布](../../implemented/architecture/2026-10-20-linux-native-canvas-x11.md)和[图片动画](../../implemented/feature/2026-10-20-linux-canvas-animation.md)已有真实 GTK 验收，但布局仍写死内边距、候选高度、序号字号与间距。共享 catalog 已解析这些字段，装上同一份 msime-windows 皮肤仍画不出指定布局。固定参考 `msime-windows@dd018f79858314ed542a47c528608752b13bd261` 的 `candidate_skin_tokens.cpp`、`candidate_skin_layers.cpp`、`candidate_skin_scene.cpp` 与 `CandidateList.cpp`。长正文和释义此前没有宽度约束，整个候选窗超出工作区后只能退回桌面面板，无法保持画布皮肤。
 
 ## Decision
 
 沿用共享 catalog 的已校验输出，按公共 `geometry`、当前排列覆盖表的顺序消费布局。Pango 保留用户字号，皮肤 `fontFamily` 排在用户字体及其回退链之前；按实际 DIP 字号换算 em 并取整，不能把 Pango 的 point 直接当作 DIP。测量、绘制、点击共用同一份布局与字体，不能只改变绘制偏移。
 
-消费 `padding`、`item_gap`、`item_extra_height`、`number_inset`、`item_padding_right`、`item_min_width`、`number_gap`、`number_scale`、`preedit_margin_dip`、`justify_rows` 和 `min_width_dip`。显式 content insets 仍按每边与九宫格边宽取最大值，未指定时才使用皮肤 padding；`line_gap_dip` 优先于拼音底部 margin。没有相关字段时保留既有布局。当前原生横排只有一行，均分只作用于该行真实存在的候选。`number_scale = 0` 隐藏序号字形，但仍保留来源的最小 9 DIP 序号栏与 `number_gap`，避免把合法零值误当作移除整个标签。隐藏拼音时本来就不留行距，`trim_hidden_preedit_gap` 无额外动作。`fit_content` 只改变横排显式间距的额外 6 DIP 及内容尾部留白，现有宽度本来就随内容收缩。
+消费 `padding`、`item_gap`、`item_extra_height`、`number_inset`、`item_padding_right`、`item_min_width`、`number_gap`、`number_scale`、`preedit_margin_dip`、`justify_rows` 和 `min_width_dip`。显式 content insets 仍按每边与九宫格边宽取最大值，未指定时才使用皮肤 padding；`line_gap_dip` 优先于拼音底部 margin。没有相关字段时保留既有布局。横排在可用宽度不足时折到下一行，每行独立撑高与均分。`number_scale = 0` 隐藏序号字形，但仍保留来源的最小 9 DIP 序号栏与 `number_gap`，避免把合法零值误当作移除整个标签。隐藏拼音时本来就不留行距，`trim_hidden_preedit_gap` 无额外动作。`fit_content` 只改变横排显式间距的额外 6 DIP 及内容尾部留白，现有宽度本来就随内容收缩。
+
+长文本遵循固定上游 `CandidateList.cpp` 的可用宽度语义：正文和释义完整换行，竖排只有短正文与整段释义都能放下时才并列，否则释义移到下方。Pango 使用词边界与字符回退换行，保留原文及 UTF-8 分段范围。布局保存每项文字的测量宽度；均分只扩展背景和命中，不让绘制擅自改变断行。预编辑、辅助行和预编辑光标也共用受限布局。短预编辑和辅助行保留原有最小行高，长文本只向下增高，避免 ASCII 与中文字体回退的行高差异改变短文本布局。
+
+X11 在测量前取得光标所在工作区并按缩放换算 DIP；九宫格、outer insets 与挂件参与最终窗口尺寸复核，必要时收紧面板宽度后重测。超高、最小序号栏也放不下或装饰无法容纳时仍回退桌面面板，不裁掉候选文字。默认无宽度限制的测量入口继续供离屏测试使用。候选显示后的独立光标矩形更新也会复核工作区尺寸，变窄或变矮时重新测量并取消旧指针格位；失败返回宿主重建桌面面板，不能只隐藏原生窗而留下空面板。
 
 ### 列表内翻页
 
-固定参考同一上游的 `CandidateRowWithPager`、`PagerArrows.cpp` 和 `candidate_skin_scene.cpp`，来源和 GPL 许可记入[第三方清单](../../../../docs/third-party.md#linux-原生画布翻页)。原生画布消费 `pageArrows`、公共及排列覆盖的 `pageArrowStyle`；折线箭头用序号色，圆角三角用候选文字色，尺寸跟随候选 DIP 字号。横排在列表右侧留出整列，箭头位于最后一行底部，折线按基础候选行高抬起；三角在箭头前显示 `page_arrow_divider`。竖排另起矮行，上一页字形左端对齐序号左缘。辅助信息单独占行，不再把翻页塞在其尾部；均分只分配箭头之外的候选区域。
+固定参考同一上游的 `CandidateRowWithPager`、`PagerArrows.cpp` 和 `candidate_skin_scene.cpp`，来源和 GPL 许可记入[第三方清单](../../../../docs/third-party.md#linux-原生画布翻页)。原生画布消费 `pageArrows`、公共及排列覆盖的 `pageArrowStyle`；折线箭头用序号色，圆角三角用候选文字色，尺寸跟随候选 DIP 字号。横排在列表右侧留出整列，箭头位于最后一行底部，折线按基础候选行高抬起；三角在箭头前显示 `page_arrow_divider`。竖排另起矮行，上一页字形左端对齐序号左缘。辅助信息单独占行，不再把翻页塞在其尾部；均分只分配箭头之外的候选区域，长文本折行也只用翻页列左侧的宽度。
 
 `pageArrows` 缺省关闭有明确适用边界：`load_native_canvas` 只接管 `canvas = true` 的包，上游 `canvas` 开关沿用 `fluent`，其出厂默认关闭。非 canvas 基底仍由已有桌面面板处理，不在 Linux 复制所有基底的开关表。显式 `false` 隐藏箭头，横排的展开开关优先于翻页开关，竖排不受展开开关影响；展开面板自身仍待补齐。开关不改变运行时是否可翻页，也不改变已有鼠标滚轮偏好。
 
@@ -35,6 +39,8 @@ Status: implemented
 
 只在绘制阶段偏移文字最容易保持窗口尺寸，却会导致文字越界、点击区域与高亮错位，因此测量和绘制使用同一份解析结果。
 
+在窗口提交前裁切或省略超长释义能避免重测，却会丢掉上游承诺显示的内容；使用 Pango 的受限布局并把新增高度传入命中矩形。
+
 ## Testing
 
 列表内翻页的原生像素测试覆盖公共／排列覆盖顺序、字体 DIP 尺寸、横竖排槽位、均分避让、辅助行分离、禁用字形透明度、禁用命中、悬停／按下、菜单关闭及横排展开优先级。共享主题 26 项测试与 `client-services --all-targets` Clippy（`-D warnings`）通过，规范化分隔线色通过 JSON 输出。
@@ -53,8 +59,14 @@ Status: implemented
 
 Rust 格式、Python 语法、笔记门禁与差异检查通过。
 
+长文本与动态工作区切片在构建机 run `20261020-091209` 通过 8/8：原生像素、候选行，以及普通／2 倍缩放／合成器下横竖排六组真实 GTK。像素覆盖中文、组合字符、emoji、无空格长串、长释义分段颜色、逐行撑高与均分、预编辑换行光标及辅助行翻页留白；GTK 通过真实 socket 异步返回合成长释义，窗口保持在屏幕内，点击新增行高底部仅上屏正文，恢复原配置后基线像素复原。验收同时发现并修复 ASCII 预编辑实际行高小于中文回退字体导致的短布局偏移，原有最小行高保留。
+
+同一 run 通过补充短行高、逐行高亮和动态工作区断言后的原生像素测试、笔记与差异检查，以及 `bash scripts/verify-local.sh --quick`（脚本按改动范围选择阶段）：Linux 原生 93/93、Rust 工作区、Android 目标、Linux 设置壳与 Apple 桥接通过。脚本按本次改动范围跳过 Windows 策略、WebAssembly、Android Java、macOS 和 pipe 阶段；Windows 原生缺 MinGW，HarmonyOS HAP 缺 staged 输入而跳过。此结果只证明实际执行的范围，不外推为其他平台设备验收。
+
+独立光标更新的回归用 GTK 改变输入框文字对齐触发，不输入按键、不重建候选；专用 Xvfb 先收窄工作区，再恢复宽度，并验证过矮工作区恢复桌面候选。固定旧提交 `a10b69c42d` 的三个窗口／宿主文件作临时对照，run `20261020-090428` 在宽度断言处按预期失败；当前实现同一断言与工作区恢复、过矮回退检查在最终六组 GTK 中全部通过。对照只使用本分支已提交文件，结束后恢复当前实现，不保留旧实现副本。
+
 ## Consequences
 
 收益是清单中的字体、序号与候选几何进入真实原生绘制，点击复用新的矩形；代价是需要同时维护 Pango 字体单位、分离序号测量和布局覆盖顺序。多行候选按真实文字高度撑高，横排同一行取最大高度。
 
-选中竖条、逐角圆角与预编辑细分颜色由[原生画布外观](../../implemented/feature/2026-10-20-linux-canvas-appearance.md)补充；[释义分段](2026-10-20-candidate-translation-runs.md)补充共享范围和实际分段配色；材质、长文本换行与展开面板仍有缺口，不能因此宣称完整 Linux 或全平台视觉兼容。字体按系统字体解析，不添加本地字体文件加载。未指定字段仍使用 Linux 原生默认值，未补齐来源各 base 的出厂几何。
+选中竖条、逐角圆角与预编辑细分颜色由[原生画布外观](../../implemented/feature/2026-10-20-linux-canvas-appearance.md)补充；[释义分段](2026-10-20-candidate-translation-runs.md)补充共享范围和实际分段配色；材质与展开面板仍有缺口，不能因此宣称完整 Linux 或全平台视觉兼容。字体按系统字体解析，不添加本地字体文件加载。Windows 基底的出厂几何由[共享出厂布局](2026-10-20-skin-factory-layout.md)提供；原生画布优先读取合并后的横竖排结果，旧 catalog 与普通主题仍沿用既有宿主默认。受限布局增加逐项测量成本；不改变候选身份、上屏和异步释义的代次围栏。

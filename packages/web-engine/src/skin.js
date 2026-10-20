@@ -253,6 +253,35 @@ function insets(value, maximum, topBottomMaximum = maximum) {
   return Object.fromEntries(["top", "right", "bottom", "left"].map((side) => [side, dimension(value[side] ?? 0, side === "top" || side === "bottom" ? topBottomMaximum : maximum)]));
 }
 
+/** 共享 catalog 发布的 Windows 出厂版式；旧网页结果没有该字段时保持旧默认。 */
+function resolvedLayout(skin, layout) {
+  const raw = skin?.resolvedLayout;
+  if (raw === null || typeof raw !== "object") return null;
+  const source = raw[layout] !== null && typeof raw[layout] === "object" ? raw[layout] : raw.geometry;
+  if (source === null || typeof source !== "object") return null;
+  const length = (value) => value !== null && typeof value === "object" && Number.isFinite(value.value)
+    && value.value >= 0 && value.value <= 500 && typeof value.em === "boolean"
+    ? { value: value.value, em: value.em } : null;
+  const number = (object, key, max = 500) => typeof object?.[key] === "number" && Number.isFinite(object[key])
+    && object[key] >= 0 && object[key] <= max ? object[key] : null;
+  return {
+    padding: length(source.padding), itemGap: length(source.itemGap), itemExtraHeight: length(source.itemExtraHeight),
+    numberInset: length(source.numberInset), numberGap: length(source.numberGap), itemPaddingRight: length(source.itemPaddingRight),
+    itemMinWidth: length(source.itemMinWidth), numberScale: number(source, "numberScale", 2), selectedBarWidth: length(source.selectedBarWidth),
+    selectedBarHeightEm: number(source, "selectedBarHeightEm", 10), selectedBarInside: typeof source.selectedBarInside === "boolean" ? source.selectedBarInside : null,
+    itemRadius: number(raw, "itemCornerRadiusDip", 32), radius: number(raw, "cornerRadiusDip", 32), borderWidth: number(raw, "borderWidthDip", 10),
+    pageArrows: typeof raw.pageArrows === "boolean" ? raw.pageArrows : null,
+    fitContent: typeof raw.fitContent === "boolean" ? raw.fitContent : null,
+    expandPanel: typeof raw.expandPanel === "boolean" ? raw.expandPanel : null,
+    shadow: ["none", "soft", "strong"].includes(raw.shadow) ? raw.shadow : null,
+    itemCornersFollowCard: typeof source.itemCornersFollowCard === "boolean" ? source.itemCornersFollowCard : null,
+    justifyRows: typeof source.justifyRows === "boolean" ? source.justifyRows : null,
+    trimHiddenPreeditGap: typeof source.trimHiddenPreeditGap === "boolean" ? source.trimHiddenPreeditGap : null,
+    preeditMargin: insets(source.preeditMarginDip, 500),
+    pageArrowStyle: ["chevron", "triangle"].includes(source.pageArrowStyle) ? source.pageArrowStyle : null,
+  };
+}
+
 /** Canvas 字段只接受共享 catalog 的有界数据；图片地址继续走与旧装饰图相同的校验。 */
 function canvasGeometry(skin, mode) {
   const raw = skin.borderImage;
@@ -280,8 +309,9 @@ function canvasGeometry(skin, mode) {
 }
 
 /** 画出来的皮肤包的几何：最小宽度、圆角、装饰带和背景图，取值规则同 `skinGeometryStyle` 和 `usePreviewBackground`。装饰带没有可用的图片时不画（网页上空着的装饰带只会在候选条上方留一块透明区域）。 */
-function packageGeometry(pkg, mode) {
+function packageGeometry(pkg, mode, layout = "horizontal") {
   const { skin } = pkg;
+  const layoutGeometry = resolvedLayout(skin, layout);
   const top = dimension(skin.decorationTopDip, 500);
   const width = dimension(skin.decorationWidthDip, 1000);
   const decorated = top > 0 && width > 0;
@@ -289,9 +319,9 @@ function packageGeometry(pkg, mode) {
   const rawBackground = skin.background !== null && typeof skin.background === "object" ? skin.background : null;
   const backgroundUrl = rawBackground ? skinImageUrl(rawBackground.image) : null;
   const opacity = rawBackground?.opacity;
-  return {
+  const result = {
     canvas: pkg.canvas && pkg.v2 ? canvasGeometry(skin, mode) : null,
-    cornerRadius: pkg.cornerRadius,
+    cornerRadius: layoutGeometry?.radius ?? pkg.cornerRadius,
     minWidth: skin.minWidthDip === undefined || skin.minWidthDip === null ? null : dimension(skin.minWidthDip, 1000),
     decoration: decorationUrl
       ? { url: decorationUrl, top, width, align: DECORATION_ALIGNS.includes(skin.decorationAlign) ? skin.decorationAlign : "right" }
@@ -305,6 +335,11 @@ function packageGeometry(pkg, mode) {
         }
       : null,
   };
+  // 与共享 catalog 的单字体名称约束一致，不把任意 CSS 字体串当作皮肤字段。
+  if (typeof skin.fontFamily === "string" && skin.fontFamily.length > 0 && new TextEncoder().encode(skin.fontFamily).length <= 64
+      && !/[\u0000-\u001f\u007f"'\\,;{}<>`]/.test(skin.fontFamily)) result.fontFamily = skin.fontFamily;
+  if (layoutGeometry) result.layout = layoutGeometry;
+  return result;
 }
 
 const NO_GEOMETRY = { canvas: null, cornerRadius: null, minWidth: null, decoration: null, background: null };
@@ -338,7 +373,7 @@ function completePalette(raw, mode, lookSelectedText, detail) {
 }
 
 /**
- * 候选条用的 CSS 自定义属性。与桌面同名的沿用 `candidatePaletteStyle`（`--cand-*`、`--accent-strong`）和 `skinGeometryStyle`（`--msime-skin-*`）的名字；桌面样式表没有的几项是 SDK 新增的：`--cand-secondary`、`--cand-selected-text`、`--cand-selected-num`、`--msime-skin-selected-bar`（`block` 或 `none`，对应 `selectedBarCss` 隐藏选中条）、`--msime-skin-decoration-image`、`--msime-skin-background-image`、`--msime-skin-background-opacity` 和 `--msime-skin-background-fit`（`object-fit` 的值，`stretch` 写成 `fill`）。每个值都是规范化的颜色、有限的数字、白名单里的关键字或经 `skinImageUrl` 检查过的 `url("…")`，跳不出声明。阴影不随皮肤变，由候选条按明暗自己画。
+ * 候选条用的 CSS 自定义属性。与桌面同名的沿用 `candidatePaletteStyle`（`--cand-*`、`--accent-strong`）和 `skinGeometryStyle`（`--msime-skin-*`）的名字。值只来自规范化颜色、有界数字、白名单关键字或经 `skinImageUrl` 检查的图片地址；皮肤阴影档位按 Windows 的固定双层配方换算，不接受任意 CSS。
  */
 function cssVariables(palette, geometry) {
   const variables = {
@@ -361,6 +396,37 @@ function cssVariables(palette, geometry) {
     "--msime-skin-decoration-top": `${geometry.decoration ? geometry.decoration.top : 0}px`,
     "--msime-skin-decoration-width": `${geometry.decoration ? geometry.decoration.width : 0}px`,
   };
+  const layout = geometry.layout;
+  if (geometry.fontFamily) variables["--msime-skin-font-family"] = JSON.stringify(geometry.fontFamily);
+  if (layout) {
+    const length = (value) => `${value.value}${value.em ? "em" : "px"}`;
+    for (const [field, name] of Object.entries({ padding: "padding", itemExtraHeight: "item-extra-height", numberInset: "number-inset",
+      numberGap: "number-gap", itemPaddingRight: "item-padding-right", itemMinWidth: "item-min-width", selectedBarWidth: "selected-bar-width" })) {
+      if (layout[field] !== null) {
+        const value = layout[field];
+        variables[`--msime-skin-${name}`] = (field === "numberInset" || field === "numberGap") && value.em
+          ? `calc(var(--cand-font-size) * ${value.value})` : length(value);
+      }
+    }
+    if (layout.itemGap !== null) {
+      const gap = length(layout.itemGap);
+      variables["--msime-skin-horizontal-gap"] = layout.fitContent ? gap : `calc(${gap} + 6px)`;
+      variables["--msime-skin-vertical-gap"] = gap;
+    }
+    if (layout.numberScale !== null) variables["--msime-skin-number-size"] = `${layout.numberScale}em`;
+    if (layout.itemRadius !== null) variables["--msime-skin-item-radius"] = `${layout.itemRadius}px`;
+    if (layout.borderWidth !== null) variables["--msime-skin-border-width"] = `${layout.borderWidth}px`;
+    if (layout.selectedBarHeightEm !== null) variables["--msime-skin-selected-bar-height"] = `${layout.selectedBarHeightEm}em`;
+    if (layout.selectedBarInside !== null) variables["--msime-skin-selected-bar-left"] = layout.selectedBarInside ? "1px" : "0px";
+    if (layout.fitContent) variables["--msime-skin-card-floor"] = "0px";
+    if (layout.preeditMargin) {
+      for (const [side, value] of Object.entries(layout.preeditMargin)) variables[`--msime-skin-preedit-margin-${side}`] = `${value}px`;
+    }
+    if (layout.shadow !== null) {
+      const scale = { none: 0, soft: 0.5, strong: 1.6 }[layout.shadow];
+      variables["--msime-skin-shadow-scale"] = String(scale);
+    }
+  }
   if (geometry.minWidth !== null) variables["--msime-skin-min-width"] = `${geometry.minWidth}px`;
   if (geometry.cornerRadius !== null) variables["--msime-skin-radius"] = `${geometry.cornerRadius}px`;
   if (geometry.decoration) variables["--msime-skin-decoration-image"] = `url("${geometry.decoration.url}")`;
@@ -418,7 +484,7 @@ export function resolveSkin(skin, { dark = false, layout = "horizontal" } = {}) 
       const pkg = readPackage({ base: target });
       mode = requested;
       raw = customCandidatePalette(pkg.base, undefined, pkg.candidate[mode]);
-      geometry = packageGeometry(pkg, mode);
+      geometry = packageGeometry(pkg, mode, layout);
       selectedText = pkg.selectedText[mode];
       animation = pkg.animation;
     }
@@ -429,7 +495,7 @@ export function resolveSkin(skin, { dark = false, layout = "horizontal" } = {}) 
     drawn = pkg.layouts.includes(layout) && pkg.themes.includes(mode);
     raw = customCandidatePalette(pkg.base, undefined, drawn ? pkg.candidate[mode] : null);
     if (drawn) {
-      geometry = packageGeometry(pkg, mode);
+      geometry = packageGeometry(pkg, mode, layout);
       selectedText = pkg.selectedText[mode];
       animation = pkg.animation;
       detail = pkg.candidate[mode];
