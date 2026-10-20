@@ -772,6 +772,35 @@ fn candidate_sources(session: &Session) -> Vec<CandidateSource> {
         .collect()
 }
 
+#[test]
+fn short_exact_mixed_english_keeps_chinese_first_and_commits_without_a_mode_switch() {
+    let fixture = Fixture::new(HELLO_FIXTURE)
+        .with_english("INSERT INTO english_words VALUES('he','HE',100),('hello','Hello',1000);");
+    for scheme in [SchemeType::Quanpin, SchemeType::Shuangpin] {
+        let mut session = fixture.session_with(|options| {
+            options.scheme = scheme;
+            options.english.mixed_candidates = true;
+            options.english.minimum_prefix = 5;
+            options.helpcode = false;
+        });
+        for _ in 0..2 {
+            type_text(&mut session, "he");
+            assert_eq!(&words(&session)[..2], ["和", "HE"]);
+            assert!(!words(&session).contains(&"Hello".to_owned()));
+            assert_eq!(session.select(1).commit.as_deref(), Some("HE"));
+            assert!(session.snapshot().preedit.is_empty());
+        }
+        let mut session = fixture.session_with(|options| {
+            options.scheme = scheme;
+            options.english.mixed_candidates = false;
+            options.english.minimum_prefix = 5;
+            options.helpcode = false;
+        });
+        type_text(&mut session, "he");
+        assert!(!words(&session).contains(&"HE".to_owned()));
+    }
+}
+
 /// 拼音拆不开、英文完全匹配整段输入时英文占首位，空格上屏英文；结束组字的标点也整段上屏这个英文词。能切成完整音节的 `he` 照旧是中文首选。
 #[test]
 fn an_exact_english_word_leads_input_pinyin_cannot_spell() {
