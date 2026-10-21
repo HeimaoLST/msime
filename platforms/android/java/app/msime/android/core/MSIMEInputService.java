@@ -5016,6 +5016,15 @@ public final class MSIMEInputService extends InputMethodService {
         if (keyCode == KeyEvent.KEYCODE_SPACE) return command(1) || super.onKeyDown(keyCode, event);
         if (keyCode == KeyEvent.KEYCODE_ENTER) { enter(); return true; }
         int unicode = event.getUnicodeChar();
+        // 普通组字里未被选词规则认领的硬件数字是字面输入；本地模式仍由引擎决定拼写、选词或原文回退。
+        if (unicode >= '0' && unicode <= '9'
+                && "none".equals(InputViewValuePolicy.textOr(view, "local_mode", "none"))
+                && (nineKeyShuangpinGrid(view)
+                || InputViewValuePolicy.booleanValue(view, "nine_key", false))) {
+            if (hasEngineComposition()) command(FINISH_COMPOSITION_COMMAND);
+            commitText(fullWidthOutput(String.valueOf((char) unicode)));
+            return true;
+        }
         if (dedicatedEnglish && unicode >= 32 && unicode <= 126 && !TextPolicy.isAsciiLetter(unicode)) {
             commitEnglishLiteral(unicode);
             return true;
