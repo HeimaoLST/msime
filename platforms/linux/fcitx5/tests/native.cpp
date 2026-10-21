@@ -2231,10 +2231,8 @@ int main(int argc, char **argv) {
     while (statisticsTotal() < 4 && std::chrono::steady_clock::now() < resumedDeadline)
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     require(statisticsTotal() == 4, "after that tick a commit and a passthrough key are recorded again");
-    // One per addAction() in activate(), plus the toolbar entry the host adds
-    // once it has a session. Adding or removing a status action changes this on
-    // purpose; the count is here so one going missing is noticed.
-    require(ic.statusArea().actions(fcitx::StatusGroup::InputMethod).size() == 24,
+    // One per entry arrangeStatusArea lists for a focused context with a session (the toolbar and voice entries included). Adding or removing a status action changes this on purpose; the count is here so one going missing is noticed.
+    require(ic.statusArea().actions(fcitx::StatusGroup::InputMethod).size() == 32,
             ("native status actions attached: " +
              std::to_string(ic.statusArea().actions(fcitx::StatusGroup::InputMethod).size()))
                 .c_str());
@@ -2281,7 +2279,7 @@ int main(int argc, char **argv) {
             "theme menu lists each installed package after the global themes");
     for (auto *action : engine.global_theme_menu_.actions())
       require(!action->name().empty(), "every theme menu entry is registered");
-    require(engine.global_theme_action_.shortText(&ic) == "主题：跟随系统", "theme action starts at the shared default");
+    require(engine.global_theme_action_.shortText(&ic) == "主题（跟随系统）", "theme action starts at the shared default");
     require(themeItem("跟随系统").isChecked(&ic) && !themeItem("夜青").isChecked(&ic), "theme menu checks the current theme");
     themeItem("夜青").activate(&ic);
     require(state->preferences_.value("global_theme", std::string{}) == "night", "theme item selects its global theme");
@@ -2300,7 +2298,7 @@ int main(int argc, char **argv) {
             "another package entry switches to that package");
     require(themeItem("Solarized").isChecked(&ic) && !themeItem("纸鸢").isChecked(&ic) && !themeItem("自定义").isChecked(&ic),
             "theme menu moves the check to the package drawn");
-    require(engine.global_theme_action_.shortText(&ic) == "主题：Solarized", "theme action names the package drawn");
+    require(engine.global_theme_action_.shortText(&ic) == "主题（Solarized）", "theme action names the package drawn");
     options["candidate_skin_catalog"]["packages"][0]["title"] = "Solarized 更新";
     std::ofstream(path) << options.dump();
     state->refreshProviderSockets();
@@ -2354,7 +2352,7 @@ int main(int argc, char **argv) {
       require(!engine.cloud_candidates_action_.isChecked(&ic),
               "cloud candidates status action reflects disabled preference");
     }
-    require(ic.statusArea().actions(fcitx::StatusGroup::InputMethod).size() == 24,
+    require(ic.statusArea().actions(fcitx::StatusGroup::InputMethod).size() == 32,
             ("status actions unchanged by the option toggles: " +
              std::to_string(ic.statusArea().actions(fcitx::StatusGroup::InputMethod).size()))
                 .c_str());
@@ -2365,7 +2363,7 @@ int main(int argc, char **argv) {
       const bool fullwidth = engine.width_action_.isChecked(&ic);
       const auto scheme = engine.scheme_action_.shortText(&ic);
       blur();
-      require(state->session_ != 0 && heldForTray() && statusActions() == 15,
+      require(state->session_ != 0 && heldForTray() && statusActions() == 23,
               ("focus out keeps the session for the tray, without the focus-only tools: " +
                std::to_string(statusActions()))
                   .c_str());
@@ -2378,7 +2376,7 @@ int main(int argc, char **argv) {
       require(engine.width_action_.isChecked(&ic) != fullwidth, "the tray switches the width after focus out");
       ic.focusIn();
       engine.activate(entry, focus);
-      require(state->session_ != 0 && !heldForTray() && statusActions() == 24,
+      require(state->session_ != 0 && !heldForTray() && statusActions() == 32,
               ("refocusing reopens the session with the status actions once each: session=" +
                std::to_string(state->session_) + " actions=" + std::to_string(statusActions()))
                   .c_str());
@@ -2399,13 +2397,13 @@ int main(int argc, char **argv) {
       }
       ic.focusIn();
       engine.activate(entry, focus);
-      require(state->session_ != 0 && statusActions() == 24, "focus brings the session and the status actions back");
+      require(state->session_ != 0 && statusActions() == 32, "focus brings the session and the status actions back");
       fcitx::InputContextEvent switched(&ic, fcitx::EventType::InputContextSwitchInputMethod);
       engine.deactivate(entry, switched);
       require(state->session_ == 0 && statusActions() == 0,
               ("switching input methods removes the status actions: " + std::to_string(statusActions())).c_str());
       engine.activate(entry, focus);
-      require(state->session_ != 0 && statusActions() == 24, "switching back restores the status actions");
+      require(state->session_ != 0 && statusActions() == 32, "switching back restores the status actions");
     }
     require(engine.emoji_category_action_.shortText(&ic) == "表情：Emoji",
             "emoji category starts in the default catalog");
@@ -2537,28 +2535,45 @@ int main(int argc, char **argv) {
             "clipboard history management menu attached");
     require(engine.cloud_clipboard_menu_.actions().size() == 5,
             "cloud clipboard menu attached");
-    require(engine.desktop_tools_menu_.actions().size() == 13,
+    require(engine.desktop_tools_menu_.actions().size() == 7,
             "desktop tools menu attached");
-    // The status area opens with the design menu: 中文/英文; 全角/标点/译文; 输入方案; 主题/词库…/设置…/关于.
+    // 状态区按 macOS 输入法菜单的顺序：中文输入、英文候选模式；繁体、全角、标点、译文；输入方案、主题；显示工具栏与工具栏子菜单、表情面板、云剪贴板、云词库、屏幕键盘、手写、语音；设置、关于；之后才是 Linux 独有的词库…。
     {
       const auto status = ic.statusArea().actions(fcitx::StatusGroup::InputMethod);
       const std::vector<fcitx::Action *> design{
-          &engine.input_mode_action_, &engine.width_action_,
+          &engine.input_mode_action_, &engine.english_action_, &engine.traditional_action_, &engine.width_action_,
           &engine.chinese_punctuation_action_, &engine.candidate_translation_action_, &engine.scheme_action_,
-          &engine.global_theme_action_, &engine.dictionary_action_, &engine.settings_action_, &engine.about_action_};
+          &engine.global_theme_action_, &engine.toolbar_enabled_action_, &engine.toolbar_action_,
+          &engine.desktop_emoji_action_, &engine.desktop_cloud_clipboard_action_, &engine.cloud_dictionary_action_,
+          &engine.keyboard_action_, &engine.handwriting_action_, &engine.voice_action_, &engine.voice_cancel_action_,
+          &engine.settings_action_, &engine.about_action_, &engine.dictionary_action_};
       require(status.size() > design.size() && std::equal(design.begin(), design.end(), status.begin()),
-              "status area starts with the design menu");
-      require(engine.input_mode_action_.shortText(&ic) == "中文" && engine.width_action_.shortText(&ic) == "全角字符" &&
+              "status area follows the macOS input menu order");
+      require(engine.input_mode_action_.shortText(&ic) == "中文输入" &&
+                  engine.english_action_.shortText(&ic) == "英文候选模式（Ctrl+Shift+E）" &&
+                  engine.traditional_action_.shortText(&ic) == "繁体输出" &&
+                  engine.width_action_.shortText(&ic) == "全角字符（Ctrl+Shift+Space）" &&
+                  engine.chinese_punctuation_action_.shortText(&ic) == "中文标点（Ctrl+.）" &&
                   engine.candidate_translation_action_.shortText(&ic) == "显示译文" &&
-                  engine.dictionary_action_.shortText(&ic) == "词库…" && engine.settings_action_.shortText(&ic) == "设置…" &&
-                  engine.about_action_.shortText(&ic) == "关于水杉输入法",
-              "design menu entries use the design labels");
-      // The Engine's dedicated English mode is not the design's 英文 (that is the 中文 toggle unchecked); it stays reachable in 输入选项, next to 混合英文.
+                  engine.desktop_emoji_action_.shortText(&ic) == "水杉表情面板…" &&
+                  engine.handwriting_action_.shortText(&ic) == "手写输入…" &&
+                  engine.dictionary_action_.shortText(&ic) == "词库…" &&
+                  engine.settings_action_.shortText(&ic) == "水杉输入法设置…" &&
+                  engine.about_action_.shortText(&ic) == "关于水杉输入法…",
+              "status entries use the macOS menu labels");
+      // 英文候选模式挂在顶层，不再收在「输入选项」里；那里的「中英混输」是另一项功能。
       const auto input = engine.input_group_menu_.actions();
-      const auto mixed = std::find(input.begin(), input.end(), &engine.mixed_english_action_);
-      require(std::find(status.begin(), status.end(), &engine.english_action_) == status.end() &&
-                  mixed != input.end() && std::next(mixed) != input.end() && *std::next(mixed) == &engine.english_action_,
-              "dedicated English mode moves into 输入选项");
+      require(std::find(input.begin(), input.end(), &engine.english_action_) == input.end() &&
+                  std::find(input.begin(), input.end(), &engine.traditional_action_) == input.end() &&
+                  engine.mixed_english_action_.shortText(&ic) == "中英混输",
+              "英文候选模式 and 繁体输出 move to the top level");
+      // 输入方案这一行带上正在用的方案，子菜单按 Engine 的方案顺序排列。
+      require(engine.scheme_action_.shortText(&ic).rfind("输入方案（", 0) == 0, "the scheme row names the scheme in use");
+      const auto schemes = engine.scheme_menu_.actions();
+      require(!schemes.empty() && schemes.front() == &engine.scheme_quanpin_action_ &&
+                  engine.scheme_japanese_action_.shortText(&ic) == "日语" &&
+                  engine.scheme_vietnamese_action_.shortText(&ic) == "越南语",
+              "the scheme menu uses the macOS order and names");
     }
     // Nothing the status area listed before is lost: each moved action sits in one of the option groups, and every entry of those menus is registered so the D-Bus menus can reach it.
     {
@@ -2568,7 +2583,7 @@ int main(int argc, char **argv) {
           require(!action->name().empty(), "every option group entry is registered");
           if (!action->isSeparator()) ++grouped;
         }
-      require(grouped == 44, ("option groups hold the moved status actions: " + std::to_string(grouped)).c_str());
+      require(grouped == 42, ("option groups hold the moved status actions: " + std::to_string(grouped)).c_str());
       for (auto *menu : {&engine.scheme_menu_, &engine.desktop_tools_menu_, &engine.helpcode_schema_menu_})
         for (auto *action : menu->actions())
           require(!action->name().empty(), "scheme and desktop tools entries are registered");
