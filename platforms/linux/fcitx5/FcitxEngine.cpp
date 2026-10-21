@@ -6323,6 +6323,23 @@ public:
   bool applyCandidatePanelTheme(fcitx::AddonInstance *classicui, const Json &preferences, bool system_dark,
                                 const Json &catalog, bool chosen) {
     namespace host = msime::linux_host;
+    // 用户维护 classicui 主题时完全退出生成与接管，不写文件、不清旧图片，也不以原生画布盖住人工主题。
+    if (!host::fcitx_theme_autogenerate_enabled(std::getenv("MSIME_FCITX5_THEME_AUTOGENERATE"))) {
+      const bool was_applied = !candidate_theme_applied_.empty();
+      candidate_theme_applied_.clear();
+      candidate_theme_attempt_.clear();
+      candidate_canvas_source_.clear();
+#ifdef MSIME_FCITX5_NATIVE_CANVAS
+      native_canvas_assets_.reset();
+      native_canvas_sources_.clear();
+      native_canvas_logo_.reset();
+      native_canvas_owned_ = false;
+#endif
+      candidate_canvas_retry_at_ = std::chrono::steady_clock::time_point::max();
+      hint_text_width_ = 0;
+      hint_inputs_ = FcitxHintInputs{};
+      return was_applied;
+    }
     const auto resolved = resolveCandidateTheme(preferences, system_dark, catalog);
     // 无覆盖自定义主题或解析失败才退出；有效系统主题仍绘制水杉样式，只跟随原生配色。
     // 只恢复仍是水杉自己写的项，用户在 fcitx5-configtool 选的主题不动。
@@ -6752,9 +6769,11 @@ public:
     const auto file = host::candidate_panel_status_file(std::getenv("XDG_RUNTIME_DIR"));
     if (!file) return;
     const auto &ui = instance_->currentUI();
-    // 只有经典界面在画时主题才有意义（fcitx_candidate_panel_limit）；kimpanel 等界面下不读它的配置。
+    // 只有经典界面在画时主题才有意义（fcitx_candidate_panel_limit）；kimpanel 等界面下不读它的配置。关闭自动生成时经典界面画的是用户维护的主题，配色和皮肤同样不生效，即使 Theme 仍指向水杉。
     bool replaceable = true;
-    if (ui == "classicui") {
+    if (ui == "classicui" && !host::fcitx_theme_autogenerate_enabled(std::getenv("MSIME_FCITX5_THEME_AUTOGENERATE"))) {
+      replaceable = false;
+    } else if (ui == "classicui") {
       const auto selection = read_classicui_theme_selection();
       replaceable = host::fcitx_candidate_theme_drawn(selection.theme,
                                                       selection.dark_theme ? &*selection.dark_theme : nullptr);
