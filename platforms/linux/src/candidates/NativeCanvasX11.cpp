@@ -37,6 +37,8 @@ struct NativeCanvasX11::Impl {
   nlohmann::json palette;
   double scale = 1;
   int width = 1, height = 1;
+  // place 最后一次把窗口放到的位置（窗口左上角，含投影边距和外留白）。
+  int window_x = 0, window_y = 0;
   int measured_work_width = 0, measured_work_height = 0;
   int pressed = -1, hovered = -1;
   int cursor_x = 0, cursor_y = 0, cursor_height = 0;
@@ -435,6 +437,8 @@ struct NativeCanvasX11::Impl {
     const auto [x, y] = native_canvas_window_origin(scale, cursor_x, cursor_y, cursor_height, width, height,
         work.x, work.y, work.width, work.height, content.horizontal ? 0 : tallest / scale, card_top, card_left, card_bottom);
     XMoveResizeWindow(display, window, x, y, static_cast<unsigned>(width), static_cast<unsigned>(height));
+    window_x = x;
+    window_y = y;
     XFlush(display);
   }
   void finishExit() {
@@ -515,6 +519,17 @@ bool NativeCanvasX11::move(int x, int y, int height) {
   state.place();
   if (resized) state.paint();
   return true;
+}
+std::optional<NativeCanvasFrame> NativeCanvasX11::frame() const {
+  const auto &state = *impl_;
+  if (!state.visible || !state.display || !state.window) return std::nullopt;
+  // 键位图要让开的是看得见的卡片，不是整个窗口：窗口四周还有投影边距、装饰图伸出的部分和外留白，按窗口矩形会让键位图离卡片远出一截。卡片矩形与 shape、place 用的同一套平移。
+  const auto &card = state.layout.panel;
+  const int left = static_cast<int>(std::floor((state.inset.left + card.x) * state.scale));
+  const int top = static_cast<int>(std::floor((state.inset.top + card.y) * state.scale));
+  const int right = static_cast<int>(std::ceil((state.inset.left + card.x + card.width) * state.scale));
+  const int bottom = static_cast<int>(std::ceil((state.inset.top + card.y + card.height) * state.scale));
+  return NativeCanvasFrame{state.window_x + left, state.window_y + top, right - left, bottom - top};
 }
 void NativeCanvasX11::hide(bool animate) {
   auto &state = *impl_;

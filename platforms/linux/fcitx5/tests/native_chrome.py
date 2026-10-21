@@ -106,6 +106,8 @@ def main():
                            candidate_translations=False, candidate_english_gloss=False, show_app_logo=True,
                            expand_candidates=True)
         preferences["navigation"]["mouse_wheel"] = True
+        # 悬浮工具栏会画在屏幕右下角，也用候选调色板；截图只看候选画布，不让它进到画面里。
+        preferences["floating_toolbar"]["enabled"] = False
 
         def publish():
             store = options["preferences_directory"].encode()

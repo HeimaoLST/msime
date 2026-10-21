@@ -190,16 +190,11 @@ pub struct HostCapabilities {
     pub system_fonts: bool,
     /// The shared UI draws its own titlebar and resize handles.
     pub window_chrome: bool,
-    /// The host presents a floating toolbar in some form. On Linux that is the
-    /// IBus property menu rather than a drawn window, so the enable switch and
-    /// component visibility are the meaningful controls there.
+    /// 宿主以某种形式提供悬浮工具栏。Linux 在 X11（以及有 Xwayland 的 Wayland 会话）上画一块与 macOS 相同的悬浮窗口，画不出来时只有 IBus 属性菜单和 Fcitx5 状态区里的「工具栏」子菜单。
     pub floating_toolbar: bool,
-    /// The toolbar surface honours scale and icon size. An IBus property menu
-    /// cannot express either value.
+    /// 工具栏按 scale_percent 和 font_size 缩放。Linux 的悬浮窗口读这两项；只剩「工具栏」子菜单的会话里它们不起作用。
     pub floating_toolbar_appearance: bool,
-    /// The host can independently show or hide toolbar components. Linux
-    /// expresses this through the IBus property menu even though it cannot
-    /// draw the Windows/macOS floating window.
+    /// 宿主能单独显示或隐藏工具栏的各个按钮。Linux 的悬浮窗口和「工具栏」子菜单都按这些开关排。
     pub floating_toolbar_components: bool,
     /// The toolbar carries a button that opens the handwriting panel. The
     /// reference's toolbar has six components and this is not one of them, so
@@ -208,7 +203,7 @@ pub struct HostCapabilities {
     /// The toolbar carries a button that starts and stops voice input, for the
     /// same reason as `floating_toolbar_handwriting`.
     pub floating_toolbar_voice: bool,
-    /// 工具栏带切换输入方案的按钮。macOS 和 Windows 的工具栏画它，Linux 的「工具栏」子菜单列出同样内容的方案子菜单，其它宿主不提供这个开关。
+    /// 工具栏带切换输入方案的按钮。macOS、Windows 和 Linux 的悬浮工具栏画它，Linux 的「工具栏」子菜单另列出同样内容的方案子菜单，其它宿主不提供这个开关。
     pub floating_toolbar_input_scheme: bool,
     /// The host consumes the shared `keybindings` preferences to switch
     /// Chinese/English and simplified/traditional mode.
@@ -570,22 +565,17 @@ impl HostCapabilities {
             // the window permissions a desktop floating window would. A HarmonyOS phone has no use
             // for one: the surfaces are on the keyboard's own key faces there.
             floating_toolbar: platform.is_desktop() || platform == HostPlatform::Harmony,
-            // macOS FloatingToolbarPanel.mm and the Windows FloatingToolbarWindow
-            // both read scale_percent and font_size; the Linux host has no
-            // equivalent surface for those two values. The HarmonyOS panel
-            // scales its own frame by the former and draws its faces at the
-            // latter.
+            // macOS 的 FloatingToolbarPanel.mm、Windows 的 FloatingToolbarWindow 和 Linux 的 FloatingToolbarX11Surface 都读 scale_percent 和 font_size；HarmonyOS 的面板按前者缩放自己、按后者画按钮面。
             floating_toolbar_appearance: matches!(
                 platform,
-                HostPlatform::Windows | HostPlatform::Macos | HostPlatform::Harmony
+                HostPlatform::Windows
+                    | HostPlatform::Macos
+                    | HostPlatform::Harmony
+                    | HostPlatform::Linux
             ),
-            // Linux maps the component switches to IBus menu entries; the
-            // native-window hosts apply them to their own toolbar buttons. The
-            // HarmonyOS panel hides the button and narrows itself, and its
-            // emoji and screen-keyboard buttons open the same surfaces its
-            // phone keyboard reaches from a key face.
+            // 自己画工具栏窗口的宿主（macOS、Windows，以及 Linux 在 X11 和 Xwayland 上的悬浮工具栏）按这些开关排自己的按钮；Linux 另把它们映射到 IBus 属性菜单和 Fcitx5 状态区的「工具栏」子菜单，画不出悬浮窗口的会话靠后者。HarmonyOS 的面板隐藏对应按钮并收窄自己，表情和屏幕键盘按钮打开手机键盘从键面进入的同一些面。
             floating_toolbar_components: platform.is_desktop() || platform == HostPlatform::Harmony,
-            // macOS 和 Windows 的工具栏画这三个按钮，Linux 的 IBus 与 Fcitx5「工具栏」子菜单列出对应的三项；手写还要随版本收窄（narrow_to_edition）。
+            // macOS、Windows 和 Linux 的悬浮工具栏画这三个按钮，Linux 的 IBus 与 Fcitx5「工具栏」子菜单另列出对应的三项；手写还要随版本收窄（narrow_to_edition）。
             floating_toolbar_handwriting: matches!(
                 platform,
                 HostPlatform::Macos | HostPlatform::Windows | HostPlatform::Linux
@@ -752,8 +742,11 @@ impl HostCapabilities {
                     | HostPlatform::Linux
                     | HostPlatform::Ios
             ),
-            // macOS 的 MSIMEShuangpinKeymapPanel 和 Windows Server 的 ShuangpinKeymapWindow 在候选窗旁画键位图；其他宿主没有这块浮窗，开关在那里什么也不做。
-            shuangpin_keymap_hint: matches!(platform, HostPlatform::Macos | HostPlatform::Windows),
+            // macOS 的 MSIMEShuangpinKeymapPanel、Windows Server 的 ShuangpinKeymapWindow 和 Linux 的 ShuangpinKeymapX11Surface 在候选窗旁画键位图（Linux 只给报根窗口坐标光标的 X11 客户端画）；其他宿主没有这块浮窗，开关在那里什么也不做。
+            shuangpin_keymap_hint: matches!(
+                platform,
+                HostPlatform::Macos | HostPlatform::Windows | HostPlatform::Linux
+            ),
             // Every host calls `msime_client_set_character_width` when its session starts and
             // from its own width switch, so the preference always has something to act on.
             character_width: true,

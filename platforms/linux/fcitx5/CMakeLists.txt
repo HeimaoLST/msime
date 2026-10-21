@@ -106,6 +106,15 @@ if(MSIME_BADGE_WAYLAND_SOURCES OR MSIME_BADGE_X11_SOURCES)
   if(MSIME_BADGE_X11_SOURCES)
     target_compile_definitions(msime-fcitx5 PRIVATE MSIME_BADGE_HAS_X11)
     target_link_libraries(msime-fcitx5 PRIVATE PkgConfig::MSIME_BADGE_X11)
+    # 悬浮工具栏和双拼键位图与徽章用同一套 X11、cairo 和 pango：没有它们时只有状态区的「工具栏」子菜单，也不画键位图。
+    target_sources(msime-fcitx5 PRIVATE ../src/overlay/OverlayX11Window.cpp ../src/overlay/ShuangpinKeymapX11Surface.cpp
+        ../src/overlay/FloatingToolbar.cpp ../src/overlay/FloatingToolbarFactory.cpp
+        ../src/overlay/FloatingToolbarX11Surface.cpp)
+    target_compile_definitions(msime-fcitx5 PRIVATE MSIME_LINUX_FLOATING_PANELS)
+    # libX11 1.7 起每条连接可以装自己的退出处理：工具栏和键位图的连接断开（Xwayland 崩溃或重启）时不再让 fcitx5 守护进程退出（见 OverlayX11Window.h）。
+    if(MSIME_BADGE_X11_x11_VERSION VERSION_GREATER_EQUAL 1.7.0)
+      target_compile_definitions(msime-fcitx5 PRIVATE MSIME_X11_IO_ERROR_EXIT_HANDLER)
+    endif()
   endif()
 endif()
 set(MSIME_FCITX5_WAVE_SOURCES)

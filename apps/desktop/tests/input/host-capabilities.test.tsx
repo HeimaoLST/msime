@@ -346,6 +346,56 @@ test.each(["windows", "macos", "harmony"] as const)(
   },
 );
 
+test("the Linux toolbar page previews the floating bar its host draws and names the menu fallback", async () => {
+  // Linux 宿主在 X11 上画悬浮工具栏并报告 floating_toolbar_appearance：页面与 macOS 一样有预览、尺寸和颜色，预览下另说明画不出来时退回「工具栏」子菜单。
+  mount({
+    host: capabilities({
+      platform: "linux",
+      floating_toolbar: true,
+      floating_toolbar_appearance: true,
+      floating_toolbar_components: true,
+    }),
+  });
+  await settingsFormReady();
+  fireEvent.click(screen.getByRole("button", { name: /^(悬浮工具栏|快捷工具)$/ }));
+  const toolbar = screen.getByRole("group", { name: "悬浮工具栏" });
+  expect(toolbar.querySelector("[data-toolbar-preview]")).toBeTruthy();
+  expect(screen.getByLabelText("在桌面显示悬浮工具栏")).toBeTruthy();
+  expect(screen.getByLabelText("工具栏大小")).toBeTruthy();
+  expect(
+    screen.getByText(/^Linux 在 X11 上显示悬浮工具栏，Wayland 桌面经 Xwayland 显示/),
+  ).toBeTruthy();
+  expect(screen.queryByText(/Linux 不显示悬浮工具栏窗口/)).toBeNull();
+  expect(screen.queryByText(/GNOME/)).toBeNull();
+  const groups = [...toolbar.querySelectorAll("[data-group-title]")];
+  expect(groups.map((title) => title.textContent)).toEqual(["显示", "按钮", "尺寸"]);
+});
+
+test("the Linux toolbar page under GNOME Shell does not point at a menu fallback that is not there", async () => {
+  // GNOME Shell 的 IBus 输入源菜单没有「工具栏」子菜单：画悬浮条的宿主在那里不能说退回子菜单，开关和按钮照样作用于悬浮条。
+  mount({
+    host: capabilities({
+      platform: "linux",
+      floating_toolbar: true,
+      floating_toolbar_appearance: true,
+      floating_toolbar_components: true,
+      candidate_panel_limit: "gnome_shell",
+    }),
+  });
+  await settingsFormReady();
+  fireEvent.click(screen.getByRole("button", { name: /^(悬浮工具栏|快捷工具)$/ }));
+  const toolbar = screen.getByRole("group", { name: "悬浮工具栏" });
+  expect(toolbar.querySelector("[data-toolbar-preview]")).toBeTruthy();
+  expect(
+    screen.getByText(/当前是 GNOME 桌面，IBus 的输入源菜单里没有「工具栏」子菜单/),
+  ).toBeTruthy();
+  expect(screen.queryByText(/以输入法菜单里的「工具栏」子菜单呈现/)).toBeNull();
+  expect(screen.queryByText(/Linux 不显示悬浮工具栏窗口/)).toBeNull();
+  expect(screen.getByText("快速访问输入法状态与常用功能")).toBeTruthy();
+  expect(screen.getByText("勾选要显示在悬浮工具栏上的按钮")).toBeTruthy();
+  expect(screen.queryByText(/当前 GNOME 桌面不生效|这个开关在这里不生效/)).toBeNull();
+});
+
 test("the floating-toolbar settings page is hidden when the host has no toolbar", async () => {
   mount({
     host: capabilities({
