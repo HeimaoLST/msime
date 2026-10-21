@@ -2033,13 +2033,21 @@ pub fn scan(root: impl AsRef<Path>) -> SkinCatalog {
 /// Most installed skins published to hosts that draw the candidate panel from `candidate_skin_catalog` (the Linux IBus and Fcitx5 hosts). Beyond this a skin menu is no longer usable, and every entry costs the document those hosts read whole.
 pub const HOST_CATALOG_MAX_PACKAGES: usize = 32;
 
+/// `host_candidate_catalog` 条目里只有宿主正在画这一款时才用得上的键：背景图和工具栏配色。运行时选项放不下时先从没选中的包上去掉它们，再整包丢弃；去掉后条目仍是完整可读的配色条目。
+pub const HOST_CATALOG_DRAWN_EXTRAS: [&str; 4] = [
+    "background_image",
+    "background_fit",
+    "background_opacity",
+    "toolbar",
+];
+
 /// 原生候选宿主读取的已安装皮肤目录（Linux 运行时选项中的 `candidate_skin_catalog`）。
 /// 每个条目包含 `id`、清单名称 `title`、全局主题 `base`、声明的 `layouts`、各主题的候选配色、
 /// `show_selected_bar`、可选的 `corner_radius_dip`、Windows 基底的 `resolvedLayout`，以及已声明装饰的尺寸、绝对图片路径和非默认对齐。
 /// 配色由 `theme::normalized_color` 规范化；把条目作为 `package` 传给 `msime_client_resolve_theme`，
 /// 与从皮肤根目录加载同一个包的解析结果一致。`root` 必须对应扫描 `catalog` 的目录。
 ///
-/// 严格条目不携带背景、工具栏、其他路径或样式表；`resolvedLayout` 只含已校验的数字和开关，以兼容旧宿主并控制整份文档的大小。
+/// 条目还带可选的行圆角 `item_corner_radius_dip`、背景图（`background_image` 绝对路径、`background_fit`、`background_opacity`）和按模式的工具栏配色 `toolbar`（不含菜单用不到的 `handle`）。每个包都带：Fcitx5 的「主题」菜单换皮肤时不重写运行时选项，宿主只能从这份目录里读到新皮肤的背景图和工具栏配色。文档放不下时由 `linux_runtime_options::runtime_options_with_skin_catalog` 先从末尾去掉没选中的包的这几样（`HOST_CATALOG_DRAWN_EXTRAS`），再整包丢弃。条目不携带其他路径或样式表；`resolvedLayout` 只含已校验的数字和开关。
 /// 没有装饰的包不写装饰键；不可解析的颜色省略，只保留清单声明主题的配色。
 /// `scan` 已限制标识与名称，宿主仍复核它们和装饰尺寸；布局与明暗支持范围沿用共享解析器的规则。
 ///
@@ -2104,6 +2112,29 @@ pub fn host_candidate_catalog(
             if let Some(radius) = package.corner_radius_dip {
                 entry["corner_radius_dip"] = radius.into();
             }
+            // 行圆角、背景图和工具栏配色只给能画它们的宿主：Linux 的 Fcitx5 经典界面主题按行圆角画选中高亮，把背景图画在卡片里，把工具栏配色用到它画的菜单上（Linux 的悬浮工具栏就是输入法菜单）。每个包都带上：Fcitx5 的「主题」菜单换皮肤时不重写运行时选项，换上的那一款只能从这里读到它们；文档预算不够时由运行时选项那一层先去掉没选中的包的这几样。
+            if let Some(radius) = package.item_corner_radius_dip {
+                entry["item_corner_radius_dip"] = radius.into();
+            }
+            if let Some((image, background)) = host_background_image(root, package) {
+                entry["background_image"] = image.into();
+                entry["background_fit"] =
+                    serde_json::to_value(background.fit).expect("an enum serializes");
+                entry["background_opacity"] = background.opacity.into();
+            }
+            let mut toolbar = serde_json::Map::new();
+            for (theme, palette) in [
+                ("light", &package.toolbar.light),
+                ("dark", &package.toolbar.dark),
+            ] {
+                let colors = host_toolbar_palette(palette);
+                if package.supports_theme(theme) && !colors.is_empty() {
+                    toolbar.insert(theme.to_owned(), serde_json::Value::Object(colors));
+                }
+            }
+            if !toolbar.is_empty() {
+                entry["toolbar"] = serde_json::Value::Object(toolbar);
+            }
             entry
         }));
     let mut published = serde_json::json!({ "packages": packages });
@@ -2124,6 +2155,36 @@ fn host_decoration_image(root: &Path, package: &SkinSummary) -> Option<String> {
         return None;
     }
     path.to_str().map(str::to_owned)
+}
+
+/// 包的背景图（`candidate_window.background`）的绝对路径，和装饰图同样的规则：`scan` 已把它限制在包目录里并确认是图片，拼不出绝对的 UTF-8 路径时不发布，因为宿主打不开它。
+fn host_background_image<'a>(
+    root: &Path,
+    package: &'a SkinSummary,
+) -> Option<(String, &'a SkinBackground)> {
+    let background = package.background.as_ref()?;
+    let path = root.join(&package.id).join(&background.image);
+    if !path.is_absolute() {
+        return None;
+    }
+    Some((path.to_str()?.to_owned(), background))
+}
+
+/// 一个模式的工具栏配色，只留宿主读得懂的 `#RRGGBB` 或 `#RRGGBBAA`，与候选配色同样处理。拖动把手 `handle` 不发布：Linux 把工具栏配色用在输入法菜单上，菜单没有把手。
+fn host_toolbar_palette(palette: &ToolbarPalette) -> serde_json::Map<String, serde_json::Value> {
+    let mut colors = serde_json::Map::new();
+    for (key, value) in [
+        ("background", &palette.background),
+        ("border", &palette.border),
+        ("divider", &palette.divider),
+        ("icon", &palette.icon),
+        ("hover", &palette.hover),
+    ] {
+        if let Some(value) = value.as_deref().and_then(super::theme::normalized_color) {
+            colors.insert(key.to_owned(), value.into());
+        }
+    }
+    colors
 }
 
 fn host_palette(palette: &CandidatePalette) -> serde_json::Map<String, serde_json::Value> {
