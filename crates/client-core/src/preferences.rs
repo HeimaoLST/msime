@@ -932,6 +932,18 @@ pub struct Preferences {
     /// *哪些*码是这样由 Engine 回答；词是否就在那里离开输入法由用户决定，关掉表示它留在候选列表里，等空格或数字键选走。
     #[serde(default = "enabled_by_default")]
     pub wubi_auto_commit_unique: bool,
+    /// 五笔 `z` 通配：`z` 匹配码表里该位置的任意一个字母（含首位）。
+    ///
+    /// 关掉时 `z` 不是码位，组字开头按下它照旧按混输开关打开临时拼音反查。两条路都要占用这个键，
+    /// 所以通配打开时反查关掉。默认关，与来源出厂 `wubi_z_mode = "off"` 一致。
+    #[serde(default)]
+    pub wubi_z_wildcard: bool,
+    /// 五笔顶字：完整四码之后再敲一个字母时上屏首选，并把这个字母留作下一组开头。
+    ///
+    /// 关掉只在拼音混输开启时生效：那个字母并进混输串；混输关闭时它无处容纳，仍按顶字上屏，不会丢字。
+    /// 默认开，与来源出厂一致，也是接入这个开关之前唯一可能的行为。
+    #[serde(default = "enabled_by_default")]
+    pub wubi_fifth_code_top_commit: bool,
     /// 五笔拼音混输：五笔候选之后接着列出同一串字母的全拼候选，五笔编码打不出时直接出拼音候选。
     #[serde(default)]
     pub wubi_mixed_pinyin: bool,
@@ -2410,6 +2422,8 @@ impl Default for Preferences {
             scheme: InputScheme::default(),
             wubi_code_hint: true,
             wubi_auto_commit_unique: true,
+            wubi_z_wildcard: false,
+            wubi_fifth_code_top_commit: true,
             wubi_mixed_pinyin: false,
             wubi_profile: WubiProfile::default(),
             touch_keyboard_layout: TouchKeyboardLayout::default(),
