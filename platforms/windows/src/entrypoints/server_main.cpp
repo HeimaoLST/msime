@@ -1032,6 +1032,9 @@ int wmain(int argc, wchar_t **argv) {
         ReadAppInputModeRules(prepared.at("value").at("preferences"));
     auto input_mode_hud_enabled = std::make_shared<std::atomic<bool>>(
         prepared.at("value").at("preferences").value("input_mode_hud", true));
+    // 徽标画不画 logo 单独跟着 `show_app_logo` 走，不借工具栏那份设置：工具栏尺寸越界时那份设置不发布，logo 不该跟着丢。
+    auto input_mode_hud_logo = std::make_shared<std::atomic<bool>>(
+        hud_show_app_logo(prepared.at("value").at("preferences")));
     // "follow" 取全局的 `theme`，它的 "system" 再交给 Windows 的应用模式。
     const auto followed_surface_theme = [&] {
       const auto &stored = prepared.at("value").at("preferences");
@@ -1149,7 +1152,7 @@ int wmain(int argc, wchar_t **argv) {
         [&, voice_config, voice_config_mutex, voice_host_options, traditional_output,
          toolbar_enabled, follow_cursor, shuangpin_keymap_enabled, typing_feedback, candidate_mouse_wheel, voice_theme, candidate_fonts, candidate_style,
          toolbar_theme, menu_theme, mode_scope_global, app_mode_rules,
-         input_mode_hud_enabled, tsf_config, candidate_layout,
+         input_mode_hud_enabled, input_mode_hud_logo, tsf_config, candidate_layout,
          tsf_config_mutex, tray_preferences, tray_preferences_mutex,
          tsf_config_revision, candidate_theme, toolbar_settings,
          language_dictionaries](const PreferenceSnapshot &snapshot) {
@@ -1185,6 +1188,7 @@ int wmain(int argc, wchar_t **argv) {
           }
           input_mode_hud_enabled->store(preferences.value("input_mode_hud", true),
                                         std::memory_order_release);
+          input_mode_hud_logo->store(hud_show_app_logo(preferences), std::memory_order_release);
           // 工具栏、托盘菜单和语音浮层跟随颜色模式，只看全局的 `theme`（见上面三个原子量的说明）。语音浮层在后面才建，所以经原子量交给循环去套用。
           const auto surface_mode =
               surface_theme_mode("follow", preferences.value("theme", std::string("dark")));
@@ -1610,14 +1614,12 @@ int wmain(int argc, wchar_t **argv) {
       const auto &assets = package_assets(theme.candidate_skin);
       toolbar.set_image_skin(assets.toolbar_image, assets.toolbar_directory);
     }
-    // 中英文切换提示，穿工具栏的配色、用工具栏的尺寸。建不出窗口时记一条诊断，Server 照常服务输入，和工具栏失败时一样。
+    // 中英文切换提示，穿工具栏的配色，按 `show_app_logo` 画不画 logo；尺寸是自己的固定紧凑尺寸，不跟工具栏的字号和缩放。建不出窗口时记一条诊断，Server 照常服务输入，和工具栏失败时一样。
     std::optional<InputModeHudWindow> mode_hud;
     try {
       mode_hud.emplace();
       mode_hud->set_palette(toolbar_surface_palette(toolbar_dark_applied));
-      if (const auto settings =
-              floating_toolbar_settings(prepared.at("value").at("preferences")))
-        mode_hud->set_settings(*settings);
+      mode_hud->set_show_logo(input_mode_hud_logo->load(std::memory_order_acquire));
     } catch (const std::exception &) {
       mode_hud.reset();
       notice("Input mode HUD unavailable; continuing without it");
@@ -1732,6 +1734,7 @@ int wmain(int argc, wchar_t **argv) {
     menu_capabilities.voice_input = true;
     menu_capabilities.settings = settings_shell.has_value();
     menu_capabilities.cloud_clipboard = preview_shell.has_value();
+    menu_capabilities.cloud_dictionary = preview_shell.has_value();
     menu_capabilities.cantonese = language_dictionaries.cantonese;
     menu_capabilities.zhuyin = language_dictionaries.zhuyin;
     menu_capabilities.stroke = language_dictionaries.stroke;
@@ -1885,9 +1888,9 @@ int wmain(int argc, wchar_t **argv) {
           [&](const TrayMenuTheme &row) { return row.id == theme; });
       return listed && store_global_theme(config.state_root, theme);
     });
-    // 悬浮工具栏的两个弹出菜单，画法与托盘卡片相同。方案菜单只放「输入方案」那一组行，右键菜单是 macOS 设置按钮的实用菜单。
+    // 悬浮工具栏的两个弹出菜单，画法与托盘卡片相同。方案菜单只放「输入方案」那一组行，缺词典跑不起来的方案不列出，与 macOS 工具栏的方案菜单一样；右键菜单是 macOS 设置按钮的实用菜单。
     TrayMenuWindow scheme_menu(
-        [&] { return tray_menu_scheme_items(menu_capabilities, tray_state()); },
+        [&] { return tray_menu_scheme_items(menu_capabilities, tray_state(), true); },
         tray_command);
     TrayMenuWindow utility_menu(
         [&] { return toolbar_utility_menu_items(menu_capabilities); }, tray_command);
@@ -2281,11 +2284,10 @@ int wmain(int argc, wchar_t **argv) {
       }
       // The settings page may have published a new value since the last pass.
       toolbar_visible = toolbar_enabled->load(std::memory_order_acquire);
-      if (auto settings = toolbar_settings->take()) {
+      if (auto settings = toolbar_settings->take())
         toolbar.set_settings(*settings);
-        if (mode_hud)
-          mode_hud->set_settings(*settings);
-      }
+      if (mode_hud)
+        mode_hud->set_show_logo(input_mode_hud_logo->load(std::memory_order_acquire));
       if (const bool dark = !surface_theme_is_light(
               voice_theme->load(std::memory_order_acquire), system_dark);
           dark != voice_dark_applied || voice_theme_applied != candidate_theme_generation) {
@@ -2395,7 +2397,7 @@ int wmain(int argc, wchar_t **argv) {
       }
       candidates.set_mouse_wheel(
           candidate_mouse_wheel->load(std::memory_order_acquire));
-      // 语言按钮在 Caps Lock 开着时显示 'A'，日文模式显示 日，韩文模式显示 한，粤拼、注音、越南文、藏文、笔画分别显示 粤、注、越、藏、笔，引擎自己的英文模式显示带下划线的 "En"，所以它要跟随这些状态。Caps Lock 开着时显示 中 会让用户误判下一个字母键的作用。
+      // 语言按钮在 Caps Lock 开着时显示 'A'，日文模式显示 日，韩文模式显示 한，粤拼、注音、越南文、藏文、笔画分别显示 粤、注、越、ཀ、笔（任务栏语言栏图标的藏文仍是「藏」），引擎自己的英文模式显示不带下划线的 "En"，所以它要跟随这些状态。Caps Lock 开着时显示 中 会让用户误判下一个字母键的作用。
       {
         ToolbarLanguageState language;
         language.caps_lock = caps_lock.load(std::memory_order_acquire);

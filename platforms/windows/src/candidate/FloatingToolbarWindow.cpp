@@ -26,6 +26,8 @@ namespace {
 constexpr wchar_t kClassName[] = L"MSIME.Client.Preview.FloatingToolbar" MSIME_EDITION_NAME_SUFFIX;
 constexpr int kWidth = 732;
 constexpr int kHeight = 52;
+// 图片工具栏自己的悬停/按下药丸的圆角，DIP。普通条的悬停圆角跟按钮尺寸走（toolbar_button_radius），toolbar_palette 不再设 item_radius，药丸用这个固定值，保持合并前图片工具栏的 6.5。
+constexpr float kImagePillRadius = 6.5f;
 int dpi_scale(HWND window, int value) {
   const UINT dpi = GetDpiForWindow(window);
   return MulDiv(value, static_cast<int>(dpi ? dpi : USER_DEFAULT_SCREEN_DPI), USER_DEFAULT_SCREEN_DPI);
@@ -85,7 +87,7 @@ bool FloatingToolbarWindow::drag_at_pixel(double x, double y) const {
     const double unit = toolbar_pixel_unit(GetDpiForWindow(window_), scale_);
     return image_.drag_at(x / unit, y / unit);
   }
-  return toolbar_drag_at_pixel(x, y, GetDpiForWindow(window_), scale_, metrics());
+  return toolbar_drag_at_pixel(x, y, GetDpiForWindow(window_), scale_, slots().size(), metrics());
 }
 bool FloatingToolbarWindow::card_at_pixel(double x, double y) const {
   return image_.active() ? (button_at_pixel(x, y).has_value() || drag_at_pixel(x, y))
@@ -96,7 +98,8 @@ void FloatingToolbarWindow::update_image() {
   if (!image_.active() || !shown_) return;
   const std::string language = language_.caps_lock ? "caps" : !shown_->chinese ? "en"
       : language_.dedicated_english ? "en-candidate" : language_.mode == scheme::InputMode::Japanese ? "ja" : "cn";
-  image_.update(floating_toolbar_slots(layout_, MSIME_EDITION_HANDWRITING != 0),
+  // 按共享键序请求，不用普通条标点在前的顺序，见 floating_toolbar_image_slots。
+  image_.update(floating_toolbar_image_slots(floating_toolbar_slots(layout_, MSIME_EDITION_HANDWRITING != 0)),
       {language, shown_->fullwidth ? "full" : "half", shown_->chinese_punctuation ? "cn" : "en",
        shown_character_set_.value_or(false) ? "traditional" : "simplified", "", "", ""});
 }
@@ -480,13 +483,20 @@ void FloatingToolbarWindow::paint() {
     return created;
   };
   const float unit = static_cast<float>(scale_);
-  auto *format = device_.GetTextFormat(
-      L"Segoe UI", static_cast<float>(font_size_) * unit, DWRITE_FONT_WEIGHT_NORMAL,
-      DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-      DWRITE_WORD_WRAPPING_NO_WRAP);
-  if (!format)
-    throw std::runtime_error("Toolbar text format unavailable");
   const auto bar = metrics();
+  // 文字按钮（中/英、标点、全半角、简繁，以及字形缺失时的替代字）用中文界面字体的常规字重，字号取工具栏字号的 0.95，与 macOS 按钮标题相同；藏文的 ཀ 换成能画藏文的字体。
+  const float text_size = static_cast<float>(bar.icon) * toolbar_glyph_scale * unit;
+  auto text_format = [&](const wchar_t *family) {
+    auto *created = device_.GetTextFormat(
+        family ? family : toolbar_text_font, text_size, DWRITE_FONT_WEIGHT_NORMAL,
+        DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+        DWRITE_WORD_WRAPPING_NO_WRAP);
+    if (!created)
+      throw std::runtime_error("Toolbar text format unavailable");
+    return created;
+  };
+  // The face every text button uses, created before drawing starts so a missing one fails here rather than half way through a frame.
+  (void)text_format(nullptr);
   const auto card = toolbar_card(slots().size(), bar);
   const D2D1_RECT_F card_rect{
       static_cast<float>(card.left) * unit, static_cast<float>(card.top) * unit,
@@ -526,10 +536,9 @@ void FloatingToolbarWindow::paint() {
         std::nullopt, std::nullopt, std::nullopt, std::nullopt, std::nullopt};
     const auto active = slots();
     const auto layout = bar;
-    // The product mark at the far left. Drawn before the drag strip and the
-    // buttons, and skipped rather than substituted if the icon will not load -
-    // a missing mark costs nothing, a placeholder box would look like a bug.
+    // The normal bar's chrome: the product mark at the far left and the hairline after it. An image toolbar draws none of it - its background image is the whole bar, and its alpha decides where the bar drags (ToolbarImageState::drag_at).
     if (!image_.active()) {
+      // The product mark. Drawn before the divider and the buttons, and skipped rather than substituted if the icon will not load - a missing mark costs nothing, a placeholder box would look like a bug.
       const auto mark = toolbar_logo(layout);
       if (layout_.show_logo) {
         // 按画出来的实际像素尺寸加载，而不是 Direct2D 的 DIP：msime.ico 带 16 到 256 的各档图像，取对那一档图标才清晰，取错就是重新采样过的模糊图标。
@@ -557,22 +566,17 @@ void FloatingToolbarWindow::paint() {
                               dot, dot),
                 grip);
       }
-      // 普通条的拖动柄与分隔线跟随高度居中，图片模式的拖动区域由背景 alpha 决定。
-      const auto height = static_cast<float>(layout.height);
-      const float top = card_rect.top;
-      const float strip = card_rect.left + static_cast<float>(layout.logo) * unit;
-      const float handle_left = strip + 3.0f * unit;
-      const D2D1_ROUNDED_RECT handle{{handle_left, top + height * 0.269f * unit,
-                                      handle_left + 2.0f * unit,
-                                      top + height * 0.731f * unit},
-                                     1.0f * unit, 1.0f * unit};
-      target->FillRoundedRectangle(handle, brush(palette_.accent));
-      const float divider =
-          strip + static_cast<float>(layout.handle - 1.0) * unit;
-      target->DrawLine({divider, top + height * 0.231f * unit},
-                       {divider, top + height * 0.769f * unit},
-                       brush(palette_.divider.value_or(palette_.border)), 1.0f * unit);
+      // The hairline between the logo and the buttons, 1.2 DIP wide and as tall as a button, as on macOS. There is no accent drag bar beside it: the logo, or the grip in its place, is the drag cue, and every part of the bar that is not a button drags. With no buttons there is nothing to separate, and macOS hides it too.
+      if (!active.empty()) {
+        const auto line = toolbar_divider(layout);
+        target->FillRectangle(D2D1_RECT_F{static_cast<float>(line.left) * unit,
+                                          static_cast<float>(line.top) * unit,
+                                          static_cast<float>(line.right) * unit,
+                                          static_cast<float>(line.bottom) * unit},
+                              brush(palette_.divider.value_or(palette_.border)));
+      }
     }
+    const float button_radius = static_cast<float>(toolbar_button_radius(layout)) * unit;
     for (size_t i = 0; i < active.size(); ++i) {
       const int button = active[i];
       const auto box = this->cell(i);
@@ -580,56 +584,54 @@ void FloatingToolbarWindow::paint() {
                              static_cast<float>(box.top) * unit,
                              static_cast<float>(box.right) * unit,
                              static_cast<float>(box.bottom) * unit};
-      // Hover and press fills, so a button looks like one. Pressed is drawn like the card's selected row, the selected fill with the selected text colour on it, rather than a darker hover. A button the shell would have to answer is drawn disabled: no hover fill and the secondary text colour, exactly as the tray draws a row whose capability is missing.
+      // Hover and press fills, so a button looks like one. On the normal bar that is the whole button square with a quarter of its height as the corner radius, and pressed in the same hover colour, as macOS's MetasequoiaFloatingToolbarButton draws both. An image toolbar keeps its own feedback over the skin's button background: a pill inset 2 DIP a side with a fixed kImagePillRadius corner, and pressed drawn like the card's selected row. A button the shell would have to answer is drawn disabled: no hover fill and the secondary text colour, exactly as the tray draws a row whose capability is missing.
       const bool usable = this->usable(button);
-      const float icon_size = static_cast<float>(image_.active() ? image_.buttons[i].icon : font_size_) * unit;
+      // An image toolbar sizes each button's glyph from the skin; the normal bar uses the toolbar font size.
+      const float icon_size = static_cast<float>(image_.active() ? image_.buttons[i].icon : bar.icon) * unit;
       if (image_.active()) image_.draw(target, image_.buttons[i].background, box, unit);
-      const bool down = usable && hovered_ == i && pressed_ == i;
+      const bool down = image_.active() && usable && hovered_ == i && pressed_ == i;
       const auto &glyph_color = !usable ? palette_.number
                                 : down  ? palette_.selected_text
                                         : palette_.text;
       if (hovered_ == i && usable) {
-        const D2D1_ROUNDED_RECT fill{{cell.left + 2.0f * unit, cell.top,
-                                      cell.right - 2.0f * unit, cell.bottom},
-                                     palette_.item_radius * unit,
-                                     palette_.item_radius * unit};
-        target->FillRoundedRectangle(
-            fill, brush(down ? palette_.selected : palette_.hover));
+        if (image_.active()) {
+          const D2D1_ROUNDED_RECT fill{{cell.left + 2.0f * unit, cell.top,
+                                        cell.right - 2.0f * unit, cell.bottom},
+                                       kImagePillRadius * unit,
+                                       kImagePillRadius * unit};
+          target->FillRoundedRectangle(
+              fill, brush(down ? palette_.selected : palette_.hover));
+        } else {
+          target->FillRoundedRectangle(D2D1_ROUNDED_RECT{cell, button_radius, button_radius},
+                                       brush(palette_.hover));
+        }
       }
+      // A skin image for the button's current state replaces the glyph.
       if (image_.active() && image_.draw(target, image_.buttons[i].image, box, unit)) continue;
       const auto icon = toolbar_icon(button, states[button], language_);
-      // Draw the glyph only when the installed icon font really has it;
-      // otherwise the text fallback, which is always readable.
-      const bool glyph = icon.codepoint && icon_family &&
-                         icon_font_has(factory, icon_family, icon.codepoint);
+      // Draw the glyph, at the full font size like macOS's SF Symbols, only when the installed icon font really has it; otherwise the text, which is always readable. The mode buttons have no glyph and are always text.
+      IDWriteTextFormat *glyph_format = nullptr;
+      if (icon.codepoint && icon_family && icon_font_has(factory, icon_family, icon.codepoint))
+        glyph_format = device_.GetTextFormat(
+            icon_family, icon_size, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+            DWRITE_WORD_WRAPPING_NO_WRAP);
       const wchar_t text[] = {icon.codepoint, L'\0'};
-      auto *cell_format =
-          glyph ? device_.GetTextFormat(
-                      icon_family, icon_size,
-                      DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER,
-                      DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-                      DWRITE_WORD_WRAPPING_NO_WRAP)
-                : image_.active() ? device_.GetTextFormat(L"Segoe UI", icon_size, DWRITE_FONT_WEIGHT_NORMAL,
-                    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP) : format;
+      // An image toolbar draws its text at the skin's icon size in the shared Chinese UI face (or the Tibetan face the badge needs), as macOS's image canvas draws the system font at iconSizeDip; the normal bar uses the same face at 0.95 of the font size.
+      IDWriteTextFormat *cell_format = glyph_format;
+      if (!cell_format && image_.active())
+        cell_format = device_.GetTextFormat(
+            icon.family ? icon.family : toolbar_text_font, icon_size, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+            DWRITE_WORD_WRAPPING_NO_WRAP);
       if (!cell_format)
-        cell_format = format;
-      const wchar_t *drawn_text = glyph ? text : icon.fallback;
+        cell_format = text_format(icon.family);
+      const wchar_t *drawn_text = glyph_format ? text : icon.fallback;
       const auto length = static_cast<UINT32>(wcslen(drawn_text));
       if (!length)
         continue;
       target->DrawText(drawn_text, length, cell_format, cell,
                        brush(glyph_color));
-      // Dedicated English underlines its "En". Upstream insets the line by a
-      // twelfth of the cell and floors both the offset and the stroke, so it
-      // stays a visible line rather than thinning away at small icon sizes.
-      if (icon.underline && !glyph) {
-        const float size = icon_size;
-        const float side = (cell.right - cell.left) * 0.08f;
-        const float y = cell.bottom - (std::max)(2.0f * unit, size * 0.12f);
-        target->DrawLine({cell.left + side, y}, {cell.right - side, y},
-                         brush(glyph_color),
-                         (std::max)(1.0f * unit, size * 0.06f));
-      }
     }
   }
   const HRESULT drawn = target->EndDraw();
@@ -773,9 +775,7 @@ LRESULT CALLBACK FloatingToolbarWindow::procedure(HWND window, UINT message,
       self->pressed_lease_.reset();
       if (self->activity_action_)
         self->activity_action_();
-      // Only the strip left of the first button drags. Treating the whole
-      // window as a caption meant a press on a button entered the system move
-      // loop, and the click below only ran for whatever button-up survived it.
+      // Every part of the bar that is not a button drags, as macOS's movableByWindowBackground does: the logo or the grip, the divider, the gaps between buttons, the padding above and below them and the trailing margin. An image toolbar drags wherever its background image is opaque and no button sits (ToolbarImageState::drag_at). A press on a button never does - treating the whole window as a caption meant a press on a button entered the system move loop, and the click below only ran for whatever button-up survived it.
       if (self->drag_at_pixel(GET_X_LPARAM(l), GET_Y_LPARAM(l))) {
         ReleaseCapture();
         SendMessageW(window, WM_NCLBUTTONDOWN, HTCAPTION, 0);
@@ -797,14 +797,16 @@ LRESULT CALLBACK FloatingToolbarWindow::procedure(HWND window, UINT message,
       return 0;
     }
     case WM_SETCURSOR:
-      // Show the move cursor over the drag strip only, so the buttons keep the
-      // ordinary arrow and the strip advertises what it does.
+      // Show the move cursor over the logo or the grip only, as macOS shows the open hand over its logo view, so the buttons keep the ordinary arrow and the logo advertises what the bar does. The rest of the bar drags too, without saying so. An image toolbar has no logo, so it shows the move cursor over every part that drags.
       if (LOWORD(l) == HTCLIENT) {
         POINT cursor{};
         RECT bounds{};
         if (GetCursorPos(&cursor) && ScreenToClient(window, &cursor) &&
             GetClientRect(window, &bounds) &&
-            self->drag_at_pixel(cursor.x, cursor.y)) {
+            (self->image_.active()
+                 ? self->drag_at_pixel(cursor.x, cursor.y)
+                 : toolbar_logo_at_pixel(cursor.x, cursor.y, GetDpiForWindow(window),
+                                         self->scale_, self->metrics()))) {
           SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
           return TRUE;
         }
@@ -897,7 +899,7 @@ LRESULT CALLBACK FloatingToolbarWindow::procedure(HWND window, UINT message,
       }
       break;
     }
-    // Let DefWindowProc handle the caption message sent by the drag strip.
+    // Let DefWindowProc handle the caption message sent by a press on the bar.
     // Sending that same synchronous message again here recurses indefinitely.
   }} catch (...) { self->fail(failure_in_message(message, static_cast<uint32_t>(GetLastError()))); return 0; }
   return DefWindowProcW(window, message, w, l);
