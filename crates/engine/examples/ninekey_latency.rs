@@ -12,7 +12,8 @@ const WORDS: [&str; 5] = [
     "436426",
     "5468426842674436426",
 ];
-const ROUNDS: usize = 20;
+/// Rounds when `NINEKEY_ROUNDS` is unset; a profiler needs a longer run.
+const DEFAULT_ROUNDS: usize = 20;
 
 fn report(label: &str, mut samples: Vec<f64>) {
     if samples.is_empty() {
@@ -46,7 +47,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut all = Vec::new();
     let mut by_position: Vec<Vec<f64>> = Vec::new();
-    for round in 0..ROUNDS {
+    let rounds = std::env::var("NINEKEY_ROUNDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_ROUNDS);
+    for round in 0..rounds {
         for word in WORDS {
             for (position, digit) in word.bytes().enumerate() {
                 let started = Instant::now();

@@ -29,64 +29,72 @@ pub fn merge_lattice_candidates(
     rescoring_context: &str,
 ) -> Option<TypoSentence> {
     // Two syllables are enough since lattice_reading: a two-syllable key can miss the exact lookup and otherwise leave prefix-range rows ahead of the sentence. Abbreviated segments (g'k't) are refused so `canonical_pinyin` stays a complete pronunciation (WL:541-545).
+    let decoded = decode_lattice(syllables, lookup, options, typo_source)?;
+    merge_decoded(
+        candidates,
+        syllables,
+        typed_pinyin,
+        options,
+        rerankers,
+        rescoring_context,
+        decoded,
+    )
+}
+
+/// 一次整句解码的结果：未截断的路径和纠错整句。只取决于音节、查到的词库行和解码参数，与已有候选、重排上下文无关，所以可以按音节缓存后再交给 `merge_decoded`。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DecodedSentences {
+    pub(crate) paths: Vec<SentencePath>,
+    pub(crate) typo: Option<TypoSentence>,
+}
+
+/// `merge_lattice_candidates` 的解码一半：少于两个音节或含不完整音节时为 `None`，与合并时不插入任何行一致。
+pub(crate) fn decode_lattice(
+    syllables: &[String],
+    lookup: &mut LatticeLookup<'_>,
+    options: &LatticeOptions<'_>,
+    typo_source: Option<&mut TypoEdgeSource<'_>>,
+) -> Option<DecodedSentences> {
     if syllables.len() < 2 || !has_only_complete_pinyin_segments(syllables) {
         return None;
     }
     let graph = build_graph(syllables, lookup, options);
-    merge_lattice_graph(
-        candidates,
+    Some(decode_graph_sentences(
         syllables,
-        typed_pinyin,
         options,
         typo_source,
-        rerankers,
-        rescoring_context,
-        graph,
-    )
+        &graph,
+    ))
 }
 
-/// 词典缓存行在建图期间保持借用，避免缓存命中先复制整页行再复制图边字段。
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn merge_lattice_candidates_borrowed<'rows>(
-    candidates: &mut Vec<WordItem>,
+/// 借用缓存行建图的 `decode_lattice`：词典缓存行在建图期间保持借用，避免缓存命中先复制整页行再复制图边字段。
+pub(crate) fn decode_lattice_borrowed<'rows>(
     syllables: &[String],
     lookup: &mut impl FnMut(&[String]) -> &'rows [super::decode::LatticeLexeme],
-    typed_pinyin: &str,
     options: &LatticeOptions<'_>,
     typo_source: Option<&mut TypoEdgeSource<'_>>,
-    rerankers: &mut [NeuralReranker],
-    rescoring_context: &str,
-) -> Option<TypoSentence> {
+) -> Option<DecodedSentences> {
     if syllables.len() < 2 || !has_only_complete_pinyin_segments(syllables) {
         return None;
     }
     let graph = build_graph_borrowed(syllables, lookup, options);
-    merge_lattice_graph(
-        candidates,
+    Some(decode_graph_sentences(
         syllables,
-        typed_pinyin,
         options,
         typo_source,
-        rerankers,
-        rescoring_context,
-        graph,
-    )
+        &graph,
+    ))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn merge_lattice_graph(
-    candidates: &mut Vec<WordItem>,
+fn decode_graph_sentences(
     syllables: &[String],
-    typed_pinyin: &str,
     options: &LatticeOptions<'_>,
     typo_source: Option<&mut TypoEdgeSource<'_>>,
-    rerankers: &mut [NeuralReranker],
-    rescoring_context: &str,
-    graph: super::decode::Graph,
-) -> Option<TypoSentence> {
-    let mut paths = decode_graph(&graph, options, None);
+    graph: &super::decode::Graph,
+) -> DecodedSentences {
+    let paths = decode_graph(graph, options, None);
     if paths.is_empty() {
-        return None;
+        return DecodedSentences { paths, typo: None };
     }
     // Typo spans cover two or three syllables, so a shorter input would only ever be replaced whole. Decoded from the same graph so the dictionary is not asked twice, and from the unreranked best so the typo sentence answers the literal reading.
     let typo = match typo_source {
@@ -95,11 +103,28 @@ fn merge_lattice_graph(
             if edges.is_empty() {
                 None
             } else {
-                decode_typo_on_graph(&graph, options, &paths[0], &edges)
+                decode_typo_on_graph(graph, options, &paths[0], &edges)
             }
         }
         _ => None,
     };
+    DecodedSentences { paths, typo }
+}
+
+/// `merge_lattice_candidates` 的合并一半：把解码出的整句按 `emit`、重排和去重插进候选，返回纠错整句交给调用方安放。
+pub(crate) fn merge_decoded(
+    candidates: &mut Vec<WordItem>,
+    syllables: &[String],
+    typed_pinyin: &str,
+    options: &LatticeOptions<'_>,
+    rerankers: &mut [NeuralReranker],
+    rescoring_context: &str,
+    decoded: DecodedSentences,
+) -> Option<TypoSentence> {
+    let DecodedSentences { mut paths, typo } = decoded;
+    if paths.is_empty() {
+        return None;
+    }
 
     if rerankers.is_empty() && options.emit > 0 {
         paths.truncate(options.emit);
