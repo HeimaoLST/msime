@@ -1374,6 +1374,8 @@ static NSImage *MSIMECandidateLogoImage() {
     NSUInteger _expandedVisibleRows;
     CGFloat _expandedScrollOffset;
     CGFloat _expandedPendingScrollDelta;
+    // 视口高度在一次展开会话内固定，避免不同候选行的自然高度让窗口随滚动上下抖动。
+    CGFloat _expandedViewportRowsHeight;
     BOOL _focusPending;
     // Dedicated English lives in the Engine session, so a session released for dictionary maintenance takes it along; the reopen puts it back.
     BOOL _resumeDedicatedEnglish;
@@ -2173,6 +2175,7 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
     _expandedFirstRow = 0;
     _expandedScrollOffset = 0;
     _expandedPendingScrollDelta = 0;
+    _expandedViewportRowsHeight = 0;
 }
 
 // 收起网格时把高亮交回普通候选窗；只导航，不选词或提交组字。
@@ -2235,6 +2238,7 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
     _expandedCursor = cursor;
     _expandedScrollOffset = 0;
     _expandedPendingScrollDelta = 0;
+    _expandedViewportRowsHeight = 0;
     // 当前高亮所在页是网格的第一行，末页减少显示行数，不向前补行。
     _expandedFirstRow = cursor / columns;
     _expandedVisibleRows = msime::candidate::kExpandedGridVisibleRows;
@@ -2264,6 +2268,7 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
     _expandedCursor = cursor;
     _expandedScrollOffset = 0;
     _expandedPendingScrollDelta = 0;
+    _expandedViewportRowsHeight = 0;
     return YES;
 }
 
@@ -8303,17 +8308,24 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     const NSUInteger paintedRows = visibleRows + (paintsTrailingRow ? 1 : 0);
     NSMutableArray<NSArray<NSDictionary *> *> *rowCandidates = [NSMutableArray arrayWithCapacity:paintedRows];
     CGFloat width = headerWidth;
-    CGFloat rowsHeight = 0;
+    CGFloat measuredRowsHeight = 0;
     for (NSUInteger row = _expandedFirstRow; row < _expandedFirstRow + paintedRows; ++row) {
         const NSUInteger start = row * columns;
         NSArray<NSDictionary *> *slice = [_expandedCandidates subarrayWithRange:NSMakeRange(start, MIN(columns, count - start))];
         layouts.push_back(geometryForRow(row));
         [rowCandidates addObject:slice];
         width = MAX(width, layouts.back().width);
-        if (row < _expandedFirstRow + visibleRows) rowsHeight += layouts.back().rowsHeight;
+        if (row < _expandedFirstRow + visibleRows) measuredRowsHeight += layouts.back().rowsHeight;
     }
     width = ceil(width);
-    if (visibleRows > 1) rowsHeight += (visibleRows - 1) * rowGap;
+    if (visibleRows > 1) measuredRowsHeight += (visibleRows - 1) * rowGap;
+    // 滚动期间固定候选区域的高度。不同候选行可能因字形回退、换行或释义高度而不同；
+    // 每帧按当前几行重算会让面板大小和锚点一起跳动，像是滚动被打断。一次展开会话
+    // 以首次布局的视口高度为准，候选按钮仍在内容视图内按各自的实际行高排布并裁切。
+    if (_expandedViewportRowsHeight <= 0) {
+        _expandedViewportRowsHeight = measuredRowsHeight;
+    }
+    const CGFloat rowsHeight = _expandedViewportRowsHeight;
 
     if (!candidatePanel.wheelPaging) [candidatePanel resetWheelAccumulator];
     // 网格滚轮由 scrollHandler 保留像素偏移，与「滚轮翻页」开关无关；该开关仍只管普通候选窗。

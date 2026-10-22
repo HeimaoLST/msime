@@ -3274,10 +3274,13 @@ static void TestGlossSenseTraditionalOutput(MSIMEAppearancePreferences *appearan
 @property(nonatomic) NSUInteger selectAnyCalls;
 @property(nonatomic) uint64_t selectAnyGeneration;
 @property(nonatomic) NSUInteger selectAnyIndex;
+@property(nonatomic) NSUInteger tallIndex;
 @end
 @implementation ExpandedGridSession
 - (NSDictionary *)gridCandidate:(NSUInteger)index highlighted:(BOOL)highlighted {
-    return @{@"text": [NSString stringWithFormat:@"%@%lu", self.prefix, (unsigned long)index],
+    NSString *text = [NSString stringWithFormat:@"%@%lu", self.prefix, (unsigned long)index];
+    if (self.tallIndex != 0 && index == self.tallIndex) text = [text stringByAppendingString:@"\n第二行"];
+    return @{@"text": text,
              @"id": @{@"session": @1, @"generation": @(self.generation), @"index": @(index)},
              @"highlighted": @(highlighted)};
 }
@@ -3535,14 +3538,17 @@ static void TestExpandedCandidateGrid() {
     [controller closeExpandedCandidates];
     session.total = 24;
     session.pageSize = 4;
+    session.tallIndex = 20;
     prefs.pageSize = 4;
     compose();
     assert(press(125) && expanded());
+    const CGFloat viewportHeight = panel.frame.size.height;
     const CGFloat firstCandidateY = NSMinY(ExpandedGridSubview(panel, 0).frame);
     [controller setValue:@(-8.0) forKey:@"expandedPendingScrollDelta"];
     [controller renderCandidates];
     assert([[controller valueForKey:@"expandedScrollOffset"] doubleValue] > 0.0);
     assert(fabs(NSMinY(ExpandedGridSubview(panel, 0).frame) - (firstCandidateY - 8.0)) < 0.01);
+    assert(fabs(panel.frame.size.height - viewportHeight) < 0.01);
     [controller setValue:@8.0 forKey:@"expandedPendingScrollDelta"];
     [controller renderCandidates];
     assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue]) < 0.01);
@@ -3551,6 +3557,7 @@ static void TestExpandedCandidateGrid() {
     [controller renderCandidates];
     assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 1);
     assert(fabs([[controller valueForKey:@"expandedScrollOffset"] doubleValue]) < 0.01);
+    assert(fabs(panel.frame.size.height - viewportHeight) < 0.01);
     [controller setValue:@10000.0 forKey:@"expandedPendingScrollDelta"];
     [controller renderCandidates];
     assert([[controller valueForKey:@"expandedFirstRow"] unsignedIntegerValue] == 0);
