@@ -25,8 +25,33 @@ extern "C" bool msime_macos_uninstall_input_source(const char *bundle_path,
 #import "../core/WindowPresentation.h"
 #include "ShuangpinProfileNames.h"
 #include "../candidate/CandidatePageSize.h"
-#include "../core/VimMode.h"
+#include "msime_client.h"
 #include <sys/stat.h>
+
+// 一个 chord 的解码结果（msime_client_toggle_hotkey_chords 回答里的一项）→ 认键组合。
+// 不是表、没有主键名或主键名认不出时都是不绑定。
+static msime::mac::ToggleChord MSIMEDecodeToggleChord(id decoded) {
+    if (![decoded isKindOfClass:NSDictionary.class]) return msime::mac::UnboundToggleChord();
+    id key = decoded[@"key"];
+    if (![key isKindOfClass:NSString.class]) return msime::mac::UnboundToggleChord();
+    return msime::mac::ToggleChordForKeyName(((NSString *)key).UTF8String,
+        [decoded[@"ctrl"] isEqual:@YES], [decoded[@"alt"] isEqual:@YES],
+        [decoded[@"shift"] isEqual:@YES], [decoded[@"meta"] isEqual:@YES]);
+}
+
+// keybindings 原值（nil 或为 null 按出厂值）→ {"english_candidates","full_width","punctuation"}
+// 各自的解码项；不是表、请求写不出或回答不合法时为 nil，调用方保持现值。
+static NSDictionary *MSIMEToggleHotkeyChords(id keys) {
+    NSData *body = [NSJSONSerialization dataWithJSONObject:@{@"keybindings": keys ?: NSNull.null} options:0 error:nil];
+    if (!body) return nil;
+    char *raw = msime_client_toggle_hotkey_chords(static_cast<const uint8_t *>(body.bytes), body.length);
+    if (!raw) return nil;
+    NSDictionary *response = [NSJSONSerialization JSONObjectWithData:
+        [NSData dataWithBytesNoCopy:raw length:strlen(raw) freeWhenDone:NO] options:0 error:nil];
+    msime_client_string_free(raw);
+    return [response[@"ok"] isEqual:@YES] && [response[@"value"] isKindOfClass:NSDictionary.class]
+        ? response[@"value"] : nil;
+}
 
 @interface MSIMETranslationSettingsWindow (Lifecycle)
 - (void)invalidatePendingCallbacks;
@@ -206,8 +231,6 @@ static NSString *const ImeModeScopeKey = @"MSIMEClientImeModeScope";
 ///
 /// 规则表现在是共享偏好文档的 `app_input_mode_rules`（crates/client-core 的 `Preferences::app_input_mode_rules`，macOS 按 bundle id、Windows 按进程基名），共享设置页和 Windows 也读写它。这个 NSUserDefaults 键只剩三种用途：升级前写下的规则在文档还没有这个键时照样生效，并由输入法载入文档后立即发起的一次保存（applicationInputModeRulesAwaitPublication）发布进文档；本窗口改规则时先记在这里，等同一次合并把它写进文档；偏好库收不下的旧规则（标识不合法，或超出 32 条）留在这里，只在本机生效。文档一旦带着这个键载入，它就是权威来源，已经进了文档的规则随即从这个键里删掉，键空了就整个删除。不在 -cloudSettingsSnapshot 里：bundle id 只对本机有意义。
 static NSString *const AppInputModeRulesKey = @"MSIMEClientAppInputModeRules";
-/// Vim 模式应用名单：共享文档的 `vim_mode_apps`（crates/client-core 的 `Preferences::vim_mode_apps`，macOS 按 bundle id）。与 AppInputModeRulesKey 同一套共享/本地通路，但没有升级前的本地键要迁移——这个功能在本机从没存在过。
-static NSString *const VimModeAppsKey = @"MSIMEClientVimModeApps";
 static BOOL ValidInputModeRule(id value) {
     return [value isKindOfClass:NSString.class] && [@[@"chinese", @"english"] containsObject:value];
 }
@@ -269,32 +292,6 @@ static NSDictionary<NSString *, NSString *> *PublishableInputModeRules(NSDiction
         if (published.count >= MaxPublishedInputModeRules) break;
         if (!PublishableInputModeRuleIdentifier(identifier) || InputModeRulesContainIdentifier(published, identifier)) continue;
         published[identifier] = rules[identifier];
-    }
-    return published;
-}
-/// 一份 Vim 模式名单里合法的条目：非空字符串、ASCII 不分大小写不重复；别的丢掉。
-static NSArray<NSString *> *ValidVimModeApps(id stored) {
-    if (![stored isKindOfClass:NSArray.class]) return @[];
-    NSMutableArray<NSString *> *apps = [NSMutableArray array];
-    for (id entry in stored) {
-        if (![entry isKindOfClass:NSString.class] || [entry length] == 0) continue;
-        BOOL duplicate = NO;
-        for (NSString *existing in apps)
-            if (InputModeRuleIdentifiersEqual(existing, entry)) { duplicate = YES; break; }
-        if (!duplicate) [apps addObject:[entry copy]];
-    }
-    return apps;
-}
-/// 能写进共享文档的那部分名单：丢掉不合法的标识和只差大小写的重复项，最多 MaxPublishedInputModeRules 条（与应用例外同一档上限）。
-static NSArray<NSString *> *PublishableVimModeApps(NSArray<NSString *> *apps) {
-    NSMutableArray<NSString *> *published = [NSMutableArray array];
-    for (NSString *identifier in apps) {
-        if (published.count >= MaxPublishedInputModeRules) break;
-        if (!PublishableInputModeRuleIdentifier(identifier)) continue;
-        BOOL duplicate = NO;
-        for (NSString *existing in published)
-            if (InputModeRuleIdentifiersEqual(existing, identifier)) { duplicate = YES; break; }
-        if (!duplicate) [published addObject:identifier];
     }
     return published;
 }
@@ -422,7 +419,6 @@ static NSDictionary<NSString *, NSString *> *SharedOverrideProperties() {
         InputModeHUDKey : @"sharedInputModeHUD",
         InputModeStatusItemKey : @"sharedInputModeStatusItem",
         AppInputModeRulesKey : @"sharedAppInputModeRules",
-        VimModeAppsKey : @"sharedVimModeApps",
         AppLogoKey : @"sharedShowsAppLogo",
         CandidatePageNumberKey : @"sharedShowsCandidatePageNumber",
         ExpandCandidatesKey : @"sharedExpandCandidates",
@@ -504,7 +500,6 @@ static NSDictionary<NSString *, NSString *> *SharedOverrideProperties() {
 /// 应用例外, read by the probe table below. It is not in AppearancePreferences.h because nothing outside this file reads or writes a rule — the lookup that consults them is -englishMode, which is public already — and the probes are written above the implementation, so the name has to be declared before they can ask for it by it.
 @interface MSIMEAppearancePreferences ()
 - (NSDictionary<NSString *, NSString *> *)applicationInputModeRules;
-- (NSArray<NSString *> *)vimModeApps;
 - (instancetype)initSilentlyWithDefaults:(NSUserDefaults *)defaults;
 @property(nonatomic) BOOL wubiZWildcard;
 @property(nonatomic) BOOL wubiFifthCodeTopCommit;
@@ -528,7 +523,6 @@ static NSDictionary<NSString *, MSIMESettingProbe> *SettingProbes() {
             DefaultImeModeKey : ^id(MSIMEAppearancePreferences *p) { return p.defaultImeMode ?: NSNull.null; },
             ImeModeScopeKey : ^id(MSIMEAppearancePreferences *p) { return p.imeModeScope ?: NSNull.null; },
             AppInputModeRulesKey : ^id(MSIMEAppearancePreferences *p) { return [p applicationInputModeRules]; },
-            VimModeAppsKey : ^id(MSIMEAppearancePreferences *p) { return [p vimModeApps]; },
             SchemeKey : ^id(MSIMEAppearancePreferences *p) { return p.inputScheme ?: NSNull.null; },
             ShuangpinProfileKey : ^id(MSIMEAppearancePreferences *p) { return p.shuangpinProfile ?: NSNull.null; },
             ShuangpinPreeditKey : ^id(MSIMEAppearancePreferences *p) { return @(p.shuangpinPreeditUsesRaw); },
@@ -1018,8 +1012,6 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSString *_sharedImeModeScope;
     // 共享文档里的应用例外（加上还没发布、文档收得下的旧规则，和本窗口对它的改动）；文档没有这个键时为 nil，查找退回 NSUserDefaults 里升级前的规则。本窗口改规则时只改它和 _localOnlyAppInputModeRules 里那一条，两边不合并，见 -setInputMode:forApplication:。
     NSDictionary<NSString *, NSString *> *_sharedAppInputModeRules;
-    // 共享文档里的 Vim 模式名单；文档没有这个键时为 nil，查找退回本地键（本机从没写过，等同空名单）。
-    NSArray<NSString *> *_sharedVimModeApps;
     // 文档收不下的旧规则：标识不合法（超过 64 字节、带 / 或 \ 等），或文档已满 32 条。它们留在 NSUserDefaults 里，只在本机查找时生效，不发布。
     NSDictionary<NSString *, NSString *> *_localOnlyAppInputModeRules;
     // 有文档还没有、但收得下的规则，需要保存一次才能发布；见 applicationInputModeRulesAwaitPublication。
@@ -1069,6 +1061,9 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSSwitch *_controlOptionSpaceShortcutToggle;
     NSNumber *_sharedCharacterSetShortcut;
     NSNumber *_sharedFullWidthShortcut;
+    msime::mac::ToggleChord _englishCandidatesToggleChord;
+    msime::mac::ToggleChord _fullWidthToggleChord;
+    msime::mac::ToggleChord _punctuationToggleChord;
     NSSwitch *_characterSetShortcutToggle;
     NSMutableDictionary *_sharedHelpcodeOptions;
     // 共享文档里每个方案选中的辅助码表插件 id，空串是没有选；文档没读过时没有这一项。
@@ -1288,6 +1283,9 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     if (self) {
         _defaults = defaults;
         _skinsRoot = [root copy];
+        _englishCandidatesToggleChord = msime::mac::FactoryEnglishCandidatesToggleChord();
+        _fullWidthToggleChord = msime::mac::FactoryFullWidthToggleChord();
+        _punctuationToggleChord = msime::mac::FactoryPunctuationToggleChord();
         [self reloadSkins];
     }
     return self;
@@ -1298,10 +1296,16 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     if (self) {
         _defaults = defaults;
         _silent = YES;
+        _englishCandidatesToggleChord = msime::mac::FactoryEnglishCandidatesToggleChord();
+        _fullWidthToggleChord = msime::mac::FactoryFullWidthToggleChord();
+        _punctuationToggleChord = msime::mac::FactoryPunctuationToggleChord();
         [self reloadSkins];
     }
     return self;
 }
+- (msime::mac::ToggleChord)englishCandidatesToggleChord { return _englishCandidatesToggleChord; }
+- (msime::mac::ToggleChord)fullWidthToggleChord { return _fullWidthToggleChord; }
+- (msime::mac::ToggleChord)punctuationToggleChord { return _punctuationToggleChord; }
 - (NSURL *)skinsRoot { return _skinsRoot; }
 - (void)setTranslationPreferencesDirectory:(NSString *)directory {
     if ([_translationPreferencesDirectory isEqual:directory]) return;
@@ -1352,11 +1356,8 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     if ([_defaults objectForKey:ImeModeScopeKey] != nil) merged[@"ime_mode_scope"] = self.imeModeScope;
     // 整张表一起写，MSIMEMergePreferenceSnapshot 对这个键整体替换而不是逐项合并，移除的规则才会从文档里消失。表为空时写空对象，偏好库保存时把它省掉。载入过文档时取文档那张表（加上本窗口的改动和收得下、等待发布的旧规则），文档没有这个键时取本地键里的整张表；只写偏好库收得下的部分（PublishableInputModeRules），否则整份保存都会被拒。
     // 还没载入过文档时一律不写，即使本地键存在：迁移之后本地键只剩文档收不下、只在本机生效的旧规则，和本窗口写下、等待下一次载入确认已进文档的规则，并不是完整的规则表，写进去会把文档里的整张表换成这一小部分甚至清空。升级前还没发布的旧规则也不会因此丢掉：载入文档后 applicationInputModeRulesAwaitPublication 为真，输入法随即保存一次把它们发布出去。
-    if (_sharedInputPreferencesApplied) {
+    if (_sharedInputPreferencesApplied)
         merged[@"app_input_mode_rules"] = PublishableInputModeRules(_sharedAppInputModeRules ?: [self applicationInputModeRules]);
-        // 与应用例外同一张表：宿主写来的就是整份名单，空表让文档里的名单消失（恢复默认值走这条路）。
-        merged[@"vim_mode_apps"] = PublishableVimModeApps([self vimModeApps]);
-    }
     // Apple exposes one switch for both a solitary Shift tap and Shift+Space.
     // Keep the legacy native keys independent when no shared snapshot exists,
     // but publish one shared value for both routes.
@@ -2182,9 +2183,6 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         _localOnlyAppInputModeRules = nil;
         _applicationInputModeRulesAwaitPublication = PublishableInputModeRules(legacy).count > 0;
     }
-    // vim_mode_apps 是字符串数组，标识认法与应用例外相同；文档缺这个键就是空名单，没有要迁移的旧键。
-    id vimApps = preferences[@"vim_mode_apps"];
-    _sharedVimModeApps = [vimApps isKindOfClass:NSArray.class] ? ValidVimModeApps(vimApps) : nil;
     id keys = preferences[@"keybindings"];
     if ([keys isKindOfClass:NSDictionary.class]) {
         // 中日英循环切换：缺键读作关，和共享偏好的默认值（对齐旧版 Windows 出厂值）一致。
@@ -2204,6 +2202,14 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         if (LocalModeBoolean(enabled)) _sharedCharacterSetShortcut = enabled;
         id fullWidth = keys[@"toggle_fullwidth_option_shift_h"];
         if (LocalModeBoolean(fullWidth)) _sharedFullWidthShortcut = fullWidth;
+    }
+    // 三个可重绑切换热键的写法交给共享契约解码：msime_client_toggle_hotkey_chords
+    // 给出主键规范名与修饰键集合，宿主按 ToggleChord 认键。keybindings 不是表或
+    // 解码失败时保持现值；keybindings 缺省或为 null 按出厂值。
+    if (NSDictionary *chords = MSIMEToggleHotkeyChords(keys)) {
+        _englishCandidatesToggleChord = MSIMEDecodeToggleChord(chords[@"english_candidates"]);
+        _fullWidthToggleChord = MSIMEDecodeToggleChord(chords[@"full_width"]);
+        _punctuationToggleChord = MSIMEDecodeToggleChord(chords[@"punctuation"]);
     }
     id punctuation = preferences[@"chinese_punctuation"];
     if (LocalModeBoolean(punctuation)) _sharedChinesePunctuation = punctuation;
@@ -2322,16 +2328,6 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     return ValidInputModeRules([_defaults dictionaryForKey:AppInputModeRulesKey]);
 }
 - (BOOL)applicationInputModeRulesAwaitPublication { return _applicationInputModeRulesAwaitPublication; }
-/// 名单按 ASCII 不分大小写查，与应用例外的标识认法一致：共享设置页写下的标识大小写未必和 bundle id 相同。
-- (NSArray<NSString *> *)vimModeApps {
-    return _sharedVimModeApps ?: ValidVimModeApps([_defaults arrayForKey:VimModeAppsKey]);
-}
-- (BOOL)vimModeEnabledForApplication:(NSString *)identifier {
-    if (![identifier isKindOfClass:NSString.class] || identifier.length == 0) return NO;
-    std::vector<std::string> apps;
-    for (NSString *entry in [self vimModeApps]) apps.emplace_back(entry.UTF8String);
-    return msime::mac::VimModeListContains(apps, identifier.UTF8String);
-}
 /// Writes one rule, or removes it when the mode is nil. The key goes rather than being left holding an empty dictionary, so that 恢复默认值 has nothing to offer once the last rule is gone.
 - (void)setInputMode:(NSString *)mode forApplication:(NSString *)identifier {
     if (![identifier isKindOfClass:NSString.class] || identifier.length == 0) return;
@@ -4106,7 +4102,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         // The first card is the only one on the page that had no heading, which also left the two
         // settings on it in no section and so out of reach of a section-level restore.
         [self sectionHeader:@"输入模式" keys:@[DefaultImeModeKey, ImeModeScopeKey]], inputModeCard,
-        [self sectionHeader:@"应用例外" keys:@[AppInputModeRulesKey, VimModeAppsKey]], appRuleCard,
+        [self sectionHeader:@"应用例外" keys:@[AppInputModeRulesKey]], appRuleCard,
         [self sectionHeader:@"中文输入方案"
                        keys:@[SchemeKey, ShuangpinProfileKey, ShuangpinPreeditKey, KeymapKey, WubiKey, WubiProfileKey,
                               WubiMixedPinyinKey, WubiZWildcardKey, WubiFifthCodeTopCommitKey, HelpcodeOptionsKey,

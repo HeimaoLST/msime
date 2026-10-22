@@ -607,46 +607,6 @@ static NSEvent *ModeKey(unsigned short code, NSEventModifierFlags flags, BOOL re
     return [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:flags timestamp:0 windowNumber:0 context:nil characters:characters charactersIgnoringModifiers:characters isARepeat:repeat keyCode:code];
 }
 
-@interface VimModeClient : ShortcutClient
-@property(nonatomic, copy) NSString *bundleIdentifier;
-@end
-@implementation VimModeClient
-@end
-
-// 经真实事件路由核对：空闲 Esc 交给应用并切英文，组字中的第一次 Esc 只取消。
-static void TestVimModeEscapeRouting(void) {
-    for (NSUInteger scenario = 0; scenario < 8; ++scenario) {
-        NSString *suite = [@"msime.vim-mode." stringByAppendingString:NSUUID.UUID.UUIDString];
-        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
-        MSIMEAppearancePreferences *appearance = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
-        [appearance applySharedInputPreferences:@{@"vim_mode_apps": @[@"org.example.Editor"]}];
-        ModeController *controller = [ModeController alloc];
-        VimModeClient *client = [VimModeClient new];
-        client.bundleIdentifier = scenario == 1 ? @"org.example.Other" : @"ORG.EXAMPLE.EDITOR";
-        ShortcutSession *session = [ShortcutSession new];
-        NSDictionary *empty = @{@"editing_text": @"", @"candidates": @[]};
-        session.nextTransition = @{@"handled": @NO, @"view": empty};
-        [controller setValue:appearance forKey:@"appearance"];
-        [controller setValue:client forKey:@"activeClient"];
-        [controller setValue:session forKey:@"session"];
-        [controller setValue:scenario == 7 ? @{@"editing_text": @"ni", @"candidates": @[]} : empty forKey:@"view"];
-        appearance.englishMode = NO;
-        const NSEventModifierFlags flags[] = {0, 0, NSEventModifierFlagShift,
-            NSEventModifierFlagControl, NSEventModifierFlagOption, NSEventModifierFlagCommand, 0, 0};
-        if (scenario == 7) session.cancelTransition = @{@"handled": @YES, @"view": empty};
-        const BOOL handled = [controller handleEvent:ModeKey(53, flags[scenario], scenario == 6) client:client];
-        assert(appearance.englishMode == (scenario == 0));
-        if (scenario == 0) assert(!handled && client.committed.length == 0);
-        if (scenario == 7) {
-            assert(handled);
-            session.cancelTransition = nil;
-            assert(![controller handleEvent:ModeKey(53, 0, NO) client:client]);
-            assert(appearance.englishMode);
-        }
-        MSIMERemoveTestPreferenceSuite(defaults, suite);
-    }
-}
-
 // 非美式键盘布局上的按键：`code` 是物理位置，`characters` 是当前布局在这个键上打出的字符。
 static NSEvent *LayoutKey(unsigned short code, NSString *characters, NSEventModifierFlags flags) {
     return [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:flags timestamp:0 windowNumber:0 context:nil characters:characters charactersIgnoringModifiers:characters isARepeat:NO keyCode:code];
@@ -673,8 +633,10 @@ static void TestShortcutLetterFollowsKeyboardLayout(void) {
     assert(msime::mac::ShortcutLetter(49, ' ') == '\0');
     assert(msime::mac::ShortcutLetter(18, '1') == '\0');
     const NSEventModifierFlags optionShift = NSEventModifierFlagOption | NSEventModifierFlagShift;
-    assert(msime::mac::IsFullWidthInputToggle(38, msime::mac::ShortcutLetter(38, 'H'), optionShift));
-    assert(!msime::mac::IsFullWidthInputToggle(4, msime::mac::ShortcutLetter(4, 'D'), optionShift));
+    assert(msime::mac::FullWidthInputToggleArm(38, msime::mac::ShortcutLetter(38, 'H'), optionShift,
+                                             msime::mac::FactoryFullWidthToggleChord()) == msime::mac::ToggleFullWidthArm::optionShiftH);
+    assert(msime::mac::FullWidthInputToggleArm(4, msime::mac::ShortcutLetter(4, 'D'), optionShift,
+                                             msime::mac::FactoryFullWidthToggleChord()) == msime::mac::ToggleFullWidthArm::none);
     assert(msime::mac::MaintenanceShortcut(msime::mac::ShortcutLetter(34, 'C'), true, true, true, false) ==
            msime::mac::MaintenanceShortcutAction::ClearCache);
     assert(msime::mac::MaintenanceShortcut(msime::mac::ShortcutLetter(8, 'J'), true, true, true, false) ==
@@ -1486,8 +1448,8 @@ static void TestPunctuation(NSUserDefaults *defaults, MSIMEAppearancePreferences
     assert([controller handleEvent:toggleEvent(47, NSEventModifierFlagControl, YES) client:client]);
     assert(!appearance.runtimeChinesePunctuation && session.punctuationCalls == calls);
     for (NSNumber *flags in @[@0, @(NSEventModifierFlagCommand), @(NSEventModifierFlagControl | NSEventModifierFlagShift), @(NSEventModifierFlagControl | NSEventModifierFlagOption), @(NSEventModifierFlagControl | NSEventModifierFlagCommand)])
-        assert(!MSIMEPunctuationToggle(toggleEvent(47, flags.unsignedIntegerValue, NO)));
-    assert(!MSIMEPunctuationToggle(toggleEvent(65, NSEventModifierFlagControl, NO))); // Keypad decimal.
+        assert(!MSIMEToggleChordMatches(msime::mac::FactoryPunctuationToggleChord(), toggleEvent(47, flags.unsignedIntegerValue, NO)));
+    assert(!MSIMEToggleChordMatches(msime::mac::FactoryPunctuationToggleChord(), toggleEvent(65, NSEventModifierFlagControl, NO))); // Keypad decimal.
     // The punctuation preference can be changed while English passthrough is active.
     appearance.englishMode = YES;
     assert([controller handleEvent:toggle client:client]);
@@ -2084,6 +2046,58 @@ static void TestCharacterSetShortcut(void) {
     MSIMERemoveTestPreferenceSuite(defaults, suite);
 }
 
+// 三个可重绑切换热键按共享偏好 `keybindings.toggle_*` 认键：改成新键后按新键命中、
+// 按旧键不再命中，空串不绑定；Option+Shift+H 不随 `toggle_full_width` 改动。
+static void TestToggleHotkeyRebinding(void) {
+    NSString *suite = [@"msime.toggle-hotkeys." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *appearance = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    ModeController *controller = [ModeController alloc];
+    ShortcutClient *client = [ShortcutClient new];
+    ShortcutSession *session = [ShortcutSession new];
+    [controller setValue:appearance forKey:@"appearance"];
+    [controller setValue:client forKey:@"activeClient"];
+    [controller setValue:session forKey:@"session"];
+    [controller setValue:@{@"editing_text":@"test", @"candidates":@[]} forKey:@"view"];
+    appearance.englishMode = NO;
+    const NSEventModifierFlags ctrl = NSEventModifierFlagControl;
+    const NSEventModifierFlags ctrlShift = NSEventModifierFlagControl | NSEventModifierFlagShift;
+    // 标点：出厂 Ctrl+. 命中；改成 Ctrl+, 后按 , 命中、按 . 不再命中；空串不绑定。
+    NSUInteger calls = session.punctuationCalls;
+    assert([controller handleEvent:ModeKey(47, ctrl, NO) client:client]);
+    assert(session.punctuationCalls == calls + 1);
+    calls = session.punctuationCalls;
+    [appearance applySharedInputPreferences:@{@"keybindings":@{@"toggle_punctuation":@"Ctrl+Comma"}}];
+    assert([controller handleEvent:ModeKey(43, ctrl, NO) client:client]);
+    assert(session.punctuationCalls == calls + 1);
+    calls = session.punctuationCalls;
+    [controller handleEvent:ModeKey(47, ctrl, NO) client:client];
+    assert(session.punctuationCalls == calls);
+    [appearance applySharedInputPreferences:@{@"keybindings":@{@"toggle_punctuation":@""}}];
+    [controller handleEvent:ModeKey(43, ctrl, NO) client:client];
+    assert(session.punctuationCalls == calls);
+    // 中英：改成 Ctrl+Shift+R 后按 R 命中、按 E 不再命中；字母主键按布局字母认。
+    const NSUInteger ecalls = session.englishCandidateCalls;
+    [appearance applySharedInputPreferences:@{@"keybindings":@{@"toggle_english_candidates":@"Ctrl+Shift+KeyR"}}];
+    assert([controller handleEvent:ModeKey(15, ctrlShift, NO) client:client]);
+    assert(session.englishCandidateCalls == ecalls + 1);
+    [controller handleEvent:ModeKey(14, ctrlShift, NO) client:client];
+    assert(session.englishCandidateCalls == ecalls + 1);
+    // 全半角：改成 Ctrl+Shift+, 后按 , 命中、Ctrl+Shift+Space 不再命中；Option+Shift+H 照常。
+    [appearance applySharedInputPreferences:@{@"keybindings":@{@"toggle_full_width":@"Ctrl+Shift+Comma"}}];
+    BOOL width = appearance.runtimeFullWidthInput;
+    NSUInteger wcalls = session.widthCalls;
+    assert([controller handleEvent:ModeKey(43, ctrlShift, NO) client:client]);
+    assert(appearance.runtimeFullWidthInput != width && session.widthCalls > wcalls);
+    width = appearance.runtimeFullWidthInput;
+    wcalls = session.widthCalls;
+    [controller handleEvent:ModeKey(49, ctrlShift, NO) client:client];
+    assert(appearance.runtimeFullWidthInput == width && session.widthCalls == wcalls);
+    assert([controller handleEvent:ModeKey(4, NSEventModifierFlagOption | NSEventModifierFlagShift, NO) client:client]);
+    assert(appearance.runtimeFullWidthInput != width && session.widthCalls > wcalls);
+    MSIMERemoveTestPreferenceSuite(defaults, suite);
+}
+
 static void TestDedicatedEnglish(MSIMEAppearancePreferences *appearance) {
     ModeController *controller = [ModeController alloc];
     ShortcutClient *client = [ShortcutClient new];
@@ -2222,7 +2236,8 @@ static void TestFullWidth(NSUserDefaults *defaults, MSIMEAppearancePreferences *
     [controller appearanceChanged:nil];
     assert(appearance.runtimeFullWidthInput && session.fullwidth);
     for (NSEventModifierFlags extra : {NSEventModifierFlagCommand, NSEventModifierFlagOption})
-        assert(!msime::mac::IsFullWidthInputToggle(49, '\0', windowsChord | extra));
+        assert(msime::mac::FullWidthInputToggleArm(49, '\0', windowsChord | extra,
+            msime::mac::FactoryFullWidthToggleChord()) == msime::mac::ToggleFullWidthArm::none);
     for (NSEventModifierFlags extra : {NSEventModifierFlagCommand, NSEventModifierFlagControl}) {
         assert(![controller handleEvent:ModeKey(4, chord | extra, NO) client:client]);
         assert(appearance.runtimeFullWidthInput);
@@ -11111,8 +11126,9 @@ int main(int argc, char **argv) {
             @autoreleasepool { TestTemporaryJapaneseLongVowelThroughRealSession(YES); }
             return 0;
         }
-        if (argc == 2 && std::string(argv[1]) == "--vim-mode") {
-            TestVimModeEscapeRouting();
+        // 可重绑切换热键的重绑路径单独可跑：全量 suite 里皮肤颜色断言在无图形会话的机器上先于它中止。
+        if (argc == 2 && std::string(argv[1]) == "--toggle-hotkeys") {
+            TestToggleHotkeyRebinding();
             return 0;
         }
         if (argc == 2 && std::string(argv[1]) == "--glass-visual") {
@@ -12958,7 +12974,7 @@ int main(int argc, char **argv) {
         @autoreleasepool { TestEmojiBridgeFallback(); }
         @autoreleasepool { TestMixedInputPreferences(); }
         @autoreleasepool { TestCharacterSetShortcut(); }
-        @autoreleasepool { TestVimModeEscapeRouting(); }
+        @autoreleasepool { TestToggleHotkeyRebinding(); }
         @autoreleasepool { TestDedicatedEnglish(appearance); }
         @autoreleasepool { TestConsecutiveUppercaseGoesToTheClient(appearance); }
         @autoreleasepool { TestSystemInputModeReport(appearance); }
