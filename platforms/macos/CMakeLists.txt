@@ -975,6 +975,7 @@ target_link_libraries(shortcut-test PRIVATE "-framework AudioToolbox")
 target_link_libraries(MSIMEClientInputMethod PRIVATE "-framework AudioToolbox")
 target_link_libraries(shortcut-test PRIVATE "-framework AVFoundation" "-framework Speech" "-framework CoreGraphics" "-framework CoreText" "-framework CoreAudio" "-framework UniformTypeIdentifiers")
 add_test(NAME shortcut COMMAND shortcut-test)
+add_test(NAME shortcut-english-punctuation COMMAND shortcut-test --english-punctuation)
 # Around 25 s locally: several cases wait on real input-source and run-loop round trips, which is past the 20 s CI default.
 # The controllers under test read runtime-options.json from Application Support, so each run gets an empty home of its own: an installed or demo profile on the developer's Mac must not reach into these cases.
 set(MSIME_SHORTCUT_TEST_HOME "${CMAKE_CURRENT_BINARY_DIR}/shortcut-test-home")
