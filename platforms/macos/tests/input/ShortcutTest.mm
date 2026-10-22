@@ -5903,10 +5903,10 @@ static bool SyntheticCapsRelease() { ++gCapsReleases; return gCapsReleaseWorks; 
 
 static void TestCapsLockTap() {
     const auto realRelease = MSIMECapsLockRelease;
-    const auto realFlags = MSIMECapsLockFlagsState;
+    const auto realFlags = MSIMEPhysicalModifierFlagsState;
     const auto realNow = MSIMECapsLockNow;
     MSIMECapsLockRelease = &SyntheticCapsRelease;
-    MSIMECapsLockFlagsState = &SyntheticCapsFlags;
+    MSIMEPhysicalModifierFlagsState = &SyntheticCapsFlags;
     MSIMECapsLockNow = &SyntheticCapsNow;
     gCapsReleases = 0;
     gCapsReleaseWorks = true;
@@ -6085,7 +6085,7 @@ static void TestCapsLockTap() {
     assert(session.capsLock && !prefs.englishMode && gCapsReleases == releasesBefore);
 
     MSIMECapsLockRelease = realRelease;
-    MSIMECapsLockFlagsState = realFlags;
+    MSIMEPhysicalModifierFlagsState = realFlags;
     MSIMECapsLockNow = realNow;
     MSIMERemoveTestPreferenceSuite(defaults, suite);
 }

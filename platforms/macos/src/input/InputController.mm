@@ -999,10 +999,10 @@ static bool MSIMEReleaseSystemCapsLock() {
     return released;
 }
 // 在原生查询边界替换合成状态，回归必须经过生产的实体按住判定。
-static CGEventFlags (*MSIMECapsLockFlagsState)(CGEventSourceStateID) = &CGEventSourceFlagsState;
+static CGEventFlags (*MSIMEPhysicalModifierFlagsState)(CGEventSourceStateID) = &CGEventSourceFlagsState;
 // 键码 0x39 的查询跟随大写锁定，松手后仍可能为真；只读 stateless 位区分实体按住与逻辑锁定。
 static bool MSIMECapsLockPhysicallyHeld() {
-    return (MSIMECapsLockFlagsState(kCGEventSourceStateHIDSystemState) & NX_ALPHASHIFT_STATELESS_MASK) != 0;
+    return (MSIMEPhysicalModifierFlagsState(kCGEventSourceStateHIDSystemState) & NX_ALPHASHIFT_STATELESS_MASK) != 0;
 }
 // 和 NSEvent.timestamp 同一个开机后时钟，单位毫秒。
 static std::int64_t MSIMEUptimeMilliseconds() {
@@ -6576,13 +6576,15 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     }
     const BOOL voiceEnabled = MSIMEVoiceInputEnabled(voiceDefaults);
     if (!voiceEnabled) _voiceHoldShortcut.reset();
+    const NSEventModifierFlags physicalModifierFlags = voiceEnabled && event.type == NSEventTypeFlagsChanged
+        ? MSIMEPhysicalModifierFlagsState(kCGEventSourceStateHIDSystemState) : 0;
     const auto voiceShortcut = voiceEnabled ? _voiceHoldShortcut.observe(event, {
         [voiceDefaults boolForKey:@"MSIMEClientVoiceHotkeyRightAlt"] != NO,
         [voiceDefaults boolForKey:@"MSIMEClientVoiceHotkeyCtrlCommand"] != NO,
         [voiceDefaults boolForKey:@"MSIMEClientVoiceHotkeyCtrlOption"] != NO,
         // 空格锁定固定为开：空格只在按住录音组合键期间才被拦下，平常打字不受影响。设置页不再给这个开关（`voice_space_lock_switch`），存下的 false 也不再读。
         true
-    }, _voiceService.active) : MSIMEVoiceHoldShortcut::Result{};
+    }, _voiceService.active, physicalModifierFlags) : MSIMEVoiceHoldShortcut::Result{};
     if (voiceShortcut.consumed || voiceShortcut.action != MSIMEVoiceHoldShortcut::Action::None) _modifierTap.reset();
     // MSIME-Windows shows the overlay's cancel and confirm buttons once the hold is locked (ControlCommand::Lock).
     if (voiceShortcut.consumed && _voiceHoldShortcut.locked() && _voiceService.active) [_voiceOverlay setRecordingLocked:YES];
