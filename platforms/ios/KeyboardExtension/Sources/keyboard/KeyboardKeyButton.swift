@@ -255,6 +255,7 @@ final class KeyboardKeyButton: UIButton {
   private var cornerHintHold: Timer?
 
   override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
+    KeyPathSignpost.elapsed("touchDownDelivered", since: touch.timestamp)
     let began = super.beginTracking(touch, with: event)
     resetCornerHint()
     guard began, cornerHint != nil else { return began }
@@ -278,6 +279,7 @@ final class KeyboardKeyButton: UIButton {
   }
 
   override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+    if let touch = touches.first { KeyPathSignpost.elapsed("touchUpDelivered", since: touch.timestamp) }
     guard cornerHintTriggered, let hint = cornerHint else {
       resetCornerHint()
       super.touchesEnded(touches, with: event)

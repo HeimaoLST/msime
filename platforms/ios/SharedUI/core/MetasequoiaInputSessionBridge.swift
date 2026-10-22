@@ -157,7 +157,7 @@ private func msimeClientSnapshotActivate(_ handle: UInt64, _ expected: UnsafePoi
 final class MSIMEInputThread: @unchecked Sendable {
   static let shared = MSIMEInputThread()
   private let condition = NSCondition()
-  private var tasks: [() -> Void] = []
+  private var tasks: [(enqueued: TimeInterval, run: () -> Void)] = []
   private var thread: Thread!
 
   private init() {
@@ -167,7 +167,8 @@ final class MSIMEInputThread: @unchecked Sendable {
         while tasks.isEmpty { condition.wait() }
         let task = tasks.removeFirst()
         condition.unlock()
-        autoreleasepool { task() }
+        KeyPathSignpost.elapsed("inputQueueWait", since: task.enqueued)
+        autoreleasepool { KeyPathSignpost.interval("inputTask") { task.run() } }
       }
     }
     thread.name = "app.msime.ios.input"
@@ -177,7 +178,7 @@ final class MSIMEInputThread: @unchecked Sendable {
 
   func async(_ operation: @escaping () -> Void) {
     condition.lock()
-    tasks.append(operation)
+    tasks.append((ProcessInfo.processInfo.systemUptime, operation))
     condition.signal()
     condition.unlock()
   }
@@ -190,7 +191,7 @@ final class MSIMEInputThread: @unchecked Sendable {
       result = operation()
       completed.signal()
     }
-    completed.wait()
+    KeyPathSignpost.interval("inputSyncBlocked") { completed.wait() }
     return result!
   }
 }
@@ -526,7 +527,11 @@ final class MetasequoiaInputSessionBridge: @unchecked Sendable {
       pendingCharactersLock.lock()
       pending.snapshot = snapshot
       pendingCharactersLock.unlock()
-      DispatchQueue.main.async { [weak self] in self?.deliverCompletedCharacters() }
+      let completed = ProcessInfo.processInfo.systemUptime
+      DispatchQueue.main.async { [weak self] in
+        KeyPathSignpost.elapsed("nineKeyMainQueueWait", since: completed)
+        self?.deliverCompletedCharacters()
+      }
     }
     return true
   }

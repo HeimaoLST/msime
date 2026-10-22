@@ -752,6 +752,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
         // 异步首键尚未渲染时也在输入；词间的短暂停顿不触发同步权限和词库维护。
         guard !self.hasComposition, !self.isInLocalMode, !self.session.hasPendingCharacters,
               ProcessInfo.processInfo.systemUptime - self.lastKeyTouchTime >= 0.3 else { return }
+        let signpost = KeyPathSignpost.begin("dictionaryMaintenance")
+        defer { KeyPathSignpost.end("dictionaryMaintenance", signpost) }
         let fullAccess = self.hasFullAccess
         self.synchronizePersonalDictionary(force: false, fullAccess: fullAccess)
         self.snapshotWorker.tick(idle: true, fullAccess: fullAccess)
@@ -899,6 +901,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   override func selectionWillChange(_ textInput: UITextInput?) {
+    let signpost = KeyPathSignpost.begin("selectionWillChange")
+    defer { KeyPathSignpost.end("selectionWillChange", signpost) }
     super.selectionWillChange(textInput)
     if !ownEditEcho.isEcho(at: ProcessInfo.processInfo.systemUptime) {
       englishCorrectionRejectedPrefix = ""
@@ -909,6 +913,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   override func textWillChange(_ textInput: UITextInput?) {
+    let signpost = KeyPathSignpost.begin("textWillChange")
+    defer { KeyPathSignpost.end("textWillChange", signpost) }
     super.textWillChange(textInput)
     replyModel.invalidateContext()
     handwriting.clear()
@@ -942,6 +948,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   override func textDidChange(_ textInput: UITextInput?) {
+    let signpost = KeyPathSignpost.begin("textDidChange")
+    defer { KeyPathSignpost.end("textDidChange", signpost) }
     super.textDidChange(textInput)
     let document = KeyboardHostContext.documentIdentifier(for: textDocumentProxy)
     if let previous = asynchronousInputDocument, previous != document {
@@ -961,6 +969,8 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
   }
 
   override func selectionDidChange(_ textInput: UITextInput?) {
+    let signpost = KeyPathSignpost.begin("selectionDidChange")
+    defer { KeyPathSignpost.end("selectionDidChange", signpost) }
     super.selectionDidChange(textInput)
     // 光标移到了 `xxx@` 后面，或者从那里移开。
     refreshEmailSuffixes()
@@ -3371,13 +3381,17 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     deferredNineKeySnapshot = snapshot
     guard !deferredNineKeyRenderScheduled else { return }
     deferredNineKeyRenderScheduled = true
+    let deferred = ProcessInfo.processInfo.systemUptime
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
+      KeyPathSignpost.elapsed("nineKeyCoalesceWait", since: deferred)
       self.flushDeferredNineKeySnapshot()
     }
   }
 
   private func handleCharacter(_ character: String) {
+    let signpost = KeyPathSignpost.begin("key")
+    defer { KeyPathSignpost.end("key", signpost) }
     playInputClick()
     if isChineseMode {
       synchronizeInputSchemePreference()
@@ -6254,16 +6268,22 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     inlineMarkedText = text
     switch edit {
     case .mark(let marked):
-      textDocumentProxy.setMarkedText(marked, selectedRange: NSRange(location: (marked as NSString).length, length: 0))
+      KeyPathSignpost.interval("setMarkedText") {
+        textDocumentProxy.setMarkedText(marked, selectedRange: NSRange(location: (marked as NSString).length, length: 0))
+      }
     case .clear:
-      textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
-      textDocumentProxy.unmarkText()
+      KeyPathSignpost.interval("clearMarkedText") {
+        textDocumentProxy.setMarkedText("", selectedRange: NSRange(location: 0, length: 0))
+        textDocumentProxy.unmarkText()
+      }
     }
     noteOwnEdit()
   }
 
   private func render(_ snapshot: MetasequoiaInputSnapshot, source originalSource: TypingSource? = nil,
                       appendingLiteral: String? = nil) {
+    let renderSignpost = KeyPathSignpost.begin("render")
+    defer { KeyPathSignpost.end("render", renderSignpost) }
     // 控制命令已产生更新快照时，之前数字的候选帧不能再覆盖选词、删除或模式切换后的状态。
     deferredNineKeySnapshot = nil
     candidateRevision &+= 1
@@ -6337,6 +6357,7 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
     func visibleValues<T>(_ values: [T]) -> [T] {
       visibleIndices.compactMap { values.indices.contains($0) ? values[$0] : nil }
     }
+    let candidateStripSignpost = KeyPathSignpost.begin("candidateStrip")
     updateCandidateStrip(
                          preedit: composing,
                          candidates: visibleValues(snapshot.candidates),
@@ -6349,11 +6370,12 @@ final class KeyboardViewController: UIInputViewController, UIGestureRecognizerDe
                          candidatePageCount: snapshot.candidatePageCount,
                          candidateEngineIndices: visibleIndices,
                          answeredByPinyinFallback: snapshot.answeredByPinyinFallback)
+    KeyPathSignpost.end("candidateStrip", candidateStripSignpost)
     // The Hanja list opens and closes while the syllable keeps composing, and Return chooses a Hanja only while it is open.
     if !inputScheme.isJapanese && koreanHanjaListOpen != wasKoreanHanjaListOpen { updateReturnKey() }
-    refreshCandidatePanelAnnotations()
-    updateSpellingStrip()
-    scheduleCandidateGlosses()
+    KeyPathSignpost.interval("candidateAnnotations") { refreshCandidatePanelAnnotations() }
+    KeyPathSignpost.interval("spellingStrip") { updateSpellingStrip() }
+    KeyPathSignpost.interval("glossSchedule") { scheduleCandidateGlosses() }
     if onlineCandidatesEnabled {
       onlineCandidates.refresh(allowed: hasFullAccess && hasComposition && !isInLocalMode)
     }
