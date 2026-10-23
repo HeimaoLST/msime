@@ -377,6 +377,39 @@ final class PersonalDictionaryStoreTests: XCTestCase {
     XCTAssertTrue(snapshot.candidates.contains(word.value))
   }
 
+  // 键盘每次出现都强制刷新一次个人词库列表。列表只要共享租约，和活着的会话并存，不能再为它销毁、重建并聚焦会话：那正是键盘出现时主线程多等的第二轮创建和聚焦。会话被重建的话，正在组的字会丢，而且原来的维护路径在组字时直接拒绝。
+  @MainActor
+  func testListingTheUsersWordsLeavesTheLiveSessionAlone() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let resources = try XCTUnwrap(Bundle.main.resourceURL?.appendingPathComponent("EngineResources", isDirectory: true))
+    let session = MetasequoiaInputSessionBridge(resources: resources,
+                                                 stateRoot: root.appendingPathComponent("EngineState"))
+    let word = try PersonalWord(kind: .quickPhrase, key: "msimelive", value: "live session fixture").validated()
+    defer {
+      _ = session.cancel()
+      try? session.applyPersonalPrevious(word.bridgeValue, replacement: nil, requestID: UUID().uuidString)
+    }
+    try session.applyPersonalPrevious(nil, replacement: word.bridgeValue, requestID: UUID().uuidString)
+
+    _ = session.cancel()
+    var composing = session.handleCharacter("n")
+    for letter in "ihao" { composing = session.handleCharacter(String(letter)) }
+    XCTAssertFalse(composing.preedit.isEmpty)
+    XCTAssertTrue(composing.candidates.contains("你好"))
+
+    let page = try session.personalEntries(atOffset: 0)
+    let rows = try XCTUnwrap(page["entries"] as? [[String: Any]])
+    XCTAssertTrue(try rows.map { try PersonalWord(bridgeValue: $0) }.contains(word),
+                  "the live session's shared lease kept the list from reading the journal")
+
+    // 同一个会话接着收下一个键：组字还在，说明会话没有被销毁重建。
+    let continued = session.handleCharacter("m")
+    XCTAssertTrue(continued.preedit.hasPrefix(composing.preedit) && continued.preedit.count > composing.preedit.count,
+                  "listing rebuilt the session and dropped the composition: \(composing.preedit) -> \(continued.preedit)")
+    _ = session.cancel()
+  }
+
   @MainActor
   func testACodeSearchReachesTheWholeStoreThroughTheKeyboardEngine() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

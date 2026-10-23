@@ -19,7 +19,8 @@ use crate::ime::online_batch::{
 };
 use crate::lattice::decode::{decode_pinned, BigramMemo, PinnedSpan, SentenceNgramTables};
 use crate::lattice::merge::{
-    merge_lattice_candidates, merge_lattice_candidates_borrowed, whole_sentence_insert_position,
+    decode_lattice, decode_lattice_borrowed, merge_decoded, merge_decoded_borrowed,
+    whole_sentence_insert_position, DecodedSentences,
 };
 use crate::lattice::neural::{
     shared_sentence_model, NeuralReranker, CONTEXT_CHARACTERS, MAX_RERANK_PATHS,
@@ -60,12 +61,16 @@ use super::typo_edges::collect_typo_edges;
 #[cfg(test)]
 mod marking_buffer_tests;
 
+mod page_copy;
+
 pub const CACHE_CAPACITY: usize = 128;
 pub const TYPO_SPAN_CACHE_CAPACITY: usize = 512;
 /// 词网格的跨度查询结果按跨度缓存的条数。九键每按一键要对几十条切分各解一次词网格，这些切分大量共用同样的跨度，下一键又会重复上一键的大部分跨度，所以容量按一次长输入里出现的不同跨度数来定。
 pub const LATTICE_SPAN_CACHE_CAPACITY: usize = 4096;
 /// 按切分缓存的词典原始行（`query_segments_keyed_flat`、单字母的 `query_initial`、`query_longer_phrases` 和模糊前缀的批量查询）每种的条数。`cache` 只有 128 条，九键一键的几十条切分会把它整个挤掉；这一层只存与查询方式无关的词典行，命中时与直接查库完全一样。
 pub const ROW_CACHE_CAPACITY: usize = 512;
+/// 按音节缓存的整句解码结果条数。九键每按一个数字要对二十条上下的切分各解一次整句，其中约三分之一是同一次刷新或上一个数字已经解过的音节串（同一条备选切分挂在好几条九键路径下）；一个长词打下来不同的音节串有两三百条。每条只存解码出的几条句子，内存很小。
+pub const SENTENCE_DECODE_CACHE_CAPACITY: usize = 512;
 /// `RowCacheBatch` 一段读事务最长持续的时间。词典的忙等待上限 `BUSY_TIMEOUT` 是 250 ms，这一段要远小于它，别的连接提交时才不会因为一次长刷新等到超时。
 const ROW_CACHE_BATCH_SPAN: Duration = Duration::from_millis(20);
 /// A single-letter query returns at most this many rows until `expand_initial_candidates`.
@@ -108,6 +113,13 @@ struct CachedFuzzyRows {
 }
 
 #[derive(Clone)]
+struct CachedDecode {
+    /// 解码时个人模型的版本；模型一变，条目作废。
+    personal_version: u64,
+    decoded: DecodedSentences,
+}
+
+#[derive(Clone)]
 struct CachedLatticeSpan {
     span_limit: usize,
     span: String,
@@ -117,6 +129,27 @@ struct CachedLatticeSpan {
 enum ColdRows {
     Transfer,
     Borrow,
+}
+
+enum ProjectedRows {
+    Selected(Vec<WordItem>),
+    /// 只供借用冷页使用，谓词已全部接受，尚未复制字段。
+    All,
+}
+
+impl From<Vec<WordItem>> for ProjectedRows {
+    fn from(rows: Vec<WordItem>) -> Self {
+        Self::Selected(rows)
+    }
+}
+
+impl ProjectedRows {
+    fn selected(self) -> Vec<WordItem> {
+        match self {
+            Self::Selected(rows) => rows,
+            Self::All => unreachable!("只有借用冷页可以延后复制"),
+        }
+    }
 }
 
 /// The reference answered a failed write with `ERROR_CODE` and no message; callers map any failure to their own diagnostic.
@@ -186,6 +219,8 @@ pub struct QuanpinDictionary {
     row_cache_batch: Option<Instant>,
     /// 词网格解码查二元分的备忘，跨查询保留；表不变它就一直有效，见 `BigramMemo`。
     bigram_memo: RefCell<BigramMemo>,
+    /// 整句解码结果，键见 `sentence_decode_key`。解码只取决于音节、词典行、n 元表、个人模型和整句选项：词典行变了随行缓存清空，个人模型按条目记的版本核对，整句选项和纠错资料变了在各自的 setter 里清空。
+    sentence_decode_cache: FifoCache<String, CachedDecode>,
     rerankers: Vec<NeuralReranker>,
     /// octagram `.gram` 语法模型；路径由 `set_sentence_association` 给定、经
     /// `GramDb::shared` 进程内共享，缺失或非法时为 `None` 退回无搭配打分。
@@ -237,6 +272,7 @@ impl QuanpinDictionary {
             row_cache_version: None,
             row_cache_batch: None,
             bigram_memo: RefCell::default(),
+            sentence_decode_cache: FifoCache::new(SENTENCE_DECODE_CACHE_CAPACITY),
             rerankers: Vec::new(),
             collocation_db: None,
             sentence_alternatives: false,
@@ -302,13 +338,29 @@ impl QuanpinDictionary {
                 match rows {
                     Cow::Owned(mut rows) => {
                         rows.retain(|row| keep(row, cached));
-                        rows
+                        ProjectedRows::Selected(rows)
                     }
                     Cow::Borrowed(rows) => {
+                        if !cached {
+                            // 谓词全部成功前不淘汰缓存；全留时留给外层复用旧页复制。
+                            let Some(rejected) = rows.iter().position(|row| !keep(row, false))
+                            else {
+                                return ProjectedRows::All;
+                            };
+                            let mut result = Vec::with_capacity(rows.len());
+                            result.extend_from_slice(&rows[..rejected]);
+                            result.extend(
+                                rows[rejected + 1..]
+                                    .iter()
+                                    .filter(|row| keep(row, false))
+                                    .cloned(),
+                            );
+                            return ProjectedRows::Selected(result);
+                        }
                         // 容器预留完整行数，只跳过拒绝行的字段复制。
                         let mut result = Vec::with_capacity(rows.len());
                         result.extend(rows.iter().filter(|row| keep(row, cached)).cloned());
-                        result
+                        ProjectedRows::Selected(result)
                     }
                 }
             });
@@ -595,6 +647,7 @@ impl QuanpinDictionary {
         // The cached lists were assembled under the previous answer.
         self.cache.clear();
         self.series_cache.clear();
+        self.sentence_decode_cache.clear();
     }
 
     /// 首页行数只决定补全词是按权重并进来还是接在整组末尾；改了就清掉按旧门槛组装的整条答案（照 `set_sentence_alternatives`）。`cache` 存的是按切分查出来的词库行，补全词是查完它才并进来的，所以这里动不了它，清掉只会白白丢掉 128 行、再查一次 SQLite。
@@ -660,6 +713,8 @@ impl QuanpinDictionary {
     }
 
     fn clear_row_caches(&mut self) {
+        // 整句是从这些行解出来的。
+        self.sentence_decode_cache.clear();
         self.lattice_span_cache.clear();
         self.segment_row_cache.clear();
         self.longer_row_cache.clear();
@@ -702,16 +757,16 @@ impl QuanpinDictionary {
 
     /// 同步投影只能筛选、复制或移交原行，不改字段和顺序；冷页全保留时可交换副本与原页。
     /// 回调的布尔值只标识核对失效后的系列热命中，借用的冷页仍为 `false`。
-    fn query_exact_projected(
+    fn query_exact_projected<P: Into<ProjectedRows>>(
         &mut self,
         raw: &str,
         segmentation: &str,
         types: u32,
         cold: ColdRows,
-        project: impl FnOnce(Cow<'_, [WordItem]>, bool) -> Vec<WordItem>,
+        project: impl FnOnce(Cow<'_, [WordItem]>, bool) -> P,
     ) -> Vec<WordItem> {
         if raw.is_empty() {
-            return project(Cow::Owned(Vec::new()), false);
+            return project(Cow::Owned(Vec::new()), false).into().selected();
         }
         self.current_autocorrect_types = types;
         if types & TYPO_EDGE_TYPES != 0 {
@@ -721,6 +776,8 @@ impl QuanpinDictionary {
             if generation != self.typo_generation {
                 self.typo_generation = generation;
                 self.series_cache.clear();
+                // 纠错整句按纠错资料规划。
+                self.sentence_decode_cache.clear();
                 self.personal_scored_keys.clear();
             }
         }
@@ -773,7 +830,7 @@ impl QuanpinDictionary {
                 self.reset_cache();
             }
             if let Some(cached) = self.series_cache.get_ref(&slot) {
-                return project(Cow::Borrowed(cached), true);
+                return project(Cow::Borrowed(cached), true).into().selected();
             }
         }
 
@@ -833,31 +890,42 @@ impl QuanpinDictionary {
         let (cached, projected) = match cold {
             ColdRows::Transfer => {
                 let cached = result.clone();
-                (cached, project(Cow::Owned(result), false))
+                (
+                    Some(cached),
+                    project(Cow::Owned(result), false).into().selected(),
+                )
             }
             ColdRows::Borrow => {
-                let projected = project(Cow::Borrowed(&result), false);
-                if projected.len() == result.len() {
-                    // 全保留时副本可直接入缓存，原页作为输出，省去额外缩容。
-                    (projected, result)
-                } else {
-                    // 外层富余容量不随整页转移而长期留在 FIFO 中。
-                    result.shrink_to_fit();
-                    (result, projected)
+                match project(Cow::Borrowed(&result), false).into() {
+                    ProjectedRows::All => (None, result),
+                    ProjectedRows::Selected(projected) => {
+                        if projected.len() == result.len() {
+                            // 既有投影回调已复制的全页仍直接入缓存。
+                            (Some(projected), result)
+                        } else {
+                            // 外层富余容量不随整页转移而长期留在 FIFO 中。
+                            result.shrink_to_fit();
+                            (Some(result), projected)
+                        }
+                    }
                 }
             }
         };
         // 单音节主路径也可能沿完整备选切分组句，需要跟随个人模型失效。
-        if segments.len() >= 2
+        let personal_scored = segments.len() >= 2
             || resolution.corrected.len() >= 2
             || alternatives
                 .iter()
-                .any(|path| path.len() >= 2 && is_literal_segmentation(raw, path))
-        {
-            self.series_cache.insert(slot.clone(), cached);
-            self.remember_personal_scored_key(slot);
-        } else {
+                .any(|path| path.len() >= 2 && is_literal_segmentation(raw, path));
+        let personal_slot = personal_scored.then(|| slot.clone());
+        if let Some(cached) = cached {
             self.series_cache.insert(slot, cached);
+        } else {
+            let (cached, previous) = self.series_cache.insert_with_previous(slot, Vec::new());
+            *cached = page_copy::clone_rows_reusing(&projected, previous.unwrap_or_default());
+        }
+        if let Some(slot) = personal_slot {
+            self.remember_personal_scored_key(slot);
         }
         projected
     }
@@ -1152,44 +1220,66 @@ impl QuanpinDictionary {
         } else {
             None
         };
-        let span_count = lattice_span_count(segments.len(), options.max_phrase_syllables);
-        let typo = if span_count <= LATTICE_SPAN_CACHE_CAPACITY {
-            warm_lattice_span_cache(
-                database,
-                &mut self.lattice_span_cache,
-                segments,
-                span_limit,
-                options.max_phrase_syllables,
-            );
-            let lattice_spans = &self.lattice_span_cache;
-            let mut lookup = |span: &[String]| {
-                cached_lattice_span_ref(lattice_spans, span, span_limit)
-                    .expect("warmed lattice span cache entry")
-            };
-            merge_lattice_candidates_borrowed(
+        // 模型已按需重载，此刻的版本就是这次解码用的版本。
+        let personal_version = personal.version();
+        let decode_key = sentence_decode_key(segments, types, typo_eligible);
+        let cached = self
+            .sentence_decode_cache
+            .get_ref(&decode_key)
+            .filter(|cached| cached.personal_version == personal_version);
+        let typo = if let Some(cached) = cached {
+            merge_decoded_borrowed(
                 result,
                 segments,
-                &mut lookup,
                 typed,
                 &options,
-                typo_source,
                 &mut self.rerankers,
                 &self.rescoring_context,
+                &cached.decoded,
             )
         } else {
-            let lattice_spans = &mut self.lattice_span_cache;
-            let mut lookup =
-                |span: &[String]| cached_lattice_span(database, lattice_spans, span, span_limit);
-            merge_lattice_candidates(
-                result,
-                segments,
-                &mut lookup,
-                typed,
-                &options,
-                typo_source,
-                &mut self.rerankers,
-                &self.rescoring_context,
-            )
+            let span_count = lattice_span_count(segments.len(), options.max_phrase_syllables);
+            let decoded = if span_count <= LATTICE_SPAN_CACHE_CAPACITY {
+                warm_lattice_span_cache(
+                    database,
+                    &mut self.lattice_span_cache,
+                    segments,
+                    span_limit,
+                    options.max_phrase_syllables,
+                );
+                let lattice_spans = &self.lattice_span_cache;
+                let mut lookup = |span: &[String]| {
+                    cached_lattice_span_ref(lattice_spans, span, span_limit)
+                        .expect("warmed lattice span cache entry")
+                };
+                decode_lattice_borrowed(segments, &mut lookup, &options, typo_source)
+            } else {
+                let lattice_spans = &mut self.lattice_span_cache;
+                let mut lookup = |span: &[String]| {
+                    cached_lattice_span(database, lattice_spans, span, span_limit)
+                };
+                decode_lattice(segments, &mut lookup, &options, typo_source)
+            };
+            if let Some(decoded) = &decoded {
+                self.sentence_decode_cache.insert(
+                    decode_key,
+                    CachedDecode {
+                        personal_version,
+                        decoded: decoded.clone(),
+                    },
+                );
+            }
+            decoded.and_then(|decoded| {
+                merge_decoded(
+                    result,
+                    segments,
+                    typed,
+                    &options,
+                    &mut self.rerankers,
+                    &self.rescoring_context,
+                    decoded,
+                )
+            })
         };
 
         // A sentence that reads one or more syllables as a typo of another. It leads only when it beats the literal sentence by the lead margin per typo; otherwise it follows the whole-sentence rows, so a correction is offered without displacing what was typed.
@@ -1588,6 +1678,27 @@ fn warm_lattice_span_cache(
     }
 }
 
+/// `sentence_decode_cache` 的键：音节串、这次查询的纠错类型和是否规划纠错整句。纠错整句只在后两者允许时才解，同一串音节在两种情况下的结果不同。
+fn sentence_decode_key(segments: &[String], types: u32, typo_eligible: bool) -> String {
+    let mut key = String::with_capacity(
+        segments
+            .iter()
+            .map(|segment| segment.len() + 1)
+            .sum::<usize>()
+            + 12,
+    );
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 {
+            key.push('\'');
+        }
+        key.push_str(segment);
+    }
+    key.push('\u{1f}');
+    key.push_str(&types.to_string());
+    key.push(if typo_eligible { 't' } else { '-' });
+    key
+}
+
 fn lattice_span_count(syllable_count: usize, max_phrase_syllables: usize) -> usize {
     let max_len = max_phrase_syllables.max(1);
     (0..syllable_count)
@@ -1965,6 +2076,10 @@ mod alternative_series_tests;
 mod lattice_span_cache_tests;
 
 #[cfg(test)]
+#[path = "dictionary/sentence_decode_cache_tests.rs"]
+mod sentence_decode_cache_tests;
+
+#[cfg(test)]
 #[path = "dictionary/row_projection_tests.rs"]
 mod row_projection_tests;
 
@@ -2024,6 +2139,9 @@ mod filtered_query_tests;
 
 #[cfg(test)]
 mod empty_projection_tests;
+
+#[cfg(test)]
+mod evicted_page_tests;
 
 #[cfg(test)]
 mod online_cache_update_tests;

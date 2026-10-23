@@ -41,7 +41,8 @@ public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
             runConfiguredChecks(true);
             return;
         }
-        if (arguments != null && "true".equals(arguments.getString("english-hold"))) {
+        if (arguments != null && ("true".equals(arguments.getString("english-hold"))
+                || "true".equals(arguments.getString("unicode18-hold")))) {
             runEnglishHoldChecks();
             return;
         }
@@ -63,7 +64,10 @@ public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
         stage = "composition";
         for (String key : new String[] {"n", "i", "h", "a", "o"}) tap(described("字母 " + key.toUpperCase(java.util.Locale.ROOT)));
         await(field(PLAIN).and(node -> equalsText("？nihao", node.getText())));
-        stage = "composition swipe";
+        stage = "commit composition before symbol swipe";
+        tap(key("空格"));
+        await(field(PLAIN).and(node -> equalsText("？你好", node.getText())));
+        stage = "committed composition swipe";
         swipeDown("v");
         await(field(PLAIN).and(node -> equalsText("？你好？", node.getText())));
 
@@ -338,6 +342,10 @@ public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
         if (findAcrossWindows(described("切换到英文输入")) != null)
             tap(described("切换到英文输入"));
         await(described("切换到所选输入方案"));
+        if (arguments != null && "true".equals(arguments.getString("unicode18-hold"))) {
+            runUnicode18SubscriptHolds(new StringBuilder());
+            return;
+        }
         String[] letters = {"q", "w", "e", "r", "t", "y", "u", "i", "o", "p",
             "a", "s", "d", "f", "g", "h", "j", "k", "l", "z", "x", "c", "v", "b", "n", "m"};
         String[] values = {"Q", "²", "₃", "肆", "⁵", "₆", "ū", "ǐ", "ò", "零",
@@ -363,6 +371,7 @@ public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
             await(field(PLAIN).and(node -> equalsText(expected.toString(), node.getText())));
             await(described("切换到所选输入方案"));
         }
+        runUnicode18SubscriptHolds(expected);
         stage = "English hold tone on last row";
         holdLetter("e");
         touch(bounds(await(described("输入 è"))));
@@ -382,6 +391,18 @@ public final class LetterHintPunctuationDeviceSmoke extends DeviceSmoke {
         expected.append("你好");
         await(field(PLAIN).and(node -> equalsText(expected.toString(), node.getText())));
         await(described("切换到英文输入"));
+    }
+
+    /** 专项可独立跑，也保留在完整英文长按套件内，验证原始码位通过真实触摸上屏。 */
+    private void runUnicode18SubscriptHolds(StringBuilder expected) throws Exception {
+        for (String[] entry : new String[][] {{"w", "\u209d"}, {"y", "\u209e"}, {"z", "\u209f"}}) {
+            stage = "English hold Unicode 18 subscript " + entry[0];
+            holdLetter(entry[0]);
+            touch(bounds(await(described("输入 " + entry[1]))));
+            expected.append(entry[1]);
+            await(field(PLAIN).and(node -> equalsText(expected.toString(), node.getText())));
+            await(described("切换到所选输入方案"));
+        }
     }
 
     private AccessibilityNodeInfo findAcrossWindows(java.util.function.Predicate<AccessibilityNodeInfo> match) {

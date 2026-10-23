@@ -155,7 +155,7 @@ final class ImeLetterRows {
     }
 
     private void showKeyPreview(Button key, String label) {
-        // No enlarged bubble in password fields: it would show each typed character to anyone looking at the screen.
+        // 密码框不放大显示按下的字符，避免旁观者看到输入。
         if (EditorPolicy.password(s.editorInputType)) return;
         KeyboardKeyPreview preview = keyPreview();
         if (preview == null || !key.isAttachedToWindow()) return;
@@ -186,6 +186,23 @@ final class ImeLetterRows {
     /** 只在气泡仍属于这个键时收起，避免先松开的手指收掉另一根仍按着的键的气泡。 */
     private void hideKeyPreview(Button key) {
         if (keyPreviewOwner == key) hideKeyPreview();
+    }
+
+    /** 九键复用字母键的预览；数字滑动另行更新键面，松手与取消只收起本键的气泡。 */
+    void updateKeyPreview(Button key, MotionEvent event) {
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN -> {
+                if (touchPreference(AndroidLocalSettings.KEY_POPUP))
+                    showKeyPreview(key, key.getText().toString());
+            }
+            case MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> hideKeyPreview(key);
+            default -> { }
+        }
+    }
+
+    /** 已显示的预览随滑动换成数字，不让关闭预览的设置被手势重新打开。 */
+    void updateKeyPreviewLabel(Button key, String label) {
+        if (keyPreviewOwner == key && keyPreview != null) keyPreview.setLabel(label);
     }
 
     /**
@@ -418,9 +435,24 @@ final class ImeLetterRows {
     private BackspaceSwipePolicy.Phase backspaceSwipePhase = BackspaceSwipePolicy.Phase.IDLE;
     private boolean backspaceUndo;
     private boolean backspaceUndoHeld;
+    private BackspaceScrub backspaceScrub;
+    private float backspaceDownX;
+    private float backspaceDownY;
+    private float backspaceTravel;
+    private float backspaceActivation;
+    private int backspaceInitialDeleted;
+    private boolean backspaceHorizontal;
+
+    void recordBackspaceScrubDelete(CharSequence before) {
+        if (backspaceScrub != null) backspaceScrub.ordinaryDelete(before);
+    }
+
+    void invalidateBackspaceScrub() {
+        if (backspaceScrub != null) backspaceScrub.invalidate();
+    }
 
     /**
-     * 短按删一次，按住连删并逐级加速，同时显示上滑快速删除提示（#8321）；上滑框内松手快速删除（#5585）。存在备份时短按改为松手删，长按后下滑框内松手撤回（#8325）。
+     * 短按删一次，按住连删并逐级加速；左滑锁定水平删除，未松手时右滑恢复（#9324）。上下滑仍提供快速删除（#5585）与撤回（#8325），方向一旦锁定就不切换。
      */
     void bindBackspaceRepeat(Button button, Runnable action) {
         button.setOnTouchListener((view, event) -> {
@@ -431,6 +463,15 @@ final class ImeLetterRows {
                     s.backspaceRepeated = false;
                     s.backspaceClearedComposition = false;
                     backspaceUndo = s.canUndoQuickDelete();
+                    backspaceDownX = event.getX();
+                    backspaceDownY = event.getY();
+                    int[] keyLocation = new int[2];
+                    int[] rootLocation = new int[2];
+                    button.getLocationOnScreen(keyLocation);
+                    if (s.keyboardRoot != null) s.keyboardRoot.getLocationOnScreen(rootLocation);
+                    backspaceTravel = Math.max(32f * DimensionPolicy.density(s),
+                        keyLocation[0] + event.getX() - rootLocation[0] - 8f * DimensionPolicy.density(s));
+                    if (!backspaceUndo) backspaceScrub = s.beginBackspaceScrub();
                     button.setPressed(true);
                     // 没有备份时按下即删并计数；有备份先等到松手，免得下滑撤回之前又破坏恢复位置。
                     if (!backspaceUndo) button.performClick();
@@ -474,6 +515,24 @@ final class ImeLetterRows {
                 }
                 case MotionEvent.ACTION_MOVE -> {
                     if (s.backspaceRepeatButton != button) return true;
+                    float dx = backspaceDownX - event.getX();
+                    if (!backspaceHorizontal && backspaceScrub != null && backspaceScrub.available()
+                            && backspaceSwipePhase == BackspaceSwipePolicy.Phase.IDLE
+                            && BackspaceScrub.starts(dx, event.getY() - backspaceDownY, DimensionPolicy.density(s))) {
+                        backspaceHorizontal = true;
+                        backspaceActivation = 8f * DimensionPolicy.density(s);
+                        backspaceInitialDeleted = Math.max(1, backspaceScrub.deleted());
+                        stopBackspaceRepeatTask();
+                        button.setPressed(false);
+                        if (s.quickDeleteOverlay != null) s.quickDeleteOverlay.hide();
+                        s.imeKeyFeedback.playFeedback(button);
+                    }
+                    if (backspaceHorizontal) {
+                        int deleted = BackspaceScrub.deletionCount(dx, backspaceTravel, backspaceScrub.count(),
+                            backspaceActivation, backspaceInitialDeleted);
+                        s.moveBackspaceScrub(backspaceScrub, deleted);
+                        return true;
+                    }
                     if (backspaceUndo) {
                         if (backspaceUndoHeld) {
                             BackspaceSwipePolicy.Phase next = BackspaceSwipePolicy.undoPhase(
@@ -539,6 +598,7 @@ final class ImeLetterRows {
         BackspaceSwipePolicy.Phase previous = backspaceSwipePhase;
         backspaceSwipePhase = next;
         if (previous == BackspaceSwipePolicy.Phase.IDLE) {
+            backspaceScrub = null;
             stopBackspaceRepeatTask();
             button.setPressed(false);
         }
@@ -563,6 +623,8 @@ final class ImeLetterRows {
         backspaceSwipePhase = BackspaceSwipePolicy.Phase.IDLE;
         backspaceUndo = false;
         backspaceUndoHeld = false;
+        backspaceScrub = null;
+        backspaceHorizontal = false;
         if (s.quickDeleteOverlay != null) s.quickDeleteOverlay.hide();
     }
 
