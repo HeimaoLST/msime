@@ -29,6 +29,7 @@ Caps Lock 和语音共用原生修饰键查询边界；沿用 Caps Lock 测试�
 - 缺位输入与排队事件都先以新增断言复现失败，再验证修复后通过。
 - macOS 27.0.1 arm64、Command Line Tools，使用已安装的 macOS 26.5 SDK：原生宿主及全部原生测试目标构建通过。默认 27 SDK 在本机缺少 SwiftUI 宏插件。
 - `voice-hold-shortcut`、`live-voice-controller`、`live-voice-socket-route`、`http-voice-controller`、`doubao-voice-controller`、`macos-diagnostic-log` 六项测试通过。控制器回归替换原生修饰键查询，验证合成采集器真实进入录音并在右侧松开时停止。
+- 同版本 0.54.0 本地回移构建完成实机验收：右 Option 按下触发录音，松开停止，连续两次录音的开始与停止日志均完整，用户确认语音识别文字正常写入文本框。首次使用完成麦克风授权后可正常重试，验收后关闭临时诊断日志。
 - `shortcut` 在边框颜色断言失败；未修改的基线 `d9630c47869f47c0a1877450b20c06d14c4b8726` 同样在 `chrome.strokeColor` 与 `SkinColor(picked.border)` 比较处失败，不修改失败基线。
 - 已运行仓库 `verify-local.sh --quick`：Rust workspace 检查、macOS 构建及共享 Apple 桥接构建通过；Android 更新任务检查因无 Java Runtime 失败，iOS 豆包测试因本机缺 XCTest 失败，门禁整体未通过。
 
@@ -36,7 +37,7 @@ Caps Lock 和语音共用原生修饰键查询边界；沿用 Caps Lock 测试�
 
 既有带侧别位事件保持原语义；缺位输入可以借助实体状态启动与结束按住录音。宿主在语音启用时为每个修饰键事件增加一次状态查询，不增加全局事件监听或新的授权请求。
 
-回退读取的是处理事件时的实体快照，无法还原已经结束的短按，也无法补救完全没有送达的事件。IMK 内部事件已确认存在缺位失败路径；修复已回移到同版本本地构建，实际录音和出字验收仍待完成，提交暂保持草稿。
+回退读取的是处理事件时的实体快照，无法还原已经结束的短按，也无法补救完全没有送达的事件。IMK 内部事件已确认存在缺位失败路径；同版本本地回移构建已完成右 Option 按住录音、松开停止及识别文字写入文本框的实机验收。
 
 ## Note audit
 
